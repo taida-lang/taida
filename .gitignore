@@ -1,0 +1,38 @@
+/target
+
+# Secrets
+*.pem
+.env
+.env.*
+.dev.json
+AGENTS.md
+CLAUDE.md
+.claude/
+
+# Local Taida project artifacts
+/.taida/*
+!/.taida/taida.lock
+
+# Generated outputs in examples/
+examples/*.o
+examples/*.js
+# Compiled binaries (extensionless) in examples/
+examples/compile_arithmetic
+examples/compile_buchi
+examples/compile_closure
+examples/compile_cond
+examples/compile_functions
+examples/compile_hello
+examples/compile_json
+examples/compile_lambda
+examples/compile_list
+examples/compile_list_map
+examples/compile_module
+examples/compile_pipeline
+examples/compile_rc
+examples/compile_recursion
+examples/compile_typedef
+examples/compile_types
+examples/compile_vars
+examples/.taida/
+examples/**/.taida/

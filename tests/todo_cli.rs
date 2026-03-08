@@ -1,0 +1,1076 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn taida_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
+    fs::create_dir_all(&dir).expect("failed to create temp dir");
+    dir
+}
+
+fn write_file(path: &Path, content: &str) {
+    fs::write(path, content).expect("failed to write file");
+}
+
+#[test]
+fn test_taida_todo_json_reports_ids_and_stats() {
+    let dir = unique_temp_dir("taida_todo_cli");
+    let src = r#"
+a <= TODO[Int](id <= "TASK-1", task <= "first")
+b <= TODO[Int](id <= "TASK-1", task <= "second", unm <= 2)
+c <= TODO[Stub["shape TBD"]](id <= "TASK-2", task <= "third")
+"#;
+    write_file(&dir.join("main.td"), src);
+
+    let output = Command::new(taida_bin())
+        .arg("todo")
+        .arg("--format")
+        .arg("json")
+        .arg(&dir)
+        .output()
+        .expect("failed to run taida todo");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "taida todo should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("todo output should be valid JSON");
+    assert_eq!(json["total"].as_u64(), Some(3));
+
+    let by_id = json["byId"]
+        .as_array()
+        .expect("byId should be an array")
+        .iter()
+        .map(|v| {
+            (
+                v["id"].as_str().unwrap_or("<null>").to_string(),
+                v["count"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect::<std::collections::HashMap<String, u64>>();
+
+    assert_eq!(by_id.get("TASK-1"), Some(&2));
+    assert_eq!(by_id.get("TASK-2"), Some(&1));
+}
+
+#[test]
+fn test_build_native_release_blocks_todo_and_stub() {
+    let dir = unique_temp_dir("taida_release_build_native");
+    let src = r#"
+t <= TODO[Stub["ship later"]](id <= "REL-1", task <= "replace this")
+t ]=> v
+stdout(typeof(v))
+"#;
+    let input = dir.join("main.td");
+    let bin = dir.join("app_bin");
+    write_file(&input, src);
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg("--release")
+        .arg(&input)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("failed to run taida build --target native --release");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "build --target native --release should fail when TODO/Stub exists"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Release gate failed"),
+        "expected release gate message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_build_js_release_blocks_todo_and_stub() {
+    let dir = unique_temp_dir("taida_release_build");
+    let src_dir = dir.join("src");
+    let out_dir = dir.join("dist");
+    fs::create_dir_all(&src_dir).expect("failed to create src dir");
+    write_file(
+        &src_dir.join("main.td"),
+        r#"
+x <= TODO[Int](id <= "REL-2", task <= "remove before release")
+stdout(x.toString())
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("--release")
+        .arg("--outdir")
+        .arg(&out_dir)
+        .arg(&src_dir)
+        .output()
+        .expect("failed to run taida build --target js --release");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "build --target js --release should fail when TODO/Stub exists"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Release gate failed"),
+        "expected release gate message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_build_native_release_blocks_todo_in_imported_module() {
+    let dir = unique_temp_dir("taida_release_build_native_import");
+    let main_td = dir.join("main.td");
+    let dep_td = dir.join("dep.td");
+    let bin = dir.join("app_bin");
+
+    write_file(
+        &main_td,
+        r#"
+>>> ./dep => @(v)
+v ]=> out
+stdout(out.toString())
+"#,
+    );
+    write_file(
+        &dep_td,
+        r#"
+v <= TODO[Int](id <= "REL-DEP", task <= "must be removed")
+<<< @(v)
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg("--release")
+        .arg(&main_td)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("failed to run taida build --target native --release");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "build --target native --release should fail when imported module has TODO/Stub"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Release gate failed"),
+        "expected release gate message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_build_native_directory_default_entry() {
+    let dir = unique_temp_dir("taida_build_native_dir_default");
+    let project = dir.join("proj");
+    let bin = dir.join("app_bin");
+    fs::create_dir_all(&project).expect("failed to create project dir");
+    write_file(
+        &project.join("main.td"),
+        r#"
+stdout("hello native dir")
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&project)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("failed to run taida build --target native <DIR>");
+
+    assert!(
+        output.status.success(),
+        "build should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(bin.exists(), "expected native output binary to exist");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_native_directory_entry_override() {
+    let dir = unique_temp_dir("taida_build_native_dir_entry");
+    let project = dir.join("proj");
+    let bin = dir.join("app_bin");
+    fs::create_dir_all(&project).expect("failed to create project dir");
+    write_file(
+        &project.join("main.td"),
+        r#"
+stdout("default entry")
+"#,
+    );
+    write_file(
+        &project.join("custom_entry.td"),
+        r#"
+stdout("custom entry")
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&project)
+        .arg("--entry")
+        .arg("custom_entry")
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("failed to run taida build --target native <DIR> --entry");
+
+    assert!(
+        output.status.success(),
+        "build should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(bin.exists(), "expected native output binary to exist");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_compile_alias_emits_deprecation_warning() {
+    let dir = unique_temp_dir("taida_compile_alias");
+    let src = dir.join("main.td");
+    let bin = dir.join("app_bin");
+    write_file(
+        &src,
+        r#"
+stdout("compile alias")
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("compile")
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("failed to run taida compile");
+
+    assert!(
+        output.status.success(),
+        "compile alias should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`taida compile` is deprecated"),
+        "expected deprecation warning, got: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_transpile_alias_emits_deprecation_warning() {
+    let dir = unique_temp_dir("taida_transpile_alias");
+    let src = dir.join("main.td");
+    let js_out = dir.join("main.mjs");
+    write_file(
+        &src,
+        r#"
+stdout("transpile alias")
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("transpile")
+        .arg(&src)
+        .arg("-o")
+        .arg(&js_out)
+        .output()
+        .expect("failed to run taida transpile");
+
+    assert!(
+        output.status.success(),
+        "transpile alias should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(js_out.exists(), "expected transpiled JS output to exist");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`taida transpile` is deprecated"),
+        "expected deprecation warning, got: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_top_level_help_prints_usage_and_commands() {
+    let output = Command::new(taida_bin())
+        .arg("--help")
+        .output()
+        .expect("failed to run taida --help");
+
+    assert!(
+        output.status.success(),
+        "--help should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage:\n  taida [--no-check] <FILE>")
+            && stdout.contains("Commands:")
+            && stdout.contains("graph")
+            && stdout.contains("Global options:"),
+        "unexpected help output: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_graph_invalid_type_fails_instead_of_fallback() {
+    let output = Command::new(taida_bin())
+        .arg("graph")
+        .arg("--type")
+        .arg("bad-view")
+        .arg("examples/04_functions.td")
+        .output()
+        .expect("failed to run taida graph with invalid type");
+
+    assert!(
+        !output.status.success(),
+        "graph should fail for invalid type"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid graph type 'bad-view'"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_graph_invalid_format_fails_instead_of_fallback() {
+    let output = Command::new(taida_bin())
+        .arg("graph")
+        .arg("--format")
+        .arg("bad-format")
+        .arg("examples/04_functions.td")
+        .output()
+        .expect("failed to run taida graph with invalid format");
+
+    assert!(
+        !output.status.success(),
+        "graph should fail for invalid format"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid graph format 'bad-format'"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_verify_jsonl_outputs_findings_and_summary_and_sets_exit_code() {
+    let dir = unique_temp_dir("taida_verify_jsonl");
+    let src = dir.join("main.td");
+    write_file(
+        &src,
+        r#"
+risky x =
+  Error(message <= "boom").throw()
+=> :Str
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("verify")
+        .arg("--format")
+        .arg("jsonl")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida verify --format jsonl");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "verify jsonl should exit non-zero when ERROR findings exist"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(!lines.is_empty(), "jsonl output should not be empty");
+    for line in &lines {
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("each jsonl line should be valid json");
+        assert_eq!(value["schema"], "taida.diagnostic.v1");
+        assert_eq!(value["stream"], "verify");
+        assert!(value.get("code").is_some());
+        assert!(value.get("message").is_some());
+        assert!(value.get("location").is_some());
+        assert!(value.get("suggestion").is_some());
+    }
+    let summary: serde_json::Value = serde_json::from_str(lines.last().copied().unwrap_or("{}"))
+        .expect("summary line should be valid json");
+    assert_eq!(summary["kind"], "summary");
+    assert!(
+        summary["summary"]["errors"].as_u64().unwrap_or(0) >= 1,
+        "summary should include at least one error"
+    );
+}
+
+#[test]
+fn test_build_js_diag_format_jsonl_outputs_parse_error_record() {
+    let dir = unique_temp_dir("taida_build_jsonl_diag");
+    let src = dir.join("broken.td");
+    write_file(&src, "x <= ");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("--diag-format")
+        .arg("jsonl")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida build --diag-format jsonl");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "build should fail for parse error in jsonl diag mode"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout
+        .lines()
+        .next()
+        .expect("jsonl diagnostics should emit at least one line");
+    let first: serde_json::Value =
+        serde_json::from_str(first_line).expect("first diagnostic line should be valid json");
+    assert_eq!(first["schema"], "taida.diagnostic.v1");
+    assert_eq!(first["stream"], "compile");
+    assert_eq!(first["kind"], "error");
+    assert_eq!(first["stage"], "parse");
+    assert_eq!(first["severity"], "ERROR");
+    assert!(first.get("code").is_some());
+    assert!(first.get("message").is_some());
+    assert!(first.get("location").is_some());
+    assert!(first.get("suggestion").is_some());
+}
+
+#[test]
+fn test_check_json_outputs_machine_readable_summary() {
+    let dir = unique_temp_dir("taida_check_json");
+    let src = dir.join("main.td");
+    write_file(
+        &src,
+        r#"
+x <= 1
+stdout(x.toString())
+"#,
+    );
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "check --json should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    assert_eq!(value["schema"], "taida.check.v1");
+    assert!(value["diagnostics"].is_array());
+    assert_eq!(value["summary"]["files"].as_u64(), Some(1));
+    assert_eq!(value["summary"]["errors"].as_u64(), Some(0));
+}
+
+// ── C-8a: taida check --json emits E1501/E1502/E1503/E1504 ──
+
+#[test]
+fn test_check_json_e1501_same_scope_redefinition() {
+    let dir = unique_temp_dir("taida_check_e1501");
+    let src = dir.join("main.td");
+    write_file(&src, "x <= 1\nx <= 2\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "check --json should fail for E1501"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    assert_eq!(value["schema"], "taida.check.v1");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "E1501"),
+        "Expected E1501 in diagnostics, got: {:?}",
+        diags
+    );
+    assert_eq!(value["summary"]["errors"].as_u64(), Some(1));
+}
+
+#[test]
+fn test_check_json_e1502_old_placeholder_partial_application() {
+    let dir = unique_temp_dir("taida_check_e1502");
+    let src = dir.join("main.td");
+    write_file(&src, "add x y = x\n=> :Int\nresult <= add(5, _)\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "check --json should fail for E1502"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "E1502"),
+        "Expected E1502 in diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_check_json_e1503_typedef_partial_application() {
+    let dir = unique_temp_dir("taida_check_e1503");
+    let src = dir.join("main.td");
+    write_file(&src, "Point => @(x, y)\np <= Point(1, )\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "check --json should fail for E1503"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "E1503"),
+        "Expected E1503 in diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_check_json_e1504_mold_placeholder_outside_pipeline() {
+    let dir = unique_temp_dir("taida_check_e1504");
+    let src = dir.join("main.td");
+    write_file(&src, "x <= Str[_]()\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "check --json should fail for E1504"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "E1504"),
+        "Expected E1504 in diagnostics, got: {:?}",
+        diags
+    );
+}
+
+// ── C-8b: file/dir produce same format, summary, exit code ──
+
+#[test]
+fn test_check_json_file_vs_dir_format_consistency() {
+    let dir = unique_temp_dir("taida_check_file_dir");
+    let single_file = dir.join("single.td");
+    let sub_dir = dir.join("sub");
+    fs::create_dir_all(&sub_dir).expect("create sub dir");
+    write_file(&single_file, "x <= 1\nx <= 2\n");
+    write_file(&sub_dir.join("a.td"), "y <= 1\ny <= 2\n");
+
+    // File input
+    let file_out = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&single_file)
+        .output()
+        .expect("check --json file");
+
+    // Dir input
+    let dir_out = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&sub_dir)
+        .output()
+        .expect("check --json dir");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    // Both should fail with exit code != 0
+    assert!(!file_out.status.success(), "file check should fail");
+    assert!(!dir_out.status.success(), "dir check should fail");
+
+    // Both should produce valid JSON with same schema
+    let file_json: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&file_out.stdout))
+            .expect("file output should be valid json");
+    let dir_json: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&dir_out.stdout))
+            .expect("dir output should be valid json");
+
+    assert_eq!(file_json["schema"], "taida.check.v1");
+    assert_eq!(dir_json["schema"], "taida.check.v1");
+    assert!(file_json["diagnostics"].is_array());
+    assert!(dir_json["diagnostics"].is_array());
+    assert!(file_json["summary"].is_object());
+    assert!(dir_json["summary"].is_object());
+
+    // Both JSON outputs should have the same field set in diagnostics
+    let file_diag = &file_json["diagnostics"][0];
+    let dir_diag = &dir_json["diagnostics"][0];
+    for field in &[
+        "stage",
+        "severity",
+        "code",
+        "message",
+        "location",
+        "suggestion",
+    ] {
+        assert!(
+            file_diag.get(*field).is_some(),
+            "file diagnostic missing field: {}",
+            field
+        );
+        assert!(
+            dir_diag.get(*field).is_some(),
+            "dir diagnostic missing field: {}",
+            field
+        );
+    }
+}
+
+#[test]
+fn test_check_file_vs_dir_success_exit_code() {
+    let dir = unique_temp_dir("taida_check_success_exit");
+    let single_file = dir.join("ok.td");
+    let sub_dir = dir.join("sub");
+    fs::create_dir_all(&sub_dir).expect("create sub dir");
+    write_file(&single_file, "x <= 1\nstdout(x.toString())\n");
+    write_file(&sub_dir.join("ok.td"), "y <= 2\nstdout(y.toString())\n");
+
+    let file_out = Command::new(taida_bin())
+        .arg("check")
+        .arg(&single_file)
+        .output()
+        .expect("check file");
+
+    let dir_out = Command::new(taida_bin())
+        .arg("check")
+        .arg(&sub_dir)
+        .output()
+        .expect("check dir");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(file_out.status.success(), "file check should succeed");
+    assert!(dir_out.status.success(), "dir check should succeed");
+}
+
+// ── C-8c: build/compile/transpile stop on checker failure ──
+
+#[test]
+fn test_build_compile_transpile_stop_on_checker_error() {
+    let dir = unique_temp_dir("taida_checker_stops_backend");
+    let src = dir.join("main.td");
+    let bin = dir.join("out_bin");
+    let js_out = dir.join("out.mjs");
+    write_file(&src, "x <= 1\nx <= 2\n");
+
+    // build --target js
+    let build_js = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&src)
+        .arg("-o")
+        .arg(&js_out)
+        .output()
+        .expect("build --target js");
+
+    // build --target native
+    let build_native = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("build --target native");
+
+    // compile (alias)
+    let compile_out = Command::new(taida_bin())
+        .arg("compile")
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("compile_bin"))
+        .output()
+        .expect("compile");
+
+    // transpile (alias)
+    let transpile_out = Command::new(taida_bin())
+        .arg("transpile")
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("transpile.mjs"))
+        .output()
+        .expect("transpile");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    // All four should fail with the same checker error
+    for (name, out) in &[
+        ("build --target js", &build_js),
+        ("build --target native", &build_native),
+        ("compile", &compile_out),
+        ("transpile", &transpile_out),
+    ] {
+        assert!(
+            !out.status.success(),
+            "{} should fail on checker error",
+            name
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[E1501]"),
+            "{} should show E1501 error, got: {}",
+            name,
+            stderr
+        );
+    }
+
+    // JS output file should NOT be created (backend didn't run)
+    assert!(
+        !js_out.exists(),
+        "JS output should not exist when checker fails"
+    );
+}
+
+#[test]
+fn test_build_diag_format_jsonl_emits_checker_error() {
+    let dir = unique_temp_dir("taida_checker_jsonl");
+    let src = dir.join("main.td");
+    write_file(&src, "x <= 1\nx <= 2\n");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("--diag-format")
+        .arg("jsonl")
+        .arg(&src)
+        .output()
+        .expect("build --diag-format jsonl");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "build should fail with checker error in jsonl mode"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout
+        .lines()
+        .next()
+        .expect("jsonl should emit at least one line");
+    let diag: serde_json::Value =
+        serde_json::from_str(first_line).expect("first jsonl line should be valid json");
+    assert_eq!(diag["schema"], "taida.diagnostic.v1");
+    assert_eq!(diag["stream"], "compile");
+    assert_eq!(diag["kind"], "error");
+    assert_eq!(diag["stage"], "type");
+    assert_eq!(diag["code"], "E1501");
+}
+
+// ── C-6a: same-scope duplicate 検出が CLI 経路（check/build）で一致する ──
+
+#[test]
+fn test_same_scope_duplicate_check_vs_build_consistency() {
+    let dir = unique_temp_dir("taida_c6a_consistency");
+    let src = dir.join("main.td");
+    write_file(&src, "x <= 1\nx <= 2\nstdout(x.toString())\n");
+
+    // taida check
+    let check_out = Command::new(taida_bin())
+        .arg("check")
+        .arg(&src)
+        .output()
+        .expect("check");
+
+    // taida build --target js
+    let build_out = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&src)
+        .output()
+        .expect("build");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    // Both should fail
+    assert!(!check_out.status.success(), "check should fail for E1501");
+    assert!(!build_out.status.success(), "build should fail for E1501");
+
+    // Both should report E1501
+    let check_stderr = String::from_utf8_lossy(&check_out.stderr);
+    let build_stderr = String::from_utf8_lossy(&build_out.stderr);
+    assert!(
+        check_stderr.contains("[E1501]")
+            || String::from_utf8_lossy(&check_out.stdout).contains("E1501"),
+        "check should report E1501, got stderr: {}, stdout: {}",
+        check_stderr,
+        String::from_utf8_lossy(&check_out.stdout)
+    );
+    assert!(
+        build_stderr.contains("[E1501]"),
+        "build should report E1501, got: {}",
+        build_stderr
+    );
+}
+
+// ── C-11c: taida check --json の回帰テスト ──
+
+#[test]
+fn test_check_json_regression_clean_file() {
+    // C-11c: Clean file produces no diagnostics
+    let dir = unique_temp_dir("taida_c11c_clean");
+    let src = dir.join("main.td");
+    write_file(&src, "x <= 42\nstdout(x.toString())\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "check --json clean file should succeed"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(value["schema"], "taida.check.v1");
+    assert_eq!(value["summary"]["errors"].as_u64(), Some(0));
+    assert!(value["diagnostics"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_check_json_regression_multiple_errors() {
+    // C-11c: Multiple errors produce correct count
+    let dir = unique_temp_dir("taida_c11c_multi");
+    let src = dir.join("main.td");
+    write_file(&src, "x <= 1\nx <= 2\ny <= 3\ny <= 4\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(&src)
+        .output()
+        .expect("check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "check --json should fail with errors"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(value["schema"], "taida.check.v1");
+    let diags = value["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        diags.len() >= 2,
+        "Expected at least 2 diagnostics, got {}",
+        diags.len()
+    );
+    assert!(
+        diags.iter().all(|d| d["code"] == "E1501"),
+        "All diagnostics should be E1501"
+    );
+}
+
+// ── C-11d: examples/quality/ の checker 用ケースを regression 化 ──
+
+#[test]
+fn test_quality_e2d_mold_partial_direct_is_rejected() {
+    // C-11d: e2d_mold_partial_direct.td should be rejected by checker (E1504)
+    let path = "examples/quality/e2d_mold_partial_direct.td";
+    if !Path::new(path).exists() {
+        return; // Skip if quality examples not present
+    }
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(path)
+        .output()
+        .expect("check quality file");
+
+    assert!(
+        !output.status.success(),
+        "e2d should be rejected by checker"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let diags = value["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "E1504"),
+        "Expected E1504 in e2d diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_quality_e2f_duplicate_variable_is_rejected() {
+    // C-11d: e2f_duplicate_variable_defs.td should be rejected by checker (E1501)
+    let path = "examples/quality/e2f_duplicate_variable_defs.td";
+    if !Path::new(path).exists() {
+        return;
+    }
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(path)
+        .output()
+        .expect("check quality file");
+
+    assert!(
+        !output.status.success(),
+        "e2f should be rejected by checker"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let diags = value["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "E1501"),
+        "Expected E1501 in e2f diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_quality_e3a_name_collision_passes() {
+    // C-11d: e3a_name_collision_check.td should PASS (demonstrates valid shadowing)
+    let path = "examples/quality/e3a_name_collision_check.td";
+    if !Path::new(path).exists() {
+        return;
+    }
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(path)
+        .output()
+        .expect("check quality file");
+
+    assert!(
+        output.status.success(),
+        "e3a should pass checker (valid shadowing), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

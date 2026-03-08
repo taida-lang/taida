@@ -1,0 +1,24 @@
+Empty HashMap: HashMap({})
+isEmpty: true
+m2.get('name') = Asuka
+m2.get('age') = 14
+m2.get('missing') = default
+m2.has('name') = true
+m2.size() = 2
+m2.keys().length() = 2
+m2.values().length() = 2
+After remove('age'): size = 1
+After merge: size = 3
+Merged age = 25
+entries count = 3
+
+=== Set ===
+setOf(@[1,2,3,2,1]).size() = 3
+After add(4): size = 4
+s2.has(4) = true
+After remove(1): size = 3
+union size = 4
+intersect size = 2
+diff size = 1
+toList length = 3
+Set: Set({1, 2, 3})

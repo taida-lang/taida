@@ -1,0 +1,5 @@
+debug(42)
+debug(3.14)
+debug("Hello, Taida!")
+debug(true)
+debug(false)

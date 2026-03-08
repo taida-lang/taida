@@ -1,0 +1,12 @@
+name.hasValue() = true
+empty.isEmpty() = true
+name.getOrDefault('unknown') = Alice
+empty.getOrDefault('unknown') = unknown
+Lax[21]().map(double) = 42
+Div[0,0]().map(double) = 0
+Lax[5]().flatMap(safeDivide) = 20
+Div[0,0]().flatMap(safeDivide) = 0
+Lax[42]().toString() = Lax(42)
+Div[0,0]().toString() = Lax(default: 0)
+typeof(Lax[1]()) = Lax
+typeof(Div[0,0]()) = Lax

@@ -1,0 +1,538 @@
+use super::*;
+
+impl Parser {
+    pub(super) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
+        self.parse_or_expr()
+    }
+
+    pub(super) fn parse_or_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_and_expr()?;
+        while self.check(&TokenKind::Or) {
+            let span = self.current_span();
+            self.advance();
+            let right = self.parse_and_expr()?;
+            left = Expr::BinaryOp(Box::new(left), BinOp::Or, Box::new(right), span);
+        }
+        Ok(left)
+    }
+
+    pub(super) fn parse_and_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_equality_expr()?;
+        while self.check(&TokenKind::And) {
+            let span = self.current_span();
+            self.advance();
+            let right = self.parse_equality_expr()?;
+            left = Expr::BinaryOp(Box::new(left), BinOp::And, Box::new(right), span);
+        }
+        Ok(left)
+    }
+
+    pub(super) fn parse_equality_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_comparison_expr()?;
+        while matches!(self.peek_kind(), TokenKind::EqEq | TokenKind::BangEq) {
+            let span = self.current_span();
+            let op = match self.advance().kind {
+                TokenKind::EqEq => BinOp::Eq,
+                TokenKind::BangEq => BinOp::NotEq,
+                _ => unreachable!(),
+            };
+            let right = self.parse_comparison_expr()?;
+            left = Expr::BinaryOp(Box::new(left), op, Box::new(right), span);
+        }
+        Ok(left)
+    }
+
+    pub(super) fn parse_comparison_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_additive_expr()?;
+        while matches!(
+            self.peek_kind(),
+            TokenKind::Lt | TokenKind::Gt | TokenKind::GtEq
+        ) {
+            let span = self.current_span();
+            let op = match self.advance().kind {
+                TokenKind::Lt => BinOp::Lt,
+                TokenKind::Gt => BinOp::Gt,
+                TokenKind::GtEq => BinOp::GtEq,
+                _ => unreachable!(),
+            };
+            let right = self.parse_additive_expr()?;
+            left = Expr::BinaryOp(Box::new(left), op, Box::new(right), span);
+        }
+        Ok(left)
+    }
+
+    pub(super) fn parse_additive_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_multiplicative_expr()?;
+        while matches!(self.peek_kind(), TokenKind::Plus | TokenKind::Minus) {
+            let span = self.current_span();
+            let op = match self.advance().kind {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => unreachable!(),
+            };
+            let right = self.parse_multiplicative_expr()?;
+            left = Expr::BinaryOp(Box::new(left), op, Box::new(right), span);
+        }
+        Ok(left)
+    }
+
+    pub(super) fn parse_multiplicative_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_unary_expr()?;
+        while matches!(self.peek_kind(), TokenKind::Star) {
+            let span = self.current_span();
+            let op = match self.advance().kind {
+                TokenKind::Star => BinOp::Mul,
+                _ => unreachable!(),
+            };
+            let right = self.parse_unary_expr()?;
+            left = Expr::BinaryOp(Box::new(left), op, Box::new(right), span);
+        }
+        // `/` and `%` operators are removed — use Div[x, y]() and Mod[x, y]() molds instead
+        if matches!(self.peek_kind(), TokenKind::Slash) {
+            return Err(self.error_at_current(
+                "The `/` operator has been removed. Use Div[x, y]() mold instead",
+            ));
+        }
+        if matches!(self.peek_kind(), TokenKind::Percent) {
+            return Err(self.error_at_current(
+                "The `%` operator has been removed. Use Mod[x, y]() mold instead",
+            ));
+        }
+        Ok(left)
+    }
+
+    pub(super) fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
+        match self.peek_kind() {
+            TokenKind::Bang => {
+                let span = self.current_span();
+                self.advance();
+                let expr = self.parse_unary_expr()?;
+                Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(expr), span))
+            }
+            TokenKind::Minus => {
+                let span = self.current_span();
+                self.advance();
+                let expr = self.parse_unary_expr()?;
+                Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(expr), span))
+            }
+            _ => self.parse_postfix_expr(),
+        }
+    }
+
+    pub(super) fn parse_postfix_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary_expr()?;
+
+        loop {
+            match self.peek_kind() {
+                // Function call: `expr(args)`
+                TokenKind::LParen => {
+                    let span = self.current_span();
+                    self.advance(); // consume `(`
+                    let args = self.parse_arg_list()?;
+                    self.expect(&TokenKind::RParen)?;
+
+                    // Check for `.throw()` pattern
+                    if let Expr::FieldAccess(inner, method, _) = &expr
+                        && method == "throw"
+                        && args.is_empty()
+                    {
+                        expr = Expr::Throw(inner.clone(), span);
+                        continue;
+                    }
+
+                    // Check if it's a method call (field access + call)
+                    if let Expr::FieldAccess(obj, method, _) = expr {
+                        expr = Expr::MethodCall(obj, method, args, span);
+                    } else {
+                        expr = Expr::FuncCall(Box::new(expr), args, span);
+                    }
+                }
+                // Field/method access: `expr.field`
+                TokenKind::Dot => {
+                    let span = self.current_span();
+                    self.advance(); // consume `.`
+                    let field = self.expect_ident()?;
+                    expr = Expr::FieldAccess(Box::new(expr), field, span);
+                }
+                // Index access: `expr[index]` — REMOVED in v0.5.0
+                // Use .get(index) instead. MoldInst `Name[args](fields)` is handled in parse_primary_expr.
+                TokenKind::LBracket => {
+                    let span = self.current_span();
+                    return Err(ParseError {
+                        message: "Index access `expr[i]` has been removed. Use `.get(i)` instead"
+                            .to_string(),
+                        span,
+                    });
+                }
+                _ => break,
+            }
+        }
+
+        Ok(expr)
+    }
+
+    pub(super) fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        match self.peek_kind().clone() {
+            TokenKind::IntLiteral(n) => {
+                self.advance();
+                Ok(Expr::IntLit(n, span))
+            }
+            TokenKind::FloatLiteral(n) => {
+                self.advance();
+                Ok(Expr::FloatLit(n, span))
+            }
+            TokenKind::StringLiteral(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::StringLit(s, span))
+            }
+            TokenKind::TemplateLiteral(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::TemplateLit(s, span))
+            }
+            TokenKind::BoolLiteral(b) => {
+                self.advance();
+                Ok(Expr::BoolLit(b, span))
+            }
+            TokenKind::Gorilla => {
+                self.advance();
+                Ok(Expr::Gorilla(span))
+            }
+            // C-2a: `_` (Placeholder) が許可される構文位置:
+            //
+            // 1. **ラムダ定義** — `_ x = expr` / `_ = expr`
+            //    → Lambda AST に変換。Placeholder にはならない。
+            //
+            // 2. **パイプライン内の関数呼び出し引数** — `data => f(_, 3)`
+            //    → Expr::Placeholder(Span)。パイプの前段の値を参照。
+            //    → checker: in_pipeline=true の場合のみ許可。
+            //
+            // 3. **パイプライン内の Mold 型引数** — `data => Trim[_]()`
+            //    → Expr::Placeholder(Span)。Mold の型引数として。
+            //    → checker: in_pipeline=true の場合のみ許可 (E1504)。
+            //
+            // 4. **条件分岐のワイルドカード** — `| _ |> expr`
+            //    → parse_cond_branch で直接処理。catch-all パターン。
+            //
+            // 5. **型注釈の省略** — `:Result[T, _]`
+            //    → parse_type_expr で処理。型推論プレースホルダ。
+            //
+            // 拒否される位置 (checker で reject):
+            // - 関数呼び出し引数（パイプライン外）— `add(5, _)` → E1502
+            // - TypeDef/BuchiPack インスタンス化 — `Point(_, 2)` → E1503
+            // - Mold 型引数（パイプライン外）— `Trim[_]()` → E1504
+            TokenKind::Placeholder => {
+                self.advance();
+                // Check if this is a lambda: `_ x = expr` or `_ = expr` (zero-param lambda)
+                if self.check_ident() {
+                    self.parse_lambda(span)
+                } else if self.check(&TokenKind::Eq) {
+                    // `_ = expr` — zero-parameter lambda (e.g., `_ = true`, `_ = false`)
+                    self.parse_lambda(span)
+                } else {
+                    Ok(Expr::Placeholder(span))
+                }
+            }
+
+            TokenKind::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+
+                // Check for type/mold instantiation: `Name[args](...)`
+                if self.check(&TokenKind::LBracket) {
+                    let save = self.pos;
+                    self.advance(); // consume `[`
+
+                    // Try to parse as mold instantiation
+                    let mut type_args = Vec::new();
+                    let mut depth = 1;
+                    let mut arg_tokens_valid = true;
+
+                    // Simple approach: parse comma-separated expressions inside brackets
+                    loop {
+                        if self.check(&TokenKind::RBracket) {
+                            depth -= 1;
+                            if depth == 0 {
+                                self.advance();
+                                break;
+                            }
+                        }
+                        if self.is_at_end() {
+                            arg_tokens_valid = false;
+                            break;
+                        }
+                        match self.parse_expression() {
+                            Ok(arg) => type_args.push(arg),
+                            Err(_) => {
+                                arg_tokens_valid = false;
+                                break;
+                            }
+                        }
+                        self.match_token(&TokenKind::Comma);
+                    }
+
+                    if arg_tokens_valid && self.check(&TokenKind::LParen) {
+                        // `Name[args](fields)` -> MoldInst or FuncCall
+                        self.advance(); // consume `(`
+                        let fields = self.parse_buchi_field_list()?;
+                        self.expect(&TokenKind::RParen)?;
+                        return Ok(Expr::MoldInst(name, type_args, fields, span));
+                    } else if arg_tokens_valid {
+                        // Index access `name[expr]` has been removed in v0.5.0.
+                        // Use `.get(index)` instead.
+                        // `Name[args]` without `()` is treated as MoldInst with no fields.
+                        if type_args.len() == 1 {
+                            // Could be `list[0]` (removed) or `Optional[T]` (MoldInst)
+                            // If the name starts with uppercase, treat as MoldInst
+                            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                                return Ok(Expr::MoldInst(name, type_args, Vec::new(), span));
+                            }
+                            // Otherwise it's an index access attempt — error
+                            return Err(ParseError {
+                                message:
+                                    "Index access `name[i]` has been removed. Use `.get(i)` instead"
+                                        .to_string(),
+                                span,
+                            });
+                        }
+                        return Ok(Expr::MoldInst(name, type_args, Vec::new(), span));
+                    }
+
+                    // Backtrack if parsing failed
+                    self.pos = save;
+                    return Ok(Expr::Ident(name, span));
+                }
+
+                // Check for type instantiation: `Name(field <= value, ...)`
+                if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && self.check(&TokenKind::LParen)
+                {
+                    let save = self.pos;
+                    self.advance(); // consume `(`
+
+                    // Check if args look like buchi fields (name <= value)
+                    if self.check_ident() {
+                        let peek_ahead = self.peek_at(1);
+                        if matches!(peek_ahead.kind, TokenKind::LtEq) {
+                            let fields = self.parse_buchi_field_list()?;
+                            self.expect(&TokenKind::RParen)?;
+                            return Ok(Expr::TypeInst(name, fields, span));
+                        }
+                    }
+
+                    // Not a type instantiation, backtrack
+                    self.pos = save;
+                }
+
+                Ok(Expr::Ident(name, span))
+            }
+
+            // Buchi pack literal: `@(...)`
+            TokenKind::At => {
+                self.advance(); // consume `@`
+                if self.check(&TokenKind::LParen) {
+                    self.advance(); // consume `(`
+                    let fields = self.parse_buchi_field_list()?;
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(Expr::BuchiPack(fields, span))
+                } else if self.check(&TokenKind::LBracket) {
+                    self.advance(); // consume `[`
+                    let mut items = Vec::new();
+                    while !self.check(&TokenKind::RBracket) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.check(&TokenKind::RBracket) {
+                            break;
+                        }
+                        items.push(self.parse_expression()?);
+                        self.match_token(&TokenKind::Comma);
+                        self.skip_newlines();
+                    }
+                    self.expect(&TokenKind::RBracket)?;
+                    Ok(Expr::ListLit(items, span))
+                } else {
+                    Err(self.error_at_current("Expected '(' or '[' after '@'"))
+                }
+            }
+
+            // Parenthesized expression
+            TokenKind::LParen => {
+                self.advance(); // consume `(`
+                let expr = self.parse_expression()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(expr)
+            }
+
+            // Condition branch: `| cond |> value`
+            TokenKind::Pipe => self.parse_cond_branch(),
+
+            // Return type annotation in expression context: `=> :Type`
+            TokenKind::FatArrow => {
+                self.advance();
+                if self.match_token(&TokenKind::Colon) {
+                    let _type_expr = self.parse_type_expr()?;
+                }
+                // Return a placeholder for now
+                Ok(Expr::Placeholder(span))
+            }
+
+            _ => Err(self.error_at_current(&format!("Unexpected token: {:?}", self.peek_kind()))),
+        }
+    }
+
+    pub(super) fn parse_lambda(&mut self, start_span: Span) -> Result<Expr, ParseError> {
+        // `_ x y = expr` -> Lambda([x, y], expr)
+        let mut params = Vec::new();
+        while self.check_ident() {
+            let param_span = self.current_span();
+            let param_name = self.expect_ident()?;
+            params.push(Param {
+                name: param_name,
+                type_annotation: None,
+                default_value: None,
+                span: param_span,
+            });
+        }
+        self.expect(&TokenKind::Eq)?;
+        let body = self.parse_expression()?;
+        Ok(Expr::Lambda(params, Box::new(body), start_span))
+    }
+
+    pub(super) fn parse_cond_branch(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current_span();
+        let mut arms = Vec::new();
+
+        // Record the column of the first `|` to detect nested CondBranch boundaries.
+        // Only `|` tokens at this same column belong to this CondBranch;
+        // deeper-indented `|` tokens belong to a nested CondBranch.
+        let branch_column = self.peek().span.column;
+
+        while self.check(&TokenKind::Pipe) {
+            let arm_span = self.current_span();
+            self.advance(); // consume `|`
+
+            // Check for default case: `| _ |>`
+            if self.check(&TokenKind::Placeholder) && self.peek_at(1).kind == TokenKind::PipeGt {
+                self.advance(); // consume `_`
+                self.advance(); // consume `|>`
+                let body = self.parse_cond_arm_body()?;
+                arms.push(CondArm {
+                    condition: None,
+                    body,
+                    span: arm_span,
+                });
+            } else {
+                let condition = self.parse_expression()?;
+                self.expect(&TokenKind::PipeGt)?;
+                let body = self.parse_cond_arm_body()?;
+                arms.push(CondArm {
+                    condition: Some(condition),
+                    body,
+                    span: arm_span,
+                });
+            }
+
+            // Speculatively skip newlines/indents to check for a continuation `|` arm.
+            // If the next non-whitespace token is NOT `|`, restore position so that
+            // the caller's block parser can see the indent tokens and determine scope correctly.
+            // This prevents eating indent tokens that belong to the enclosing block
+            // (e.g., when a CondBranch appears inside a lambda body within a function).
+            // Additionally, check that the `|` is at the same column as the first `|`
+            // to prevent a nested CondBranch from consuming outer arms.
+            let save_pos = self.pos;
+            self.skip_newlines();
+            if !self.check(&TokenKind::Pipe) || self.peek().span.column != branch_column {
+                self.pos = save_pos;
+            }
+        }
+
+        Ok(Expr::CondBranch(arms, span))
+    }
+
+    /// Parse the body of a condition arm after `|>`.
+    /// If the body is on the same line, parse a single expression.
+    /// If the body continues on the next line (indented), parse as a block.
+    pub(super) fn parse_cond_arm_body(&mut self) -> Result<Vec<Statement>, ParseError> {
+        // Check if body is a multi-line block (newline follows |>)
+        if matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Indent(_)) {
+            // Multi-line body: parse as block
+            let block = self.parse_block()?;
+            if block.is_empty() {
+                return Err(self.error_at_current("Expected expression in condition arm body"));
+            }
+            Ok(block)
+        } else {
+            // Single-line body: parse expression and wrap
+            let expr = self.parse_expression()?;
+            Ok(vec![Statement::Expr(expr)])
+        }
+    }
+
+    pub(super) fn parse_arg_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut args = Vec::new();
+        // Empty arg list: `f()`
+        if self.check(&TokenKind::RParen) {
+            return Ok(args);
+        }
+        // Parse first slot
+        loop {
+            if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
+                // Empty slot (hole): no expression before comma or rparen
+                let span = self.current_span();
+                args.push(Expr::Hole(span));
+            } else {
+                args.push(self.parse_expression()?);
+            }
+            // After each slot, expect comma or rparen
+            if self.check(&TokenKind::Comma) {
+                self.advance(); // consume comma
+                // If RParen follows, there's one more trailing hole
+                if self.check(&TokenKind::RParen) {
+                    let span = self.current_span();
+                    args.push(Expr::Hole(span));
+                    break;
+                }
+                // Otherwise continue to parse next slot
+            } else {
+                // No comma → must be RParen (end of arg list)
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    pub(super) fn parse_buchi_field_list(&mut self) -> Result<Vec<BuchiField>, ParseError> {
+        let mut fields = Vec::new();
+        self.skip_newlines();
+        while !self.check(&TokenKind::RParen) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(&TokenKind::RParen) {
+                break;
+            }
+            let field_span = self.current_span();
+
+            if self.check_ident() && self.peek_at(1).kind == TokenKind::LtEq {
+                let name = self.expect_ident()?;
+                self.expect(&TokenKind::LtEq)?;
+                let value = self.parse_expression()?;
+                fields.push(BuchiField {
+                    name,
+                    value,
+                    span: field_span,
+                });
+            } else {
+                // Positional argument — use index as name
+                let value = self.parse_expression()?;
+                fields.push(BuchiField {
+                    name: format!("_{}", fields.len()),
+                    value,
+                    span: field_span,
+                });
+            }
+            self.match_token(&TokenKind::Comma);
+            self.skip_newlines();
+        }
+        Ok(fields)
+    }
+}

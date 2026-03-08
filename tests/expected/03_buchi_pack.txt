@@ -1,0 +1,5 @@
+Name: Asuka
+Age: 14
+CallSign: Eva-02
+Rei's email: rei@nerv.jp
+Rei's phone: NERV-001

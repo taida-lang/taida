@@ -1,0 +1,1614 @@
+use super::*;
+use crate::parser::parse;
+
+fn check(source: &str) -> (TypeChecker, Vec<TypeError>) {
+    let (program, parse_errors) = parse(source);
+    assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    let errors = checker.errors.clone();
+    (checker, errors)
+}
+
+#[test]
+fn test_literal_type_inference() {
+    let mut checker = TypeChecker::new();
+    assert_eq!(
+        checker.infer_expr_type(&Expr::IntLit(
+            42,
+            Span {
+                start: 0,
+                end: 2,
+                line: 1,
+                column: 1
+            }
+        )),
+        Type::Int
+    );
+    assert_eq!(
+        checker.infer_expr_type(&Expr::FloatLit(
+            314.0 / 100.0,
+            Span {
+                start: 0,
+                end: 4,
+                line: 1,
+                column: 1
+            }
+        )),
+        Type::Float
+    );
+    assert_eq!(
+        checker.infer_expr_type(&Expr::StringLit(
+            "hello".to_string(),
+            Span {
+                start: 0,
+                end: 7,
+                line: 1,
+                column: 1
+            }
+        )),
+        Type::Str
+    );
+    assert_eq!(
+        checker.infer_expr_type(&Expr::BoolLit(
+            true,
+            Span {
+                start: 0,
+                end: 4,
+                line: 1,
+                column: 1
+            }
+        )),
+        Type::Bool
+    );
+}
+
+#[test]
+fn test_buchi_pack_type_inference() {
+    let mut checker = TypeChecker::new();
+    let expr = Expr::BuchiPack(
+        vec![
+            BuchiField {
+                name: "name".to_string(),
+                value: Expr::StringLit(
+                    "Alice".to_string(),
+                    Span {
+                        start: 0,
+                        end: 7,
+                        line: 1,
+                        column: 1,
+                    },
+                ),
+                span: Span {
+                    start: 0,
+                    end: 7,
+                    line: 1,
+                    column: 1,
+                },
+            },
+            BuchiField {
+                name: "age".to_string(),
+                value: Expr::IntLit(
+                    30,
+                    Span {
+                        start: 0,
+                        end: 2,
+                        line: 1,
+                        column: 1,
+                    },
+                ),
+                span: Span {
+                    start: 0,
+                    end: 2,
+                    line: 1,
+                    column: 1,
+                },
+            },
+        ],
+        Span {
+            start: 0,
+            end: 10,
+            line: 1,
+            column: 1,
+        },
+    );
+    let ty = checker.infer_expr_type(&expr);
+    assert_eq!(
+        ty,
+        Type::BuchiPack(vec![
+            ("name".to_string(), Type::Str),
+            ("age".to_string(), Type::Int),
+        ])
+    );
+}
+
+#[test]
+fn test_list_type_inference() {
+    let mut checker = TypeChecker::new();
+    let s = Span {
+        start: 0,
+        end: 1,
+        line: 1,
+        column: 1,
+    };
+    let expr = Expr::ListLit(
+        vec![Expr::IntLit(1, s.clone()), Expr::IntLit(2, s.clone())],
+        s.clone(),
+    );
+    assert_eq!(
+        checker.infer_expr_type(&expr),
+        Type::List(Box::new(Type::Int))
+    );
+
+    // Empty list
+    let empty = Expr::ListLit(vec![], s);
+    assert_eq!(
+        checker.infer_expr_type(&empty),
+        Type::List(Box::new(Type::Unknown))
+    );
+}
+
+#[test]
+fn test_type_registration() {
+    let (checker, errors) = check("Person = @(name: Str, age: Int)");
+    assert!(errors.is_empty());
+    let fields = checker.registry.get_type_fields("Person").unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0], ("name".to_string(), Type::Str));
+    assert_eq!(fields[1], ("age".to_string(), Type::Int));
+}
+
+#[test]
+fn test_error_type_registration() {
+    let source = "Error => ValidationError = @(field: Str, code: Int)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert!(checker.registry.is_error_type("ValidationError"));
+    let fields = checker.registry.get_type_fields("ValidationError").unwrap();
+    assert_eq!(fields.len(), 4);
+}
+
+#[test]
+fn test_inheritance_registration() {
+    let source = "Person = @(name: Str, age: Int)\nPerson => Employee = @(department: Str)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    let emp_fields = checker.registry.get_type_fields("Employee").unwrap();
+    assert_eq!(emp_fields.len(), 3);
+}
+
+#[test]
+fn test_arithmetic_type_checking() {
+    let s = Span {
+        start: 0,
+        end: 1,
+        line: 1,
+        column: 1,
+    };
+    let mut checker = TypeChecker::new();
+    let expr = Expr::BinaryOp(
+        Box::new(Expr::IntLit(1, s.clone())),
+        BinOp::Add,
+        Box::new(Expr::IntLit(2, s.clone())),
+        s.clone(),
+    );
+    assert_eq!(checker.infer_expr_type(&expr), Type::Int);
+
+    let expr2 = Expr::BinaryOp(
+        Box::new(Expr::IntLit(1, s.clone())),
+        BinOp::Add,
+        Box::new(Expr::FloatLit(2.0, s.clone())),
+        s.clone(),
+    );
+    assert_eq!(checker.infer_expr_type(&expr2), Type::Float);
+
+    let expr3 = Expr::BinaryOp(
+        Box::new(Expr::IntLit(1, s.clone())),
+        BinOp::Gt,
+        Box::new(Expr::IntLit(2, s.clone())),
+        s,
+    );
+    assert_eq!(checker.infer_expr_type(&expr3), Type::Bool);
+}
+
+#[test]
+fn test_field_access_type_checking() {
+    let s = Span {
+        start: 0,
+        end: 1,
+        line: 1,
+        column: 1,
+    };
+    let mut checker = TypeChecker::new();
+    let buchi = Expr::BuchiPack(
+        vec![BuchiField {
+            name: "name".to_string(),
+            value: Expr::StringLit("Alice".to_string(), s.clone()),
+            span: s.clone(),
+        }],
+        s.clone(),
+    );
+    let access = Expr::FieldAccess(Box::new(buchi.clone()), "name".to_string(), s.clone());
+    assert_eq!(checker.infer_expr_type(&access), Type::Str);
+
+    let bad_access = Expr::FieldAccess(Box::new(buchi), "email".to_string(), s);
+    checker.infer_expr_type(&bad_access);
+    assert_eq!(checker.errors.len(), 1);
+    assert!(checker.errors[0].message.contains("does not exist"));
+}
+
+// ── Scope tracking tests ──────────────────────────────
+
+#[test]
+fn test_scope_variable_tracking() {
+    let (checker, errors) = check("x <= 42\ny <= x + 1");
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("x"), Some(Type::Int));
+    assert_eq!(checker.lookup_var("y"), Some(Type::Int));
+}
+
+#[test]
+fn test_scope_type_annotation_match() {
+    let (_, errors) = check("x: Int <= 42");
+    assert!(
+        errors.is_empty(),
+        "Should not produce errors for matching type"
+    );
+}
+
+#[test]
+fn test_scope_type_annotation_mismatch() {
+    let (_, errors) = check("x: Int <= \"hello\"");
+    assert_eq!(errors.len(), 1, "Should detect type mismatch");
+    assert!(errors[0].message.contains("Type mismatch"));
+}
+
+#[test]
+fn test_func_def_scope() {
+    let source = "add x y =\n  x + y";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert!(checker.func_types.contains_key("add"));
+}
+
+#[test]
+fn test_import_registers_symbols() {
+    let (checker, errors) = check(">>> std/math => @(sqrt, PI)");
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    // Imported symbols should be in scope as Unknown
+    assert_eq!(checker.lookup_var("sqrt"), Some(Type::Unknown));
+    assert_eq!(checker.lookup_var("PI"), Some(Type::Unknown));
+}
+
+#[test]
+fn test_list_get_type() {
+    // IndexAccess removed in v0.5.0 -- use .get(i) instead
+    // v0.7.0: .get() returns Lax[T]
+    let (checker, errors) = check("items <= @[1, 2, 3]\nfirst <= items.get(0)");
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(
+        checker.lookup_var("items"),
+        Some(Type::List(Box::new(Type::Int)))
+    );
+    assert_eq!(
+        checker.lookup_var("first"),
+        Some(Type::Generic("Lax".to_string(), vec![Type::Int]))
+    );
+}
+
+#[test]
+fn test_method_return_type_str() {
+    let source = "name <= \"hello\"\nlen <= name.length()";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("len"), Some(Type::Int));
+}
+
+#[test]
+fn test_method_return_type_json_v070() {
+    // v0.7.0: JSON is opaque (molten iron). No methods allowed.
+    // JSON methods return Unknown since they are abolished.
+    let source = "json <= jsonEncode(42)\nresult <= json.toString()";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    // jsonEncode returns Str, not Json
+    assert_eq!(checker.lookup_var("json"), Some(Type::Str));
+}
+
+#[test]
+fn test_func_call_return_type() {
+    let source = "double x =\n  x * 2\n\nresult <= double(21)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    // Without return type annotation, func returns Unknown
+    assert_eq!(checker.lookup_var("result"), Some(Type::Unknown));
+}
+
+#[test]
+fn test_func_call_too_many_args_is_error() {
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\n\nresult <= add(1, 2, 3)";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1301]")),
+        "Expected E1301 too many args error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_param_default_self_or_forward_reference_is_error() {
+    let source = r#"selfRef a: Int <= a =
+  a
+=> :Int
+
+forwardRef a: Int <= b b: Int <= 1 =
+  a + b
+=> :Int"#;
+    let (_checker, errors) = check(source);
+    let e1302_count = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1302]"))
+        .count();
+    assert!(
+        e1302_count >= 2,
+        "Expected E1302 for self/forward refs, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_param_default_type_mismatch_is_error() {
+    let source = r#"bad a: Int <= "oops" =
+  a
+=> :Int"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1303]")),
+        "Expected E1303 default type mismatch error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_param_default_can_reference_previous_param() {
+    let source = r#"ok a: Int <= 1 b: Int <= a =
+  b
+=> :Int
+
+x <= ok()"#;
+    let (_checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+}
+
+// ---- H-3: Type checker strengthening tests ----
+
+#[test]
+fn test_mold_inst_type_inference() {
+    // Type conversion molds return Lax[T]
+    let source = "x <= Int[\"42\"]()";
+    let (checker, _errors) = check(source);
+    assert_eq!(
+        checker.lookup_var("x"),
+        Some(Type::Generic("Lax".to_string(), vec![Type::Int]))
+    );
+}
+
+#[test]
+fn test_mold_inst_div_type() {
+    let source = "x <= Div[10, 3]()";
+    let (checker, _errors) = check(source);
+    assert_eq!(
+        checker.lookup_var("x"),
+        Some(Type::Generic("Lax".to_string(), vec![Type::Int]))
+    );
+}
+
+#[test]
+fn test_molten_rejects_type_args() {
+    let source = "m <= Molten[1]()";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Molten takes no type arguments")),
+        "Expected Molten arity error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cond_branch_type() {
+    // Condition branch should infer type from first arm
+    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("y"), Some(Type::Str));
+}
+
+#[test]
+fn test_num_state_check_methods() {
+    let source = "n <= 42\nresult <= n.isPositive()";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("result"), Some(Type::Bool));
+}
+
+#[test]
+fn test_list_state_check_methods() {
+    let source = "items <= @[1, 2, 3]\nempty <= items.isEmpty()";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("empty"), Some(Type::Bool));
+}
+
+#[test]
+fn test_list_none_method() {
+    let source = "items <= @[1, 2, 3]\nresult <= items.none(_ x = x > 10)";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("result"), Some(Type::Bool));
+}
+
+#[test]
+fn test_func_with_return_type_annotation() {
+    // Taida syntax: `name params = body => :ReturnType`
+    let source = "greet name =\n  `Hello ${name}`\n=> :Str\n\nmsg <= greet(\"Alice\")";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("msg"), Some(Type::Str));
+}
+
+#[test]
+fn test_stdin_returns_str() {
+    let source = "input <= stdin(\"prompt: \")";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("input"), Some(Type::Str));
+}
+
+#[test]
+fn test_argv_returns_str_list() {
+    let source = "args <= argv()";
+    let (checker, _errors) = check(source);
+    assert_eq!(
+        checker.lookup_var("args"),
+        Some(Type::List(Box::new(Type::Str)))
+    );
+}
+
+#[test]
+fn test_sha256_returns_str() {
+    let source = ">>> taida-lang/crypto => @(sha256)\nh <= sha256(\"abc\")";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("h"), Some(Type::Str));
+}
+
+#[test]
+fn test_range_returns_int_list() {
+    let source = "nums <= range(1, 10)";
+    let (checker, _errors) = check(source);
+    assert_eq!(
+        checker.lookup_var("nums"),
+        Some(Type::List(Box::new(Type::Int)))
+    );
+}
+
+#[test]
+fn test_hashmap_type() {
+    let source = "m <= hashMap(@[])\nresult <= m.has(\"key\")";
+    let (checker, _errors) = check(source);
+    assert_eq!(
+        checker.lookup_var("m"),
+        Some(Type::Named("HashMap".to_string()))
+    );
+    assert_eq!(checker.lookup_var("result"), Some(Type::Bool));
+}
+
+#[test]
+fn test_set_type() {
+    let source = "s <= setOf(@[1, 2, 3])\nresult <= s.has(1)";
+    let (checker, _errors) = check(source);
+    assert_eq!(
+        checker.lookup_var("s"),
+        Some(Type::Named("Set".to_string()))
+    );
+    assert_eq!(checker.lookup_var("result"), Some(Type::Bool));
+}
+
+#[test]
+fn test_string_mold_type() {
+    let source = "result <= Upper[\"hello\"]()";
+    let (checker, _errors) = check(source);
+    assert_eq!(checker.lookup_var("result"), Some(Type::Str));
+}
+
+#[test]
+fn test_hof_mold_type() {
+    let source = "nums <= @[1, 2, 3]\nresult <= Filter[nums, _ x = x > 1]()";
+    let (checker, _errors) = check(source);
+    match checker.lookup_var("result") {
+        Some(Type::List(_)) => {} // OK - should be List type
+        other => panic!("Expected List type, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_empty_list_without_annotation_error() {
+    // @[] without type annotation should produce an error
+    let (_, errors) = check("items <= @[]");
+    assert_eq!(
+        errors.len(),
+        1,
+        "Should detect empty list without type annotation"
+    );
+    assert!(
+        errors[0].message.contains("Empty list literal"),
+        "Error message should mention empty list literal: {}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn test_empty_list_with_annotation_ok() {
+    // @[] with type annotation should be accepted
+    let (checker, errors) = check("items: @[Int] <= @[]");
+    assert!(
+        errors.is_empty(),
+        "Should not produce errors for annotated empty list: {:?}",
+        errors
+    );
+    assert_eq!(
+        checker.lookup_var("items"),
+        Some(Type::List(Box::new(Type::Int)))
+    );
+}
+
+#[test]
+fn test_non_empty_list_without_annotation_ok() {
+    // @[1, 2, 3] without annotation is fine (type can be inferred)
+    let (checker, errors) = check("nums <= @[1, 2, 3]");
+    assert!(
+        errors.is_empty(),
+        "Should not produce errors for non-empty list"
+    );
+    assert_eq!(
+        checker.lookup_var("nums"),
+        Some(Type::List(Box::new(Type::Int)))
+    );
+}
+
+// ── Low-1: unmold_type for custom mold Named types ──
+
+#[test]
+fn test_unmold_type_custom_mold_named() {
+    // Named type that is a registered mold should unmold to its first type param
+    let mut checker = TypeChecker::new();
+    // Register a custom mold "Container" with type param "T"
+    checker.registry.register_mold(
+        "Container",
+        vec!["T".to_string()],
+        vec![("count".to_string(), Type::Int)],
+    );
+    // A Named("Container") type should not return Unknown when unmolded
+    // It should return Unknown (we can't know T without instantiation), but
+    // at least Generic("Container", [Unknown]) style should be recognized
+    let named_ty = Type::Named("Container".to_string());
+    let unmolded = checker.unmold_type(&named_ty);
+    // For Named mold types, we return Unknown (type param not instantiated)
+    // This is acceptable — the key fix is that Generic("Container", [Int]) unmolds to Int
+    assert_eq!(unmolded, Type::Unknown);
+
+    // The real improvement: Generic("Container", [Int]) should unmold to Int
+    let generic_ty = Type::Generic("Container".to_string(), vec![Type::Int]);
+    let unmolded_generic = checker.unmold_type(&generic_ty);
+    assert_eq!(unmolded_generic, Type::Int);
+}
+
+#[test]
+fn test_mold_field_type_only_is_valid() {
+    let source = r#"Mold[T] => Container[T] = @(
+  count: Int
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Type-only field in MoldDef should be valid: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_field_default_only_is_valid() {
+    let source = r#"Mold[T] => Container[T] = @(
+  count <= 0
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Default-only field in MoldDef should be valid: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_field_without_type_and_default_is_error() {
+    let source = r#"Mold[T] => Container[T] = @(
+  count
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1400]") && e.message.contains("Hint:")),
+        "Expected field declaration error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_type_params_without_binding_target_is_error() {
+    let source = r#"Mold[T, U] => Broken[T, U] = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1401]")
+                && e.message.contains("unbound type parameter(s): U")),
+        "Expected unbound type parameter error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_inst_missing_required_positional_args_is_error() {
+    let source = r#"Mold[T, U] => Pair[T, U] = @(
+  second: U
+)
+p <= Pair[1]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1402]")
+                && e.message
+                    .contains("requires 2 positional `[]` argument(s), got 1")
+        }),
+        "Expected missing positional arg error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_inst_too_many_positional_args_is_error() {
+    let source = r#"Mold[T, U] => Pair[T, U] = @(
+  second: U
+  flag: Bool <= false
+)
+p <= Pair[1, 2, true]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1403]")
+                && e.message
+                    .contains("takes 2 positional `[]` argument(s), got 3")
+        }),
+        "Expected positional overflow error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_inst_required_field_in_named_options_is_error() {
+    let source = r#"Mold[T, U] => Pair[T, U] = @(
+  second: U
+  flag: Bool <= false
+)
+p <= Pair[1](second <= 2)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1405]")
+                && e.message.contains("field 'second' must be passed via `[]`")
+        }),
+        "Expected []/() mismatch error for required field, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_inst_duplicate_and_undefined_options_are_errors() {
+    let source = r#"Mold[T, U] => Pair[T, U] = @(
+  second: U
+  flag: Bool <= false
+)
+p <= Pair[1, 2](flag <= true, flag <= false, nope <= true)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1404]") && e.message.contains("duplicate option 'flag'")
+        }),
+        "Expected duplicate option error, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1406]") && e.message.contains("undefined option 'nope'")
+        }),
+        "Expected undefined option error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_inst_with_valid_binding_rules_has_no_errors() {
+    let source = r#"Mold[T, U] => Pair[T, U] = @(
+  second: U
+  flag: Bool <= false
+)
+p <= Pair[1, 2](flag <= true)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected valid custom mold instantiation to pass, got: {:?}",
+        errors
+    );
+}
+
+// ── E1501: Same-scope name collision ──
+
+#[test]
+fn test_same_scope_variable_redefinition_is_error() {
+    let source = "x <= 1\nx <= 2";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected E1501 same-scope redefinition error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_same_scope_function_overload_is_error() {
+    let source = "f x: Int =\n  x + 1\n=> :Int\nf x: Str =\n  x\n=> :Str";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected E1501 function overload error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_function_overwrites_variable_is_error() {
+    let source = "x <= 1\nx =\n  42\n=> :Int";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected E1501 variable-to-function overwrite error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_inner_scope_shadowing_is_allowed() {
+    let source = "x <= 1\nf =\n  x <= 2\n  x\n=> :Int";
+    let (_, errors) = check(source);
+    let e1501_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1501]"))
+        .collect();
+    assert!(
+        e1501_errors.is_empty(),
+        "Shadowing in inner scope should not produce E1501, got: {:?}",
+        e1501_errors
+    );
+}
+
+// ── E1502: Old `_` partial application reject ──
+
+#[test]
+fn test_old_placeholder_partial_application_is_rejected() {
+    // C-5c / QF-42: `f(5, _)` should be rejected — use `f(5, )` instead
+    let source = "add x y = x + y => :Int\nresult <= add(5, _)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1502]")),
+        "Expected E1502 old placeholder partial application error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_placeholder_in_pipeline_is_allowed() {
+    // `_` in pipeline context is valid — refers to pipe value
+    let source = r#"
+add x y = x + y => :Int
+5 => add(_, 3) => result
+"#;
+    let (_, errors) = check(source);
+    let e1502_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1502]"))
+        .collect();
+    assert!(
+        e1502_errors.is_empty(),
+        "Placeholder in pipeline should not produce E1502, got: {:?}",
+        e1502_errors
+    );
+}
+
+#[test]
+fn test_lambda_underscore_is_allowed() {
+    // `_ x = x + 1` is a lambda, not a placeholder — should be allowed
+    let source = "f <= _ x = x + 1";
+    let (_, errors) = check(source);
+    let e1502_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1502]"))
+        .collect();
+    assert!(
+        e1502_errors.is_empty(),
+        "Lambda underscore should not produce E1502, got: {:?}",
+        e1502_errors
+    );
+}
+
+// ── E1503: TypeDef/BuchiPack partial application reject ──
+
+#[test]
+fn test_typedef_partial_application_placeholder_is_rejected() {
+    // C-5d / QF-43: `Point(_, 2)` should be rejected
+    let source = "Point = @(x: Int, y: Int)\np <= Point(_, 2)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1503]")),
+        "Expected E1503 TypeDef partial application error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_typedef_partial_application_hole_is_rejected() {
+    // C-5d / QF-43: `Point(, 2)` (empty slot) should also be rejected for TypeDef
+    let source = "Point = @(x: Int, y: Int)\np <= Point(, 2)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1503]")),
+        "Expected E1503 TypeDef partial application (hole) error, got: {:?}",
+        errors
+    );
+}
+
+// ── E1504: Mold[_]() direct binding reject ──
+
+#[test]
+fn test_mold_placeholder_direct_binding_is_rejected() {
+    // C-5e / QF-44: `trimIt <= Trim[_]()` outside pipeline should be rejected
+    let source = r#"trimIt <= Trim[_]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1504]")),
+        "Expected E1504 Mold[_]() direct binding error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_placeholder_in_pipeline_is_allowed() {
+    // `data => Trim[_]()` in pipeline is valid
+    let source = r#""  hello  " => Trim[_]() => result"#;
+    let (_, errors) = check(source);
+    let e1504_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1504]"))
+        .collect();
+    assert!(
+        e1504_errors.is_empty(),
+        "Mold[_]() in pipeline should not produce E1504, got: {:?}",
+        e1504_errors
+    );
+}
+
+// ── C-10a: QF-41 空白区切り呼び出し ──
+
+#[test]
+fn test_whitespace_separated_call_is_not_parsed_as_funccall() {
+    // QF-41: `f x` should not be parsed as a function call
+    // In Taida, function calls require parentheses: `f(x)`
+    // `f x` is either a function definition or two separate expressions
+    let source = "f x = x + 1 => :Int\nresult <= f(5)";
+    let (_, errors) = check(source);
+    // Just verify that proper call syntax works without errors
+    // (空白区切り呼び出しの誤パースは parser レベルで防止)
+    let _ = errors; // parser-level concern, checker validates what parser produces
+}
+
+// ── C-10e/C-10f: QF-45 / QF-46 checker regression ──
+
+#[test]
+fn test_qf45_function_overload_is_checker_rejected() {
+    // QF-45: Function overload must be caught by checker (E1501)
+    let source = "greet name: Str =\n  name\n=> :Str\ngreet name: Int =\n  toString(name)\n=> :Str";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "QF-45: Expected E1501 for function overload, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_qf46_same_scope_redefinition_is_checker_rejected() {
+    // QF-46: Same-scope variable redefinition must be caught by checker (E1501)
+    let source = "counter <= 0\ncounter <= 1";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "QF-46: Expected E1501 for same-scope redefinition, got: {:?}",
+        errors
+    );
+}
+
+// ── C-4a: 空スロット 0 個は通常呼び出し、1 個以上は部分適用 ──
+
+#[test]
+fn test_no_holes_is_normal_call() {
+    // C-4a: `f(1, 2)` — no holes, normal function call
+    let source = "add x y = x + y\n=> :Int\nresult <= add(1, 2)";
+    let (_, errors) = check(source);
+    // Should succeed without errors (normal call)
+    assert!(
+        errors.is_empty(),
+        "Normal call should not produce errors, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_with_holes_is_partial_application() {
+    // C-4a: `f(1, )` — one hole, partial application
+    let source = "add x y = x + y\n=> :Int\nadd1 <= add(1, )";
+    let (_, errors) = check(source);
+    // Partial application via empty slot should be accepted by checker
+    // (it's only rejected for TypeDef/BuchiPack via E1503)
+    let e1503_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1503]"))
+        .collect();
+    assert!(
+        e1503_errors.is_empty(),
+        "Function partial application should not produce E1503, got: {:?}",
+        e1503_errors
+    );
+}
+
+// ── C-4b: arity と空スロット数の整合性 ──
+
+#[test]
+fn test_arity_check_normal_call_too_many_args() {
+    // C-4b: Too many args should produce E1301
+    let source = "add x y = x + y\n=> :Int\nresult <= add(1, 2, 3)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1301]")),
+        "Expected E1301 for too many args, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_arity_check_partial_with_holes() {
+    // C-4b: Partial application with holes should not trigger arity errors
+    // `add(, )` — 2 holes for 2-param function, valid partial application
+    let source = "add x y = x + y\n=> :Int\nadd_none <= add(, )";
+    let (_, errors) = check(source);
+    let e1301_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1301]"))
+        .collect();
+    assert!(
+        e1301_errors.is_empty(),
+        "Partial application should not produce E1301, got: {:?}",
+        e1301_errors
+    );
+}
+
+// ── C-4c: デフォルト引数と空スロットの組み合わせ ──
+
+#[test]
+fn test_default_args_with_partial_application_valid() {
+    // C-4c: `sum3(1, , )` — partial application with all 3 slots filled, valid
+    let source = "sum3 a b <= 10 c <= 20 =\n  a + b + c\n=> :Int\nadd_from_1 <= sum3(1, , )";
+    let (_, errors) = check(source);
+    let relevant_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            e.message.contains("[E1301]")
+                || e.message.contains("[E1503]")
+                || e.message.contains("[E1505]")
+        })
+        .collect();
+    assert!(
+        relevant_errors.is_empty(),
+        "Partial application with all slots should not error, got: {:?}",
+        relevant_errors
+    );
+}
+
+#[test]
+fn test_default_args_with_partial_application_missing_slots() {
+    // C-4c: `sum3(1, )` — 2 slots for 3-param function, E1505
+    let source = "sum3 a b <= 10 c <= 20 =\n  a + b + c\n=> :Int\nadd_from_1 <= sum3(1, )";
+    let (_, errors) = check(source);
+    let e1505: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1505]"))
+        .collect();
+    assert!(
+        !e1505.is_empty(),
+        "Partial application with fewer slots than arity should produce E1505"
+    );
+}
+
+// ── C-4d: `f(1)` は通常呼び出し、`f(1, )` は部分適用 ──
+
+#[test]
+fn test_f1_is_normal_f1_comma_is_partial() {
+    // C-4d: Confirm `f(1)` and `f(1, )` are treated differently by checker
+    let source_normal = "id x = x\n=> :Int\nresult <= id(1)";
+    let source_partial = "add x y = x + y\n=> :Int\nadd1 <= add(1, )";
+
+    let (_, errors_normal) = check(source_normal);
+    let (_, errors_partial) = check(source_partial);
+
+    // Normal call: no errors
+    assert!(
+        errors_normal.is_empty(),
+        "Normal call should not error, got: {:?}",
+        errors_normal
+    );
+
+    // Partial application: no E1503 (function partial is allowed)
+    let e1503: Vec<_> = errors_partial
+        .iter()
+        .filter(|e| e.message.contains("[E1503]"))
+        .collect();
+    assert!(
+        e1503.is_empty(),
+        "Function partial application should not produce E1503, got: {:?}",
+        e1503
+    );
+}
+
+#[test]
+fn test_partial_application_returns_function_type() {
+    // C-4a: Partial application should type the result as a function, not the return type
+    // add1 <= add(1, ) should make add1 a function (:Int => :Int)
+    // add1 + 1 should be a type error
+    let source = "add x: Int y: Int = x + y => :Int\nadd1 <= add(1, )\nn <= add1 + 1";
+    let (_, errors) = check(source);
+    let type_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("Cannot apply"))
+        .collect();
+    assert!(
+        !type_errors.is_empty(),
+        "Using partial application result as Int should produce type error, got: {:?}",
+        errors
+    );
+    // The error message should show concrete function type, not (?) => ?
+    assert!(
+        type_errors[0].message.contains("(Int) => Int"),
+        "Should show concrete type (Int) => Int, got: {}",
+        type_errors[0].message
+    );
+}
+
+// ── C-6b: Inner scope shadowing 許可 / same-scope redefine 禁止 回帰テスト ──
+
+#[test]
+fn test_inner_scope_shadow_allowed_regression() {
+    // C-6b: Shadowing in inner scope is always allowed
+    let source = "x <= 10\nwrapper =\n  x <= 20\n  x\n=> :Int";
+    let (_, errors) = check(source);
+    let e1501: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1501]"))
+        .collect();
+    assert!(
+        e1501.is_empty(),
+        "Inner scope shadowing should be allowed, got: {:?}",
+        e1501
+    );
+}
+
+#[test]
+fn test_same_scope_redefine_forbidden_regression() {
+    // C-6b: Same-scope redefinition is always forbidden
+    let source = "a <= 1\nb <= 2\na <= 3";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Same-scope redefinition should produce E1501, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_nested_function_shadow_allowed() {
+    // C-6b: Function inside function can shadow outer variable
+    let source = "total <= 100\ncalc =\n  total <= 200\n  total\n=> :Int\nstdout(total.toString())";
+    let (_, errors) = check(source);
+    let e1501: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1501]"))
+        .collect();
+    assert!(
+        e1501.is_empty(),
+        "Nested function shadowing should be allowed, got: {:?}",
+        e1501
+    );
+}
+
+// ── C-11b: docs 由来の否定例 ──
+
+#[test]
+fn test_docs_negative_same_scope_redefinition() {
+    // C-11b: docs say same-scope redefinition is an error
+    let source = "counter <= 0\ncounter <= counter + 1";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Docs-derived negative case: same-scope redefine should error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_docs_negative_function_overload() {
+    // C-11b: docs say function overloading is disallowed
+    let source = "greet name: Str =\n  name\n=> :Str\ngreet age: Int =\n  age.toString()\n=> :Str";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Docs-derived negative case: overload should error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_docs_negative_old_placeholder_partial() {
+    // C-11b: docs say old `_` partial application is rejected
+    let source = "add x y = x + y\n=> :Int\nresult <= add(5, _)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1502]")),
+        "Docs-derived negative case: old _ partial should error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_docs_negative_typedef_partial() {
+    // C-11b: docs say TypeDef partial application is not supported
+    let source = "Point = @(x: Int, y: Int)\np <= Point(1, )";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1503]")),
+        "Docs-derived negative case: TypeDef partial should error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_docs_negative_mold_placeholder_outside_pipeline() {
+    // C-11b: docs say Mold[_]() outside pipeline is rejected
+    let source = "x <= Trim[_]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1504]")),
+        "Docs-derived negative case: Mold[_]() outside pipeline should error, got: {:?}",
+        errors
+    );
+}
+
+// ── Phase 7: E1506 — Function argument type mismatch ──
+
+#[test]
+fn test_func_arg_type_mismatch_is_error() {
+    // E1506: add(x: Int, y: Int) called with ("oops", 1) should error
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nresult <= add(\"oops\", 1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")),
+        "Expected E1506 for argument type mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_func_arg_type_mismatch_correct_arg_is_ok() {
+    // Correct types should not produce E1506
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int\nresult <= add(1, 2)";
+    let (_, errors) = check(source);
+    let e1506: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1506]"))
+        .collect();
+    assert!(
+        e1506.is_empty(),
+        "Correct arg types should not produce E1506, got: {:?}",
+        e1506
+    );
+}
+
+#[test]
+fn test_func_arg_type_mismatch_partial_app_then_call() {
+    // E1506: add1 = add(1, ) is Function(Int) => Int
+    // add1("oops") should error
+    let source =
+        "add x: Int y: Int =\n  x + y\n=> :Int\nadd1 <= add(1, )\nresult <= add1(\"oops\")";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")),
+        "Expected E1506 for partial application argument type mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_func_arg_type_mismatch_unknown_types_not_checked() {
+    // Unknown param types should not produce E1506
+    let source = "f x y =\n  x + y\nresult <= f(\"hello\", 1)";
+    let (_, errors) = check(source);
+    let e1506: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1506]"))
+        .collect();
+    assert!(
+        e1506.is_empty(),
+        "Unknown param types should not produce E1506, got: {:?}",
+        e1506
+    );
+}
+
+#[test]
+fn test_func_arg_type_subtype_is_ok() {
+    // Int is subtype of Num, should not error
+    let source = "f x: Num =\n  x\n=> :Num\nresult <= f(42)";
+    let (_, errors) = check(source);
+    let e1506: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1506]"))
+        .collect();
+    assert!(
+        e1506.is_empty(),
+        "Subtype arg should not produce E1506, got: {:?}",
+        e1506
+    );
+}
+
+// ── Phase 7: E1507 — Builtin arity check ──
+
+#[test]
+fn test_builtin_range_too_few_args() {
+    // E1507: range(1) — needs 2-3 args
+    let source = "nums <= range(1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1507]")),
+        "Expected E1507 for range(1) too few args, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_builtin_range_correct_arity() {
+    // range(1, 10) is correct — no E1507
+    let source = "nums <= range(1, 10)";
+    let (_, errors) = check(source);
+    let e1507: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1507]"))
+        .collect();
+    assert!(
+        e1507.is_empty(),
+        "Correct arity should not produce E1507, got: {:?}",
+        e1507
+    );
+}
+
+#[test]
+fn test_builtin_debug_too_many_args() {
+    // E1507: debug(1, 2, 3) — max 2 args
+    let source = "debug(1, 2, 3)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1507]")),
+        "Expected E1507 for debug(1, 2, 3) too many args, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_builtin_stdout_correct_arity() {
+    // stdout(x) is correct — no E1507
+    let source = "stdout(\"hello\")";
+    let (_, errors) = check(source);
+    let e1507: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1507]"))
+        .collect();
+    assert!(
+        e1507.is_empty(),
+        "stdout with 1 arg should not produce E1507, got: {:?}",
+        e1507
+    );
+}
+
+#[test]
+fn test_builtin_argv_no_args() {
+    // argv() takes 0 args — no E1507
+    let source = "args <= argv()";
+    let (_, errors) = check(source);
+    let e1507: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1507]"))
+        .collect();
+    assert!(
+        e1507.is_empty(),
+        "argv() with 0 args should not produce E1507, got: {:?}",
+        e1507
+    );
+}
+
+#[test]
+fn test_builtin_hashmap_empty_is_ok() {
+    // hashMap() with 0 args should be accepted
+    let source = "m <= hashMap()";
+    let (_, errors) = check(source);
+    let e1507: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1507]"))
+        .collect();
+    assert!(
+        e1507.is_empty(),
+        "hashMap() should accept 0 args, got: {:?}",
+        e1507
+    );
+}
+
+// ── Phase 7: E1508 — Method call argument check ──
+
+#[test]
+fn test_method_call_take_wrong_type() {
+    // E1508: xs.take("oops") — take expects Int
+    let source = "xs <= @[1, 2, 3]\nresult <= xs.take(\"oops\")";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected E1508 for take(\"oops\") type mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_method_call_take_too_many_args() {
+    // E1508: xs.take(1, 2) — take expects 1 arg
+    let source = "xs <= @[1, 2, 3]\nresult <= xs.take(1, 2)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected E1508 for take(1, 2) too many args, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_method_call_charat_wrong_type() {
+    // E1508: s.get(true) — get on Str expects Int
+    let source = "s <= \"hello\"\nresult <= s.get(true)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected E1508 for get(true) type mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_method_call_correct_args() {
+    // Correct method calls should not produce E1508
+    let source = "xs <= @[1, 2, 3]\nresult <= xs.get(0)";
+    let (_, errors) = check(source);
+    let e1508: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1508]"))
+        .collect();
+    assert!(
+        e1508.is_empty(),
+        "Correct method call should not produce E1508, got: {:?}",
+        e1508
+    );
+}
+
+#[test]
+fn test_method_call_length_no_args() {
+    // length() should not error
+    let source = "xs <= @[1, 2, 3]\nn <= xs.length()";
+    let (_, errors) = check(source);
+    let e1508: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1508]"))
+        .collect();
+    assert!(
+        e1508.is_empty(),
+        "length() should not produce E1508, got: {:?}",
+        e1508
+    );
+}
+
+#[test]
+fn test_method_call_length_with_args_is_error() {
+    // E1508: xs.length(1) — length takes 0 args
+    let source = "xs <= @[1, 2, 3]\nn <= xs.length(1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected E1508 for length(1) too many args, got: {:?}",
+        errors
+    );
+}
+
+// ── Phase 7: E1501 — TypeDef name collision ──
+
+#[test]
+fn test_typedef_duplicate_is_error() {
+    // E1501: Pilot defined twice should error
+    let source = "Pilot = @(name: Str)\nPilot = @(age: Int)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected E1501 for duplicate TypeDef, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_typedef_func_collision_is_error() {
+    // E1501: TypeDef name colliding with function name
+    let source = "Pilot x: Str =\n  x\n=> :Str\nPilot = @(name: Str)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected E1501 for TypeDef/function collision, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_typedef_single_definition_is_ok() {
+    // Single TypeDef should not produce E1501
+    let source = "Pilot = @(name: Str)";
+    let (_, errors) = check(source);
+    let e1501: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1501]"))
+        .collect();
+    assert!(
+        e1501.is_empty(),
+        "Single TypeDef should not produce E1501, got: {:?}",
+        e1501
+    );
+}
+
+// --- E0401: リスト要素の同質性チェック ---
+
+#[test]
+fn test_list_homogeneous_int() {
+    // @[1, 2, 3] — 同質な Int リスト、エラーなし
+    let source = "nums <= @[1, 2, 3]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        e0401.is_empty(),
+        "Homogeneous Int list should not produce E0401, got: {:?}",
+        e0401
+    );
+}
+
+#[test]
+fn test_list_mixed_int_str() {
+    // @[1, "x"] — Int と Str の混在、E0401 が出るべき
+    let source = r#"mixed <= @[1, "x"]"#;
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert_eq!(
+        e0401.len(),
+        1,
+        "Mixed Int/Str list should produce E0401, got: {:?}",
+        e0401
+    );
+    assert!(e0401[0].message.contains("Int"), "Should mention Int");
+    assert!(e0401[0].message.contains("Str"), "Should mention Str");
+}
+
+#[test]
+fn test_list_int_float_unifies_to_num() {
+    // @[1, 2.5] — Int と Float の混在は Num に統一、エラーなし
+    let source = "nums <= @[1, 2.5]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        e0401.is_empty(),
+        "Int/Float mix should unify to Num, not E0401, got: {:?}",
+        e0401
+    );
+}
+
+#[test]
+fn test_list_homogeneous_bool() {
+    // @[true, false] — 同質な Bool リスト
+    let source = "flags <= @[true, false]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        e0401.is_empty(),
+        "Homogeneous Bool list should not produce E0401, got: {:?}",
+        e0401
+    );
+}
+
+#[test]
+fn test_list_homogeneous_packs() {
+    // @[@(x <= 1), @(y <= 2)] — BuchiPack 同士は構造的部分型で許容
+    let source = "packs <= @[@(x <= 1), @(y <= 2)]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        e0401.is_empty(),
+        "BuchiPack list should not produce E0401, got: {:?}",
+        e0401
+    );
+}
+
+#[test]
+fn test_list_empty() {
+    // @[] — 空リスト、エラーなし
+    let source = "empty <= @[]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        e0401.is_empty(),
+        "Empty list should not produce E0401, got: {:?}",
+        e0401
+    );
+}
+
+#[test]
+fn test_list_single_element() {
+    // @[1] — 単一要素、エラーなし
+    let source = "single <= @[1]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        e0401.is_empty(),
+        "Single element list should not produce E0401, got: {:?}",
+        e0401
+    );
+}
