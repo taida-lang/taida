@@ -1073,42 +1073,47 @@ impl Emitter {
                 ectx.val_map.insert(*dst, results[0]);
             }
             IrInst::Call(dst, func_name, args) => {
-                let func_ref = ectx.func_refs[func_name];
-                let (param_types, return_types) = runtime_func_signature(func_name);
+                // ── Integer/Bool intrinsics: emit native instructions instead of call ──
+                if let Some(result) = Self::try_emit_intrinsic(builder, ectx, func_name, args) {
+                    ectx.val_map.insert(*dst, result);
+                } else {
+                    let func_ref = ectx.func_refs[func_name];
+                    let (param_types, return_types) = runtime_func_signature(func_name);
 
-                let arg_vals: Vec<clif::Value> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &arg)| {
-                        let val = ectx.val_map[&arg];
-                        let val_type = builder.func.dfg.value_type(val);
-                        let expected_type = param_types.get(i).copied().unwrap_or(types::I64);
+                    let arg_vals: Vec<clif::Value> = args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &arg)| {
+                            let val = ectx.val_map[&arg];
+                            let val_type = builder.func.dfg.value_type(val);
+                            let expected_type = param_types.get(i).copied().unwrap_or(types::I64);
 
-                        if val_type == expected_type {
-                            val
-                        } else if val_type == types::F64 && expected_type == types::I64 {
-                            builder
-                                .ins()
-                                .bitcast(types::I64, clif::MemFlags::new(), val)
-                        } else if val_type == types::I64 && expected_type == types::F64 {
-                            builder
-                                .ins()
-                                .bitcast(types::F64, clif::MemFlags::new(), val)
-                        } else {
-                            val
-                        }
-                    })
-                    .collect();
+                            if val_type == expected_type {
+                                val
+                            } else if val_type == types::F64 && expected_type == types::I64 {
+                                builder
+                                    .ins()
+                                    .bitcast(types::I64, clif::MemFlags::new(), val)
+                            } else if val_type == types::I64 && expected_type == types::F64 {
+                                builder
+                                    .ins()
+                                    .bitcast(types::F64, clif::MemFlags::new(), val)
+                            } else {
+                                val
+                            }
+                        })
+                        .collect();
 
-                let call = builder.ins().call(func_ref, &arg_vals);
-                let results = builder.inst_results(call);
-                if !results.is_empty() {
-                    ectx.val_map.insert(*dst, results[0]);
-                } else if return_types.is_empty() {
-                    // void 関数: trap の代わりに 0 を返す
-                    // (trap はブロック終端命令なので後続命令を追加できない)
-                    let dummy = builder.ins().iconst(types::I64, 0);
-                    ectx.val_map.insert(*dst, dummy);
+                    let call = builder.ins().call(func_ref, &arg_vals);
+                    let results = builder.inst_results(call);
+                    if !results.is_empty() {
+                        ectx.val_map.insert(*dst, results[0]);
+                    } else if return_types.is_empty() {
+                        // void 関数: trap の代わりに 0 を返す
+                        // (trap はブロック終端命令なので後続命令を追加できない)
+                        let dummy = builder.ins().iconst(types::I64, 0);
+                        ectx.val_map.insert(*dst, dummy);
+                    }
                 }
             }
             IrInst::CallUser(dst, func_name, args) => {
@@ -1347,5 +1352,92 @@ impl Emitter {
 
         let result = builder.use_var(result_var);
         ectx.val_map.insert(result_dst, result);
+    }
+
+    /// Simple integer/bool operations → native Cranelift instructions.
+    /// Returns Some(result_value) if the function was inlined, None otherwise.
+    fn try_emit_intrinsic(
+        builder: &mut FunctionBuilder,
+        ectx: &mut EmitCtx,
+        func_name: &str,
+        args: &[IrVar],
+    ) -> Option<clif::Value> {
+        use cranelift_codegen::ir::condcodes::IntCC;
+
+        match func_name {
+            // ── Binary integer arithmetic ──
+            "taida_int_add" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                Some(builder.ins().iadd(a, b))
+            }
+            "taida_int_sub" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                Some(builder.ins().isub(a, b))
+            }
+            "taida_int_mul" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                Some(builder.ins().imul(a, b))
+            }
+
+            // ── Integer comparisons (return i64: 0 or 1) ──
+            "taida_int_eq" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                let cmp = builder.ins().icmp(IntCC::Equal, a, b);
+                Some(builder.ins().uextend(types::I64, cmp))
+            }
+            "taida_int_neq" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                let cmp = builder.ins().icmp(IntCC::NotEqual, a, b);
+                Some(builder.ins().uextend(types::I64, cmp))
+            }
+            "taida_int_lt" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                let cmp = builder.ins().icmp(IntCC::SignedLessThan, a, b);
+                Some(builder.ins().uextend(types::I64, cmp))
+            }
+            "taida_int_gt" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, a, b);
+                Some(builder.ins().uextend(types::I64, cmp))
+            }
+            "taida_int_gte" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, a, b);
+                Some(builder.ins().uextend(types::I64, cmp))
+            }
+
+            // ── Unary integer ──
+            "taida_int_neg" if args.len() == 1 => {
+                let a = ectx.val_map[&args[0]];
+                Some(builder.ins().ineg(a))
+            }
+
+            // ── Boolean operations ──
+            "taida_bool_not" if args.len() == 1 => {
+                let a = ectx.val_map[&args[0]];
+                let one = builder.ins().iconst(types::I64, 1);
+                Some(builder.ins().bxor(a, one))
+            }
+            "taida_bool_and" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                Some(builder.ins().band(a, b))
+            }
+            "taida_bool_or" if args.len() == 2 => {
+                let a = ectx.val_map[&args[0]];
+                let b = ectx.val_map[&args[1]];
+                Some(builder.ins().bor(a, b))
+            }
+
+            _ => None,
+        }
     }
 }
