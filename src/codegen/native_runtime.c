@@ -13,6 +13,19 @@
 #include <limits.h>
 #include <pthread.h>
 
+// ---------------------------------------------------------------------------
+// W-0d: ABI 正規化 — 値型・ポインタ型・関数ポインタ型の typedef
+//
+// Native (LP64): taida_val = int64_t (8B), taida_ptr = intptr_t (8B)
+// WASM32 (ILP32): taida_val = int64_t (8B), taida_ptr = intptr_t (4B)
+//
+// W-0 では Native のみ。LP64 環境で taida_val = int64_t = intptr_t = 64-bit なので
+// 動作は一切変わらない。WASM32 対応時に taida_ptr が 32-bit になる。
+// ---------------------------------------------------------------------------
+typedef int64_t   taida_val;     // 整数値 (Int, Bool, Hash, tag, count, index, dummy)
+typedef intptr_t  taida_ptr;     // ヒープポインタ (Str, Pack, List, HashMap, Set, ...)
+typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
+
 // Taida Magic Numbers for pointer tagging and type safety
 #define TAIDA_MAGIC_MASK  0xFFFFFFFFFFFFFF00LL
 #define TAIDA_RC_MASK     0x00000000000000FFLL
@@ -51,7 +64,7 @@
 // RULE 2 — Display/toString temporaries: every heap string created by
 //   taida_value_to_display_string / taida_value_to_debug_string / *_to_string
 //   MUST be released by the caller via taida_str_release after use.
-//   Pattern: long tmp = taida_value_to_debug_string(val); use(tmp); taida_str_release(tmp);
+//   Pattern: taida_val tmp = taida_value_to_debug_string(val); use(tmp); taida_str_release(tmp);
 //
 // RULE 3 — New runtime helper checklist (see NATIVE_OWNERSHIP_AUDIT.md):
 //   (a) Does it allocate heap objects? -> Set magic header + initial rc=1.
@@ -64,301 +77,301 @@
 
 // HashMap layout macros (needed by taida_release before HashMap section)
 #define HM_HEADER 4  // number of header slots before entries
-#define TAIDA_HASHMAP_TOMBSTONE_HASH 1L
+#define TAIDA_HASHMAP_TOMBSTONE_HASH ((taida_val)1)
 #define HM_SLOT_EMPTY(h, k)     ((h) == 0 && (k) == 0)
 #define HM_SLOT_TOMBSTONE(h, k) ((h) == TAIDA_HASHMAP_TOMBSTONE_HASH && (k) == 0)
 #define HM_SLOT_OCCUPIED(h, k)  (!HM_SLOT_EMPTY(h, k) && !HM_SLOT_TOMBSTONE(h, k))
 
-#define TAIDA_IS_LIST(ptr)  (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_LIST_MAGIC)
-#define TAIDA_IS_PACK(ptr)  (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_PACK_MAGIC)
-#define TAIDA_IS_STR(ptr)   (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC)
-#define TAIDA_IS_HMAP(ptr)  (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_HMAP_MAGIC)
-#define TAIDA_IS_SET(ptr)   (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_SET_MAGIC)
-#define TAIDA_IS_ASYNC(ptr) (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_ASYNC_MAGIC)
-#define TAIDA_IS_BYTES(ptr) (taida_ptr_is_readable(ptr, 8) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_MAGIC)
-#define TAIDA_IS_CLOSURE(ptr) (taida_ptr_is_readable(ptr, sizeof(long) * 3) && (((long*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_CLOSURE_MAGIC)
+#define TAIDA_IS_LIST(ptr)  (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_LIST_MAGIC)
+#define TAIDA_IS_PACK(ptr)  (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_PACK_MAGIC)
+#define TAIDA_IS_STR(ptr)   (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC)
+#define TAIDA_IS_HMAP(ptr)  (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_HMAP_MAGIC)
+#define TAIDA_IS_SET(ptr)   (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_SET_MAGIC)
+#define TAIDA_IS_ASYNC(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_ASYNC_MAGIC)
+#define TAIDA_IS_BYTES(ptr) (taida_ptr_is_readable(ptr, 8) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_BYTES_MAGIC)
+#define TAIDA_IS_CLOSURE(ptr) (taida_ptr_is_readable(ptr, sizeof(taida_val) * 3) && (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) == TAIDA_CLOSURE_MAGIC)
 
-#define TAIDA_GET_RC(ptr)      (((long*)ptr)[0] & TAIDA_RC_MASK)
-#define TAIDA_SET_RC(ptr, rc)  (((long*)ptr)[0] = (((long*)ptr)[0] & TAIDA_MAGIC_MASK) | ((rc) & TAIDA_RC_MASK))
-#define TAIDA_INC_RC(ptr)      do { long _rc = TAIDA_GET_RC(ptr); if (_rc < 255) TAIDA_SET_RC(ptr, _rc + 1); } while (0)
-#define TAIDA_DEC_RC(ptr)      do { long _rc = TAIDA_GET_RC(ptr); if (_rc > 0) TAIDA_SET_RC(ptr, _rc - 1); } while (0)
+#define TAIDA_GET_RC(ptr)      (((taida_val*)ptr)[0] & TAIDA_RC_MASK)
+#define TAIDA_SET_RC(ptr, rc)  (((taida_val*)ptr)[0] = (((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK) | ((rc) & TAIDA_RC_MASK))
+#define TAIDA_INC_RC(ptr)      do { taida_val _rc = TAIDA_GET_RC(ptr); if (_rc < 255) TAIDA_SET_RC(ptr, _rc + 1); } while (0)
+#define TAIDA_DEC_RC(ptr)      do { taida_val _rc = TAIDA_GET_RC(ptr); if (_rc > 0) TAIDA_SET_RC(ptr, _rc - 1); } while (0)
 
-extern long _taida_main(void);
+extern taida_val _taida_main(void);
 static int taida_cli_argc = 0;
 static char **taida_cli_argv = NULL;
 
 // Forward declarations
-long taida_retain(long ptr);
-long taida_async_ok(long value);
-long taida_async_ok_tagged(long value, long value_tag);
-long taida_async_err(long error);
-void taida_async_set_value_tag(long async_ptr, long tag);
-long taida_pack_new(long field_count);
-long taida_pack_set(long pack_ptr, long field_idx, long value);
-long taida_pack_set_hash(long pack_ptr, long index, long hash);
-long taida_pack_set_tag(long pack_ptr, long index, long tag);
-long taida_pack_get_idx(long pack_ptr, long index);
-long taida_throw(long error_val);
-long taida_lax_new(long value, long default_value);
-long taida_lax_empty(long default_value);
-long taida_lax_unmold(long lax_ptr);
-long taida_async_unmold(long async_ptr);
-long taida_async_all(long list_ptr);
-long taida_async_race(long list_ptr);
-long taida_async_map(long async_ptr, long fn_ptr);
-long taida_async_get_or_default(long async_ptr, long def);
-long taida_async_spawn(long fn_ptr, long arg);
-long taida_async_cancel(long async_ptr);
-static void taida_async_join(long async_ptr);
-static long taida_async_to_string(long async_ptr);
-long taida_str_from_int(long v);
-long taida_str_from_float(double v);
-long taida_str_from_bool(long v);
-long taida_is_closure_value(long ptr);
-long taida_json_schema_cast(long raw_ptr, long schema_ptr);
-long taida_list_new(void);
-long taida_list_push(long list_ptr, long item);
-long taida_result_create(long value, long throw_val, long predicate);
-long taida_result_map(long result, long fn_ptr);
-long taida_result_flat_map(long result, long fn_ptr);
-long taida_result_map_error(long result, long fn_ptr);
-long taida_result_get_or_throw(long result);
-long taida_result_to_string(long result);
-long taida_list_length(long list_ptr);
-long taida_lax_map(long lax_ptr, long fn_ptr);
-long taida_lax_flat_map(long lax_ptr, long fn_ptr);
-long taida_gorillax_new(long value);
-long taida_molten_new(void);
-long taida_stub_new(long message);
-long taida_todo_new(long id, long task, long sol, long unm);
-long taida_cage_apply(long cage_value, long fn_ptr);
-long taida_gorillax_err(long error);
-long taida_gorillax_unmold(long ptr);
-long taida_gorillax_relax(long ptr);
-long taida_gorillax_to_string(long ptr);
-long taida_relaxed_gorillax_unmold(long ptr);
-long taida_relaxed_gorillax_to_string(long ptr);
-long taida_list_map(long list_ptr, long fn_ptr);
-long taida_list_is_empty(long list_ptr);
-long taida_hashmap_new(void);
-void taida_hashmap_set_value_tag(long hm_ptr, long tag);
-long taida_hashmap_set(long hm_ptr, long key_hash, long key_ptr, long value);
-long taida_hashmap_get(long hm_ptr, long key_hash, long key_ptr);
-long taida_hashmap_has(long hm_ptr, long key_hash, long key_ptr);
-long taida_hashmap_remove(long hm_ptr, long key_hash, long key_ptr);
-long taida_hashmap_remove_immut(long hm_ptr, long key_hash, long key_ptr);
-long taida_hashmap_is_empty(long hm_ptr);
-long taida_hashmap_get_lax(long hm_ptr, long key_hash, long key_ptr);
-long taida_hashmap_to_string(long hm_ptr);
-long taida_str_hash(long str_ptr);
-long taida_str_concat(const char* a, const char* b);
+taida_val taida_retain(taida_val ptr);
+taida_val taida_async_ok(taida_val value);
+taida_val taida_async_ok_tagged(taida_val value, taida_val value_tag);
+taida_val taida_async_err(taida_val error);
+void taida_async_set_value_tag(taida_val async_ptr, taida_val tag);
+taida_val taida_pack_new(taida_val field_count);
+taida_val taida_pack_set(taida_val pack_ptr, taida_val field_idx, taida_val value);
+taida_val taida_pack_set_hash(taida_val pack_ptr, taida_val index, taida_val hash);
+taida_val taida_pack_set_tag(taida_val pack_ptr, taida_val index, taida_val tag);
+taida_val taida_pack_get_idx(taida_val pack_ptr, taida_val index);
+taida_val taida_throw(taida_val error_val);
+taida_val taida_lax_new(taida_val value, taida_val default_value);
+taida_val taida_lax_empty(taida_val default_value);
+taida_val taida_lax_unmold(taida_val lax_ptr);
+taida_val taida_async_unmold(taida_val async_ptr);
+taida_val taida_async_all(taida_val list_ptr);
+taida_val taida_async_race(taida_val list_ptr);
+taida_val taida_async_map(taida_val async_ptr, taida_val fn_ptr);
+taida_val taida_async_get_or_default(taida_val async_ptr, taida_val def);
+taida_val taida_async_spawn(taida_val fn_ptr, taida_val arg);
+taida_val taida_async_cancel(taida_val async_ptr);
+static void taida_async_join(taida_val async_ptr);
+static taida_val taida_async_to_string(taida_val async_ptr);
+taida_val taida_str_from_int(taida_val v);
+taida_val taida_str_from_float(double v);
+taida_val taida_str_from_bool(taida_val v);
+taida_val taida_is_closure_value(taida_val ptr);
+taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr);
+taida_val taida_list_new(void);
+taida_val taida_list_push(taida_val list_ptr, taida_val item);
+taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val predicate);
+taida_val taida_result_map(taida_val result, taida_val fn_ptr);
+taida_val taida_result_flat_map(taida_val result, taida_val fn_ptr);
+taida_val taida_result_map_error(taida_val result, taida_val fn_ptr);
+taida_val taida_result_get_or_throw(taida_val result);
+taida_val taida_result_to_string(taida_val result);
+taida_val taida_list_length(taida_val list_ptr);
+taida_val taida_lax_map(taida_val lax_ptr, taida_val fn_ptr);
+taida_val taida_lax_flat_map(taida_val lax_ptr, taida_val fn_ptr);
+taida_val taida_gorillax_new(taida_val value);
+taida_val taida_molten_new(void);
+taida_val taida_stub_new(taida_val message);
+taida_val taida_todo_new(taida_val id, taida_val task, taida_val sol, taida_val unm);
+taida_val taida_cage_apply(taida_val cage_value, taida_val fn_ptr);
+taida_val taida_gorillax_err(taida_val error);
+taida_val taida_gorillax_unmold(taida_val ptr);
+taida_val taida_gorillax_relax(taida_val ptr);
+taida_val taida_gorillax_to_string(taida_val ptr);
+taida_val taida_relaxed_gorillax_unmold(taida_val ptr);
+taida_val taida_relaxed_gorillax_to_string(taida_val ptr);
+taida_val taida_list_map(taida_val list_ptr, taida_val fn_ptr);
+taida_val taida_list_is_empty(taida_val list_ptr);
+taida_val taida_hashmap_new(void);
+void taida_hashmap_set_value_tag(taida_val hm_ptr, taida_val tag);
+taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr, taida_val value);
+taida_val taida_hashmap_get(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr);
+taida_val taida_hashmap_has(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr);
+taida_val taida_hashmap_remove(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr);
+taida_val taida_hashmap_remove_immut(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr);
+taida_val taida_hashmap_is_empty(taida_val hm_ptr);
+taida_val taida_hashmap_get_lax(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr);
+taida_val taida_hashmap_to_string(taida_val hm_ptr);
+taida_val taida_str_hash(taida_val str_ptr);
+taida_val taida_str_concat(const char* a, const char* b);
 // Heap string helpers (hidden header: [magic+rc, len, bytes...\0])
 static char* taida_str_alloc(size_t len);
 static char* taida_str_new_copy(const char* src);
-void  taida_str_retain(long ptr);
-static void  taida_str_release(long ptr);
+void  taida_str_retain(taida_val ptr);
+static void  taida_str_release(taida_val ptr);
 // List element retain/release helpers (based on elem_type_tag)
-static void taida_list_elem_retain(long elem, long elem_tag);
-static void taida_list_elem_release(long elem, long elem_tag);
-long taida_list_get(long list_ptr, long index);
-long taida_set_has(long set_ptr, long item);
-long taida_set_remove(long set_ptr, long item);
-long taida_set_add(long set_ptr, long item);
-void taida_set_set_elem_tag(long set_ptr, long tag);
+static void taida_list_elem_retain(taida_val elem, taida_val elem_tag);
+static void taida_list_elem_release(taida_val elem, taida_val elem_tag);
+taida_val taida_list_get(taida_val list_ptr, taida_val index);
+taida_val taida_set_has(taida_val set_ptr, taida_val item);
+taida_val taida_set_remove(taida_val set_ptr, taida_val item);
+taida_val taida_set_add(taida_val set_ptr, taida_val item);
+void taida_set_set_elem_tag(taida_val set_ptr, taida_val tag);
 // Str state check methods
-long taida_str_contains(const char* s, const char* sub);
-long taida_str_starts_with(const char* s, const char* prefix);
-long taida_str_ends_with(const char* s, const char* suffix);
-long taida_str_last_index_of(const char* s, const char* sub);
-long taida_str_get(const char* s, long idx);
+taida_val taida_str_contains(const char* s, const char* sub);
+taida_val taida_str_starts_with(const char* s, const char* prefix);
+taida_val taida_str_ends_with(const char* s, const char* suffix);
+taida_val taida_str_last_index_of(const char* s, const char* sub);
+taida_val taida_str_get(const char* s, taida_val idx);
 // List state check methods
-long taida_list_last_index_of(long list_ptr, long item);
-long taida_list_any(long list_ptr, long fn_ptr);
-long taida_list_all(long list_ptr, long fn_ptr);
-long taida_list_none(long list_ptr, long fn_ptr);
+taida_val taida_list_last_index_of(taida_val list_ptr, taida_val item);
+taida_val taida_list_any(taida_val list_ptr, taida_val fn_ptr);
+taida_val taida_list_all(taida_val list_ptr, taida_val fn_ptr);
+taida_val taida_list_none(taida_val list_ptr, taida_val fn_ptr);
 // Prelude functions
-long taida_io_stdin(long prompt_ptr);
-long taida_sha256(long value);
-long taida_time_now_ms(void);
-long taida_time_sleep(long ms);
-long taida_json_encode(long val);
-long taida_json_pretty(long val);
-long taida_register_field_name(long hash, long name_ptr);
-long taida_register_field_type(long hash, long name_ptr, long type_tag);
-static const char* taida_lookup_field_name(long hash);
-static int taida_lookup_field_type(long hash);
-static long taida_is_hashmap(long ptr);
+taida_val taida_io_stdin(taida_val prompt_ptr);
+taida_val taida_sha256(taida_val value);
+taida_val taida_time_now_ms(void);
+taida_val taida_time_sleep(taida_val ms);
+taida_val taida_json_encode(taida_val val);
+taida_val taida_json_pretty(taida_val val);
+taida_val taida_register_field_name(taida_val hash, taida_val name_ptr);
+taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_val type_tag);
+static const char* taida_lookup_field_name(taida_val hash);
+static int taida_lookup_field_type(taida_val hash);
+static taida_val taida_is_hashmap(taida_val ptr);
 // NO-1: HashMap ownership helpers (forward declarations)
-static void taida_hashmap_val_retain(long val, long val_tag);
-static void taida_hashmap_val_release(long val, long val_tag);
-static void taida_hashmap_key_retain(long key);
-static void taida_hashmap_key_release(long key);
-static long taida_is_set(long ptr);
-static int taida_is_list(long ptr);
-static int taida_is_bytes(long ptr);
-static int taida_is_buchi_pack(long ptr);
-static long taida_lax_to_string(long lax_ptr);
-static long taida_set_to_string(long set_ptr);
-static int taida_has_magic_header(long tag);
-static long taida_make_error(const char *error_type, const char *error_msg);
+static void taida_hashmap_val_retain(taida_val val, taida_val val_tag);
+static void taida_hashmap_val_release(taida_val val, taida_val val_tag);
+static void taida_hashmap_key_retain(taida_val key);
+static void taida_hashmap_key_release(taida_val key);
+static taida_val taida_is_set(taida_val ptr);
+static int taida_is_list(taida_val ptr);
+static int taida_is_bytes(taida_val ptr);
+static int taida_is_buchi_pack(taida_val ptr);
+static taida_val taida_lax_to_string(taida_val lax_ptr);
+static taida_val taida_set_to_string(taida_val set_ptr);
+static int taida_has_magic_header(taida_val tag);
+static taida_val taida_make_error(const char *error_type, const char *error_msg);
 static const char *taida_os_error_kind(int err_code, const char *err_msg);
-static long taida_make_io_error(int err_code, const char *err_msg);
-static int taida_ptr_is_readable(long ptr, size_t bytes);
+static taida_val taida_make_io_error(int err_code, const char *err_msg);
+static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
-static long taida_value_to_display_string(long val);
-static long taida_value_to_debug_string(long val);
-long taida_polymorphic_contains(long obj, long needle);
-long taida_polymorphic_index_of(long obj, long needle);
-long taida_polymorphic_last_index_of(long obj, long needle);
-static long taida_bytes_new_filled(long len, unsigned char fill);
-static long taida_bytes_from_raw(const unsigned char *data, long len);
-static long taida_bytes_clone(long bytes_ptr);
-static long taida_bytes_len(long bytes_ptr);
-static long taida_bytes_default_value(void);
-static long taida_bytes_get_lax(long bytes_ptr, long index);
-static int taida_bytes_cursor_unpack(long cursor_ptr, long *bytes_out, long *offset_out);
-static long taida_bytes_cursor_step(long value, long cursor);
-static double _l2d(long v);
-static long _d2l(double v);
+static taida_val taida_value_to_display_string(taida_val val);
+static taida_val taida_value_to_debug_string(taida_val val);
+taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
+taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
+taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle);
+static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill);
+static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len);
+static taida_val taida_bytes_clone(taida_val bytes_ptr);
+static taida_val taida_bytes_len(taida_val bytes_ptr);
+static taida_val taida_bytes_default_value(void);
+static taida_val taida_bytes_get_lax(taida_val bytes_ptr, taida_val index);
+static int taida_bytes_cursor_unpack(taida_val cursor_ptr, taida_val *bytes_out, taida_val *offset_out);
+static taida_val taida_bytes_cursor_step(taida_val value, taida_val cursor);
+static double _l2d(taida_val v);
+static taida_val _d2l(double v);
 // OS package forward declarations
-long taida_os_read(long path_ptr);
-long taida_os_read_bytes(long path_ptr);
-long taida_os_list_dir(long path_ptr);
-long taida_os_stat(long path_ptr);
-long taida_os_exists(long path_ptr);
-long taida_os_env_var(long name_ptr);
-long taida_os_write_file(long path_ptr, long content_ptr);
-long taida_os_write_bytes(long path_ptr, long content_ptr);
-long taida_os_append_file(long path_ptr, long content_ptr);
-long taida_os_remove(long path_ptr);
-long taida_os_create_dir(long path_ptr);
-long taida_os_rename(long from_ptr, long to_ptr);
-long taida_os_run(long program_ptr, long args_list_ptr);
-long taida_os_exec_shell(long command_ptr);
-long taida_os_all_env(void);
-long taida_os_argv(void);
+taida_val taida_os_read(taida_val path_ptr);
+taida_val taida_os_read_bytes(taida_val path_ptr);
+taida_val taida_os_list_dir(taida_val path_ptr);
+taida_val taida_os_stat(taida_val path_ptr);
+taida_val taida_os_exists(taida_val path_ptr);
+taida_val taida_os_env_var(taida_val name_ptr);
+taida_val taida_os_write_file(taida_val path_ptr, taida_val content_ptr);
+taida_val taida_os_write_bytes(taida_val path_ptr, taida_val content_ptr);
+taida_val taida_os_append_file(taida_val path_ptr, taida_val content_ptr);
+taida_val taida_os_remove(taida_val path_ptr);
+taida_val taida_os_create_dir(taida_val path_ptr);
+taida_val taida_os_rename(taida_val from_ptr, taida_val to_ptr);
+taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr);
+taida_val taida_os_exec_shell(taida_val command_ptr);
+taida_val taida_os_all_env(void);
+taida_val taida_os_argv(void);
 // OS package Phase 2: async APIs
-long taida_os_read_async(long path_ptr);
-long taida_os_http_get(long url_ptr);
-long taida_os_http_post(long url_ptr, long body_ptr);
-long taida_os_http_request(long method_ptr, long url_ptr, long headers_ptr, long body_ptr);
-long taida_os_dns_resolve(long host_ptr, long timeout_ms);
-long taida_os_tcp_connect(long host_ptr, long port, long timeout_ms);
-long taida_os_tcp_listen(long port, long timeout_ms);
-long taida_os_tcp_accept(long listener_fd, long timeout_ms);
-long taida_os_socket_send(long socket_fd, long data_ptr, long timeout_ms);
-long taida_os_socket_send_all(long socket_fd, long data_ptr, long timeout_ms);
-long taida_os_socket_recv(long socket_fd, long timeout_ms);
-long taida_os_socket_send_bytes(long socket_fd, long data_ptr, long timeout_ms);
-long taida_os_socket_recv_bytes(long socket_fd, long timeout_ms);
-long taida_os_socket_recv_exact(long socket_fd, long size, long timeout_ms);
-long taida_os_udp_bind(long host_ptr, long port, long timeout_ms);
-long taida_os_udp_send_to(long socket_fd, long host_ptr, long port, long data_ptr, long timeout_ms);
-long taida_os_udp_recv_from(long socket_fd, long timeout_ms);
-long taida_os_socket_close(long socket_fd);
-long taida_os_listener_close(long listener_fd);
+taida_val taida_os_read_async(taida_val path_ptr);
+taida_val taida_os_http_get(taida_val url_ptr);
+taida_val taida_os_http_post(taida_val url_ptr, taida_val body_ptr);
+taida_val taida_os_http_request(taida_val method_ptr, taida_val url_ptr, taida_val headers_ptr, taida_val body_ptr);
+taida_val taida_os_dns_resolve(taida_val host_ptr, taida_val timeout_ms);
+taida_val taida_os_tcp_connect(taida_val host_ptr, taida_val port, taida_val timeout_ms);
+taida_val taida_os_tcp_listen(taida_val port, taida_val timeout_ms);
+taida_val taida_os_tcp_accept(taida_val listener_fd, taida_val timeout_ms);
+taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms);
+taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms);
+taida_val taida_os_socket_recv(taida_val socket_fd, taida_val timeout_ms);
+taida_val taida_os_socket_send_bytes(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms);
+taida_val taida_os_socket_recv_bytes(taida_val socket_fd, taida_val timeout_ms);
+taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_val timeout_ms);
+taida_val taida_os_udp_bind(taida_val host_ptr, taida_val port, taida_val timeout_ms);
+taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_val port, taida_val data_ptr, taida_val timeout_ms);
+taida_val taida_os_udp_recv_from(taida_val socket_fd, taida_val timeout_ms);
+taida_val taida_os_socket_close(taida_val socket_fd);
+taida_val taida_os_listener_close(taida_val listener_fd);
 // Pool package runtime
-long taida_pool_create(long config_ptr);
-long taida_pool_acquire(long pool_or_pack, long timeout_ms);
-long taida_pool_release(long pool_or_pack, long token, long resource);
-long taida_pool_close(long pool_or_pack);
-long taida_pool_health(long pool_or_pack);
-long taida_bit_and(long a, long b);
-long taida_bit_or(long a, long b);
-long taida_bit_xor(long a, long b);
-long taida_bit_not(long x);
-long taida_shift_l(long x, long n);
-long taida_shift_r(long x, long n);
-long taida_shift_ru(long x, long n);
-long taida_to_radix(long value, long base);
-long taida_int_mold_auto(long v);
-long taida_int_mold_str_base(long v, long base);
-long taida_uint8_mold(long v);
-long taida_uint8_mold_float(double v);
-long taida_u16be_mold(long value);
-long taida_u16le_mold(long value);
-long taida_u32be_mold(long value);
-long taida_u32le_mold(long value);
-long taida_u16be_decode_mold(long value);
-long taida_u16le_decode_mold(long value);
-long taida_u32be_decode_mold(long value);
-long taida_u32le_decode_mold(long value);
-long taida_bytes_mold(long value, long fill);
-long taida_bytes_set(long bytes_ptr, long idx, long value);
-long taida_bytes_to_list(long bytes_ptr);
-long taida_bytes_cursor_new(long bytes_ptr, long offset);
-long taida_bytes_cursor_remaining(long cursor_ptr);
-long taida_bytes_cursor_take(long cursor_ptr, long size);
-long taida_bytes_cursor_u8(long cursor_ptr);
-long taida_char_mold_int(long value);
-long taida_char_mold_str(long value);
-long taida_codepoint_mold_str(long value);
-long taida_utf8_encode_mold(long value);
-long taida_utf8_decode_mold(long value);
-long taida_slice_mold(long value, long start, long end);
+taida_val taida_pool_create(taida_val config_ptr);
+taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms);
+taida_val taida_pool_release(taida_val pool_or_pack, taida_val token, taida_val resource);
+taida_val taida_pool_close(taida_val pool_or_pack);
+taida_val taida_pool_health(taida_val pool_or_pack);
+taida_val taida_bit_and(taida_val a, taida_val b);
+taida_val taida_bit_or(taida_val a, taida_val b);
+taida_val taida_bit_xor(taida_val a, taida_val b);
+taida_val taida_bit_not(taida_val x);
+taida_val taida_shift_l(taida_val x, taida_val n);
+taida_val taida_shift_r(taida_val x, taida_val n);
+taida_val taida_shift_ru(taida_val x, taida_val n);
+taida_val taida_to_radix(taida_val value, taida_val base);
+taida_val taida_int_mold_auto(taida_val v);
+taida_val taida_int_mold_str_base(taida_val v, taida_val base);
+taida_val taida_uint8_mold(taida_val v);
+taida_val taida_uint8_mold_float(double v);
+taida_val taida_u16be_mold(taida_val value);
+taida_val taida_u16le_mold(taida_val value);
+taida_val taida_u32be_mold(taida_val value);
+taida_val taida_u32le_mold(taida_val value);
+taida_val taida_u16be_decode_mold(taida_val value);
+taida_val taida_u16le_decode_mold(taida_val value);
+taida_val taida_u32be_decode_mold(taida_val value);
+taida_val taida_u32le_decode_mold(taida_val value);
+taida_val taida_bytes_mold(taida_val value, taida_val fill);
+taida_val taida_bytes_set(taida_val bytes_ptr, taida_val idx, taida_val value);
+taida_val taida_bytes_to_list(taida_val bytes_ptr);
+taida_val taida_bytes_cursor_new(taida_val bytes_ptr, taida_val offset);
+taida_val taida_bytes_cursor_remaining(taida_val cursor_ptr);
+taida_val taida_bytes_cursor_take(taida_val cursor_ptr, taida_val size);
+taida_val taida_bytes_cursor_u8(taida_val cursor_ptr);
+taida_val taida_char_mold_int(taida_val value);
+taida_val taida_char_mold_str(taida_val value);
+taida_val taida_codepoint_mold_str(taida_val value);
+taida_val taida_utf8_encode_mold(taida_val value);
+taida_val taida_utf8_decode_mold(taida_val value);
+taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end);
 
 // Taida runtime functions
 void taida_gorilla(void) { exit(1); }
 
-long taida_debug_int(long value) {
+taida_val taida_debug_int(taida_val value) {
     printf("%ld\n", value);
     return 0;
 }
 
-long taida_debug_float(double value) {
+taida_val taida_debug_float(double value) {
     printf("%g\n", value);
     return 0;
 }
 
-long taida_debug_bool(long value) {
+taida_val taida_debug_bool(taida_val value) {
     if (value) printf("true\n"); else printf("false\n");
     return 0;
 }
 
-long taida_debug_str(const char* ptr) {
+taida_val taida_debug_str(const char* ptr) {
     if (ptr) printf("%s\n", ptr); else printf("\n");
     return 0;
 }
 
 // Arithmetic runtime
-long taida_int_add(long a, long b) { return a + b; }
-long taida_int_sub(long a, long b) { return a - b; }
-long taida_int_mul(long a, long b) { return a * b; }
+taida_val taida_int_add(taida_val a, taida_val b) { return a + b; }
+taida_val taida_int_sub(taida_val a, taida_val b) { return a - b; }
+taida_val taida_int_mul(taida_val a, taida_val b) { return a * b; }
 
 // Bitwise molds (Int64 semantics)
-long taida_bit_and(long a, long b) { return (long)(((uint64_t)a) & ((uint64_t)b)); }
-long taida_bit_or(long a, long b) { return (long)(((uint64_t)a) | ((uint64_t)b)); }
-long taida_bit_xor(long a, long b) { return (long)(((uint64_t)a) ^ ((uint64_t)b)); }
-long taida_bit_not(long x) { return (long)(~((uint64_t)x)); }
+taida_val taida_bit_and(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) & ((uint64_t)b)); }
+taida_val taida_bit_or(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) | ((uint64_t)b)); }
+taida_val taida_bit_xor(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) ^ ((uint64_t)b)); }
+taida_val taida_bit_not(taida_val x) { return (taida_val)(~((uint64_t)x)); }
 
-long taida_shift_l(long x, long n) {
+taida_val taida_shift_l(taida_val x, taida_val n) {
     if (n < 0 || n > 63) return taida_lax_empty(0);
     uint64_t shifted = ((uint64_t)x) << (unsigned int)n;
-    return taida_lax_new((long)shifted, 0);
+    return taida_lax_new((taida_val)shifted, 0);
 }
 
-long taida_shift_r(long x, long n) {
+taida_val taida_shift_r(taida_val x, taida_val n) {
     if (n < 0 || n > 63) return taida_lax_empty(0);
     int64_t shifted = ((int64_t)x) >> (unsigned int)n;
-    return taida_lax_new((long)shifted, 0);
+    return taida_lax_new((taida_val)shifted, 0);
 }
 
-long taida_shift_ru(long x, long n) {
+taida_val taida_shift_ru(taida_val x, taida_val n) {
     if (n < 0 || n > 63) return taida_lax_empty(0);
     uint64_t shifted = ((uint64_t)x) >> (unsigned int)n;
-    return taida_lax_new((long)shifted, 0);
+    return taida_lax_new((taida_val)shifted, 0);
 }
 
-static long taida_digit_to_char(long digit) {
+static taida_val taida_digit_to_char(taida_val digit) {
     return (digit < 10) ? ('0' + digit) : ('a' + (digit - 10));
 }
 
-long taida_to_radix(long value, long base) {
-    if (base < 2 || base > 36) return taida_lax_empty((long)"");
+taida_val taida_to_radix(taida_val value, taida_val base) {
+    if (base < 2 || base > 36) return taida_lax_empty((taida_val)"");
     if (value == 0) {
         char *out = taida_str_alloc(1);
         out[0] = '0';
-        return taida_lax_new((long)out, (long)"");
+        return taida_lax_new((taida_val)out, (taida_val)"");
     }
 
     uint64_t mag = value < 0
@@ -368,7 +381,7 @@ long taida_to_radix(long value, long base) {
     size_t pos = 0;
     while (mag > 0) {
         uint64_t rem = mag % (uint64_t)base;
-        tmp[pos++] = (char)taida_digit_to_char((long)rem);
+        tmp[pos++] = (char)taida_digit_to_char((taida_val)rem);
         mag /= (uint64_t)base;
     }
     if (value < 0) tmp[pos++] = '-';
@@ -377,23 +390,23 @@ long taida_to_radix(long value, long base) {
     for (size_t i = 0; i < pos; i++) {
         out[i] = tmp[pos - 1 - i];
     }
-    return taida_lax_new((long)out, (long)"");
+    return taida_lax_new((taida_val)out, (taida_val)"");
 }
 // FNV-1a hashes for error field names
 #define HASH_TYPE    0xa79439ef7bfa9c2dULL
 #define HASH_MESSAGE 0x546401b5d2a8d2a4ULL
 
-static long taida_make_error(const char *error_type, const char *error_msg) {
-    long pack = taida_pack_new(2);
+static taida_val taida_make_error(const char *error_type, const char *error_msg) {
+    taida_val pack = taida_pack_new(2);
     // Set hash for "type" field (index 0)
-    taida_pack_set_hash(pack, 0, (long)HASH_TYPE);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
     char *type_str = taida_str_new_copy(error_type);
-    taida_pack_set(pack, 0, (long)type_str);
+    taida_pack_set(pack, 0, (taida_val)type_str);
     taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
     // Set hash for "message" field (index 1)
-    taida_pack_set_hash(pack, 1, (long)HASH_MESSAGE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_MESSAGE);
     char *msg_str = taida_str_new_copy(error_msg);
-    taida_pack_set(pack, 1, (long)msg_str);
+    taida_pack_set(pack, 1, (taida_val)msg_str);
     taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
     return pack;
 }
@@ -490,30 +503,30 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg) {
     return "other";
 }
 
-static long taida_make_io_error(int err_code, const char *err_msg) {
+static taida_val taida_make_io_error(int err_code, const char *err_msg) {
     const char *message = err_msg ? err_msg : "unknown io error";
     const char *kind = taida_os_error_kind(err_code, message);
 
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_TYPE);
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
     char *type_str = taida_str_new_copy("IoError");
-    taida_pack_set(pack, 0, (long)type_str);
+    taida_pack_set(pack, 0, (taida_val)type_str);
     taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
 
-    taida_pack_set_hash(pack, 1, (long)HASH_MESSAGE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_MESSAGE);
     char *msg_str = taida_str_new_copy(message);
-    taida_pack_set(pack, 1, (long)msg_str);
+    taida_pack_set(pack, 1, (taida_val)msg_str);
     taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
 
-    long code_hash = taida_str_hash((long)"code");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
     taida_pack_set_hash(pack, 2, code_hash);
-    taida_pack_set(pack, 2, (long)err_code);
+    taida_pack_set(pack, 2, (taida_val)err_code);
     // code is Int, tag defaults to 0 (TAIDA_TAG_INT)
 
-    long kind_hash = taida_str_hash((long)"kind");
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
     taida_pack_set_hash(pack, 3, kind_hash);
     char *kind_str = taida_str_new_copy(kind);
-    taida_pack_set(pack, 3, (long)kind_str);
+    taida_pack_set(pack, 3, (taida_val)kind_str);
     taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
     return pack;
 }
@@ -552,9 +565,9 @@ static const char __bytes_cursor_type_str[] = "BytesCursor";
 // NO-4 RULE 1: All runtime-built packs MUST use this helper (or taida_pack_set_tag
 // + explicit retain) when storing heap children. Raw taida_pack_set alone is
 // INSUFFICIENT — it skips type_tag and retain, causing leak on release.
-static void taida_retain_and_tag_field(long pack, long field_idx, long value) {
-    if (value > 4096 && taida_ptr_is_readable(value, sizeof(long))) {
-        long vtag = ((long*)value)[0] & TAIDA_MAGIC_MASK;
+static void taida_retain_and_tag_field(taida_val pack, taida_val field_idx, taida_val value) {
+    if (value > 4096 && taida_ptr_is_readable(value, sizeof(taida_val))) {
+        taida_val vtag = ((taida_val*)value)[0] & TAIDA_MAGIC_MASK;
         if (vtag == TAIDA_PACK_MAGIC) {
             taida_retain(value);
             taida_pack_set_tag(pack, field_idx, TAIDA_TAG_PACK);
@@ -578,9 +591,9 @@ static void taida_retain_and_tag_field(long pack, long field_idx, long value) {
     // Str の hidden-header は value の 16 バイト前にあるため、上記の value[0] チェックでは検出できない。
     // 別途 ptr-16 を調べて TAIDA_STR_MAGIC を確認する。
     if (value > 4096) {
-        long *hdr = ((long*)value) - 2;
-        if (taida_ptr_is_readable((long)hdr, sizeof(long))) {
-            long htag = hdr[0] & TAIDA_MAGIC_MASK;
+        taida_val *hdr = ((taida_val*)value) - 2;
+        if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) {
+            taida_val htag = hdr[0] & TAIDA_MAGIC_MASK;
             if (htag == TAIDA_STR_MAGIC) {
                 taida_str_retain(value);
                 taida_pack_set_tag(pack, field_idx, TAIDA_TAG_STR);
@@ -589,114 +602,114 @@ static void taida_retain_and_tag_field(long pack, long field_idx, long value) {
     }
 }
 
-long taida_lax_new(long value, long default_value) {
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_HAS_VALUE);
+taida_val taida_lax_new(taida_val value, taida_val default_value) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);  // hasValue = true
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
-    taida_pack_set_hash(pack, 1, (long)HASH___VALUE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, value);
     // retain-on-store: value が Pack/List/Closure の場合 retain + tag 設定
     taida_retain_and_tag_field(pack, 1, value);
-    taida_pack_set_hash(pack, 2, (long)HASH___DEFAULT);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);
     taida_pack_set(pack, 2, default_value);
     // retain-on-store: default_value が Pack/List/Closure の場合 retain + tag 設定
     taida_retain_and_tag_field(pack, 2, default_value);
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__lax_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__lax_type_str);
     // __lax_type_str is static, not heap-allocated - leave as INT(0) to skip free
     return pack;
 }
 
-long taida_lax_empty(long default_value) {
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_HAS_VALUE);
+taida_val taida_lax_empty(taida_val default_value) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);  // hasValue = false
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
-    taida_pack_set_hash(pack, 1, (long)HASH___VALUE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, default_value);
     // retain-on-store: default_value stored in __value slot
     taida_retain_and_tag_field(pack, 1, default_value);
-    taida_pack_set_hash(pack, 2, (long)HASH___DEFAULT);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);
     taida_pack_set(pack, 2, default_value);
     // retain-on-store: same default_value stored in __default slot (needs separate retain)
     taida_retain_and_tag_field(pack, 2, default_value);
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__lax_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__lax_type_str);
     // __lax_type_str is static - leave tag as INT(0)
     return pack;
 }
 
-long taida_lax_has_value(long lax_ptr) {
+taida_val taida_lax_has_value(taida_val lax_ptr) {
     return taida_pack_get_idx(lax_ptr, 0);  // hasValue field
 }
 
-long taida_lax_get_or_default(long lax_ptr, long fallback) {
+taida_val taida_lax_get_or_default(taida_val lax_ptr, taida_val fallback) {
     if (taida_pack_get_idx(lax_ptr, 0)) {
         return taida_pack_get_idx(lax_ptr, 1);  // __value
     }
     return fallback;
 }
 
-long taida_lax_unmold(long lax_ptr) {
+taida_val taida_lax_unmold(taida_val lax_ptr) {
     if (taida_pack_get_idx(lax_ptr, 0)) {
         return taida_pack_get_idx(lax_ptr, 1);  // __value
     }
     return taida_pack_get_idx(lax_ptr, 2);  // __default
 }
 
-long taida_lax_is_empty(long lax_ptr) {
+taida_val taida_lax_is_empty(taida_val lax_ptr) {
     return taida_pack_get_idx(lax_ptr, 0) ? 0 : 1;
 }
 
-long taida_molten_new(void) {
-    long pack = taida_pack_new(1);
-    taida_pack_set_hash(pack, 0, (long)HASH___TYPE);
-    taida_pack_set(pack, 0, (long)__molten_type_str);
+taida_val taida_molten_new(void) {
+    taida_val pack = taida_pack_new(1);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 0, (taida_val)__molten_type_str);
     // Static string - leave tag as INT(0) to skip free
     return pack;
 }
 
-long taida_stub_new(long message) {
+taida_val taida_stub_new(taida_val message) {
     if (message == 0 || message < 4096) {
-        long err = taida_make_error("TypeError", "Stub message must be a string literal/expression");
+        taida_val err = taida_make_error("TypeError", "Stub message must be a string literal/expression");
         return taida_throw(err);
     }
     size_t len = 0;
     if (!taida_read_cstr_len_safe((const char*)message, 1024, &len)) {
-        long err = taida_make_error("TypeError", "Stub message must be a string literal/expression");
+        taida_val err = taida_make_error("TypeError", "Stub message must be a string literal/expression");
         return taida_throw(err);
     }
     return taida_molten_new();
 }
 
-long taida_todo_new(long id, long task, long sol, long unm) {
-    long pack = taida_pack_new(7);
-    taida_pack_set_hash(pack, 0, (long)HASH_TODO_ID);
+taida_val taida_todo_new(taida_val id, taida_val task, taida_val sol, taida_val unm) {
+    taida_val pack = taida_pack_new(7);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TODO_ID);
     taida_pack_set(pack, 0, id);
-    taida_pack_set_hash(pack, 1, (long)HASH_TODO_TASK);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_TODO_TASK);
     taida_pack_set(pack, 1, task);
-    taida_pack_set_hash(pack, 2, (long)HASH_TODO_SOL);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH_TODO_SOL);
     taida_pack_set(pack, 2, sol);
-    taida_pack_set_hash(pack, 3, (long)HASH_TODO_UNM);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH_TODO_UNM);
     taida_pack_set(pack, 3, unm);
-    taida_pack_set_hash(pack, 4, (long)HASH___VALUE);
+    taida_pack_set_hash(pack, 4, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 4, sol);
-    taida_pack_set_hash(pack, 5, (long)HASH___DEFAULT);
+    taida_pack_set_hash(pack, 5, (taida_val)HASH___DEFAULT);
     taida_pack_set(pack, 5, unm);
-    taida_pack_set_hash(pack, 6, (long)HASH___TYPE);
-    taida_pack_set(pack, 6, (long)__todo_type_str);
+    taida_pack_set_hash(pack, 6, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 6, (taida_val)__todo_type_str);
     return pack;
 }
 
-static int taida_is_molten(long ptr) {
+static int taida_is_molten(taida_val ptr) {
     if (!TAIDA_IS_PACK(ptr)) return 0;
-    if (!taida_ptr_is_readable(ptr, sizeof(long) * 5)) return 0;
-    long *obj = (long*)ptr;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
+    taida_val *obj = (taida_val*)ptr;
     if (obj[1] != 1) return 0;
-    if (obj[2] != (long)HASH___TYPE) return 0;  // hash at stride-3 offset 0
-    long type_ptr = obj[4];  // value at stride-3 offset 2
-    if (type_ptr == (long)__molten_type_str) return 1;
+    if (obj[2] != (taida_val)HASH___TYPE) return 0;  // hash at stride-3 offset 0
+    taida_val type_ptr = obj[4];  // value at stride-3 offset 2
+    if (type_ptr == (taida_val)__molten_type_str) return 1;
     if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
     const char *type_str = (const char*)type_ptr;
     size_t len = 0;
@@ -710,39 +723,39 @@ static int taida_is_molten(long ptr) {
 // Same BuchiPack layout as Lax: @(hasValue, __value, __error, __type)
 // Field 2 is __error (not __default like Lax).
 
-long taida_gorillax_new(long value) {
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_HAS_VALUE);
+taida_val taida_gorillax_new(taida_val value) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);  // hasValue = true
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
-    taida_pack_set_hash(pack, 1, (long)HASH___VALUE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, value);
     // retain-on-store: value が Pack/List/Closure の場合 retain + tag 設定
     taida_retain_and_tag_field(pack, 1, value);
-    taida_pack_set_hash(pack, 2, (long)HASH___DEFAULT);  // reuse hash slot (field 2)
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);  // reuse hash slot (field 2)
     taida_pack_set(pack, 2, 0);  // __error = Unit (no error)
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__gorillax_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__gorillax_type_str);
     return pack;
 }
 
-long taida_gorillax_err(long error) {
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_HAS_VALUE);
+taida_val taida_gorillax_err(taida_val error) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);  // hasValue = false
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
-    taida_pack_set_hash(pack, 1, (long)HASH___VALUE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, 0);  // __value = Unit
-    taida_pack_set_hash(pack, 2, (long)HASH___DEFAULT);  // reuse hash slot (field 2)
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);  // reuse hash slot (field 2)
     taida_pack_set(pack, 2, error);  // __error may be a Pack
     taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
     if (error != 0) taida_retain(error);  // retain-on-store: error pack child
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__gorillax_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__gorillax_type_str);
     return pack;
 }
 
-long taida_gorillax_unmold(long ptr) {
+taida_val taida_gorillax_unmold(taida_val ptr) {
     if (taida_pack_get_idx(ptr, 0)) {
         return taida_pack_get_idx(ptr, 1);  // hasValue=true → __value
     }
@@ -753,63 +766,63 @@ long taida_gorillax_unmold(long ptr) {
 }
 
 // Gorillax.relax() → RelaxedGorillax (same data, different __type)
-long taida_gorillax_relax(long ptr) {
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_HAS_VALUE);
+taida_val taida_gorillax_relax(taida_val ptr) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, taida_pack_get_idx(ptr, 0));  // hasValue
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
-    taida_pack_set_hash(pack, 1, (long)HASH___VALUE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, taida_pack_get_idx(ptr, 1));  // __value
     // QF-50: retain-on-store for __value (may be Pack/List/Closure/HMap/Set/Str)
     taida_retain_and_tag_field(pack, 1, taida_pack_get_idx(ptr, 1));
-    taida_pack_set_hash(pack, 2, (long)HASH___DEFAULT);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);
     taida_pack_set(pack, 2, taida_pack_get_idx(ptr, 2));  // __error
     // QF-50: retain-on-store for __error (typically a Pack)
     taida_retain_and_tag_field(pack, 2, taida_pack_get_idx(ptr, 2));
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__relaxed_gorillax_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__relaxed_gorillax_type_str);
     return pack;
 }
 
-long taida_relaxed_gorillax_unmold(long ptr) {
+taida_val taida_relaxed_gorillax_unmold(taida_val ptr) {
     if (taida_pack_get_idx(ptr, 0)) {
         return taida_pack_get_idx(ptr, 1);  // hasValue=true → __value
     }
     // hasValue=false → throw RelaxedGorillaEscaped
-    long error = taida_make_error("RelaxedGorillaEscaped", "Relaxed gorilla escaped");
+    taida_val error = taida_make_error("RelaxedGorillaEscaped", "Relaxed gorilla escaped");
     return taida_throw(error);
 }
 
-long taida_gorillax_to_string(long ptr) {
+taida_val taida_gorillax_to_string(taida_val ptr) {
     char tmp[128];
     if (taida_pack_get_idx(ptr, 0)) {
-        long value = taida_pack_get_idx(ptr, 1);
+        taida_val value = taida_pack_get_idx(ptr, 1);
         snprintf(tmp, sizeof(tmp), "Gorillax(%ld)", value);
     } else {
         snprintf(tmp, sizeof(tmp), "Gorillax(><)");
     }
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
-long taida_relaxed_gorillax_to_string(long ptr) {
+taida_val taida_relaxed_gorillax_to_string(taida_val ptr) {
     char tmp[128];
     if (taida_pack_get_idx(ptr, 0)) {
-        long value = taida_pack_get_idx(ptr, 1);
+        taida_val value = taida_pack_get_idx(ptr, 1);
         snprintf(tmp, sizeof(tmp), "RelaxedGorillax(%ld)", value);
     } else {
         snprintf(tmp, sizeof(tmp), "RelaxedGorillax(escaped)");
     }
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
 // Helper: check __type field of fc=4 BuchiPack for Gorillax/RelaxedGorillax
 // Returns: 0 = Lax, 1 = Gorillax, 2 = RelaxedGorillax
-static int taida_detect_gorillax_type(long ptr) {
-    if (!taida_ptr_is_readable(ptr, sizeof(long) * 10)) return 0;
-    long type_ptr = taida_pack_get_idx(ptr, 3);  // __type field
+static int taida_detect_gorillax_type(taida_val ptr) {
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 10)) return 0;
+    taida_val type_ptr = taida_pack_get_idx(ptr, 3);  // __type field
     if (type_ptr == 0 || type_ptr < 4096) return 0;
-    if (type_ptr == (long)__gorillax_type_str) return 1;
-    if (type_ptr == (long)__relaxed_gorillax_type_str) return 2;
+    if (type_ptr == (taida_val)__gorillax_type_str) return 1;
+    if (type_ptr == (taida_val)__relaxed_gorillax_type_str) return 2;
     const char *type_str = (const char*)type_ptr;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(type_str, 64, &len)) return 0;
@@ -820,11 +833,11 @@ static int taida_detect_gorillax_type(long ptr) {
 
 // taida_int_div and taida_int_mod removed — use Div/Mod molds
 // Div[x, y]() and Mod[x, y]() return Lax BuchiPack
-long taida_div_mold(long a, long b) {
+taida_val taida_div_mold(taida_val a, taida_val b) {
     if (b == 0) return taida_lax_empty(0);
     return taida_lax_new(a / b, 0);
 }
-long taida_mod_mold(long a, long b) {
+taida_val taida_mod_mold(taida_val a, taida_val b) {
     if (b == 0) return taida_lax_empty(0);
     return taida_lax_new(a % b, 0);
 }
@@ -833,44 +846,44 @@ long taida_mod_mold(long a, long b) {
 // Each returns a Lax BuchiPack. Str default="", Int default=0, Float default=0.0, Bool default=false(0).
 
 // Str[x]() — always succeeds
-long taida_str_mold_int(long v) {
-    return taida_lax_new(taida_str_from_int(v), (long)"");
+taida_val taida_str_mold_int(taida_val v) {
+    return taida_lax_new(taida_str_from_int(v), (taida_val)"");
 }
-long taida_str_mold_float(double v) {
-    return taida_lax_new(taida_str_from_float(v), (long)"");
+taida_val taida_str_mold_float(double v) {
+    return taida_lax_new(taida_str_from_float(v), (taida_val)"");
 }
-long taida_str_mold_bool(long v) {
-    return taida_lax_new(taida_str_from_bool(v), (long)"");
+taida_val taida_str_mold_bool(taida_val v) {
+    return taida_lax_new(taida_str_from_bool(v), (taida_val)"");
 }
-long taida_str_mold_str(long v) {
-    return taida_lax_new(v, (long)"");
+taida_val taida_str_mold_str(taida_val v) {
+    return taida_lax_new(v, (taida_val)"");
 }
 
 // Int[x]() — Str parse can fail
-long taida_int_mold_int(long v) {
+taida_val taida_int_mold_int(taida_val v) {
     return taida_lax_new(v, 0);
 }
-long taida_int_mold_float(double v) {
-    return taida_lax_new((long)v, 0);
+taida_val taida_int_mold_float(double v) {
+    return taida_lax_new((taida_val)v, 0);
 }
-long taida_int_mold_str(long v) {
+taida_val taida_int_mold_str(taida_val v) {
     const char *s = (const char *)v;
     if (!s || *s == '\0') return taida_lax_empty(0);
     char *end;
-    long result = strtol(s, &end, 10);
+    taida_val result = strtol(s, &end, 10);
     if (*end != '\0') return taida_lax_empty(0);  // parse failed
     return taida_lax_new(result, 0);
 }
-long taida_int_mold_bool(long v) {
+taida_val taida_int_mold_bool(taida_val v) {
     return taida_lax_new(v ? 1 : 0, 0);
 }
 
-long taida_int_mold_auto(long v) {
+taida_val taida_int_mold_auto(taida_val v) {
     if (v == 0) return taida_int_mold_int(0);
     if (v < 0 || v < 4096) return taida_int_mold_int(v);
 
-    if (taida_ptr_is_readable(v, sizeof(long))) {
-        long tag = ((long*)v)[0];
+    if (taida_ptr_is_readable(v, sizeof(taida_val))) {
+        taida_val tag = ((taida_val*)v)[0];
         if (taida_has_magic_header(tag)) {
             return taida_lax_empty(0);
         }
@@ -884,15 +897,15 @@ long taida_int_mold_auto(long v) {
     return taida_int_mold_int(v);
 }
 
-// Float[x]() — Str parse can fail, result stored as bitcast long
-long taida_float_mold_int(long v) {
+// Float[x]() — Str parse can fail, result stored as bitcast taida_val
+taida_val taida_float_mold_int(taida_val v) {
     double d = (double)v;
     return taida_lax_new(_d2l(d), _d2l(0.0));
 }
-long taida_float_mold_float(double v) {
+taida_val taida_float_mold_float(double v) {
     return taida_lax_new(_d2l(v), _d2l(0.0));
 }
-long taida_float_mold_str(long v) {
+taida_val taida_float_mold_str(taida_val v) {
     const char *s = (const char *)v;
     if (!s || *s == '\0') return taida_lax_empty(_d2l(0.0));
     char *end;
@@ -900,25 +913,25 @@ long taida_float_mold_str(long v) {
     if (*end != '\0') return taida_lax_empty(_d2l(0.0));  // parse failed
     return taida_lax_new(_d2l(result), _d2l(0.0));
 }
-long taida_float_mold_bool(long v) {
+taida_val taida_float_mold_bool(taida_val v) {
     return taida_lax_new(_d2l(v ? 1.0 : 0.0), _d2l(0.0));
 }
 
 // Bool[x]() — Str accepts only "true"/"false"
-long taida_bool_mold_int(long v) {
+taida_val taida_bool_mold_int(taida_val v) {
     return taida_lax_new(v != 0 ? 1 : 0, 0);
 }
-long taida_bool_mold_float(double v) {
+taida_val taida_bool_mold_float(double v) {
     return taida_lax_new(v != 0.0 ? 1 : 0, 0);
 }
-long taida_bool_mold_str(long v) {
+taida_val taida_bool_mold_str(taida_val v) {
     const char *s = (const char *)v;
     if (!s) return taida_lax_empty(0);
     if (strcmp(s, "true") == 0) return taida_lax_new(1, 0);
     if (strcmp(s, "false") == 0) return taida_lax_new(0, 0);
     return taida_lax_empty(0);  // not "true" or "false"
 }
-long taida_bool_mold_bool(long v) {
+taida_val taida_bool_mold_bool(taida_val v) {
     return taida_lax_new(v, 0);
 }
 
@@ -929,7 +942,7 @@ static int taida_char_to_digit(int c) {
     return -1;
 }
 
-long taida_int_mold_str_base(long v, long base) {
+taida_val taida_int_mold_str_base(taida_val v, taida_val base) {
     if (base < 2 || base > 36) return taida_lax_empty(0);
     const char *s = (const char*)v;
     size_t len = 0;
@@ -959,50 +972,50 @@ long taida_int_mold_str_base(long v, long base) {
     } else {
         out = (int64_t)acc;
     }
-    return taida_lax_new((long)out, 0);
+    return taida_lax_new((taida_val)out, 0);
 }
 
-long taida_uint8_mold(long v) {
-    long parsed = v;
+taida_val taida_uint8_mold(taida_val v) {
+    taida_val parsed = v;
     const char *s = (const char*)v;
     size_t len = 0;
     if (taida_read_cstr_len_safe(s, 256, &len) && len > 0) {
         char *end = NULL;
-        long tmp = strtol(s, &end, 10);
+        taida_val tmp = strtol(s, &end, 10);
         if (end && *end == '\0') parsed = tmp;
     }
     if (parsed < 0 || parsed > 255) return taida_lax_empty(0);
     return taida_lax_new(parsed, 0);
 }
 
-long taida_uint8_mold_float(double v) {
+taida_val taida_uint8_mold_float(double v) {
     if (!isfinite(v)) return taida_lax_empty(0);
     if (v < 0.0 || v > 255.0) return taida_lax_empty(0);
     if (floor(v) != v) return taida_lax_empty(0);
-    return taida_lax_new((long)v, 0);
+    return taida_lax_new((taida_val)v, 0);
 }
 
-long taida_u16be_mold(long value) {
+taida_val taida_u16be_mold(taida_val value) {
     if (value < 0 || value > 65535) return taida_lax_empty(taida_bytes_default_value());
     unsigned char raw[2];
     uint16_t n = (uint16_t)value;
     raw[0] = (unsigned char)((n >> 8) & 0xFF);
     raw[1] = (unsigned char)(n & 0xFF);
-    long out = taida_bytes_from_raw(raw, 2);
+    taida_val out = taida_bytes_from_raw(raw, 2);
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_u16le_mold(long value) {
+taida_val taida_u16le_mold(taida_val value) {
     if (value < 0 || value > 65535) return taida_lax_empty(taida_bytes_default_value());
     unsigned char raw[2];
     uint16_t n = (uint16_t)value;
     raw[0] = (unsigned char)(n & 0xFF);
     raw[1] = (unsigned char)((n >> 8) & 0xFF);
-    long out = taida_bytes_from_raw(raw, 2);
+    taida_val out = taida_bytes_from_raw(raw, 2);
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_u32be_mold(long value) {
+taida_val taida_u32be_mold(taida_val value) {
     if (value < 0 || (uint64_t)value > 0xFFFFFFFFULL) {
         return taida_lax_empty(taida_bytes_default_value());
     }
@@ -1012,11 +1025,11 @@ long taida_u32be_mold(long value) {
     raw[1] = (unsigned char)((n >> 16) & 0xFF);
     raw[2] = (unsigned char)((n >> 8) & 0xFF);
     raw[3] = (unsigned char)(n & 0xFF);
-    long out = taida_bytes_from_raw(raw, 4);
+    taida_val out = taida_bytes_from_raw(raw, 4);
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_u32le_mold(long value) {
+taida_val taida_u32le_mold(taida_val value) {
     if (value < 0 || (uint64_t)value > 0xFFFFFFFFULL) {
         return taida_lax_empty(taida_bytes_default_value());
     }
@@ -1026,48 +1039,48 @@ long taida_u32le_mold(long value) {
     raw[1] = (unsigned char)((n >> 8) & 0xFF);
     raw[2] = (unsigned char)((n >> 16) & 0xFF);
     raw[3] = (unsigned char)((n >> 24) & 0xFF);
-    long out = taida_bytes_from_raw(raw, 4);
+    taida_val out = taida_bytes_from_raw(raw, 4);
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_u16be_decode_mold(long value) {
+taida_val taida_u16be_decode_mold(taida_val value) {
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
-    long *bytes = (long*)value;
+    taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 2) return taida_lax_empty(0);
     uint16_t out = (uint16_t)(((uint16_t)bytes[2] << 8) | (uint16_t)bytes[3]);
-    return taida_lax_new((long)out, 0);
+    return taida_lax_new((taida_val)out, 0);
 }
 
-long taida_u16le_decode_mold(long value) {
+taida_val taida_u16le_decode_mold(taida_val value) {
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
-    long *bytes = (long*)value;
+    taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 2) return taida_lax_empty(0);
     uint16_t out = (uint16_t)(((uint16_t)bytes[3] << 8) | (uint16_t)bytes[2]);
-    return taida_lax_new((long)out, 0);
+    return taida_lax_new((taida_val)out, 0);
 }
 
-long taida_u32be_decode_mold(long value) {
+taida_val taida_u32be_decode_mold(taida_val value) {
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
-    long *bytes = (long*)value;
+    taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 4) return taida_lax_empty(0);
     uint32_t out =
         ((uint32_t)bytes[2] << 24) |
         ((uint32_t)bytes[3] << 16) |
         ((uint32_t)bytes[4] << 8) |
         (uint32_t)bytes[5];
-    return taida_lax_new((long)(uint64_t)out, 0);
+    return taida_lax_new((taida_val)(uint64_t)out, 0);
 }
 
-long taida_u32le_decode_mold(long value) {
+taida_val taida_u32le_decode_mold(taida_val value) {
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty(0);
-    long *bytes = (long*)value;
+    taida_val *bytes = (taida_val*)value;
     if (bytes[1] != 4) return taida_lax_empty(0);
     uint32_t out =
         ((uint32_t)bytes[5] << 24) |
         ((uint32_t)bytes[4] << 16) |
         ((uint32_t)bytes[3] << 8) |
         (uint32_t)bytes[2];
-    return taida_lax_new((long)(uint64_t)out, 0);
+    return taida_lax_new((taida_val)(uint64_t)out, 0);
 }
 
 static int taida_utf8_decode_one(
@@ -1170,33 +1183,33 @@ static int taida_utf8_single_scalar(const unsigned char *buf, size_t len, uint32
     return 1;
 }
 
-long taida_char_mold_int(long value) {
-    if (value < 0 || value > 0x10FFFF) return taida_lax_empty((long)"");
-    if (value >= 0xD800 && value <= 0xDFFF) return taida_lax_empty((long)"");
+taida_val taida_char_mold_int(taida_val value) {
+    if (value < 0 || value > 0x10FFFF) return taida_lax_empty((taida_val)"");
+    if (value >= 0xD800 && value <= 0xDFFF) return taida_lax_empty((taida_val)"");
     unsigned char utf8[4];
     size_t out_len = 0;
     if (!taida_utf8_encode_scalar((uint32_t)value, utf8, &out_len)) {
-        return taida_lax_empty((long)"");
+        return taida_lax_empty((taida_val)"");
     }
     char *out = taida_str_alloc(out_len);
     memcpy(out, utf8, out_len);
-    return taida_lax_new((long)out, (long)"");
+    return taida_lax_new((taida_val)out, (taida_val)"");
 }
 
-long taida_char_mold_str(long value) {
+taida_val taida_char_mold_str(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(s, 4096, &len) || len == 0) {
-        return taida_lax_empty((long)"");
+        return taida_lax_empty((taida_val)"");
     }
     uint32_t cp = 0;
     if (!taida_utf8_single_scalar((const unsigned char*)s, len, &cp)) {
-        return taida_lax_empty((long)"");
+        return taida_lax_empty((taida_val)"");
     }
-    return taida_char_mold_int((long)cp);
+    return taida_char_mold_int((taida_val)cp);
 }
 
-long taida_codepoint_mold_str(long value) {
+taida_val taida_codepoint_mold_str(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(s, 4096, &len) || len == 0) {
@@ -1206,22 +1219,22 @@ long taida_codepoint_mold_str(long value) {
     if (!taida_utf8_single_scalar((const unsigned char*)s, len, &cp)) {
         return taida_lax_empty(0);
     }
-    return taida_lax_new((long)cp, 0);
+    return taida_lax_new((taida_val)cp, 0);
 }
 
-long taida_bytes_mold(long value, long fill) {
+taida_val taida_bytes_mold(taida_val value, taida_val fill) {
     if (TAIDA_IS_BYTES(value)) {
-        long cloned = taida_bytes_clone(value);
+        taida_val cloned = taida_bytes_clone(value);
         return taida_lax_new(cloned, taida_bytes_default_value());
     }
 
     if (TAIDA_IS_LIST(value)) {
-        long *list = (long*)value;
-        long len = list[2];
-        long out = taida_bytes_new_filled(len, 0);
-        long *bytes = (long*)out;
-        for (long i = 0; i < len; i++) {
-            long item = list[4 + i];
+        taida_val *list = (taida_val*)value;
+        taida_val len = list[2];
+        taida_val out = taida_bytes_new_filled(len, 0);
+        taida_val *bytes = (taida_val*)out;
+        for (taida_val i = 0; i < len; i++) {
+            taida_val item = list[4 + i];
             if (item < 0 || item > 255) {
                 return taida_lax_empty(taida_bytes_default_value());
             }
@@ -1233,49 +1246,49 @@ long taida_bytes_mold(long value, long fill) {
     const char *s = (const char*)value;
     size_t slen = 0;
     if (taida_read_cstr_len_safe(s, 65536, &slen)) {
-        long out = taida_bytes_from_raw((const unsigned char*)s, (long)slen);
+        taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)slen);
         return taida_lax_new(out, taida_bytes_default_value());
     }
 
-    long len = value;
+    taida_val len = value;
     if (len < 0 || len > 10000000) return taida_lax_empty(taida_bytes_default_value());
     if (fill < 0 || fill > 255) return taida_lax_empty(taida_bytes_default_value());
-    long out = taida_bytes_new_filled(len, (unsigned char)fill);
+    taida_val out = taida_bytes_new_filled(len, (unsigned char)fill);
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_bytes_set(long bytes_ptr, long idx, long value) {
+taida_val taida_bytes_set(taida_val bytes_ptr, taida_val idx, taida_val value) {
     if (!TAIDA_IS_BYTES(bytes_ptr)) return taida_lax_empty(taida_bytes_default_value());
-    long len = taida_bytes_len(bytes_ptr);
+    taida_val len = taida_bytes_len(bytes_ptr);
     if (idx < 0 || idx >= len) return taida_lax_empty(taida_bytes_default_value());
     if (value < 0 || value > 255) return taida_lax_empty(taida_bytes_default_value());
-    long out = taida_bytes_clone(bytes_ptr);
-    long *bytes = (long*)out;
+    taida_val out = taida_bytes_clone(bytes_ptr);
+    taida_val *bytes = (taida_val*)out;
     bytes[2 + idx] = value;
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_bytes_to_list(long bytes_ptr) {
-    long list = taida_list_new();
+taida_val taida_bytes_to_list(taida_val bytes_ptr) {
+    taida_val list = taida_list_new();
     if (!TAIDA_IS_BYTES(bytes_ptr)) return list;
-    long *bytes = (long*)bytes_ptr;
-    long len = bytes[1];
-    for (long i = 0; i < len; i++) {
+    taida_val *bytes = (taida_val*)bytes_ptr;
+    taida_val len = bytes[1];
+    for (taida_val i = 0; i < len; i++) {
         list = taida_list_push(list, bytes[2 + i]);
     }
     return list;
 }
 
-static int taida_bytes_cursor_unpack(long cursor_ptr, long *bytes_out, long *offset_out) {
+static int taida_bytes_cursor_unpack(taida_val cursor_ptr, taida_val *bytes_out, taida_val *offset_out) {
     if (!TAIDA_IS_PACK(cursor_ptr)) return 0;
-    long *pack = (long*)cursor_ptr;
-    long field_count = pack[1];
+    taida_val *pack = (taida_val*)cursor_ptr;
+    taida_val field_count = pack[1];
     if (field_count < 2) return 0;
     // A-4b: stride-3 layout: [magic+rc, fc, hash0, tag0, val0, hash1, tag1, val1, ...]
-    long bytes_ptr = pack[2 + 0 * 3 + 2];  // field 0 value
-    long offset = pack[2 + 1 * 3 + 2];      // field 1 value
+    taida_val bytes_ptr = pack[2 + 0 * 3 + 2];  // field 0 value
+    taida_val offset = pack[2 + 1 * 3 + 2];      // field 1 value
     if (!TAIDA_IS_BYTES(bytes_ptr)) return 0;
-    long len = taida_bytes_len(bytes_ptr);
+    taida_val len = taida_bytes_len(bytes_ptr);
     if (offset < 0) offset = 0;
     if (offset > len) offset = len;
     *bytes_out = bytes_ptr;
@@ -1283,106 +1296,106 @@ static int taida_bytes_cursor_unpack(long cursor_ptr, long *bytes_out, long *off
     return 1;
 }
 
-static long taida_bytes_cursor_step(long value, long cursor) {
-    long pack = taida_pack_new(2);
-    taida_pack_set_hash(pack, 0, (long)HASH_STEP_VALUE);
+static taida_val taida_bytes_cursor_step(taida_val value, taida_val cursor) {
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_STEP_VALUE);
     taida_pack_set(pack, 0, value);
-    taida_pack_set_hash(pack, 1, (long)HASH_STEP_CURSOR);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_STEP_CURSOR);
     taida_pack_set(pack, 1, cursor);
     return pack;
 }
 
-long taida_bytes_cursor_new(long bytes_ptr, long offset) {
+taida_val taida_bytes_cursor_new(taida_val bytes_ptr, taida_val offset) {
     if (!TAIDA_IS_BYTES(bytes_ptr)) {
         bytes_ptr = taida_bytes_default_value();
     }
-    long len = taida_bytes_len(bytes_ptr);
+    taida_val len = taida_bytes_len(bytes_ptr);
     if (offset < 0) offset = 0;
     if (offset > len) offset = len;
 
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_CURSOR_BYTES);
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_CURSOR_BYTES);
     taida_pack_set(pack, 0, bytes_ptr);
-    taida_pack_set_hash(pack, 1, (long)HASH_CURSOR_OFFSET);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_CURSOR_OFFSET);
     taida_pack_set(pack, 1, offset);
-    taida_pack_set_hash(pack, 2, (long)HASH_CURSOR_LENGTH);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH_CURSOR_LENGTH);
     taida_pack_set(pack, 2, len);
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__bytes_cursor_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__bytes_cursor_type_str);
     return pack;
 }
 
-long taida_bytes_cursor_remaining(long cursor_ptr) {
-    long bytes_ptr = 0;
-    long offset = 0;
+taida_val taida_bytes_cursor_remaining(taida_val cursor_ptr) {
+    taida_val bytes_ptr = 0;
+    taida_val offset = 0;
     if (!taida_bytes_cursor_unpack(cursor_ptr, &bytes_ptr, &offset)) return 0;
     return taida_bytes_len(bytes_ptr) - offset;
 }
 
-long taida_bytes_cursor_take(long cursor_ptr, long size) {
-    long bytes_ptr = 0;
-    long offset = 0;
+taida_val taida_bytes_cursor_take(taida_val cursor_ptr, taida_val size) {
+    taida_val bytes_ptr = 0;
+    taida_val offset = 0;
     if (!taida_bytes_cursor_unpack(cursor_ptr, &bytes_ptr, &offset)) {
-        long empty_cursor = taida_bytes_cursor_new(taida_bytes_default_value(), 0);
-        long def = taida_bytes_cursor_step(taida_bytes_default_value(), empty_cursor);
+        taida_val empty_cursor = taida_bytes_cursor_new(taida_bytes_default_value(), 0);
+        taida_val def = taida_bytes_cursor_step(taida_bytes_default_value(), empty_cursor);
         return taida_lax_empty(def);
     }
 
-    long current_cursor = taida_bytes_cursor_new(bytes_ptr, offset);
-    long default_step = taida_bytes_cursor_step(taida_bytes_default_value(), current_cursor);
+    taida_val current_cursor = taida_bytes_cursor_new(bytes_ptr, offset);
+    taida_val default_step = taida_bytes_cursor_step(taida_bytes_default_value(), current_cursor);
     if (size < 0) return taida_lax_empty(default_step);
 
-    long len = taida_bytes_len(bytes_ptr);
+    taida_val len = taida_bytes_len(bytes_ptr);
     if (offset + size > len) return taida_lax_empty(default_step);
 
-    long *src = (long*)bytes_ptr;
-    long out = taida_bytes_new_filled(size, 0);
-    long *dst = (long*)out;
-    for (long i = 0; i < size; i++) {
+    taida_val *src = (taida_val*)bytes_ptr;
+    taida_val out = taida_bytes_new_filled(size, 0);
+    taida_val *dst = (taida_val*)out;
+    for (taida_val i = 0; i < size; i++) {
         dst[2 + i] = src[2 + offset + i];
     }
-    long next_cursor = taida_bytes_cursor_new(bytes_ptr, offset + size);
-    long step = taida_bytes_cursor_step(out, next_cursor);
+    taida_val next_cursor = taida_bytes_cursor_new(bytes_ptr, offset + size);
+    taida_val step = taida_bytes_cursor_step(out, next_cursor);
     return taida_lax_new(step, default_step);
 }
 
-long taida_bytes_cursor_u8(long cursor_ptr) {
-    long bytes_ptr = 0;
-    long offset = 0;
+taida_val taida_bytes_cursor_u8(taida_val cursor_ptr) {
+    taida_val bytes_ptr = 0;
+    taida_val offset = 0;
     if (!taida_bytes_cursor_unpack(cursor_ptr, &bytes_ptr, &offset)) {
-        long empty_cursor = taida_bytes_cursor_new(taida_bytes_default_value(), 0);
-        long def = taida_bytes_cursor_step(0, empty_cursor);
+        taida_val empty_cursor = taida_bytes_cursor_new(taida_bytes_default_value(), 0);
+        taida_val def = taida_bytes_cursor_step(0, empty_cursor);
         return taida_lax_empty(def);
     }
 
-    long current_cursor = taida_bytes_cursor_new(bytes_ptr, offset);
-    long default_step = taida_bytes_cursor_step(0, current_cursor);
-    long len = taida_bytes_len(bytes_ptr);
+    taida_val current_cursor = taida_bytes_cursor_new(bytes_ptr, offset);
+    taida_val default_step = taida_bytes_cursor_step(0, current_cursor);
+    taida_val len = taida_bytes_len(bytes_ptr);
     if (offset >= len) return taida_lax_empty(default_step);
 
-    long *bytes = (long*)bytes_ptr;
-    long value = bytes[2 + offset];
-    long next_cursor = taida_bytes_cursor_new(bytes_ptr, offset + 1);
-    long step = taida_bytes_cursor_step(value, next_cursor);
+    taida_val *bytes = (taida_val*)bytes_ptr;
+    taida_val value = bytes[2 + offset];
+    taida_val next_cursor = taida_bytes_cursor_new(bytes_ptr, offset + 1);
+    taida_val step = taida_bytes_cursor_step(value, next_cursor);
     return taida_lax_new(step, default_step);
 }
 
-long taida_utf8_encode_mold(long value) {
+taida_val taida_utf8_encode_mold(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(s, 65536, &len)) {
         return taida_lax_empty(taida_bytes_default_value());
     }
-    long out = taida_bytes_from_raw((const unsigned char*)s, (long)len);
+    taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)len);
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-long taida_utf8_decode_mold(long value) {
-    if (!TAIDA_IS_BYTES(value)) return taida_lax_empty((long)"");
-    long *bytes = (long*)value;
-    long len = bytes[1];
+taida_val taida_utf8_decode_mold(taida_val value) {
+    if (!TAIDA_IS_BYTES(value)) return taida_lax_empty((taida_val)"");
+    taida_val *bytes = (taida_val*)value;
+    taida_val len = bytes[1];
     unsigned char *raw = (unsigned char*)malloc((size_t)len);
-    for (long i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
+    for (taida_val i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
 
     size_t pos = 0;
     while (pos < (size_t)len) {
@@ -1390,7 +1403,7 @@ long taida_utf8_decode_mold(long value) {
         uint32_t cp = 0;
         if (!taida_utf8_decode_one(raw + pos, (size_t)len - pos, &consumed, &cp)) {
             free(raw);
-            return taida_lax_empty((long)"");
+            return taida_lax_empty((taida_val)"");
         }
         pos += consumed;
     }
@@ -1398,25 +1411,25 @@ long taida_utf8_decode_mold(long value) {
     char *out = taida_str_alloc((size_t)len);
     memcpy(out, raw, (size_t)len);
     free(raw);
-    return taida_lax_new((long)out, (long)"");
+    return taida_lax_new((taida_val)out, (taida_val)"");
 }
 
-long taida_int_neg(long a) { return -a; }
+taida_val taida_int_neg(taida_val a) { return -a; }
 double taida_float_neg(double a) { return -a; }
 
 // Comparison runtime
-long taida_int_eq(long a, long b)  { return a == b ? 1 : 0; }
-long taida_int_neq(long a, long b) { return a != b ? 1 : 0; }
-long taida_str_eq(long a, long b)  { return (a && b) ? (strcmp((char*)a, (char*)b) == 0 ? 1 : 0) : (a == b ? 1 : 0); }
-long taida_str_neq(long a, long b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
-static int taida_is_string_value(long v) {
+taida_val taida_int_eq(taida_val a, taida_val b)  { return a == b ? 1 : 0; }
+taida_val taida_int_neq(taida_val a, taida_val b) { return a != b ? 1 : 0; }
+taida_val taida_str_eq(taida_val a, taida_val b)  { return (a && b) ? (strcmp((char*)a, (char*)b) == 0 ? 1 : 0) : (a == b ? 1 : 0); }
+taida_val taida_str_neq(taida_val a, taida_val b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
+static int taida_is_string_value(taida_val v) {
     if (v == 0 || v == 1 || v < 4096) return 0;
     // Check if 8-byte aligned (heap object) and has magic header
     if ((v & 0x7) == 0) {
         unsigned char vec = 0;
         uintptr_t page = (uintptr_t)v & ~((uintptr_t)4095);
         if (mincore((void*)page, 4096, &vec) == 0) {
-            long first = ((long*)v)[0];
+            taida_val first = ((taida_val*)v)[0];
             if (taida_has_magic_header(first)) return 0;
         }
     }
@@ -1427,32 +1440,32 @@ static int taida_is_string_value(long v) {
     if (mincore((void*)page, 4096, &vec) != 0) return 0;
     return 1;
 }
-long taida_poly_eq(long a, long b) {
+taida_val taida_poly_eq(taida_val a, taida_val b) {
     if (taida_is_string_value(a) && taida_is_string_value(b))
         return strcmp((char*)a, (char*)b) == 0 ? 1 : 0;
     return a == b ? 1 : 0;
 }
-long taida_poly_neq(long a, long b) {
+taida_val taida_poly_neq(taida_val a, taida_val b) {
     if (taida_is_string_value(a) && taida_is_string_value(b))
         return strcmp((char*)a, (char*)b) != 0 ? 1 : 0;
     return a != b ? 1 : 0;
 }
-long taida_int_lt(long a, long b)  { return a < b ? 1 : 0; }
-long taida_int_gt(long a, long b)  { return a > b ? 1 : 0; }
-long taida_int_gte(long a, long b) { return a >= b ? 1 : 0; }
+taida_val taida_int_lt(taida_val a, taida_val b)  { return a < b ? 1 : 0; }
+taida_val taida_int_gt(taida_val a, taida_val b)  { return a > b ? 1 : 0; }
+taida_val taida_int_gte(taida_val a, taida_val b) { return a >= b ? 1 : 0; }
 
 // Boolean runtime
-long taida_bool_and(long a, long b) { return (a && b) ? 1 : 0; }
-long taida_bool_or(long a, long b)  { return (a || b) ? 1 : 0; }
-long taida_bool_not(long a)         { return a ? 0 : 1; }
+taida_val taida_bool_and(taida_val a, taida_val b) { return (a && b) ? 1 : 0; }
+taida_val taida_bool_or(taida_val a, taida_val b)  { return (a || b) ? 1 : 0; }
+taida_val taida_bool_not(taida_val a)         { return a ? 0 : 1; }
 
 // ── Reference Counting ────────────────────────────────────
 // All heap objects (Pack, List, Closure) start with refcount at [0].
 // taida_retain increments refcount.
 // taida_release decrements refcount and frees when it reaches 0.
 
-static int taida_has_magic_header(long tag) {
-    long magic = tag & TAIDA_MAGIC_MASK;
+static int taida_has_magic_header(taida_val tag) {
+    taida_val magic = tag & TAIDA_MAGIC_MASK;
     return magic == TAIDA_LIST_MAGIC ||
            magic == TAIDA_PACK_MAGIC ||
            magic == TAIDA_HMAP_MAGIC ||
@@ -1462,15 +1475,15 @@ static int taida_has_magic_header(long tag) {
            magic == TAIDA_BYTES_MAGIC;
 }
 
-long taida_retain(long ptr) {
+taida_val taida_retain(taida_val ptr) {
     if (ptr == 0) return 0;
     // Non-heap values are never retained.
     if (ptr > 0 && ptr < 4096) return ptr;
     if (ptr < 0) return ptr;
-    if (!taida_ptr_is_readable(ptr, sizeof(long))) return ptr;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val))) return ptr;
 
-    long *obj = (long*)ptr;
-    long tag = obj[0];
+    taida_val *obj = (taida_val*)ptr;
+    taida_val tag = obj[0];
     if (taida_has_magic_header(tag)) {
         TAIDA_INC_RC(ptr);
         return ptr;
@@ -1479,17 +1492,17 @@ long taida_retain(long ptr) {
     return ptr;
 }
 
-long taida_release(long ptr) {
+taida_val taida_release(taida_val ptr) {
     if (ptr == 0) return 0;
     // Skip non-heap values (small integers, negative values)
     if (ptr > 0 && ptr < 4096) return 0;
     if (ptr < 0) return 0;
-    if (!taida_ptr_is_readable(ptr, sizeof(long))) return 0;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val))) return 0;
 
-    long *obj = (long*)ptr;
-    long tag = obj[0];
+    taida_val *obj = (taida_val*)ptr;
+    taida_val tag = obj[0];
     if (taida_has_magic_header(tag)) {
-        long rc = TAIDA_GET_RC(ptr);
+        taida_val rc = TAIDA_GET_RC(ptr);
         if (rc <= 1) {
             // A-4d: Recursive release for Pack children before freeing.
             // Uses type tags (A-4a/b) to safely identify child heap objects.
@@ -1516,17 +1529,17 @@ long taida_release(long ptr) {
             // STR fields use taida_str_release which is safe for both
             // heap strings (hidden header) and static literals (no-op).
             if (TAIDA_IS_PACK(ptr)) {
-                long count = obj[1];
-                for (long i = 0; i < count; i++) {
-                    long field_tag = obj[2 + i * 3 + 1];
+                taida_val count = obj[1];
+                for (taida_val i = 0; i < count; i++) {
+                    taida_val field_tag = obj[2 + i * 3 + 1];
                     if (field_tag == TAIDA_TAG_PACK || field_tag == TAIDA_TAG_LIST || field_tag == TAIDA_TAG_CLOSURE
                         || field_tag == TAIDA_TAG_HMAP || field_tag == TAIDA_TAG_SET) {
-                        long child = obj[2 + i * 3 + 2];
+                        taida_val child = obj[2 + i * 3 + 2];
                         if (child > 4096) {
                             taida_release(child);
                         }
                     } else if (field_tag == TAIDA_TAG_STR) {
-                        long child = obj[2 + i * 3 + 2];
+                        taida_val child = obj[2 + i * 3 + 2];
                         if (child > 4096) {
                             taida_str_release(child);
                         }
@@ -1539,16 +1552,16 @@ long taida_release(long ptr) {
             // copied from other lists have been retained (Step 3), so
             // release here is balanced.
             if (TAIDA_IS_LIST(ptr)) {
-                long *lobj = (long*)ptr;
-                long llen = lobj[2];
-                long etag = lobj[3];
-                for (long i = 0; i < llen; i++) {
+                taida_val *lobj = (taida_val*)ptr;
+                taida_val llen = lobj[2];
+                taida_val etag = lobj[3];
+                for (taida_val i = 0; i < llen; i++) {
                     taida_list_elem_release(lobj[4 + i], etag);
                 }
             }
             // Closure: release env pack (exclusively owned)
             if (TAIDA_IS_CLOSURE(ptr)) {
-                long env_ptr = obj[2];
+                taida_val env_ptr = obj[2];
                 if (env_ptr > 4096) {
                     taida_release(env_ptr);
                 }
@@ -1556,21 +1569,21 @@ long taida_release(long ptr) {
             // NO-2: Set — recursively release all elements using elem_type_tag
             // Same pattern as List recursive release (offset 3 = elem_type_tag).
             if (TAIDA_IS_SET(ptr)) {
-                long *sobj = (long*)ptr;
-                long slen = sobj[2];
-                long etag = sobj[3];  // elem_type_tag
-                for (long i = 0; i < slen; i++) {
+                taida_val *sobj = (taida_val*)ptr;
+                taida_val slen = sobj[2];
+                taida_val etag = sobj[3];  // elem_type_tag
+                for (taida_val i = 0; i < slen; i++) {
                     taida_list_elem_release(sobj[4 + i], etag);
                 }
             }
             // NO-1: HashMap — recursively release all keys and values
             if (TAIDA_IS_HMAP(ptr)) {
-                long *hobj = (long*)ptr;
-                long hcap = hobj[1];
-                long vtag = hobj[3];  // value_type_tag
-                for (long i = 0; i < hcap; i++) {
-                    long sh = hobj[HM_HEADER + i * 3];
-                    long sk = hobj[HM_HEADER + i * 3 + 1];
+                taida_val *hobj = (taida_val*)ptr;
+                taida_val hcap = hobj[1];
+                taida_val vtag = hobj[3];  // value_type_tag
+                for (taida_val i = 0; i < hcap; i++) {
+                    taida_val sh = hobj[HM_HEADER + i * 3];
+                    taida_val sk = hobj[HM_HEADER + i * 3 + 1];
                     if (HM_SLOT_OCCUPIED(sh, sk)) {
                         taida_hashmap_key_release(sk);
                         taida_hashmap_val_release(hobj[HM_HEADER + i * 3 + 2], vtag);
@@ -1579,10 +1592,10 @@ long taida_release(long ptr) {
             }
             // NO-3: Async — recursively release value and error based on type tags
             if (TAIDA_IS_ASYNC(ptr)) {
-                long *aobj = (long*)ptr;
-                long status = aobj[1];
-                long vtag = aobj[5];  // value_tag
-                long etag = aobj[6];  // error_tag
+                taida_val *aobj = (taida_val*)ptr;
+                taida_val status = aobj[1];
+                taida_val vtag = aobj[5];  // value_tag
+                taida_val etag = aobj[6];  // error_tag
                 if (status == 1) {
                     // fulfilled: release value
                     taida_list_elem_release(aobj[2], vtag);
@@ -1598,7 +1611,7 @@ long taida_release(long ptr) {
                     aobj[4] = 0;
                     // After join, thread may have written value/error.
                     // Re-check and release.
-                    long new_status = aobj[1];
+                    taida_val new_status = aobj[1];
                     if (new_status == 1) {
                         taida_list_elem_release(aobj[2], aobj[5]);
                     } else if (new_status == 2) {
@@ -1625,10 +1638,10 @@ long taida_release(long ptr) {
 // Allocate a heap string with room for `len` characters (+ \0).
 // Returns pointer to the bytes area.  Caller must fill the bytes.
 static char* taida_str_alloc(size_t len) {
-    long *hdr = (long*)malloc(sizeof(long) * 2 + len + 1);
+    taida_val *hdr = (taida_val*)malloc(sizeof(taida_val) * 2 + len + 1);
     if (!hdr) { fprintf(stderr, "taida: out of memory (taida_str_alloc)\n"); exit(1); }
     hdr[0] = TAIDA_STR_MAGIC | 1;  // magic + refcount = 1
-    hdr[1] = (long)len;
+    hdr[1] = (taida_val)len;
     char *bytes = (char*)(hdr + 2);
     bytes[len] = '\0';
     return bytes;
@@ -1648,16 +1661,16 @@ static char* taida_str_new_copy(const char* src) {
 }
 
 // Retain a heap string (RC++).  No-op for static strings.
-void taida_str_retain(long ptr) {
+void taida_str_retain(taida_val ptr) {
     if (ptr == 0) return;
     if (ptr > 0 && ptr < 4096) return;
     if (ptr < 0) return;
     // Check hidden header at ptr - 16
-    long *hdr = ((long*)ptr) - 2;
-    if (!taida_ptr_is_readable((long)hdr, sizeof(long))) return;
-    long tag = hdr[0];
+    taida_val *hdr = ((taida_val*)ptr) - 2;
+    if (!taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) return;
+    taida_val tag = hdr[0];
     if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
-        long rc = tag & TAIDA_RC_MASK;
+        taida_val rc = tag & TAIDA_RC_MASK;
         if (rc < 255) {
             hdr[0] = (tag & TAIDA_MAGIC_MASK) | (rc + 1);
         }
@@ -1667,16 +1680,16 @@ void taida_str_retain(long ptr) {
 
 // Release a heap string (RC--).  Frees when RC reaches 0.
 // No-op for static strings (no hidden header).
-static void taida_str_release(long ptr) {
+static void taida_str_release(taida_val ptr) {
     if (ptr == 0) return;
     if (ptr > 0 && ptr < 4096) return;
     if (ptr < 0) return;
     // Check hidden header at ptr - 16
-    long *hdr = ((long*)ptr) - 2;
-    if (!taida_ptr_is_readable((long)hdr, sizeof(long))) return;
-    long tag = hdr[0];
+    taida_val *hdr = ((taida_val*)ptr) - 2;
+    if (!taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) return;
+    taida_val tag = hdr[0];
     if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
-        long rc = tag & TAIDA_RC_MASK;
+        taida_val rc = tag & TAIDA_RC_MASK;
         if (rc <= 1) {
             free(hdr);  // Free the entire allocation (header + bytes)
         } else {
@@ -1690,36 +1703,36 @@ static void taida_str_release(long ptr) {
 // Pack layout (A-4b): [magic+rc, field_count, hash0, tag0, val0, hash1, tag1, val1, ...]
 // Stride = 3 per field: [hash, type_tag, value]
 
-long taida_pack_new(long field_count) {
-    long *pack = (long*)malloc((2 + field_count * 3) * sizeof(long));
+taida_val taida_pack_new(taida_val field_count) {
+    taida_val *pack = (taida_val*)malloc((2 + field_count * 3) * sizeof(taida_val));
     if (!pack) { fprintf(stderr, "taida: out of memory (taida_pack_new)\n"); exit(1); }
     pack[0] = TAIDA_PACK_MAGIC | 1;  // Magic + refcount
     pack[1] = field_count;
     // Initialize tag slots to TAIDA_TAG_INT (0) by default
-    for (long i = 0; i < field_count; i++) {
+    for (taida_val i = 0; i < field_count; i++) {
         pack[2 + i * 3] = 0;     // hash
         pack[2 + i * 3 + 1] = 0; // tag = INT (default)
         pack[2 + i * 3 + 2] = 0; // value
     }
-    return (long)pack;
+    return (taida_val)pack;
 }
 
-long taida_pack_set(long pack_ptr, long index, long value) {
-    long *pack = (long*)pack_ptr;
+taida_val taida_pack_set(taida_val pack_ptr, taida_val index, taida_val value) {
+    taida_val *pack = (taida_val*)pack_ptr;
     pack[2 + index * 3 + 2] = value;
     return pack_ptr;
 }
 
-long taida_pack_set_tag(long pack_ptr, long index, long tag) {
-    long *pack = (long*)pack_ptr;
+taida_val taida_pack_set_tag(taida_val pack_ptr, taida_val index, taida_val tag) {
+    taida_val *pack = (taida_val*)pack_ptr;
     pack[2 + index * 3 + 1] = tag;
     return pack_ptr;
 }
 
-long taida_pack_get(long pack_ptr, long field_hash) {
-    long *pack = (long*)pack_ptr;
-    long count = pack[1];
-    for (long i = 0; i < count; i++) {
+taida_val taida_pack_get(taida_val pack_ptr, taida_val field_hash) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    taida_val count = pack[1];
+    for (taida_val i = 0; i < count; i++) {
         if (pack[2 + i * 3] == field_hash) {
             return pack[2 + i * 3 + 2];
         }
@@ -1727,10 +1740,10 @@ long taida_pack_get(long pack_ptr, long field_hash) {
     return 0; // default value
 }
 
-long taida_pack_has_hash(long pack_ptr, long field_hash) {
-    long *pack = (long*)pack_ptr;
-    long count = pack[1];
-    for (long i = 0; i < count; i++) {
+taida_val taida_pack_has_hash(taida_val pack_ptr, taida_val field_hash) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    taida_val count = pack[1];
+    for (taida_val i = 0; i < count; i++) {
         if (pack[2 + i * 3] == field_hash) {
             return 1;
         }
@@ -1738,28 +1751,28 @@ long taida_pack_has_hash(long pack_ptr, long field_hash) {
     return 0;
 }
 
-long taida_pack_get_idx(long pack_ptr, long index) {
-    long *pack = (long*)pack_ptr;
+taida_val taida_pack_get_idx(taida_val pack_ptr, taida_val index) {
+    taida_val *pack = (taida_val*)pack_ptr;
     return pack[2 + index * 3 + 2];
 }
 
-long taida_pack_set_hash(long pack_ptr, long index, long hash) {
-    long *pack = (long*)pack_ptr;
+taida_val taida_pack_set_hash(taida_val pack_ptr, taida_val index, taida_val hash) {
+    taida_val *pack = (taida_val*)pack_ptr;
     pack[2 + index * 3] = hash;
     return pack_ptr;
 }
 
 // ── Global variable table ─────────────────────────────────
 // Simple hash table for top-level variables accessed from functions.
-// Key = name_hash (FNV-1a), Value = long (tagged pointer or int).
+// Key = name_hash (FNV-1a), Value = taida_val (tagged pointer or int).
 
 #define TAIDA_GLOBAL_TABLE_SIZE 256
-static long taida_global_keys[TAIDA_GLOBAL_TABLE_SIZE];
-static long taida_global_vals[TAIDA_GLOBAL_TABLE_SIZE];
+static taida_val taida_global_keys[TAIDA_GLOBAL_TABLE_SIZE];
+static taida_val taida_global_vals[TAIDA_GLOBAL_TABLE_SIZE];
 static int taida_global_used[TAIDA_GLOBAL_TABLE_SIZE];
 
-void taida_global_set(long name_hash, long value) {
-    unsigned int idx = (unsigned int)((unsigned long)name_hash % TAIDA_GLOBAL_TABLE_SIZE);
+void taida_global_set(taida_val name_hash, taida_val value) {
+    unsigned int idx = (unsigned int)((uint64_t)name_hash % TAIDA_GLOBAL_TABLE_SIZE);
     for (int i = 0; i < TAIDA_GLOBAL_TABLE_SIZE; i++) {
         unsigned int slot = (idx + i) % TAIDA_GLOBAL_TABLE_SIZE;
         if (!taida_global_used[slot] || taida_global_keys[slot] == name_hash) {
@@ -1771,8 +1784,8 @@ void taida_global_set(long name_hash, long value) {
     }
 }
 
-long taida_global_get(long name_hash) {
-    unsigned int idx = (unsigned int)((unsigned long)name_hash % TAIDA_GLOBAL_TABLE_SIZE);
+taida_val taida_global_get(taida_val name_hash) {
+    unsigned int idx = (unsigned int)((uint64_t)name_hash % TAIDA_GLOBAL_TABLE_SIZE);
     for (int i = 0; i < TAIDA_GLOBAL_TABLE_SIZE; i++) {
         unsigned int slot = (idx + i) % TAIDA_GLOBAL_TABLE_SIZE;
         if (!taida_global_used[slot]) return 0;
@@ -1784,48 +1797,48 @@ long taida_global_get(long name_hash) {
 // ── Closure runtime ───────────────────────────────────────
 // Closure layout: [magic+refcount, fn_ptr, env_ptr]
 
-long taida_closure_new(long fn_ptr, long env_ptr) {
-    long *closure = (long*)malloc(3 * sizeof(long));
+taida_val taida_closure_new(taida_val fn_ptr, taida_val env_ptr) {
+    taida_val *closure = (taida_val*)malloc(3 * sizeof(taida_val));
     if (!closure) { fprintf(stderr, "taida: out of memory (taida_closure_new)\n"); exit(1); }
     closure[0] = TAIDA_CLOSURE_MAGIC | 1;
     closure[1] = fn_ptr;
     closure[2] = env_ptr;
-    return (long)closure;
+    return (taida_val)closure;
 }
 
-long taida_closure_get_fn(long closure_ptr) {
-    return ((long*)closure_ptr)[1];
+taida_val taida_closure_get_fn(taida_val closure_ptr) {
+    return ((taida_val*)closure_ptr)[1];
 }
 
-long taida_closure_get_env(long closure_ptr) {
-    return ((long*)closure_ptr)[2];
+taida_val taida_closure_get_env(taida_val closure_ptr) {
+    return ((taida_val*)closure_ptr)[2];
 }
 
-long taida_is_closure_value(long ptr) {
+taida_val taida_is_closure_value(taida_val ptr) {
     return TAIDA_IS_CLOSURE(ptr) ? 1 : 0;
 }
 
-typedef long (*taida_cb1_fn)(long);
-typedef long (*taida_closure_cb1_fn)(long, long);
-typedef long (*taida_cb2_fn)(long, long);
-typedef long (*taida_closure_cb2_fn)(long, long, long);
+typedef taida_val (*taida_cb1_fn)(taida_val);
+typedef taida_val (*taida_closure_cb1_fn)(taida_val, taida_val);
+typedef taida_val (*taida_cb2_fn)(taida_val, taida_val);
+typedef taida_val (*taida_closure_cb2_fn)(taida_val, taida_val, taida_val);
 
-static long taida_invoke_callback1(long fn_ptr, long arg0) {
+static taida_val taida_invoke_callback1(taida_val fn_ptr, taida_val arg0) {
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
-        long *closure = (long*)fn_ptr;
+        taida_val *closure = (taida_val*)fn_ptr;
         taida_closure_cb1_fn closure_fn = (taida_closure_cb1_fn)closure[1];
-        long env_ptr = closure[2];
+        taida_val env_ptr = closure[2];
         return closure_fn(env_ptr, arg0);
     }
     taida_cb1_fn fn = (taida_cb1_fn)fn_ptr;
     return fn(arg0);
 }
 
-static long taida_invoke_callback2(long fn_ptr, long arg0, long arg1) {
+static taida_val taida_invoke_callback2(taida_val fn_ptr, taida_val arg0, taida_val arg1) {
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
-        long *closure = (long*)fn_ptr;
+        taida_val *closure = (taida_val*)fn_ptr;
         taida_closure_cb2_fn closure_fn = (taida_closure_cb2_fn)closure[1];
-        long env_ptr = closure[2];
+        taida_val env_ptr = closure[2];
         return closure_fn(env_ptr, arg0, arg1);
     }
     taida_cb2_fn fn = (taida_cb2_fn)fn_ptr;
@@ -1836,53 +1849,53 @@ static long taida_invoke_callback2(long fn_ptr, long arg0, long arg1) {
 // obj.field(args) — get field from pack, then invoke as function.
 // Handles both plain function pointers and closures.
 
-typedef long (*taida_cb0_fn)(void);
-typedef long (*taida_closure_cb0_fn)(long);
-typedef long (*taida_cb3_fn)(long, long, long);
-typedef long (*taida_closure_cb3_fn)(long, long, long, long);
+typedef taida_val (*taida_cb0_fn)(void);
+typedef taida_val (*taida_closure_cb0_fn)(taida_val);
+typedef taida_val (*taida_cb3_fn)(taida_val, taida_val, taida_val);
+typedef taida_val (*taida_closure_cb3_fn)(taida_val, taida_val, taida_val, taida_val);
 
-long taida_pack_call_field0(long pack_ptr, long field_hash) {
-    long fn_ptr = taida_pack_get(pack_ptr, field_hash);
+taida_val taida_pack_call_field0(taida_val pack_ptr, taida_val field_hash) {
+    taida_val fn_ptr = taida_pack_get(pack_ptr, field_hash);
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
-        long *closure = (long*)fn_ptr;
+        taida_val *closure = (taida_val*)fn_ptr;
         taida_closure_cb0_fn closure_fn = (taida_closure_cb0_fn)closure[1];
-        long env_ptr = closure[2];
+        taida_val env_ptr = closure[2];
         return closure_fn(env_ptr);
     }
     taida_cb0_fn fn = (taida_cb0_fn)fn_ptr;
     return fn();
 }
 
-long taida_pack_call_field1(long pack_ptr, long field_hash, long arg0) {
-    long fn_ptr = taida_pack_get(pack_ptr, field_hash);
+taida_val taida_pack_call_field1(taida_val pack_ptr, taida_val field_hash, taida_val arg0) {
+    taida_val fn_ptr = taida_pack_get(pack_ptr, field_hash);
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
-        long *closure = (long*)fn_ptr;
+        taida_val *closure = (taida_val*)fn_ptr;
         taida_closure_cb1_fn closure_fn = (taida_closure_cb1_fn)closure[1];
-        long env_ptr = closure[2];
+        taida_val env_ptr = closure[2];
         return closure_fn(env_ptr, arg0);
     }
     taida_cb1_fn fn = (taida_cb1_fn)fn_ptr;
     return fn(arg0);
 }
 
-long taida_pack_call_field2(long pack_ptr, long field_hash, long arg0, long arg1) {
-    long fn_ptr = taida_pack_get(pack_ptr, field_hash);
+taida_val taida_pack_call_field2(taida_val pack_ptr, taida_val field_hash, taida_val arg0, taida_val arg1) {
+    taida_val fn_ptr = taida_pack_get(pack_ptr, field_hash);
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
-        long *closure = (long*)fn_ptr;
+        taida_val *closure = (taida_val*)fn_ptr;
         taida_closure_cb2_fn closure_fn = (taida_closure_cb2_fn)closure[1];
-        long env_ptr = closure[2];
+        taida_val env_ptr = closure[2];
         return closure_fn(env_ptr, arg0, arg1);
     }
     taida_cb2_fn fn = (taida_cb2_fn)fn_ptr;
     return fn(arg0, arg1);
 }
 
-long taida_pack_call_field3(long pack_ptr, long field_hash, long arg0, long arg1, long arg2) {
-    long fn_ptr = taida_pack_get(pack_ptr, field_hash);
+taida_val taida_pack_call_field3(taida_val pack_ptr, taida_val field_hash, taida_val arg0, taida_val arg1, taida_val arg2) {
+    taida_val fn_ptr = taida_pack_get(pack_ptr, field_hash);
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
-        long *closure = (long*)fn_ptr;
+        taida_val *closure = (taida_val*)fn_ptr;
         taida_closure_cb3_fn closure_fn = (taida_closure_cb3_fn)closure[1];
-        long env_ptr = closure[2];
+        taida_val env_ptr = closure[2];
         return closure_fn(env_ptr, arg0, arg1, arg2);
     }
     taida_cb3_fn fn = (taida_cb3_fn)fn_ptr;
@@ -1897,7 +1910,7 @@ long taida_pack_call_field3(long pack_ptr, long field_hash, long arg0, long arg1
 
 // Retain a list element based on the list's elem_type_tag.
 // Used when copying elements from one list to another (shared ownership).
-static void taida_list_elem_retain(long elem, long elem_tag) {
+static void taida_list_elem_retain(taida_val elem, taida_val elem_tag) {
     if (elem_tag == TAIDA_TAG_PACK || elem_tag == TAIDA_TAG_LIST || elem_tag == TAIDA_TAG_CLOSURE
         || elem_tag == TAIDA_TAG_HMAP || elem_tag == TAIDA_TAG_SET) {
         if (elem > 4096) taida_retain(elem);
@@ -1909,7 +1922,7 @@ static void taida_list_elem_retain(long elem, long elem_tag) {
 
 // Release a list element based on the list's elem_type_tag.
 // Used when freeing a list to release owned elements.
-static void taida_list_elem_release(long elem, long elem_tag) {
+static void taida_list_elem_release(taida_val elem, taida_val elem_tag) {
     if (elem_tag == TAIDA_TAG_PACK || elem_tag == TAIDA_TAG_LIST || elem_tag == TAIDA_TAG_CLOSURE
         || elem_tag == TAIDA_TAG_HMAP || elem_tag == TAIDA_TAG_SET) {
         if (elem > 4096) taida_release(elem);
@@ -1919,28 +1932,28 @@ static void taida_list_elem_release(long elem, long elem_tag) {
     // INT, FLOAT, BOOL, UNKNOWN → no-op (conservative: leak rather than crash)
 }
 
-long taida_list_new(void) {
-    long *list = (long*)malloc((4 + 16) * sizeof(long));
+taida_val taida_list_new(void) {
+    taida_val *list = (taida_val*)malloc((4 + 16) * sizeof(taida_val));
     if (!list) { fprintf(stderr, "taida: out of memory (taida_list_new)\n"); exit(1); }
     list[0] = TAIDA_LIST_MAGIC | 1;   // Magic + refcount
     list[1] = 16;  // capacity
     list[2] = 0;   // length
     list[3] = TAIDA_TAG_UNKNOWN;  // elem_type_tag (unknown until set)
-    return (long)list;
+    return (taida_val)list;
 }
 
-void taida_list_set_elem_tag(long list_ptr, long tag) {
-    ((long*)list_ptr)[3] = tag;
+void taida_list_set_elem_tag(taida_val list_ptr, taida_val tag) {
+    ((taida_val*)list_ptr)[3] = tag;
 }
 
-long taida_list_push(long list_ptr, long item) {
-    long *list = (long*)list_ptr;
-    long rc  = list[0];
-    long cap = list[1];
-    long len = list[2];
+taida_val taida_list_push(taida_val list_ptr, taida_val item) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val rc  = list[0];
+    taida_val cap = list[1];
+    taida_val len = list[2];
     if (len >= cap) {
-        long new_cap = cap * 2;
-        long *tmp = (long*)realloc(list, (4 + new_cap) * sizeof(long));
+        taida_val new_cap = cap * 2;
+        taida_val *tmp = (taida_val*)realloc(list, (4 + new_cap) * sizeof(taida_val));
         if (!tmp) { fprintf(stderr, "taida: out of memory (taida_list_push)\n"); exit(1); }
         list = tmp;
         list[0] = rc;       // preserve refcount
@@ -1948,95 +1961,95 @@ long taida_list_push(long list_ptr, long item) {
     }
     list[4 + len] = item;
     list[2] = len + 1;
-    return (long)list;
+    return (taida_val)list;
 }
 
-long taida_list_length(long list_ptr) {
-    return ((long*)list_ptr)[2];
+taida_val taida_list_length(taida_val list_ptr) {
+    return ((taida_val*)list_ptr)[2];
 }
 
-long taida_list_get(long list_ptr, long index) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_list_get(taida_val list_ptr, taida_val index) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     if (index < 0 || index >= len) {
         return taida_lax_empty(0);  // OOB returns empty Lax (v0.5.0)
     }
     return taida_lax_new(list[4 + index], 0);
 }
 
-long taida_list_first(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_list_first(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
     return taida_lax_new(list[4], 0);
 }
 
-long taida_list_last(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_list_last(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
     return taida_lax_new(list[4 + len - 1], 0);
 }
 
-long taida_list_sum(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long sum = 0;
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_sum(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val sum = 0;
+    for (taida_val i = 0; i < len; i++) {
         sum += list[4 + i];
     }
     return sum;
 }
 
-long taida_list_reverse(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_reverse(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = len - 1; i >= 0; i--) {
+    for (taida_val i = len - 1; i >= 0; i--) {
         taida_list_elem_retain(list[4 + i], elem_tag);
         new_list = taida_list_push(new_list, list[4 + i]);
     }
     return new_list;
 }
 
-long taida_list_contains(long list_ptr, long item) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_contains(taida_val list_ptr, taida_val item) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
         if (list[4 + i] == item) return 1;
     }
     return 0;
 }
 
-long taida_list_is_empty(long list_ptr) {
-    return ((long*)list_ptr)[2] == 0 ? 1 : 0;
+taida_val taida_list_is_empty(taida_val list_ptr) {
+    return ((taida_val*)list_ptr)[2] == 0 ? 1 : 0;
 }
 
-// list.map(fn_ptr) - fn_ptr takes (long) -> long
-long taida_list_map(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long new_list = taida_list_new();
+// list.map(fn_ptr) - fn_ptr takes (taida_val) -> taida_val
+taida_val taida_list_map(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val new_list = taida_list_new();
     // map may change element type, so leave elem_tag as UNKNOWN
-    for (long i = 0; i < len; i++) {
-        long result = taida_invoke_callback1(fn_ptr, list[4 + i]);
+    for (taida_val i = 0; i < len; i++) {
+        taida_val result = taida_invoke_callback1(fn_ptr, list[4 + i]);
         new_list = taida_list_push(new_list, result);
     }
     return new_list;
 }
 
-// list.filter(fn_ptr) - fn_ptr takes (long) -> long (truthy/falsy)
-long taida_list_filter(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+// list.filter(fn_ptr) - fn_ptr takes (taida_val) -> taida_val (truthy/falsy)
+taida_val taida_list_filter(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) {
             taida_list_elem_retain(list[4 + i], elem_tag);
             new_list = taida_list_push(new_list, list[4 + i]);
@@ -2046,129 +2059,129 @@ long taida_list_filter(long list_ptr, long fn_ptr) {
 }
 
 // ── Bytes runtime ─────────────────────────────────────────
-// Bytes layout: [magic+rc, length, b0, b1, ...] (each byte stored in long slot)
+// Bytes layout: [magic+rc, length, b0, b1, ...] (each byte stored in taida_val slot)
 
-static long taida_bytes_new_filled(long len, unsigned char fill) {
+static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill) {
     if (len < 0) len = 0;
-    long *bytes = (long*)malloc((2 + len) * sizeof(long));
+    taida_val *bytes = (taida_val*)malloc((2 + len) * sizeof(taida_val));
     if (!bytes) { fprintf(stderr, "taida: out of memory (taida_bytes_new_filled)\n"); exit(1); }
     bytes[0] = TAIDA_BYTES_MAGIC | 1;
     bytes[1] = len;
-    for (long i = 0; i < len; i++) {
-        bytes[2 + i] = (long)fill;
+    for (taida_val i = 0; i < len; i++) {
+        bytes[2 + i] = (taida_val)fill;
     }
-    return (long)bytes;
+    return (taida_val)bytes;
 }
 
-static long taida_bytes_from_raw(const unsigned char *data, long len) {
-    long out = taida_bytes_new_filled(len, 0);
-    long *bytes = (long*)out;
-    for (long i = 0; i < len; i++) {
-        bytes[2 + i] = (long)data[i];
+static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len) {
+    taida_val out = taida_bytes_new_filled(len, 0);
+    taida_val *bytes = (taida_val*)out;
+    for (taida_val i = 0; i < len; i++) {
+        bytes[2 + i] = (taida_val)data[i];
     }
     return out;
 }
 
-static long taida_bytes_clone(long bytes_ptr) {
+static taida_val taida_bytes_clone(taida_val bytes_ptr) {
     if (!TAIDA_IS_BYTES(bytes_ptr)) return taida_bytes_new_filled(0, 0);
-    long *src = (long*)bytes_ptr;
-    long len = src[1];
-    long out = taida_bytes_new_filled(len, 0);
-    long *dst = (long*)out;
-    for (long i = 0; i < len; i++) {
+    taida_val *src = (taida_val*)bytes_ptr;
+    taida_val len = src[1];
+    taida_val out = taida_bytes_new_filled(len, 0);
+    taida_val *dst = (taida_val*)out;
+    for (taida_val i = 0; i < len; i++) {
         dst[2 + i] = src[2 + i];
     }
     return out;
 }
 
-static long taida_bytes_len(long bytes_ptr) {
+static taida_val taida_bytes_len(taida_val bytes_ptr) {
     if (!TAIDA_IS_BYTES(bytes_ptr)) return 0;
-    return ((long*)bytes_ptr)[1];
+    return ((taida_val*)bytes_ptr)[1];
 }
 
-static long taida_bytes_default_value(void) {
+static taida_val taida_bytes_default_value(void) {
     return taida_bytes_new_filled(0, 0);
 }
 
-static long taida_bytes_get_lax(long bytes_ptr, long index) {
+static taida_val taida_bytes_get_lax(taida_val bytes_ptr, taida_val index) {
     if (!TAIDA_IS_BYTES(bytes_ptr)) return taida_lax_empty(0);
-    long *bytes = (long*)bytes_ptr;
-    long len = bytes[1];
+    taida_val *bytes = (taida_val*)bytes_ptr;
+    taida_val len = bytes[1];
     if (index < 0 || index >= len) return taida_lax_empty(0);
     return taida_lax_new(bytes[2 + index], 0);
 }
 
 // ── String methods ────────────────────────────────────────
 
-long taida_str_concat(const char* a, const char* b) {
+taida_val taida_str_concat(const char* a, const char* b) {
     if (!a) a = "";
     if (!b) b = "";
     size_t la = strlen(a), lb = strlen(b);
     char *buf = taida_str_alloc(la + lb);
     memcpy(buf, a, la);
     memcpy(buf + la, b, lb);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
-long taida_str_length(const char* s) {
+taida_val taida_str_length(const char* s) {
     if (!s) return 0;
-    return (long)strlen(s);
+    return (taida_val)strlen(s);
 }
 
-long taida_str_char_at(const char* s, long idx) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
-    if (idx < 0 || idx >= len) { char *r = taida_str_alloc(0); return (long)r; }
+taida_val taida_str_char_at(const char* s, taida_val idx) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
+    if (idx < 0 || idx >= len) { char *r = taida_str_alloc(0); return (taida_val)r; }
     char *r = taida_str_alloc(1);
     r[0] = s[idx];
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_slice(const char* s, long start, long end) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
+taida_val taida_str_slice(const char* s, taida_val start, taida_val end) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
     if (start < 0) start = 0;
     if (end > len) end = len;
-    if (start >= end) { char *r = taida_str_alloc(0); return (long)r; }
-    long slen = end - start;
+    if (start >= end) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val slen = end - start;
     char *r = taida_str_alloc(slen);
     memcpy(r, s + start, slen);
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_slice_mold(long value, long start, long end) {
+taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
     if (TAIDA_IS_BYTES(value)) {
-        long *bytes = (long*)value;
-        long len = bytes[1];
-        long s = start;
-        long e = end;
+        taida_val *bytes = (taida_val*)value;
+        taida_val len = bytes[1];
+        taida_val s = start;
+        taida_val e = end;
         if (s < 0) s = 0;
         if (s > len) s = len;
         if (e < 0 || e > len) e = len;
         if (e < s) e = s;
-        long out_len = e - s;
-        long out = taida_bytes_new_filled(out_len, 0);
-        long *dst = (long*)out;
-        for (long i = 0; i < out_len; i++) {
+        taida_val out_len = e - s;
+        taida_val out = taida_bytes_new_filled(out_len, 0);
+        taida_val *dst = (taida_val*)out;
+        for (taida_val i = 0; i < out_len; i++) {
             dst[2 + i] = bytes[2 + s + i];
         }
         return out;
     }
 
     if (TAIDA_IS_LIST(value)) {
-        long *list = (long*)value;
-        long len = list[2];
-        long elem_tag = list[3];
-        long s = start;
-        long e = end;
+        taida_val *list = (taida_val*)value;
+        taida_val len = list[2];
+        taida_val elem_tag = list[3];
+        taida_val s = start;
+        taida_val e = end;
         if (s < 0) s = 0;
         if (s > len) s = len;
         if (e < 0 || e > len) e = len;
         if (e < s) e = s;
-        long out = taida_list_new();
-        long *ol = (long*)out;
+        taida_val out = taida_list_new();
+        taida_val *ol = (taida_val*)out;
         ol[3] = elem_tag;  // propagate elem_type_tag
-        for (long i = s; i < e; i++) {
+        for (taida_val i = s; i < e; i++) {
             taida_list_elem_retain(list[4 + i], elem_tag);
             out = taida_list_push(out, list[4 + i]);
         }
@@ -2178,11 +2191,11 @@ long taida_slice_mold(long value, long start, long end) {
     const char *s = (const char*)value;
     if (!s) {
         char *r = taida_str_alloc(0);
-        return (long)r;
+        return (taida_val)r;
     }
-    long len = (long)strlen(s);
-    long cs = start;
-    long ce = end;
+    taida_val len = (taida_val)strlen(s);
+    taida_val cs = start;
+    taida_val ce = end;
     if (cs < 0) cs = 0;
     if (cs > len) cs = len;
     if (ce < 0 || ce > len) ce = len;
@@ -2190,286 +2203,286 @@ long taida_slice_mold(long value, long start, long end) {
     return taida_str_slice(s, cs, ce);
 }
 
-long taida_str_index_of(const char* s, const char* sub) {
+taida_val taida_str_index_of(const char* s, const char* sub) {
     if (!s || !sub) return -1;
     const char *p = strstr(s, sub);
     if (!p) return -1;
-    return (long)(p - s);
+    return (taida_val)(p - s);
 }
 
-long taida_str_last_index_of(const char* s, const char* sub) {
+taida_val taida_str_last_index_of(const char* s, const char* sub) {
     if (!s || !sub) return -1;
-    long slen = (long)strlen(s);
-    long sublen = (long)strlen(sub);
+    taida_val slen = (taida_val)strlen(s);
+    taida_val sublen = (taida_val)strlen(sub);
     if (sublen > slen) return -1;
-    for (long i = slen - sublen; i >= 0; i--) {
+    for (taida_val i = slen - sublen; i >= 0; i--) {
         if (strncmp(s + i, sub, sublen) == 0) return i;
     }
     return -1;
 }
 
-long taida_str_contains(const char* s, const char* sub) {
+taida_val taida_str_contains(const char* s, const char* sub) {
     if (!s || !sub) return 0;
     return strstr(s, sub) != NULL ? 1 : 0;
 }
 
-long taida_str_starts_with(const char* s, const char* prefix) {
+taida_val taida_str_starts_with(const char* s, const char* prefix) {
     if (!s || !prefix) return 0;
-    long plen = (long)strlen(prefix);
+    taida_val plen = (taida_val)strlen(prefix);
     return strncmp(s, prefix, plen) == 0 ? 1 : 0;
 }
 
-long taida_str_ends_with(const char* s, const char* suffix) {
+taida_val taida_str_ends_with(const char* s, const char* suffix) {
     if (!s || !suffix) return 0;
-    long slen = (long)strlen(s);
-    long suflen = (long)strlen(suffix);
+    taida_val slen = (taida_val)strlen(s);
+    taida_val suflen = (taida_val)strlen(suffix);
     if (suflen > slen) return 0;
     return strcmp(s + slen - suflen, suffix) == 0 ? 1 : 0;
 }
 
-long taida_str_get(const char* s, long idx) {
-    if (!s) return taida_lax_empty((long)"");
-    long len = (long)strlen(s);
-    if (idx < 0 || idx >= len) return taida_lax_empty((long)"");
+taida_val taida_str_get(const char* s, taida_val idx) {
+    if (!s) return taida_lax_empty((taida_val)"");
+    taida_val len = (taida_val)strlen(s);
+    if (idx < 0 || idx >= len) return taida_lax_empty((taida_val)"");
     char *r = taida_str_alloc(1);
     r[0] = s[idx];
-    return taida_lax_new((long)r, (long)"");
+    return taida_lax_new((taida_val)r, (taida_val)"");
 }
 
-long taida_str_to_upper(const char* s) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
+taida_val taida_str_to_upper(const char* s) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
     char *r = taida_str_alloc(len);
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         r[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
     }
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_to_lower(const char* s) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
+taida_val taida_str_to_lower(const char* s) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
     char *r = taida_str_alloc(len);
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         r[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
     }
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_trim(const char* s) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
-    long start = 0, end = len;
+taida_val taida_str_trim(const char* s) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
+    taida_val start = 0, end = len;
     while (start < len && (s[start]==' '||s[start]=='\t'||s[start]=='\n'||s[start]=='\r')) start++;
     while (end > start && (s[end-1]==' '||s[end-1]=='\t'||s[end-1]=='\n'||s[end-1]=='\r')) end--;
-    long slen = end - start;
+    taida_val slen = end - start;
     char *r = taida_str_alloc(slen);
     memcpy(r, s + start, slen);
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_split(const char* s, const char* sep) {
+taida_val taida_str_split(const char* s, const char* sep) {
     if (!s) return taida_list_new();
-    long list = taida_list_new();
+    taida_val list = taida_list_new();
     if (!sep || strlen(sep) == 0) {
         // Split into chars
-        long len = (long)strlen(s);
-        for (long i = 0; i < len; i++) {
+        taida_val len = (taida_val)strlen(s);
+        for (taida_val i = 0; i < len; i++) {
             char *c = taida_str_alloc(1);
             c[0] = s[i];
-            list = taida_list_push(list, (long)c);
+            list = taida_list_push(list, (taida_val)c);
         }
         return list;
     }
-    long sep_len = (long)strlen(sep);
+    taida_val sep_len = (taida_val)strlen(sep);
     const char *p = s;
     while (1) {
         const char *found = strstr(p, sep);
         if (!found) {
-            long slen = (long)strlen(p);
+            taida_val slen = (taida_val)strlen(p);
             char *part = taida_str_alloc(slen);
             memcpy(part, p, slen);
-            list = taida_list_push(list, (long)part);
+            list = taida_list_push(list, (taida_val)part);
             break;
         }
-        long plen = (long)(found - p);
+        taida_val plen = (taida_val)(found - p);
         char *part = taida_str_alloc(plen);
         memcpy(part, p, plen);
-        list = taida_list_push(list, (long)part);
+        list = taida_list_push(list, (taida_val)part);
         p = found + sep_len;
     }
     return list;
 }
 
-long taida_str_replace(const char* s, const char* from, const char* to) {
+taida_val taida_str_replace(const char* s, const char* from, const char* to) {
     if (!s || !from || !to) {
-        if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-        return (long)taida_str_new_copy(s);
+        if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+        return (taida_val)taida_str_new_copy(s);
     }
-    long from_len = (long)strlen(from);
-    long to_len = (long)strlen(to);
+    taida_val from_len = (taida_val)strlen(from);
+    taida_val to_len = (taida_val)strlen(to);
     if (from_len == 0) {
-        return (long)taida_str_new_copy(s);
+        return (taida_val)taida_str_new_copy(s);
     }
     // Count occurrences
-    long count = 0;
+    taida_val count = 0;
     const char *p = s;
     while ((p = strstr(p, from)) != NULL) { count++; p += from_len; }
-    long s_len = (long)strlen(s);
-    long new_len = s_len + count * (to_len - from_len);
+    taida_val s_len = (taida_val)strlen(s);
+    taida_val new_len = s_len + count * (to_len - from_len);
     char *r = taida_str_alloc(new_len);
     char *dst = r;
     p = s;
     while (1) {
         const char *found = strstr(p, from);
         if (!found) {
-            long remaining = (long)strlen(p);
+            taida_val remaining = (taida_val)strlen(p);
             memcpy(dst, p, remaining);
             dst += remaining;
             break;
         }
-        long chunk = (long)(found - p);
+        taida_val chunk = (taida_val)(found - p);
         memcpy(dst, p, chunk); dst += chunk;
         memcpy(dst, to, to_len); dst += to_len;
         p = found + from_len;
     }
     *dst = '\0';
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_to_int(const char* s) {
+taida_val taida_str_to_int(const char* s) {
     if (!s) return 0;
     return atol(s);
 }
 
-long taida_str_repeat(const char* s, long n) {
-    if (!s || n <= 0) { char *r = taida_str_alloc(0); return (long)r; }
-    long slen = (long)strlen(s);
+taida_val taida_str_repeat(const char* s, taida_val n) {
+    if (!s || n <= 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val slen = (taida_val)strlen(s);
     // Overflow check: slen * n must not overflow
-    if (slen > 0 && n > (long)(((size_t)-1) / 2) / slen) {
+    if (slen > 0 && n > (taida_val)(((size_t)-1) / 2) / slen) {
         // Overflow: return empty string
-        char *r = taida_str_alloc(0); return (long)r;
+        char *r = taida_str_alloc(0); return (taida_val)r;
     }
-    long total = slen * n;
+    taida_val total = slen * n;
     char *r = taida_str_alloc(total);
-    for (long i = 0; i < n; i++) {
+    for (taida_val i = 0; i < n; i++) {
         memcpy(r + i * slen, s, slen);
     }
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_reverse(const char* s) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
+taida_val taida_str_reverse(const char* s) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
     char *r = taida_str_alloc(len);
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         r[i] = s[len - 1 - i];
     }
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_trim_start(const char* s) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
-    long start = 0;
+taida_val taida_str_trim_start(const char* s) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
+    taida_val start = 0;
     while (start < len && (s[start]==' '||s[start]=='\t'||s[start]=='\n'||s[start]=='\r')) start++;
-    long slen = len - start;
+    taida_val slen = len - start;
     char *r = taida_str_alloc(slen);
     memcpy(r, s + start, slen);
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_trim_end(const char* s) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long len = (long)strlen(s);
-    long end = len;
+taida_val taida_str_trim_end(const char* s) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
+    taida_val end = len;
     while (end > 0 && (s[end-1]==' '||s[end-1]=='\t'||s[end-1]=='\n'||s[end-1]=='\r')) end--;
     char *r = taida_str_alloc(end);
     memcpy(r, s, end);
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_replace_first(const char* s, const char* from, const char* to) {
+taida_val taida_str_replace_first(const char* s, const char* from, const char* to) {
     if (!s || !from || !to) {
-        if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-        return (long)taida_str_new_copy(s);
+        if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+        return (taida_val)taida_str_new_copy(s);
     }
-    long from_len = (long)strlen(from);
-    long to_len = (long)strlen(to);
+    taida_val from_len = (taida_val)strlen(from);
+    taida_val to_len = (taida_val)strlen(to);
     if (from_len == 0) {
-        return (long)taida_str_new_copy(s);
+        return (taida_val)taida_str_new_copy(s);
     }
     const char *found = strstr(s, from);
     if (!found) {
-        return (long)taida_str_new_copy(s);
+        return (taida_val)taida_str_new_copy(s);
     }
-    long s_len = (long)strlen(s);
-    long new_len = s_len - from_len + to_len;
+    taida_val s_len = (taida_val)strlen(s);
+    taida_val new_len = s_len - from_len + to_len;
     char *r = taida_str_alloc(new_len);
-    long prefix = (long)(found - s);
+    taida_val prefix = (taida_val)(found - s);
     memcpy(r, s, prefix);
     memcpy(r + prefix, to, to_len);
-    long suffix = s_len - prefix - from_len;
+    taida_val suffix = s_len - prefix - from_len;
     memcpy(r + prefix + to_len, found + from_len, suffix);
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_str_pad(const char* s, long target_len, const char* pad_char, long pad_end) {
-    if (!s) { char *r = taida_str_alloc(0); return (long)r; }
-    long slen = (long)strlen(s);
+taida_val taida_str_pad(const char* s, taida_val target_len, const char* pad_char, taida_val pad_end) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val slen = (taida_val)strlen(s);
     if (slen >= target_len) {
-        return (long)taida_str_new_copy(s);
+        return (taida_val)taida_str_new_copy(s);
     }
-    long pad_len = target_len - slen;
+    taida_val pad_len = target_len - slen;
     char pc = ' ';
     if (pad_char && strlen(pad_char) > 0) pc = pad_char[0];
     char *r = taida_str_alloc(target_len);
     if (pad_end) {
         memcpy(r, s, slen);
-        for (long i = 0; i < pad_len; i++) r[slen + i] = pc;
+        for (taida_val i = 0; i < pad_len; i++) r[slen + i] = pc;
     } else {
-        for (long i = 0; i < pad_len; i++) r[i] = pc;
+        for (taida_val i = 0; i < pad_len; i++) r[i] = pc;
         memcpy(r + pad_len, s, slen);
     }
-    return (long)r;
+    return (taida_val)r;
 }
 
 // ── Template string (sprintf-based) ──────────────────────
 // Format: "Hello, {0}! You are {1}." with args as variadic
 // We use a simpler approach: taida_template_concat builds result from parts and values
-long taida_str_from_int(long v) {
+taida_val taida_str_from_int(taida_val v) {
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "%ld", v);
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
-long taida_str_from_float(double v) {
+taida_val taida_str_from_float(double v) {
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "%g", v);
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
-long taida_str_from_bool(long v) {
-    return (long)taida_str_new_copy(v ? "true" : "false");
+taida_val taida_str_from_bool(taida_val v) {
+    return (taida_val)taida_str_new_copy(v ? "true" : "false");
 }
 
 // ── Int methods ───────────────────────────────────────────
-long taida_int_abs(long a) { return a < 0 ? -a : a; }
+taida_val taida_int_abs(taida_val a) { return a < 0 ? -a : a; }
 
-long taida_int_to_str(long a) {
+taida_val taida_int_to_str(taida_val a) {
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "%ld", a);
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
-long taida_int_to_float(long a) {
+taida_val taida_int_to_float(taida_val a) {
     double d = (double)a;
-    long result;
-    memcpy(&result, &d, sizeof(long));
+    taida_val result;
+    memcpy(&result, &d, sizeof(taida_val));
     return result;
 }
 
-long taida_int_clamp(long a, long lo, long hi) {
+taida_val taida_int_clamp(taida_val a, taida_val lo, taida_val hi) {
     if (a < lo) return lo;
     if (a > hi) return hi;
     return a;
@@ -2481,18 +2494,18 @@ double taida_float_ceil(double a) { return ceil(a); }
 double taida_float_round(double a) { return round(a); }
 double taida_float_abs(double a) { return a < 0 ? -a : a; }
 
-long taida_float_to_int(double a) { return (long)a; }
+taida_val taida_float_to_int(double a) { return (taida_val)a; }
 
-long taida_float_to_str(double a) {
+taida_val taida_float_to_str(double a) {
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "%g", a);
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
-long taida_float_to_fixed(double a, long digits) {
+taida_val taida_float_to_fixed(double a, taida_val digits) {
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "%.*f", (int)digits, a);
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
 double taida_float_clamp(double a, double lo, double hi) {
@@ -2505,155 +2518,155 @@ double taida_float_clamp(double a, double lo, double hi) {
 // For Int: isNaN=false, isInfinite=false, isFinite=true always
 // For Float: need actual NaN/Inf checks
 
-long taida_int_is_positive(long a) { return a > 0 ? 1 : 0; }
-long taida_int_is_negative(long a) { return a < 0 ? 1 : 0; }
-long taida_int_is_zero(long a) { return a == 0 ? 1 : 0; }
+taida_val taida_int_is_positive(taida_val a) { return a > 0 ? 1 : 0; }
+taida_val taida_int_is_negative(taida_val a) { return a < 0 ? 1 : 0; }
+taida_val taida_int_is_zero(taida_val a) { return a == 0 ? 1 : 0; }
 
-long taida_float_is_nan(double a) { return isnan(a) ? 1 : 0; }
-long taida_float_is_infinite(double a) { return isinf(a) ? 1 : 0; }
-long taida_float_is_finite_check(double a) { return isfinite(a) ? 1 : 0; }
-long taida_float_is_positive(double a) { return a > 0.0 ? 1 : 0; }
-long taida_float_is_negative(double a) { return a < 0.0 ? 1 : 0; }
-long taida_float_is_zero(double a) { return a == 0.0 ? 1 : 0; }
+taida_val taida_float_is_nan(double a) { return isnan(a) ? 1 : 0; }
+taida_val taida_float_is_infinite(double a) { return isinf(a) ? 1 : 0; }
+taida_val taida_float_is_finite_check(double a) { return isfinite(a) ? 1 : 0; }
+taida_val taida_float_is_positive(double a) { return a > 0.0 ? 1 : 0; }
+taida_val taida_float_is_negative(double a) { return a < 0.0 ? 1 : 0; }
+taida_val taida_float_is_zero(double a) { return a == 0.0 ? 1 : 0; }
 
 // ── Bool methods ──────────────────────────────────────────
-long taida_bool_to_str(long a) {
-    return (long)taida_str_new_copy(a ? "true" : "false");
+taida_val taida_bool_to_str(taida_val a) {
+    return (taida_val)taida_str_new_copy(a ? "true" : "false");
 }
 
-long taida_bool_to_int(long a) { return a ? 1 : 0; }
+taida_val taida_bool_to_int(taida_val a) { return a ? 1 : 0; }
 
 // ── Additional List methods ──────────────────────────────
-long taida_list_index_of(long list_ptr, long item) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_index_of(taida_val list_ptr, taida_val item) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
         if (list[4 + i] == item) return i;
     }
     return -1;
 }
 
-long taida_list_last_index_of(long list_ptr, long item) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = len - 1; i >= 0; i--) {
+taida_val taida_list_last_index_of(taida_val list_ptr, taida_val item) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = len - 1; i >= 0; i--) {
         if (list[4 + i] == item) return i;
     }
     return -1;
 }
 
-long taida_list_any(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_any(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) return 1;
     }
     return 0;
 }
 
-long taida_list_all(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_all(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
         if (!taida_invoke_callback1(fn_ptr, list[4 + i])) return 0;
     }
     return 1;
 }
 
-long taida_list_none(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_none(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) return 0;
     }
     return 1;
 }
 
-long taida_list_concat(long list1, long list2) {
+taida_val taida_list_concat(taida_val list1, taida_val list2) {
     if (TAIDA_IS_BYTES(list1) && TAIDA_IS_BYTES(list2)) {
-        long len1 = taida_bytes_len(list1);
-        long len2 = taida_bytes_len(list2);
-        long out = taida_bytes_new_filled(len1 + len2, 0);
-        long *dst = (long*)out;
-        long *a = (long*)list1;
-        long *b = (long*)list2;
-        for (long i = 0; i < len1; i++) dst[2 + i] = a[2 + i];
-        for (long i = 0; i < len2; i++) dst[2 + len1 + i] = b[2 + i];
+        taida_val len1 = taida_bytes_len(list1);
+        taida_val len2 = taida_bytes_len(list2);
+        taida_val out = taida_bytes_new_filled(len1 + len2, 0);
+        taida_val *dst = (taida_val*)out;
+        taida_val *a = (taida_val*)list1;
+        taida_val *b = (taida_val*)list2;
+        for (taida_val i = 0; i < len1; i++) dst[2 + i] = a[2 + i];
+        for (taida_val i = 0; i < len2; i++) dst[2 + len1 + i] = b[2 + i];
         return out;
     }
 
-    long *l1 = (long*)list1;
-    long *l2 = (long*)list2;
-    long len1 = l1[2], len2 = l2[2];
-    long elem_tag = l1[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+    taida_val *l1 = (taida_val*)list1;
+    taida_val *l2 = (taida_val*)list2;
+    taida_val len1 = l1[2], len2 = l2[2];
+    taida_val elem_tag = l1[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag from first list
-    for (long i = 0; i < len1; i++) {
+    for (taida_val i = 0; i < len1; i++) {
         taida_list_elem_retain(l1[4 + i], elem_tag);
         new_list = taida_list_push(new_list, l1[4 + i]);
     }
-    for (long i = 0; i < len2; i++) {
+    for (taida_val i = 0; i < len2; i++) {
         taida_list_elem_retain(l2[4 + i], elem_tag);
         new_list = taida_list_push(new_list, l2[4 + i]);
     }
     return new_list;
 }
 
-long taida_list_join(long list_ptr, const char* sep) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    if (len == 0) { char *r = taida_str_alloc(0); return (long)r; }
+taida_val taida_list_join(taida_val list_ptr, const char* sep) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    if (len == 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
     if (!sep) sep = "";
-    long sep_len = (long)strlen(sep);
+    taida_val sep_len = (taida_val)strlen(sep);
 
     // Convert each element through the shared toString path.
     // This avoids pointer heuristics and keeps behavior consistent.
     const char **strs = (const char**)malloc(len * sizeof(const char*));
-    long total = 0;
-    for (long i = 0; i < len; i++) {
+    taida_val total = 0;
+    for (taida_val i = 0; i < len; i++) {
         strs[i] = (const char*)taida_value_to_display_string(list[4 + i]);
-        total += (long)strlen(strs[i]);
+        total += (taida_val)strlen(strs[i]);
         if (i > 0) total += sep_len;
     }
 
     char *r = taida_str_alloc(total);
     char *dst = r;
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         if (i > 0 && sep_len > 0) { memcpy(dst, sep, sep_len); dst += sep_len; }
-        long sl = (long)strlen(strs[i]);
+        taida_val sl = (taida_val)strlen(strs[i]);
         memcpy(dst, strs[i], sl);
         dst += sl;
     }
     *dst = '\0';
 
     // Free temporary strings
-    for (long i = 0; i < len; i++) {
-        taida_str_release((long)strs[i]);
+    for (taida_val i = 0; i < len; i++) {
+        taida_str_release((taida_val)strs[i]);
     }
     free(strs);
 
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_list_sort(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_sort(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
     // Copy items
-    long *items = (long*)malloc(len * sizeof(long));
-    for (long i = 0; i < len; i++) items[i] = list[4 + i];
+    taida_val *items = (taida_val*)malloc(len * sizeof(taida_val));
+    for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Simple insertion sort
-    for (long i = 1; i < len; i++) {
-        long key = items[i];
-        long j = i - 1;
+    for (taida_val i = 1; i < len; i++) {
+        taida_val key = items[i];
+        taida_val j = i - 1;
         while (j >= 0 && items[j] > key) { items[j+1] = items[j]; j--; }
         items[j+1] = key;
     }
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         taida_list_elem_retain(items[i], elem_tag);
         new_list = taida_list_push(new_list, items[i]);
     }
@@ -2661,20 +2674,20 @@ long taida_list_sort(long list_ptr) {
     return new_list;
 }
 
-long taida_list_unique(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl_init = (long*)new_list;
+taida_val taida_list_unique(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl_init = (taida_val*)new_list;
     nl_init[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
         // Check if already in new_list
-        long *nl = (long*)new_list;
-        long nlen = nl[2];
-        long found = 0;
-        for (long j = 0; j < nlen; j++) {
+        taida_val *nl = (taida_val*)new_list;
+        taida_val nlen = nl[2];
+        taida_val found = 0;
+        for (taida_val j = 0; j < nlen; j++) {
             if (nl[4 + j] == item) { found = 1; break; }
         }
         if (!found) {
@@ -2685,23 +2698,23 @@ long taida_list_unique(long list_ptr) {
     return new_list;
 }
 
-long taida_list_flatten(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long new_list = taida_list_new();
+taida_val taida_list_flatten(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val new_list = taida_list_new();
     // flatten changes nesting level, propagate inner list's elem_tag if possible
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
         if (TAIDA_IS_LIST(item)) {
-            long *sub = (long*)item;
-            long slen = sub[2];
-            long sub_tag = sub[3];
+            taida_val *sub = (taida_val*)item;
+            taida_val slen = sub[2];
+            taida_val sub_tag = sub[3];
             // Propagate inner list's elem_tag to result
             if (i == 0) {
-                long *nl = (long*)new_list;
+                taida_val *nl = (taida_val*)new_list;
                 nl[3] = sub_tag;
             }
-            for (long j = 0; j < slen; j++) {
+            for (taida_val j = 0; j < slen; j++) {
                 taida_list_elem_retain(sub[4 + j], sub_tag);
                 new_list = taida_list_push(new_list, sub[4 + j]);
             }
@@ -2714,23 +2727,23 @@ long taida_list_flatten(long list_ptr) {
     return new_list;
 }
 
-long taida_list_max(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_list_max(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
-    long max = list[4];
-    for (long i = 1; i < len; i++) {
+    taida_val max = list[4];
+    for (taida_val i = 1; i < len; i++) {
         if (list[4 + i] > max) max = list[4 + i];
     }
     return taida_lax_new(max, 0);
 }
 
-long taida_list_min(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_list_min(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
-    long min = list[4];
-    for (long i = 1; i < len; i++) {
+    taida_val min = list[4];
+    for (taida_val i = 1; i < len; i++) {
         if (list[4 + i] < min) min = list[4 + i];
     }
     return taida_lax_new(min, 0);
@@ -2738,14 +2751,14 @@ long taida_list_min(long list_ptr) {
 
 // ── Additional List mold operations ──────────────────────
 
-long taida_list_append(long list_ptr, long item) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_append(taida_val list_ptr, taida_val item) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         taida_list_elem_retain(list[4 + i], elem_tag);
         new_list = taida_list_push(new_list, list[4 + i]);
     }
@@ -2754,39 +2767,39 @@ long taida_list_append(long list_ptr, long item) {
     return new_list;
 }
 
-long taida_list_prepend(long list_ptr, long item) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
     // New item: no retain (ownership transferred from caller)
     new_list = taida_list_push(new_list, item);
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         taida_list_elem_retain(list[4 + i], elem_tag);
         new_list = taida_list_push(new_list, list[4 + i]);
     }
     return new_list;
 }
 
-long taida_list_sort_desc(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_sort_desc(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    long *items = (long*)malloc(len * sizeof(long));
-    for (long i = 0; i < len; i++) items[i] = list[4 + i];
+    taida_val *items = (taida_val*)malloc(len * sizeof(taida_val));
+    for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Insertion sort descending
-    for (long i = 1; i < len; i++) {
-        long key = items[i];
-        long j = i - 1;
+    for (taida_val i = 1; i < len; i++) {
+        taida_val key = items[i];
+        taida_val j = i - 1;
         while (j >= 0 && items[j] < key) { items[j+1] = items[j]; j--; }
         items[j+1] = key;
     }
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         taida_list_elem_retain(items[i], elem_tag);
         new_list = taida_list_push(new_list, items[i]);
     }
@@ -2794,11 +2807,11 @@ long taida_list_sort_desc(long list_ptr) {
     return new_list;
 }
 
-long taida_list_find(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
+taida_val taida_list_find(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
         if (taida_invoke_callback1(fn_ptr, item)) {
             return taida_lax_new(item, 0);
         }
@@ -2806,58 +2819,58 @@ long taida_list_find(long list_ptr, long fn_ptr) {
     return taida_lax_empty(0);
 }
 
-long taida_list_find_index(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_find_index(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) return i;
     }
     return -1;
 }
 
-long taida_list_count(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long count = 0;
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_count(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val count = 0;
+    for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) count++;
     }
     return count;
 }
 
 // list.fold(init, fn) — left fold: fn takes (acc, item) -> acc
-long taida_list_fold(long list_ptr, long init, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long acc = init;
-    for (long i = 0; i < len; i++) {
+taida_val taida_list_fold(taida_val list_ptr, taida_val init, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val acc = init;
+    for (taida_val i = 0; i < len; i++) {
         acc = taida_invoke_callback2(fn_ptr, acc, list[4 + i]);
     }
     return acc;
 }
 
 // list.foldr(init, fn) — right fold: fn takes (acc, item) -> acc
-long taida_list_foldr(long list_ptr, long init, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long acc = init;
-    for (long i = len - 1; i >= 0; i--) {
+taida_val taida_list_foldr(taida_val list_ptr, taida_val init, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val acc = init;
+    for (taida_val i = len - 1; i >= 0; i--) {
         acc = taida_invoke_callback2(fn_ptr, acc, list[4 + i]);
     }
     return acc;
 }
 
 // Take[list, n]() — first n elements
-long taida_list_take(long list_ptr, long n) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long take_n = n < len ? n : len;
+taida_val taida_list_take(taida_val list_ptr, taida_val n) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val take_n = n < len ? n : len;
     if (take_n < 0) take_n = 0;
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = 0; i < take_n; i++) {
+    for (taida_val i = 0; i < take_n; i++) {
         taida_list_elem_retain(list[4 + i], elem_tag);
         new_list = taida_list_push(new_list, list[4 + i]);
     }
@@ -2865,14 +2878,14 @@ long taida_list_take(long list_ptr, long n) {
 }
 
 // TakeWhile[list, fn]() — take while fn returns truthy
-long taida_list_take_while(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_take_while(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) {
             taida_list_elem_retain(list[4 + i], elem_tag);
             new_list = taida_list_push(new_list, list[4 + i]);
@@ -2884,16 +2897,16 @@ long taida_list_take_while(long list_ptr, long fn_ptr) {
 }
 
 // Drop[list, n]() — skip first n elements
-long taida_list_drop(long list_ptr, long n) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long skip = n < len ? n : len;
+taida_val taida_list_drop(taida_val list_ptr, taida_val n) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val skip = n < len ? n : len;
     if (skip < 0) skip = 0;
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    for (long i = skip; i < len; i++) {
+    for (taida_val i = skip; i < len; i++) {
         taida_list_elem_retain(list[4 + i], elem_tag);
         new_list = taida_list_push(new_list, list[4 + i]);
     }
@@ -2901,15 +2914,15 @@ long taida_list_drop(long list_ptr, long n) {
 }
 
 // DropWhile[list, fn]() — skip while fn returns truthy
-long taida_list_drop_while(long list_ptr, long fn_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_drop_while(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    long dropping = 1;
-    for (long i = 0; i < len; i++) {
+    taida_val dropping = 1;
+    for (taida_val i = 0; i < len; i++) {
         if (dropping && taida_invoke_callback1(fn_ptr, list[4 + i])) {
             continue;
         }
@@ -2926,25 +2939,25 @@ long taida_list_drop_while(long list_ptr, long fn_ptr) {
 #define HASH_INDEX  0x83cf8e8f9081468bULL
 #define HASH_VALUE  0x7ce4fd9430e80ceaULL
 
-long taida_list_zip(long list1, long list2) {
-    long *l1 = (long*)list1;
-    long *l2 = (long*)list2;
-    long len1 = l1[2], len2 = l2[2];
-    long min_len = len1 < len2 ? len1 : len2;
-    long elem_tag1 = l1[3];  // ソースリスト1の要素型タグ
-    long elem_tag2 = l2[3];  // ソースリスト2の要素型タグ
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_zip(taida_val list1, taida_val list2) {
+    taida_val *l1 = (taida_val*)list1;
+    taida_val *l2 = (taida_val*)list2;
+    taida_val len1 = l1[2], len2 = l2[2];
+    taida_val min_len = len1 < len2 ? len1 : len2;
+    taida_val elem_tag1 = l1[3];  // ソースリスト1の要素型タグ
+    taida_val elem_tag2 = l2[3];  // ソースリスト2の要素型タグ
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = TAIDA_TAG_PACK;  // zip produces Pack elements
-    for (long i = 0; i < min_len; i++) {
+    for (taida_val i = 0; i < min_len; i++) {
         // Create a BuchiPack with fields: first, second
-        long pair = taida_pack_new(2);
-        pair = taida_pack_set_hash(pair, 0, (long)HASH_FIRST);
+        taida_val pair = taida_pack_new(2);
+        pair = taida_pack_set_hash(pair, 0, (taida_val)HASH_FIRST);
         pair = taida_pack_set(pair, 0, l1[4 + i]);
         // tag + retain for first field based on source list's elem_type_tag
         taida_pack_set_tag(pair, 0, elem_tag1);
         taida_list_elem_retain(l1[4 + i], elem_tag1);
-        pair = taida_pack_set_hash(pair, 1, (long)HASH_SECOND);
+        pair = taida_pack_set_hash(pair, 1, (taida_val)HASH_SECOND);
         pair = taida_pack_set(pair, 1, l2[4 + i]);
         // tag + retain for second field based on source list's elem_type_tag
         taida_pack_set_tag(pair, 1, elem_tag2);
@@ -2954,20 +2967,20 @@ long taida_list_zip(long list1, long list2) {
     return new_list;
 }
 
-long taida_list_enumerate(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
-    long elem_tag = list[3];  // ソースリストの要素型タグ
-    long new_list = taida_list_new();
-    long *nl = (long*)new_list;
+taida_val taida_list_enumerate(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];  // ソースリストの要素型タグ
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
     nl[3] = TAIDA_TAG_PACK;  // enumerate produces Pack elements
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         // Create a BuchiPack with fields: index, value
-        long pair = taida_pack_new(2);
-        pair = taida_pack_set_hash(pair, 0, (long)HASH_INDEX);
+        taida_val pair = taida_pack_new(2);
+        pair = taida_pack_set_hash(pair, 0, (taida_val)HASH_INDEX);
         pair = taida_pack_set(pair, 0, i);
         // index は INT なのでタグはデフォルト(0)のまま、retain 不要
-        pair = taida_pack_set_hash(pair, 1, (long)HASH_VALUE);
+        pair = taida_pack_set_hash(pair, 1, (taida_val)HASH_VALUE);
         pair = taida_pack_set(pair, 1, list[4 + i]);
         // value フィールドにソースリストの elem_type_tag に基づいて tag + retain
         taida_pack_set_tag(pair, 1, elem_tag);
@@ -2992,7 +3005,7 @@ long taida_list_enumerate(long list_ptr) {
 // (HM_HEADER, TAIDA_HASHMAP_TOMBSTONE_HASH, HM_SLOT_* macros defined earlier)
 
 // Retain a HashMap value based on the map's value_type_tag.
-static void taida_hashmap_val_retain(long val, long val_tag) {
+static void taida_hashmap_val_retain(taida_val val, taida_val val_tag) {
     if (val_tag == TAIDA_TAG_PACK || val_tag == TAIDA_TAG_LIST || val_tag == TAIDA_TAG_CLOSURE || val_tag == TAIDA_TAG_HMAP || val_tag == TAIDA_TAG_SET) {
         if (val > 4096) taida_retain(val);
     } else if (val_tag == TAIDA_TAG_STR) {
@@ -3002,7 +3015,7 @@ static void taida_hashmap_val_retain(long val, long val_tag) {
 }
 
 // Release a HashMap value based on the map's value_type_tag.
-static void taida_hashmap_val_release(long val, long val_tag) {
+static void taida_hashmap_val_release(taida_val val, taida_val val_tag) {
     if (val_tag == TAIDA_TAG_PACK || val_tag == TAIDA_TAG_LIST || val_tag == TAIDA_TAG_CLOSURE || val_tag == TAIDA_TAG_HMAP || val_tag == TAIDA_TAG_SET) {
         if (val > 4096) taida_release(val);
     } else if (val_tag == TAIDA_TAG_STR) {
@@ -3012,16 +3025,16 @@ static void taida_hashmap_val_release(long val, long val_tag) {
 }
 
 // Retain a HashMap key (always Str).
-static void taida_hashmap_key_retain(long key) {
+static void taida_hashmap_key_retain(taida_val key) {
     if (key > 4096) taida_str_retain(key);
 }
 
 // Release a HashMap key (always Str).
-static void taida_hashmap_key_release(long key) {
+static void taida_hashmap_key_release(taida_val key) {
     if (key > 4096) taida_str_release(key);
 }
 
-static long taida_hashmap_adjust_hash(long h) {
+static taida_val taida_hashmap_adjust_hash(taida_val h) {
     // Avoid 0 (empty) and 1 (tombstone)
     if (h == 0) return 42424242L;
     if (h == 1) return 14141414L;
@@ -3030,11 +3043,11 @@ static long taida_hashmap_adjust_hash(long h) {
 
 // Slot helpers: HM_SLOT_* macros defined in header section above
 
-static long taida_is_hashmap(long ptr) {
+static taida_val taida_is_hashmap(taida_val ptr) {
     return TAIDA_IS_HMAP(ptr);
 }
 
-static int taida_ptr_is_readable(long ptr, size_t bytes) {
+static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
     if (ptr == 0 || ptr < 4096) return 0;
     // Taida heap objects are always 8-byte aligned.
     if (ptr & 0x7) return 0;
@@ -3044,7 +3057,7 @@ static int taida_ptr_is_readable(long ptr, size_t bytes) {
     if (start > UINTPTR_MAX - (bytes - 1)) return 0;
     uintptr_t end = start + (bytes - 1);
 
-    long page_size = sysconf(_SC_PAGESIZE);
+    taida_val page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) page_size = 4096;
     uintptr_t step = (uintptr_t)page_size;
     uintptr_t page_mask = step - 1;
@@ -3068,7 +3081,7 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
     uintptr_t ptr = (uintptr_t)s;
     if (ptr < 4096) return 0;
 
-    long page_size = sysconf(_SC_PAGESIZE);
+    taida_val page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) page_size = 4096;
     uintptr_t page_mask = (uintptr_t)(page_size - 1);
     uintptr_t current_page = 0;
@@ -3092,29 +3105,29 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
     return 0;
 }
 
-static int taida_hashmap_key_valid(long key_ptr) {
+static int taida_hashmap_key_valid(taida_val key_ptr) {
     // All values are valid keys in Taida. 
     // Null (0) is traditionally not a key, but we can allow it as Int(0).
     return 1;
 }
 
 // FNV-1a hash for string keys (runtime computation)
-long taida_str_hash(long str_ptr) {
+taida_val taida_str_hash(taida_val str_ptr) {
     const unsigned char *s = (const unsigned char*)str_ptr;
     size_t len = 0;
     if (!taida_read_cstr_len_safe((const char*)s, 8192, &len)) return 0;
 
-    unsigned long long hash = 0xcbf29ce484222325ULL;
+    uint64_t hash = 0xcbf29ce484222325ULL;
     for (size_t i = 0; i < len; i++) {
         hash ^= s[i];
         hash *= 0x100000001b3ULL;
     }
-    return (long)hash;
+    return (taida_val)hash;
 }
 
-long taida_value_hash(long val) {
+taida_val taida_value_hash(taida_val val) {
     size_t len = 0;
-    long h = val;
+    taida_val h = val;
     // Check if it's a valid string pointer
     if (taida_read_cstr_len_safe((const char*)val, 8192, &len)) {
         h = taida_str_hash(val);
@@ -3124,7 +3137,7 @@ long taida_value_hash(long val) {
     return taida_hashmap_adjust_hash(h);
 }
 
-static int taida_hashmap_key_eq(long key_a, long key_b) {
+static int taida_hashmap_key_eq(taida_val key_a, taida_val key_b) {
     if (key_a == key_b) return 1;
     // For string comparison, ensure both are valid pointers
     if (!taida_hashmap_key_valid(key_a) || !taida_hashmap_key_valid(key_b)) return 0;
@@ -3138,32 +3151,32 @@ static int taida_hashmap_key_eq(long key_a, long key_b) {
     return memcmp(sa, sb, la) == 0;
 }
 
-static long taida_hashmap_new_with_cap(long cap) {
-    long *hm = (long*)calloc(HM_HEADER + cap * 3, sizeof(long));
+static taida_val taida_hashmap_new_with_cap(taida_val cap) {
+    taida_val *hm = (taida_val*)calloc(HM_HEADER + cap * 3, sizeof(taida_val));
     if (!hm) { fprintf(stderr, "taida: out of memory (taida_hashmap_new_with_cap)\n"); exit(1); }
     hm[0] = TAIDA_HMAP_MAGIC | 1;  // Magic + refcount
     hm[1] = cap;  // capacity
     hm[2] = 0;    // length
     hm[3] = TAIDA_TAG_UNKNOWN;  // value_type_tag (unknown until set)
-    return (long)hm;
+    return (taida_val)hm;
 }
 
-void taida_hashmap_set_value_tag(long hm_ptr, long tag) {
-    ((long*)hm_ptr)[3] = tag;
+void taida_hashmap_set_value_tag(taida_val hm_ptr, taida_val tag) {
+    ((taida_val*)hm_ptr)[3] = tag;
 }
 
-long taida_hashmap_new(void) {
+taida_val taida_hashmap_new(void) {
     return taida_hashmap_new_with_cap(16);
 }
 
 // Internal set used by resize (does not trigger resize)
-static void taida_hashmap_set_internal(long *hm, long cap, long key_hash, long key_ptr, long value) {
-    unsigned long long uh = (unsigned long long)key_hash;
-    long idx = (long)(uh % (unsigned long long)cap);
-    for (long i = 0; i < cap; i++) {
-        long slot = (idx + i) % cap;
-        long sh = hm[HM_HEADER + slot * 3];
-        long sk = hm[HM_HEADER + slot * 3 + 1];
+static void taida_hashmap_set_internal(taida_val *hm, taida_val cap, taida_val key_hash, taida_val key_ptr, taida_val value) {
+    uint64_t uh = (uint64_t)key_hash;
+    taida_val idx = (taida_val)(uh % (uint64_t)cap);
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val slot = (idx + i) % cap;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_EMPTY(sh, sk)) {
             hm[HM_HEADER + slot * 3] = key_hash;
             hm[HM_HEADER + slot * 3 + 1] = key_ptr;
@@ -3181,16 +3194,16 @@ static void taida_hashmap_set_internal(long *hm, long cap, long key_hash, long k
 // Resize the hashmap to new_cap (re-hash all occupied entries)
 // This is a MOVE operation — entries transfer ownership from old to new.
 // No retain/release needed; the old table's raw memory is freed.
-static long taida_hashmap_resize(long hm_ptr, long new_cap) {
-    long *old_hm = (long*)hm_ptr;
-    long old_cap = old_hm[1];
-    long new_hm_ptr = taida_hashmap_new_with_cap(new_cap);
-    long *new_hm = (long*)new_hm_ptr;
+static taida_val taida_hashmap_resize(taida_val hm_ptr, taida_val new_cap) {
+    taida_val *old_hm = (taida_val*)hm_ptr;
+    taida_val old_cap = old_hm[1];
+    taida_val new_hm_ptr = taida_hashmap_new_with_cap(new_cap);
+    taida_val *new_hm = (taida_val*)new_hm_ptr;
     // NO-1: propagate value_type_tag from old to new
     new_hm[3] = old_hm[3];
-    for (long i = 0; i < old_cap; i++) {
-        long sh = old_hm[HM_HEADER + i * 3];
-        long sk = old_hm[HM_HEADER + i * 3 + 1];
+    for (taida_val i = 0; i < old_cap; i++) {
+        taida_val sh = old_hm[HM_HEADER + i * 3];
+        taida_val sk = old_hm[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             taida_hashmap_set_internal(new_hm, new_cap, sh, sk, old_hm[HM_HEADER + i * 3 + 2]);
         }
@@ -3199,33 +3212,33 @@ static long taida_hashmap_resize(long hm_ptr, long new_cap) {
     return new_hm_ptr;
 }
 
-long taida_hashmap_set(long hm_ptr, long key_hash, long key_ptr, long value) {
+taida_val taida_hashmap_set(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr, taida_val value) {
     if (!taida_hashmap_key_valid(key_ptr)) {
         return hm_ptr;
     }
 
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    long len = hm[2];
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val len = hm[2];
 
     // Load factor check: resize at 0.75 (F-21 fix)
     if (len * 4 >= cap * 3) {
         hm_ptr = taida_hashmap_resize(hm_ptr, cap * 2);
-        hm = (long*)hm_ptr;
+        hm = (taida_val*)hm_ptr;
         cap = hm[1];
     }
 
-    long val_tag = hm[3];  // value_type_tag
-    unsigned long long uh = (unsigned long long)key_hash;
-    long idx = (long)(uh % (unsigned long long)cap);
-    long first_tombstone = -1;
-    for (long i = 0; i < cap; i++) {
-        long slot = (idx + i) % cap;
-        long sh = hm[HM_HEADER + slot * 3];
-        long sk = hm[HM_HEADER + slot * 3 + 1];
+    taida_val val_tag = hm[3];  // value_type_tag
+    uint64_t uh = (uint64_t)key_hash;
+    taida_val idx = (taida_val)(uh % (uint64_t)cap);
+    taida_val first_tombstone = -1;
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val slot = (idx + i) % cap;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_EMPTY(sh, sk)) {
             // Insert at tombstone if we passed one, else at this empty slot
-            long target = (first_tombstone >= 0) ? first_tombstone : slot;
+            taida_val target = (first_tombstone >= 0) ? first_tombstone : slot;
             hm[HM_HEADER + target * 3] = key_hash;
             hm[HM_HEADER + target * 3 + 1] = key_ptr;
             hm[HM_HEADER + target * 3 + 2] = value;
@@ -3242,7 +3255,7 @@ long taida_hashmap_set(long hm_ptr, long key_hash, long key_ptr, long value) {
         // Occupied slot: compare hash AND key (F-19 fix)
         if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) {
             // NO-1: release old value, retain new value on overwrite
-            long old_val = hm[HM_HEADER + slot * 3 + 2];
+            taida_val old_val = hm[HM_HEADER + slot * 3 + 2];
             taida_hashmap_val_release(old_val, val_tag);
             taida_hashmap_val_retain(value, val_tag);
             hm[HM_HEADER + slot * 3 + 2] = value;
@@ -3262,17 +3275,17 @@ long taida_hashmap_set(long hm_ptr, long key_hash, long key_ptr, long value) {
     return hm_ptr;
 }
 
-long taida_hashmap_get(long hm_ptr, long key_hash, long key_ptr) {
+taida_val taida_hashmap_get(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
     if (!taida_hashmap_key_valid(key_ptr)) return 0;
 
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    unsigned long long uh = (unsigned long long)key_hash;
-    long idx = (long)(uh % (unsigned long long)cap);
-    for (long i = 0; i < cap; i++) {
-        long slot = (idx + i) % cap;
-        long sh = hm[HM_HEADER + slot * 3];
-        long sk = hm[HM_HEADER + slot * 3 + 1];
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    uint64_t uh = (uint64_t)key_hash;
+    taida_val idx = (taida_val)(uh % (uint64_t)cap);
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val slot = (idx + i) % cap;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_EMPTY(sh, sk)) return 0; // not found
         if (HM_SLOT_TOMBSTONE(sh, sk)) continue; // skip tombstone
         if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) return hm[HM_HEADER + slot * 3 + 2];
@@ -3280,17 +3293,17 @@ long taida_hashmap_get(long hm_ptr, long key_hash, long key_ptr) {
     return 0;
 }
 
-long taida_hashmap_has(long hm_ptr, long key_hash, long key_ptr) {
+taida_val taida_hashmap_has(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
     if (!taida_hashmap_key_valid(key_ptr)) return 0;
 
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    unsigned long long uh = (unsigned long long)key_hash;
-    long idx = (long)(uh % (unsigned long long)cap);
-    for (long i = 0; i < cap; i++) {
-        long slot = (idx + i) % cap;
-        long sh = hm[HM_HEADER + slot * 3];
-        long sk = hm[HM_HEADER + slot * 3 + 1];
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    uint64_t uh = (uint64_t)key_hash;
+    taida_val idx = (taida_val)(uh % (uint64_t)cap);
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val slot = (idx + i) % cap;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_EMPTY(sh, sk)) return 0;
         if (HM_SLOT_TOMBSTONE(sh, sk)) continue;
         if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) return 1;
@@ -3298,18 +3311,18 @@ long taida_hashmap_has(long hm_ptr, long key_hash, long key_ptr) {
     return 0;
 }
 
-long taida_hashmap_remove(long hm_ptr, long key_hash, long key_ptr) {
+taida_val taida_hashmap_remove(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
     if (!taida_hashmap_key_valid(key_ptr)) return hm_ptr;
 
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    long val_tag = hm[3];  // value_type_tag
-    unsigned long long uh = (unsigned long long)key_hash;
-    long idx = (long)(uh % (unsigned long long)cap);
-    for (long i = 0; i < cap; i++) {
-        long slot = (idx + i) % cap;
-        long sh = hm[HM_HEADER + slot * 3];
-        long sk = hm[HM_HEADER + slot * 3 + 1];
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val val_tag = hm[3];  // value_type_tag
+    uint64_t uh = (uint64_t)key_hash;
+    taida_val idx = (taida_val)(uh % (uint64_t)cap);
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val slot = (idx + i) % cap;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_EMPTY(sh, sk)) return hm_ptr;
         if (HM_SLOT_TOMBSTONE(sh, sk)) continue;
         if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) {
@@ -3327,15 +3340,15 @@ long taida_hashmap_remove(long hm_ptr, long key_hash, long key_ptr) {
     return hm_ptr;
 }
 
-long taida_hashmap_keys(long hm_ptr) {
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    long list = taida_list_new();
+taida_val taida_hashmap_keys(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val list = taida_list_new();
     // NO-1: keys are always Str — set elem_type_tag and retain each key
-    ((long*)list)[3] = TAIDA_TAG_STR;
-    for (long i = 0; i < cap; i++) {
-        long sh = hm[HM_HEADER + i * 3];
-        long sk = hm[HM_HEADER + i * 3 + 1];
+    ((taida_val*)list)[3] = TAIDA_TAG_STR;
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val sh = hm[HM_HEADER + i * 3];
+        taida_val sk = hm[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             taida_hashmap_key_retain(sk);
             list = taida_list_push(list, sk);
@@ -3344,18 +3357,18 @@ long taida_hashmap_keys(long hm_ptr) {
     return list;
 }
 
-long taida_hashmap_values(long hm_ptr) {
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    long val_tag = hm[3];  // value_type_tag
-    long list = taida_list_new();
+taida_val taida_hashmap_values(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val val_tag = hm[3];  // value_type_tag
+    taida_val list = taida_list_new();
     // NO-1: propagate value_type_tag to the returned list and retain each value
-    ((long*)list)[3] = val_tag;
-    for (long i = 0; i < cap; i++) {
-        long sh = hm[HM_HEADER + i * 3];
-        long sk = hm[HM_HEADER + i * 3 + 1];
+    ((taida_val*)list)[3] = val_tag;
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val sh = hm[HM_HEADER + i * 3];
+        taida_val sk = hm[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
-            long v = hm[HM_HEADER + i * 3 + 2];
+            taida_val v = hm[HM_HEADER + i * 3 + 2];
             taida_hashmap_val_retain(v, val_tag);
             list = taida_list_push(list, v);
         }
@@ -3363,60 +3376,60 @@ long taida_hashmap_values(long hm_ptr) {
     return list;
 }
 
-long taida_hashmap_length(long hm_ptr) {
-    return ((long*)hm_ptr)[2];
+taida_val taida_hashmap_length(taida_val hm_ptr) {
+    return ((taida_val*)hm_ptr)[2];
 }
 
-long taida_hashmap_is_empty(long hm_ptr) {
-    return ((long*)hm_ptr)[2] == 0 ? 1 : 0;
+taida_val taida_hashmap_is_empty(taida_val hm_ptr) {
+    return ((taida_val*)hm_ptr)[2] == 0 ? 1 : 0;
 }
 
 // Clone a hashmap (for immutable set/remove/merge semantics)
 // Cloned entries share ownership with the original, so retain all keys+values.
-static long taida_hashmap_clone(long hm_ptr) {
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    long val_tag = hm[3];  // value_type_tag
-    long total = HM_HEADER + cap * 3;
-    long *new_hm = (long*)malloc(total * sizeof(long));
-    memcpy(new_hm, hm, total * sizeof(long));
+static taida_val taida_hashmap_clone(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val val_tag = hm[3];  // value_type_tag
+    taida_val total = HM_HEADER + cap * 3;
+    taida_val *new_hm = (taida_val*)malloc(total * sizeof(taida_val));
+    memcpy(new_hm, hm, total * sizeof(taida_val));
     new_hm[0] = TAIDA_HMAP_MAGIC | 1;  // preserve magic + reset rc
     // Retain all keys and values in the clone (shared ownership)
-    for (long i = 0; i < cap; i++) {
-        long sh = new_hm[HM_HEADER + i * 3];
-        long sk = new_hm[HM_HEADER + i * 3 + 1];
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val sh = new_hm[HM_HEADER + i * 3];
+        taida_val sk = new_hm[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             taida_hashmap_key_retain(sk);
             taida_hashmap_val_retain(new_hm[HM_HEADER + i * 3 + 2], val_tag);
         }
     }
-    return (long)new_hm;
+    return (taida_val)new_hm;
 }
 
 // Immutable set: clone then set
-long taida_hashmap_set_immut(long hm_ptr, long key_hash, long key_ptr, long value) {
-    long new_hm = taida_hashmap_clone(hm_ptr);
+taida_val taida_hashmap_set_immut(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr, taida_val value) {
+    taida_val new_hm = taida_hashmap_clone(hm_ptr);
     return taida_hashmap_set(new_hm, key_hash, key_ptr, value);
 }
 
 // Immutable remove: clone then remove
-long taida_hashmap_remove_immut(long hm_ptr, long key_hash, long key_ptr) {
-    long new_hm = taida_hashmap_clone(hm_ptr);
+taida_val taida_hashmap_remove_immut(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
+    taida_val new_hm = taida_hashmap_clone(hm_ptr);
     return taida_hashmap_remove(new_hm, key_hash, key_ptr);
 }
 
 // Get returning Lax (Lax[value]() or empty Lax)
-long taida_hashmap_get_lax(long hm_ptr, long key_hash, long key_ptr) {
+taida_val taida_hashmap_get_lax(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
     if (!taida_hashmap_key_valid(key_ptr)) return taida_lax_empty(0);
 
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    unsigned long long uh = (unsigned long long)key_hash;
-    long idx = (long)(uh % (unsigned long long)cap);
-    for (long i = 0; i < cap; i++) {
-        long slot = (idx + i) % cap;
-        long sh = hm[HM_HEADER + slot * 3];
-        long sk = hm[HM_HEADER + slot * 3 + 1];
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    uint64_t uh = (uint64_t)key_hash;
+    taida_val idx = (taida_val)(uh % (uint64_t)cap);
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val slot = (idx + i) % cap;
+        taida_val sh = hm[HM_HEADER + slot * 3];
+        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
         if (HM_SLOT_EMPTY(sh, sk)) return taida_lax_empty(0);
         if (HM_SLOT_TOMBSTONE(sh, sk)) continue;
         if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) return taida_lax_new(hm[HM_HEADER + slot * 3 + 2], 0);
@@ -3425,29 +3438,29 @@ long taida_hashmap_get_lax(long hm_ptr, long key_hash, long key_ptr) {
 }
 
 // Entries: returns list of BuchiPack @(key, value)
-long taida_hashmap_entries(long hm_ptr) {
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
-    long val_tag = hm[3];  // value_type_tag
-    long list = taida_list_new();
+taida_val taida_hashmap_entries(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val val_tag = hm[3];  // value_type_tag
+    taida_val list = taida_list_new();
     // NO-1: entries returns List[Pack] — set elem_type_tag = PACK
-    ((long*)list)[3] = TAIDA_TAG_PACK;
+    ((taida_val*)list)[3] = TAIDA_TAG_PACK;
     // FNV-1a hashes for "key" and "value"
     #define HASH_KEY   0x3dc94a19365b10ecULL
     #define HASH_VAL   0x7ce4fd9430e80ceaULL
-    for (long i = 0; i < cap; i++) {
-        long sh = hm[HM_HEADER + i * 3];
-        long sk = hm[HM_HEADER + i * 3 + 1];
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val sh = hm[HM_HEADER + i * 3];
+        taida_val sk = hm[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
-            long pair = taida_pack_new(2);
-            taida_pack_set_hash(pair, 0, (long)HASH_KEY);
+            taida_val pair = taida_pack_new(2);
+            taida_pack_set_hash(pair, 0, (taida_val)HASH_KEY);
             // NO-1: tag + retain key (Str) and value fields in pair pack
             taida_pack_set_tag(pair, 0, TAIDA_TAG_STR);
             taida_hashmap_key_retain(sk);
             taida_pack_set(pair, 0, sk);
-            taida_pack_set_hash(pair, 1, (long)HASH_VAL);
+            taida_pack_set_hash(pair, 1, (taida_val)HASH_VAL);
             taida_pack_set_tag(pair, 1, val_tag);
-            long v = hm[HM_HEADER + i * 3 + 2];
+            taida_val v = hm[HM_HEADER + i * 3 + 2];
             taida_hashmap_val_retain(v, val_tag);
             taida_pack_set(pair, 1, v);
             list = taida_list_push(list, pair);
@@ -3457,13 +3470,13 @@ long taida_hashmap_entries(long hm_ptr) {
 }
 
 // Merge two hashmaps (other overwrites this)
-long taida_hashmap_merge(long hm_ptr, long other_ptr) {
-    long new_hm = taida_hashmap_clone(hm_ptr);
-    long *other = (long*)other_ptr;
-    long cap = other[1];
-    for (long i = 0; i < cap; i++) {
-        long sh = other[HM_HEADER + i * 3];
-        long sk = other[HM_HEADER + i * 3 + 1];
+taida_val taida_hashmap_merge(taida_val hm_ptr, taida_val other_ptr) {
+    taida_val new_hm = taida_hashmap_clone(hm_ptr);
+    taida_val *other = (taida_val*)other_ptr;
+    taida_val cap = other[1];
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val sh = other[HM_HEADER + i * 3];
+        taida_val sk = other[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             new_hm = taida_hashmap_set(new_hm, sh, sk, other[HM_HEADER + i * 3 + 2]);
         }
@@ -3472,23 +3485,23 @@ long taida_hashmap_merge(long hm_ptr, long other_ptr) {
 }
 
 // HashMap.toString() -> "HashMap({key1: val1, key2: val2})"
-long taida_hashmap_to_string(long hm_ptr) {
-    long *hm = (long*)hm_ptr;
-    long cap = hm[1];
+taida_val taida_hashmap_to_string(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
 
     size_t buf_size = 256;
     char *buf = (char*)malloc(buf_size);
     strcpy(buf, "HashMap({");
-    long count = 0;
+    taida_val count = 0;
 
-    for (long i = 0; i < cap; i++) {
-        long sh = hm[HM_HEADER + i * 3];
-        long sk = hm[HM_HEADER + i * 3 + 1];
+    for (taida_val i = 0; i < cap; i++) {
+        taida_val sh = hm[HM_HEADER + i * 3];
+        taida_val sk = hm[HM_HEADER + i * 3 + 1];
         if (HM_SLOT_OCCUPIED(sh, sk)) {
-            long value = hm[HM_HEADER + i * 3 + 2];
+            taida_val value = hm[HM_HEADER + i * 3 + 2];
 
-            long key_str_ptr = taida_value_to_debug_string(sk);
-            long val_str_ptr = taida_value_to_debug_string(value);
+            taida_val key_str_ptr = taida_value_to_debug_string(sk);
+            taida_val val_str_ptr = taida_value_to_debug_string(value);
             const char *key_str = (const char*)key_str_ptr;
             const char *val_str = (const char*)val_str_ptr;
             if (!key_str) key_str = "\"\"";
@@ -3512,7 +3525,7 @@ long taida_hashmap_to_string(long hm_ptr) {
         }
     }
     strcat(buf, "})");
-    long result = (long)taida_str_new_copy(buf);
+    taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
 }
@@ -3533,40 +3546,40 @@ long taida_hashmap_to_string(long hm_ptr) {
 // Simplest approach: Set = list ptr, and all set ops maintain uniqueness.
 // The set functions accept and return list ptrs.
 
-static long taida_is_set(long ptr) {
+static taida_val taida_is_set(taida_val ptr) {
     return TAIDA_IS_SET(ptr);
 }
 
-long taida_set_new(void) {
-    long list = taida_list_new();
+taida_val taida_set_new(void) {
+    taida_val list = taida_list_new();
     // Tag the list as a Set with magic
-    ((long*)list)[0] = TAIDA_SET_MAGIC | 1;
+    ((taida_val*)list)[0] = TAIDA_SET_MAGIC | 1;
     // elem_type_tag at offset 3 is already TAIDA_TAG_UNKNOWN from taida_list_new
     return list;
 }
 
 // NO-2: Set elem_type_tag setter (analogous to taida_list_set_elem_tag / taida_hashmap_set_value_tag)
-void taida_set_set_elem_tag(long set_ptr, long tag) {
-    ((long*)set_ptr)[3] = tag;
+void taida_set_set_elem_tag(taida_val set_ptr, taida_val tag) {
+    ((taida_val*)set_ptr)[3] = tag;
 }
 
-static long taida_set_contains(long set_ptr, long item) {
-    long *list = (long*)set_ptr;
-    long len = list[2];  // length at index 2
-    for (long i = 0; i < len; i++) {
+static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];  // length at index 2
+    for (taida_val i = 0; i < len; i++) {
         if (list[4 + i] == item) return 1;
     }
     return 0;
 }
 
-long taida_set_from_list(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];  // length at index 2
-    long elem_tag = list[3];  // NO-2: propagate elem_type_tag from source list
-    long new_set = taida_set_new();
-    ((long*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
+taida_val taida_set_from_list(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];  // length at index 2
+    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag from source list
+    taida_val new_set = taida_set_new();
+    ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
         if (!taida_set_contains(new_set, item)) {
             taida_list_elem_retain(item, elem_tag);  // NO-2: retain-on-copy
             new_set = taida_list_push(new_set, item);
@@ -3575,18 +3588,18 @@ long taida_set_from_list(long list_ptr) {
     return new_set;
 }
 
-long taida_set_add(long set_ptr, long item) {
+taida_val taida_set_add(taida_val set_ptr, taida_val item) {
     if (taida_set_contains(set_ptr, item)) {
         return set_ptr;  // Already exists, return unchanged
     }
     // Use taida_list_push for correct list manipulation
-    long *list = (long*)set_ptr;
-    long len = list[2];
-    long elem_tag = list[3];  // NO-2: propagate elem_type_tag
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag
     // Clone the set, then push the new item
-    long new_set = taida_set_new();
-    ((long*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
-    for (long i = 0; i < len; i++) {
+    taida_val new_set = taida_set_new();
+    ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
+    for (taida_val i = 0; i < len; i++) {
         taida_list_elem_retain(list[4 + i], elem_tag);  // NO-2: retain-on-copy
         new_set = taida_list_push(new_set, list[4 + i]);
     }
@@ -3595,13 +3608,13 @@ long taida_set_add(long set_ptr, long item) {
     return new_set;
 }
 
-long taida_set_remove(long set_ptr, long item) {
-    long *list = (long*)set_ptr;
-    long len = list[2];  // length at index 2
-    long elem_tag = list[3];  // NO-2: propagate elem_type_tag
-    long new_set = taida_set_new();
-    ((long*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
-    for (long i = 0; i < len; i++) {
+taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];  // length at index 2
+    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag
+    taida_val new_set = taida_set_new();
+    ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
+    for (taida_val i = 0; i < len; i++) {
         if (list[4 + i] != item) {
             taida_list_elem_retain(list[4 + i], elem_tag);  // NO-2: retain-on-copy
             new_set = taida_list_push(new_set, list[4 + i]);
@@ -3610,47 +3623,47 @@ long taida_set_remove(long set_ptr, long item) {
     return new_set;
 }
 
-long taida_set_has(long set_ptr, long item) {
+taida_val taida_set_has(taida_val set_ptr, taida_val item) {
     return taida_set_contains(set_ptr, item);
 }
 
-long taida_set_size(long set_ptr) {
-    return ((long*)set_ptr)[2];  // length at index 2
+taida_val taida_set_size(taida_val set_ptr) {
+    return ((taida_val*)set_ptr)[2];  // length at index 2
 }
 
-long taida_set_is_empty(long set_ptr) {
-    return ((long*)set_ptr)[2] == 0 ? 1 : 0;  // length at index 2
+taida_val taida_set_is_empty(taida_val set_ptr) {
+    return ((taida_val*)set_ptr)[2] == 0 ? 1 : 0;  // length at index 2
 }
 
-long taida_set_to_list(long set_ptr) {
+taida_val taida_set_to_list(taida_val set_ptr) {
     // Clone the set as a regular list (not tagged as Set)
-    long *list = (long*)set_ptr;
-    long len = list[2];  // length at index 2
-    long elem_tag = list[3];  // NO-2: propagate elem_type_tag
-    long new_list = taida_list_new();  // regular list, refcount=1 (not SET tag)
-    ((long*)new_list)[3] = elem_tag;  // NO-2: set elem_type_tag on result list
-    for (long i = 0; i < len; i++) {
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];  // length at index 2
+    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag
+    taida_val new_list = taida_list_new();  // regular list, refcount=1 (not SET tag)
+    ((taida_val*)new_list)[3] = elem_tag;  // NO-2: set elem_type_tag on result list
+    for (taida_val i = 0; i < len; i++) {
         taida_list_elem_retain(list[4 + i], elem_tag);  // NO-2: retain-on-copy
         new_list = taida_list_push(new_list, list[4 + i]);
     }
     return new_list;
 }
 
-long taida_set_union(long set_a, long set_b) {
-    long *a = (long*)set_a;
-    long *b = (long*)set_b;
-    long a_len = a[2];  // length at index 2
-    long b_len = b[2];
-    long elem_tag = a[3];  // NO-2: propagate elem_type_tag from set_a
+taida_val taida_set_union(taida_val set_a, taida_val set_b) {
+    taida_val *a = (taida_val*)set_a;
+    taida_val *b = (taida_val*)set_b;
+    taida_val a_len = a[2];  // length at index 2
+    taida_val b_len = b[2];
+    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag from set_a
     // Start with a copy of a
-    long result = taida_set_new();
-    ((long*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
-    for (long i = 0; i < a_len; i++) {
+    taida_val result = taida_set_new();
+    ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
+    for (taida_val i = 0; i < a_len; i++) {
         taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
         result = taida_list_push(result, a[4 + i]);
     }
     // Add items from b that aren't in a
-    for (long i = 0; i < b_len; i++) {
+    for (taida_val i = 0; i < b_len; i++) {
         if (!taida_set_contains(result, b[4 + i])) {
             taida_list_elem_retain(b[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, b[4 + i]);
@@ -3659,13 +3672,13 @@ long taida_set_union(long set_a, long set_b) {
     return result;
 }
 
-long taida_set_intersect(long set_a, long set_b) {
-    long *a = (long*)set_a;
-    long a_len = a[2];  // length at index 2
-    long elem_tag = a[3];  // NO-2: propagate elem_type_tag
-    long result = taida_set_new();
-    ((long*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
-    for (long i = 0; i < a_len; i++) {
+taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
+    taida_val *a = (taida_val*)set_a;
+    taida_val a_len = a[2];  // length at index 2
+    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
+    taida_val result = taida_set_new();
+    ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
+    for (taida_val i = 0; i < a_len; i++) {
         if (taida_set_contains(set_b, a[4 + i])) {
             taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, a[4 + i]);
@@ -3674,13 +3687,13 @@ long taida_set_intersect(long set_a, long set_b) {
     return result;
 }
 
-long taida_set_diff(long set_a, long set_b) {
-    long *a = (long*)set_a;
-    long a_len = a[2];  // length at index 2
-    long elem_tag = a[3];  // NO-2: propagate elem_type_tag
-    long result = taida_set_new();
-    ((long*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
-    for (long i = 0; i < a_len; i++) {
+taida_val taida_set_diff(taida_val set_a, taida_val set_b) {
+    taida_val *a = (taida_val*)set_a;
+    taida_val a_len = a[2];  // length at index 2
+    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
+    taida_val result = taida_set_new();
+    ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
+    for (taida_val i = 0; i < a_len; i++) {
         if (!taida_set_contains(set_b, a[4 + i])) {
             taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, a[4 + i]);
@@ -3690,13 +3703,13 @@ long taida_set_diff(long set_a, long set_b) {
 }
 
 // Set.toString() -> "Set({1, 2, 3})"
-long taida_set_to_string(long set_ptr) {
-    long *list = (long*)set_ptr;
-    long len = list[2];  // length at index 2
+taida_val taida_set_to_string(taida_val set_ptr) {
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];  // length at index 2
     size_t buf_size = 128;
     char *buf = (char*)malloc(buf_size);
     strcpy(buf, "Set({");
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         if (i > 0) strcat(buf, ", ");
         char item_str[64];
         snprintf(item_str, sizeof(item_str), "%ld", list[4 + i]);
@@ -3707,7 +3720,7 @@ long taida_set_to_string(long set_ptr) {
         strcat(buf, item_str);
     }
     strcat(buf, "})");
-    long result = (long)taida_str_new_copy(buf);
+    taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
 }
@@ -3716,62 +3729,62 @@ long taida_set_to_string(long set_ptr) {
 // .length() — works on Str (strlen) and List/Set (list[2], unchanged by elem_type_tag)
 // Detection: if ptr looks like a heap object with list layout (ptr[0] small, ptr[1] >= 8),
 // treat as list. Otherwise treat as string.
-long taida_polymorphic_length(long ptr) {
+taida_val taida_polymorphic_length(taida_val ptr) {
     if (ptr == 0) return 0;
     if (ptr < 4096) return 0;
     // Check for HashMap
     if (taida_is_hashmap(ptr)) {
-        if (!taida_ptr_is_readable(ptr, sizeof(long) * 3)) return 0;
-        return ((long*)ptr)[2];
+        if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 3)) return 0;
+        return ((taida_val*)ptr)[2];
     }
     // Check for Set
     if (taida_is_set(ptr)) {
-        if (!taida_ptr_is_readable(ptr, sizeof(long) * 3)) return 0;
-        return ((long*)ptr)[2];
+        if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 3)) return 0;
+        return ((taida_val*)ptr)[2];
     }
     // Check for List
     if (TAIDA_IS_LIST(ptr)) {
-        return ((long*)ptr)[2];
+        return ((taida_val*)ptr)[2];
     }
     // Check for Bytes
     if (TAIDA_IS_BYTES(ptr)) {
-        return ((long*)ptr)[1];
+        return ((taida_val*)ptr)[1];
     }
     // Treat as string
     size_t sl = 0;
-    if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (long)sl;
+    if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (taida_val)sl;
     return 0;
 }
 
 // Polymorphic .contains(needle) — works on Str and List.
 // Runtime dispatch is required for cases where static lowering cannot prove
 // string type (e.g. field access inside lambda callbacks).
-long taida_polymorphic_contains(long obj, long needle) {
+taida_val taida_polymorphic_contains(taida_val obj, taida_val needle) {
     if (obj == 0 || obj < 4096) return 0;
     // Check for non-string types first (list, pack, bytes, hashmap, etc.)
-    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((long*)obj)[0])) {
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
         return taida_list_contains(obj, needle);
     }
     // No magic header — treat as C string
-    long needle_str = taida_value_to_display_string(needle);
-    long out = taida_str_contains((const char*)obj, (const char*)needle_str);
+    taida_val needle_str = taida_value_to_display_string(needle);
+    taida_val out = taida_str_contains((const char*)obj, (const char*)needle_str);
     taida_release(needle_str);
     return out;
 }
 
-long taida_polymorphic_index_of(long obj, long needle) {
+taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle) {
     if (obj == 0 || obj < 4096) return -1;
     // Check for non-string types first (list, pack, bytes, hashmap, etc.)
-    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((long*)obj)[0])) {
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
         return taida_list_index_of(obj, needle);
     }
     // No magic header — treat as C string
     return taida_str_index_of((const char*)obj, (const char*)needle);
 }
 
-long taida_polymorphic_last_index_of(long obj, long needle) {
+taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle) {
     if (obj == 0 || obj < 4096) return -1;
-    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((long*)obj)[0])) {
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
         return taida_list_last_index_of(obj, needle);
     }
     return taida_str_last_index_of((const char*)obj, (const char*)needle);
@@ -3781,9 +3794,9 @@ long taida_polymorphic_last_index_of(long obj, long needle) {
 // These work on both HashMap and Set (auto-detect via tag)
 
 // .get(key_or_index) — HashMap: hash-based lookup returning Lax, List: index-based returning Lax
-long taida_collection_get(long ptr, long item) {
+taida_val taida_collection_get(taida_val ptr, taida_val item) {
     if (taida_is_hashmap(ptr)) {
-        long key_hash = taida_value_hash(item);
+        taida_val key_hash = taida_value_hash(item);
         return taida_hashmap_get_lax(ptr, key_hash, item);
     }
     if (taida_is_bytes(ptr)) {
@@ -3794,9 +3807,9 @@ long taida_collection_get(long ptr, long item) {
 }
 
 // .has(key_or_item) — HashMap: hash-based lookup, Set: linear scan
-long taida_collection_has(long ptr, long item) {
+taida_val taida_collection_has(taida_val ptr, taida_val item) {
     if (taida_is_hashmap(ptr)) {
-        long key_hash = taida_value_hash(item);
+        taida_val key_hash = taida_value_hash(item);
         return taida_hashmap_has(ptr, key_hash, item);
     }
     // Set/List: linear scan
@@ -3804,9 +3817,9 @@ long taida_collection_has(long ptr, long item) {
 }
 
 // .remove(key_or_item) — HashMap: hash-based removal, Set: linear scan
-long taida_collection_remove(long ptr, long item) {
+taida_val taida_collection_remove(taida_val ptr, taida_val item) {
     if (taida_is_hashmap(ptr)) {
-        long key_hash = taida_value_hash(item);
+        taida_val key_hash = taida_value_hash(item);
         return taida_hashmap_remove_immut(ptr, key_hash, item);
     }
     // Set: linear scan removal
@@ -3814,8 +3827,8 @@ long taida_collection_remove(long ptr, long item) {
 }
 
 // .size() — works on both HashMap and Set (both store length at ptr[2])
-long taida_collection_size(long ptr) {
-    return ((long*)ptr)[2];
+taida_val taida_collection_size(taida_val ptr) {
+    return ((taida_val*)ptr)[2];
 }
 
 // ── Error ceiling (setjmp/longjmp) ───────────────────────
@@ -3824,24 +3837,24 @@ long taida_collection_size(long ptr) {
 #include <setjmp.h>
 
 static __thread jmp_buf __taida_error_jmp[64];
-static __thread long __taida_error_val[64];
-static __thread long __taida_try_result[64];
+static __thread taida_val __taida_error_val[64];
+static __thread taida_val __taida_try_result[64];
 static __thread int __taida_error_depth = 0;
 
-long taida_error_ceiling_push(void) {
+taida_val taida_error_ceiling_push(void) {
     if (__taida_error_depth >= 64) {
         fprintf(stderr, "Error: maximum error handling depth exceeded (64)\n");
         exit(1);
     }
     int depth = __taida_error_depth++;
-    return (long)depth;
+    return (taida_val)depth;
 }
 
 void taida_error_ceiling_pop(void) {
     if (__taida_error_depth > 0) __taida_error_depth--;
 }
 
-long taida_throw(long error_val) {
+taida_val taida_throw(taida_val error_val) {
     if (__taida_error_depth > 0) {
         int depth = __taida_error_depth - 1;
         __taida_error_val[depth] = error_val;
@@ -3855,11 +3868,11 @@ long taida_throw(long error_val) {
 
 // Try to execute a function pointer; if it throws, return 1 and store error.
 // This wraps setjmp so the jmp_buf lives in THIS function's stack frame.
-// fn_ptr: pointer to a 1-arg function (env_ptr) returning long
+// fn_ptr: pointer to a 1-arg function (env_ptr) returning taida_val
 // env_ptr: environment pack containing captured variables from parent scope
 // Returns: 0 if fn completed normally, 1 if an error was thrown
-long taida_error_try_call(long fn_ptr, long env_ptr, long depth) {
-    typedef long (*fn_t)(long);
+taida_val taida_error_try_call(taida_val fn_ptr, taida_val env_ptr, taida_val depth) {
+    typedef taida_val (*fn_t)(taida_val);
     fn_t func = (fn_t)fn_ptr;
     if (setjmp(__taida_error_jmp[(int)depth]) == 0) {
         __taida_try_result[(int)depth] = func(env_ptr);
@@ -3870,34 +3883,34 @@ long taida_error_try_call(long fn_ptr, long env_ptr, long depth) {
 }
 
 // Get the return value of the last successful try_call at the given depth
-long taida_error_try_get_result(long depth) {
+taida_val taida_error_try_get_result(taida_val depth) {
     return __taida_try_result[(int)depth];
 }
 
 // Legacy: for backward compat with existing IR that calls setjmp directly.
 // This won't work properly from Cranelift code but is kept for reference.
-long taida_error_setjmp(long depth) {
-    return (long)setjmp(__taida_error_jmp[(int)depth]);
+taida_val taida_error_setjmp(taida_val depth) {
+    return (taida_val)setjmp(__taida_error_jmp[(int)depth]);
 }
 
-long taida_error_get_value(long depth) {
+taida_val taida_error_get_value(taida_val depth) {
     return __taida_error_val[(int)depth];
 }
 
-long taida_cage_apply(long cage_value, long fn_ptr) {
+taida_val taida_cage_apply(taida_val cage_value, taida_val fn_ptr) {
     if (fn_ptr == 0) {
-        long error = taida_make_error("CageError", "Cage second argument must be a function");
+        taida_val error = taida_make_error("CageError", "Cage second argument must be a function");
         return taida_gorillax_err(error);
     }
 
-    long depth = taida_error_ceiling_push();
+    taida_val depth = taida_error_ceiling_push();
     if (setjmp(__taida_error_jmp[(int)depth]) == 0) {
-        long result = taida_invoke_callback1(fn_ptr, cage_value);
+        taida_val result = taida_invoke_callback1(fn_ptr, cage_value);
         taida_error_ceiling_pop();
         return taida_gorillax_new(result);
     }
 
-    long error = taida_error_get_value(depth);
+    taida_val error = taida_error_get_value(depth);
     taida_error_ceiling_pop();
     if (error == 0) {
         error = taida_make_error("CageError", "Cage function failed");
@@ -3923,7 +3936,7 @@ long taida_cage_apply(long cage_value, long fn_ptr) {
 static const char __result_type_str[] = "Result";
 
 // Throw payload must be type-confirmed to avoid pointer-guess heuristics.
-static int taida_can_throw_payload(long val) {
+static int taida_can_throw_payload(taida_val val) {
     if (val == 0) return 0;
     if (TAIDA_IS_PACK(val) || TAIDA_IS_LIST(val) || TAIDA_IS_HMAP(val) || TAIDA_IS_SET(val) || TAIDA_IS_ASYNC(val)) {
         return 1;
@@ -3935,14 +3948,14 @@ static int taida_can_throw_payload(long val) {
 // ── Result constructors ──
 
 // Result[value, predicate](throw <= error) — create Result with optional predicate
-long taida_result_create(long value, long throw_val, long predicate) {
-    long pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, (long)HASH_RES___VALUE);
+taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val predicate) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_RES___VALUE);
     taida_pack_set(pack, 0, value);
     // retain-on-store: value が Pack/List/Closure の場合 retain
     // value の型は不明なので magic header で判定
-    if (value > 4096 && taida_ptr_is_readable(value, sizeof(long))) {
-        long vtag = ((long*)value)[0] & TAIDA_MAGIC_MASK;
+    if (value > 4096 && taida_ptr_is_readable(value, sizeof(taida_val))) {
+        taida_val vtag = ((taida_val*)value)[0] & TAIDA_MAGIC_MASK;
         if (vtag == TAIDA_PACK_MAGIC || vtag == TAIDA_LIST_MAGIC || vtag == TAIDA_CLOSURE_MAGIC) {
             taida_retain(value);
             // value の型タグも設定
@@ -3951,20 +3964,20 @@ long taida_result_create(long value, long throw_val, long predicate) {
             else taida_pack_set_tag(pack, 0, TAIDA_TAG_CLOSURE);
         }
     }
-    taida_pack_set_hash(pack, 1, (long)HASH_RES___PREDICATE);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_RES___PREDICATE);
     taida_pack_set(pack, 1, predicate);  // 0 = no predicate, non-zero = function pointer
     if (predicate != 0) {
         taida_pack_set_tag(pack, 1, TAIDA_TAG_CLOSURE);
         taida_retain(predicate);  // retain-on-store: closure child
     }
-    taida_pack_set_hash(pack, 2, (long)HASH_RES_THROW);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH_RES_THROW);
     taida_pack_set(pack, 2, throw_val);  // 0 = success (Unit), non-zero = error
     if (throw_val != 0) {
         taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
         taida_retain(throw_val);  // retain-on-store: pack child
     }
-    taida_pack_set_hash(pack, 3, (long)HASH___TYPE);
-    taida_pack_set(pack, 3, (long)__result_type_str);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__result_type_str);
     // __result_type_str is static - leave tag as INT(0)
     return pack;
 }
@@ -3973,145 +3986,145 @@ long taida_result_create(long value, long throw_val, long predicate) {
 // 1. If throw is set (not 0), it's an error — UNLESS predicate passes
 // 2. If predicate exists, evaluate P(value) — true = success, false = error
 // 3. No predicate + no throw = success (backward compatible)
-static long taida_result_is_error_check(long result) {
-    long throw_val = taida_pack_get_idx(result, 2);  // throw
-    long pred = taida_pack_get_idx(result, 1);  // __predicate
-    long value = taida_pack_get_idx(result, 0);  // __value
+static taida_val taida_result_is_error_check(taida_val result) {
+    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw
+    taida_val pred = taida_pack_get_idx(result, 1);  // __predicate
+    taida_val value = taida_pack_get_idx(result, 0);  // __value
 
     if (throw_val != 0) {
         // If predicate exists, evaluate it even when throw is set
         if (pred != 0) {
-            long pred_result = taida_invoke_callback1(pred, value);
+            taida_val pred_result = taida_invoke_callback1(pred, value);
             if (!pred_result) return 1;  // predicate failed — error
             return 0;  // predicate passed even though throw was set — success
         }
         return 1;  // throw set, no predicate — error
     }
     if (pred != 0) {
-        long pred_result = taida_invoke_callback1(pred, value);
+        taida_val pred_result = taida_invoke_callback1(pred, value);
         return pred_result ? 0 : 1;
     }
     return 0;  // no throw, no predicate — success
 }
 
-long taida_result_is_ok(long result) {
+taida_val taida_result_is_ok(taida_val result) {
     return taida_result_is_error_check(result) ? 0 : 1;
 }
 
-long taida_result_get_or_default(long result, long def) {
+taida_val taida_result_get_or_default(taida_val result, taida_val def) {
     if (!taida_result_is_error_check(result)) return taida_pack_get_idx(result, 0);
     return def;
 }
 
-long taida_result_is_error(long result) {
+taida_val taida_result_is_error(taida_val result) {
     return taida_result_is_error_check(result);
 }
 
 // ── Result methods (map, flatMap, mapError, getOrThrow, isError, toString) ──
 
 // Result.map(fn) — if success, apply fn to __value
-long taida_result_map(long result, long fn_ptr) {
+taida_val taida_result_map(taida_val result, taida_val fn_ptr) {
     if (taida_result_is_error_check(result)) {
         return result;  // Error: return as-is
     }
-    long value = taida_pack_get_idx(result, 0);  // __value
-    long new_val = taida_invoke_callback1(fn_ptr, value);
+    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val new_val = taida_invoke_callback1(fn_ptr, value);
     return taida_result_create(new_val, 0, 0);  // success, no predicate
 }
 
 // Result.flatMap(fn) — if success, apply fn (which should return Result)
-long taida_result_flat_map(long result, long fn_ptr) {
+taida_val taida_result_flat_map(taida_val result, taida_val fn_ptr) {
     if (taida_result_is_error_check(result)) {
         return result;
     }
-    long value = taida_pack_get_idx(result, 0);  // __value
-    long new_result = taida_invoke_callback1(fn_ptr, value);
+    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val new_result = taida_invoke_callback1(fn_ptr, value);
     return new_result;
 }
 
 // Result.mapError(fn) — if error, apply fn to throw value
-long taida_result_map_error(long result, long fn_ptr) {
+taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
     if (!taida_result_is_error_check(result)) {
         return result;  // Success: return as-is
     }
-    long throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
-    long new_error = taida_invoke_callback1(fn_ptr, throw_val);
+    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
+    taida_val new_error = taida_invoke_callback1(fn_ptr, throw_val);
     return taida_result_create(0, new_error, 0);
 }
 
 // Result.getOrThrow() — if success return __value, otherwise throw
-long taida_result_get_or_throw(long result) {
+taida_val taida_result_get_or_throw(taida_val result) {
     if (!taida_result_is_error_check(result)) {
         return taida_pack_get_idx(result, 0);  // __value
     }
-    long throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
+    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
     if (taida_can_throw_payload(throw_val)) {
         return taida_throw(throw_val);
     }
     // Fallback: create a generic error
-    long error = taida_make_error("ResultError", "Result predicate failed");
+    taida_val error = taida_make_error("ResultError", "Result predicate failed");
     return taida_throw(error);
 }
 
 // Result.toString() — "Result(value)" or "Result(throw <= message)"
-long taida_result_to_string(long result) {
+taida_val taida_result_to_string(taida_val result) {
     if (!taida_result_is_error_check(result)) {
-        long value = taida_pack_get_idx(result, 0);  // __value
-        long value_str = taida_value_to_display_string(value);
+        taida_val value = taida_pack_get_idx(result, 0);  // __value
+        taida_val value_str = taida_value_to_display_string(value);
         const char *value_cstr = (const char*)value_str;
         size_t value_len = strlen(value_cstr);
         size_t need = value_len + 10;
         char *buf = taida_str_alloc(need);
         snprintf(buf, need + 1, "Result(%s)", value_cstr);
         taida_str_release(value_str);
-        return (long)buf;
+        return (taida_val)buf;
     }
-    long throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
+    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
     if (throw_val == 0) {
-        return (long)taida_str_new_copy("Result(throw <= error)");
+        return (taida_val)taida_str_new_copy("Result(throw <= error)");
     }
-    long err_disp = taida_value_to_display_string(throw_val);
+    taida_val err_disp = taida_value_to_display_string(throw_val);
     const char *err_str = (const char*)err_disp;
     size_t elen = strlen(err_str);
     size_t need = elen + 24;
     char *buf = taida_str_alloc(need);
     snprintf(buf, need + 1, "Result(throw <= %s)", err_str);
     taida_str_release(err_disp);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
 // ── Lax methods (map, flatMap) ──────────────────────────────
 
 // Lax.map(fn) — if hasValue, apply fn to __value and return new Lax
-long taida_lax_map(long lax_ptr, long fn_ptr) {
+taida_val taida_lax_map(taida_val lax_ptr, taida_val fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         // Empty Lax: return empty with same default
-        long def = taida_pack_get_idx(lax_ptr, 2);
+        taida_val def = taida_pack_get_idx(lax_ptr, 2);
         return taida_lax_empty(def);
     }
-    long value = taida_pack_get_idx(lax_ptr, 1);
-    long def = taida_pack_get_idx(lax_ptr, 2);
-    long result = taida_invoke_callback1(fn_ptr, value);
+    taida_val value = taida_pack_get_idx(lax_ptr, 1);
+    taida_val def = taida_pack_get_idx(lax_ptr, 2);
+    taida_val result = taida_invoke_callback1(fn_ptr, value);
     return taida_lax_new(result, def);
 }
 
 // Lax.flatMap(fn) — if hasValue, apply fn (which should return Lax)
-long taida_lax_flat_map(long lax_ptr, long fn_ptr) {
+taida_val taida_lax_flat_map(taida_val lax_ptr, taida_val fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
-        long def = taida_pack_get_idx(lax_ptr, 2);
+        taida_val def = taida_pack_get_idx(lax_ptr, 2);
         return taida_lax_empty(def);
     }
-    long value = taida_pack_get_idx(lax_ptr, 1);
-    long result = taida_invoke_callback1(fn_ptr, value);
+    taida_val value = taida_pack_get_idx(lax_ptr, 1);
+    taida_val result = taida_invoke_callback1(fn_ptr, value);
     // flatMap expects fn to return Lax — return directly
     return result;
 }
 
 // Lax.toString() — "Lax(value)" or "Lax(default: value)"
-long taida_lax_to_string(long lax_ptr) {
-    long val = taida_pack_get_idx(lax_ptr, 1);
-    long def = taida_pack_get_idx(lax_ptr, 2);
-    long rendered = taida_pack_get_idx(lax_ptr, 0)
+taida_val taida_lax_to_string(taida_val lax_ptr) {
+    taida_val val = taida_pack_get_idx(lax_ptr, 1);
+    taida_val def = taida_pack_get_idx(lax_ptr, 2);
+    taida_val rendered = taida_pack_get_idx(lax_ptr, 0)
         ? taida_value_to_display_string(val)
         : taida_value_to_display_string(def);
     const char *rs = (const char*)rendered;
@@ -4123,7 +4136,7 @@ long taida_lax_to_string(long lax_ptr) {
         snprintf(buf, need + 1, "Lax(default: %s)", rs);
     }
     taida_str_release(rendered);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
 // ── Polymorphic monadic dispatch ──────────────────────────
@@ -4137,26 +4150,26 @@ long taida_lax_to_string(long lax_ptr) {
 //   3 = Result (for backward compat with all dispatch code)
 //   4 = Lax/Gorillax/RelaxedGorillax
 
-static int taida_is_list(long ptr) {
+static int taida_is_list(taida_val ptr) {
     return TAIDA_IS_LIST(ptr);
 }
 
-static int taida_is_bytes(long ptr) {
+static int taida_is_bytes(taida_val ptr) {
     return TAIDA_IS_BYTES(ptr);
 }
 
-static int taida_monadic_field_count(long ptr) {
-    if (!taida_ptr_is_readable(ptr, sizeof(long) * 3)) return 0;
-    long *obj = (long*)ptr;
-    long fc = obj[1];
+static int taida_monadic_field_count(taida_val ptr) {
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 3)) return 0;
+    taida_val *obj = (taida_val*)ptr;
+    taida_val fc = obj[1];
     // Both Result and Lax are now fc=4; distinguish by hash0
     if (fc == 4) {
-        long hash0 = obj[2];
+        taida_val hash0 = obj[2];
         if (hash0 > 0x10000 || hash0 < 0) {
             // Result (fc=4, hash0=HASH_RES___VALUE) → return 3 for compat
-            if (hash0 == (long)HASH_RES___VALUE) return 3;
+            if (hash0 == (taida_val)HASH_RES___VALUE) return 3;
             // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE) → return 4
-            if (hash0 == (long)HASH_HAS_VALUE) return 4;
+            if (hash0 == (taida_val)HASH_HAS_VALUE) return 4;
         }
     }
     return 0;
@@ -4165,20 +4178,20 @@ static int taida_monadic_field_count(long ptr) {
 // ── Async pthread support ────────────────────────────────────
 // Thread argument: passed to pthread entry, stores callback + result pointer.
 typedef struct {
-    long fn_ptr;
-    long arg;               // callback argument
-    long *async_obj;        // back-pointer to Async object (writes value/status)
+    taida_val fn_ptr;
+    taida_val arg;               // callback argument
+    taida_val *async_obj;        // back-pointer to Async object (writes value/status)
 } taida_thread_arg;
 
 // NO-3: Detect the type tag of a runtime value by inspecting its magic header.
 // Returns TAIDA_TAG_* constant. Used by thread entry to set value_tag dynamically.
-static long taida_detect_value_tag(long val) {
+static taida_val taida_detect_value_tag(taida_val val) {
     if (val == 0) return TAIDA_TAG_INT;
     if (val > 0 && val < 4096) return TAIDA_TAG_INT;  // small integer
     if (val < 0) return TAIDA_TAG_INT;  // negative integer (or float-as-bits, but conservative)
-    if (!taida_ptr_is_readable(val, sizeof(long))) return TAIDA_TAG_INT;
-    long *obj = (long*)val;
-    long magic = obj[0] & TAIDA_MAGIC_MASK;
+    if (!taida_ptr_is_readable(val, sizeof(taida_val))) return TAIDA_TAG_INT;
+    taida_val *obj = (taida_val*)val;
+    taida_val magic = obj[0] & TAIDA_MAGIC_MASK;
     if (magic == TAIDA_PACK_MAGIC) return TAIDA_TAG_PACK;
     if (magic == TAIDA_LIST_MAGIC) return TAIDA_TAG_LIST;
     if (magic == TAIDA_CLOSURE_MAGIC) return TAIDA_TAG_CLOSURE;
@@ -4189,9 +4202,9 @@ static long taida_detect_value_tag(long val) {
     // Check hidden-header String: ptr-16 may contain STR_MAGIC.
     // Same pattern as taida_str_release.
     {
-        long *hdr = ((long*)val) - 2;
-        if (taida_ptr_is_readable((long)hdr, sizeof(long))) {
-            long htag = hdr[0] & TAIDA_MAGIC_MASK;
+        taida_val *hdr = ((taida_val*)val) - 2;
+        if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) {
+            taida_val htag = hdr[0] & TAIDA_MAGIC_MASK;
             if (htag == TAIDA_STR_MAGIC) return TAIDA_TAG_STR;
         }
     }
@@ -4203,10 +4216,10 @@ static long taida_detect_value_tag(long val) {
 // pthread entry point: call the function, write result into the Async object.
 static void* taida_thread_entry(void* raw) {
     taida_thread_arg *ta = (taida_thread_arg*)raw;
-    long result = taida_invoke_callback1(ta->fn_ptr, ta->arg);
+    taida_val result = taida_invoke_callback1(ta->fn_ptr, ta->arg);
     // NO-3: detect value type and store tag for recursive release on drop.
     // Move semantics: the callback result is transferred to the Async object.
-    long vtag = taida_detect_value_tag(result);
+    taida_val vtag = taida_detect_value_tag(result);
     ta->async_obj[2] = result;   // write value
     ta->async_obj[5] = vtag;     // set value_tag
     __atomic_thread_fence(__ATOMIC_RELEASE);  // barrier: ensure value+tag visible before status
@@ -4217,12 +4230,12 @@ static void* taida_thread_entry(void* raw) {
 
 // Detect Async value: [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
 // Uses a magic number in slot[0] for unambiguous identification.
-static int taida_is_async(long ptr) {
+static int taida_is_async(taida_val ptr) {
     return TAIDA_IS_ASYNC(ptr);
 }
 
 // Detect BuchiPack of any size (fc >= 1, with FNV-1a hash check)
-static int taida_is_buchi_pack(long ptr) {
+static int taida_is_buchi_pack(taida_val ptr) {
     return TAIDA_IS_PACK(ptr);
 }
 
@@ -4231,25 +4244,25 @@ static int taida_is_buchi_pack(long ptr) {
 // or taida_str_alloc. The CALLER is responsible for calling taida_str_release on
 // the returned value after use. Intermediate strings generated during recursive
 // formatting (e.g., item_str in list display) are released within the function.
-static long taida_value_to_display_string(long val);
-static long taida_value_to_debug_string(long val);
+static taida_val taida_value_to_display_string(taida_val val);
+static taida_val taida_value_to_debug_string(taida_val val);
 
 // Convert a list to display string: @[item1, item2, ...]
-static long taida_list_to_display_string(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long list_len = list[2];
+static taida_val taida_list_to_display_string(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val list_len = list[2];
     size_t cap = 64;
     size_t len = 0;
     char *buf = (char*)malloc(cap);
     buf[0] = '\0';
     // Append "@["
     { const char *s = "@["; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
-    for (long i = 0; i < list_len; i++) {
+    for (taida_val i = 0; i < list_len; i++) {
         if (i > 0) {
             const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
         }
-        long item = list[4 + i];
-        long item_str = taida_value_to_debug_string(item);
+        taida_val item = list[4 + i];
+        taida_val item_str = taida_value_to_debug_string(item);
         const char *is = (const char*)item_str;
         if (is) {
             size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
@@ -4259,17 +4272,17 @@ static long taida_list_to_display_string(long list_ptr) {
     // Append "]"
     while (len + 2 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
     buf[len++] = ']'; buf[len] = '\0';
-    long result = (long)taida_str_new_copy(buf);
+    taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
 }
 
-static long taida_bytes_to_display_string(long bytes_ptr) {
+static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
     if (!TAIDA_IS_BYTES(bytes_ptr)) {
-        return (long)taida_str_new_copy("Bytes[@[]]");
+        return (taida_val)taida_str_new_copy("Bytes[@[]]");
     }
-    long *bytes = (long*)bytes_ptr;
-    long len_bytes = bytes[1];
+    taida_val *bytes = (taida_val*)bytes_ptr;
+    taida_val len_bytes = bytes[1];
     size_t cap = 64;
     size_t len = 0;
     char *buf = (char*)malloc(cap);
@@ -4281,7 +4294,7 @@ static long taida_bytes_to_display_string(long bytes_ptr) {
     len += pl;
     buf[len] = '\0';
 
-    for (long i = 0; i < len_bytes; i++) {
+    for (taida_val i = 0; i < len_bytes; i++) {
         if (i > 0) {
             const char *sep = ", ";
             size_t sl = 2;
@@ -4306,15 +4319,15 @@ static long taida_bytes_to_display_string(long bytes_ptr) {
     memcpy(buf + len, suffix, sl);
     len += sl;
     buf[len] = '\0';
-    long result = (long)taida_str_new_copy(buf);
+    taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
 }
 
 // Convert a BuchiPack to display string: @(field <= value, ...)
-static long taida_pack_to_display_string(long pack_ptr) {
-    long *pack = (long*)pack_ptr;
-    long fc = pack[1];
+static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    taida_val fc = pack[1];
     size_t cap = 128;
     size_t len = 0;
     char *buf = (char*)malloc(cap);
@@ -4322,9 +4335,9 @@ static long taida_pack_to_display_string(long pack_ptr) {
     // Append "@("
     { const char *s = "@("; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
     int count = 0;
-    for (long i = 0; i < fc; i++) {
-        long field_hash = pack[2 + i * 3];
-        long field_val = pack[2 + i * 3 + 2];
+    for (taida_val i = 0; i < fc; i++) {
+        taida_val field_hash = pack[2 + i * 3];
+        taida_val field_val = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
         // Skip internal __ fields for display
@@ -4346,7 +4359,7 @@ static long taida_pack_to_display_string(long pack_ptr) {
             size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
         } else {
             // Append value (debug string: strings are quoted)
-            long val_str = taida_value_to_debug_string(field_val);
+            taida_val val_str = taida_value_to_debug_string(field_val);
             const char *vs = (const char*)val_str;
             if (vs) {
                 size_t sl = strlen(vs); while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, vs, sl); len += sl; buf[len] = '\0';
@@ -4358,15 +4371,15 @@ static long taida_pack_to_display_string(long pack_ptr) {
     // Append ")"
     while (len + 2 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
     buf[len++] = ')'; buf[len] = '\0';
-    long result = (long)taida_str_new_copy(buf);
+    taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
 }
 
 // Convert any Taida value to its display string (like interpreter's to_display_string)
-static long taida_value_to_display_string(long val) {
+static taida_val taida_value_to_display_string(taida_val val) {
     if (val == 0) {
-        return (long)taida_str_new_copy("0");
+        return (taida_val)taida_str_new_copy("0");
     }
     // Precise object checks using magics first.
     if (taida_is_hashmap(val)) return taida_hashmap_to_string(val);
@@ -4394,16 +4407,16 @@ static long taida_value_to_display_string(long val) {
     if (taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl);
         memcpy(r, s, sl);
-        return (long)r;
+        return (taida_val)r;
     }
     // Fallback: it's an integer.
-    char tmp[32]; snprintf(tmp, sizeof(tmp), "%ld", val); return (long)taida_str_new_copy(tmp);
+    char tmp[32]; snprintf(tmp, sizeof(tmp), "%ld", val); return (taida_val)taida_str_new_copy(tmp);
 }
 
 // Convert value to debug string (strings are quoted, everything else like display)
-static long taida_value_to_debug_string(long val) {
+static taida_val taida_value_to_debug_string(taida_val val) {
     if (val == 0) {
-        return (long)taida_str_new_copy("0");
+        return (taida_val)taida_str_new_copy("0");
     }
     // Check for objects first using magics
     if (taida_is_hashmap(val)) return taida_hashmap_to_string(val);
@@ -4426,14 +4439,14 @@ static long taida_value_to_debug_string(long val) {
         r[0] = '"';
         memcpy(r + 1, s, sl);
         r[sl + 1] = '"';
-        return (long)r;
+        return (taida_val)r;
     }
     // Fallback: integer
-    char tmp[32]; snprintf(tmp, sizeof(tmp), "%ld", val); return (long)taida_str_new_copy(tmp);
+    char tmp[32]; snprintf(tmp, sizeof(tmp), "%ld", val); return (taida_val)taida_str_new_copy(tmp);
 }
 
 // Polymorphic .getOrDefault(fallback) — works on Result, Lax
-long taida_polymorphic_get_or_default(long obj, long def) {
+taida_val taida_polymorphic_get_or_default(taida_val obj, taida_val def) {
     if (obj == 0 || obj < 4096) return def;
     // Check Async first (before monadic, since Async has different layout)
     if (taida_is_async(obj)) return taida_async_get_or_default(obj, def);
@@ -4444,7 +4457,7 @@ long taida_polymorphic_get_or_default(long obj, long def) {
 }
 
 // Polymorphic .hasValue() — works on Lax
-long taida_polymorphic_has_value(long obj) {
+taida_val taida_polymorphic_has_value(taida_val obj) {
     if (obj == 0 || obj < 4096) return 0;
     int fc = taida_monadic_field_count(obj);
     if (fc == 4) return taida_pack_get_idx(obj, 0);     // Lax: hasValue field
@@ -4452,7 +4465,7 @@ long taida_polymorphic_has_value(long obj) {
 }
 
 // Polymorphic .isEmpty() — works on List, Lax
-long taida_polymorphic_is_empty(long obj) {
+taida_val taida_polymorphic_is_empty(taida_val obj) {
     if (obj == 0 || obj < 4096) return 1;
     // Check for HashMap
     if (taida_is_hashmap(obj)) return taida_hashmap_is_empty(obj);
@@ -4466,12 +4479,12 @@ long taida_polymorphic_is_empty(long obj) {
 }
 
 // Polymorphic .toString() — works on Int, Float, Bool, Result, Lax, HashMap, Set, List, BuchiPack
-long taida_polymorphic_to_string(long obj) {
+taida_val taida_polymorphic_to_string(taida_val obj) {
     return taida_value_to_display_string(obj);
 }
 
 // Polymorphic .map(fn) — works on List, Result, Lax, Async
-long taida_polymorphic_map(long obj, long fn_ptr) {
+taida_val taida_polymorphic_map(taida_val obj, taida_val fn_ptr) {
     if (obj == 0 || obj < 4096) return obj;
     // Check Async first (before monadic, since Async has different layout)
     if (taida_is_async(obj)) return taida_async_map(obj, fn_ptr);
@@ -4483,7 +4496,7 @@ long taida_polymorphic_map(long obj, long fn_ptr) {
 }
 
 // Polymorphic .flatMap(fn) — works on Result, Lax
-long taida_monadic_flat_map(long obj, long fn_ptr) {
+taida_val taida_monadic_flat_map(taida_val obj, taida_val fn_ptr) {
     if (obj == 0 || obj < 4096) return obj;
     int fc = taida_monadic_field_count(obj);
     if (fc == 3) return taida_result_flat_map(obj, fn_ptr);
@@ -4492,7 +4505,7 @@ long taida_monadic_flat_map(long obj, long fn_ptr) {
 }
 
 // Polymorphic .getOrThrow() — works on Result
-long taida_monadic_get_or_throw(long obj) {
+taida_val taida_monadic_get_or_throw(taida_val obj) {
     if (obj == 0 || obj < 4096) return obj;
     int fc = taida_monadic_field_count(obj);
     if (fc == 3) return taida_result_get_or_throw(obj);
@@ -4502,11 +4515,11 @@ long taida_monadic_get_or_throw(long obj) {
 }
 
 // Polymorphic .toString() — works on Result, Lax
-long taida_monadic_to_string(long obj) {
+taida_val taida_monadic_to_string(taida_val obj) {
     if (obj == 0 || obj < 4096) {
         char tmp[32];
         snprintf(tmp, 32, "%ld", obj);
-        return (long)taida_str_new_copy(tmp);
+        return (taida_val)taida_str_new_copy(tmp);
     }
     int fc = taida_monadic_field_count(obj);
     if (fc == 3) return taida_result_to_string(obj);
@@ -4519,23 +4532,23 @@ long taida_monadic_to_string(long obj) {
     // Fallback: treat as int
     char tmp[32];
     snprintf(tmp, 32, "%ld", obj);
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
 // ── Async methods ────────────────────────────────────────
-long taida_async_map(long async_ptr, long fn_ptr) {
-    long *obj = (long*)async_ptr;
+taida_val taida_async_map(taida_val async_ptr, taida_val fn_ptr) {
+    taida_val *obj = (taida_val*)async_ptr;
     // Join thread if pending
     if (obj[1] == 0) taida_async_join(async_ptr);
     if (obj[1] != 1) return async_ptr; // not fulfilled, return as-is
-    long new_val = taida_invoke_callback1(fn_ptr, obj[2]);
+    taida_val new_val = taida_invoke_callback1(fn_ptr, obj[2]);
     // NO-3: detect type of mapped value and create tagged async
-    long vtag = taida_detect_value_tag(new_val);
+    taida_val vtag = taida_detect_value_tag(new_val);
     return taida_async_ok_tagged(new_val, vtag);
 }
 
-long taida_async_get_or_default(long async_ptr, long def) {
-    long *obj = (long*)async_ptr;
+taida_val taida_async_get_or_default(taida_val async_ptr, taida_val def) {
+    taida_val *obj = (taida_val*)async_ptr;
     // Join thread if pending
     if (obj[1] == 0) taida_async_join(async_ptr);
     if (obj[1] == 1) return obj[2]; // fulfilled
@@ -4547,12 +4560,12 @@ long taida_async_get_or_default(long async_ptr, long def) {
 // to set value_tag. Legacy taida_async_ok uses UNKNOWN tag (conservative leak).
 // NO-3: Async layout: [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
 //   status: 0=pending, 1=fulfilled, 2=rejected
-//   thread_handle: 0 = no thread, otherwise pthread_t cast to long
+//   thread_handle: 0 = no thread, otherwise pthread_t cast to taida_val
 //   value_tag: type tag for value (TAIDA_TAG_* constant, -1 = UNKNOWN)
 //   error_tag: type tag for error (usually TAIDA_TAG_PACK from taida_make_error)
 
-long taida_async_ok_tagged(long value, long value_tag) {
-    long *obj = (long*)malloc(7 * sizeof(long));
+taida_val taida_async_ok_tagged(taida_val value, taida_val value_tag) {
+    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
     obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
     obj[1] = 1;  // fulfilled
     obj[2] = value;
@@ -4563,12 +4576,12 @@ long taida_async_ok_tagged(long value, long value_tag) {
     // NO-3: move semantics — caller transfers ownership of value to Async.
     // Async release will call taida_list_elem_release on value.
     // If the value is shared, the caller must retain before calling this.
-    return (long)obj;
+    return (taida_val)obj;
 }
 
-long taida_async_ok(long value) {
+taida_val taida_async_ok(taida_val value) {
     // Legacy wrapper: uses UNKNOWN tag (conservative — no retain/release for children)
-    long *obj = (long*)malloc(7 * sizeof(long));
+    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
     obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
     obj[1] = 1;  // fulfilled
     obj[2] = value;
@@ -4576,11 +4589,11 @@ long taida_async_ok(long value) {
     obj[4] = 0;  // no thread
     obj[5] = TAIDA_TAG_UNKNOWN;  // value_tag unknown
     obj[6] = TAIDA_TAG_UNKNOWN;  // no error
-    return (long)obj;
+    return (taida_val)obj;
 }
 
-long taida_async_err(long error) {
-    long *obj = (long*)malloc(7 * sizeof(long));
+taida_val taida_async_err(taida_val error) {
+    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
     obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
     obj[1] = 2;  // rejected
     obj[2] = 0;  // no value
@@ -4589,19 +4602,19 @@ long taida_async_err(long error) {
     obj[5] = TAIDA_TAG_UNKNOWN;  // no value
     obj[6] = TAIDA_TAG_PACK;    // error is always a Pack (from taida_make_error)
     // NO-3: move semantics — caller transfers ownership of error to Async.
-    return (long)obj;
+    return (taida_val)obj;
 }
 
 // NO-3: Set value_tag on an existing Async object (for lowering to call after taida_async_ok)
-void taida_async_set_value_tag(long async_ptr, long tag) {
-    ((long*)async_ptr)[5] = tag;
+void taida_async_set_value_tag(taida_val async_ptr, taida_val tag) {
+    ((taida_val*)async_ptr)[5] = tag;
 }
 
 // Join a pending Async's thread (if any). After this call, status is no longer Pending.
-static void taida_async_join(long async_ptr) {
-    long *obj = (long*)async_ptr;
+static void taida_async_join(taida_val async_ptr) {
+    taida_val *obj = (taida_val*)async_ptr;
     if (obj[1] != 0) return;              // not pending — nothing to join
-    long th = obj[4];
+    taida_val th = obj[4];
     if (th != 0) {
         pthread_join((pthread_t)th, NULL);
         obj[4] = 0;                       // clear thread handle
@@ -4609,21 +4622,21 @@ static void taida_async_join(long async_ptr) {
     }
 }
 
-long taida_async_unmold(long async_ptr) {
+taida_val taida_async_unmold(taida_val async_ptr) {
     if (async_ptr == 0) return 0;
-    long *obj = (long*)async_ptr;
+    taida_val *obj = (taida_val*)async_ptr;
     // If pending with a thread, join it first
     if (obj[1] == 0) {
         taida_async_join(async_ptr);
     }
-    long status = obj[1];
+    taida_val status = obj[1];
     if (status == 1) return obj[2];       // fulfilled → value
     if (status == 2) {                    // rejected → throw (catchable by |==)
-        long error = obj[3];
+        taida_val error = obj[3];
         if (taida_can_throw_payload(error)) {
             return taida_throw(error);
         }
-        long err = taida_make_error("AsyncError", "Async rejected");
+        taida_val err = taida_make_error("AsyncError", "Async rejected");
         return taida_throw(err);
     }
     return 0;                              // pending (no thread) → Unit
@@ -4632,10 +4645,10 @@ long taida_async_unmold(long async_ptr) {
 // ── Async spawn (pthread-based) ──────────────────────────────
 
 // Spawn a function in a background pthread. Returns Async[pending] with thread_handle.
-long taida_async_spawn(long fn_ptr, long arg) {
+taida_val taida_async_spawn(taida_val fn_ptr, taida_val arg) {
     taida_thread_arg *ta = (taida_thread_arg*)malloc(sizeof(taida_thread_arg));
     if (!ta) { fprintf(stderr, "taida: out of memory (taida_async_spawn)\n"); exit(1); }
-    long *obj = (long*)malloc(7 * sizeof(long));
+    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
     if (!obj) { free(ta); fprintf(stderr, "taida: out of memory (taida_async_spawn)\n"); exit(1); }
     obj[0] = TAIDA_ASYNC_MAGIC | 1; // Magic + initial refcount
     obj[1] = 0;   // status: pending
@@ -4651,35 +4664,35 @@ long taida_async_spawn(long fn_ptr, long arg) {
 
     pthread_t thread;
     pthread_create(&thread, NULL, taida_thread_entry, ta);
-    obj[4] = (long)thread;
+    obj[4] = (taida_val)thread;
 
-    return (long)obj;
+    return (taida_val)obj;
 }
 
-long taida_async_cancel(long async_ptr) {
+taida_val taida_async_cancel(taida_val async_ptr) {
     if (async_ptr == 0) {
-        long err = taida_make_error("CancelledError", "Async operation cancelled");
+        taida_val err = taida_make_error("CancelledError", "Async operation cancelled");
         return taida_async_err(err);
     }
     if (!TAIDA_IS_ASYNC(async_ptr)) {
         // NO-3: detect value type for ownership tracking
-        long vtag = taida_detect_value_tag(async_ptr);
+        taida_val vtag = taida_detect_value_tag(async_ptr);
         return taida_async_ok_tagged(async_ptr, vtag);
     }
 
-    long *obj = (long*)async_ptr;
+    taida_val *obj = (taida_val*)async_ptr;
     if (obj[1] != 0) {
         // Fulfilled/rejected async values are already resolved.
         return async_ptr;
     }
 
-    long th = obj[4];
+    taida_val th = obj[4];
     if (th != 0) {
         // Best-effort cancellation for pending pthread tasks.
         pthread_cancel((pthread_t)th);
         pthread_detach((pthread_t)th);
     }
-    long err = taida_make_error("CancelledError", "Async operation cancelled");
+    taida_val err = taida_make_error("CancelledError", "Async operation cancelled");
     return taida_async_err(err);
 }
 
@@ -4687,35 +4700,35 @@ long taida_async_cancel(long async_ptr) {
 
 // All[asyncList]() — join all pending threads, collect all fulfilled values.
 // If any element is rejected, throw the error.
-long taida_async_all(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_async_all(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     // First pass: join all pending threads
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
         if (TAIDA_IS_ASYNC(item)) {
             taida_async_join(item);
         }
     }
     // Second pass: collect values, retaining each element and tracking elem_type_tag.
-    long result_list = taida_list_new();
-    long unified_tag = TAIDA_TAG_UNKNOWN;
+    taida_val result_list = taida_list_new();
+    taida_val unified_tag = TAIDA_TAG_UNKNOWN;
     int tag_set = 0;
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
-        long val;
-        long vtag;
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
+        taida_val val;
+        taida_val vtag;
         if (TAIDA_IS_ASYNC(item)) {
-            long *obj = (long*)item;
-            long status = obj[1];
+            taida_val *obj = (taida_val*)item;
+            taida_val status = obj[1];
             if (status == 2) {
-                long error = obj[3];
+                taida_val error = obj[3];
                 // Release partially built result_list before throwing
                 taida_release(result_list);
                 if (taida_can_throw_payload(error)) {
                     return taida_throw(error);
                 }
-                long err = taida_make_error("AsyncError", "All: async rejected");
+                taida_val err = taida_make_error("AsyncError", "All: async rejected");
                 return taida_throw(err);
             }
             val = obj[2];
@@ -4742,30 +4755,30 @@ long taida_async_all(long list_ptr) {
 }
 
 // Race[asyncList]() — join all pending threads, return the first fulfilled value.
-long taida_async_race(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_async_race(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     if (len == 0) {
         // Matches Interpreter behavior: Race[@[]] -> Async(@())
         return taida_async_ok_tagged(taida_pack_new(0), TAIDA_TAG_PACK);
     }
     // Join all pending threads (simple approach: join all, pick first)
-    for (long i = 0; i < len; i++) {
-        long item = list[4 + i];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
         if (TAIDA_IS_ASYNC(item)) {
             taida_async_join(item);
         }
     }
-    long first = list[4];
+    taida_val first = list[4];
     if (TAIDA_IS_ASYNC(first)) {
-        long *obj = (long*)first;
-        long status = obj[1];
+        taida_val *obj = (taida_val*)first;
+        taida_val status = obj[1];
         if (status == 2) {
-            long error = obj[3];
+            taida_val error = obj[3];
             if (taida_can_throw_payload(error)) {
                 return taida_throw(error);
             }
-            long err = taida_make_error("AsyncError", "Race: async rejected");
+            taida_val err = taida_make_error("AsyncError", "Race: async rejected");
             return taida_throw(err);
         }
         // NO-3: propagate value_tag from the source Async.
@@ -4775,7 +4788,7 @@ long taida_async_race(long list_ptr) {
     }
     // NO-3: non-async element — detect its type.
     // The element is borrowed from the input list; retain for new Async ownership.
-    long ftag = taida_detect_value_tag(first);
+    taida_val ftag = taida_detect_value_tag(first);
     taida_list_elem_retain(first, ftag);
     return taida_async_ok_tagged(first, ftag);
 }
@@ -4785,11 +4798,11 @@ long taida_async_race(long list_ptr) {
 // Result:   BuchiPack fc=4, hash0=HASH_RES___VALUE → evaluate predicate, check throw, return __value or throw
 // Lax:      BuchiPack fc=4, hash0=HASH_HAS_VALUE → lax_unmold
 // Async:    [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
-long taida_generic_unmold(long ptr) {
+taida_val taida_generic_unmold(taida_val ptr) {
     if (ptr == 0) return 0;
 
     if (taida_is_molten(ptr)) {
-        long error = taida_make_error(
+        taida_val error = taida_make_error(
             "TypeError",
             "Cannot unmold Molten directly. Molten can only be used inside Cage."
         );
@@ -4798,24 +4811,24 @@ long taida_generic_unmold(long ptr) {
     
     // Check for BuchiPack (monadic types) using magic
     if (TAIDA_IS_PACK(ptr)) {
-        long *obj = (long*)ptr;
-        long field_count = obj[1];
-        long hash0 = obj[2];
+        taida_val *obj = (taida_val*)ptr;
+        taida_val field_count = obj[1];
+        taida_val hash0 = obj[2];
 
         // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw
-        if (field_count == 4 && hash0 == (long)HASH_RES___VALUE) {
-        long value = taida_pack_get_idx(ptr, 0);       // __value
-        long pred = taida_pack_get_idx(ptr, 1);         // __predicate
-        long throw_val = taida_pack_get_idx(ptr, 2);    // throw
+        if (field_count == 4 && hash0 == (taida_val)HASH_RES___VALUE) {
+        taida_val value = taida_pack_get_idx(ptr, 0);       // __value
+        taida_val pred = taida_pack_get_idx(ptr, 1);         // __predicate
+        taida_val throw_val = taida_pack_get_idx(ptr, 2);    // throw
 
         // If throw is set explicitly, check predicate first
         if (throw_val != 0) {
             if (pred != 0) {
-                long pred_result = taida_invoke_callback1(pred, value);
+                taida_val pred_result = taida_invoke_callback1(pred, value);
                 if (!pred_result) {
                     // Predicate failed — throw the error
                     if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-                    long error = taida_make_error("ResultError", "Result predicate failed");
+                    taida_val error = taida_make_error("ResultError", "Result predicate failed");
                     return taida_throw(error);
                 }
                 // Predicate passed even with throw set — return value
@@ -4823,16 +4836,16 @@ long taida_generic_unmold(long ptr) {
             }
             // No predicate, throw is set — throw
             if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-            long error = taida_make_error("ResultError", "Result error");
+            taida_val error = taida_make_error("ResultError", "Result error");
             return taida_throw(error);
         }
 
         // Evaluate predicate if present (no throw set)
         if (pred != 0) {
-            long pred_result = taida_invoke_callback1(pred, value);
+            taida_val pred_result = taida_invoke_callback1(pred, value);
             if (pred_result) return value;  // success
             // Predicate failed — throw default error
-            long error = taida_make_error("ResultError", "Result predicate failed");
+            taida_val error = taida_make_error("ResultError", "Result predicate failed");
             return taida_throw(error);
         }
 
@@ -4841,7 +4854,7 @@ long taida_generic_unmold(long ptr) {
     }
 
     // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE)
-    if (field_count == 4 && hash0 == (long)HASH_HAS_VALUE) {
+    if (field_count == 4 && hash0 == (taida_val)HASH_HAS_VALUE) {
         int gtype = taida_detect_gorillax_type(ptr);
         if (gtype == 1) return taida_gorillax_unmold(ptr);
         if (gtype == 2) return taida_relaxed_gorillax_unmold(ptr);
@@ -4849,10 +4862,10 @@ long taida_generic_unmold(long ptr) {
     }
 
     // TODO unmold: return `unm` channel when present.
-    if (taida_pack_has_hash(ptr, (long)HASH___TYPE)) {
-        long type_ptr = taida_pack_get(ptr, (long)HASH___TYPE);
+    if (taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
+        taida_val type_ptr = taida_pack_get(ptr, (taida_val)HASH___TYPE);
         int is_todo = 0;
-        if (type_ptr == (long)__todo_type_str) {
+        if (type_ptr == (taida_val)__todo_type_str) {
             is_todo = 1;
         } else if (type_ptr > 4096) {
             const char *type_str = (const char*)type_ptr;
@@ -4863,17 +4876,17 @@ long taida_generic_unmold(long ptr) {
             }
         }
         if (is_todo) {
-            if (taida_pack_has_hash(ptr, (long)HASH_TODO_UNM)) {
-                return taida_pack_get(ptr, (long)HASH_TODO_UNM);
+            if (taida_pack_has_hash(ptr, (taida_val)HASH_TODO_UNM)) {
+                return taida_pack_get(ptr, (taida_val)HASH_TODO_UNM);
             }
-            if (taida_pack_has_hash(ptr, (long)HASH___DEFAULT)) {
-                return taida_pack_get(ptr, (long)HASH___DEFAULT);
+            if (taida_pack_has_hash(ptr, (taida_val)HASH___DEFAULT)) {
+                return taida_pack_get(ptr, (taida_val)HASH___DEFAULT);
             }
-            if (taida_pack_has_hash(ptr, (long)HASH_TODO_SOL)) {
-                return taida_pack_get(ptr, (long)HASH_TODO_SOL);
+            if (taida_pack_has_hash(ptr, (taida_val)HASH_TODO_SOL)) {
+                return taida_pack_get(ptr, (taida_val)HASH_TODO_SOL);
             }
-            if (taida_pack_has_hash(ptr, (long)HASH___VALUE)) {
-                return taida_pack_get(ptr, (long)HASH___VALUE);
+            if (taida_pack_has_hash(ptr, (taida_val)HASH___VALUE)) {
+                return taida_pack_get(ptr, (taida_val)HASH___VALUE);
             }
             return taida_pack_new(0);
         }
@@ -4881,9 +4894,9 @@ long taida_generic_unmold(long ptr) {
 
     // Custom mold default unmold:
     // pack with first field __type and a __value field.
-    if (hash0 == (long)HASH___TYPE &&
-        taida_pack_has_hash(ptr, (long)HASH___VALUE)) {
-        return taida_pack_get(ptr, (long)HASH___VALUE);
+    if (hash0 == (taida_val)HASH___TYPE &&
+        taida_pack_has_hash(ptr, (taida_val)HASH___VALUE)) {
+        return taida_pack_get(ptr, (taida_val)HASH___VALUE);
     }
     }
 
@@ -4895,53 +4908,53 @@ long taida_generic_unmold(long ptr) {
     return ptr;
 }
 
-long taida_async_is_pending(long async_ptr) {
-    return ((long*)async_ptr)[1] == 0 ? 1 : 0;
+taida_val taida_async_is_pending(taida_val async_ptr) {
+    return ((taida_val*)async_ptr)[1] == 0 ? 1 : 0;
 }
 
-long taida_async_is_fulfilled(long async_ptr) {
-    return ((long*)async_ptr)[1] == 1 ? 1 : 0;
+taida_val taida_async_is_fulfilled(taida_val async_ptr) {
+    return ((taida_val*)async_ptr)[1] == 1 ? 1 : 0;
 }
 
-long taida_async_is_rejected(long async_ptr) {
-    return ((long*)async_ptr)[1] == 2 ? 1 : 0;
+taida_val taida_async_is_rejected(taida_val async_ptr) {
+    return ((taida_val*)async_ptr)[1] == 2 ? 1 : 0;
 }
 
-long taida_async_get_value(long async_ptr) {
-    return ((long*)async_ptr)[2];
+taida_val taida_async_get_value(taida_val async_ptr) {
+    return ((taida_val*)async_ptr)[2];
 }
 
-long taida_async_get_error(long async_ptr) {
-    return ((long*)async_ptr)[3];
+taida_val taida_async_get_error(taida_val async_ptr) {
+    return ((taida_val*)async_ptr)[3];
 }
 
 // Async toString — format like interpreter: Async[fulfilled: value] / Async[rejected: error] / Async[pending]
-static long taida_async_to_string(long async_ptr) {
-    long *obj = (long*)async_ptr;
-    long status = obj[1];
+static taida_val taida_async_to_string(taida_val async_ptr) {
+    taida_val *obj = (taida_val*)async_ptr;
+    taida_val status = obj[1];
     char tmp[256];
     if (status == 1) {
-        long value = obj[2];
-        long val_str = taida_value_to_display_string(value);
+        taida_val value = obj[2];
+        taida_val val_str = taida_value_to_display_string(value);
         snprintf(tmp, sizeof(tmp), "Async[fulfilled: %s]", (const char*)val_str);
         taida_str_release(val_str);
     } else if (status == 2) {
-        long error = obj[3];
-        long err_str = taida_value_to_display_string(error);
+        taida_val error = obj[3];
+        taida_val err_str = taida_value_to_display_string(error);
         snprintf(tmp, sizeof(tmp), "Async[rejected: %s]", (const char*)err_str);
         taida_str_release(err_str);
     } else {
         snprintf(tmp, sizeof(tmp), "Async[pending]");
     }
-    return (long)taida_str_new_copy(tmp);
+    return (taida_val)taida_str_new_copy(tmp);
 }
 
 // ── Debug for list ────────────────────────────────────────
-long taida_debug_list(long list_ptr) {
-    long *list = (long*)list_ptr;
-    long len = list[2];
+taida_val taida_debug_list(taida_val list_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
     printf("@[");
-    for (long i = 0; i < len; i++) {
+    for (taida_val i = 0; i < len; i++) {
         if (i > 0) printf(", ");
         printf("%ld", list[4 + i]);
     }
@@ -4978,7 +4991,7 @@ long taida_debug_list(long list_ptr) {
 
 typedef struct {
     int type;
-    long int_val;
+    taida_val int_val;
     double float_val;
     char *str_val;        // for strings (heap-allocated)
     struct json_array *arr;  // for arrays
@@ -5006,11 +5019,11 @@ typedef struct json_obj {
 static json_val json_parse_value(const char **p);
 static void json_skip_ws(const char **p);
 static json_val json_default_for_desc(const char *desc);
-static long json_apply_schema(json_val *jval, const char **desc);
+static taida_val json_apply_schema(json_val *jval, const char **desc);
 
 // FNV-1a hash (matches Rust side)
-static unsigned long long fnv1a(const char *s, int len) {
-    unsigned long long hash = 0xcbf29ce484222325ULL;
+static uint64_t fnv1a(const char *s, int len) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
     for (int i = 0; i < len; i++) {
         hash ^= (unsigned char)s[i];
         hash *= 0x100000001b3ULL;
@@ -5086,12 +5099,12 @@ static json_val json_parse_number(const char **p) {
     *p = end;
     if (is_int && d >= -9007199254740992.0 && d <= 9007199254740992.0) {
         v.type = JSON_INT;
-        v.int_val = (long)d;
+        v.int_val = (taida_val)d;
         v.float_val = d;
     } else {
         v.type = JSON_FLOAT;
         v.float_val = d;
-        v.int_val = (long)d;
+        v.int_val = (taida_val)d;
     }
     return v;
 }
@@ -5215,7 +5228,7 @@ static int schema_find_closing_brace(const char *desc) {
 }
 
 // --- Default values from schema ---
-static long json_default_value_for_desc(const char *desc) {
+static taida_val json_default_value_for_desc(const char *desc) {
     if (!desc || !*desc) return 0;
     switch (desc[0]) {
         case 'i': return 0;
@@ -5223,7 +5236,7 @@ static long json_default_value_for_desc(const char *desc) {
         case 's': {
             char *empty = (char*)malloc(1);
             empty[0] = '\0';
-            return (long)empty;
+            return (taida_val)empty;
         }
         case 'b': return 0;
         case 'T': {
@@ -5242,18 +5255,18 @@ static long json_default_value_for_desc(const char *desc) {
 }
 
 // --- Convert JSON value to typed value using schema ---
-// Returns a long (int, float-as-bitcast, string pointer, or BuchiPack pointer)
+// Returns a taida_val (int, float-as-bitcast, string pointer, or BuchiPack pointer)
 
-static long json_to_int(json_val *jv) {
+static taida_val json_to_int(json_val *jv) {
     if (!jv) return 0;
     switch (jv->type) {
         case JSON_INT: return jv->int_val;
-        case JSON_FLOAT: return (long)jv->float_val;
+        case JSON_FLOAT: return (taida_val)jv->float_val;
         case JSON_BOOL: return jv->int_val;
         case JSON_STRING: {
             if (!jv->str_val) return 0;
             char *end;
-            long r = strtol(jv->str_val, &end, 10);
+            taida_val r = strtol(jv->str_val, &end, 10);
             if (*end != '\0') return 0;
             return r;
         }
@@ -5261,7 +5274,7 @@ static long json_to_int(json_val *jv) {
     }
 }
 
-static long json_to_float(json_val *jv) {
+static taida_val json_to_float(json_val *jv) {
     if (!jv) return _d2l(0.0);
     switch (jv->type) {
         case JSON_FLOAT: return _d2l(jv->float_val);
@@ -5278,34 +5291,34 @@ static long json_to_float(json_val *jv) {
     }
 }
 
-static long json_to_str(json_val *jv) {
-    if (!jv) { return (long)taida_str_alloc(0); }
+static taida_val json_to_str(json_val *jv) {
+    if (!jv) { return (taida_val)taida_str_alloc(0); }
     switch (jv->type) {
         case JSON_STRING: {
-            if (!jv->str_val) { return (long)taida_str_alloc(0); }
-            return (long)taida_str_new_copy(jv->str_val);
+            if (!jv->str_val) { return (taida_val)taida_str_alloc(0); }
+            return (taida_val)taida_str_new_copy(jv->str_val);
         }
         case JSON_INT: {
             char buf[32]; snprintf(buf, sizeof(buf), "%ld", jv->int_val);
-            return (long)taida_str_new_copy(buf);
+            return (taida_val)taida_str_new_copy(buf);
         }
         case JSON_FLOAT: {
             char buf[64]; snprintf(buf, sizeof(buf), "%g", jv->float_val);
-            return (long)taida_str_new_copy(buf);
+            return (taida_val)taida_str_new_copy(buf);
         }
         case JSON_BOOL: {
-            return (long)taida_str_new_copy(jv->int_val ? "true" : "false");
+            return (taida_val)taida_str_new_copy(jv->int_val ? "true" : "false");
         }
         case JSON_NULL: {
-            return (long)taida_str_alloc(0);
+            return (taida_val)taida_str_alloc(0);
         }
         default: {
-            char *e = (char*)malloc(1); e[0]='\0'; return (long)e;
+            char *e = (char*)malloc(1); e[0]='\0'; return (taida_val)e;
         }
     }
 }
 
-static long json_to_bool(json_val *jv) {
+static taida_val json_to_bool(json_val *jv) {
     if (!jv) return 0;
     switch (jv->type) {
         case JSON_BOOL: return jv->int_val;
@@ -5318,9 +5331,9 @@ static long json_to_bool(json_val *jv) {
 }
 
 // Apply a schema descriptor to a JSON value, constructing the appropriate native value.
-// Returns: long (the native value — int, float-bitcast, string ptr, BuchiPack ptr, or list ptr)
+// Returns: taida_val (the native value — int, float-bitcast, string ptr, BuchiPack ptr, or list ptr)
 // The desc pointer is advanced past the consumed descriptor.
-static long json_apply_schema(json_val *jval, const char **desc) {
+static taida_val json_apply_schema(json_val *jval, const char **desc) {
     if (!desc || !*desc || !**desc) return 0;
     const char *d = *desc;
 
@@ -5338,7 +5351,7 @@ static long json_apply_schema(json_val *jval, const char **desc) {
         case 's': {
             *desc = d + 1;
             if (!jval || jval->type == JSON_NULL) {
-                char *e = (char*)malloc(1); e[0]='\0'; return (long)e;
+                char *e = (char*)malloc(1); e[0]='\0'; return (taida_val)e;
             }
             return json_to_str(jval);
         }
@@ -5374,7 +5387,7 @@ static long json_apply_schema(json_val *jval, const char **desc) {
             }
 
             // +1 for __type field
-            long pack = taida_pack_new(field_count + 1);
+            taida_val pack = taida_pack_new(field_count + 1);
 
             // Parse each field and apply schema
             int idx = 0;
@@ -5387,8 +5400,8 @@ static long json_apply_schema(json_val *jval, const char **desc) {
                 if (*d == ':') d++;
 
                 // Compute FNV-1a hash for field name
-                unsigned long long hash = fnv1a(fname, fn_len);
-                taida_pack_set_hash(pack, idx, (long)hash);
+                uint64_t hash = fnv1a(fname, fn_len);
+                taida_pack_set_hash(pack, idx, (taida_val)hash);
 
                 // Look up this field in JSON object
                 json_val *field_jval = NULL;
@@ -5397,7 +5410,7 @@ static long json_apply_schema(json_val *jval, const char **desc) {
                 }
 
                 // Apply sub-schema to field value
-                long field_val = json_apply_schema(field_jval, &d);
+                taida_val field_val = json_apply_schema(field_jval, &d);
                 taida_pack_set(pack, idx, field_val);
                 idx++;
 
@@ -5406,11 +5419,11 @@ static long json_apply_schema(json_val *jval, const char **desc) {
             if (*d == '}') d++;
 
             // Add __type field
-            unsigned long long type_hash = fnv1a("__type", 6);
-            taida_pack_set_hash(pack, idx, (long)type_hash);
+            uint64_t type_hash = fnv1a("__type", 6);
+            taida_pack_set_hash(pack, idx, (taida_val)type_hash);
             char *type_str = (char*)malloc(tn_len + 1);
             memcpy(type_str, type_name, tn_len + 1);
-            taida_pack_set(pack, idx, (long)type_str);
+            taida_pack_set(pack, idx, (taida_val)type_str);
 
             *desc = d;
             return pack;
@@ -5426,12 +5439,12 @@ static long json_apply_schema(json_val *jval, const char **desc) {
             memcpy(inner_desc, d, inner_len);
             inner_desc[inner_len] = '\0';
 
-            long list = taida_list_new();
+            taida_val list = taida_list_new();
 
             if (jval && jval->type == JSON_ARRAY && jval->arr) {
                 for (int i = 0; i < jval->arr->count; i++) {
                     const char *elem_desc = inner_desc;
-                    long elem = json_apply_schema(&jval->arr->items[i], &elem_desc);
+                    taida_val elem = json_apply_schema(&jval->arr->items[i], &elem_desc);
                     list = taida_list_push(list, elem);
                 }
             }
@@ -5454,12 +5467,12 @@ static long json_apply_schema(json_val *jval, const char **desc) {
 // raw_ptr: C string (the raw JSON)
 // schema_ptr: C string (the schema descriptor)
 // Returns: Lax BuchiPack (hasValue=true if parse succeeds, false on error)
-long taida_json_schema_cast(long raw_ptr, long schema_ptr) {
+taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     const char *raw = (const char *)raw_ptr;
     const char *schema = (const char *)schema_ptr;
 
     if (!raw || !schema) {
-        long def = json_default_value_for_desc(schema);
+        taida_val def = json_default_value_for_desc(schema);
         return taida_lax_empty(def);
     }
 
@@ -5468,7 +5481,7 @@ long taida_json_schema_cast(long raw_ptr, long schema_ptr) {
     json_skip_ws(&p);
     if (!*p) {
         // Empty string -> parse error
-        long def = json_default_value_for_desc(schema);
+        taida_val def = json_default_value_for_desc(schema);
         return taida_lax_empty(def);
     }
 
@@ -5479,7 +5492,7 @@ long taida_json_schema_cast(long raw_ptr, long schema_ptr) {
     // valid JSON (non-null value that didn't consume input)
     if (p == before_parse) {
         // Parser didn't consume anything -> parse error
-        long def = json_default_value_for_desc(schema);
+        taida_val def = json_default_value_for_desc(schema);
         return taida_lax_empty(def);
     }
 
@@ -5487,46 +5500,46 @@ long taida_json_schema_cast(long raw_ptr, long schema_ptr) {
     json_skip_ws(&p);
     if (*p != '\0') {
         // Trailing garbage -> parse error
-        long def = json_default_value_for_desc(schema);
+        taida_val def = json_default_value_for_desc(schema);
         return taida_lax_empty(def);
     }
 
     // Apply schema
     const char *desc = schema;
-    long result = json_apply_schema(&jval, &desc);
+    taida_val result = json_apply_schema(&jval, &desc);
 
     // Compute default for same schema
-    long def = json_default_value_for_desc(schema);
+    taida_val def = json_default_value_for_desc(schema);
 
     return taida_lax_new(result, def);
 }
 
 // Legacy JSON functions (kept for backward compat with older tests)
-long taida_json_parse(long str_ptr) {
+taida_val taida_json_parse(taida_val str_ptr) {
     const char *src = (const char*)str_ptr;
     if (!src) src = "{}";
     size_t len = strlen(src);
     char *buf = (char*)malloc(len + 1);
     memcpy(buf, src, len + 1);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
-long taida_json_empty(void) {
+taida_val taida_json_empty(void) {
     char *buf = (char*)malloc(3);
     buf[0] = '{'; buf[1] = '}'; buf[2] = '\0';
-    return (long)buf;
+    return (taida_val)buf;
 }
 
-long taida_json_from_int(long value) {
+taida_val taida_json_from_int(taida_val value) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%ld", value);
     size_t len = strlen(buf);
     char *result = (char*)malloc(len + 1);
     memcpy(result, buf, len + 1);
-    return (long)result;
+    return (taida_val)result;
 }
 
-long taida_json_from_str(long str_ptr) {
+taida_val taida_json_from_str(taida_val str_ptr) {
     const char *src = (const char*)str_ptr;
     if (!src) src = "";
     size_t src_len = strlen(src);
@@ -5536,46 +5549,46 @@ long taida_json_from_str(long str_ptr) {
     memcpy(buf + 1, src, src_len);
     buf[new_len - 1] = '"';
     buf[new_len] = '\0';
-    return (long)buf;
+    return (taida_val)buf;
 }
 
-long taida_json_unmold(long json_ptr) {
+taida_val taida_json_unmold(taida_val json_ptr) {
     const char *src = (const char*)json_ptr;
-    if (!src) { char *e = (char*)malloc(1); e[0]='\0'; return (long)e; }
+    if (!src) { char *e = (char*)malloc(1); e[0]='\0'; return (taida_val)e; }
     size_t len = strlen(src);
     char *buf = (char*)malloc(len + 1);
     memcpy(buf, src, len + 1);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
-long taida_json_stringify(long json_ptr) {
+taida_val taida_json_stringify(taida_val json_ptr) {
     return taida_json_unmold(json_ptr);
 }
 
-long taida_json_to_str(long json_ptr) {
+taida_val taida_json_to_str(taida_val json_ptr) {
     return taida_json_unmold(json_ptr);
 }
 
-long taida_json_to_int(long json_ptr) {
+taida_val taida_json_to_int(taida_val json_ptr) {
     const char *data = (const char*)json_ptr;
     if (!data) return 0;
     return atol(data);
 }
 
-long taida_json_size(long json_ptr) {
+taida_val taida_json_size(taida_val json_ptr) {
     const char *data = (const char*)json_ptr;
     if (!data) return 0;
-    return (long)strlen(data);
+    return (taida_val)strlen(data);
 }
 
-long taida_json_has(long json_ptr, long key_ptr) {
+taida_val taida_json_has(taida_val json_ptr, taida_val key_ptr) {
     const char *json_data = (const char*)json_ptr;
     const char *key_data = (const char*)key_ptr;
     if (!json_data || !key_data) return 0;
     return strstr(json_data, key_data) != NULL ? 1 : 0;
 }
 
-long taida_debug_json(long json_ptr) {
+taida_val taida_debug_json(taida_val json_ptr) {
     const char *data = (const char*)json_ptr;
     if (data) printf("JSON(%s)\n", data);
     else printf("JSON(null)\n");
@@ -5583,7 +5596,7 @@ long taida_debug_json(long json_ptr) {
 }
 
 // ── stdlib math (native) ──────────────────────────────────
-// Values may be integer (small values stored directly) or float (f64 bits in long).
+// Values may be integer (small values stored directly) or float (f64 bits in taida_val).
 // We use a heuristic: the Taida lowering emits ConstFloat for known float literals
 // and ConstInt for integer literals. Integer values in math context should be
 // converted to double before computation.
@@ -5592,13 +5605,13 @@ long taida_debug_json(long json_ptr) {
 // an integer (from ConstInt), the lowering inserts a taida_int_to_float call.
 // For now, we use a bit-pattern heuristic as a fallback.
 
-static double _l2d(long v) { union { long l; double d; } u; u.l = v; return u.d; }
-static long _d2l(double v) { union { long l; double d; } u; u.d = v; return u.l; }
+static double _l2d(taida_val v) { union { taida_val l; double d; } u; u.l = v; return u.d; }
+static taida_val _d2l(double v) { union { taida_val l; double d; } u; u.d = v; return u.l; }
 
 // Smart conversion: if the bit pattern represents a "reasonable" f64, use it as-is.
 // If it looks like a small integer (-1M..1M), convert from integer.
 // This heuristic handles both ConstFloat (bitcast) and ConstInt paths.
-static double _to_double(long v) {
+static double _to_double(taida_val v) {
     // If v is a small integer (common case for literals like 16, 100, etc.)
     // f64 encoding of small integers has specific bit patterns
     // Quick check: if |v| < 2^20 (about 1M), it's likely a plain integer
@@ -5611,10 +5624,10 @@ static double _to_double(long v) {
 
 // taida_math_* functions removed (std dissolution)
 
-// Float arithmetic (values stored as f64 bits in long)
-long taida_float_add(long a, long b) { return _d2l(_to_double(a) + _to_double(b)); }
-long taida_float_sub(long a, long b) { return _d2l(_to_double(a) - _to_double(b)); }
-long taida_float_mul(long a, long b) { return _d2l(_to_double(a) * _to_double(b)); }
+// Float arithmetic (values stored as f64 bits in taida_val)
+taida_val taida_float_add(taida_val a, taida_val b) { return _d2l(_to_double(a) + _to_double(b)); }
+taida_val taida_float_sub(taida_val a, taida_val b) { return _d2l(_to_double(a) - _to_double(b)); }
+taida_val taida_float_mul(taida_val a, taida_val b) { return _d2l(_to_double(a) * _to_double(b)); }
 // taida_float_div removed — use Div[x, y]() mold instead
 
 // ── Field Name Registry (for jsonEncode) ──────────────────
@@ -5623,10 +5636,10 @@ long taida_float_mul(long a, long b) { return _d2l(_to_double(a) * _to_double(b)
 
 #define FIELD_REGISTRY_CAP 256
 // type_tag: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool
-static struct { long hash; const char *name; int type_tag; } __field_registry[FIELD_REGISTRY_CAP];
+static struct { taida_val hash; const char *name; int type_tag; } __field_registry[FIELD_REGISTRY_CAP];
 static int __field_registry_len = 0;
 
-long taida_register_field_name(long hash, long name_ptr) {
+taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
     // Check for duplicate
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return 0;
@@ -5641,7 +5654,7 @@ long taida_register_field_name(long hash, long name_ptr) {
 }
 
 // Extended version: register field with type tag
-long taida_register_field_type(long hash, long name_ptr, long type_tag) {
+taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_val type_tag) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) {
             __field_registry[i].type_tag = (int)type_tag;
@@ -5657,14 +5670,14 @@ long taida_register_field_type(long hash, long name_ptr, long type_tag) {
     return 0;
 }
 
-static const char* taida_lookup_field_name(long hash) {
+static const char* taida_lookup_field_name(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].name;
     }
     return NULL;
 }
 
-static int taida_lookup_field_type(long hash) {
+static int taida_lookup_field_type(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].type_tag;
     }
@@ -5716,7 +5729,7 @@ static void json_append_escaped_str(char **buf, size_t *cap, size_t *len, const 
 
 // Forward declare: recursive serialization
 // type_hint: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool
-static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val, int indent, int depth, int type_hint);
+static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val val, int indent, int depth, int type_hint);
 
 // Append indentation (for pretty mode, indent > 0)
 static void json_append_indent(char **buf, size_t *cap, size_t *len, int indent, int depth) {
@@ -5730,14 +5743,14 @@ static void json_append_indent(char **buf, size_t *cap, size_t *len, int indent,
 // Helper: serialize a BuchiPack's fields as JSON object
 // Fields are sorted alphabetically (matching interpreter/JS behavior).
 // All __ fields are skipped (__type, __value, __default, __entries, __items).
-static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, long *pack, long fc, int indent, int depth) {
+static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, taida_val *pack, taida_val fc, int indent, int depth) {
     // Collect visible fields: (name, val, type_hint, index for stable sort)
-    typedef struct { const char *name; long val; int type_hint; } JsonField;
+    typedef struct { const char *name; taida_val val; int type_hint; } JsonField;
     JsonField fields[100];
     int nfields = 0;
-    for (long i = 0; i < fc && nfields < 100; i++) {
-        long field_hash = pack[2 + i * 3];
-        long field_val = pack[2 + i * 3 + 2];
+    for (taida_val i = 0; i < fc && nfields < 100; i++) {
+        taida_val field_hash = pack[2 + i * 3];
+        taida_val field_val = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
         // Skip all __ fields (__type, __value, __default, __entries, __items)
@@ -5774,7 +5787,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, lon
     json_append_char(buf, cap, len, '}');
 }
 
-static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val, int indent, int depth, int type_hint) {
+static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val val, int indent, int depth, int type_hint) {
     // Bool type hint: serialize 0/1 as false/true
     if (type_hint == 4) {
         json_append(buf, cap, len, val ? "true" : "false");
@@ -5822,13 +5835,13 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val,
 
     // Check for HashMap
     if (taida_is_hashmap(val)) {
-        long *hm = (long*)val;
-        long hm_cap = hm[1];
+        taida_val *hm = (taida_val*)val;
+        taida_val hm_cap = hm[1];
         json_append_char(buf, cap, len, '{');
-        long count = 0;
-        for (long i = 0; i < hm_cap; i++) {
-            long slot_hash = hm[HM_HEADER + i * 3];
-            long slot_key = hm[HM_HEADER + i * 3 + 1];
+        taida_val count = 0;
+        for (taida_val i = 0; i < hm_cap; i++) {
+            taida_val slot_hash = hm[HM_HEADER + i * 3];
+            taida_val slot_key = hm[HM_HEADER + i * 3 + 1];
             if (HM_SLOT_OCCUPIED(slot_hash, slot_key)) {
                 if (count > 0) json_append_char(buf, cap, len, ',');
                 if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
@@ -5848,10 +5861,10 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val,
 
     // Check for Set
     if (taida_is_set(val)) {
-        long *list = (long*)val;
-        long list_len = list[2];
+        taida_val *list = (taida_val*)val;
+        taida_val list_len = list[2];
         json_append_char(buf, cap, len, '[');
-        for (long i = 0; i < list_len; i++) {
+        for (taida_val i = 0; i < list_len; i++) {
             if (i > 0) json_append_char(buf, cap, len, ',');
             if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
             json_serialize_typed(buf, cap, len, list[4 + i], indent, depth + 1, 0);
@@ -5864,19 +5877,19 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val,
     // Check for BuchiPack (monadic types: Result, Lax)
     int fc = taida_monadic_field_count(val);
     if (fc > 0) {
-        long *pack = (long*)val;
+        taida_val *pack = (taida_val*)val;
         // Use actual field_count from pack, not the type ID from monadic_field_count
-        long real_fc = pack[1];
+        taida_val real_fc = pack[1];
         json_serialize_pack_fields(buf, cap, len, pack, real_fc, indent, depth);
         return;
     }
 
     // Check for List (before general BuchiPack since list detection is more specific)
     if (taida_is_list(val)) {
-        long *list = (long*)val;
-        long list_len = list[2];
+        taida_val *list = (taida_val*)val;
+        taida_val list_len = list[2];
         json_append_char(buf, cap, len, '[');
-        for (long i = 0; i < list_len; i++) {
+        for (taida_val i = 0; i < list_len; i++) {
             if (i > 0) json_append_char(buf, cap, len, ',');
             if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
             json_serialize_typed(buf, cap, len, list[4 + i], indent, depth + 1, 0);
@@ -5888,8 +5901,8 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val,
 
     // Check for BuchiPack (any size, including user-defined types)
     if (taida_is_buchi_pack(val)) {
-        long *obj = (long*)val;
-        long obj_fc = obj[1];
+        taida_val *obj = (taida_val*)val;
+        taida_val obj_fc = obj[1];
         json_serialize_pack_fields(buf, cap, len, obj, obj_fc, indent, depth);
         return;
     }
@@ -5906,54 +5919,54 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, long val,
     }
 }
 
-long taida_json_encode(long val) {
+taida_val taida_json_encode(taida_val val) {
     size_t cap = 256;
     size_t len = 0;
     char *buf = (char*)malloc(cap);
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 0, 0, 0);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
-long taida_json_pretty(long val) {
+taida_val taida_json_pretty(taida_val val) {
     size_t cap = 256;
     size_t len = 0;
     char *buf = (char*)malloc(cap);
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 2, 0, 0);
-    return (long)buf;
+    return (taida_val)buf;
 }
 
 // ── stdlib I/O (native) ───────────────────────────────────
 
-long taida_time_now_ms(void) {
+taida_val taida_time_now_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-        return (long)time(NULL) * 1000L;
+        return (taida_val)time(NULL) * 1000L;
     }
-    long long ms = (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
-    if (ms > LONG_MAX) return LONG_MAX;
-    if (ms < LONG_MIN) return LONG_MIN;
-    return (long)ms;
+    int64_t ms = (int64_t)ts.tv_sec * 1000LL + (int64_t)(ts.tv_nsec / 1000000L);
+    if (ms > INT64_MAX) return INT64_MAX;
+    if (ms < INT64_MIN) return INT64_MIN;
+    return (taida_val)ms;
 }
 
-static long taida_time_sleep_task(long ms) {
+static taida_val taida_time_sleep_task(taida_val ms) {
     struct timespec req;
     req.tv_sec = (time_t)(ms / 1000);
-    req.tv_nsec = (long)((ms % 1000) * 1000000L);
+    req.tv_nsec = (taida_val)((ms % 1000) * 1000000L);
     while (nanosleep(&req, &req) == -1 && errno == EINTR) {
     }
     return taida_pack_new(0);
 }
 
-long taida_time_sleep(long ms) {
-    const long max_sleep_ms = 2147483647L;
+taida_val taida_time_sleep(taida_val ms) {
+    const taida_val max_sleep_ms = 2147483647L;
     if (ms < 0 || ms > max_sleep_ms) {
         char msg[160];
         snprintf(msg, sizeof(msg), "sleep: ms must be in range 0..=%ld, got %ld", max_sleep_ms, ms);
         return taida_async_err(taida_make_error("RangeError", msg));
     }
-    return taida_async_spawn((long)taida_time_sleep_task, ms);
+    return taida_async_spawn((taida_val)taida_time_sleep_task, ms);
 }
 
 // ── SHA-256 prelude function (builtin, no external dependency) ─────────
@@ -6093,7 +6106,7 @@ static void taida_sha256_final(taida_sha256_ctx *ctx, unsigned char out[32]) {
     }
 }
 
-static long taida_sha256_hex_from_bytes(const unsigned char *data, size_t len) {
+static taida_val taida_sha256_hex_from_bytes(const unsigned char *data, size_t len) {
     taida_sha256_ctx ctx;
     unsigned char digest[32];
     static const char hex[] = "0123456789abcdef";
@@ -6105,35 +6118,35 @@ static long taida_sha256_hex_from_bytes(const unsigned char *data, size_t len) {
         out[i * 2] = hex[(digest[i] >> 4) & 0x0f];
         out[i * 2 + 1] = hex[digest[i] & 0x0f];
     }
-    return (long)out;
+    return (taida_val)out;
 }
 
-long taida_sha256(long value) {
+taida_val taida_sha256(taida_val value) {
     if (TAIDA_IS_BYTES(value)) {
-        long len = taida_bytes_len(value);
+        taida_val len = taida_bytes_len(value);
         if (len <= 0) return taida_sha256_hex_from_bytes(NULL, 0);
-        long *bytes = (long*)value;
+        taida_val *bytes = (taida_val*)value;
         unsigned char *raw = (unsigned char*)malloc((size_t)len);
         if (!raw) return taida_sha256_hex_from_bytes(NULL, 0);
-        for (long i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
-        long out = taida_sha256_hex_from_bytes(raw, (size_t)len);
+        for (taida_val i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
+        taida_val out = taida_sha256_hex_from_bytes(raw, (size_t)len);
         free(raw);
         return out;
     }
 
-    long display = taida_value_to_display_string(value);
+    taida_val display = taida_value_to_display_string(value);
     const char *s = (const char*)display;
     size_t slen = 0;
     if (!taida_read_cstr_len_safe(s, 1 << 20, &slen)) {
         taida_str_release(display);
         return taida_sha256_hex_from_bytes(NULL, 0);
     }
-    long out = taida_sha256_hex_from_bytes((const unsigned char*)s, slen);
+    taida_val out = taida_sha256_hex_from_bytes((const unsigned char*)s, slen);
     taida_str_release(display);
     return out;
 }
 
-long taida_io_stdin(long prompt_ptr) {
+taida_val taida_io_stdin(taida_val prompt_ptr) {
     // Print prompt if provided
     const char *prompt = (const char*)prompt_ptr;
     if (prompt && prompt[0] != '\0') {
@@ -6144,7 +6157,7 @@ long taida_io_stdin(long prompt_ptr) {
     char line[4096];
     if (fgets(line, sizeof(line), stdin) == NULL) {
         // EOF or error — return empty string
-        return (long)taida_str_alloc(0);
+        return (taida_val)taida_str_alloc(0);
     }
     // Strip trailing newline
     size_t slen = strlen(line);
@@ -6158,17 +6171,17 @@ long taida_io_stdin(long prompt_ptr) {
     }
     char *r = taida_str_alloc(slen);
     memcpy(r, line, slen);
-    return (long)r;
+    return (taida_val)r;
 }
 
-long taida_io_stdout(long val_ptr) {
+taida_val taida_io_stdout(taida_val val_ptr) {
     // For now, treat val as a string pointer
     const char *s = (const char*)val_ptr;
     if (s) printf("%s\n", s);
     return 0;
 }
 
-long taida_io_stderr(long val_ptr) {
+taida_val taida_io_stderr(taida_val val_ptr) {
     const char *s = (const char*)val_ptr;
     if (s) fprintf(stderr, "%s\n", s);
     return 0;
@@ -6177,98 +6190,98 @@ long taida_io_stderr(long val_ptr) {
 // ── taida-lang/os package — Native runtime ────────────────
 
 // Helper: build os Result success BuchiPack @(ok=true, code=0, message="")
-static long taida_os_result_success(long inner) {
+static taida_val taida_os_result_success(taida_val inner) {
     return taida_result_create(inner, 0, 0);
 }
 
 // Helper: build os Result failure with IoError
-static long taida_os_result_failure(int err_code, const char *err_msg) {
+static taida_val taida_os_result_failure(int err_code, const char *err_msg) {
     // inner = @(ok=false, code=errno, message=err_msg, kind=...)
     const char *message = err_msg ? err_msg : "unknown io error";
     const char *kind = taida_os_error_kind(err_code, message);
-    long inner = taida_pack_new(4);
+    taida_val inner = taida_pack_new(4);
     // ok field
-    long ok_hash = 0x08b05d07b5566befULL;  // FNV-1a("ok")
-    taida_pack_set_hash(inner, 0, (long)ok_hash);
+    taida_val ok_hash = 0x08b05d07b5566befULL;  // FNV-1a("ok")
+    taida_pack_set_hash(inner, 0, (taida_val)ok_hash);
     taida_pack_set(inner, 0, 0);  // false
     // code field
-    long code_hash = 0x0bb51791194b4414ULL;  // FNV-1a("code")
-    taida_pack_set_hash(inner, 1, (long)code_hash);
-    taida_pack_set(inner, 1, (long)err_code);
+    taida_val code_hash = 0x0bb51791194b4414ULL;  // FNV-1a("code")
+    taida_pack_set_hash(inner, 1, (taida_val)code_hash);
+    taida_pack_set(inner, 1, (taida_val)err_code);
     // message field
-    long msg_hash = 0x546401b5d2a8d2a4ULL;   // FNV-1a("message")
-    taida_pack_set_hash(inner, 2, (long)msg_hash);
+    taida_val msg_hash = 0x546401b5d2a8d2a4ULL;   // FNV-1a("message")
+    taida_pack_set_hash(inner, 2, (taida_val)msg_hash);
     char *msg_copy = taida_str_new_copy(message);
-    taida_pack_set(inner, 2, (long)msg_copy);
+    taida_pack_set(inner, 2, (taida_val)msg_copy);
     // kind field
-    long kind_hash = taida_str_hash((long)"kind");
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
     taida_pack_set_hash(inner, 3, kind_hash);
     char *kind_copy = taida_str_new_copy(kind);
-    taida_pack_set(inner, 3, (long)kind_copy);
+    taida_pack_set(inner, 3, (taida_val)kind_copy);
 
-    long error = taida_make_io_error(err_code, message);
+    taida_val error = taida_make_io_error(err_code, message);
     return taida_result_create(inner, error, 0);
 }
 
 // Helper: build os ok inner @(ok=true, code=0, message="")
-static long taida_os_ok_inner(void) {
-    long inner = taida_pack_new(3);
-    long ok_hash = 0x08b05d07b5566befULL;
-    taida_pack_set_hash(inner, 0, (long)ok_hash);
+static taida_val taida_os_ok_inner(void) {
+    taida_val inner = taida_pack_new(3);
+    taida_val ok_hash = 0x08b05d07b5566befULL;
+    taida_pack_set_hash(inner, 0, (taida_val)ok_hash);
     taida_pack_set(inner, 0, 1);  // true
-    long code_hash = 0x0bb51791194b4414ULL;
-    taida_pack_set_hash(inner, 1, (long)code_hash);
+    taida_val code_hash = 0x0bb51791194b4414ULL;
+    taida_pack_set_hash(inner, 1, (taida_val)code_hash);
     taida_pack_set(inner, 1, 0);
-    long msg_hash = 0x546401b5d2a8d2a4ULL;
-    taida_pack_set_hash(inner, 2, (long)msg_hash);
-    taida_pack_set(inner, 2, (long)"");
+    taida_val msg_hash = 0x546401b5d2a8d2a4ULL;
+    taida_pack_set_hash(inner, 2, (taida_val)msg_hash);
+    taida_pack_set(inner, 2, (taida_val)"");
     return inner;
 }
 
 // Helper: build process result inner @(stdout, stderr, code)
-static long taida_os_process_inner(const char *out, const char *err, long code) {
-    long inner = taida_pack_new(3);
+static taida_val taida_os_process_inner(const char *out, const char *err, taida_val code) {
+    taida_val inner = taida_pack_new(3);
     // stdout
-    long stdout_hash = 0x42e6d785a74f8c66ULL;  // FNV-1a("stdout")
-    taida_pack_set_hash(inner, 0, (long)stdout_hash);
+    taida_val stdout_hash = 0x42e6d785a74f8c66ULL;  // FNV-1a("stdout")
+    taida_pack_set_hash(inner, 0, (taida_val)stdout_hash);
     char *out_copy = taida_str_new_copy(out);
-    taida_pack_set(inner, 0, (long)out_copy);
+    taida_pack_set(inner, 0, (taida_val)out_copy);
     // stderr
-    long stderr_hash = 0x104ce5858b0a80b5ULL;  // FNV-1a("stderr")
-    taida_pack_set_hash(inner, 1, (long)stderr_hash);
+    taida_val stderr_hash = 0x104ce5858b0a80b5ULL;  // FNV-1a("stderr")
+    taida_pack_set_hash(inner, 1, (taida_val)stderr_hash);
     char *err_copy = taida_str_new_copy(err);
-    taida_pack_set(inner, 1, (long)err_copy);
+    taida_pack_set(inner, 1, (taida_val)err_copy);
     // code
-    long code_hash = 0x0bb51791194b4414ULL;
-    taida_pack_set_hash(inner, 2, (long)code_hash);
+    taida_val code_hash = 0x0bb51791194b4414ULL;
+    taida_pack_set_hash(inner, 2, (taida_val)code_hash);
     taida_pack_set(inner, 2, code);
     return inner;
 }
 
 // ── Read[path]() → Lax[Str] ──────────────────────────────
-long taida_os_read(long path_ptr) {
+taida_val taida_os_read(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty((long)"");
+    if (!path) return taida_lax_empty((taida_val)"");
 
     // Check file size (64MB limit)
     struct stat st;
-    if (stat(path, &st) != 0) return taida_lax_empty((long)"");
-    if (st.st_size > 64 * 1024 * 1024) return taida_lax_empty((long)"");
+    if (stat(path, &st) != 0) return taida_lax_empty((taida_val)"");
+    if (st.st_size > 64 * 1024 * 1024) return taida_lax_empty((taida_val)"");
 
     FILE *f = fopen(path, "r");
-    if (!f) return taida_lax_empty((long)"");
+    if (!f) return taida_lax_empty((taida_val)"");
 
-    long size = st.st_size;
+    taida_val size = st.st_size;
     char *buf = taida_str_alloc(size);
-    long read_bytes = (long)fread(buf, 1, size, f);
+    taida_val read_bytes = (taida_val)fread(buf, 1, size, f);
     fclose(f);
     buf[read_bytes] = '\0';
 
-    return taida_lax_new((long)buf, (long)"");
+    return taida_lax_new((taida_val)buf, (taida_val)"");
 }
 
 // ── readBytes(path) → Lax[Bytes] ──────────────────────────
-long taida_os_read_bytes(long path_ptr) {
+taida_val taida_os_read_bytes(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return taida_lax_empty(taida_bytes_default_value());
 
@@ -6279,7 +6292,7 @@ long taida_os_read_bytes(long path_ptr) {
     FILE *f = fopen(path, "rb");
     if (!f) return taida_lax_empty(taida_bytes_default_value());
 
-    long size = st.st_size;
+    taida_val size = st.st_size;
     unsigned char *buf = NULL;
     if (size > 0) {
         buf = (unsigned char*)malloc((size_t)size);
@@ -6295,7 +6308,7 @@ long taida_os_read_bytes(long path_ptr) {
     }
     fclose(f);
 
-    long bytes = taida_bytes_from_raw(buf, (long)read_bytes);
+    taida_val bytes = taida_bytes_from_raw(buf, (taida_val)read_bytes);
     free(buf);
     return taida_lax_new(bytes, taida_bytes_default_value());
 }
@@ -6306,7 +6319,7 @@ static int taida_cmp_strings(const void *a, const void *b) {
 }
 
 // ── ListDir[path]() → Lax[@[Str]] ────────────────────────
-long taida_os_list_dir(long path_ptr) {
+taida_val taida_os_list_dir(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return taida_lax_empty(taida_list_new());
 
@@ -6314,8 +6327,8 @@ long taida_os_list_dir(long path_ptr) {
     if (!dir) return taida_lax_empty(taida_list_new());
 
     // Collect entries, then sort
-    long capacity = 64;
-    long count = 0;
+    taida_val capacity = 64;
+    taida_val count = 0;
     char **names = (char**)malloc(capacity * sizeof(char*));
 
     struct dirent *entry;
@@ -6336,9 +6349,9 @@ long taida_os_list_dir(long path_ptr) {
         qsort(names, count, sizeof(char*), taida_cmp_strings);
     }
 
-    long list = taida_list_new();
-    for (long i = 0; i < count; i++) {
-        list = taida_list_push(list, (long)names[i]);
+    taida_val list = taida_list_new();
+    for (taida_val i = 0; i < count; i++) {
+        list = taida_list_push(list, (taida_val)names[i]);
     }
     free(names);
 
@@ -6346,19 +6359,19 @@ long taida_os_list_dir(long path_ptr) {
 }
 
 // ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
-long taida_os_stat(long path_ptr) {
+taida_val taida_os_stat(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
 
     // Build default stat pack
-    long default_pack = taida_pack_new(3);
-    long size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
-    long modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
-    long is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
-    taida_pack_set_hash(default_pack, 0, (long)size_hash);
+    taida_val default_pack = taida_pack_new(3);
+    taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
+    taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
+    taida_val is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
+    taida_pack_set_hash(default_pack, 0, (taida_val)size_hash);
     taida_pack_set(default_pack, 0, 0);
-    taida_pack_set_hash(default_pack, 1, (long)modified_hash);
-    taida_pack_set(default_pack, 1, (long)"");
-    taida_pack_set_hash(default_pack, 2, (long)is_dir_hash);
+    taida_pack_set_hash(default_pack, 1, (taida_val)modified_hash);
+    taida_pack_set(default_pack, 1, (taida_val)"");
+    taida_pack_set_hash(default_pack, 2, (taida_val)is_dir_hash);
     taida_pack_set(default_pack, 2, 0);
 
     if (!path) return taida_lax_empty(default_pack);
@@ -6377,36 +6390,36 @@ long taida_os_stat(long path_ptr) {
     }
     char *time_str = taida_str_new_copy(time_buf);
 
-    long stat_pack = taida_pack_new(3);
-    taida_pack_set_hash(stat_pack, 0, (long)size_hash);
-    taida_pack_set(stat_pack, 0, (long)st.st_size);
-    taida_pack_set_hash(stat_pack, 1, (long)modified_hash);
-    taida_pack_set(stat_pack, 1, (long)time_str);
-    taida_pack_set_hash(stat_pack, 2, (long)is_dir_hash);
+    taida_val stat_pack = taida_pack_new(3);
+    taida_pack_set_hash(stat_pack, 0, (taida_val)size_hash);
+    taida_pack_set(stat_pack, 0, (taida_val)st.st_size);
+    taida_pack_set_hash(stat_pack, 1, (taida_val)modified_hash);
+    taida_pack_set(stat_pack, 1, (taida_val)time_str);
+    taida_pack_set_hash(stat_pack, 2, (taida_val)is_dir_hash);
     taida_pack_set(stat_pack, 2, S_ISDIR(st.st_mode) ? 1 : 0);
 
     return taida_lax_new(stat_pack, default_pack);
 }
 
 // ── Exists[path]() → Bool ─────────────────────────────────
-long taida_os_exists(long path_ptr) {
+taida_val taida_os_exists(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return 0;
     return access(path, F_OK) == 0 ? 1 : 0;
 }
 
 // ── EnvVar[name]() → Lax[Str] ─────────────────────────────
-long taida_os_env_var(long name_ptr) {
+taida_val taida_os_env_var(taida_val name_ptr) {
     const char *name = (const char*)name_ptr;
-    if (!name) return taida_lax_empty((long)"");
+    if (!name) return taida_lax_empty((taida_val)"");
     const char *val = getenv(name);
-    if (!val) return taida_lax_empty((long)"");
+    if (!val) return taida_lax_empty((taida_val)"");
     char *copy = taida_str_new_copy(val);
-    return taida_lax_new((long)copy, (long)"");
+    return taida_lax_new((taida_val)copy, (taida_val)"");
 }
 
 // ── writeFile(path, content) → Result ──────────────────────
-long taida_os_write_file(long path_ptr, long content_ptr) {
+taida_val taida_os_write_file(taida_val path_ptr, taida_val content_ptr) {
     const char *path = (const char*)path_ptr;
     const char *content = (const char*)content_ptr;
     if (!path || !content) return taida_os_result_failure(EINVAL, "writeFile: invalid arguments");
@@ -6423,18 +6436,18 @@ long taida_os_write_file(long path_ptr, long content_ptr) {
 }
 
 // ── writeBytes(path, content) → Result ─────────────────────
-long taida_os_write_bytes(long path_ptr, long content_ptr) {
+taida_val taida_os_write_bytes(taida_val path_ptr, taida_val content_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return taida_os_result_failure(EINVAL, "writeBytes: invalid arguments");
 
     unsigned char *payload_buf = NULL;
     size_t payload_len = 0;
     if (TAIDA_IS_BYTES(content_ptr)) {
-        long *bytes = (long*)content_ptr;
-        long len = bytes[1];
+        taida_val *bytes = (taida_val*)content_ptr;
+        taida_val len = bytes[1];
         if (len < 0) return taida_os_result_failure(EINVAL, "writeBytes: invalid bytes payload");
         payload_buf = (unsigned char*)malloc((size_t)len);
-        for (long i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
+        for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
         const char *content = (const char*)content_ptr;
@@ -6466,7 +6479,7 @@ long taida_os_write_bytes(long path_ptr, long content_ptr) {
 }
 
 // ── appendFile(path, content) → Result ─────────────────────
-long taida_os_append_file(long path_ptr, long content_ptr) {
+taida_val taida_os_append_file(taida_val path_ptr, taida_val content_ptr) {
     const char *path = (const char*)path_ptr;
     const char *content = (const char*)content_ptr;
     if (!path || !content) return taida_os_result_failure(EINVAL, "appendFile: invalid arguments");
@@ -6508,7 +6521,7 @@ static int taida_os_remove_recursive(const char *path) {
     }
 }
 
-long taida_os_remove(long path_ptr) {
+taida_val taida_os_remove(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return taida_os_result_failure(EINVAL, "remove: invalid arguments");
 
@@ -6538,7 +6551,7 @@ static int taida_os_mkdir_p(const char *path) {
     return 0;
 }
 
-long taida_os_create_dir(long path_ptr) {
+taida_val taida_os_create_dir(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
     if (!path) return taida_os_result_failure(EINVAL, "createDir: invalid arguments");
 
@@ -6549,7 +6562,7 @@ long taida_os_create_dir(long path_ptr) {
 }
 
 // ── rename(from, to) → Result ──────────────────────────────
-long taida_os_rename(long from_ptr, long to_ptr) {
+taida_val taida_os_rename(taida_val from_ptr, taida_val to_ptr) {
     const char *from = (const char*)from_ptr;
     const char *to = (const char*)to_ptr;
     if (!from || !to) return taida_os_result_failure(EINVAL, "rename: invalid arguments");
@@ -6561,13 +6574,13 @@ long taida_os_rename(long from_ptr, long to_ptr) {
 }
 
 // ── run(program, args) → Gorillax[@(stdout, stderr, code)] ──
-long taida_os_run(long program_ptr, long args_list_ptr) {
+taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
     const char *program = (const char*)program_ptr;
     if (!program) return taida_gorillax_err(taida_make_io_error(EINVAL, "run: invalid arguments"));
 
     // Build argv from list
-    long *list = (long*)args_list_ptr;
-    long argc = list ? list[2] : 0;
+    taida_val *list = (taida_val*)args_list_ptr;
+    taida_val argc = list ? list[2] : 0;
 
     // Create pipes for stdout and stderr
     int stdout_pipe[2], stderr_pipe[2];
@@ -6594,7 +6607,7 @@ long taida_os_run(long program_ptr, long args_list_ptr) {
         // Build argv: [program, arg0, arg1, ..., NULL]
         char **argv = (char**)malloc((argc + 2) * sizeof(char*));
         argv[0] = (char*)program;
-        for (long i = 0; i < argc; i++) {
+        for (taida_val i = 0; i < argc; i++) {
             argv[i + 1] = (char*)list[4 + i];
         }
         argv[argc + 1] = NULL;
@@ -6637,10 +6650,10 @@ long taida_os_run(long program_ptr, long args_list_ptr) {
 
     int status;
     waitpid(pid, &status, 0);
-    long exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    taida_val exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
     if (exit_code == 0) {
-        long inner = taida_os_process_inner(out_buf, err_buf, exit_code);
+        taida_val inner = taida_os_process_inner(out_buf, err_buf, exit_code);
         free(out_buf);
         free(err_buf);
         return taida_gorillax_new(inner);
@@ -6649,13 +6662,13 @@ long taida_os_run(long program_ptr, long args_list_ptr) {
         free(err_buf);
         char msg[256];
         snprintf(msg, sizeof(msg), "Process '%s' exited with code %ld", program, exit_code);
-        long error = taida_make_error("ProcessError", msg);
+        taida_val error = taida_make_error("ProcessError", msg);
         return taida_gorillax_err(error);
     }
 }
 
 // ── execShell(command) → Gorillax[@(stdout, stderr, code)] ──
-long taida_os_exec_shell(long command_ptr) {
+taida_val taida_os_exec_shell(taida_val command_ptr) {
     const char *command = (const char*)command_ptr;
     if (!command) return taida_gorillax_err(taida_make_io_error(EINVAL, "execShell: invalid arguments"));
 
@@ -6707,10 +6720,10 @@ long taida_os_exec_shell(long command_ptr) {
 
     int status;
     waitpid(pid, &status, 0);
-    long exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    taida_val exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
     if (exit_code == 0) {
-        long inner = taida_os_process_inner(out_buf, err_buf, exit_code);
+        taida_val inner = taida_os_process_inner(out_buf, err_buf, exit_code);
         free(out_buf);
         free(err_buf);
         return taida_gorillax_new(inner);
@@ -6719,7 +6732,7 @@ long taida_os_exec_shell(long command_ptr) {
         free(err_buf);
         char msg[256];
         snprintf(msg, sizeof(msg), "Shell command exited with code %ld: %s", exit_code, command);
-        long error = taida_make_error("ProcessError", msg);
+        taida_val error = taida_make_error("ProcessError", msg);
         return taida_gorillax_err(error);
     }
 }
@@ -6727,16 +6740,16 @@ long taida_os_exec_shell(long command_ptr) {
 // ── allEnv() → HashMap[Str, Str] ──────────────────────────
 extern char **environ;
 
-long taida_os_all_env(void) {
+taida_val taida_os_all_env(void) {
     // F-24 fix: count env vars and set initial capacity accordingly
-    long env_count = 0;
+    taida_val env_count = 0;
     if (environ) {
         for (char **e = environ; *e; e++) env_count++;
     }
     // Capacity should be at least 2x entries for good load factor
-    long init_cap = 16;
+    taida_val init_cap = 16;
     while (init_cap * 3 < env_count * 4) init_cap *= 2;  // ensure load < 0.75
-    long hm = taida_hashmap_new_with_cap(init_cap);
+    taida_val hm = taida_hashmap_new_with_cap(init_cap);
     // NO-1: allEnv returns HashMap[Str, Str] — set value_type_tag
     taida_hashmap_set_value_tag(hm, TAIDA_TAG_STR);
     if (!environ) return hm;
@@ -6747,19 +6760,19 @@ long taida_os_all_env(void) {
         char *key = taida_str_alloc(key_len);
         memcpy(key, *env, key_len);
         char *val = taida_str_new_copy(eq + 1);
-        long key_hash = taida_str_hash((long)key);
-        hm = taida_hashmap_set(hm, key_hash, (long)key, (long)val);
+        taida_val key_hash = taida_str_hash((taida_val)key);
+        hm = taida_hashmap_set(hm, key_hash, (taida_val)key, (taida_val)val);
     }
     return hm;
 }
 
-long taida_os_argv(void) {
-    long list = taida_list_new();
+taida_val taida_os_argv(void) {
+    taida_val list = taida_list_new();
     if (!taida_cli_argv || taida_cli_argc <= 1) return list;
     // Native binary mode: <program> [args...]
     for (int i = 1; i < taida_cli_argc; i++) {
         const char *arg = taida_cli_argv[i] ? taida_cli_argv[i] : "";
-        list = taida_list_push(list, (long)taida_str_new_copy(arg));
+        list = taida_list_push(list, (taida_val)taida_str_new_copy(arg));
     }
     return list;
 }
@@ -6776,16 +6789,16 @@ long taida_os_argv(void) {
 
 // Helper: create a resolved Async[value] (fulfilled)
 // NO-3: auto-detect value type for ownership tracking
-static long taida_async_resolved(long value) {
-    long vtag = taida_detect_value_tag(value);
+static taida_val taida_async_resolved(taida_val value) {
+    taida_val vtag = taida_detect_value_tag(value);
     return taida_async_ok_tagged(value, vtag);
 }
 
 // ── ReadAsync[path]() → Async[Lax[Str]] ──────────────────
 // Synchronous implementation wrapped in Async (pthread spawn for true async is future work)
-long taida_os_read_async(long path_ptr) {
+taida_val taida_os_read_async(taida_val path_ptr) {
     // Reuse the sync Read implementation, wrap in Async
-    long lax_result = taida_os_read(path_ptr);
+    taida_val lax_result = taida_os_read(path_ptr);
     return taida_async_resolved(lax_result);
 }
 
@@ -6795,42 +6808,42 @@ long taida_os_read_async(long path_ptr) {
 #define TAIDA_HTTP_BODY_HASH    0xcd4de79bc6c93295ULL
 #define TAIDA_HTTP_HEADERS_HASH 0x8cc1ca917bac9b49ULL
 
-static long taida_os_http_default_response(void) {
-    long result = taida_pack_new(3);
-    taida_pack_set_hash(result, 0, (long)TAIDA_HTTP_STATUS_HASH);
+static taida_val taida_os_http_default_response(void) {
+    taida_val result = taida_pack_new(3);
+    taida_pack_set_hash(result, 0, (taida_val)TAIDA_HTTP_STATUS_HASH);
     taida_pack_set(result, 0, 0);
-    taida_pack_set_hash(result, 1, (long)TAIDA_HTTP_BODY_HASH);
-    taida_pack_set(result, 1, (long)"");
-    taida_pack_set_hash(result, 2, (long)TAIDA_HTTP_HEADERS_HASH);
+    taida_pack_set_hash(result, 1, (taida_val)TAIDA_HTTP_BODY_HASH);
+    taida_pack_set(result, 1, (taida_val)"");
+    taida_pack_set_hash(result, 2, (taida_val)TAIDA_HTTP_HEADERS_HASH);
     taida_pack_set(result, 2, taida_pack_new(0));
     return result;
 }
 
-static long taida_os_http_failure_lax(void) {
+static taida_val taida_os_http_failure_lax(void) {
     return taida_lax_empty(taida_os_http_default_response());
 }
 
-static char *taida_os_http_headers_to_lines(long headers_ptr) {
+static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
     if (!headers_ptr || !taida_is_buchi_pack(headers_ptr)) {
         char *empty = (char*)malloc(1);
         empty[0] = '\0';
         return empty;
     }
 
-    long *pack = (long*)headers_ptr;
-    long fc = pack[1];
+    taida_val *pack = (taida_val*)headers_ptr;
+    taida_val fc = pack[1];
     size_t cap = 128;
     size_t len = 0;
     char *buf = (char*)malloc(cap);
     buf[0] = '\0';
 
-    for (long i = 0; i < fc; i++) {
-        long field_hash = pack[2 + i * 3];
-        long field_val = pack[2 + i * 3 + 2];
+    for (taida_val i = 0; i < fc; i++) {
+        taida_val field_hash = pack[2 + i * 3];
+        taida_val field_val = pack[2 + i * 3 + 2];
         const char *name = taida_lookup_field_name(field_hash);
         if (!name || !name[0]) continue;
 
-        long value_str_ptr = taida_value_to_display_string(field_val);
+        taida_val value_str_ptr = taida_value_to_display_string(field_val);
         const char *value_str = (const char*)value_str_ptr;
         if (!value_str) value_str = "";
 
@@ -6853,7 +6866,7 @@ static char *taida_os_http_headers_to_lines(long headers_ptr) {
     return buf;
 }
 
-static long taida_os_http_parse_headers(const char *header_start, const char *header_end) {
+static taida_val taida_os_http_parse_headers(const char *header_start, const char *header_end) {
     if (!header_start || !header_end || header_end <= header_start) return taida_pack_new(0);
 
     const char *lines_start = strstr(header_start, "\r\n");
@@ -6871,10 +6884,10 @@ static long taida_os_http_parse_headers(const char *header_start, const char *he
         scan = line_end + 2;
     }
 
-    long headers_pack = taida_pack_new((long)header_count);
-    long idx = 0;
+    taida_val headers_pack = taida_pack_new((taida_val)header_count);
+    taida_val idx = 0;
     scan = lines_start;
-    while (scan < header_end && idx < (long)header_count) {
+    while (scan < header_end && idx < (taida_val)header_count) {
         const char *line_end = strstr(scan, "\r\n");
         if (!line_end || line_end > header_end) line_end = header_end;
         const char *colon = memchr(scan, ':', (size_t)(line_end - scan));
@@ -6895,13 +6908,13 @@ static long taida_os_http_parse_headers(const char *header_start, const char *he
             memcpy(value, value_start, value_len);
             value[value_len] = '\0';
 
-            long key_hash = taida_str_hash((long)key);
-            taida_register_field_name(key_hash, (long)key);
-            taida_register_field_type(key_hash, (long)key, 3);
+            taida_val key_hash = taida_str_hash((taida_val)key);
+            taida_register_field_name(key_hash, (taida_val)key);
+            taida_register_field_type(key_hash, (taida_val)key, 3);
             taida_pack_set_hash(headers_pack, idx, key_hash);
             char *value_str = taida_str_new_copy(value);
             free(value);
-            taida_pack_set(headers_pack, idx, (long)value_str);
+            taida_pack_set(headers_pack, idx, (taida_val)value_str);
             taida_pack_set_tag(headers_pack, idx, TAIDA_TAG_STR);
             idx++;
         }
@@ -6954,7 +6967,7 @@ static char *taida_os_shell_quote(const char *s) {
     return out;
 }
 
-static long taida_os_http_do_curl(const char *method, const char *url, long headers_ptr, const char *body) {
+static taida_val taida_os_http_do_curl(const char *method, const char *url, taida_val headers_ptr, const char *body) {
     const char *method_str = (method && *method) ? method : "GET";
     const char *url_str = url ? url : "";
     const char *body_str = body ? body : "";
@@ -6990,15 +7003,15 @@ static long taida_os_http_do_curl(const char *method, const char *url, long head
     free(q_url);
 
     if (headers_ptr && taida_is_buchi_pack(headers_ptr)) {
-        long *pack = (long*)headers_ptr;
-        long fc = pack[1];
-        for (long i = 0; i < fc; i++) {
-            long field_hash = pack[2 + i * 3];
-            long field_val = pack[2 + i * 3 + 2];
+        taida_val *pack = (taida_val*)headers_ptr;
+        taida_val fc = pack[1];
+        for (taida_val i = 0; i < fc; i++) {
+            taida_val field_hash = pack[2 + i * 3];
+            taida_val field_val = pack[2 + i * 3 + 2];
             const char *name = taida_lookup_field_name(field_hash);
             if (!name || !name[0]) continue;
 
-            long value_str_ptr = taida_value_to_display_string(field_val);
+            taida_val value_str_ptr = taida_value_to_display_string(field_val);
             const char *value_str = (const char*)value_str_ptr;
             if (!value_str) value_str = "";
 
@@ -7100,21 +7113,21 @@ static long taida_os_http_do_curl(const char *method, const char *url, long head
     memcpy(body_copy, resp_body, resp_body_len);
     body_copy[resp_body_len] = '\0';
 
-    long headers_pack = taida_os_http_parse_headers(resp_buf, header_end);
+    taida_val headers_pack = taida_os_http_parse_headers(resp_buf, header_end);
 
-    long result = taida_pack_new(3);
-    taida_pack_set_hash(result, 0, (long)TAIDA_HTTP_STATUS_HASH);
-    taida_pack_set(result, 0, (long)status_code);
-    taida_pack_set_hash(result, 1, (long)TAIDA_HTTP_BODY_HASH);
-    taida_pack_set(result, 1, (long)body_copy);
-    taida_pack_set_hash(result, 2, (long)TAIDA_HTTP_HEADERS_HASH);
+    taida_val result = taida_pack_new(3);
+    taida_pack_set_hash(result, 0, (taida_val)TAIDA_HTTP_STATUS_HASH);
+    taida_pack_set(result, 0, (taida_val)status_code);
+    taida_pack_set_hash(result, 1, (taida_val)TAIDA_HTTP_BODY_HASH);
+    taida_pack_set(result, 1, (taida_val)body_copy);
+    taida_pack_set_hash(result, 2, (taida_val)TAIDA_HTTP_HEADERS_HASH);
     taida_pack_set(result, 2, headers_pack);
 
     free(resp_buf);
     return taida_async_resolved(taida_lax_new(result, taida_os_http_default_response()));
 }
 
-static long taida_os_http_do(const char *method, const char *url, long headers_ptr, const char *body) {
+static taida_val taida_os_http_do(const char *method, const char *url, taida_val headers_ptr, const char *body) {
     if (!url) return taida_async_resolved(taida_os_http_failure_lax());
 
     const char *scheme_end = strstr(url, "://");
@@ -7255,29 +7268,29 @@ static long taida_os_http_do(const char *method, const char *url, long headers_p
     memcpy(body_copy, resp_body, resp_body_len);
     body_copy[resp_body_len] = '\0';
 
-    long headers_pack = taida_os_http_parse_headers(resp_buf, header_end);
+    taida_val headers_pack = taida_os_http_parse_headers(resp_buf, header_end);
 
-    long result = taida_pack_new(3);
-    taida_pack_set_hash(result, 0, (long)TAIDA_HTTP_STATUS_HASH);
-    taida_pack_set(result, 0, (long)status_code);
-    taida_pack_set_hash(result, 1, (long)TAIDA_HTTP_BODY_HASH);
-    taida_pack_set(result, 1, (long)body_copy);
-    taida_pack_set_hash(result, 2, (long)TAIDA_HTTP_HEADERS_HASH);
+    taida_val result = taida_pack_new(3);
+    taida_pack_set_hash(result, 0, (taida_val)TAIDA_HTTP_STATUS_HASH);
+    taida_pack_set(result, 0, (taida_val)status_code);
+    taida_pack_set_hash(result, 1, (taida_val)TAIDA_HTTP_BODY_HASH);
+    taida_pack_set(result, 1, (taida_val)body_copy);
+    taida_pack_set_hash(result, 2, (taida_val)TAIDA_HTTP_HEADERS_HASH);
     taida_pack_set(result, 2, headers_pack);
 
     free(resp_buf);
     return taida_async_resolved(taida_lax_new(result, taida_os_http_default_response()));
 }
 
-long taida_os_http_get(long url_ptr) {
+taida_val taida_os_http_get(taida_val url_ptr) {
     return taida_os_http_do("GET", (const char*)url_ptr, 0, NULL);
 }
 
-long taida_os_http_post(long url_ptr, long body_ptr) {
+taida_val taida_os_http_post(taida_val url_ptr, taida_val body_ptr) {
     return taida_os_http_do("POST", (const char*)url_ptr, 0, (const char*)body_ptr);
 }
 
-long taida_os_http_request(long method_ptr, long url_ptr, long headers_ptr, long body_ptr) {
+taida_val taida_os_http_request(taida_val method_ptr, taida_val url_ptr, taida_val headers_ptr, taida_val body_ptr) {
     const char *method = (const char*)method_ptr;
     if (!method || !*method) method = "GET";
     return taida_os_http_do(method, (const char*)url_ptr, headers_ptr, (const char*)body_ptr);
@@ -7285,13 +7298,13 @@ long taida_os_http_request(long method_ptr, long url_ptr, long headers_ptr, long
 
 // ── TCP socket APIs ───────────────────────────────────────
 
-static long taida_os_network_timeout_ms(long timeout_ms) {
+static taida_val taida_os_network_timeout_ms(taida_val timeout_ms) {
     if (timeout_ms <= 0 || timeout_ms > 600000) return 30000;
     return timeout_ms;
 }
 
-static void taida_os_apply_socket_timeout(int fd, long timeout_ms) {
-    long ms = taida_os_network_timeout_ms(timeout_ms);
+static void taida_os_apply_socket_timeout(int fd, taida_val timeout_ms) {
+    taida_val ms = taida_os_network_timeout_ms(timeout_ms);
     struct timeval tv;
     tv.tv_sec = (time_t)(ms / 1000);
     tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
@@ -7299,7 +7312,7 @@ static void taida_os_apply_socket_timeout(int fd, long timeout_ms) {
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
-static long taida_os_dns_failure(const char *op_name, int gai_code) {
+static taida_val taida_os_dns_failure(const char *op_name, int gai_code) {
     char msg[256];
     if (gai_code != 0) {
         snprintf(msg, sizeof(msg), "%s: %s", op_name, gai_strerror(gai_code));
@@ -7309,7 +7322,7 @@ static long taida_os_dns_failure(const char *op_name, int gai_code) {
     return taida_async_resolved(taida_os_result_failure(EINVAL, msg));
 }
 
-long taida_os_dns_resolve(long host_ptr, long timeout_ms) {
+taida_val taida_os_dns_resolve(taida_val host_ptr, taida_val timeout_ms) {
     (void)timeout_ms; // getaddrinfo timeout is not configurable per-call in this runtime path.
 
     const char *host = (const char*)host_ptr;
@@ -7325,7 +7338,7 @@ long taida_os_dns_resolve(long host_ptr, long timeout_ms) {
         return taida_os_dns_failure("dnsResolve", gai);
     }
 
-    long addresses = taida_list_new();
+    taida_val addresses = taida_list_new();
     for (struct addrinfo *it = res; it; it = it->ai_next) {
         char ip_buf[INET6_ADDRSTRLEN] = {0};
         const char *ip = NULL;
@@ -7341,9 +7354,9 @@ long taida_os_dns_resolve(long host_ptr, long timeout_ms) {
         if (!ip || !ip[0]) continue;
 
         int exists = 0;
-        long len = taida_list_length(addresses);
-        long *list_ptr = (long*)addresses;
-        for (long i = 0; i < len; i++) {
+        taida_val len = taida_list_length(addresses);
+        taida_val *list_ptr = (taida_val*)addresses;
+        for (taida_val i = 0; i < len; i++) {
             const char *prev = (const char*)list_ptr[4 + i];
             if (prev && strcmp(prev, ip) == 0) {
                 exists = 1;
@@ -7353,7 +7366,7 @@ long taida_os_dns_resolve(long host_ptr, long timeout_ms) {
         if (exists) continue;
 
         char *copy = taida_str_new_copy(ip);
-        addresses = taida_list_push(addresses, (long)copy);
+        addresses = taida_list_push(addresses, (taida_val)copy);
     }
     freeaddrinfo(res);
 
@@ -7361,14 +7374,14 @@ long taida_os_dns_resolve(long host_ptr, long timeout_ms) {
         return taida_os_dns_failure("dnsResolve", 0);
     }
 
-    long inner = taida_pack_new(1);
-    long addresses_hash = taida_str_hash((long)"addresses");
+    taida_val inner = taida_pack_new(1);
+    taida_val addresses_hash = taida_str_hash((taida_val)"addresses");
     taida_pack_set_hash(inner, 0, addresses_hash);
     taida_pack_set(inner, 0, addresses);
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_tcp_connect(long host_ptr, long port, long timeout_ms) {
+taida_val taida_os_tcp_connect(taida_val host_ptr, taida_val port, taida_val timeout_ms) {
     const char *host = (const char*)host_ptr;
     if (!host) return taida_async_resolved(taida_os_result_failure(EINVAL, "tcpConnect: invalid host"));
 
@@ -7397,23 +7410,23 @@ long taida_os_tcp_connect(long host_ptr, long port, long timeout_ms) {
     freeaddrinfo(res);
 
     // Return @(socket: fd, host: host, port: port)
-    long inner = taida_pack_new(3);
-    long socket_hash = 0x10f2dcb841372d0cULL;
-    taida_pack_set_hash(inner, 0, (long)socket_hash);
-    taida_pack_set(inner, 0, (long)sockfd);
-    long host_hash = 0x4077f8cc7eaf4d6fULL;
-    taida_pack_set_hash(inner, 1, (long)host_hash);
+    taida_val inner = taida_pack_new(3);
+    taida_val socket_hash = 0x10f2dcb841372d0cULL;
+    taida_pack_set_hash(inner, 0, (taida_val)socket_hash);
+    taida_pack_set(inner, 0, (taida_val)sockfd);
+    taida_val host_hash = 0x4077f8cc7eaf4d6fULL;
+    taida_pack_set_hash(inner, 1, (taida_val)host_hash);
     char *host_copy = taida_str_new_copy(host);
-    taida_pack_set(inner, 1, (long)host_copy);
+    taida_pack_set(inner, 1, (taida_val)host_copy);
     taida_pack_set_tag(inner, 1, TAIDA_TAG_STR);
-    long port_hash = 0x8c2cdb0da8933fa6ULL;
-    taida_pack_set_hash(inner, 2, (long)port_hash);
+    taida_val port_hash = 0x8c2cdb0da8933fa6ULL;
+    taida_pack_set_hash(inner, 2, (taida_val)port_hash);
     taida_pack_set(inner, 2, port);
 
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_tcp_listen(long port, long timeout_ms) {
+taida_val taida_os_tcp_listen(taida_val port, taida_val timeout_ms) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
@@ -7440,18 +7453,18 @@ long taida_os_tcp_listen(long port, long timeout_ms) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
 
-    long inner = taida_pack_new(2);
-    long listener_hash = 0x5a2d194b8a8ae591ULL;
-    taida_pack_set_hash(inner, 0, (long)listener_hash);
-    taida_pack_set(inner, 0, (long)sockfd);
-    long port_hash = 0x8c2cdb0da8933fa6ULL;
-    taida_pack_set_hash(inner, 1, (long)port_hash);
+    taida_val inner = taida_pack_new(2);
+    taida_val listener_hash = 0x5a2d194b8a8ae591ULL;
+    taida_pack_set_hash(inner, 0, (taida_val)listener_hash);
+    taida_pack_set(inner, 0, (taida_val)sockfd);
+    taida_val port_hash = 0x8c2cdb0da8933fa6ULL;
+    taida_pack_set_hash(inner, 1, (taida_val)port_hash);
     taida_pack_set(inner, 1, port);
 
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_tcp_accept(long listener_fd, long timeout_ms) {
+taida_val taida_os_tcp_accept(taida_val listener_fd, taida_val timeout_ms) {
     struct sockaddr_in peer_addr;
     socklen_t peer_len = sizeof(peer_addr);
     taida_os_apply_socket_timeout((int)listener_fd, timeout_ms);
@@ -7465,16 +7478,16 @@ long taida_os_tcp_accept(long listener_fd, long timeout_ms) {
     char host_buf[INET_ADDRSTRLEN] = {0};
     const char *peer_host = inet_ntop(AF_INET, &peer_addr.sin_addr, host_buf, sizeof(host_buf));
     if (!peer_host) peer_host = "";
-    long peer_port = (long)ntohs(peer_addr.sin_port);
+    taida_val peer_port = (taida_val)ntohs(peer_addr.sin_port);
 
-    long inner = taida_pack_new(3);
-    long socket_hash = taida_str_hash((long)"socket");
-    long host_hash = taida_str_hash((long)"host");
-    long port_hash = taida_str_hash((long)"port");
+    taida_val inner = taida_pack_new(3);
+    taida_val socket_hash = taida_str_hash((taida_val)"socket");
+    taida_val host_hash = taida_str_hash((taida_val)"host");
+    taida_val port_hash = taida_str_hash((taida_val)"port");
     taida_pack_set_hash(inner, 0, socket_hash);
-    taida_pack_set(inner, 0, (long)client_fd);
+    taida_pack_set(inner, 0, (taida_val)client_fd);
     taida_pack_set_hash(inner, 1, host_hash);
-    taida_pack_set(inner, 1, (long)taida_str_new_copy(peer_host));
+    taida_pack_set(inner, 1, (taida_val)taida_str_new_copy(peer_host));
     taida_pack_set_tag(inner, 1, TAIDA_TAG_STR);
     taida_pack_set_hash(inner, 2, port_hash);
     taida_pack_set(inner, 2, peer_port);
@@ -7482,15 +7495,15 @@ long taida_os_tcp_accept(long listener_fd, long timeout_ms) {
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_socket_send(long socket_fd, long data_ptr, long timeout_ms) {
+taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
     unsigned char *payload_buf = NULL;
     size_t payload_len = 0;
     if (TAIDA_IS_BYTES(data_ptr)) {
-        long *bytes = (long*)data_ptr;
-        long len = bytes[1];
+        taida_val *bytes = (taida_val*)data_ptr;
+        taida_val len = bytes[1];
         if (len < 0) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSend: invalid data"));
         payload_buf = (unsigned char*)malloc((size_t)len);
-        for (long i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
+        for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
         const char *data = (const char*)data_ptr;
@@ -7510,26 +7523,26 @@ long taida_os_socket_send(long socket_fd, long data_ptr, long timeout_ms) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
 
-    long inner = taida_pack_new(2);
-    long ok_hash = 0x08b05d07b5566befULL;
-    taida_pack_set_hash(inner, 0, (long)ok_hash);
+    taida_val inner = taida_pack_new(2);
+    taida_val ok_hash = 0x08b05d07b5566befULL;
+    taida_pack_set_hash(inner, 0, (taida_val)ok_hash);
     taida_pack_set(inner, 0, 1);
-    long bytes_hash = 0x67ec7cd6a574048aULL;
-    taida_pack_set_hash(inner, 1, (long)bytes_hash);
+    taida_val bytes_hash = 0x67ec7cd6a574048aULL;
+    taida_pack_set_hash(inner, 1, (taida_val)bytes_hash);
     taida_pack_set(inner, 1, sent);
 
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_socket_send_all(long socket_fd, long data_ptr, long timeout_ms) {
+taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
     unsigned char *payload_buf = NULL;
     size_t payload_len = 0;
     if (TAIDA_IS_BYTES(data_ptr)) {
-        long *bytes = (long*)data_ptr;
-        long len = bytes[1];
+        taida_val *bytes = (taida_val*)data_ptr;
+        taida_val len = bytes[1];
         if (len < 0) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSendAll: invalid data"));
         payload_buf = (unsigned char*)malloc((size_t)len);
-        for (long i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
+        for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
         const char *data = (const char*)data_ptr;
@@ -7561,50 +7574,50 @@ long taida_os_socket_send_all(long socket_fd, long data_ptr, long timeout_ms) {
     }
     free(payload_buf);
 
-    long inner = taida_pack_new(2);
-    long ok_hash = taida_str_hash((long)"ok");
-    long bytes_hash = taida_str_hash((long)"bytesSent");
+    taida_val inner = taida_pack_new(2);
+    taida_val ok_hash = taida_str_hash((taida_val)"ok");
+    taida_val bytes_hash = taida_str_hash((taida_val)"bytesSent");
     taida_pack_set_hash(inner, 0, ok_hash);
     taida_pack_set(inner, 0, 1);
     taida_pack_set_hash(inner, 1, bytes_hash);
-    taida_pack_set(inner, 1, (long)sent_total);
+    taida_pack_set(inner, 1, (taida_val)sent_total);
 
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_socket_recv(long socket_fd, long timeout_ms) {
+taida_val taida_os_socket_recv(taida_val socket_fd, taida_val timeout_ms) {
     char buf[65536];
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recv((int)socket_fd, buf, sizeof(buf) - 1, 0);
     if (n <= 0) {
-        return taida_async_resolved(taida_lax_empty((long)""));
+        return taida_async_resolved(taida_lax_empty((taida_val)""));
     }
     buf[n] = '\0';
     char *result = taida_str_new_copy(buf);
-    return taida_async_resolved(taida_lax_new((long)result, (long)""));
+    return taida_async_resolved(taida_lax_new((taida_val)result, (taida_val)""));
 }
 
-long taida_os_socket_send_bytes(long socket_fd, long data_ptr, long timeout_ms) {
+taida_val taida_os_socket_send_bytes(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
     return taida_os_socket_send(socket_fd, data_ptr, timeout_ms);
 }
 
-long taida_os_socket_recv_bytes(long socket_fd, long timeout_ms) {
+taida_val taida_os_socket_recv_bytes(taida_val socket_fd, taida_val timeout_ms) {
     unsigned char buf[65536];
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recv((int)socket_fd, buf, sizeof(buf), 0);
     if (n <= 0) {
         return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
     }
-    long bytes = taida_bytes_from_raw(buf, (long)n);
+    taida_val bytes = taida_bytes_from_raw(buf, (taida_val)n);
     return taida_async_resolved(taida_lax_new(bytes, taida_bytes_default_value()));
 }
 
-long taida_os_socket_recv_exact(long socket_fd, long size, long timeout_ms) {
+taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_val timeout_ms) {
     if (size < 0) {
         return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
     }
     if (size == 0) {
-        long empty = taida_bytes_default_value();
+        taida_val empty = taida_bytes_default_value();
         return taida_async_resolved(taida_lax_new(empty, empty));
     }
 
@@ -7629,20 +7642,20 @@ long taida_os_socket_recv_exact(long socket_fd, long size, long timeout_ms) {
         total += (size_t)n;
     }
 
-    long bytes = taida_bytes_from_raw(buf, size);
+    taida_val bytes = taida_bytes_from_raw(buf, size);
     free(buf);
     return taida_async_resolved(taida_lax_new(bytes, taida_bytes_default_value()));
 }
 
-static long taida_os_udp_default_payload(void) {
-    long payload = taida_pack_new(4);
-    long host_hash = taida_str_hash((long)"host");
-    long port_hash = taida_str_hash((long)"port");
-    long data_hash = taida_str_hash((long)"data");
-    long truncated_hash = taida_str_hash((long)"truncated");
+static taida_val taida_os_udp_default_payload(void) {
+    taida_val payload = taida_pack_new(4);
+    taida_val host_hash = taida_str_hash((taida_val)"host");
+    taida_val port_hash = taida_str_hash((taida_val)"port");
+    taida_val data_hash = taida_str_hash((taida_val)"data");
+    taida_val truncated_hash = taida_str_hash((taida_val)"truncated");
 
     taida_pack_set_hash(payload, 0, host_hash);
-    taida_pack_set(payload, 0, (long)taida_str_new_copy(""));
+    taida_pack_set(payload, 0, (taida_val)taida_str_new_copy(""));
     taida_pack_set_hash(payload, 1, port_hash);
     taida_pack_set(payload, 1, 0);
     taida_pack_set_hash(payload, 2, data_hash);
@@ -7652,7 +7665,7 @@ static long taida_os_udp_default_payload(void) {
     return payload;
 }
 
-long taida_os_udp_bind(long host_ptr, long port, long timeout_ms) {
+taida_val taida_os_udp_bind(taida_val host_ptr, taida_val port, taida_val timeout_ms) {
     const char *host = (const char*)host_ptr;
     if (!host) return taida_async_resolved(taida_os_result_failure(EINVAL, "udpBind: invalid host"));
 
@@ -7690,14 +7703,14 @@ long taida_os_udp_bind(long host_ptr, long port, long timeout_ms) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
 
-    long inner = taida_pack_new(3);
-    long socket_hash = taida_str_hash((long)"socket");
-    long host_hash = taida_str_hash((long)"host");
-    long port_hash = taida_str_hash((long)"port");
+    taida_val inner = taida_pack_new(3);
+    taida_val socket_hash = taida_str_hash((taida_val)"socket");
+    taida_val host_hash = taida_str_hash((taida_val)"host");
+    taida_val port_hash = taida_str_hash((taida_val)"port");
     taida_pack_set_hash(inner, 0, socket_hash);
-    taida_pack_set(inner, 0, (long)sockfd);
+    taida_pack_set(inner, 0, (taida_val)sockfd);
     taida_pack_set_hash(inner, 1, host_hash);
-    taida_pack_set(inner, 1, (long)taida_str_new_copy(host));
+    taida_pack_set(inner, 1, (taida_val)taida_str_new_copy(host));
     taida_pack_set_tag(inner, 1, TAIDA_TAG_STR);
     taida_pack_set_hash(inner, 2, port_hash);
     taida_pack_set(inner, 2, port);
@@ -7705,7 +7718,7 @@ long taida_os_udp_bind(long host_ptr, long port, long timeout_ms) {
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_udp_send_to(long socket_fd, long host_ptr, long port, long data_ptr, long timeout_ms) {
+taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_val port, taida_val data_ptr, taida_val timeout_ms) {
     const char *host = (const char*)host_ptr;
     if (!host) {
         return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: invalid arguments"));
@@ -7714,13 +7727,13 @@ long taida_os_udp_send_to(long socket_fd, long host_ptr, long port, long data_pt
     unsigned char *payload_buf = NULL;
     size_t payload_len = 0;
     if (TAIDA_IS_BYTES(data_ptr)) {
-        long *bytes = (long*)data_ptr;
-        long len = bytes[1];
+        taida_val *bytes = (taida_val*)data_ptr;
+        taida_val len = bytes[1];
         if (len < 0) {
             return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: invalid bytes payload"));
         }
         payload_buf = (unsigned char*)malloc((size_t)len);
-        for (long i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
+        for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
         const char *data = (const char*)data_ptr;
@@ -7753,9 +7766,9 @@ long taida_os_udp_send_to(long socket_fd, long host_ptr, long port, long data_pt
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
 
-    long inner = taida_pack_new(2);
-    long ok_hash = taida_str_hash((long)"ok");
-    long bytes_hash = taida_str_hash((long)"bytesSent");
+    taida_val inner = taida_pack_new(2);
+    taida_val ok_hash = taida_str_hash((taida_val)"ok");
+    taida_val bytes_hash = taida_str_hash((taida_val)"bytesSent");
     taida_pack_set_hash(inner, 0, ok_hash);
     taida_pack_set(inner, 0, 1);
     taida_pack_set_hash(inner, 1, bytes_hash);
@@ -7763,7 +7776,7 @@ long taida_os_udp_send_to(long socket_fd, long host_ptr, long port, long data_pt
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_os_udp_recv_from(long socket_fd, long timeout_ms) {
+taida_val taida_os_udp_recv_from(taida_val socket_fd, taida_val timeout_ms) {
     unsigned char buf[65508];
     struct sockaddr_in from_addr;
     socklen_t from_len = sizeof(from_addr);
@@ -7773,25 +7786,25 @@ long taida_os_udp_recv_from(long socket_fd, long timeout_ms) {
     if (n < 0) {
         return taida_async_resolved(taida_lax_empty(taida_os_udp_default_payload()));
     }
-    long copy_len = (long)n;
-    long truncated = 0;
+    taida_val copy_len = (taida_val)n;
+    taida_val truncated = 0;
     if ((size_t)n > sizeof(buf)) {
-        copy_len = (long)sizeof(buf);
+        copy_len = (taida_val)sizeof(buf);
         truncated = 1;
     }
 
     char host_buf[INET_ADDRSTRLEN] = {0};
     const char *host = inet_ntop(AF_INET, &from_addr.sin_addr, host_buf, sizeof(host_buf));
     if (!host) host = "";
-    long peer_port = (long)ntohs(from_addr.sin_port);
+    taida_val peer_port = (taida_val)ntohs(from_addr.sin_port);
 
-    long payload = taida_pack_new(4);
-    long host_hash = taida_str_hash((long)"host");
-    long port_hash = taida_str_hash((long)"port");
-    long data_hash = taida_str_hash((long)"data");
-    long truncated_hash = taida_str_hash((long)"truncated");
+    taida_val payload = taida_pack_new(4);
+    taida_val host_hash = taida_str_hash((taida_val)"host");
+    taida_val port_hash = taida_str_hash((taida_val)"port");
+    taida_val data_hash = taida_str_hash((taida_val)"data");
+    taida_val truncated_hash = taida_str_hash((taida_val)"truncated");
     taida_pack_set_hash(payload, 0, host_hash);
-    taida_pack_set(payload, 0, (long)taida_str_new_copy(host));
+    taida_pack_set(payload, 0, (taida_val)taida_str_new_copy(host));
     taida_pack_set_tag(payload, 0, TAIDA_TAG_STR);
     taida_pack_set_hash(payload, 1, port_hash);
     taida_pack_set(payload, 1, peer_port);
@@ -7803,14 +7816,14 @@ long taida_os_udp_recv_from(long socket_fd, long timeout_ms) {
     return taida_async_resolved(taida_lax_new(payload, taida_os_udp_default_payload()));
 }
 
-long taida_os_socket_close(long socket_fd) {
+taida_val taida_os_socket_close(taida_val socket_fd) {
     if (close((int)socket_fd) < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
     return taida_async_resolved(taida_os_result_success(taida_os_ok_inner()));
 }
 
-long taida_os_listener_close(long listener_fd) {
+taida_val taida_os_listener_close(taida_val listener_fd) {
     if (close((int)listener_fd) < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
@@ -7823,76 +7836,76 @@ long taida_os_listener_close(long listener_fd) {
 
 typedef struct {
     int open;
-    long max_size;
-    long max_idle;
-    long acquire_timeout_ms;
-    long next_token;
+    taida_val max_size;
+    taida_val max_idle;
+    taida_val acquire_timeout_ms;
+    taida_val next_token;
     size_t idle_len;
     size_t idle_cap;
-    long *idle_tokens;
-    long *idle_resources;
+    taida_val *idle_tokens;
+    taida_val *idle_resources;
     size_t in_use_len;
     size_t in_use_cap;
-    long *in_use_tokens;
+    taida_val *in_use_tokens;
 } taida_pool_state;
 
 static taida_pool_state *taida_pool_states[TAIDA_POOL_MAX_STATES] = {0};
-static long taida_pool_next_id = 1;
+static taida_val taida_pool_next_id = 1;
 
-static long taida_pool_parse_handle(long pool_or_pack) {
-    long pool_hash = taida_str_hash((long)"pool");
+static taida_val taida_pool_parse_handle(taida_val pool_or_pack) {
+    taida_val pool_hash = taida_str_hash((taida_val)"pool");
     if (taida_is_buchi_pack(pool_or_pack) && taida_pack_has_hash(pool_or_pack, pool_hash)) {
         return taida_pack_get(pool_or_pack, pool_hash);
     }
     return pool_or_pack;
 }
 
-static long taida_pool_io_error(const char *kind, const char *msg) {
+static taida_val taida_pool_io_error(const char *kind, const char *msg) {
     const char *message = msg ? msg : "pool error";
     const char *k = kind ? kind : "other";
-    long error = taida_pack_new(4);
-    taida_pack_set_hash(error, 0, (long)HASH_TYPE);
-    taida_pack_set(error, 0, (long)taida_str_new_copy("IoError"));
+    taida_val error = taida_pack_new(4);
+    taida_pack_set_hash(error, 0, (taida_val)HASH_TYPE);
+    taida_pack_set(error, 0, (taida_val)taida_str_new_copy("IoError"));
     taida_pack_set_tag(error, 0, TAIDA_TAG_STR);
-    taida_pack_set_hash(error, 1, (long)HASH_MESSAGE);
-    taida_pack_set(error, 1, (long)taida_str_new_copy(message));
+    taida_pack_set_hash(error, 1, (taida_val)HASH_MESSAGE);
+    taida_pack_set(error, 1, (taida_val)taida_str_new_copy(message));
     taida_pack_set_tag(error, 1, TAIDA_TAG_STR);
-    long code_hash = taida_str_hash((long)"code");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
     taida_pack_set_hash(error, 2, code_hash);
     taida_pack_set(error, 2, -1);
-    long kind_hash = taida_str_hash((long)"kind");
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
     taida_pack_set_hash(error, 3, kind_hash);
-    taida_pack_set(error, 3, (long)taida_str_new_copy(k));
+    taida_pack_set(error, 3, (taida_val)taida_str_new_copy(k));
     taida_pack_set_tag(error, 3, TAIDA_TAG_STR);
     return error;
 }
 
-static long taida_pool_result_failure(const char *kind, const char *msg) {
+static taida_val taida_pool_result_failure(const char *kind, const char *msg) {
     const char *message = msg ? msg : "pool error";
     const char *k = kind ? kind : "other";
-    long inner = taida_pack_new(4);
-    long ok_hash = taida_str_hash((long)"ok");
-    long code_hash = taida_str_hash((long)"code");
-    long msg_hash = taida_str_hash((long)"message");
-    long kind_hash = taida_str_hash((long)"kind");
+    taida_val inner = taida_pack_new(4);
+    taida_val ok_hash = taida_str_hash((taida_val)"ok");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
+    taida_val msg_hash = taida_str_hash((taida_val)"message");
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
     taida_pack_set_hash(inner, 0, ok_hash);
     taida_pack_set(inner, 0, 0);
     taida_pack_set_hash(inner, 1, code_hash);
     taida_pack_set(inner, 1, -1);
     taida_pack_set_hash(inner, 2, msg_hash);
-    taida_pack_set(inner, 2, (long)taida_str_new_copy(message));
+    taida_pack_set(inner, 2, (taida_val)taida_str_new_copy(message));
     taida_pack_set_tag(inner, 2, TAIDA_TAG_STR);
     taida_pack_set_hash(inner, 3, kind_hash);
-    taida_pack_set(inner, 3, (long)taida_str_new_copy(k));
+    taida_pack_set(inner, 3, (taida_val)taida_str_new_copy(k));
     taida_pack_set_tag(inner, 3, TAIDA_TAG_STR);
     return taida_result_create(inner, taida_pool_io_error(k, message), 0);
 }
 
-static int taida_pool_push_idle(taida_pool_state *st, long token, long resource) {
+static int taida_pool_push_idle(taida_pool_state *st, taida_val token, taida_val resource) {
     if (st->idle_len >= st->idle_cap) {
         size_t new_cap = st->idle_cap == 0 ? 4 : st->idle_cap * 2;
-        long *new_tokens = (long*)realloc(st->idle_tokens, sizeof(long) * new_cap);
-        long *new_resources = (long*)realloc(st->idle_resources, sizeof(long) * new_cap);
+        taida_val *new_tokens = (taida_val*)realloc(st->idle_tokens, sizeof(taida_val) * new_cap);
+        taida_val *new_resources = (taida_val*)realloc(st->idle_resources, sizeof(taida_val) * new_cap);
         if (!new_tokens || !new_resources) {
             if (new_tokens) st->idle_tokens = new_tokens;
             if (new_resources) st->idle_resources = new_resources;
@@ -7908,10 +7921,10 @@ static int taida_pool_push_idle(taida_pool_state *st, long token, long resource)
     return 1;
 }
 
-static int taida_pool_push_in_use(taida_pool_state *st, long token) {
+static int taida_pool_push_in_use(taida_pool_state *st, taida_val token) {
     if (st->in_use_len >= st->in_use_cap) {
         size_t new_cap = st->in_use_cap == 0 ? 4 : st->in_use_cap * 2;
-        long *new_tokens = (long*)realloc(st->in_use_tokens, sizeof(long) * new_cap);
+        taida_val *new_tokens = (taida_val*)realloc(st->in_use_tokens, sizeof(taida_val) * new_cap);
         if (!new_tokens) return 0;
         st->in_use_tokens = new_tokens;
         st->in_use_cap = new_cap;
@@ -7920,19 +7933,19 @@ static int taida_pool_push_in_use(taida_pool_state *st, long token) {
     return 1;
 }
 
-static long taida_pool_find_in_use_idx(taida_pool_state *st, long token) {
+static taida_val taida_pool_find_in_use_idx(taida_pool_state *st, taida_val token) {
     for (size_t i = 0; i < st->in_use_len; i++) {
-        if (st->in_use_tokens[i] == token) return (long)i;
+        if (st->in_use_tokens[i] == token) return (taida_val)i;
     }
     return -1;
 }
 
-static long taida_pool_health_pack(long open, long idle, long in_use, long waiting) {
-    long pack = taida_pack_new(4);
-    long open_hash = taida_str_hash((long)"open");
-    long idle_hash = taida_str_hash((long)"idle");
-    long in_use_hash = taida_str_hash((long)"inUse");
-    long waiting_hash = taida_str_hash((long)"waiting");
+static taida_val taida_pool_health_pack(taida_val open, taida_val idle, taida_val in_use, taida_val waiting) {
+    taida_val pack = taida_pack_new(4);
+    taida_val open_hash = taida_str_hash((taida_val)"open");
+    taida_val idle_hash = taida_str_hash((taida_val)"idle");
+    taida_val in_use_hash = taida_str_hash((taida_val)"inUse");
+    taida_val waiting_hash = taida_str_hash((taida_val)"waiting");
     taida_pack_set_hash(pack, 0, open_hash);
     taida_pack_set(pack, 0, open ? 1 : 0);
     taida_pack_set_hash(pack, 1, idle_hash);
@@ -7944,17 +7957,17 @@ static long taida_pool_health_pack(long open, long idle, long in_use, long waiti
     return pack;
 }
 
-long taida_pool_create(long config_ptr) {
+taida_val taida_pool_create(taida_val config_ptr) {
     if (!taida_is_buchi_pack(config_ptr)) {
         return taida_pool_result_failure("invalid", "poolCreate: config must be a pack");
     }
 
-    long max_size = 10;
-    long max_idle = 10;
-    long acquire_timeout_ms = 30000;
-    long max_size_hash = taida_str_hash((long)"maxSize");
-    long max_idle_hash = taida_str_hash((long)"maxIdle");
-    long timeout_hash = taida_str_hash((long)"acquireTimeoutMs");
+    taida_val max_size = 10;
+    taida_val max_idle = 10;
+    taida_val acquire_timeout_ms = 30000;
+    taida_val max_size_hash = taida_str_hash((taida_val)"maxSize");
+    taida_val max_idle_hash = taida_str_hash((taida_val)"maxIdle");
+    taida_val timeout_hash = taida_str_hash((taida_val)"acquireTimeoutMs");
 
     if (taida_pack_has_hash(config_ptr, max_size_hash)) {
         max_size = taida_pack_get(config_ptr, max_size_hash);
@@ -7977,7 +7990,7 @@ long taida_pool_create(long config_ptr) {
         return taida_pool_result_failure("invalid", "poolCreate: acquireTimeoutMs must be > 0");
     }
 
-    long pool_id = taida_pool_next_id++;
+    taida_val pool_id = taida_pool_next_id++;
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES) {
         return taida_pool_result_failure("other", "poolCreate: pool table exhausted");
     }
@@ -7991,15 +8004,15 @@ long taida_pool_create(long config_ptr) {
     st->next_token = 1;
     taida_pool_states[pool_id] = st;
 
-    long inner = taida_pack_new(1);
-    long pool_hash = taida_str_hash((long)"pool");
+    taida_val inner = taida_pack_new(1);
+    taida_val pool_hash = taida_str_hash((taida_val)"pool");
     taida_pack_set_hash(inner, 0, pool_hash);
     taida_pack_set(inner, 0, pool_id);
     return taida_os_result_success(inner);
 }
 
-long taida_pool_acquire(long pool_or_pack, long timeout_ms) {
-    long pool_id = taida_pool_parse_handle(pool_or_pack);
+taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms) {
+    taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
         return taida_async_resolved(taida_pool_result_failure("invalid", "poolAcquire: unknown pool handle"));
     }
@@ -8009,18 +8022,18 @@ long taida_pool_acquire(long pool_or_pack, long timeout_ms) {
         return taida_async_resolved(taida_pool_result_failure("closed", "poolAcquire: pool is closed"));
     }
 
-    long effective_timeout = timeout_ms > 0 ? timeout_ms : st->acquire_timeout_ms;
+    taida_val effective_timeout = timeout_ms > 0 ? timeout_ms : st->acquire_timeout_ms;
     if (effective_timeout <= 0) {
         return taida_async_resolved(taida_pool_result_failure("invalid", "poolAcquire: timeoutMs must be > 0"));
     }
 
-    long token = 0;
-    long resource = 0;  // Unit
+    taida_val token = 0;
+    taida_val resource = 0;  // Unit
     if (st->idle_len > 0) {
         st->idle_len--;
         token = st->idle_tokens[st->idle_len];
         resource = st->idle_resources[st->idle_len];
-    } else if ((long)st->in_use_len < st->max_size) {
+    } else if ((taida_val)st->in_use_len < st->max_size) {
         token = st->next_token++;
         resource = 0;
     } else {
@@ -8033,9 +8046,9 @@ long taida_pool_acquire(long pool_or_pack, long timeout_ms) {
         return taida_async_resolved(taida_pool_result_failure("other", "poolAcquire: out of memory"));
     }
 
-    long inner = taida_pack_new(2);
-    long resource_hash = taida_str_hash((long)"resource");
-    long token_hash = taida_str_hash((long)"token");
+    taida_val inner = taida_pack_new(2);
+    taida_val resource_hash = taida_str_hash((taida_val)"resource");
+    taida_val token_hash = taida_str_hash((taida_val)"token");
     taida_pack_set_hash(inner, 0, resource_hash);
     taida_pack_set(inner, 0, resource);
     taida_pack_set_hash(inner, 1, token_hash);
@@ -8043,8 +8056,8 @@ long taida_pool_acquire(long pool_or_pack, long timeout_ms) {
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_pool_release(long pool_or_pack, long token, long resource) {
-    long pool_id = taida_pool_parse_handle(pool_or_pack);
+taida_val taida_pool_release(taida_val pool_or_pack, taida_val token, taida_val resource) {
+    taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
         return taida_pool_result_failure("invalid", "poolRelease: unknown pool handle");
     }
@@ -8054,24 +8067,24 @@ long taida_pool_release(long pool_or_pack, long token, long resource) {
         return taida_pool_result_failure("closed", "poolRelease: pool is closed");
     }
 
-    long idx = taida_pool_find_in_use_idx(st, token);
+    taida_val idx = taida_pool_find_in_use_idx(st, token);
     if (idx < 0) {
         return taida_pool_result_failure("invalid", "poolRelease: token is not in-use");
     }
     st->in_use_tokens[idx] = st->in_use_tokens[st->in_use_len - 1];
     st->in_use_len--;
 
-    long reused = 0;
-    if ((long)st->idle_len < st->max_idle) {
+    taida_val reused = 0;
+    if ((taida_val)st->idle_len < st->max_idle) {
         if (!taida_pool_push_idle(st, token, resource)) {
             return taida_pool_result_failure("other", "poolRelease: out of memory");
         }
         reused = 1;
     }
 
-    long inner = taida_pack_new(2);
-    long ok_hash = taida_str_hash((long)"ok");
-    long reused_hash = taida_str_hash((long)"reused");
+    taida_val inner = taida_pack_new(2);
+    taida_val ok_hash = taida_str_hash((taida_val)"ok");
+    taida_val reused_hash = taida_str_hash((taida_val)"reused");
     taida_pack_set_hash(inner, 0, ok_hash);
     taida_pack_set(inner, 0, 1);
     taida_pack_set_hash(inner, 1, reused_hash);
@@ -8079,8 +8092,8 @@ long taida_pool_release(long pool_or_pack, long token, long resource) {
     return taida_os_result_success(inner);
 }
 
-long taida_pool_close(long pool_or_pack) {
-    long pool_id = taida_pool_parse_handle(pool_or_pack);
+taida_val taida_pool_close(taida_val pool_or_pack) {
+    taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
         return taida_async_resolved(taida_pool_result_failure("invalid", "poolClose: unknown pool handle"));
     }
@@ -8092,25 +8105,25 @@ long taida_pool_close(long pool_or_pack) {
     st->idle_len = 0;
     st->in_use_len = 0;
 
-    long inner = taida_pack_new(1);
-    long ok_hash = taida_str_hash((long)"ok");
+    taida_val inner = taida_pack_new(1);
+    taida_val ok_hash = taida_str_hash((taida_val)"ok");
     taida_pack_set_hash(inner, 0, ok_hash);
     taida_pack_set(inner, 0, 1);
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-long taida_pool_health(long pool_or_pack) {
-    long pool_id = taida_pool_parse_handle(pool_or_pack);
+taida_val taida_pool_health(taida_val pool_or_pack) {
+    taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
         return taida_pool_health_pack(0, 0, 0, 0);
     }
     taida_pool_state *st = taida_pool_states[pool_id];
-    return taida_pool_health_pack(st->open, (long)st->idle_len, (long)st->in_use_len, 0);
+    return taida_pool_health_pack(st->open, (taida_val)st->idle_len, (taida_val)st->in_use_len, 0);
 }
 
 int main(int argc, char **argv) {
     taida_cli_argc = argc;
     taida_cli_argv = argv;
-    long result = _taida_main();
+    taida_val result = _taida_main();
     return (int)result;
 }
