@@ -235,10 +235,22 @@ pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
         }
     }
 
+    // W-5g: Build function name -> user arity map for closure creation.
+    // User arity = total params - 1 (for __env), or total params if no __env.
+    let mut func_user_arity: HashMap<String, usize> = HashMap::new();
+    for func in &ir_module.functions {
+        let arity = if func.params.first().map(|s| s.as_str()) == Some("__env") {
+            func.params.len().saturating_sub(1)
+        } else {
+            func.params.len()
+        };
+        func_user_arity.insert(func.name.clone(), arity);
+    }
+
     // 関数定義
     for func in &ir_module.functions {
         writeln!(c).unwrap();
-        emit_function(&mut c, func, &global_map)?;
+        emit_function(&mut c, func, &global_map, &func_user_arity)?;
     }
 
     Ok(c)
@@ -409,7 +421,7 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         // W-4f: Polymorphic isEmpty
         "taida_polymorphic_is_empty" => "int64_t taida_polymorphic_is_empty(int64_t ptr);".to_string(),
         // W-5: Closure runtime functions
-        "taida_closure_new" => "int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr);".to_string(),
+        "taida_closure_new" => "int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr, int64_t user_arity);".to_string(),
         "taida_closure_get_fn" => "int64_t taida_closure_get_fn(int64_t closure_ptr);".to_string(),
         "taida_closure_get_env" => "int64_t taida_closure_get_env(int64_t closure_ptr);".to_string(),
         "taida_is_closure_value" => "int64_t taida_is_closure_value(int64_t val);".to_string(),
@@ -498,6 +510,7 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
 struct FuncContext<'a> {
     param_names: Vec<String>,
     global_map: &'a HashMap<i64, String>,
+    func_user_arity: &'a HashMap<String, usize>,
 }
 
 /// 単一関数を C コードに変換
@@ -505,6 +518,7 @@ fn emit_function(
     c: &mut String,
     func: &IrFunction,
     global_map: &HashMap<i64, String>,
+    func_user_arity: &HashMap<String, usize>,
 ) -> Result<(), WasmCEmitError> {
     // 関数シグネチャ
     write!(c, "int64_t {}(", func.name).unwrap();
@@ -553,6 +567,7 @@ fn emit_function(
     let fctx = FuncContext {
         param_names: func.params.clone(),
         global_map,
+        func_user_arity,
     };
 
     // 末尾再帰のサポート: TailCall を含む場合はループで囲む
@@ -748,8 +763,10 @@ fn emit_inst(
                 // Set hash to 0 (not needed for index-based access)
                 writeln!(c, "{}taida_pack_set({}, {}LL, nv_{});", indent, env_var, i, sanitize_name(cap_name)).unwrap();
             }
-            // 2. Create closure: taida_closure_new(fn_ptr, env_ptr)
-            writeln!(c, "{}v_{} = taida_closure_new((int64_t)(intptr_t)&{}, {});", indent, dst, func_name, env_var).unwrap();
+            // 2. Create closure: taida_closure_new(fn_ptr, env_ptr, user_arity)
+            // W-5g: user_arity is needed for WASM indirect call type matching
+            let user_arity = fctx.func_user_arity.get(func_name.as_str()).copied().unwrap_or(0);
+            writeln!(c, "{}v_{} = taida_closure_new((int64_t)(intptr_t)&{}, {}, {}LL);", indent, dst, func_name, env_var, user_arity).unwrap();
         }
         // W-5: CallIndirect — indirect function call (closure or plain function pointer)
         IrInst::CallIndirect(dst, fn_var, args) => {

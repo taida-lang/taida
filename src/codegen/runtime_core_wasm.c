@@ -263,6 +263,8 @@ int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);
 int64_t taida_throw(int64_t error_val);
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
 int64_t taida_can_throw_payload(int64_t val);
+static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
+static int64_t _wasm_result_is_error_check(int64_t result);
 
 /* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
@@ -276,24 +278,52 @@ int64_t taida_mod_mold(int64_t a, int64_t b) {
     return taida_lax_new(a % b, 0);
 }
 
-/* ── generic_unmold — W-5f: Lax/Result/Gorillax-aware ── */
+/* ── generic_unmold — W-5g: Lax/Result/Gorillax-aware, predicate-evaluated ── */
 
 int64_t taida_generic_unmold(int64_t val) {
     if (_wasm_is_lax(val)) {
         return taida_lax_unmold(val);
     }
     if (_wasm_is_result(val)) {
-        /* Result unmold: check throw, then return __value */
-        int64_t throw_val = taida_pack_get_idx(val, 2); /* throw field */
+        /* Result unmold: evaluate predicate + check throw (matching native) */
+        int64_t value = taida_pack_get_idx(val, 0);      /* __value */
+        int64_t pred = taida_pack_get_idx(val, 1);        /* __predicate */
+        int64_t throw_val = taida_pack_get_idx(val, 2);   /* throw */
+
         if (throw_val != 0) {
-            /* Has throw — invoke throw */
+            if (pred != 0) {
+                int64_t pred_result = _wasm_invoke_callback1(pred, value);
+                if (!pred_result) {
+                    /* Predicate failed — throw the error */
+                    if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+                    int64_t error = taida_make_error(
+                        (int64_t)(intptr_t)"ResultError",
+                        (int64_t)(intptr_t)"Result predicate failed");
+                    return taida_throw(error);
+                }
+                /* Predicate passed even with throw set — return value */
+                return value;
+            }
+            /* No predicate, throw is set — throw */
             if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
             int64_t error = taida_make_error(
                 (int64_t)(intptr_t)"ResultError",
                 (int64_t)(intptr_t)"Result error");
             return taida_throw(error);
         }
-        return taida_pack_get_idx(val, 0); /* __value */
+
+        /* Evaluate predicate if present (no throw set) */
+        if (pred != 0) {
+            int64_t pred_result = _wasm_invoke_callback1(pred, value);
+            if (pred_result) return value;  /* success */
+            /* Predicate failed — throw default error */
+            int64_t error = taida_make_error(
+                (int64_t)(intptr_t)"ResultError",
+                (int64_t)(intptr_t)"Result predicate failed");
+            return taida_throw(error);
+        }
+
+        return value; /* no throw, no predicate — success */
     }
     if (_wasm_is_gorillax(val)) {
         /* Gorillax unmold: return __value if ok, throw otherwise */
@@ -894,8 +924,22 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
    - Gorillax/Relaxed: hash0 = WASM_HASH_IS_OK     (0x7c9519b57ab70d1e)
    - Result:           hash0 = WASM_HASH___VALUE    (0x7c9537dfed3ca530) */
 
+/* W-5g: Bounds-check helper for WASM32. On wasm32, intptr_t is 32-bit,
+   so int64_t values that are bitcast floats (e.g. _d2l(3.14)) would be
+   truncated and dereference invalid memory. This helper prevents that. */
+static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes) {
+    if (val <= 0 || val > 0xFFFFFFFF) return 0;
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    unsigned int addr = (unsigned int)val;
+    if (addr < 4096) return 0; /* skip low addresses (null, small ints) */
+    if (addr + min_bytes > mem_size) return 0;
+    return 1;
+}
+
 static int _wasm_is_result(int64_t val) {
-    if (val < 4096) return 0;
+    /* Need at least 13 int64_t slots (fc + 4*3 fields) = 104 bytes */
+    if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
     /* Result: fc=4, hash0 = WASM_HASH___VALUE, hash2 = WASM_HASH_THROW */
     if (p[0] == 4 && p[1] == WASM_HASH___VALUE) {
@@ -906,7 +950,7 @@ static int _wasm_is_result(int64_t val) {
 }
 
 static int _wasm_is_gorillax(int64_t val) {
-    if (val < 4096) return 0;
+    if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
     /* Gorillax/RelaxedGorillax: fc=4, hash0 = WASM_HASH_IS_OK */
     if (p[0] == 4 && p[1] == WASM_HASH_IS_OK) return 1;
@@ -949,10 +993,9 @@ static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
     return _sb_finish(&sb);
 }
 
-/* W-5f: Result.toString() — "Result(value)" or "Result(throw <= message)" */
+/* W-5g: Result.toString() — predicate-aware, matching native */
 static int64_t _wasm_result_to_string(int64_t result) {
-    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
-    if (throw_val == 0) {
+    if (!_wasm_result_is_error_check(result)) {
         /* Success case */
         int64_t value = taida_pack_get_idx(result, 0); /* __value */
         int64_t value_str = _wasm_value_to_display_string(value);
@@ -964,6 +1007,10 @@ static int64_t _wasm_result_to_string(int64_t result) {
         return _sb_finish(&sb);
     }
     /* Error case */
+    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
+    if (throw_val == 0) {
+        return (int64_t)(intptr_t)"Result(throw <= error)";
+    }
     int64_t err_str = _wasm_value_to_display_string(throw_val);
     _wasm_strbuf sb;
     _sb_init(&sb);
@@ -1752,12 +1799,13 @@ int64_t taida_polymorphic_is_empty(int64_t ptr) {
 
 #define WASM_CLOSURE_MARKER 0x434C4F53ULL /* "CLOS" */
 
-int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr) {
-    int64_t *closure = (int64_t *)wasm_alloc(3 * 8);
+int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr, int64_t user_arity) {
+    int64_t *closure = (int64_t *)wasm_alloc(4 * 8);
     if (!closure) return 0;
     closure[0] = (int64_t)WASM_CLOSURE_MARKER;
     closure[1] = fn_ptr;
     closure[2] = env_ptr;
+    closure[3] = user_arity; /* W-5g: number of user args (excluding __env) */
     return (int64_t)(intptr_t)closure;
 }
 
@@ -1772,7 +1820,8 @@ int64_t taida_closure_get_env(int64_t closure_ptr) {
 }
 
 int64_t taida_is_closure_value(int64_t val) {
-    if (val < 4096) return 0;
+    /* W-5g: bounds check before dereference (closure is 4 * int64_t = 32 bytes) */
+    if (!_wasm_is_valid_ptr(val, 32)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
     return (p[0] == (int64_t)WASM_CLOSURE_MARKER) ? 1 : 0;
 }
@@ -1933,7 +1982,7 @@ int64_t taida_lax_is_empty(int64_t lax_ptr) {
 
 /* Forward declare: check if a value is a Lax pack */
 static int _wasm_is_lax(int64_t val) {
-    if (val < 4096) return 0;
+    if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
     /* Check if it looks like a pack with 4 fields and first hash = HASH_HAS_VALUE */
     if (p[0] == 4 && p[1] == WASM_HASH_HAS_VALUE) return 1;
@@ -2048,13 +2097,36 @@ int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate)
     return pack;
 }
 
+/* W-5g: Helper — check if Result has error (matching native taida_result_is_error_check).
+   1. If throw is set (not 0), it's an error — UNLESS predicate passes
+   2. If predicate exists, evaluate P(value) — true = success, false = error
+   3. No predicate + no throw = success (backward compatible) */
+static int64_t _wasm_result_is_error_check(int64_t result) {
+    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw */
+    int64_t pred = taida_pack_get_idx(result, 1);      /* __predicate */
+    int64_t value = taida_pack_get_idx(result, 0);     /* __value */
+
+    if (throw_val != 0) {
+        if (pred != 0) {
+            int64_t pred_result = _wasm_invoke_callback1(pred, value);
+            if (!pred_result) return 1; /* predicate failed — error */
+            return 0; /* predicate passed even though throw was set — success */
+        }
+        return 1; /* throw set, no predicate — error */
+    }
+    if (pred != 0) {
+        int64_t pred_result = _wasm_invoke_callback1(pred, value);
+        return pred_result ? 0 : 1;
+    }
+    return 0; /* no throw, no predicate — success */
+}
+
 int64_t taida_result_is_ok(int64_t result) {
-    /* ok if throw field (index 2) is 0 */
-    return taida_pack_get_idx(result, 2) == 0 ? 1 : 0;
+    return _wasm_result_is_error_check(result) ? 0 : 1;
 }
 
 int64_t taida_result_is_error(int64_t result) {
-    return taida_pack_get_idx(result, 2) != 0 ? 1 : 0;
+    return _wasm_result_is_error_check(result);
 }
 
 int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
@@ -2065,12 +2137,23 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
 
 /* ── W-5: Cage ── */
 
-/* Callback invoker helpers for wasm-min */
+/* Callback invoker helpers for wasm-min
+ * W-5g: In WASM, indirect call type signature must match exactly.
+ * Zero-param lambdas (_ = expr) have user_arity=0, so the closure function
+ * only takes (__env). We must dispatch based on arity to avoid type mismatch. */
 static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
     if (taida_is_closure_value(fn_ptr)) {
         int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
-        typedef int64_t (*closure_fn_t)(int64_t, int64_t);
-        closure_fn_t func = (closure_fn_t)(intptr_t)closure[1];
+        int64_t user_arity = closure[3];
+        if (user_arity == 0) {
+            /* Zero-param lambda: call with env only, ignore arg0 */
+            typedef int64_t (*closure_fn0_t)(int64_t);
+            closure_fn0_t func = (closure_fn0_t)(intptr_t)closure[1];
+            return func(closure[2]);
+        }
+        /* 1+ param lambda: call with env + arg0 */
+        typedef int64_t (*closure_fn1_t)(int64_t, int64_t);
+        closure_fn1_t func = (closure_fn1_t)(intptr_t)closure[1];
         return func(closure[2], arg0);
     }
     typedef int64_t (*fn_t)(int64_t);
@@ -2162,9 +2245,59 @@ int64_t taida_float_mold_float(int64_t v) {
 }
 
 int64_t taida_float_mold_str(int64_t v) {
-    /* Parse string to float — simplified */
-    (void)v;
-    return taida_lax_new(_d2l(0.0), _d2l(0.0));
+    /* Parse string to float — manual parser (no strtod in wasm freestanding) */
+    const char *s = (const char *)(intptr_t)v;
+    if (!s || *s == '\0') return taida_lax_empty(_d2l(0.0));
+
+    int i = 0;
+    int negative = 0;
+    if (s[i] == '-') { negative = 1; i++; }
+    else if (s[i] == '+') { i++; }
+
+    /* Must start with digit or '.' */
+    if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '.'))
+        return taida_lax_empty(_d2l(0.0));
+
+    double result = 0.0;
+    /* Integer part */
+    while (s[i] >= '0' && s[i] <= '9') {
+        result = result * 10.0 + (s[i] - '0');
+        i++;
+    }
+    /* Fractional part */
+    if (s[i] == '.') {
+        i++;
+        double frac = 0.1;
+        int has_frac = 0;
+        while (s[i] >= '0' && s[i] <= '9') {
+            result += (s[i] - '0') * frac;
+            frac *= 0.1;
+            has_frac = 1;
+            i++;
+        }
+        (void)has_frac;
+    }
+    /* Exponent part (e/E) */
+    if (s[i] == 'e' || s[i] == 'E') {
+        i++;
+        int exp_neg = 0;
+        if (s[i] == '-') { exp_neg = 1; i++; }
+        else if (s[i] == '+') { i++; }
+        int exp = 0;
+        while (s[i] >= '0' && s[i] <= '9') {
+            exp = exp * 10 + (s[i] - '0');
+            i++;
+        }
+        double multiplier = 1.0;
+        for (int e = 0; e < exp; e++) multiplier *= 10.0;
+        if (exp_neg) result /= multiplier;
+        else result *= multiplier;
+    }
+    /* Must have consumed entire string */
+    if (s[i] != '\0') return taida_lax_empty(_d2l(0.0));
+
+    if (negative) result = -result;
+    return taida_lax_new(_d2l(result), _d2l(0.0));
 }
 
 int64_t taida_float_mold_bool(int64_t v) {
@@ -2182,11 +2315,12 @@ int64_t taida_bool_mold_float(int64_t v) {
 
 int64_t taida_bool_mold_str(int64_t v) {
     const char *s = (const char *)(intptr_t)v;
-    if (s && s[0] == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'e' && s[4] == 0)
+    if (!s) return taida_lax_empty(0);
+    if (s[0] == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'e' && s[4] == 0)
         return taida_lax_new(1, 0);
-    if (s && s[0] == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e' && s[5] == 0)
+    if (s[0] == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e' && s[5] == 0)
         return taida_lax_new(0, 0);
-    return taida_lax_new(0, 0); /* default false */
+    return taida_lax_empty(0); /* not "true" or "false" — empty Lax */
 }
 
 int64_t taida_bool_mold_bool(int64_t v) {

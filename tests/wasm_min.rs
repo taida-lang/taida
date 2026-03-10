@@ -884,3 +884,49 @@ fn wasm_min_result_basic() {
         native_output, wasm
     );
 }
+
+/// W-5g F-1: Result with predicate — predicate-fail should be error, predicate-pass should succeed.
+#[test]
+fn wasm_min_result_predicate() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/result_predicate.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "result_predicate: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}
+
+/// W-5g F-2: Str->Float/Bool mold failure should return empty Lax (not success Lax(0)).
+#[test]
+fn wasm_min_mold_fail() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/mold_fail.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "mold_fail: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}
