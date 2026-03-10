@@ -438,7 +438,7 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_gorillax_relax" => "int64_t taida_gorillax_relax(int64_t gx);".to_string(),
         "taida_relaxed_gorillax_new" => "int64_t taida_relaxed_gorillax_new(int64_t value);".to_string(),
         "taida_relaxed_gorillax_err" => "int64_t taida_relaxed_gorillax_err(int64_t error);".to_string(),
-        "taida_result_create" => "int64_t taida_result_create(int64_t value, int64_t pred, int64_t throw_val, int64_t unmold_flag);".to_string(),
+        "taida_result_create" => "int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);".to_string(),
         "taida_result_is_ok" => "int64_t taida_result_is_ok(int64_t result);".to_string(),
         "taida_result_is_error" => "int64_t taida_result_is_error(int64_t result);".to_string(),
         "taida_result_map_error" => "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string(),

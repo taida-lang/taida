@@ -834,3 +834,53 @@ fn wasm_min_lax_basic() {
         interp, wasm
     );
 }
+
+// ---------------------------------------------------------------------------
+// W-5f: Lax/Result toString and Result basic tests
+// ---------------------------------------------------------------------------
+
+/// W-5f F-2: Lax.toString() — "Lax(42)", "Lax(default: 0)", "Lax(3)".
+#[test]
+fn wasm_min_lax_tostring() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/lax_tostring.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "lax_tostring: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}
+
+/// W-5f F-1/F-3: Result basic — create, unmold, toString.
+#[test]
+fn wasm_min_result_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/result_basic.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "result_basic: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}

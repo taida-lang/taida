@@ -252,28 +252,59 @@ int64_t taida_bool_and(int64_t a, int64_t b) { return (a && b) ? 1 : 0; }
 int64_t taida_bool_or(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
 int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 
-/* ── Forward declarations for Lax (defined in W-5 section below) ── */
+/* ── Forward declarations for Lax/Result/Gorillax (defined in W-5 section below) ── */
 int64_t taida_lax_new(int64_t value, int64_t default_value);
+int64_t taida_lax_empty(int64_t default_value);
 int64_t taida_lax_unmold(int64_t lax_ptr);
 static int _wasm_is_lax(int64_t val);
+static int _wasm_is_result(int64_t val);
+static int _wasm_is_gorillax(int64_t val);
+int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);
+int64_t taida_throw(int64_t error_val);
+int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
+int64_t taida_can_throw_payload(int64_t val);
 
 /* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
 int64_t taida_div_mold(int64_t a, int64_t b) {
-    if (b == 0) return taida_lax_new(0, 0);
+    if (b == 0) return taida_lax_empty(0);
     return taida_lax_new(a / b, 0);
 }
 
 int64_t taida_mod_mold(int64_t a, int64_t b) {
-    if (b == 0) return taida_lax_new(0, 0);
+    if (b == 0) return taida_lax_empty(0);
     return taida_lax_new(a % b, 0);
 }
 
-/* ── generic_unmold — W-5: Lax-aware (extracts value from Lax pack) ── */
+/* ── generic_unmold — W-5f: Lax/Result/Gorillax-aware ── */
 
 int64_t taida_generic_unmold(int64_t val) {
     if (_wasm_is_lax(val)) {
         return taida_lax_unmold(val);
+    }
+    if (_wasm_is_result(val)) {
+        /* Result unmold: check throw, then return __value */
+        int64_t throw_val = taida_pack_get_idx(val, 2); /* throw field */
+        if (throw_val != 0) {
+            /* Has throw — invoke throw */
+            if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+            int64_t error = taida_make_error(
+                (int64_t)(intptr_t)"ResultError",
+                (int64_t)(intptr_t)"Result error");
+            return taida_throw(error);
+        }
+        return taida_pack_get_idx(val, 0); /* __value */
+    }
+    if (_wasm_is_gorillax(val)) {
+        /* Gorillax unmold: return __value if ok, throw otherwise */
+        int64_t is_ok = taida_pack_get_idx(val, 0);
+        if (is_ok) return taida_pack_get_idx(val, 1); /* __value */
+        int64_t error_val = taida_pack_get_idx(val, 2); /* __error */
+        if (taida_can_throw_payload(error_val)) return taida_throw(error_val);
+        int64_t err = taida_make_error(
+            (int64_t)(intptr_t)"GorillaxError",
+            (int64_t)(intptr_t)"Gorillax error");
+        return taida_throw(err);
     }
     return val;
 }
@@ -707,6 +738,16 @@ static int64_t _wasm_value_to_debug_string(int64_t val);
 static int _is_wasm_hashmap(int64_t ptr);
 static const char *_wasm_lookup_field_name(int64_t hash);
 static int64_t _wasm_lookup_field_type(int64_t hash);
+/* W-5f: Monadic type hash constants (FNV-1a hashes of field names).
+   Centralized here for use by both display_string and the runtime constructors below. */
+#define WASM_HASH_HAS_VALUE   0x7c9515d6c843d1c0LL
+#define WASM_HASH___VALUE     0x7c9537dfed3ca530LL
+#define WASM_HASH___TYPE      0x7c9537e3ed3caf38LL
+#define WASM_HASH_IS_OK       0x7c9519b57ab70d1eLL
+#define WASM_HASH___ERROR     0x7c950f4ce4f47736LL
+#define WASM_HASH___DEFAULT   0x7c950e1c3b85a1c0LL
+#define WASM_HASH_THROW       0x7c9536adee0f6a14LL
+#define WASM_HASH___PREDICATE 0x7c952b0c14af9d98LL
 
 /* W-4f2: Dynamic string buffer for building collection toString output */
 typedef struct {
@@ -847,6 +888,115 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
     return _sb_finish(&sb);
 }
 
+/* W-5f: Detect Lax, Result, Gorillax, RelaxedGorillax by pack structure.
+   These all have fc=4 with distinctive first-field hashes:
+   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x7c9515d6c843d1c0)
+   - Gorillax/Relaxed: hash0 = WASM_HASH_IS_OK     (0x7c9519b57ab70d1e)
+   - Result:           hash0 = WASM_HASH___VALUE    (0x7c9537dfed3ca530) */
+
+static int _wasm_is_result(int64_t val) {
+    if (val < 4096) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    /* Result: fc=4, hash0 = WASM_HASH___VALUE, hash2 = WASM_HASH_THROW */
+    if (p[0] == 4 && p[1] == WASM_HASH___VALUE) {
+        int64_t hash2 = p[1 + 2 * 3]; /* field 2 hash */
+        if (hash2 == WASM_HASH_THROW) return 1;
+    }
+    return 0;
+}
+
+static int _wasm_is_gorillax(int64_t val) {
+    if (val < 4096) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    /* Gorillax/RelaxedGorillax: fc=4, hash0 = WASM_HASH_IS_OK */
+    if (p[0] == 4 && p[1] == WASM_HASH_IS_OK) return 1;
+    return 0;
+}
+
+/* Detect Gorillax type: 0 = unknown, 1 = Gorillax, 2 = RelaxedGorillax */
+static int _wasm_gorillax_type(int64_t val) {
+    int64_t *p = (int64_t *)(intptr_t)val;
+    /* __type field is at index 3: p[1 + 3*3 + 2] = p[12] */
+    int64_t type_str = p[1 + 3 * 3 + 2]; /* field 3 value */
+    if (type_str > 4096 && _looks_like_string(type_str)) {
+        const char *s = (const char *)(intptr_t)type_str;
+        if (s[0] == 'G') return 1; /* "Gorillax" */
+        if (s[0] == 'R') return 2; /* "RelaxedGorillax" */
+    }
+    return 1; /* default to Gorillax */
+}
+
+/* W-5f: Lax.toString() — "Lax(value)" or "Lax(default: value)" */
+static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
+    int64_t has_value = taida_pack_get_idx(lax_ptr, 0); /* hasValue */
+    int64_t value = taida_pack_get_idx(lax_ptr, 1);     /* __value */
+    int64_t def = taida_pack_get_idx(lax_ptr, 2);       /* __default */
+    int64_t rendered = has_value
+        ? _wasm_value_to_display_string(value)
+        : _wasm_value_to_display_string(def);
+    const char *rs = (const char *)(intptr_t)rendered;
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    if (has_value) {
+        _sb_append(&sb, "Lax(");
+        _sb_append(&sb, rs);
+        _sb_append(&sb, ")");
+    } else {
+        _sb_append(&sb, "Lax(default: ");
+        _sb_append(&sb, rs);
+        _sb_append(&sb, ")");
+    }
+    return _sb_finish(&sb);
+}
+
+/* W-5f: Result.toString() — "Result(value)" or "Result(throw <= message)" */
+static int64_t _wasm_result_to_string(int64_t result) {
+    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
+    if (throw_val == 0) {
+        /* Success case */
+        int64_t value = taida_pack_get_idx(result, 0); /* __value */
+        int64_t value_str = _wasm_value_to_display_string(value);
+        _wasm_strbuf sb;
+        _sb_init(&sb);
+        _sb_append(&sb, "Result(");
+        _sb_append(&sb, (const char *)(intptr_t)value_str);
+        _sb_append(&sb, ")");
+        return _sb_finish(&sb);
+    }
+    /* Error case */
+    int64_t err_str = _wasm_value_to_display_string(throw_val);
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "Result(throw <= ");
+    _sb_append(&sb, (const char *)(intptr_t)err_str);
+    _sb_append(&sb, ")");
+    return _sb_finish(&sb);
+}
+
+/* W-5f: Gorillax.toString() — "Gorillax(value)" or "Gorillax(><)" */
+static int64_t _wasm_gorillax_to_string(int64_t gx) {
+    int64_t is_ok = taida_pack_get_idx(gx, 0);
+    int gtype = _wasm_gorillax_type(gx);
+    const char *prefix = (gtype == 2) ? "RelaxedGorillax" : "Gorillax";
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, prefix);
+    _sb_append(&sb, "(");
+    if (is_ok) {
+        int64_t value = taida_pack_get_idx(gx, 1);
+        int64_t val_str = _wasm_value_to_display_string(value);
+        _sb_append(&sb, (const char *)(intptr_t)val_str);
+    } else {
+        if (gtype == 2) {
+            _sb_append(&sb, "escaped");
+        } else {
+            _sb_append(&sb, "><");
+        }
+    }
+    _sb_append(&sb, ")");
+    return _sb_finish(&sb);
+}
+
 /* W-4f2: Convert value to display string (like native's taida_value_to_display_string) */
 static int64_t _wasm_value_to_display_string(int64_t val) {
     if (val == 0) return (int64_t)(intptr_t)"0";
@@ -856,6 +1006,10 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
     if (_is_wasm_set(val)) return _wasm_set_to_string(val);
     /* Check List (has list-like header but no set/hashmap marker) */
     if (_looks_like_list(val)) return _wasm_list_to_string(val);
+    /* W-5f: Check monadic types before generic pack (Lax/Result/Gorillax) */
+    if (_wasm_is_result(val)) return _wasm_result_to_string(val);
+    if (_wasm_is_gorillax(val)) return _wasm_gorillax_to_string(val);
+    if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
     /* Check Pack (field_count + hash pattern) */
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* Check if it's a string */
@@ -871,6 +1025,10 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
     if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
     if (_is_wasm_set(val)) return _wasm_set_to_string(val);
     if (_looks_like_list(val)) return _wasm_list_to_string(val);
+    /* W-5f: Check monadic types before generic pack */
+    if (_wasm_is_result(val)) return _wasm_result_to_string(val);
+    if (_wasm_is_gorillax(val)) return _wasm_gorillax_to_string(val);
+    if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* Check if it's a string — quote it for debug */
     if (_looks_like_string(val)) {
@@ -1716,10 +1874,7 @@ int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
 /* Lax is a BuchiPack @(hasValue: Bool, __value: T, __default: T, __type: Str)
    Layout: 4-field pack using same hash constants as native. */
 
-#define WASM_HASH_HAS_VALUE 0x7c9515d6c843d1c0LL
-#define WASM_HASH___VALUE   0x7c9537dfed3ca530LL
-#define WASM_HASH___DEFAULT 0x7c950e1c3b85a1c0LL
-#define WASM_HASH___TYPE    0x7c9537e3ed3caf38LL
+/* WASM_HASH_HAS_VALUE, __VALUE, __DEFAULT, __TYPE defined early (near line 710) */
 
 int64_t taida_lax_new(int64_t value, int64_t default_value) {
     int64_t pack = taida_pack_new(4);
@@ -1789,8 +1944,7 @@ static int _wasm_is_lax(int64_t val) {
 /* Gorillax: @(isOk: Bool, __value: T, __error: Error, __type: "Gorillax")
    Using pack fields at fixed indices. */
 
-#define WASM_HASH_IS_OK     0x7c9519b57ab70d1eLL
-#define WASM_HASH___ERROR   0x7c950f4ce4f47736LL
+/* WASM_HASH_IS_OK, __ERROR defined early (near line 710) */
 
 int64_t taida_gorillax_new(int64_t value) {
     int64_t pack = taida_pack_new(4);
@@ -1879,20 +2033,18 @@ int64_t taida_relaxed_gorillax_err(int64_t error) {
 /* Result: @(__value: T, __predicate: P, throw: Error, __type: "Result")
    field 0: __value, field 1: __predicate, field 2: throw, field 3: __type */
 
-#define WASM_HASH___PREDICATE 0x7c952b0c14af9d98LL
-#define WASM_HASH_THROW       0x7c9536adee0f6a14LL
+/* WASM_HASH___PREDICATE, WASM_HASH_THROW defined early (near line 710) */
 
-int64_t taida_result_create(int64_t value, int64_t pred, int64_t throw_val, int64_t unmold_flag) {
+int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate) {
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH___VALUE);
     taida_pack_set(pack, 0, value);
     taida_pack_set_hash(pack, 1, WASM_HASH___PREDICATE);
-    taida_pack_set(pack, 1, pred);
+    taida_pack_set(pack, 1, predicate);
     taida_pack_set_hash(pack, 2, WASM_HASH_THROW);
     taida_pack_set(pack, 2, throw_val);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
-    (void)unmold_flag;
     return pack;
 }
 
