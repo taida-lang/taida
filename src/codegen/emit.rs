@@ -29,6 +29,7 @@ pub enum CompileTarget {
 /// W-0 では `CompileTarget::Native` のみ。全メソッドが I64 を返すため
 /// 出力は一切変わらない。コード上で「内部 boxed value」と「runtime ABI 上の
 /// pointer/fn pointer」の意味が明示される。
+#[derive(Clone, Copy)]
 struct AbiHelper {
     target: CompileTarget,
 }
@@ -564,15 +565,13 @@ fn resolve_abi(abi: &RuntimeAbi, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<cl
     (params, returns)
 }
 
-/// runtime_func_signature() の互換ラッパー
+/// runtime 関数シグネチャを ABI テーブル経由で解決する
 ///
-/// W-0b で runtime_abi() + resolve_abi() に移行した。
-/// 呼び出し元では AbiHelper を持っていない箇所があるため、
-/// Native ターゲット固定で解決するラッパーを提供する。
-fn runtime_func_signature(name: &str) -> (Vec<clif::Type>, Vec<clif::Type>) {
-    let helper = AbiHelper::new(CompileTarget::Native);
+/// W-0f: CompileTarget::Native 固定だったラッパーを廃止し、
+/// AbiHelper を受け取る形に変更。呼び出し元は self.abi を渡す。
+fn runtime_func_signature_for(name: &str, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<clif::Type>) {
     let abi = runtime_abi(name);
-    resolve_abi(&abi, &helper)
+    resolve_abi(&abi, helper)
 }
 
 pub struct Emitter {
@@ -601,6 +600,8 @@ struct EmitCtx {
     /// ユーザー関数・IR 変数・内部 SSA の境界では常にこの型を使う。
     /// W-0 では I64 固定。Wasm32 でも I64（案 A: 統一値表現）。
     value_ty: clif::Type,
+    /// W-0f: ABI ヘルパー（runtime 関数シグネチャ解決に使用）
+    abi: AbiHelper,
 }
 
 #[derive(Debug)]
@@ -790,7 +791,7 @@ impl Emitter {
             match inst {
                 IrInst::Call(_, func_name, _) => {
                     if !self.declared_funcs.contains_key(func_name) {
-                        let (params, returns) = runtime_func_signature(func_name);
+                        let (params, returns) = runtime_func_signature_for(func_name, &self.abi);
                         self.declare_runtime_func(func_name, &params, &returns)?;
                     }
                 }
@@ -884,7 +885,7 @@ impl Emitter {
 
     fn ensure_runtime_func(&mut self, name: &str) -> Result<(), EmitError> {
         if !self.declared_funcs.contains_key(name) {
-            let (params, returns) = runtime_func_signature(name);
+            let (params, returns) = runtime_func_signature_for(name, &self.abi);
             self.declare_runtime_func(name, &params, &returns)?;
         }
         Ok(())
@@ -1085,6 +1086,7 @@ impl Emitter {
                 tco_param_vars: Vec::new(),
                 call_conv: self.abi.call_conv(),
                 value_ty: self.abi.value_ty(),
+                abi: self.abi,
             };
 
             if has_tail_call {
@@ -1232,8 +1234,10 @@ impl Emitter {
                 if let Some(result) = Self::try_emit_intrinsic(builder, ectx, func_name, args) {
                     ectx.val_map.insert(*dst, result);
                 } else {
+                    // W-0f: runtime_func_signature_for() で ectx.abi ベースの解決に統一
                     let func_ref = ectx.func_refs[func_name];
-                    let (param_types, return_types) = runtime_func_signature(func_name);
+                    let runtime_abi_def = runtime_abi(func_name);
+                    let (param_types, return_types) = resolve_abi(&runtime_abi_def, &ectx.abi);
 
                     let arg_vals: Vec<clif::Value> = args
                         .iter()
@@ -1247,13 +1251,31 @@ impl Emitter {
                             if val_type == expected_type {
                                 val
                             } else if val_type == types::F64 && expected_type == ectx.value_ty {
+                                // F64 → boxed value: bitcast to I64
                                 builder
                                     .ins()
                                     .bitcast(ectx.value_ty, clif::MemFlags::new(), val)
                             } else if val_type == ectx.value_ty && expected_type == types::F64 {
+                                // boxed value → F64: bitcast
                                 builder
                                     .ins()
                                     .bitcast(types::F64, clif::MemFlags::new(), val)
+                            } else if val_type == ectx.value_ty
+                                && (expected_type == ectx.abi.ptr_ty()
+                                    || expected_type == ectx.abi.fn_ptr_ty())
+                                && val_type != expected_type
+                            {
+                                // W-0f F-2: boxed value_ty → ptr_ty/fn_ptr_ty (truncate)
+                                // Wasm32: I64 → I32
+                                builder.ins().ireduce(expected_type, val)
+                            } else if (val_type == ectx.abi.ptr_ty()
+                                || val_type == ectx.abi.fn_ptr_ty())
+                                && expected_type == ectx.value_ty
+                                && val_type != expected_type
+                            {
+                                // W-0f F-2: ptr_ty/fn_ptr_ty → boxed value_ty (extend)
+                                // Wasm32: I32 → I64
+                                builder.ins().uextend(expected_type, val)
                             } else {
                                 val
                             }
@@ -1263,7 +1285,18 @@ impl Emitter {
                     let call = builder.ins().call(func_ref, &arg_vals);
                     let results = builder.inst_results(call);
                     if !results.is_empty() {
-                        ectx.val_map.insert(*dst, results[0]);
+                        let result = results[0];
+                        let result_type = builder.func.dfg.value_type(result);
+                        // W-0f F-2: runtime 戻り値が ptr_ty/fn_ptr_ty の場合、boxed value_ty に変換
+                        let boxed = if result_type != ectx.value_ty
+                            && (result_type == ectx.abi.ptr_ty()
+                                || result_type == ectx.abi.fn_ptr_ty())
+                        {
+                            builder.ins().uextend(ectx.value_ty, result)
+                        } else {
+                            result
+                        };
+                        ectx.val_map.insert(*dst, boxed);
                     } else if return_types.is_empty() {
                         // void 関数: trap の代わりに 0 を返す
                         // (trap はブロック終端命令なので後続命令を追加できない)
