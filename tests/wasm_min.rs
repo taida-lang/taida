@@ -166,12 +166,6 @@ fn compile_wasm_and_get_size(td_path: &Path, wasm_path: &Path) -> u64 {
 
 #[test]
 fn wasm_min_size_gate() {
-    // Skip if toolchain unavailable
-    if wasmtime_bin().is_none() {
-        eprintln!("wasmtime not found, skipping wasm-min tests");
-        return;
-    }
-
     let hello_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
     let pi_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_pi_approx.td");
 
@@ -220,11 +214,6 @@ fn wasm_min_size_gate() {
 /// W-2c: Size gate with exact Wado comparison — reports the ratio.
 #[test]
 fn wasm_min_size_gate_wado_comparison() {
-    if wasmtime_bin().is_none() {
-        eprintln!("wasmtime not found, skipping wasm-min tests");
-        return;
-    }
-
     let hello_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
     let pi_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_pi_approx.td");
 
@@ -361,11 +350,6 @@ fn wasm_min_multiple_globals() {
 /// W-2: --release gate should work with wasm-min (positive case: no TODO/Stub).
 #[test]
 fn wasm_min_release_gate_positive() {
-    if wasmtime_bin().is_none() {
-        eprintln!("wasmtime not found, skipping wasm-min tests");
-        return;
-    }
-
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/wasm_min/release_gate.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_release_pos.wasm");
@@ -413,8 +397,8 @@ fn wasm_min_release_gate_negative() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("TODO") || stderr.contains("Release gate"),
-        "Error should mention TODO or Release gate, got: {}",
+        stderr.contains("Release gate failed"),
+        "Error should contain 'Release gate failed', got: {}",
         stderr
     );
 }
