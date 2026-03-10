@@ -36,3 +36,6 @@ examples/compile_types
 examples/compile_vars
 examples/.taida/
 examples/**/.taida/
+
+# Local development notes (untracked)
+.dev/

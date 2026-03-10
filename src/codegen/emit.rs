@@ -11,6 +11,70 @@ use target_lexicon::Triple;
 
 use super::ir::*;
 
+// ---------------------------------------------------------------------------
+// W-0a: コンパイルターゲットと ABI ヘルパー
+// ---------------------------------------------------------------------------
+
+/// コンパイルターゲット
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompileTarget {
+    /// ホストネイティブ（x86_64/aarch64, SystemV）
+    Native,
+    /// WASM32（wasm32-unknown-unknown, WasmBasicCAbi）
+    Wasm32,
+}
+
+/// ターゲット依存の型ヘルパー
+///
+/// W-0 では `CompileTarget::Native` のみ。全メソッドが I64 を返すため
+/// 出力は一切変わらない。コード上で「内部 boxed value」と「runtime ABI 上の
+/// pointer/fn pointer」の意味が明示される。
+struct AbiHelper {
+    target: CompileTarget,
+}
+
+impl AbiHelper {
+    fn new(target: CompileTarget) -> Self {
+        Self { target }
+    }
+
+    /// Taida の内部 boxed value 型。
+    /// user function / IrVar / CallUser / CallIndirect の境界では常に I64 を維持する。
+    fn value_ty(&self) -> clif::Type {
+        types::I64
+    }
+
+    /// ランタイム関数 ABI 上のヒープポインタ型
+    fn ptr_ty(&self) -> clif::Type {
+        match self.target {
+            CompileTarget::Native => types::I64,
+            CompileTarget::Wasm32 => types::I32,
+        }
+    }
+
+    /// ランタイム関数 ABI 上の関数ポインタ型
+    fn fn_ptr_ty(&self) -> clif::Type {
+        match self.target {
+            CompileTarget::Native => types::I64,
+            CompileTarget::Wasm32 => types::I32,
+        }
+    }
+
+    fn triple(&self) -> Triple {
+        match self.target {
+            CompileTarget::Native => Triple::host(),
+            CompileTarget::Wasm32 => "wasm32-unknown-unknown".parse().unwrap(),
+        }
+    }
+
+    fn call_conv(&self) -> CallConv {
+        // Cranelift 0.129.1 では WASM 用の専用 CallConv がないため、
+        // triple_default() に委譲する。wasm32 triple でも SystemV が返される
+        // （Cranelift が内部で WASM ABI を適用する）。
+        CallConv::triple_default(&self.triple())
+    }
+}
+
 fn runtime_func_signature(name: &str) -> (Vec<clif::Type>, Vec<clif::Type>) {
     match name {
         "taida_debug_int" => (vec![types::I64], vec![types::I64]),
@@ -452,6 +516,7 @@ pub struct Emitter {
     declared_funcs: HashMap<String, FuncId>,
     string_constants: Vec<(cranelift_module::DataId, Vec<u8>)>,
     user_func_sigs: HashMap<String, (Vec<clif::Type>, Vec<clif::Type>)>,
+    abi: AbiHelper,
 }
 
 /// emit_function 内で使うコンテキスト
@@ -464,6 +529,8 @@ struct EmitCtx {
     tco_loop_block: Option<clif::Block>,
     /// TCO: パラメータ Variable のリスト（引数の再代入用）
     tco_param_vars: Vec<cranelift_frontend::Variable>,
+    /// ターゲットの呼出規約（CallIndirect 等で使用）
+    call_conv: CallConv,
 }
 
 #[derive(Debug)]
@@ -478,11 +545,19 @@ impl std::fmt::Display for EmitError {
 }
 
 impl Emitter {
+    /// 既存互換: ホストネイティブターゲットで Emitter を生成
     pub fn new() -> Result<Self, EmitError> {
+        Self::new_with_target(CompileTarget::Native)
+    }
+
+    /// 指定ターゲットで Emitter を生成
+    pub fn new_with_target(target: CompileTarget) -> Result<Self, EmitError> {
+        let abi = AbiHelper::new(target);
+
         let shared_builder = settings::builder();
         let shared_flags = settings::Flags::new(shared_builder);
 
-        let triple = Triple::host();
+        let triple = abi.triple();
         let isa = cranelift_codegen::isa::lookup(triple.clone())
             .map_err(|e| EmitError {
                 message: format!("ISA lookup failed: {}", e),
@@ -510,6 +585,7 @@ impl Emitter {
             declared_funcs: HashMap::new(),
             string_constants: Vec::new(),
             user_func_sigs: HashMap::new(),
+            abi,
         })
     }
 
@@ -530,7 +606,7 @@ impl Emitter {
         for &r in returns {
             sig.returns.push(AbiParam::new(r));
         }
-        sig.call_conv = CallConv::SystemV;
+        sig.call_conv = self.abi.call_conv();
 
         let id = self
             .module
@@ -553,7 +629,7 @@ impl Emitter {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.call_conv = self.abi.call_conv();
 
         let params: Vec<clif::Type> = (0..param_count).map(|_| types::I64).collect();
         self.user_func_sigs
@@ -583,7 +659,7 @@ impl Emitter {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.call_conv = self.abi.call_conv();
 
         let params: Vec<clif::Type> = (0..param_count).map(|_| types::I64).collect();
         self.user_func_sigs
@@ -612,7 +688,7 @@ impl Emitter {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.call_conv = self.abi.call_conv();
 
         let params: Vec<clif::Type> = (0..param_count).map(|_| types::I64).collect();
         self.user_func_sigs
@@ -785,7 +861,7 @@ impl Emitter {
             if ir_func.name == "_taida_main" {
                 let mut sig = self.module.make_signature();
                 sig.returns.push(AbiParam::new(types::I64));
-                sig.call_conv = CallConv::SystemV;
+                sig.call_conv = self.abi.call_conv();
 
                 let id = self
                     .module
@@ -903,7 +979,7 @@ impl Emitter {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.call_conv = self.abi.call_conv();
 
         self.ctx.func.signature = sig;
         self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0, func_id.as_u32());
@@ -933,6 +1009,7 @@ impl Emitter {
                 str_globals,
                 tco_loop_block: None,
                 tco_param_vars: Vec::new(),
+                call_conv: self.abi.call_conv(),
             };
 
             if has_tail_call {
@@ -1189,7 +1266,7 @@ impl Emitter {
                 for &arg in args {
                     closure_args.push(ectx.val_map[&arg]);
                 }
-                let mut closure_sig = clif::Signature::new(CallConv::SystemV);
+                let mut closure_sig = clif::Signature::new(ectx.call_conv);
                 for _ in &closure_args {
                     closure_sig.params.push(AbiParam::new(types::I64));
                 }
@@ -1207,7 +1284,7 @@ impl Emitter {
                 builder.seal_block(plain_block);
                 let plain_args: Vec<clif::Value> =
                     args.iter().map(|&arg| ectx.val_map[&arg]).collect();
-                let mut plain_sig = clif::Signature::new(CallConv::SystemV);
+                let mut plain_sig = clif::Signature::new(ectx.call_conv);
                 for _ in &plain_args {
                     plain_sig.params.push(AbiParam::new(types::I64));
                 }
