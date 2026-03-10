@@ -1,5 +1,6 @@
 pub mod driver;
 pub mod emit;
+pub mod emit_wasm_c;
 pub mod ir;
 pub mod lower;
 mod lower_json;

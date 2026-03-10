@@ -39,7 +39,7 @@ Usage:
   taida <COMMAND> [OPTIONS]
 
 Commands:
-  build       Build JS or Native output
+  build       Build JS, Native, or WASM output
   compile     Deprecated alias for `build --target native`
   transpile   Deprecated alias for `build --target js`
   todo        Scan TODO/Stub molds
@@ -424,6 +424,7 @@ fn run_check_cmd(args: &[String]) {
 enum BuildTarget {
     Js,
     Native,
+    WasmMin,
 }
 
 impl BuildTarget {
@@ -431,6 +432,7 @@ impl BuildTarget {
         match raw {
             "js" => Some(Self::Js),
             "native" => Some(Self::Native),
+            "wasm-min" => Some(Self::WasmMin),
             _ => None,
         }
     }
@@ -439,6 +441,7 @@ impl BuildTarget {
         match self {
             Self::Js => "js",
             Self::Native => "native",
+            Self::WasmMin => "wasm-min",
         }
     }
 }
@@ -598,10 +601,11 @@ fn run_transpile(args: &[String], no_check: bool) {
 
 fn print_build_usage_and_exit() -> ! {
     eprintln!(
-        "Usage: taida build [--target js|native] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>"
+        "Usage: taida build [--target js|native|wasm-min] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>"
     );
     eprintln!("  js target: <PATH> accepts file/dir, -o is output file(or outdir for dir)");
     eprintln!("  native target: <PATH> accepts file/dir, --entry is dir-only (default: main.td)");
+    eprintln!("  wasm-min target: <PATH> accepts single file, -o is output .wasm path");
     std::process::exit(1);
 }
 
@@ -624,7 +628,7 @@ fn run_build(args: &[String], no_check: bool) {
                 target = match BuildTarget::parse(args[i].as_str()) {
                     Some(v) => v,
                     None => {
-                        eprintln!("Unknown build target '{}'. Expected: js | native", args[i]);
+                        eprintln!("Unknown build target '{}'. Expected: js | native | wasm-min", args[i]);
                         std::process::exit(1);
                     }
                 };
@@ -716,6 +720,15 @@ fn run_build(args: &[String], no_check: bool) {
                 output_path.as_deref(),
                 entry_path.as_deref(),
                 release_mode,
+                no_check,
+                diag_format,
+                &mut compile_stats,
+            );
+        }
+        BuildTarget::WasmMin => {
+            run_build_wasm_min(
+                input_path,
+                output_path.as_deref(),
                 no_check,
                 diag_format,
                 &mut compile_stats,
@@ -1383,6 +1396,157 @@ fn run_build_native(
                     code,
                     &message,
                     Some(&entry_file.to_string_lossy()),
+                    None,
+                    None,
+                    suggestion,
+                );
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_build_wasm_min(
+    input_path: &Path,
+    output_path: Option<&str>,
+    no_check: bool,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+) {
+    if input_path.is_dir() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "compile",
+                None,
+                "wasm-min target does not support directory input.",
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("wasm-min target does not support directory input.");
+        }
+        std::process::exit(1);
+    }
+
+    if !input_path.exists() || !input_path.is_file() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "io",
+                None,
+                &format!("Build input not found: {}", input_path.display()),
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("Build input not found: {}", input_path.display());
+        }
+        std::process::exit(1);
+    }
+
+    if !no_check {
+        let source = match fs::read_to_string(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                if diag_format == DiagFormat::Jsonl {
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "io",
+                        None,
+                        &format!("Error reading file '{}': {}", input_path.display(), e),
+                        Some(&input_path.to_string_lossy()),
+                        None,
+                        None,
+                        None,
+                    );
+                } else {
+                    eprintln!("Error reading file '{}': {}", input_path.display(), e);
+                }
+                std::process::exit(1);
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            for err in &parse_errors {
+                if diag_format == DiagFormat::Jsonl {
+                    let (code, suggestion) = split_diag_code_and_hint(&err.message);
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "parse",
+                        code,
+                        &err.message,
+                        Some(&input_path.to_string_lossy()),
+                        Some(err.span.line),
+                        Some(err.span.column),
+                        suggestion,
+                    );
+                } else {
+                    eprintln!("{}", err);
+                }
+            }
+            std::process::exit(1);
+        }
+        run_type_checks_and_warnings(
+            &program,
+            &input_path.to_string_lossy(),
+            diag_format,
+            compile_stats,
+        );
+    }
+
+    // Default output: .taida/build/wasm-min/{stem}.wasm (project-local)
+    let default_wasm_output;
+    let output: Option<&Path> = if let Some(p) = output_path {
+        Some(Path::new(p))
+    } else {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let build_dir = find_packages_tdm()
+            .unwrap_or_else(|| input_path.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .join(".taida")
+            .join("build")
+            .join("wasm-min");
+        if let Err(e) = fs::create_dir_all(&build_dir) {
+            eprintln!(
+                "Error creating build directory '{}': {}",
+                build_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+        default_wasm_output = build_dir.join(format!("{}.wasm", stem));
+        Some(default_wasm_output.as_path())
+    };
+    match codegen::driver::compile_file_wasm(input_path, output) {
+        Ok(wasm_path) => {
+            if diag_format == DiagFormat::Text {
+                println!("Built (wasm-min): {}", wasm_path.display());
+            }
+        }
+        Err(e) => {
+            if diag_format == DiagFormat::Jsonl {
+                let message = e.to_string();
+                let (code, suggestion) = split_diag_code_and_hint(&message);
+                emit_compile_diag_jsonl(
+                    compile_stats,
+                    "ERROR",
+                    "codegen",
+                    code,
+                    &message,
+                    Some(&input_path.to_string_lossy()),
                     None,
                     None,
                     suggestion,

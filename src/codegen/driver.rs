@@ -1,11 +1,13 @@
 /// コンパイルドライバ — .td → パース → IR → CLIF → .o → バイナリ
 ///
 /// cranelift-object で .o を出力し、システムリンカでバイナリを生成。
+/// wasm-min ターゲット時は wasm-ld で .wasm を生成する。
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::emit::Emitter;
+use super::emit_wasm_c;
 use super::lower::Lowering;
 use super::rc_opt;
 use crate::module_graph;
@@ -24,7 +26,7 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-/// 単一 .td ファイルを .o にコンパイル（リンクなし）
+/// 単一 .td ファイルを Native .o にコンパイル（リンクなし）
 fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), CompileError> {
     let source = fs::read_to_string(input_path).map_err(|e| CompileError {
         message: format!("failed to read '{}': {}", input_path.display(), e),
@@ -203,4 +205,238 @@ fn link_objects_inner(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// W-1: wasm-min コンパイルパス
+// ---------------------------------------------------------------------------
+
+/// wasm-ld の実行パスを検出する
+fn find_wasm_ld() -> Result<PathBuf, CompileError> {
+    // 1. PATH 上の wasm-ld
+    if let Ok(output) = Command::new("which").arg("wasm-ld").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
+
+    // 2. 既知の LLVM インストール先を探索
+    let candidates = [
+        "/opt/rocm-6.4.2/lib/llvm/bin/wasm-ld",
+        "/usr/lib/llvm-17/bin/wasm-ld",
+        "/usr/lib/llvm-18/bin/wasm-ld",
+        "/usr/lib/llvm-19/bin/wasm-ld",
+        "/usr/lib/llvm-20/bin/wasm-ld",
+        "/usr/local/bin/wasm-ld",
+    ];
+    for candidate in &candidates {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    Err(CompileError {
+        message: "wasm-ld not found. Install LLVM/LLD (e.g. `apt install lld-17`).".to_string(),
+    })
+}
+
+/// clang の実行パスを検出する（wasm32 クロスコンパイル用）
+fn find_clang_for_wasm() -> Result<String, CompileError> {
+    // バージョン付きの clang を優先的に検索
+    for ver in &["17", "18", "19", "20"] {
+        let name = format!("clang-{}", ver);
+        if let Ok(output) = Command::new("which").arg(&name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    // フォールバック: PATH 上の clang
+    if let Ok(output) = Command::new("which").arg("clang").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(path);
+            }
+        }
+    }
+
+    Err(CompileError {
+        message: "clang not found. Install clang (e.g. `apt install clang-17`).".to_string(),
+    })
+}
+
+/// .td ファイルを wasm-min ターゲットでコンパイルし .wasm を生成する
+///
+/// wasm-min は単一ファイルのみ対応（モジュールインポート非対応）。
+/// パイプライン: .td → parse → IR → C source → clang(wasm32) → .o → wasm-ld → .wasm
+///
+/// Cranelift の ISA に wasm32 が存在しないため、IR → C → clang ルートを採用する。
+pub fn compile_file_wasm(
+    input_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<PathBuf, CompileError> {
+    let source = fs::read_to_string(input_path).map_err(|e| CompileError {
+        message: format!("failed to read '{}': {}", input_path.display(), e),
+    })?;
+
+    let (program, parse_errors) = parse(&source);
+    if !parse_errors.is_empty() {
+        let msgs: Vec<String> = parse_errors.iter().map(|e| format!("{}", e)).collect();
+        return Err(CompileError {
+            message: format!("parse errors:\n{}", msgs.join("\n")),
+        });
+    }
+
+    let mut lowering = Lowering::new();
+    if let Some(parent) = input_path.parent() {
+        lowering.set_source_dir(parent.to_path_buf());
+    }
+    lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
+        message: format!("{}", e),
+    })?;
+
+    // wasm-min ではモジュールインポートは未対応
+    if !ir_module.imports.is_empty() {
+        return Err(CompileError {
+            message: "wasm-min does not support module imports.".to_string(),
+        });
+    }
+
+    // RC 最適化パス（retain/release は C emitter で無視されるが、IR を整える）
+    rc_opt::optimize(&mut ir_module);
+
+    // IR → C ソースコード
+    let generated_c = emit_wasm_c::emit_c(&ir_module).map_err(|e| CompileError {
+        message: format!("wasm-min C emission failed: {}", e),
+    })?;
+
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    // 出力パスの決定
+    let wasm_path = match output_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let stem = input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            base_dir.join(format!("{}.wasm", stem))
+        }
+    };
+
+    // 一時ファイルパスの生成
+    let tmp_base = input_path.with_extension("_wasm_tmp");
+    let gen_c_path = tmp_base.with_extension("gen.c");
+    let gen_obj_path = tmp_base.with_extension("gen.o");
+    let rt_c_path = tmp_base.with_extension("rt.c");
+    let rt_obj_path = tmp_base.with_extension("rt.o");
+
+    // 生成された C ソースを書き出し
+    fs::write(&gen_c_path, &generated_c).map_err(|e| CompileError {
+        message: format!("failed to write generated C: {}", e),
+    })?;
+
+    // runtime_core_wasm.c を書き出し
+    let rt_source = include_str!("runtime_core_wasm.c");
+    fs::write(&rt_c_path, rt_source).map_err(|e| CompileError {
+        message: format!("failed to write wasm runtime source: {}", e),
+    })?;
+
+    let clang = find_clang_for_wasm()?;
+
+    // 生成 C をコンパイル
+    let gen_status = Command::new(&clang)
+        .args([
+            "--target=wasm32-unknown-wasi",
+            "-nostdlib",
+            "-O2",
+            "-c",
+        ])
+        .arg(&gen_c_path)
+        .arg("-o")
+        .arg(&gen_obj_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("clang invocation failed: {}", e),
+        })?;
+
+    if !gen_status.success() {
+        // C ソースをデバッグ用に残す
+        let _ = fs::remove_file(&rt_c_path);
+        let _ = fs::remove_file(&rt_obj_path);
+        return Err(CompileError {
+            message: format!(
+                "clang wasm32 compilation of generated code failed (source preserved at: {})",
+                gen_c_path.display()
+            ),
+        });
+    }
+
+    // runtime をコンパイル
+    let rt_status = Command::new(&clang)
+        .args([
+            "--target=wasm32-unknown-wasi",
+            "-nostdlib",
+            "-O2",
+            "-c",
+        ])
+        .arg(&rt_c_path)
+        .arg("-o")
+        .arg(&rt_obj_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("clang invocation failed: {}", e),
+        })?;
+
+    let _ = fs::remove_file(&gen_c_path);
+    let _ = fs::remove_file(&rt_c_path);
+
+    if !rt_status.success() {
+        let _ = fs::remove_file(&gen_obj_path);
+        return Err(CompileError {
+            message: "clang wasm32 compilation of runtime failed.".to_string(),
+        });
+    }
+
+    // wasm-ld でリンク
+    let wasm_ld = find_wasm_ld()?;
+    let ld_status = Command::new(&wasm_ld)
+        .args([
+            "--no-entry",
+            "--export=_start",
+            "--strip-all",
+            "--gc-sections",
+        ])
+        .arg(&rt_obj_path)
+        .arg(&gen_obj_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("wasm-ld invocation failed: {}", e),
+        })?;
+
+    // 一時ファイルの削除
+    let _ = fs::remove_file(&gen_obj_path);
+    let _ = fs::remove_file(&rt_obj_path);
+
+    if !ld_status.success() {
+        return Err(CompileError {
+            message: format!(
+                "wasm-ld failed with exit code: {:?}",
+                ld_status.code()
+            ),
+        });
+    }
+
+    Ok(wasm_path)
 }
