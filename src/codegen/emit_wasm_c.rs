@@ -1,7 +1,7 @@
 /// wasm-min C emitter -- Taida IR を C コードに変換し、clang で wasm32 object を生成
 ///
 /// wasm-min は Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang -> wasm32 .o
-/// というパイプラインを採用する。サポートする IR 命令は最小限:
+/// というパイプラインを採用する。サポートする IR 命令:
 ///
 /// - ConstInt, ConstFloat, ConstBool, ConstStr
 /// - Call (runtime 関数のみ)
@@ -11,8 +11,8 @@
 /// - GlobalSet, GlobalGet
 /// - Retain, Release (no-op)
 /// - PackNew, PackSet, PackSetTag, PackGet (W-4)
+/// - FuncAddr, MakeClosure, CallIndirect (W-5)
 ///
-/// クロージャは未対応。
 /// 未対応 IR は silent miscompile ではなく compile error を返す。
 
 use std::collections::{HashMap, HashSet};
@@ -71,15 +71,10 @@ fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<S
             IrInst::PackGet(_, _, _) => {}
             IrInst::PackSet(_, _, _) => {}
             IrInst::PackSetTag(_, _, _) => {}
-            IrInst::FuncAddr(_, _) => {
-                out.push("function references (FuncAddr)".to_string());
-            }
-            IrInst::MakeClosure(_, _, _) => {
-                out.push("closures (MakeClosure)".to_string());
-            }
-            IrInst::CallIndirect(_, _, _) => {
-                out.push("indirect calls (CallIndirect)".to_string());
-            }
+            // W-5: FuncAddr, MakeClosure, CallIndirect are now supported
+            IrInst::FuncAddr(_, _) => {}
+            IrInst::MakeClosure(_, _, _) => {}
+            IrInst::CallIndirect(_, _, _) => {}
             IrInst::CondBranch(_, arms) => {
                 for arm in arms {
                     collect_unsupported_insts(&arm.body, _func_name, out);
@@ -268,6 +263,20 @@ fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
             IrInst::PackGet(_, _, _) => {
                 set.insert("taida_pack_get_idx".to_string());
             }
+            // W-5: Closure IR instructions need runtime function prototypes
+            IrInst::MakeClosure(_, _, _) => {
+                set.insert("taida_pack_new".to_string());
+                set.insert("taida_pack_set".to_string());
+                set.insert("taida_pack_set_hash".to_string());
+                set.insert("taida_closure_new".to_string());
+            }
+            IrInst::CallIndirect(_, _, _) => {
+                set.insert("taida_is_closure_value".to_string());
+                set.insert("taida_closure_get_fn".to_string());
+                set.insert("taida_closure_get_env".to_string());
+            }
+            // W-5: FuncAddr does not need extra runtime functions
+            IrInst::FuncAddr(_, _) => {}
             IrInst::CondBranch(_, arms) => {
                 for arm in arms {
                     collect_needed_runtime_funcs(&arm.body, set);
@@ -399,6 +408,74 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_hashmap_merge" => "int64_t taida_hashmap_merge(int64_t hm, int64_t other);".to_string(),
         // W-4f: Polymorphic isEmpty
         "taida_polymorphic_is_empty" => "int64_t taida_polymorphic_is_empty(int64_t ptr);".to_string(),
+        // W-5: Closure runtime functions
+        "taida_closure_new" => "int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr);".to_string(),
+        "taida_closure_get_fn" => "int64_t taida_closure_get_fn(int64_t closure_ptr);".to_string(),
+        "taida_closure_get_env" => "int64_t taida_closure_get_env(int64_t closure_ptr);".to_string(),
+        "taida_is_closure_value" => "int64_t taida_is_closure_value(int64_t val);".to_string(),
+        // W-5: Error ceiling runtime functions
+        "taida_error_ceiling_push" => "int64_t taida_error_ceiling_push(void);".to_string(),
+        "taida_error_ceiling_pop" => "void taida_error_ceiling_pop(void);".to_string(),
+        "taida_throw" => "int64_t taida_throw(int64_t error_val);".to_string(),
+        "taida_error_try_call" => "int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);".to_string(),
+        "taida_error_try_get_result" => "int64_t taida_error_try_get_result(int64_t depth);".to_string(),
+        "taida_error_get_value" => "int64_t taida_error_get_value(int64_t depth);".to_string(),
+        "taida_error_setjmp" => "int64_t taida_error_setjmp(int64_t depth);".to_string(),
+        "taida_make_error" => "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string(),
+        // W-5: Lax runtime functions
+        "taida_lax_new" => "int64_t taida_lax_new(int64_t value, int64_t default_value);".to_string(),
+        "taida_lax_empty" => "int64_t taida_lax_empty(int64_t default_value);".to_string(),
+        "taida_lax_has_value" => "int64_t taida_lax_has_value(int64_t lax_ptr);".to_string(),
+        "taida_lax_get_or_default" => "int64_t taida_lax_get_or_default(int64_t lax_ptr, int64_t fallback);".to_string(),
+        "taida_lax_unmold" => "int64_t taida_lax_unmold(int64_t lax_ptr);".to_string(),
+        "taida_lax_is_empty" => "int64_t taida_lax_is_empty(int64_t lax_ptr);".to_string(),
+        // W-5: Gorillax/Result runtime functions
+        "taida_gorillax_new" => "int64_t taida_gorillax_new(int64_t value);".to_string(),
+        "taida_gorillax_err" => "int64_t taida_gorillax_err(int64_t error);".to_string(),
+        "taida_gorillax_is_ok" => "int64_t taida_gorillax_is_ok(int64_t gx);".to_string(),
+        "taida_gorillax_get_value" => "int64_t taida_gorillax_get_value(int64_t gx);".to_string(),
+        "taida_gorillax_get_error" => "int64_t taida_gorillax_get_error(int64_t gx);".to_string(),
+        "taida_gorillax_relax" => "int64_t taida_gorillax_relax(int64_t gx);".to_string(),
+        "taida_relaxed_gorillax_new" => "int64_t taida_relaxed_gorillax_new(int64_t value);".to_string(),
+        "taida_relaxed_gorillax_err" => "int64_t taida_relaxed_gorillax_err(int64_t error);".to_string(),
+        "taida_result_create" => "int64_t taida_result_create(int64_t value, int64_t pred, int64_t throw_val, int64_t unmold_flag);".to_string(),
+        "taida_result_is_ok" => "int64_t taida_result_is_ok(int64_t result);".to_string(),
+        "taida_result_is_error" => "int64_t taida_result_is_error(int64_t result);".to_string(),
+        "taida_result_map_error" => "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string(),
+        "taida_cage_apply" => "int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr);".to_string(),
+        // W-5: Error/Molten/Stub helpers
+        "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
+        "taida_stub_new" => "int64_t taida_stub_new(int64_t message);".to_string(),
+        "taida_todo_new" => "int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm);".to_string(),
+        // W-5: Type molds that return Lax
+        "taida_str_mold_int" => "int64_t taida_str_mold_int(int64_t v);".to_string(),
+        "taida_str_mold_float" => "int64_t taida_str_mold_float(int64_t v);".to_string(),
+        "taida_str_mold_bool" => "int64_t taida_str_mold_bool(int64_t v);".to_string(),
+        "taida_str_mold_str" => "int64_t taida_str_mold_str(int64_t v);".to_string(),
+        "taida_int_mold_int" => "int64_t taida_int_mold_int(int64_t v);".to_string(),
+        "taida_int_mold_float" => "int64_t taida_int_mold_float(int64_t v);".to_string(),
+        "taida_int_mold_bool" => "int64_t taida_int_mold_bool(int64_t v);".to_string(),
+        "taida_float_mold_int" => "int64_t taida_float_mold_int(int64_t v);".to_string(),
+        "taida_float_mold_float" => "int64_t taida_float_mold_float(int64_t v);".to_string(),
+        "taida_float_mold_str" => "int64_t taida_float_mold_str(int64_t v);".to_string(),
+        "taida_float_mold_bool" => "int64_t taida_float_mold_bool(int64_t v);".to_string(),
+        "taida_bool_mold_int" => "int64_t taida_bool_mold_int(int64_t v);".to_string(),
+        "taida_bool_mold_float" => "int64_t taida_bool_mold_float(int64_t v);".to_string(),
+        "taida_bool_mold_str" => "int64_t taida_bool_mold_str(int64_t v);".to_string(),
+        "taida_bool_mold_bool" => "int64_t taida_bool_mold_bool(int64_t v);".to_string(),
+        // W-5: Float div/mod molds
+        "taida_float_div_mold" => "int64_t taida_float_div_mold(int64_t a, int64_t b);".to_string(),
+        "taida_float_mod_mold" => "int64_t taida_float_mod_mold(int64_t a, int64_t b);".to_string(),
+        // W-5: String template helpers (str_from_int/float/bool are aliases)
+        "taida_str_from_int" => "int64_t taida_str_from_int(int64_t v);".to_string(),
+        "taida_str_from_float" => "int64_t taida_str_from_float(int64_t v);".to_string(),
+        // W-5: Lax method helpers
+        "taida_can_throw_payload" => "int64_t taida_can_throw_payload(int64_t val);".to_string(),
+        // W-5: Float comparison
+        "taida_float_eq" | "taida_float_neq" | "taida_float_lt" | "taida_float_gt"
+        | "taida_float_lte" | "taida_float_gte" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
         // RC no-ops
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
@@ -570,7 +647,8 @@ fn emit_inst(
             if name == "taida_retain" || name == "taida_release" || name == "taida_str_retain"
                 || name == "taida_list_set_elem_tag"
                 || name == "taida_hashmap_set_value_tag"
-                || name == "taida_set_set_elem_tag" {
+                || name == "taida_set_set_elem_tag"
+                || name == "taida_error_ceiling_pop" {
                 write!(c, "{}{}(", indent, name).unwrap();
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -657,16 +735,58 @@ fn emit_inst(
         IrInst::PackGet(dst, pack_var, index) => {
             writeln!(c, "{}v_{} = taida_pack_get_idx(v_{}, {}LL);", indent, dst, pack_var, index).unwrap();
         }
-        // F-1: These should never be reached because validate_wasm_min_capabilities
-        // catches them before emission. But if somehow they slip through, error out.
-        IrInst::FuncAddr(_, _)
-        | IrInst::MakeClosure(_, _, _)
-        | IrInst::CallIndirect(_, _, _) => {
-            return Err(WasmCEmitError {
-                message: "Internal error: unsupported IR instruction reached emit phase. \
-                          This should have been caught by validate_wasm_min_capabilities."
-                    .to_string(),
-            });
+        // W-5: FuncAddr — get a function pointer as int64_t
+        IrInst::FuncAddr(dst, func_name) => {
+            writeln!(c, "{}v_{} = (int64_t)(intptr_t)&{};", indent, dst, func_name).unwrap();
+        }
+        // W-5: MakeClosure — create a closure (env pack + function pointer)
+        IrInst::MakeClosure(dst, func_name, captures) => {
+            // 1. Create environment pack with captured variables
+            let env_var = format!("_env_{}", dst);
+            writeln!(c, "{}int64_t {} = taida_pack_new({}LL);", indent, env_var, captures.len()).unwrap();
+            for (i, cap_name) in captures.iter().enumerate() {
+                // Set hash to 0 (not needed for index-based access)
+                writeln!(c, "{}taida_pack_set({}, {}LL, nv_{});", indent, env_var, i, sanitize_name(cap_name)).unwrap();
+            }
+            // 2. Create closure: taida_closure_new(fn_ptr, env_ptr)
+            writeln!(c, "{}v_{} = taida_closure_new((int64_t)(intptr_t)&{}, {});", indent, dst, func_name, env_var).unwrap();
+        }
+        // W-5: CallIndirect — indirect function call (closure or plain function pointer)
+        IrInst::CallIndirect(dst, fn_var, args) => {
+            // Check if it's a closure or a plain function pointer
+            writeln!(c, "{}if (taida_is_closure_value(v_{})) {{", indent, fn_var).unwrap();
+            // Closure path: extract fn_ptr and env_ptr, call with env as first arg
+            writeln!(c, "{}    int64_t _ci_fn = taida_closure_get_fn(v_{});", indent, fn_var).unwrap();
+            writeln!(c, "{}    int64_t _ci_env = taida_closure_get_env(v_{});", indent, fn_var).unwrap();
+            // Build closure call: fn(env, arg0, arg1, ...)
+            let closure_argc = args.len() + 1; // env + user args
+            write!(c, "{}    v_{} = ((int64_t (*)(", indent, dst).unwrap();
+            for i in 0..closure_argc {
+                if i > 0 { write!(c, ", ").unwrap(); }
+                write!(c, "int64_t").unwrap();
+            }
+            write!(c, "))(intptr_t)_ci_fn)(_ci_env").unwrap();
+            for arg in args {
+                write!(c, ", v_{}", arg).unwrap();
+            }
+            writeln!(c, ");").unwrap();
+            writeln!(c, "{}}} else {{", indent).unwrap();
+            // Plain function pointer path: call directly
+            write!(c, "{}    v_{} = ((int64_t (*)(", indent, dst).unwrap();
+            for (i, _) in args.iter().enumerate() {
+                if i > 0 { write!(c, ", ").unwrap(); }
+                write!(c, "int64_t").unwrap();
+            }
+            if args.is_empty() {
+                write!(c, "void").unwrap();
+            }
+            write!(c, "))(intptr_t)v_{})(", fn_var).unwrap();
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 { write!(c, ", ").unwrap(); }
+                write!(c, "v_{}", arg).unwrap();
+            }
+            writeln!(c, ");").unwrap();
+            writeln!(c, "{}}}", indent).unwrap();
         }
         IrInst::TailCall(args) => {
             // 末尾再帰: TailCall(args) の args を一時変数に評価してから

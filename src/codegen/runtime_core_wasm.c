@@ -252,21 +252,29 @@ int64_t taida_bool_and(int64_t a, int64_t b) { return (a && b) ? 1 : 0; }
 int64_t taida_bool_or(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
 int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 
-/* ── Div/Mod mold (wasm-min: ヒープなし簡易実装) ── */
-/* Native では Lax ラッパーを返すが、wasm-min では値を直接返す。     */
-/* taida_generic_unmold は identity（Lax ラッパーがないため）。         */
+/* ── Forward declarations for Lax (defined in W-5 section below) ── */
+int64_t taida_lax_new(int64_t value, int64_t default_value);
+int64_t taida_lax_unmold(int64_t lax_ptr);
+static int _wasm_is_lax(int64_t val);
+
+/* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
 int64_t taida_div_mold(int64_t a, int64_t b) {
-    if (b == 0) return 0;
-    return a / b;
+    if (b == 0) return taida_lax_new(0, 0);
+    return taida_lax_new(a / b, 0);
 }
 
 int64_t taida_mod_mold(int64_t a, int64_t b) {
-    if (b == 0) return 0;
-    return a % b;
+    if (b == 0) return taida_lax_new(0, 0);
+    return taida_lax_new(a % b, 0);
 }
 
+/* ── generic_unmold — W-5: Lax-aware (extracts value from Lax pack) ── */
+
 int64_t taida_generic_unmold(int64_t val) {
+    if (_wasm_is_lax(val)) {
+        return taida_lax_unmold(val);
+    }
     return val;
 }
 
@@ -1577,6 +1585,503 @@ int64_t taida_polymorphic_is_empty(int64_t ptr) {
         const char *s = (const char *)(intptr_t)ptr;
         return s[0] == '\0' ? 1 : 0;
     }
+    return 0;
+}
+
+/* ── W-5: Closure runtime ────────────────────────────────── */
+/* Closure layout: [fn_ptr, env_ptr]
+   No magic header or refcount in wasm-min (bump allocator, no free). */
+
+#define WASM_CLOSURE_MARKER 0x434C4F53ULL /* "CLOS" */
+
+int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr) {
+    int64_t *closure = (int64_t *)wasm_alloc(3 * 8);
+    if (!closure) return 0;
+    closure[0] = (int64_t)WASM_CLOSURE_MARKER;
+    closure[1] = fn_ptr;
+    closure[2] = env_ptr;
+    return (int64_t)(intptr_t)closure;
+}
+
+int64_t taida_closure_get_fn(int64_t closure_ptr) {
+    int64_t *c = (int64_t *)(intptr_t)closure_ptr;
+    return c[1];
+}
+
+int64_t taida_closure_get_env(int64_t closure_ptr) {
+    int64_t *c = (int64_t *)(intptr_t)closure_ptr;
+    return c[2];
+}
+
+int64_t taida_is_closure_value(int64_t val) {
+    if (val < 4096) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    return (p[0] == (int64_t)WASM_CLOSURE_MARKER) ? 1 : 0;
+}
+
+/* ── W-5: Error ceiling (error-flag based, no setjmp/longjmp) ── */
+/* WASM freestanding mode does not have setjmp.h. Instead we use an
+   error-flag approach: taida_throw sets a global flag and stores the
+   error value. taida_error_try_call wraps a function pointer call and
+   checks the flag after return. Functions that may throw must check
+   the error flag and propagate it via early return.
+
+   For wasm-min's simpler use case, we implement the same API as native
+   but with setjmp emulated via the error flag + wrapper function approach.
+   taida_error_try_call calls the function; if taida_throw was invoked,
+   the function returns normally (with a dummy value) and try_call detects
+   the flag was set. */
+
+static int64_t __wasm_error_val[64];
+static int64_t __wasm_try_result[64];
+static int __wasm_error_depth = 0;
+static int __wasm_error_thrown = 0;
+
+int64_t taida_error_ceiling_push(void) {
+    if (__wasm_error_depth >= 64) {
+        /* overflow: crash */
+        const char *msg = "Error: maximum error handling depth exceeded\n";
+        write_stdout(msg, wasm_strlen(msg));
+        __builtin_trap();
+    }
+    int depth = __wasm_error_depth++;
+    return (int64_t)depth;
+}
+
+void taida_error_ceiling_pop(void) {
+    if (__wasm_error_depth > 0) __wasm_error_depth--;
+    __wasm_error_thrown = 0;
+}
+
+int64_t taida_throw(int64_t error_val) {
+    if (__wasm_error_depth > 0) {
+        int depth = __wasm_error_depth - 1;
+        __wasm_error_val[depth] = error_val;
+        __wasm_error_thrown = 1;
+        return 0; /* caller should check __wasm_error_thrown */
+    }
+    /* No error ceiling: gorilla crash */
+    const char *msg = "Unhandled error (no error ceiling)\n";
+    write_stdout(msg, wasm_strlen(msg));
+    __builtin_trap();
+    return 0;
+}
+
+/* taida_error_try_call: call fn_ptr(env_ptr) under error ceiling protection.
+   Returns 0 if normal, 1 if error was thrown. */
+int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth) {
+    typedef int64_t (*fn_t)(int64_t);
+    fn_t func = (fn_t)(intptr_t)fn_ptr;
+    __wasm_error_thrown = 0;
+    int64_t result = func(env_ptr);
+    if (__wasm_error_thrown) {
+        __wasm_error_thrown = 0;
+        return 1; /* error caught */
+    }
+    __wasm_try_result[(int)depth] = result;
+    return 0; /* normal completion */
+}
+
+int64_t taida_error_try_get_result(int64_t depth) {
+    return __wasm_try_result[(int)depth];
+}
+
+int64_t taida_error_setjmp(int64_t depth) {
+    /* Legacy compat — not used in wasm-min's error flow */
+    (void)depth;
+    return 0;
+}
+
+int64_t taida_error_get_value(int64_t depth) {
+    return __wasm_error_val[(int)depth];
+}
+
+/* ── W-5: Error object creation ── */
+/* FNV-1a hashes for error BuchiPack fields (same as native_runtime.c) */
+#define WASM_HASH_TYPE      0x7c9537e3ed3caf38LL
+#define WASM_HASH_MESSAGE   0x7c95b116bce72d44LL
+#define WASM_HASH_FIELD     0x7c9512b6ebabfbccLL
+#define WASM_HASH_CODE      0x7c950c66ec05f5caLL
+
+int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, WASM_HASH_TYPE);
+    taida_pack_set(pack, 0, type_ptr);
+    taida_pack_set_hash(pack, 1, WASM_HASH_MESSAGE);
+    taida_pack_set(pack, 1, msg_ptr);
+    return pack;
+}
+
+/* ── W-5: Lax[T] runtime ────────────────────────────────── */
+/* Lax is a BuchiPack @(hasValue: Bool, __value: T, __default: T, __type: Str)
+   Layout: 4-field pack using same hash constants as native. */
+
+#define WASM_HASH_HAS_VALUE 0x7c9515d6c843d1c0LL
+#define WASM_HASH___VALUE   0x7c9537dfed3ca530LL
+#define WASM_HASH___DEFAULT 0x7c950e1c3b85a1c0LL
+#define WASM_HASH___TYPE    0x7c9537e3ed3caf38LL
+
+int64_t taida_lax_new(int64_t value, int64_t default_value) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 1);  /* hasValue = true */
+    taida_pack_set_tag(pack, 0, 2); /* BOOL tag */
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    taida_pack_set_hash(pack, 2, WASM_HASH___DEFAULT);
+    taida_pack_set(pack, 2, default_value);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    return pack;
+}
+
+int64_t taida_lax_empty(int64_t default_value) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 0);  /* hasValue = false */
+    taida_pack_set_tag(pack, 0, 2); /* BOOL tag */
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, default_value);
+    taida_pack_set_hash(pack, 2, WASM_HASH___DEFAULT);
+    taida_pack_set(pack, 2, default_value);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    return pack;
+}
+
+int64_t taida_lax_has_value(int64_t lax_ptr) {
+    return taida_pack_get_idx(lax_ptr, 0);  /* hasValue field */
+}
+
+int64_t taida_lax_get_or_default(int64_t lax_ptr, int64_t fallback) {
+    if (taida_pack_get_idx(lax_ptr, 0)) {
+        return taida_pack_get_idx(lax_ptr, 1);  /* __value */
+    }
+    return fallback;
+}
+
+int64_t taida_lax_unmold(int64_t lax_ptr) {
+    if (taida_pack_get_idx(lax_ptr, 0)) {
+        return taida_pack_get_idx(lax_ptr, 1);  /* __value */
+    }
+    return taida_pack_get_idx(lax_ptr, 2);  /* __default */
+}
+
+int64_t taida_lax_is_empty(int64_t lax_ptr) {
+    return taida_pack_get_idx(lax_ptr, 0) ? 0 : 1;
+}
+
+/* ── W-5: generic_unmold — now Lax-aware ── */
+/* Override the simplified version from W-1. When the value is a Lax pack
+   (detected by field count == 4 and hasValue field), extract the value;
+   otherwise return identity. */
+
+/* Forward declare: check if a value is a Lax pack */
+static int _wasm_is_lax(int64_t val) {
+    if (val < 4096) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    /* Check if it looks like a pack with 4 fields and first hash = HASH_HAS_VALUE */
+    if (p[0] == 4 && p[1] == WASM_HASH_HAS_VALUE) return 1;
+    return 0;
+}
+
+/* ── W-5: Gorillax (Result container) ── */
+/* Gorillax: @(isOk: Bool, __value: T, __error: Error, __type: "Gorillax")
+   Using pack fields at fixed indices. */
+
+#define WASM_HASH_IS_OK     0x7c9519b57ab70d1eLL
+#define WASM_HASH___ERROR   0x7c950f4ce4f47736LL
+
+int64_t taida_gorillax_new(int64_t value) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set(pack, 0, 1); /* isOk = true */
+    taida_pack_set_tag(pack, 0, 2); /* BOOL */
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
+    taida_pack_set(pack, 2, 0);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Gorillax");
+    return pack;
+}
+
+int64_t taida_gorillax_err(int64_t error) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set(pack, 0, 0); /* isOk = false */
+    taida_pack_set_tag(pack, 0, 2); /* BOOL */
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, 0);
+    taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
+    taida_pack_set(pack, 2, error);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Gorillax");
+    return pack;
+}
+
+int64_t taida_gorillax_is_ok(int64_t gx) {
+    return taida_pack_get_idx(gx, 0);
+}
+
+int64_t taida_gorillax_get_value(int64_t gx) {
+    return taida_pack_get_idx(gx, 1);
+}
+
+int64_t taida_gorillax_get_error(int64_t gx) {
+    return taida_pack_get_idx(gx, 2);
+}
+
+int64_t taida_gorillax_relax(int64_t gx) {
+    /* RelaxedGorillax: same layout, just change __type */
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set(pack, 0, taida_pack_get_idx(gx, 0));
+    taida_pack_set_tag(pack, 0, 2);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, taida_pack_get_idx(gx, 1));
+    taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
+    taida_pack_set(pack, 2, taida_pack_get_idx(gx, 2));
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    return pack;
+}
+
+int64_t taida_relaxed_gorillax_new(int64_t value) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set(pack, 0, 1);
+    taida_pack_set_tag(pack, 0, 2);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
+    taida_pack_set(pack, 2, 0);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    return pack;
+}
+
+int64_t taida_relaxed_gorillax_err(int64_t error) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set(pack, 0, 0);
+    taida_pack_set_tag(pack, 0, 2);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, 0);
+    taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
+    taida_pack_set(pack, 2, error);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    return pack;
+}
+
+/* ── W-5: Result[T, P] ── */
+/* Result: @(__value: T, __predicate: P, throw: Error, __type: "Result")
+   field 0: __value, field 1: __predicate, field 2: throw, field 3: __type */
+
+#define WASM_HASH___PREDICATE 0x7c952b0c14af9d98LL
+#define WASM_HASH_THROW       0x7c9536adee0f6a14LL
+
+int64_t taida_result_create(int64_t value, int64_t pred, int64_t throw_val, int64_t unmold_flag) {
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASM_HASH___VALUE);
+    taida_pack_set(pack, 0, value);
+    taida_pack_set_hash(pack, 1, WASM_HASH___PREDICATE);
+    taida_pack_set(pack, 1, pred);
+    taida_pack_set_hash(pack, 2, WASM_HASH_THROW);
+    taida_pack_set(pack, 2, throw_val);
+    taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
+    (void)unmold_flag;
+    return pack;
+}
+
+int64_t taida_result_is_ok(int64_t result) {
+    /* ok if throw field (index 2) is 0 */
+    return taida_pack_get_idx(result, 2) == 0 ? 1 : 0;
+}
+
+int64_t taida_result_is_error(int64_t result) {
+    return taida_pack_get_idx(result, 2) != 0 ? 1 : 0;
+}
+
+int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
+    /* Simplified: not used in wasm-min common paths */
+    (void)fn_ptr;
+    return result;
+}
+
+/* ── W-5: Cage ── */
+
+/* Callback invoker helpers for wasm-min */
+static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
+    if (taida_is_closure_value(fn_ptr)) {
+        int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
+        typedef int64_t (*closure_fn_t)(int64_t, int64_t);
+        closure_fn_t func = (closure_fn_t)(intptr_t)closure[1];
+        return func(closure[2], arg0);
+    }
+    typedef int64_t (*fn_t)(int64_t);
+    fn_t func = (fn_t)(intptr_t)fn_ptr;
+    return func(arg0);
+}
+
+int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr) {
+    if (fn_ptr == 0) {
+        int64_t error = taida_make_error(
+            (int64_t)(intptr_t)"CageError",
+            (int64_t)(intptr_t)"Cage second argument must be a function");
+        return taida_gorillax_err(error);
+    }
+
+    int64_t depth = taida_error_ceiling_push();
+    __wasm_error_thrown = 0;
+    int64_t result = _wasm_invoke_callback1(fn_ptr, cage_value);
+    if (__wasm_error_thrown) {
+        int64_t error = taida_error_get_value(depth);
+        taida_error_ceiling_pop();
+        if (error == 0) {
+            error = taida_make_error(
+                (int64_t)(intptr_t)"CageError",
+                (int64_t)(intptr_t)"Cage function failed");
+        }
+        return taida_gorillax_err(error);
+    }
+    taida_error_ceiling_pop();
+    return taida_gorillax_new(result);
+}
+
+/* ── W-5: Molten/Stub/Todo stubs ── */
+
+int64_t taida_molten_new(void) {
+    int64_t pack = taida_pack_new(1);
+    taida_pack_set_hash(pack, 0, WASM_HASH___TYPE);
+    taida_pack_set(pack, 0, (int64_t)(intptr_t)"Molten");
+    return pack;
+}
+
+int64_t taida_stub_new(int64_t message) {
+    (void)message;
+    return taida_molten_new();
+}
+
+int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm) {
+    (void)id; (void)task; (void)sol; (void)unm;
+    return taida_molten_new();
+}
+
+/* ── W-5: Type conversion molds (returning Lax) ── */
+/* These wrap taida_lax_new with conversion logic, matching native_runtime.c */
+
+int64_t taida_str_mold_int(int64_t v) {
+    return taida_lax_new(taida_int_to_str(v), (int64_t)(intptr_t)"");
+}
+
+int64_t taida_str_mold_float(int64_t v) {
+    return taida_lax_new(taida_float_to_str(v), (int64_t)(intptr_t)"");
+}
+
+int64_t taida_str_mold_bool(int64_t v) {
+    return taida_lax_new(taida_str_from_bool(v), (int64_t)(intptr_t)"");
+}
+
+int64_t taida_str_mold_str(int64_t v) {
+    return taida_lax_new(v, (int64_t)(intptr_t)"");
+}
+
+int64_t taida_int_mold_int(int64_t v) {
+    return taida_lax_new(v, 0);
+}
+
+int64_t taida_int_mold_float(int64_t v) {
+    return taida_lax_new(taida_float_to_int(v), 0);
+}
+
+int64_t taida_int_mold_bool(int64_t v) {
+    return taida_lax_new(v != 0 ? 1 : 0, 0);
+}
+
+int64_t taida_float_mold_int(int64_t v) {
+    return taida_lax_new(taida_int_to_float(v), _d2l(0.0));
+}
+
+int64_t taida_float_mold_float(int64_t v) {
+    return taida_lax_new(v, _d2l(0.0));
+}
+
+int64_t taida_float_mold_str(int64_t v) {
+    /* Parse string to float — simplified */
+    (void)v;
+    return taida_lax_new(_d2l(0.0), _d2l(0.0));
+}
+
+int64_t taida_float_mold_bool(int64_t v) {
+    return taida_lax_new(_d2l(v ? 1.0 : 0.0), _d2l(0.0));
+}
+
+int64_t taida_bool_mold_int(int64_t v) {
+    return taida_lax_new(v != 0 ? 1 : 0, 0);
+}
+
+int64_t taida_bool_mold_float(int64_t v) {
+    double d = _to_double(v);
+    return taida_lax_new(d != 0.0 ? 1 : 0, 0);
+}
+
+int64_t taida_bool_mold_str(int64_t v) {
+    const char *s = (const char *)(intptr_t)v;
+    if (s && s[0] == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'e' && s[4] == 0)
+        return taida_lax_new(1, 0);
+    if (s && s[0] == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e' && s[5] == 0)
+        return taida_lax_new(0, 0);
+    return taida_lax_new(0, 0); /* default false */
+}
+
+int64_t taida_bool_mold_bool(int64_t v) {
+    return taida_lax_new(v, 0);
+}
+
+/* ── W-5: Float div/mod molds (returning Lax) ── */
+
+int64_t taida_float_div_mold(int64_t a, int64_t b) {
+    double da = _to_double(a), db = _to_double(b);
+    if (db == 0.0) return taida_lax_new(_d2l(0.0), _d2l(0.0));
+    return taida_lax_new(_d2l(da / db), _d2l(0.0));
+}
+
+int64_t taida_float_mod_mold(int64_t a, int64_t b) {
+    double da = _to_double(a), db = _to_double(b);
+    if (db == 0.0) return taida_lax_new(_d2l(0.0), _d2l(0.0));
+    /* fmod without libc — use repeated subtraction (good enough for wasm-min) */
+    double q = da / db;
+    /* truncate toward zero */
+    int64_t qi = (int64_t)q;
+    double result = da - (double)qi * db;
+    return taida_lax_new(_d2l(result), _d2l(0.0));
+}
+
+/* ── W-5: Float comparison ── */
+
+int64_t taida_float_eq(int64_t a, int64_t b) { return _to_double(a) == _to_double(b) ? 1 : 0; }
+int64_t taida_float_neq(int64_t a, int64_t b) { return _to_double(a) != _to_double(b) ? 1 : 0; }
+int64_t taida_float_lt(int64_t a, int64_t b) { return _to_double(a) < _to_double(b) ? 1 : 0; }
+int64_t taida_float_gt(int64_t a, int64_t b) { return _to_double(a) > _to_double(b) ? 1 : 0; }
+int64_t taida_float_lte(int64_t a, int64_t b) { return _to_double(a) <= _to_double(b) ? 1 : 0; }
+int64_t taida_float_gte(int64_t a, int64_t b) { return _to_double(a) >= _to_double(b) ? 1 : 0; }
+
+/* ── W-5: String template helpers (aliases) ── */
+
+int64_t taida_str_from_int(int64_t v) { return taida_int_to_str(v); }
+int64_t taida_str_from_float(int64_t v) { return taida_float_to_str(v); }
+
+/* ── W-5: Error helpers ── */
+
+int64_t taida_can_throw_payload(int64_t val) {
+    /* Check if val is a pack with a "type" field (looks like an error) */
+    if (val < 4096) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    /* Simple heuristic: first field hash is type hash */
+    if (p[0] >= 1 && p[0] <= 10 && p[1] == WASM_HASH_TYPE) return 1;
     return 0;
 }
 

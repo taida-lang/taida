@@ -374,20 +374,30 @@ fn wasm_min_pack_accepted() {
     );
 }
 
+// W-5: wasm_min_reject_closure removed -- Closures are now supported.
+// See wasm_min_closure_basic, wasm_min_closure_accepted instead.
+
+/// W-5: Closures should now be accepted by wasm-min.
 #[test]
-fn wasm_min_reject_closure() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/unsupported_closure.td");
-    let stderr = expect_wasm_min_compile_failure(&td_path);
+fn wasm_min_closure_accepted() {
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/unsupported_closure.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_closure_accepted.wasm");
+
+    let output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-min"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida");
+
+    let _ = std::fs::remove_file(&wasm_path);
+
     assert!(
-        stderr.contains("wasm-min does not support"),
-        "Error should mention 'wasm-min does not support', got: {}",
-        stderr
-    );
-    assert!(
-        stderr.contains("closure") || stderr.contains("Closure") || stderr.contains("MakeClosure"),
-        "Error should mention closures, got: {}",
-        stderr
+        output.status.success(),
+        "W-5: Closures should now be accepted by wasm-min, but compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -749,5 +759,78 @@ fn wasm_min_set_basic() {
         native_output, wasm,
         "set_basic: wasm-min output should match native (expected '{}', got '{}')",
         native_output, wasm
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W-5: Control flow and function tests
+// ---------------------------------------------------------------------------
+
+/// W-5: Basic closure — function returning a function with captured variable.
+#[test]
+fn wasm_min_closure_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/closure_basic.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "closure_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-5: Error ceiling — error handling with |== operator.
+#[test]
+fn wasm_min_error_ceiling() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/error_ceiling.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "error_ceiling: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-5: Lax[T] — Div/Mod molds return Lax, ]=> unmolds.
+#[test]
+fn wasm_min_lax_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/lax_basic.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "lax_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
