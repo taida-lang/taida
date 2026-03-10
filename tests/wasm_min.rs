@@ -301,20 +301,76 @@ fn expect_wasm_min_compile_failure(td_path: &Path) -> String {
     String::from_utf8_lossy(&compile_output.stderr).to_string()
 }
 
+// W-4: BuchiPack is now supported in wasm-min.
+// wasm_min_reject_buchipack removed -- see wasm_min_pack_basic instead.
+
+/// W-4: Basic BuchiPack support — create, field access, stdout.
 #[test]
-fn wasm_min_reject_buchipack() {
+fn wasm_min_pack_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/pack_basic.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "pack_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-4: Nested BuchiPack — inner pack accessed through outer pack fields.
+#[test]
+fn wasm_min_pack_nested() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/pack_nested.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "pack_nested: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-4: BuchiPack compile acceptance test (was wasm_min_reject_buchipack before W-4).
+#[test]
+fn wasm_min_pack_accepted() {
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/unsupported_pack.td");
-    let stderr = expect_wasm_min_compile_failure(&td_path);
+    let wasm_path = std::env::temp_dir().join("taida_wasm_pack_accepted.wasm");
+
+    let output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-min"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida");
+
+    let _ = std::fs::remove_file(&wasm_path);
+
     assert!(
-        stderr.contains("wasm-min does not support"),
-        "Error should mention 'wasm-min does not support', got: {}",
-        stderr
-    );
-    assert!(
-        stderr.contains("BuchiPack") || stderr.contains("Pack"),
-        "Error should mention BuchiPack/Pack, got: {}",
-        stderr
+        output.status.success(),
+        "W-4: BuchiPack should now be accepted by wasm-min, but compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -616,5 +672,32 @@ fn wasm_min_int_mold_str() {
         native_output, wasm,
         "int_mold_str: wasm-min output should match native (expected '{}', got '{}')",
         native_output, wasm
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W-4: Collection type tests
+// ---------------------------------------------------------------------------
+
+/// W-4: Basic list support — create, push, length.
+#[test]
+fn wasm_min_list_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/list_basic.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "list_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }

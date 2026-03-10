@@ -10,8 +10,9 @@
 /// - CondBranch, Return, TailCall
 /// - GlobalSet, GlobalGet
 /// - Retain, Release (no-op)
+/// - PackNew, PackSet, PackSetTag, PackGet (W-4)
 ///
-/// クロージャ・BuchiPack は未対応。
+/// クロージャは未対応。
 /// 未対応 IR は silent miscompile ではなく compile error を返す。
 
 use std::collections::{HashMap, HashSet};
@@ -65,18 +66,11 @@ fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<S
         match inst {
             // W-3: Float literals are now supported (f64 bits stored in int64_t via bitcast)
             IrInst::ConstFloat(_, _) => {}
-            IrInst::PackNew(_, _) => {
-                out.push("BuchiPack (PackNew)".to_string());
-            }
-            IrInst::PackGet(_, _, _) => {
-                out.push("BuchiPack (PackGet)".to_string());
-            }
-            IrInst::PackSet(_, _, _) => {
-                out.push("BuchiPack (PackSet)".to_string());
-            }
-            IrInst::PackSetTag(_, _, _) => {
-                out.push("BuchiPack (PackSetTag)".to_string());
-            }
+            // W-4: BuchiPack operations are now supported
+            IrInst::PackNew(_, _) => {}
+            IrInst::PackGet(_, _, _) => {}
+            IrInst::PackSet(_, _, _) => {}
+            IrInst::PackSetTag(_, _, _) => {}
             IrInst::FuncAddr(_, _) => {
                 out.push("function references (FuncAddr)".to_string());
             }
@@ -91,7 +85,7 @@ fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<S
                     collect_unsupported_insts(&arm.body, _func_name, out);
                 }
             }
-            // All supported instructions (ConstFloat is handled above)
+            // All other supported instructions (ConstFloat and Pack* are handled above)
             IrInst::ConstInt(_, _)
             | IrInst::ConstBool(_, _)
             | IrInst::ConstStr(_, _)
@@ -261,6 +255,19 @@ fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
             IrInst::Call(_, name, _) => {
                 set.insert(name.clone());
             }
+            // W-4: Pack IR instructions need runtime function prototypes
+            IrInst::PackNew(_, _) => {
+                set.insert("taida_pack_new".to_string());
+            }
+            IrInst::PackSet(_, _, _) => {
+                set.insert("taida_pack_set".to_string());
+            }
+            IrInst::PackSetTag(_, _, _) => {
+                set.insert("taida_pack_set_tag".to_string());
+            }
+            IrInst::PackGet(_, _, _) => {
+                set.insert("taida_pack_get_idx".to_string());
+            }
             IrInst::CondBranch(_, arms) => {
                 for arm in arms {
                     collect_needed_runtime_funcs(&arm.body, set);
@@ -333,8 +340,47 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_poly_eq" | "taida_poly_neq" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
+        // W-4: Field registry (no-op in wasm-min, used for display in native)
+        "taida_register_field_name" => "int64_t taida_register_field_name(int64_t hash, int64_t name_ptr);".to_string(),
+        "taida_register_field_type" => "int64_t taida_register_field_type(int64_t hash, int64_t name_ptr, int64_t type_tag);".to_string(),
+        // W-4: BuchiPack runtime functions
+        "taida_pack_new" => "int64_t taida_pack_new(int64_t field_count);".to_string(),
+        "taida_pack_set" => "int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);".to_string(),
+        "taida_pack_set_tag" => "int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);".to_string(),
+        "taida_pack_get_idx" => "int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);".to_string(),
+        "taida_pack_set_hash" => "int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash);".to_string(),
+        "taida_pack_get" => "int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);".to_string(),
+        "taida_pack_has_hash" => "int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);".to_string(),
+        // W-4: List runtime functions
+        "taida_list_new" => "int64_t taida_list_new(void);".to_string(),
+        "taida_list_push" => "int64_t taida_list_push(int64_t list_ptr, int64_t item);".to_string(),
+        "taida_list_length" => "int64_t taida_list_length(int64_t list_ptr);".to_string(),
+        "taida_list_get" => "int64_t taida_list_get(int64_t list_ptr, int64_t index);".to_string(),
+        "taida_list_is_empty" => "int64_t taida_list_is_empty(int64_t list_ptr);".to_string(),
+        "taida_list_set_elem_tag" => {
+            "void taida_list_set_elem_tag(int64_t list_ptr, int64_t tag);".to_string()
+        }
+        // W-4: HashMap runtime functions
+        "taida_hashmap_new" => "int64_t taida_hashmap_new(void);".to_string(),
+        "taida_hashmap_set" => "int64_t taida_hashmap_set(int64_t hm, int64_t kh, int64_t kp, int64_t v);".to_string(),
+        "taida_hashmap_set_immut" => "int64_t taida_hashmap_set_immut(int64_t hm, int64_t kh, int64_t kp, int64_t v);".to_string(),
+        "taida_hashmap_get" => "int64_t taida_hashmap_get(int64_t hm, int64_t kh, int64_t kp);".to_string(),
+        "taida_hashmap_has" => "int64_t taida_hashmap_has(int64_t hm, int64_t kh, int64_t kp);".to_string(),
+        "taida_hashmap_is_empty" => "int64_t taida_hashmap_is_empty(int64_t hm);".to_string(),
+        "taida_hashmap_get_lax" => "int64_t taida_hashmap_get_lax(int64_t hm, int64_t kh, int64_t kp);".to_string(),
+        "taida_hashmap_set_value_tag" => {
+            "void taida_hashmap_set_value_tag(int64_t hm, int64_t tag);".to_string()
+        }
+        "taida_str_hash" => "int64_t taida_str_hash(int64_t str_ptr);".to_string(),
+        // W-4: Set runtime functions
+        "taida_set_from_list" => "int64_t taida_set_from_list(int64_t list_ptr);".to_string(),
+        "taida_set_add" => "int64_t taida_set_add(int64_t set_ptr, int64_t item);".to_string(),
+        "taida_set_has" => "int64_t taida_set_has(int64_t set_ptr, int64_t item);".to_string(),
+        "taida_set_set_elem_tag" => {
+            "void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag);".to_string()
+        }
         // RC no-ops
-        "taida_retain" | "taida_release" => {
+        "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
         }
         other => {
@@ -500,11 +546,19 @@ fn emit_inst(
             writeln!(c, "{}v_{} = nv_{};", indent, dst, sanitize_name(name)).unwrap();
         }
         IrInst::Call(dst, name, args) => {
-            // RC no-ops: retain/release は void 返り値
-            if name == "taida_retain" || name == "taida_release" {
-                if let Some(arg) = args.first() {
-                    writeln!(c, "{}{}(v_{});", indent, name, arg).unwrap();
+            // void-returning functions: RC no-ops + tag setters
+            if name == "taida_retain" || name == "taida_release" || name == "taida_str_retain"
+                || name == "taida_list_set_elem_tag"
+                || name == "taida_hashmap_set_value_tag"
+                || name == "taida_set_set_elem_tag" {
+                write!(c, "{}{}(", indent, name).unwrap();
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(c, ", ").unwrap();
+                    }
+                    write!(c, "v_{}", arg).unwrap();
                 }
+                writeln!(c, ");").unwrap();
                 writeln!(c, "{}v_{} = 0;", indent, dst).unwrap();
             } else {
                 write!(c, "{}v_{} = {}(", indent, dst, name).unwrap();
@@ -570,13 +624,22 @@ fn emit_inst(
             let var_name = fctx.global_map.get(name_hash).expect("global hash not in map");
             writeln!(c, "{}v_{} = {};", indent, dst, var_name).unwrap();
         }
+        // W-4: BuchiPack operations
+        IrInst::PackNew(dst, field_count) => {
+            writeln!(c, "{}v_{} = taida_pack_new({}LL);", indent, dst, field_count).unwrap();
+        }
+        IrInst::PackSet(pack_var, index, value_var) => {
+            writeln!(c, "{}taida_pack_set(v_{}, {}LL, v_{});", indent, pack_var, index, value_var).unwrap();
+        }
+        IrInst::PackSetTag(pack_var, index, tag) => {
+            writeln!(c, "{}taida_pack_set_tag(v_{}, {}LL, {}LL);", indent, pack_var, index, tag).unwrap();
+        }
+        IrInst::PackGet(dst, pack_var, index) => {
+            writeln!(c, "{}v_{} = taida_pack_get_idx(v_{}, {}LL);", indent, dst, pack_var, index).unwrap();
+        }
         // F-1: These should never be reached because validate_wasm_min_capabilities
         // catches them before emission. But if somehow they slip through, error out.
-        IrInst::PackNew(_, _)
-        | IrInst::PackGet(_, _, _)
-        | IrInst::PackSet(_, _, _)
-        | IrInst::PackSetTag(_, _, _)
-        | IrInst::FuncAddr(_, _)
+        IrInst::FuncAddr(_, _)
         | IrInst::MakeClosure(_, _, _)
         | IrInst::CallIndirect(_, _, _) => {
             return Err(WasmCEmitError {

@@ -586,22 +586,76 @@ int64_t taida_float_to_str(int64_t val) {
     return (int64_t)(intptr_t)buf;
 }
 
-/* ── W-3f: taida_polymorphic_length (wasm-min: string only) ── */
+/* W-4: Forward declarations for list functions (used by polymorphic helpers) */
+int64_t taida_list_length(int64_t list_ptr);
+
+/* ── W-3f/W-4: taida_polymorphic_length (wasm-min: string + list) ── */
+
+/* Helper: check if a pointer looks like a list (bump-allocated).
+   Lists have [capacity(int64), length(int64), ...] where capacity >= 16.
+   Strings have printable ASCII/UTF-8 as first byte.
+   We check the first int64_t: if it's a reasonable capacity (8-65536),
+   it's likely a list. */
+static int _looks_like_list(int64_t ptr) {
+    if (ptr == 0) return 0;
+    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    unsigned int addr = (unsigned int)ptr;
+    /* Need at least 3 int64_t slots (header) */
+    if (addr + 24 > mem_size) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    int64_t cap = data[0];
+    int64_t len = data[1];
+    /* Valid list: capacity is a reasonable power-of-2-ish number,
+       length is non-negative and <= capacity */
+    if (cap >= 8 && cap <= 65536 && len >= 0 && len <= cap) return 1;
+    return 0;
+}
 
 int64_t taida_polymorphic_length(int64_t ptr) {
+    if (!ptr) return 0;
+    /* W-4: Check if it's a list first */
+    if (_looks_like_list(ptr)) {
+        return taida_list_length(ptr);
+    }
+    /* Otherwise treat as string */
     const char *s = (const char *)(intptr_t)ptr;
-    if (!s) return 0;
     return (int64_t)wasm_strlen(s);
 }
 
 /* ── W-3f: taida_polymorphic_to_string (wasm-min: Int/Float/Bool/Str) ── */
 
+/* Helper: check if a value looks like a valid string pointer in WASM linear memory.
+   In wasm32, valid heap/data addresses are positive and within linear memory.
+   We check that the pointer is in a reasonable range and points to a NUL-terminated
+   byte sequence with printable or whitespace characters. */
+static int _looks_like_string(int64_t val) {
+    /* Zero is not a string (it's the integer 0 or null) */
+    if (val == 0) return 0;
+    /* Negative values or values > 32-bit range are not pointers on wasm32 */
+    if (val < 0 || val > 0xFFFFFFFF) return 0;
+    /* Check if it's within current WASM memory */
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    unsigned int addr = (unsigned int)val;
+    if (addr >= mem_size) return 0;
+    /* Check if it starts with a printable/whitespace ASCII byte (not \0) */
+    const char *s = (const char *)(intptr_t)val;
+    if (s[0] == '\0') return 0;
+    /* Verify first few bytes are valid UTF-8/ASCII (not random garbage) */
+    for (int i = 0; i < 8 && s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        /* Accept printable ASCII, whitespace, and high bytes (UTF-8 continuation) */
+        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') return 0;
+    }
+    return 1;
+}
+
 int64_t taida_polymorphic_to_string(int64_t obj) {
-    /* In wasm-min, values are either int64_t numbers or string pointers.
-       We use the same heuristic as _to_double: small values are integers. */
-    /* For string pointers, return as-is. For numbers, convert to string. */
-    /* Since wasm-min has no heap objects, we do a simple approach:
-       treat as integer and convert to string via taida_int_to_str. */
+    /* If the value looks like a string pointer, return as-is */
+    if (_looks_like_string(obj)) return obj;
+    /* Otherwise, convert integer to string */
     return taida_int_to_str(obj);
 }
 
@@ -612,10 +666,343 @@ int64_t taida_int_mold_str(int64_t v) {
     return taida_str_to_int(v);
 }
 
+/* ── W-4: Field registry (no-op in wasm-min, used for debug/display in native) ── */
+
+int64_t taida_register_field_name(int64_t hash, int64_t name_ptr) {
+    (void)hash; (void)name_ptr;
+    return 0;
+}
+
+int64_t taida_register_field_type(int64_t hash, int64_t name_ptr, int64_t type_tag) {
+    (void)hash; (void)name_ptr; (void)type_tag;
+    return 0;
+}
+
+/* ── W-4: BuchiPack runtime (bump allocator, no RC/magic) ── */
+/* Layout: [field_count, field0_hash, field0_tag, field0_value, field1_hash, ...]
+   Same as native_runtime.c but without magic header and refcount.
+   Each field occupies 3 int64_t slots: hash, tag, value.
+   Total allocation: (1 + field_count * 3) * sizeof(int64_t) */
+
+int64_t taida_pack_new(int64_t field_count) {
+    int64_t slots = 1 + field_count * 3;
+    int64_t *pack = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
+    if (!pack) return 0;
+    pack[0] = field_count;
+    /* Zero-initialize all field slots (hash=0, tag=0=INT, value=0) */
+    for (int64_t i = 1; i < slots; i++) pack[i] = 0;
+    return (int64_t)(intptr_t)pack;
+}
+
+int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    pack[1 + index * 3 + 2] = value;
+    return pack_ptr;
+}
+
+int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    pack[1 + index * 3 + 1] = tag;
+    return pack_ptr;
+}
+
+int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    return pack[1 + index * 3 + 2];
+}
+
+int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    pack[1 + index * 3] = hash;
+    return pack_ptr;
+}
+
+int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    int64_t count = pack[0];
+    for (int64_t i = 0; i < count; i++) {
+        if (pack[1 + i * 3] == field_hash) {
+            return pack[1 + i * 3 + 2];
+        }
+    }
+    return 0; /* default value */
+}
+
+int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    int64_t count = pack[0];
+    for (int64_t i = 0; i < count; i++) {
+        if (pack[1 + i * 3] == field_hash) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ── W-4: List runtime (bump allocator, no RC/magic) ── */
+/* Layout: [capacity, length, elem_type_tag, elem0, elem1, ...]
+   Same concept as native_runtime.c but without magic header and refcount.
+   Note: bump allocator cannot realloc, so we use copy-on-grow. */
+
+int64_t taida_list_new(void) {
+    int64_t initial_cap = 16;
+    int64_t slots = 3 + initial_cap;  /* header(3) + elements */
+    int64_t *list = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
+    if (!list) return 0;
+    list[0] = initial_cap;  /* capacity */
+    list[1] = 0;            /* length */
+    list[2] = -1;           /* elem_type_tag (UNKNOWN) */
+    return (int64_t)(intptr_t)list;
+}
+
+void taida_list_set_elem_tag(int64_t list_ptr, int64_t tag) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    list[2] = tag;
+}
+
+int64_t taida_list_push(int64_t list_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t cap = list[0];
+    int64_t len = list[1];
+    if (len >= cap) {
+        /* Grow: allocate new list with double capacity, copy over */
+        int64_t new_cap = cap * 2;
+        int64_t new_slots = 3 + new_cap;
+        int64_t *new_list = (int64_t *)wasm_alloc((unsigned int)(new_slots * 8));
+        if (!new_list) return list_ptr;
+        /* Copy header + existing elements */
+        for (int64_t i = 0; i < 3 + len; i++) new_list[i] = list[i];
+        new_list[0] = new_cap;
+        list = new_list;
+        list_ptr = (int64_t)(intptr_t)new_list;
+    }
+    list[3 + len] = item;
+    list[1] = len + 1;
+    return list_ptr;
+}
+
+int64_t taida_list_length(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    return list[1];
+}
+
+/* taida_list_get: in native returns Lax, in wasm-min returns raw value
+   (no Lax wrapper). OOB returns 0. */
+int64_t taida_list_get(int64_t list_ptr, int64_t index) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (index < 0 || index >= len) return 0;
+    return list[3 + index];
+}
+
+int64_t taida_list_is_empty(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    return list[1] == 0 ? 1 : 0;
+}
+
+/* ── W-4: HashMap runtime (bump allocator, no RC/magic) ── */
+/* Layout: [capacity, length, value_type_tag, entries...]
+   Each entry: [key_hash, key_ptr, value] (3 slots)
+   Header = 3 slots, then capacity * 3 entry slots.
+   Open addressing with linear probing. */
+
+#define WASM_HM_HEADER 3
+
+/* String comparison helper */
+static int _wasm_streq(const char *a, const char *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static int64_t _wasm_hashmap_new_with_cap(int64_t cap) {
+    int64_t slots = WASM_HM_HEADER + cap * 3;
+    int64_t *hm = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
+    if (!hm) return 0;
+    /* Zero-initialize everything (empty slots have hash=0, key=0) */
+    for (int64_t i = 0; i < slots; i++) hm[i] = 0;
+    hm[0] = cap;
+    hm[1] = 0;     /* length */
+    hm[2] = -1;    /* value_type_tag = UNKNOWN */
+    return (int64_t)(intptr_t)hm;
+}
+
+int64_t taida_hashmap_new(void) {
+    return _wasm_hashmap_new_with_cap(16);
+}
+
+void taida_hashmap_set_value_tag(int64_t hm_ptr, int64_t tag) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    hm[2] = tag;
+}
+
+/* FNV-1a hash for string keys */
+int64_t taida_str_hash(int64_t str_ptr) {
+    const unsigned char *s = (const unsigned char *)(intptr_t)str_ptr;
+    if (!s) return 0;
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    while (*s) {
+        hash ^= *s++;
+        hash *= 0x100000001b3ULL;
+    }
+    return (int64_t)hash;
+}
+
+int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int64_t value) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t len = hm[1];
+
+    /* Resize if load factor > 70% */
+    if (len * 10 >= cap * 7) {
+        int64_t new_cap = cap * 2;
+        int64_t new_hm_ptr = _wasm_hashmap_new_with_cap(new_cap);
+        int64_t *new_hm = (int64_t *)(intptr_t)new_hm_ptr;
+        new_hm[2] = hm[2]; /* propagate value_type_tag */
+        /* Re-hash all occupied entries */
+        for (int64_t i = 0; i < cap; i++) {
+            int64_t sh = hm[WASM_HM_HEADER + i * 3];
+            int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+            if (sh != 0 || sk != 0) {
+                /* Insert into new table */
+                uint64_t uh = (uint64_t)sh;
+                int64_t idx = (int64_t)(uh % (uint64_t)new_cap);
+                for (int64_t j = 0; j < new_cap; j++) {
+                    int64_t slot = (idx + j) % new_cap;
+                    int64_t esh = new_hm[WASM_HM_HEADER + slot * 3];
+                    int64_t esk = new_hm[WASM_HM_HEADER + slot * 3 + 1];
+                    if (esh == 0 && esk == 0) {
+                        new_hm[WASM_HM_HEADER + slot * 3] = sh;
+                        new_hm[WASM_HM_HEADER + slot * 3 + 1] = sk;
+                        new_hm[WASM_HM_HEADER + slot * 3 + 2] = hm[WASM_HM_HEADER + i * 3 + 2];
+                        new_hm[1]++;
+                        break;
+                    }
+                }
+            }
+        }
+        hm = new_hm;
+        hm_ptr = new_hm_ptr;
+        cap = new_cap;
+    }
+
+    /* Insert or update */
+    uint64_t uh = (uint64_t)key_hash;
+    int64_t idx = (int64_t)(uh % (uint64_t)cap);
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t slot = (idx + i) % cap;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (sh == 0 && sk == 0) {
+            /* Empty slot — insert */
+            hm[WASM_HM_HEADER + slot * 3] = key_hash;
+            hm[WASM_HM_HEADER + slot * 3 + 1] = key_ptr;
+            hm[WASM_HM_HEADER + slot * 3 + 2] = value;
+            hm[1]++;
+            return hm_ptr;
+        }
+        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr)) {
+            /* Existing key — update value */
+            hm[WASM_HM_HEADER + slot * 3 + 2] = value;
+            return hm_ptr;
+        }
+    }
+    return hm_ptr;
+}
+
+int64_t taida_hashmap_get(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    uint64_t uh = (uint64_t)key_hash;
+    int64_t idx = (int64_t)(uh % (uint64_t)cap);
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t slot = (idx + i) % cap;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (sh == 0 && sk == 0) return 0; /* not found */
+        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr))
+            return hm[WASM_HM_HEADER + slot * 3 + 2];
+    }
+    return 0;
+}
+
+int64_t taida_hashmap_has(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    uint64_t uh = (uint64_t)key_hash;
+    int64_t idx = (int64_t)(uh % (uint64_t)cap);
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t slot = (idx + i) % cap;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (sh == 0 && sk == 0) return 0;
+        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr))
+            return 1;
+    }
+    return 0;
+}
+
+int64_t taida_hashmap_is_empty(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    return hm[1] == 0 ? 1 : 0;
+}
+
+/* Immutable set: in wasm-min, just mutate in place (bump allocator, no sharing) */
+int64_t taida_hashmap_set_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int64_t value) {
+    return taida_hashmap_set(hm_ptr, key_hash, key_ptr, value);
+}
+
+/* taida_hashmap_get_lax: in native returns Lax, in wasm-min returns raw value */
+int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
+    return taida_hashmap_get(hm_ptr, key_hash, key_ptr);
+}
+
+/* ── W-4: Set runtime (simplified — backed by linear scan array) ── */
+/* Layout: [capacity, length, elem_type_tag, elem0, elem1, ...]
+   Same as List layout. Uses linear scan for has/add/remove.
+   Sufficient for wasm-min's simple programs. */
+
+int64_t taida_set_new(void) {
+    return taida_list_new();  /* Same layout as list */
+}
+
+void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
+    taida_list_set_elem_tag(set_ptr, tag);
+}
+
+int64_t taida_set_has(int64_t set_ptr, int64_t item) {
+    int64_t *set = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = set[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (set[3 + i] == item) return 1;
+    }
+    return 0;
+}
+
+int64_t taida_set_add(int64_t set_ptr, int64_t item) {
+    if (taida_set_has(set_ptr, item)) return set_ptr;
+    return taida_list_push(set_ptr, item);
+}
+
+int64_t taida_set_from_list(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t set = taida_set_new();
+    for (int64_t i = 0; i < len; i++) {
+        set = taida_set_add(set, list[3 + i]);
+    }
+    return set;
+}
+
 /* ── RC no-ops (wasm-min ではヒープなし) ── */
 
 void taida_retain(int64_t val) { (void)val; }
 void taida_release(int64_t val) { (void)val; }
+void taida_str_retain(int64_t val) { (void)val; }
 
 /* ── _taida_main: C emitter が生成する関数（extern） ── */
 
