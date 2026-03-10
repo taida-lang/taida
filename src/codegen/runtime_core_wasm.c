@@ -589,6 +589,15 @@ int64_t taida_float_to_str(int64_t val) {
 /* W-4: Forward declarations for list functions (used by polymorphic helpers) */
 int64_t taida_list_length(int64_t list_ptr);
 
+/* W-4f2: Collection type markers for polymorphic dispatch */
+#define WASM_SET_MARKER_VAL  0x53455400LL  /* "SET\0" */
+/* W-4f2: Collection type markers and layout constants */
+#define WASM_HM_HEADER 4
+#define WASM_HM_MARKER_VAL 0x484D4150LL  /* "HMAP" — distinguishes HashMap from List/Set */
+
+/* W-4f2: List/Set element offset — header is [cap, len, elem_tag, type_marker] = 4 slots */
+#define WASM_LIST_ELEMS 4
+
 /* ── W-3f/W-4: taida_polymorphic_length (wasm-min: string + list) ── */
 
 /* Helper: check if a pointer looks like a list (bump-allocated).
@@ -602,8 +611,8 @@ static int _looks_like_list(int64_t ptr) {
     unsigned int pages = __builtin_wasm_memory_size(0);
     unsigned int mem_size = pages * 65536;
     unsigned int addr = (unsigned int)ptr;
-    /* Need at least 3 int64_t slots (header) */
-    if (addr + 24 > mem_size) return 0;
+    /* Need at least 4 int64_t slots (header: cap, len, elem_tag, type_marker) */
+    if (addr + 32 > mem_size) return 0;
     int64_t *data = (int64_t *)(intptr_t)ptr;
     int64_t cap = data[0];
     int64_t len = data[1];
@@ -611,6 +620,13 @@ static int _looks_like_list(int64_t ptr) {
        length is non-negative and <= capacity */
     if (cap >= 8 && cap <= 65536 && len >= 0 && len <= cap) return 1;
     return 0;
+}
+
+/* W-4f2: Check if a pointer is a Set (has WASM_SET_MARKER_VAL at slot[3]) */
+static int _is_wasm_set(int64_t ptr) {
+    if (!_looks_like_list(ptr)) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    return data[3] == WASM_SET_MARKER_VAL;
 }
 
 int64_t taida_polymorphic_length(int64_t ptr) {
@@ -624,7 +640,7 @@ int64_t taida_polymorphic_length(int64_t ptr) {
     return (int64_t)wasm_strlen(s);
 }
 
-/* ── W-3f: taida_polymorphic_to_string (wasm-min: Int/Float/Bool/Str) ── */
+/* ── W-3f/W-4f2: taida_polymorphic_to_string (full collection support) ── */
 
 /* Helper: check if a value looks like a valid string pointer in WASM linear memory.
    In wasm32, valid heap/data addresses are positive and within linear memory.
@@ -652,11 +668,220 @@ static int _looks_like_string(int64_t val) {
     return 1;
 }
 
+/* W-4f2: Check if a value looks like a BuchiPack.
+   Pack layout: [field_count, field0_hash, field0_tag, field0_value, ...]
+   field_count is typically small (1-50), and field hashes are large int64_t values. */
+static int _looks_like_pack(int64_t val) {
+    if (val == 0) return 0;
+    if (val < 0 || val > 0xFFFFFFFF) return 0;
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    unsigned int addr = (unsigned int)val;
+    /* Need at least 1 int64_t (field_count) */
+    if (addr + 8 > mem_size) return 0;
+    int64_t *data = (int64_t *)(intptr_t)val;
+    int64_t fc = data[0];
+    /* Valid pack: field_count is small and positive */
+    if (fc < 1 || fc > 100) return 0;
+    /* Verify there's enough memory for the full pack */
+    int64_t total_bytes = (1 + fc * 3) * 8;
+    if (addr + (unsigned int)total_bytes > mem_size) return 0;
+    /* Check that at least the first field hash is a non-zero large value
+       (field hashes from FNV-1a are typically large numbers) */
+    int64_t first_hash = data[1];
+    if (first_hash == 0) return 0;
+    return 1;
+}
+
+/* Forward declarations for toString helpers */
+static int64_t _wasm_value_to_display_string(int64_t val);
+static int64_t _wasm_value_to_debug_string(int64_t val);
+static int _is_wasm_hashmap(int64_t ptr);
+static const char *_wasm_lookup_field_name(int64_t hash);
+static int64_t _wasm_lookup_field_type(int64_t hash);
+
+/* W-4f2: Dynamic string buffer for building collection toString output */
+typedef struct {
+    char *buf;
+    int len;
+    int cap;
+} _wasm_strbuf;
+
+static void _sb_init(_wasm_strbuf *sb) {
+    sb->cap = 128;
+    sb->buf = (char *)wasm_alloc(sb->cap);
+    sb->len = 0;
+    if (sb->buf) sb->buf[0] = '\0';
+}
+
+static void _sb_ensure(_wasm_strbuf *sb, int needed) {
+    if (sb->len + needed + 1 > sb->cap) {
+        int new_cap = sb->cap;
+        while (sb->len + needed + 1 > new_cap) new_cap *= 2;
+        char *new_buf = (char *)wasm_alloc(new_cap);
+        if (!new_buf) return;
+        for (int i = 0; i < sb->len; i++) new_buf[i] = sb->buf[i];
+        new_buf[sb->len] = '\0';
+        sb->buf = new_buf;
+        sb->cap = new_cap;
+    }
+}
+
+static void _sb_append(_wasm_strbuf *sb, const char *s) {
+    int slen = wasm_strlen(s);
+    _sb_ensure(sb, slen);
+    for (int i = 0; i < slen; i++) sb->buf[sb->len + i] = s[i];
+    sb->len += slen;
+    sb->buf[sb->len] = '\0';
+}
+
+static int64_t _sb_finish(_wasm_strbuf *sb) {
+    return (int64_t)(intptr_t)sb->buf;
+}
+
+/* W-4f2: HashMap toString: HashMap({"key": value, ...}) */
+/* Tombstone: hash == 1, key == 0 (same as native TAIDA_HASHMAP_TOMBSTONE_HASH) */
+#define WASM_HM_TOMBSTONE_HASH 1
+#define WASM_HM_SLOT_EMPTY(h, k)     ((h) == 0 && (k) == 0)
+#define WASM_HM_SLOT_TOMBSTONE(h, k) ((h) == WASM_HM_TOMBSTONE_HASH && (k) == 0)
+#define WASM_HM_SLOT_OCCUPIED(h, k)  (!WASM_HM_SLOT_EMPTY(h, k) && !WASM_HM_SLOT_TOMBSTONE(h, k))
+
+static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "HashMap({");
+    int64_t count = 0;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t sh = hm[WASM_HM_HEADER + i * 3];
+        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
+            int64_t value = hm[WASM_HM_HEADER + i * 3 + 2];
+            if (count > 0) _sb_append(&sb, ", ");
+            int64_t key_str = _wasm_value_to_debug_string(sk);
+            int64_t val_str = _wasm_value_to_debug_string(value);
+            _sb_append(&sb, (const char *)(intptr_t)key_str);
+            _sb_append(&sb, ": ");
+            _sb_append(&sb, (const char *)(intptr_t)val_str);
+            count++;
+        }
+    }
+    _sb_append(&sb, "})");
+    return _sb_finish(&sb);
+}
+
+/* W-4f2: Set toString: Set({elem1, elem2, ...}) */
+static int64_t _wasm_set_to_string(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "Set({");
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) _sb_append(&sb, ", ");
+        /* Native uses snprintf(int64_t) for set elements — integers only */
+        int64_t elem = list[WASM_LIST_ELEMS + i];
+        int64_t elem_str = _wasm_value_to_display_string(elem);
+        _sb_append(&sb, (const char *)(intptr_t)elem_str);
+    }
+    _sb_append(&sb, "})");
+    return _sb_finish(&sb);
+}
+
+/* W-4f2: List toString: @[elem1, elem2, ...] */
+static int64_t _wasm_list_to_string(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "@[");
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) _sb_append(&sb, ", ");
+        int64_t item = list[WASM_LIST_ELEMS + i];
+        int64_t item_str = _wasm_value_to_debug_string(item);
+        _sb_append(&sb, (const char *)(intptr_t)item_str);
+    }
+    _sb_append(&sb, "]");
+    return _sb_finish(&sb);
+}
+
+/* W-4f2: Pack toString: @(field <= value, ...) */
+static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    int64_t fc = pack[0];
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "@(");
+    int count = 0;
+    for (int64_t i = 0; i < fc; i++) {
+        int64_t field_hash = pack[1 + i * 3];
+        int64_t field_val = pack[1 + i * 3 + 2];
+        const char *fname = _wasm_lookup_field_name(field_hash);
+        if (!fname) continue;
+        /* Skip internal __ fields for display (same as native) */
+        if (fname[0] == '_' && fname[1] == '_') continue;
+        if (count > 0) _sb_append(&sb, ", ");
+        _sb_append(&sb, fname);
+        _sb_append(&sb, " <= ");
+        /* Check if field is Bool via type registry */
+        int64_t ftype = _wasm_lookup_field_type(field_hash);
+        if (ftype == 4) {
+            /* Bool type tag = 4 in native convention */
+            _sb_append(&sb, field_val ? "true" : "false");
+        } else {
+            int64_t val_str = _wasm_value_to_debug_string(field_val);
+            _sb_append(&sb, (const char *)(intptr_t)val_str);
+        }
+        count++;
+    }
+    _sb_append(&sb, ")");
+    return _sb_finish(&sb);
+}
+
+/* W-4f2: Convert value to display string (like native's taida_value_to_display_string) */
+static int64_t _wasm_value_to_display_string(int64_t val) {
+    if (val == 0) return (int64_t)(intptr_t)"0";
+    /* Check HashMap first (has distinctive marker) */
+    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
+    /* Check Set (has WASM_SET_MARKER_VAL marker) */
+    if (_is_wasm_set(val)) return _wasm_set_to_string(val);
+    /* Check List (has list-like header but no set/hashmap marker) */
+    if (_looks_like_list(val)) return _wasm_list_to_string(val);
+    /* Check Pack (field_count + hash pattern) */
+    if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
+    /* Check if it's a string */
+    if (_looks_like_string(val)) return val;
+    /* Fallback: integer */
+    return taida_int_to_str(val);
+}
+
+/* W-4f2: Convert value to debug string (strings are quoted, everything else like display) */
+static int64_t _wasm_value_to_debug_string(int64_t val) {
+    if (val == 0) return (int64_t)(intptr_t)"0";
+    /* Check collection types first */
+    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
+    if (_is_wasm_set(val)) return _wasm_set_to_string(val);
+    if (_looks_like_list(val)) return _wasm_list_to_string(val);
+    if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
+    /* Check if it's a string — quote it for debug */
+    if (_looks_like_string(val)) {
+        const char *s = (const char *)(intptr_t)val;
+        int slen = wasm_strlen(s);
+        char *buf = (char *)wasm_alloc(slen + 3);
+        if (!buf) return val;
+        buf[0] = '"';
+        for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
+        buf[slen + 1] = '"';
+        buf[slen + 2] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    /* Fallback: integer */
+    return taida_int_to_str(val);
+}
+
 int64_t taida_polymorphic_to_string(int64_t obj) {
-    /* If the value looks like a string pointer, return as-is */
-    if (_looks_like_string(obj)) return obj;
-    /* Otherwise, convert integer to string */
-    return taida_int_to_str(obj);
+    return _wasm_value_to_display_string(obj);
 }
 
 /* ── W-3f: taida_int_mold_str (wasm-min: parse string to int, simplified) ── */
@@ -666,16 +891,61 @@ int64_t taida_int_mold_str(int64_t v) {
     return taida_str_to_int(v);
 }
 
-/* ── W-4: Field registry (no-op in wasm-min, used for debug/display in native) ── */
+/* ── W-4f2: Field name/type registry for Pack toString ── */
+/* Simple linear array registry. Sufficient for wasm-min programs with few field names. */
+
+#define WASM_FIELD_REGISTRY_MAX 256
+
+static struct {
+    int64_t hash;
+    const char *name;
+    int64_t type_tag;
+} _wasm_field_registry[WASM_FIELD_REGISTRY_MAX];
+static int _wasm_field_registry_count = 0;
 
 int64_t taida_register_field_name(int64_t hash, int64_t name_ptr) {
-    (void)hash; (void)name_ptr;
+    /* Check if already registered */
+    for (int i = 0; i < _wasm_field_registry_count; i++) {
+        if (_wasm_field_registry[i].hash == hash) return 0;
+    }
+    if (_wasm_field_registry_count < WASM_FIELD_REGISTRY_MAX) {
+        _wasm_field_registry[_wasm_field_registry_count].hash = hash;
+        _wasm_field_registry[_wasm_field_registry_count].name = (const char *)(intptr_t)name_ptr;
+        _wasm_field_registry[_wasm_field_registry_count].type_tag = -1;
+        _wasm_field_registry_count++;
+    }
     return 0;
 }
 
 int64_t taida_register_field_type(int64_t hash, int64_t name_ptr, int64_t type_tag) {
-    (void)hash; (void)name_ptr; (void)type_tag;
+    /* Update existing entry or add new one */
+    for (int i = 0; i < _wasm_field_registry_count; i++) {
+        if (_wasm_field_registry[i].hash == hash) {
+            _wasm_field_registry[i].type_tag = type_tag;
+            return 0;
+        }
+    }
+    if (_wasm_field_registry_count < WASM_FIELD_REGISTRY_MAX) {
+        _wasm_field_registry[_wasm_field_registry_count].hash = hash;
+        _wasm_field_registry[_wasm_field_registry_count].name = (const char *)(intptr_t)name_ptr;
+        _wasm_field_registry[_wasm_field_registry_count].type_tag = type_tag;
+        _wasm_field_registry_count++;
+    }
     return 0;
+}
+
+static const char *_wasm_lookup_field_name(int64_t hash) {
+    for (int i = 0; i < _wasm_field_registry_count; i++) {
+        if (_wasm_field_registry[i].hash == hash) return _wasm_field_registry[i].name;
+    }
+    return 0;
+}
+
+static int64_t _wasm_lookup_field_type(int64_t hash) {
+    for (int i = 0; i < _wasm_field_registry_count; i++) {
+        if (_wasm_field_registry[i].hash == hash) return _wasm_field_registry[i].type_tag;
+    }
+    return -1;
 }
 
 /* ── W-4: BuchiPack runtime (bump allocator, no RC/magic) ── */
@@ -746,12 +1016,13 @@ int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {
 
 int64_t taida_list_new(void) {
     int64_t initial_cap = 16;
-    int64_t slots = 3 + initial_cap;  /* header(3) + elements */
+    int64_t slots = WASM_LIST_ELEMS + initial_cap;  /* header(4) + elements */
     int64_t *list = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
     if (!list) return 0;
     list[0] = initial_cap;  /* capacity */
     list[1] = 0;            /* length */
     list[2] = -1;           /* elem_type_tag (UNKNOWN) */
+    list[3] = 0;            /* type_marker (0 = plain list) */
     return (int64_t)(intptr_t)list;
 }
 
@@ -767,16 +1038,16 @@ int64_t taida_list_push(int64_t list_ptr, int64_t item) {
     if (len >= cap) {
         /* Grow: allocate new list with double capacity, copy over */
         int64_t new_cap = cap * 2;
-        int64_t new_slots = 3 + new_cap;
+        int64_t new_slots = WASM_LIST_ELEMS + new_cap;
         int64_t *new_list = (int64_t *)wasm_alloc((unsigned int)(new_slots * 8));
         if (!new_list) return list_ptr;
         /* Copy header + existing elements */
-        for (int64_t i = 0; i < 3 + len; i++) new_list[i] = list[i];
+        for (int64_t i = 0; i < WASM_LIST_ELEMS + len; i++) new_list[i] = list[i];
         new_list[0] = new_cap;
         list = new_list;
         list_ptr = (int64_t)(intptr_t)new_list;
     }
-    list[3 + len] = item;
+    list[WASM_LIST_ELEMS + len] = item;
     list[1] = len + 1;
     return list_ptr;
 }
@@ -792,7 +1063,7 @@ int64_t taida_list_get(int64_t list_ptr, int64_t index) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (index < 0 || index >= len) return 0;
-    return list[3 + index];
+    return list[WASM_LIST_ELEMS + index];
 }
 
 int64_t taida_list_is_empty(int64_t list_ptr) {
@@ -807,8 +1078,7 @@ int64_t taida_list_is_empty(int64_t list_ptr) {
    then capacity * 3 entry slots.
    Open addressing with linear probing. */
 
-#define WASM_HM_HEADER 4
-#define WASM_HM_MARKER_VAL 0x484D4150LL  /* "HMAP" — distinguishes HashMap from List/Set */
+/* WASM_HM_HEADER and WASM_HM_MARKER_VAL defined above (near WASM_LIST_ELEMS) */
 
 /* String comparison helper */
 static int _wasm_streq(const char *a, const char *b) {
@@ -1126,12 +1396,14 @@ static int64_t taida_hashmap_remove(int64_t hm_ptr, int64_t key_hash, int64_t ke
 }
 
 /* ── W-4: Set runtime (simplified — backed by linear scan array) ── */
-/* Layout: [capacity, length, elem_type_tag, elem0, elem1, ...]
-   Same as List layout. Uses linear scan for has/add/remove.
+/* Layout: [capacity, length, elem_type_tag, WASM_SET_MARKER_VAL, elem0, elem1, ...]
+   Same as List layout but with Set marker at slot[3]. Uses linear scan for has/add/remove.
    Sufficient for wasm-min's simple programs. */
 
 int64_t taida_set_new(void) {
-    return taida_list_new();  /* Same layout as list */
+    int64_t set = taida_list_new();
+    if (set) ((int64_t *)(intptr_t)set)[3] = WASM_SET_MARKER_VAL;
+    return set;
 }
 
 void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
@@ -1153,7 +1425,7 @@ int64_t taida_set_has(int64_t set_ptr, int64_t item) {
     int64_t *set = (int64_t *)(intptr_t)set_ptr;
     int64_t len = set[1];
     for (int64_t i = 0; i < len; i++) {
-        if (_wasm_value_eq(set[3 + i], item)) return 1;
+        if (_wasm_value_eq(set[WASM_LIST_ELEMS + i], item)) return 1;
     }
     return 0;
 }
@@ -1167,7 +1439,7 @@ int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     int64_t len = old[1];
     int64_t new_set = taida_set_new();
     for (int64_t i = 0; i < len; i++) {
-        new_set = taida_list_push(new_set, old[3 + i]);
+        new_set = taida_list_push(new_set, old[WASM_LIST_ELEMS + i]);
     }
     new_set = taida_list_push(new_set, item);
     return new_set;
@@ -1178,7 +1450,7 @@ int64_t taida_set_from_list(int64_t list_ptr) {
     int64_t len = list[1];
     int64_t set = taida_set_new();
     for (int64_t i = 0; i < len; i++) {
-        set = taida_set_add(set, list[3 + i]);
+        set = taida_set_add(set, list[WASM_LIST_ELEMS + i]);
     }
     return set;
 }
@@ -1189,8 +1461,8 @@ int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
     int64_t len = list[1];
     int64_t result = taida_set_new();
     for (int64_t i = 0; i < len; i++) {
-        if (!_wasm_value_eq(list[3 + i], item)) {
-            result = taida_list_push(result, list[3 + i]);
+        if (!_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) {
+            result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
@@ -1204,11 +1476,11 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t b_len = b[1];
     int64_t result = taida_set_new();
     for (int64_t i = 0; i < a_len; i++) {
-        result = taida_list_push(result, a[3 + i]);
+        result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     for (int64_t i = 0; i < b_len; i++) {
-        if (!taida_set_has(result, b[3 + i])) {
-            result = taida_list_push(result, b[3 + i]);
+        if (!taida_set_has(result, b[WASM_LIST_ELEMS + i])) {
+            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
@@ -1220,8 +1492,8 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t result = taida_set_new();
     for (int64_t i = 0; i < a_len; i++) {
-        if (taida_set_has(set_b, a[3 + i])) {
-            result = taida_list_push(result, a[3 + i]);
+        if (taida_set_has(set_b, a[WASM_LIST_ELEMS + i])) {
+            result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
@@ -1233,8 +1505,8 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t result = taida_set_new();
     for (int64_t i = 0; i < a_len; i++) {
-        if (!taida_set_has(set_b, a[3 + i])) {
-            result = taida_list_push(result, a[3 + i]);
+        if (!taida_set_has(set_b, a[WASM_LIST_ELEMS + i])) {
+            result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
@@ -1246,7 +1518,7 @@ int64_t taida_set_to_list(int64_t set_ptr) {
     int64_t len = list[1];
     int64_t result = taida_list_new();
     for (int64_t i = 0; i < len; i++) {
-        result = taida_list_push(result, list[3 + i]);
+        result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
     }
     return result;
 }

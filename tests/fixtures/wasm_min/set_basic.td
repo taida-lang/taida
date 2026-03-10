@@ -1,4 +1,6 @@
-// W-4f/F-2: Set basic operations test for wasm-min
+// W-4f2: Set basic operations test for wasm-min
+// Tests size, add, has, remove, union, intersect, diff, toList AND toString content
+
 s <= setOf(@[1, 2, 3, 2, 1])
 stdout("size: " + s.size().toString())
 
@@ -20,3 +22,9 @@ stdout("diff size: " + a.diff(b).size().toString())
 
 // toList
 stdout("toList len: " + s.toList().length().toString())
+
+// W-4f2: toString — verifies full Set formatting
+stdout(s.toString())
+
+// W-4f2: union toString
+stdout(a.union(b).toString())

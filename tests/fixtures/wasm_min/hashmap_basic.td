@@ -1,4 +1,6 @@
-// W-4f/F-2: HashMap basic operations test for wasm-min
+// W-4f2: HashMap basic operations test for wasm-min
+// Tests size, has, keys, values, remove, merge, entries AND toString/get content
+
 m <= hashMap()
 stdout("isEmpty: " + m.isEmpty().toString())
 
@@ -22,3 +24,9 @@ stdout("merged size: " + merged.size().toString())
 
 // entries
 stdout("entries len: " + merged.entries().length().toString())
+
+// W-4f2: toString — verifies full HashMap formatting
+stdout(m2.toString())
+
+// W-4f2: after remove toString
+stdout(m3.toString())
