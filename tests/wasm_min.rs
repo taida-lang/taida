@@ -701,3 +701,53 @@ fn wasm_min_list_basic() {
         interp, wasm
     );
 }
+
+// ---------------------------------------------------------------------------
+// W-4f: HashMap/Set integration tests (F-2)
+// ---------------------------------------------------------------------------
+
+/// W-4f F-2: HashMap basic operations — new, set, has, size, keys, values, remove, merge, entries.
+#[test]
+fn wasm_min_hashmap_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/hashmap_basic.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "hashmap_basic: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}
+
+/// W-4f F-2: Set basic operations — setOf, size, add, has, remove, union, intersect, diff, toList.
+#[test]
+fn wasm_min_set_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/set_basic.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "set_basic: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}

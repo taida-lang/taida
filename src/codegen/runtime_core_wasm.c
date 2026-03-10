@@ -801,12 +801,14 @@ int64_t taida_list_is_empty(int64_t list_ptr) {
 }
 
 /* ── W-4: HashMap runtime (bump allocator, no RC/magic) ── */
-/* Layout: [capacity, length, value_type_tag, entries...]
+/* Layout: [capacity, length, value_type_tag, type_marker, entries...]
    Each entry: [key_hash, key_ptr, value] (3 slots)
-   Header = 3 slots, then capacity * 3 entry slots.
+   Header = 4 slots (including type_marker for polymorphic dispatch),
+   then capacity * 3 entry slots.
    Open addressing with linear probing. */
 
-#define WASM_HM_HEADER 3
+#define WASM_HM_HEADER 4
+#define WASM_HM_MARKER_VAL 0x484D4150LL  /* "HMAP" — distinguishes HashMap from List/Set */
 
 /* String comparison helper */
 static int _wasm_streq(const char *a, const char *b) {
@@ -828,6 +830,7 @@ static int64_t _wasm_hashmap_new_with_cap(int64_t cap) {
     hm[0] = cap;
     hm[1] = 0;     /* length */
     hm[2] = -1;    /* value_type_tag = UNKNOWN */
+    hm[3] = WASM_HM_MARKER_VAL;  /* type marker for polymorphic dispatch */
     return (int64_t)(intptr_t)hm;
 }
 
@@ -863,6 +866,7 @@ int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int
         int64_t new_hm_ptr = _wasm_hashmap_new_with_cap(new_cap);
         int64_t *new_hm = (int64_t *)(intptr_t)new_hm_ptr;
         new_hm[2] = hm[2]; /* propagate value_type_tag */
+        new_hm[3] = WASM_HM_MARKER_VAL;  /* propagate type marker */
         /* Re-hash all occupied entries */
         for (int64_t i = 0; i < cap; i++) {
             int64_t sh = hm[WASM_HM_HEADER + i * 3];
@@ -951,14 +955,174 @@ int64_t taida_hashmap_is_empty(int64_t hm_ptr) {
     return hm[1] == 0 ? 1 : 0;
 }
 
-/* Immutable set: in wasm-min, just mutate in place (bump allocator, no sharing) */
+/* Immutable set: clone the hashmap first to preserve immutable semantics.
+   In wasm-min's bump allocator, taida_hashmap_set modifies in place,
+   which would mutate the original hashmap. */
+static int64_t _wasm_hashmap_clone(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t new_hm_ptr = _wasm_hashmap_new_with_cap(cap);
+    int64_t *new_hm = (int64_t *)(intptr_t)new_hm_ptr;
+    new_hm[2] = hm[2]; /* propagate value_type_tag */
+    /* Copy all entries */
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t sh = hm[WASM_HM_HEADER + i * 3];
+        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        new_hm[WASM_HM_HEADER + i * 3] = sh;
+        new_hm[WASM_HM_HEADER + i * 3 + 1] = sk;
+        new_hm[WASM_HM_HEADER + i * 3 + 2] = hm[WASM_HM_HEADER + i * 3 + 2];
+    }
+    new_hm[1] = hm[1]; /* copy length */
+    return new_hm_ptr;
+}
+
 int64_t taida_hashmap_set_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int64_t value) {
-    return taida_hashmap_set(hm_ptr, key_hash, key_ptr, value);
+    int64_t clone = _wasm_hashmap_clone(hm_ptr);
+    return taida_hashmap_set(clone, key_hash, key_ptr, value);
 }
 
 /* taida_hashmap_get_lax: in native returns Lax, in wasm-min returns raw value */
 int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
     return taida_hashmap_get(hm_ptr, key_hash, key_ptr);
+}
+
+/* ── W-4f: HashMap type detection helper ── */
+/* Check if a pointer is a HashMap by looking for the type marker at index 3. */
+static int _is_wasm_hashmap(int64_t ptr) {
+    if (ptr == 0) return 0;
+    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    unsigned int addr = (unsigned int)ptr;
+    /* Need at least 4 int64_t header slots */
+    if (addr + 32 > mem_size) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    return data[3] == WASM_HM_MARKER_VAL;
+}
+
+/* ── W-4f: taida_value_hash — polymorphic hash for collection keys ── */
+/* For strings, compute FNV-1a hash. For scalars, use identity (adjusted). */
+int64_t taida_value_hash(int64_t val) {
+    /* Try to detect string pointers */
+    if (_looks_like_string(val)) {
+        int64_t h = taida_str_hash(val);
+        /* Adjust to avoid 0/1 (reserved for empty/tombstone) */
+        if (h == 0 || h == 1) h = h + 2;
+        return h;
+    }
+    /* Scalar: use identity, adjusted to avoid 0/1 */
+    int64_t h = val;
+    if (h == 0 || h == 1) h = h + 2;
+    return h;
+}
+
+/* ── W-4f: HashMap additional methods ── */
+
+/* HashMap.keys() -> List of key pointers */
+int64_t taida_hashmap_keys(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t list = taida_list_new();
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t sh = hm[WASM_HM_HEADER + i * 3];
+        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (sh != 0 || sk != 0) {
+            list = taida_list_push(list, sk);
+        }
+    }
+    return list;
+}
+
+/* HashMap.values() -> List of values */
+int64_t taida_hashmap_values(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t list = taida_list_new();
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t sh = hm[WASM_HM_HEADER + i * 3];
+        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (sh != 0 || sk != 0) {
+            list = taida_list_push(list, hm[WASM_HM_HEADER + i * 3 + 2]);
+        }
+    }
+    return list;
+}
+
+/* HashMap.entries() -> List of BuchiPack @(key, value) */
+int64_t taida_hashmap_entries(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t list = taida_list_new();
+    /* FNV-1a hashes for "key" and "value" (same as native runtime) */
+    #define WASM_HASH_KEY   0x3dc94a19365b10ecLL
+    #define WASM_HASH_VAL   0x7ce4fd9430e80ceaLL
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t sh = hm[WASM_HM_HEADER + i * 3];
+        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (sh != 0 || sk != 0) {
+            int64_t pair = taida_pack_new(2);
+            taida_pack_set_hash(pair, 0, WASM_HASH_KEY);
+            taida_pack_set(pair, 0, sk);
+            taida_pack_set_hash(pair, 1, WASM_HASH_VAL);
+            taida_pack_set(pair, 1, hm[WASM_HM_HEADER + i * 3 + 2]);
+            list = taida_list_push(list, pair);
+        }
+    }
+    return list;
+}
+
+/* HashMap.merge(other) -> new HashMap with other's entries overwriting */
+int64_t taida_hashmap_merge(int64_t hm_ptr, int64_t other_ptr) {
+    int64_t *other = (int64_t *)(intptr_t)other_ptr;
+    int64_t cap = other[0];
+    /* Start with a copy of hm (in wasm-min, just use the original since bump allocator) */
+    /* Actually, we need a new copy. Iterate hm first, then apply other's entries. */
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t hm_cap = hm[0];
+    int64_t result = taida_hashmap_new();
+    int64_t *r = (int64_t *)(intptr_t)result;
+    r[2] = hm[2]; /* propagate value_type_tag */
+    /* Copy from hm */
+    for (int64_t i = 0; i < hm_cap; i++) {
+        int64_t sh = hm[WASM_HM_HEADER + i * 3];
+        int64_t sk = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (sh != 0 || sk != 0) {
+            result = taida_hashmap_set(result, sh, sk, hm[WASM_HM_HEADER + i * 3 + 2]);
+        }
+    }
+    /* Overwrite/add from other */
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t sh = other[WASM_HM_HEADER + i * 3];
+        int64_t sk = other[WASM_HM_HEADER + i * 3 + 1];
+        if (sh != 0 || sk != 0) {
+            result = taida_hashmap_set(result, sh, sk, other[WASM_HM_HEADER + i * 3 + 2]);
+        }
+    }
+    return result;
+}
+
+/* HashMap.remove(key_hash, key_ptr) -> new HashMap without the key (immutable) */
+/* In wasm-min, mutate in place (bump allocator, no sharing). Uses tombstone. */
+static int64_t taida_hashmap_remove(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    uint64_t uh = (uint64_t)key_hash;
+    int64_t idx = (int64_t)(uh % (uint64_t)cap);
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t slot = (idx + i) % cap;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (sh == 0 && sk == 0) return hm_ptr; /* not found */
+        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr)) {
+            /* Found — tombstone it */
+            hm[WASM_HM_HEADER + slot * 3] = 1; /* tombstone hash */
+            hm[WASM_HM_HEADER + slot * 3 + 1] = 0;
+            hm[WASM_HM_HEADER + slot * 3 + 2] = 0;
+            hm[1]--;
+            return hm_ptr;
+        }
+    }
+    return hm_ptr;
 }
 
 /* ── W-4: Set runtime (simplified — backed by linear scan array) ── */
@@ -974,18 +1138,39 @@ void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
     taida_list_set_elem_tag(set_ptr, tag);
 }
 
+/* W-4f/F-3: Type-tag-aware equality for Set elements.
+   For strings, compare by content (strcmp). For others, compare by raw value. */
+static int _wasm_value_eq(int64_t a, int64_t b) {
+    if (a == b) return 1;
+    /* Check if both look like strings — if so, compare by content */
+    if (_looks_like_string(a) && _looks_like_string(b)) {
+        return _wasm_streq((const char *)(intptr_t)a, (const char *)(intptr_t)b);
+    }
+    return 0;
+}
+
 int64_t taida_set_has(int64_t set_ptr, int64_t item) {
     int64_t *set = (int64_t *)(intptr_t)set_ptr;
     int64_t len = set[1];
     for (int64_t i = 0; i < len; i++) {
-        if (set[3 + i] == item) return 1;
+        if (_wasm_value_eq(set[3 + i], item)) return 1;
     }
     return 0;
 }
 
 int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     if (taida_set_has(set_ptr, item)) return set_ptr;
-    return taida_list_push(set_ptr, item);
+    /* Create a new set (copy elements) to preserve immutable semantics.
+       In wasm-min's bump allocator, taida_list_push modifies in place when
+       there's room, which would mutate the original set. */
+    int64_t *old = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = old[1];
+    int64_t new_set = taida_set_new();
+    for (int64_t i = 0; i < len; i++) {
+        new_set = taida_list_push(new_set, old[3 + i]);
+    }
+    new_set = taida_list_push(new_set, item);
+    return new_set;
 }
 
 int64_t taida_set_from_list(int64_t list_ptr) {
@@ -996,6 +1181,131 @@ int64_t taida_set_from_list(int64_t list_ptr) {
         set = taida_set_add(set, list[3 + i]);
     }
     return set;
+}
+
+/* W-4f: Set.remove(item) -> new Set without the item */
+int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    int64_t result = taida_set_new();
+    for (int64_t i = 0; i < len; i++) {
+        if (!_wasm_value_eq(list[3 + i], item)) {
+            result = taida_list_push(result, list[3 + i]);
+        }
+    }
+    return result;
+}
+
+/* W-4f: Set.union(other) -> new Set with all elements from both */
+int64_t taida_set_union(int64_t set_a, int64_t set_b) {
+    int64_t *a = (int64_t *)(intptr_t)set_a;
+    int64_t *b = (int64_t *)(intptr_t)set_b;
+    int64_t a_len = a[1];
+    int64_t b_len = b[1];
+    int64_t result = taida_set_new();
+    for (int64_t i = 0; i < a_len; i++) {
+        result = taida_list_push(result, a[3 + i]);
+    }
+    for (int64_t i = 0; i < b_len; i++) {
+        if (!taida_set_has(result, b[3 + i])) {
+            result = taida_list_push(result, b[3 + i]);
+        }
+    }
+    return result;
+}
+
+/* W-4f: Set.intersect(other) -> new Set with common elements */
+int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
+    int64_t *a = (int64_t *)(intptr_t)set_a;
+    int64_t a_len = a[1];
+    int64_t result = taida_set_new();
+    for (int64_t i = 0; i < a_len; i++) {
+        if (taida_set_has(set_b, a[3 + i])) {
+            result = taida_list_push(result, a[3 + i]);
+        }
+    }
+    return result;
+}
+
+/* W-4f: Set.diff(other) -> new Set with elements in a but not in b */
+int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
+    int64_t *a = (int64_t *)(intptr_t)set_a;
+    int64_t a_len = a[1];
+    int64_t result = taida_set_new();
+    for (int64_t i = 0; i < a_len; i++) {
+        if (!taida_set_has(set_b, a[3 + i])) {
+            result = taida_list_push(result, a[3 + i]);
+        }
+    }
+    return result;
+}
+
+/* W-4f: Set.toList() -> List copy */
+int64_t taida_set_to_list(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    int64_t result = taida_list_new();
+    for (int64_t i = 0; i < len; i++) {
+        result = taida_list_push(result, list[3 + i]);
+    }
+    return result;
+}
+
+/* ── W-4f: Polymorphic collection methods ── */
+/* These work on both HashMap and Set (auto-detect via type marker). */
+
+/* .get(key_or_index) — HashMap: hash-based lookup, List: index-based */
+int64_t taida_collection_get(int64_t ptr, int64_t item) {
+    if (_is_wasm_hashmap(ptr)) {
+        int64_t key_hash = taida_value_hash(item);
+        return taida_hashmap_get_lax(ptr, key_hash, item);
+    }
+    /* List/Set: index-based access */
+    return taida_list_get(ptr, item);
+}
+
+/* .has(key_or_item) — HashMap: hash-based lookup, Set/List: linear scan */
+int64_t taida_collection_has(int64_t ptr, int64_t item) {
+    if (_is_wasm_hashmap(ptr)) {
+        int64_t key_hash = taida_value_hash(item);
+        return taida_hashmap_has(ptr, key_hash, item);
+    }
+    /* Set/List: linear scan */
+    return taida_set_has(ptr, item);
+}
+
+/* .remove(key_or_item) — HashMap: clone + hash-based removal, Set: linear scan */
+int64_t taida_collection_remove(int64_t ptr, int64_t item) {
+    if (_is_wasm_hashmap(ptr)) {
+        int64_t clone = _wasm_hashmap_clone(ptr);
+        int64_t key_hash = taida_value_hash(item);
+        return taida_hashmap_remove(clone, key_hash, item);
+    }
+    /* Set: taida_set_remove already creates a new set */
+    return taida_set_remove(ptr, item);
+}
+
+/* .size() — both HashMap and Set store length at ptr[1] */
+int64_t taida_collection_size(int64_t ptr) {
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    return data[1];
+}
+
+/* ── W-4f: taida_polymorphic_is_empty (wasm-min: List/Set/HashMap) ── */
+/* For List/Set: length at index 1. For HashMap: length at index 1. */
+int64_t taida_polymorphic_is_empty(int64_t ptr) {
+    if (ptr == 0) return 1;
+    /* All collection types store length at index 1 in wasm-min */
+    if (_looks_like_list(ptr) || _is_wasm_hashmap(ptr)) {
+        int64_t *data = (int64_t *)(intptr_t)ptr;
+        return data[1] == 0 ? 1 : 0;
+    }
+    /* String: check if empty */
+    if (_looks_like_string(ptr)) {
+        const char *s = (const char *)(intptr_t)ptr;
+        return s[0] == '\0' ? 1 : 0;
+    }
+    return 0;
 }
 
 /* ── RC no-ops (wasm-min ではヒープなし) ── */

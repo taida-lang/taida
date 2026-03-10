@@ -379,6 +379,26 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_set_set_elem_tag" => {
             "void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag);".to_string()
         }
+        // W-4f: Set operations (union/intersect/diff/toList/remove)
+        "taida_set_union" => "int64_t taida_set_union(int64_t set_a, int64_t set_b);".to_string(),
+        "taida_set_intersect" => "int64_t taida_set_intersect(int64_t set_a, int64_t set_b);".to_string(),
+        "taida_set_diff" => "int64_t taida_set_diff(int64_t set_a, int64_t set_b);".to_string(),
+        "taida_set_to_list" => "int64_t taida_set_to_list(int64_t set_ptr);".to_string(),
+        "taida_set_remove" => "int64_t taida_set_remove(int64_t set_ptr, int64_t item);".to_string(),
+        // W-4f: Polymorphic collection methods
+        "taida_collection_get" => "int64_t taida_collection_get(int64_t ptr, int64_t item);".to_string(),
+        "taida_collection_has" => "int64_t taida_collection_has(int64_t ptr, int64_t item);".to_string(),
+        "taida_collection_remove" => "int64_t taida_collection_remove(int64_t ptr, int64_t item);".to_string(),
+        "taida_collection_size" => "int64_t taida_collection_size(int64_t ptr);".to_string(),
+        // W-4f: Value hash (polymorphic key hashing for HashMap/Set)
+        "taida_value_hash" => "int64_t taida_value_hash(int64_t val);".to_string(),
+        // W-4f: HashMap additional methods (keys/values/entries/merge)
+        "taida_hashmap_keys" => "int64_t taida_hashmap_keys(int64_t hm);".to_string(),
+        "taida_hashmap_values" => "int64_t taida_hashmap_values(int64_t hm);".to_string(),
+        "taida_hashmap_entries" => "int64_t taida_hashmap_entries(int64_t hm);".to_string(),
+        "taida_hashmap_merge" => "int64_t taida_hashmap_merge(int64_t hm, int64_t other);".to_string(),
+        // W-4f: Polymorphic isEmpty
+        "taida_polymorphic_is_empty" => "int64_t taida_polymorphic_is_empty(int64_t ptr);".to_string(),
         // RC no-ops
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
