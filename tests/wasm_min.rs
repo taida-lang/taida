@@ -42,6 +42,39 @@ fn wasmtime_bin() -> Option<PathBuf> {
     None
 }
 
+/// Run a .td file with the native backend and return its stdout.
+fn run_native(td_path: &Path) -> Option<String> {
+    let stem = td_path.file_stem()?.to_string_lossy().to_string();
+    let native_path = std::env::temp_dir().join(format!("taida_native_test_{}", stem));
+
+    let compile_output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(td_path)
+        .arg("-o")
+        .arg(&native_path)
+        .output()
+        .ok()?;
+
+    if !compile_output.status.success() {
+        return None;
+    }
+
+    let output = Command::new(&native_path).output().ok()?;
+    let _ = std::fs::remove_file(&native_path);
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string(),
+    )
+}
+
 /// Run a .td file with the interpreter and return its stdout.
 fn run_interpreter(td_path: &Path) -> Option<String> {
     let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
@@ -302,22 +335,8 @@ fn wasm_min_reject_closure() {
     );
 }
 
-#[test]
-fn wasm_min_reject_float() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/unsupported_float.td");
-    let stderr = expect_wasm_min_compile_failure(&td_path);
-    assert!(
-        stderr.contains("wasm-min does not support"),
-        "Error should mention 'wasm-min does not support', got: {}",
-        stderr
-    );
-    assert!(
-        stderr.contains("Float"),
-        "Error should mention Float, got: {}",
-        stderr
-    );
-}
+// W-3: wasm_min_reject_float removed -- Float is now supported.
+// See wasm_min_float_accepted test instead.
 
 // ---------------------------------------------------------------------------
 // W-2: Regression tests (from review Low findings)
@@ -368,6 +387,106 @@ fn wasm_min_release_gate_positive() {
     assert!(
         output.status.success(),
         "wasm-min --release should succeed for clean code, but failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W-3: Float support tests
+// ---------------------------------------------------------------------------
+
+/// W-3: Float literals and debug(Float) should work.
+#[test]
+fn wasm_min_float_basic() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/float_basic.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "float_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-3: Float arithmetic (add, sub, mul) should work.
+#[test]
+fn wasm_min_float_arith() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/float_arith.td");
+    // Float formatting differs between interpreter and compiled backends
+    // (e.g., "5.0" vs "5", "5.840400000000001" vs "5.8404").
+    // Compare against native backend output instead.
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "float_arith: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}
+
+/// W-3: String concatenation should work (requires bump allocator).
+#[test]
+fn wasm_min_str_ops() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/str_ops.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "str_ops: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-3: Float is no longer rejected (was rejected in wasm-min v1).
+#[test]
+fn wasm_min_float_accepted() {
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/unsupported_float.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_float_accepted.wasm");
+
+    let output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-min"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida");
+
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        output.status.success(),
+        "W-3: Float should now be accepted by wasm-min, but compile failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

@@ -3,7 +3,7 @@
 /// wasm-min は Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang -> wasm32 .o
 /// というパイプラインを採用する。サポートする IR 命令は最小限:
 ///
-/// - ConstInt, ConstBool, ConstStr
+/// - ConstInt, ConstFloat, ConstBool, ConstStr
 /// - Call (runtime 関数のみ)
 /// - CallUser (ユーザー定義関数)
 /// - DefVar, UseVar
@@ -11,7 +11,7 @@
 /// - GlobalSet, GlobalGet
 /// - Retain, Release (no-op)
 ///
-/// ヒープアロケーション・クロージャ・BuchiPack・Float は未対応（wasm-min v1 スコープ外）。
+/// クロージャ・BuchiPack は未対応。
 /// 未対応 IR は silent miscompile ではなく compile error を返す。
 
 use std::collections::{HashMap, HashSet};
@@ -63,10 +63,8 @@ pub fn validate_wasm_min_capabilities(ir_module: &IrModule) -> Result<(), WasmCE
 fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<String>) {
     for inst in insts {
         match inst {
-            // F-1 + F-3: unsupported IR instructions
-            IrInst::ConstFloat(_, _) => {
-                out.push("Float literals".to_string());
-            }
+            // W-3: Float literals are now supported (f64 bits stored in int64_t via bitcast)
+            IrInst::ConstFloat(_, _) => {}
             IrInst::PackNew(_, _) => {
                 out.push("BuchiPack (PackNew)".to_string());
             }
@@ -93,7 +91,7 @@ fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<S
                     collect_unsupported_insts(&arm.body, _func_name, out);
                 }
             }
-            // All supported instructions
+            // All supported instructions (ConstFloat is handled above)
             IrInst::ConstInt(_, _)
             | IrInst::ConstBool(_, _)
             | IrInst::ConstStr(_, _)
@@ -203,6 +201,10 @@ pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
     writeln!(c, "#include <stdint.h>").unwrap();
     writeln!(c).unwrap();
 
+    // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)
+    writeln!(c, "static int64_t _d2l(double v) {{ union {{ int64_t l; double d; }} u; u.d = v; return u.l; }}").unwrap();
+    writeln!(c).unwrap();
+
     // F-4: グローバル変数を名前ベースの C 変数として宣言
     let global_hashes = collect_global_hashes(ir_module);
     let global_map = build_global_name_map(&global_hashes);
@@ -279,8 +281,9 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_io_stdout" | "taida_io_stderr" => {
             format!("int64_t {}(int64_t val);", name)
         }
-        // Debug 出力 (F-3: taida_debug_float は除去 -- wasm-min v1 は整数のみ)
-        "taida_debug_int" | "taida_debug_str" | "taida_debug_bool" => {
+        // Debug 出力 (W-3: taida_debug_float 追加)
+        "taida_debug_int" | "taida_debug_str" | "taida_debug_bool"
+        | "taida_debug_float" => {
             format!("int64_t {}(int64_t val);", name)
         }
         // 整数演算 (2引数)
@@ -290,6 +293,27 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         }
         // 整数演算 (1引数)
         "taida_int_neg" => "int64_t taida_int_neg(int64_t a);".to_string(),
+        // W-3: Float 演算 (boxed float as int64_t via bitcast)
+        "taida_float_add" | "taida_float_sub" | "taida_float_mul" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
+        "taida_float_neg" => "int64_t taida_float_neg(int64_t a);".to_string(),
+        // W-3: Int→Float 変換 (returns boxed float as int64_t)
+        "taida_int_to_float" => "int64_t taida_int_to_float(int64_t a);".to_string(),
+        // W-3: Float→Int 変換
+        "taida_float_to_int" => "int64_t taida_float_to_int(int64_t a);".to_string(),
+        // W-3: String operations
+        "taida_str_concat" => "int64_t taida_str_concat(int64_t a, int64_t b);".to_string(),
+        "taida_str_length" => "int64_t taida_str_length(int64_t s);".to_string(),
+        "taida_str_eq" => "int64_t taida_str_eq(int64_t a, int64_t b);".to_string(),
+        "taida_str_neq" => "int64_t taida_str_neq(int64_t a, int64_t b);".to_string(),
+        // W-3: Type conversions
+        "taida_int_to_str" => "int64_t taida_int_to_str(int64_t a);".to_string(),
+        "taida_str_to_int" => "int64_t taida_str_to_int(int64_t s);".to_string(),
+        "taida_str_from_bool" => "int64_t taida_str_from_bool(int64_t v);".to_string(),
+        "taida_float_to_str" => "int64_t taida_float_to_str(int64_t a);".to_string(),
+        "taida_int_abs" => "int64_t taida_int_abs(int64_t a);".to_string(),
+        "taida_int_lte" => "int64_t taida_int_lte(int64_t a, int64_t b);".to_string(),
         // ブール演算
         "taida_bool_and" | "taida_bool_or" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
@@ -444,6 +468,12 @@ fn emit_inst(
         IrInst::ConstInt(dst, val) => {
             writeln!(c, "{}v_{} = {}LL;", indent, dst, val).unwrap();
         }
+        IrInst::ConstFloat(dst, val) => {
+            // W-3: Store f64 bits in int64_t via bitcast (same representation as native backend)
+            // Use _d2l() helper to bitcast double -> int64_t
+            // Format with enough precision to round-trip
+            writeln!(c, "{}v_{} = _d2l({:.17e});", indent, dst, val).unwrap();
+        }
         IrInst::ConstBool(dst, val) => {
             writeln!(c, "{}v_{} = {};", indent, dst, if *val { 1 } else { 0 }).unwrap();
         }
@@ -537,8 +567,7 @@ fn emit_inst(
         }
         // F-1: These should never be reached because validate_wasm_min_capabilities
         // catches them before emission. But if somehow they slip through, error out.
-        IrInst::ConstFloat(_, _)
-        | IrInst::PackNew(_, _)
+        IrInst::PackNew(_, _)
         | IrInst::PackGet(_, _, _)
         | IrInst::PackSet(_, _, _)
         | IrInst::PackSetTag(_, _, _)
