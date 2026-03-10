@@ -1,14 +1,38 @@
 /**
- * runtime_core_wasm.c — wasm-min 最小ランタイム
+ * runtime_core_wasm.c — wasm-min 最小ランタイム (runtime_core 相当)
+ *
+ * W-2a: Runtime 境界の分類
+ * ==========================
+ *
+ * native_runtime.c (8000+ 行) の全ランタイム関数は以下の 4 カテゴリに分類される:
+ *
+ *   runtime_core:        I/O (stdout/stderr/debug), 整数演算, ブール演算,
+ *                         Div/Mod mold, poly_eq/neq, retain/release (no-op)
+ *   runtime_collections: BuchiPack, List, HashMap, Set, String 操作,
+ *                         Lax, Result, Gorillax, Molten, Stub, Todo, Cage, JSON
+ *   runtime_os:          ファイルI/O, プロセス, 環境変数, CLI 引数
+ *   runtime_async:       Async[T], spawn, cancel, all, race, map
+ *
+ * wasm-min は runtime_core のみをリンクする。
+ * native_runtime.c をそのまま wasm に持ち込まない。
+ * wasm-min v1 の許可機能: static string print / int print / integer arithmetic のみ。
+ *
+ * 本ファイル (runtime_core_wasm.c) が wasm-min の全 runtime である。
+ * wasm-ld --gc-sections + --strip-all により、未使用関数は .wasm に含まれない。
+ * これにより hello_world で RC / collection / OS / async コードが一切混入しないことが
+ * 構造的に保証される。
  *
  * WASI fd_write ベースの stdout のみ。ヒープアロケーション禁止。
  * RC / retain / release / collection runtime を持ち込まない。
  *
  * 全値は int64_t (boxed value) として統一。文字列は NUL 終端ポインタを
  * int64_t にキャストして保持する（Native backend と同一表現）。
+ * static string literal は heap header を持たない borrowed data として扱う。
+ * wasm data section に直接配置され、malloc/free/RC を必要としない。
  *
  * サポートする機能:
  *   - taida_io_stdout(val)    : 文字列ポインタ → stdout + 改行
+ *   - taida_io_stderr(val)    : 文字列ポインタ → stderr + 改行
  *   - taida_debug_int(val)    : i64 の 10 進文字列化 + stdout
  *   - taida_debug_str(val)    : debug(Str) — 文字列ポインタ → stdout + 改行
  *   - taida_debug_bool(val)   : debug(Bool) — "true"/"false" + 改行
@@ -16,6 +40,9 @@
  *   - taida_int_neg            : 符号反転
  *   - taida_int_eq/neq/lt/gt/gte : 整数比較
  *   - taida_bool_and/or/not   : ブール演算
+ *   - taida_div_mold/mod_mold : 除算/剰余（簡易版、ゼロ除算は 0 を返す）
+ *   - taida_generic_unmold    : identity（Lax ラッパーなし）
+ *   - taida_poly_eq/neq       : 多態比較（整数比較のみ）
  *   - taida_retain/taida_release : no-op (wasm-min ではヒープなし)
  *   - _start                  : WASI エントリポイント (_taida_main を呼び出す)
  */

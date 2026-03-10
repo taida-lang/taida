@@ -333,8 +333,8 @@ pub fn compile_file_wasm(
         }
     };
 
-    // 一時ファイルパスの生成
-    let tmp_base = input_path.with_extension("_wasm_tmp");
+    // 一時ファイルパスの生成（出力パスベースで一意化し、並列コンパイルの衝突を防ぐ）
+    let tmp_base = wasm_path.with_extension("_wasm_tmp");
     let gen_c_path = tmp_base.with_extension("gen.c");
     let gen_obj_path = tmp_base.with_extension("gen.o");
     let rt_c_path = tmp_base.with_extension("rt.c");

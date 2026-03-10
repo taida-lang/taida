@@ -2,6 +2,10 @@
 ///
 /// Compiles .td files to .wasm via `taida build --target wasm-min`,
 /// runs them with wasmtime, and verifies output matches the interpreter.
+///
+/// W-2: Size gate CI tests — hard gates on .wasm file sizes.
+/// Wado baselines: hello_world = 1,572 bytes, pi_approx = 9,269 bytes.
+/// Gate: hello <= 2KB (minimum), <= 1,572 bytes (stretch); pi <= 9,269 bytes (hard).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -134,63 +138,117 @@ fn wasm_min_pi_approx() {
     assert_eq!(interp, wasm, "wasm-min output should match interpreter");
 }
 
+// ---------------------------------------------------------------------------
+// W-2c: Size Gate CI — hard gates on .wasm file sizes
+// ---------------------------------------------------------------------------
+
+/// Helper: compile a .td to .wasm and return the file size in bytes.
+fn compile_wasm_and_get_size(td_path: &Path, wasm_path: &Path) -> u64 {
+    let output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-min"])
+        .arg(td_path)
+        .arg("-o")
+        .arg(wasm_path)
+        .output()
+        .expect("failed to run taida");
+    assert!(
+        output.status.success(),
+        "wasm-min compile failed for {}: {}",
+        td_path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let size = std::fs::metadata(wasm_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let _ = std::fs::remove_file(wasm_path);
+    size
+}
+
 #[test]
 fn wasm_min_size_gate() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
-    };
+    // Skip if toolchain unavailable
+    if wasmtime_bin().is_none() {
+        eprintln!("wasmtime not found, skipping wasm-min tests");
+        return;
+    }
 
-    // Compile both examples
     let hello_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
     let pi_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_pi_approx.td");
 
-    let hello_wasm = std::env::temp_dir().join("taida_wasm_size_hello.wasm");
-    let pi_wasm = std::env::temp_dir().join("taida_wasm_size_pi.wasm");
-
-    let _ = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
-        .arg(&hello_path)
-        .arg("-o")
-        .arg(&hello_wasm)
-        .output();
-
-    let _ = Command::new(taida_bin())
-        .args(["build", "--target", "wasm-min"])
-        .arg(&pi_path)
-        .arg("-o")
-        .arg(&pi_wasm)
-        .output();
-
-    let hello_size = std::fs::metadata(&hello_wasm)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let pi_size = std::fs::metadata(&pi_wasm).map(|m| m.len()).unwrap_or(0);
-
-    let _ = std::fs::remove_file(&hello_wasm);
-    let _ = std::fs::remove_file(&pi_wasm);
+    let hello_size = compile_wasm_and_get_size(
+        &hello_path,
+        &std::env::temp_dir().join("taida_wasm_size_hello.wasm"),
+    );
+    let pi_size = compile_wasm_and_get_size(
+        &pi_path,
+        &std::env::temp_dir().join("taida_wasm_size_pi.wasm"),
+    );
 
     // Wado baselines: hello_world = 1,572 bytes, pi_approx = 9,269 bytes
-    // Our gates: hello <= 2KB, pi <= 9,269 bytes (hard gate)
     eprintln!("wasm-min hello size: {} bytes (Wado: 1,572)", hello_size);
     eprintln!("wasm-min pi size: {} bytes (Wado: 9,269)", pi_size);
 
-    assert!(
-        hello_size > 0 && hello_size <= 2048,
-        "hello.wasm should be <= 2KB, got {} bytes",
-        hello_size
-    );
+    // Hard gate: pi_approx must be <= 9,269 bytes (Wado baseline)
     assert!(
         pi_size > 0 && pi_size <= 9269,
-        "pi.wasm should be <= 9,269 bytes (Wado baseline), got {} bytes",
+        "HARD GATE FAIL: pi.wasm should be <= 9,269 bytes (Wado baseline), got {} bytes. \
+         W-3 and beyond are blocked until this passes.",
         pi_size
     );
 
-    // Verify execution too
-    let _ = wasmtime; // ensure wasmtime exists
+    // Minimum gate: hello must be <= 2KB
+    assert!(
+        hello_size > 0 && hello_size <= 2048,
+        "MINIMUM GATE FAIL: hello.wasm should be <= 2KB, got {} bytes",
+        hello_size
+    );
+
+    // Stretch goal: hello <= 1,572 bytes (Wado baseline)
+    if hello_size <= 1572 {
+        eprintln!(
+            "STRETCH GOAL MET: hello.wasm ({} bytes) <= Wado baseline (1,572 bytes)",
+            hello_size
+        );
+    } else {
+        eprintln!(
+            "Stretch goal not met: hello.wasm ({} bytes) > Wado baseline (1,572 bytes)",
+            hello_size
+        );
+    }
+}
+
+/// W-2c: Size gate with exact Wado comparison — reports the ratio.
+#[test]
+fn wasm_min_size_gate_wado_comparison() {
+    if wasmtime_bin().is_none() {
+        eprintln!("wasmtime not found, skipping wasm-min tests");
+        return;
+    }
+
+    let hello_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
+    let pi_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_pi_approx.td");
+
+    let hello_size = compile_wasm_and_get_size(
+        &hello_path,
+        &std::env::temp_dir().join("taida_wasm_wado_hello.wasm"),
+    );
+    let pi_size = compile_wasm_and_get_size(
+        &pi_path,
+        &std::env::temp_dir().join("taida_wasm_wado_pi.wasm"),
+    );
+
+    // Report Wado comparison ratios
+    let hello_ratio = 1572.0 / hello_size as f64;
+    let pi_ratio = 9269.0 / pi_size as f64;
+    eprintln!(
+        "Wado comparison: hello = {} bytes (Wado: 1,572 = {:.1}x larger), \
+         pi = {} bytes (Wado: 9,269 = {:.1}x larger)",
+        hello_size, hello_ratio, pi_size, pi_ratio
+    );
+
+    // Sanity: both should be non-zero and compile correctly
+    assert!(hello_size > 0, "hello.wasm should not be empty");
+    assert!(pi_size > 0, "pi.wasm should not be empty");
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +326,95 @@ fn wasm_min_reject_float() {
     assert!(
         stderr.contains("Float"),
         "Error should mention Float, got: {}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W-2: Regression tests (from review Low findings)
+// ---------------------------------------------------------------------------
+
+/// W-2: Multiple global variables should each get their own C static variable.
+/// Verifies that globals do not collide (F-4 regression).
+#[test]
+fn wasm_min_multiple_globals() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/multiple_globals.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "multiple globals: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-2: --release gate should work with wasm-min (positive case: no TODO/Stub).
+#[test]
+fn wasm_min_release_gate_positive() {
+    if wasmtime_bin().is_none() {
+        eprintln!("wasmtime not found, skipping wasm-min tests");
+        return;
+    }
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/release_gate.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_release_pos.wasm");
+
+    // Compiling with --release should succeed (no TODO/Stub in source)
+    let output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-min", "--release"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida");
+
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        output.status.success(),
+        "wasm-min --release should succeed for clean code, but failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// W-2: --release gate should reject TODO molds in wasm-min (negative case).
+#[test]
+fn wasm_min_release_gate_negative() {
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/release_gate_todo.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_release_neg.wasm");
+
+    // Compiling with --release should fail (TODO mold present)
+    let output = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-min", "--release"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida");
+
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        !output.status.success(),
+        "wasm-min --release should fail when TODO mold is present, but it succeeded"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TODO") || stderr.contains("Release gate"),
+        "Error should mention TODO or Release gate, got: {}",
         stderr
     );
 }
