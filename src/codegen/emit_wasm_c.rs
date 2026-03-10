@@ -1,15 +1,20 @@
-/// wasm-min C emitter — Taida IR を C コードに変換し、clang で wasm32 object を生成
+/// wasm-min C emitter -- Taida IR を C コードに変換し、clang で wasm32 object を生成
 ///
-/// wasm-min は Cranelift の ISA に wasm32 が存在しないため、IR → C → clang → wasm32 .o
+/// wasm-min は Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang -> wasm32 .o
 /// というパイプラインを採用する。サポートする IR 命令は最小限:
 ///
-/// - ConstInt, ConstFloat, ConstBool, ConstStr
+/// - ConstInt, ConstBool, ConstStr
 /// - Call (runtime 関数のみ)
+/// - CallUser (ユーザー定義関数)
 /// - DefVar, UseVar
-/// - Return
+/// - CondBranch, Return, TailCall
+/// - GlobalSet, GlobalGet
+/// - Retain, Release (no-op)
 ///
-/// ヒープアロケーション・クロージャ・BuchiPack は未対応（wasm-min v1 スコープ外）。
+/// ヒープアロケーション・クロージャ・BuchiPack・Float は未対応（wasm-min v1 スコープ外）。
+/// 未対応 IR は silent miscompile ではなく compile error を返す。
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use super::ir::*;
@@ -24,6 +29,134 @@ impl std::fmt::Display for WasmCEmitError {
         write!(f, "{}", self.message)
     }
 }
+
+// ---------------------------------------------------------------------------
+// F-1: Capability validator -- 未対応 IR を compile error にする
+// ---------------------------------------------------------------------------
+
+/// wasm-min で未対応の IR 命令を検出して compile error にする。
+/// silent miscompile を防ぐための事前バリデーション。
+pub fn validate_wasm_min_capabilities(ir_module: &IrModule) -> Result<(), WasmCEmitError> {
+    let mut unsupported = Vec::new();
+
+    for func in &ir_module.functions {
+        collect_unsupported_insts(&func.body, &func.name, &mut unsupported);
+    }
+
+    if unsupported.is_empty() {
+        Ok(())
+    } else {
+        // Deduplicate by feature name
+        let mut features: Vec<&str> = unsupported.iter().map(|s| s.as_str()).collect();
+        features.sort();
+        features.dedup();
+        Err(WasmCEmitError {
+            message: format!(
+                "wasm-min does not support the following features: {}. \
+                 Use the interpreter or native backend instead.",
+                features.join(", ")
+            ),
+        })
+    }
+}
+
+fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<String>) {
+    for inst in insts {
+        match inst {
+            // F-1 + F-3: unsupported IR instructions
+            IrInst::ConstFloat(_, _) => {
+                out.push("Float literals".to_string());
+            }
+            IrInst::PackNew(_, _) => {
+                out.push("BuchiPack (PackNew)".to_string());
+            }
+            IrInst::PackGet(_, _, _) => {
+                out.push("BuchiPack (PackGet)".to_string());
+            }
+            IrInst::PackSet(_, _, _) => {
+                out.push("BuchiPack (PackSet)".to_string());
+            }
+            IrInst::PackSetTag(_, _, _) => {
+                out.push("BuchiPack (PackSetTag)".to_string());
+            }
+            IrInst::FuncAddr(_, _) => {
+                out.push("function references (FuncAddr)".to_string());
+            }
+            IrInst::MakeClosure(_, _, _) => {
+                out.push("closures (MakeClosure)".to_string());
+            }
+            IrInst::CallIndirect(_, _, _) => {
+                out.push("indirect calls (CallIndirect)".to_string());
+            }
+            IrInst::CondBranch(_, arms) => {
+                for arm in arms {
+                    collect_unsupported_insts(&arm.body, _func_name, out);
+                }
+            }
+            // All supported instructions
+            IrInst::ConstInt(_, _)
+            | IrInst::ConstBool(_, _)
+            | IrInst::ConstStr(_, _)
+            | IrInst::DefVar(_, _)
+            | IrInst::UseVar(_, _)
+            | IrInst::Call(_, _, _)
+            | IrInst::CallUser(_, _, _)
+            | IrInst::Return(_)
+            | IrInst::Retain(_)
+            | IrInst::Release(_)
+            | IrInst::GlobalSet(_, _)
+            | IrInst::GlobalGet(_, _)
+            | IrInst::TailCall(_) => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-4: Global variable name collection (for name-based C variables)
+// ---------------------------------------------------------------------------
+
+/// Collect all global variable hashes used in the module and assign them
+/// unique C variable names based on their hash values.
+fn collect_global_hashes(ir_module: &IrModule) -> Vec<i64> {
+    let mut hashes = HashSet::new();
+    for func in &ir_module.functions {
+        collect_global_hashes_from_insts(&func.body, &mut hashes);
+    }
+    let mut sorted: Vec<i64> = hashes.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
+fn collect_global_hashes_from_insts(insts: &[IrInst], hashes: &mut HashSet<i64>) {
+    for inst in insts {
+        match inst {
+            IrInst::GlobalSet(hash, _) | IrInst::GlobalGet(_, hash) => {
+                hashes.insert(*hash);
+            }
+            IrInst::CondBranch(_, arms) => {
+                for arm in arms {
+                    collect_global_hashes_from_insts(&arm.body, hashes);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build a map from hash -> C variable name for globals.
+fn build_global_name_map(hashes: &[i64]) -> HashMap<i64, String> {
+    let mut map = HashMap::new();
+    for (i, hash) in hashes.iter().enumerate() {
+        // Use hash value in the name to avoid ambiguity, plus index for uniqueness
+        let unsigned = *hash as u64;
+        map.insert(*hash, format!("_tg_{}_{}", i, unsigned));
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
+// C string literal helper
+// ---------------------------------------------------------------------------
 
 /// C コード上でのエスケープ済み文字列リテラルを生成
 fn c_string_literal(s: &str) -> String {
@@ -52,8 +185,17 @@ fn c_string_literal(s: &str) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 /// Taida IR モジュールを wasm-min 用 C ソースに変換する
+///
+/// F-1: 事前に capability validation を実行し、未対応 IR は compile error にする。
 pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
+    // F-1: capability validation (prevents silent miscompile)
+    validate_wasm_min_capabilities(ir_module)?;
+
     let mut c = String::new();
 
     // ヘッダー
@@ -61,23 +203,19 @@ pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
     writeln!(c, "#include <stdint.h>").unwrap();
     writeln!(c).unwrap();
 
-    // グローバル変数テーブル（wasm-min: hash-indexed static array）
-    // GlobalSet/GlobalGet で使用。最大 256 スロット。
-    let has_globals = ir_module.functions.iter().any(|f| uses_globals(&f.body));
-    if has_globals {
-        writeln!(c, "#define TAIDA_GLOBAL_SLOTS 256").unwrap();
-        writeln!(c, "static int64_t _taida_globals[TAIDA_GLOBAL_SLOTS];").unwrap();
-        writeln!(c, "static inline void taida_global_set(int64_t hash, int64_t val) {{").unwrap();
-        writeln!(c, "    _taida_globals[(uint64_t)hash % TAIDA_GLOBAL_SLOTS] = val;").unwrap();
-        writeln!(c, "}}").unwrap();
-        writeln!(c, "static inline int64_t taida_global_get(int64_t hash) {{").unwrap();
-        writeln!(c, "    return _taida_globals[(uint64_t)hash % TAIDA_GLOBAL_SLOTS];").unwrap();
-        writeln!(c, "}}").unwrap();
+    // F-4: グローバル変数を名前ベースの C 変数として宣言
+    let global_hashes = collect_global_hashes(ir_module);
+    let global_map = build_global_name_map(&global_hashes);
+    for hash in &global_hashes {
+        let var_name = &global_map[hash];
+        writeln!(c, "static int64_t {};", var_name).unwrap();
+    }
+    if !global_hashes.is_empty() {
         writeln!(c).unwrap();
     }
 
     // runtime 関数のプロトタイプ宣言（必要なもののみ）
-    let mut needed_funcs = std::collections::HashSet::new();
+    let mut needed_funcs = HashSet::new();
     for func in &ir_module.functions {
         collect_needed_runtime_funcs(&func.body, &mut needed_funcs);
     }
@@ -109,13 +247,13 @@ pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
     // 関数定義
     for func in &ir_module.functions {
         writeln!(c).unwrap();
-        emit_function(&mut c, func)?;
+        emit_function(&mut c, func, &global_map)?;
     }
 
     Ok(c)
 }
 
-fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut std::collections::HashSet<String>) {
+fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
     for inst in insts {
         match inst {
             IrInst::Call(_, name, _) => {
@@ -141,11 +279,10 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_io_stdout" | "taida_io_stderr" => {
             format!("int64_t {}(int64_t val);", name)
         }
-        // Debug 出力
+        // Debug 出力 (F-3: taida_debug_float は除去 -- wasm-min v1 は整数のみ)
         "taida_debug_int" | "taida_debug_str" | "taida_debug_bool" => {
             format!("int64_t {}(int64_t val);", name)
         }
-        "taida_debug_float" => "int64_t taida_debug_float(int64_t val);".to_string(),
         // 整数演算 (2引数)
         "taida_int_add" | "taida_int_sub" | "taida_int_mul" | "taida_int_eq"
         | "taida_int_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => {
@@ -172,23 +309,31 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
             format!("void {}(int64_t val);", name)
         }
         other => {
-            // 未サポート関数: プロトタイプなしで宣言（リンク時にエラーになる）
-            return Ok(format!(
-                "/* unsupported in wasm-min: {} */\nint64_t {}();",
-                other, other
-            ));
+            // F-1: unsupported runtime functions are compile errors, not silent stubs
+            return Err(WasmCEmitError {
+                message: format!(
+                    "wasm-min does not support runtime function '{}'. \
+                     Use the interpreter or native backend instead.",
+                    other
+                ),
+            });
         }
     };
     Ok(proto)
 }
 
 /// 現在の関数のパラメータ名（TailCall で使用）
-struct FuncContext {
+struct FuncContext<'a> {
     param_names: Vec<String>,
+    global_map: &'a HashMap<i64, String>,
 }
 
 /// 単一関数を C コードに変換
-fn emit_function(c: &mut String, func: &IrFunction) -> Result<(), WasmCEmitError> {
+fn emit_function(
+    c: &mut String,
+    func: &IrFunction,
+    global_map: &HashMap<i64, String>,
+) -> Result<(), WasmCEmitError> {
     // 関数シグネチャ
     write!(c, "int64_t {}(", func.name).unwrap();
     for (i, param_name) in func.params.iter().enumerate() {
@@ -212,7 +357,7 @@ fn emit_function(c: &mut String, func: &IrFunction) -> Result<(), WasmCEmitError
     }
 
     // Named variables（DefVar/UseVar 用）
-    let mut named_vars = std::collections::HashSet::new();
+    let mut named_vars = HashSet::new();
     collect_named_vars(&func.body, &mut named_vars);
     // パラメータ名も named_vars に含める
     for param_name in &func.params {
@@ -235,6 +380,7 @@ fn emit_function(c: &mut String, func: &IrFunction) -> Result<(), WasmCEmitError
 
     let fctx = FuncContext {
         param_names: func.params.clone(),
+        global_map,
     };
 
     // 末尾再帰のサポート: TailCall を含む場合はループで囲む
@@ -257,7 +403,7 @@ fn emit_function(c: &mut String, func: &IrFunction) -> Result<(), WasmCEmitError
     Ok(())
 }
 
-fn collect_named_vars(insts: &[IrInst], set: &mut std::collections::HashSet<String>) {
+fn collect_named_vars(insts: &[IrInst], set: &mut HashSet<String>) {
     for inst in insts {
         match inst {
             IrInst::DefVar(name, _) => {
@@ -297,11 +443,6 @@ fn emit_inst(
     match inst {
         IrInst::ConstInt(dst, val) => {
             writeln!(c, "{}v_{} = {}LL;", indent, dst, val).unwrap();
-        }
-        IrInst::ConstFloat(dst, val) => {
-            // Store as bitcast i64 (matching native backend behavior)
-            let bits = val.to_bits();
-            writeln!(c, "{}v_{} = {}LL; /* float {} */", indent, dst, bits as i64, val).unwrap();
         }
         IrInst::ConstBool(dst, val) => {
             writeln!(c, "{}v_{} = {};", indent, dst, if *val { 1 } else { 0 }).unwrap();
@@ -385,58 +526,30 @@ fn emit_inst(
             // RC 操作は wasm-min では無視（ヒープなし）
             writeln!(c, "{}/* retain/release skipped (wasm-min) */", indent).unwrap();
         }
+        // F-4: グローバル変数を名前ベースの C 変数で読み書き
         IrInst::GlobalSet(name_hash, value_var) => {
-            writeln!(
-                c,
-                "{}taida_global_set({}LL, v_{});",
-                indent, name_hash, value_var
-            )
-            .unwrap();
+            let var_name = fctx.global_map.get(name_hash).expect("global hash not in map");
+            writeln!(c, "{}{} = v_{};", indent, var_name, value_var).unwrap();
         }
         IrInst::GlobalGet(dst, name_hash) => {
-            writeln!(
-                c,
-                "{}v_{} = taida_global_get({}LL);",
-                indent, dst, name_hash
-            )
-            .unwrap();
+            let var_name = fctx.global_map.get(name_hash).expect("global hash not in map");
+            writeln!(c, "{}v_{} = {};", indent, dst, var_name).unwrap();
         }
-        IrInst::PackNew(dst, _)
-        | IrInst::PackGet(dst, _, _) => {
-            writeln!(
-                c,
-                "{}v_{} = 0; /* unsupported in wasm-min */",
-                indent, dst
-            )
-            .unwrap();
-        }
-        IrInst::PackSet(_, _, _)
-        | IrInst::PackSetTag(_, _, _) => {
-            writeln!(c, "{}/* unsupported op in wasm-min */", indent).unwrap();
-        }
-        IrInst::FuncAddr(dst, _name) => {
-            writeln!(
-                c,
-                "{}v_{} = 0; /* func addr unsupported in wasm-min */",
-                indent, dst
-            )
-            .unwrap();
-        }
-        IrInst::MakeClosure(dst, _, _) => {
-            writeln!(
-                c,
-                "{}v_{} = 0; /* closures unsupported in wasm-min */",
-                indent, dst
-            )
-            .unwrap();
-        }
-        IrInst::CallIndirect(dst, _, _) => {
-            writeln!(
-                c,
-                "{}v_{} = 0; /* indirect call unsupported in wasm-min */",
-                indent, dst
-            )
-            .unwrap();
+        // F-1: These should never be reached because validate_wasm_min_capabilities
+        // catches them before emission. But if somehow they slip through, error out.
+        IrInst::ConstFloat(_, _)
+        | IrInst::PackNew(_, _)
+        | IrInst::PackGet(_, _, _)
+        | IrInst::PackSet(_, _, _)
+        | IrInst::PackSetTag(_, _, _)
+        | IrInst::FuncAddr(_, _)
+        | IrInst::MakeClosure(_, _, _)
+        | IrInst::CallIndirect(_, _, _) => {
+            return Err(WasmCEmitError {
+                message: "Internal error: unsupported IR instruction reached emit phase. \
+                          This should have been caught by validate_wasm_min_capabilities."
+                    .to_string(),
+            });
         }
         IrInst::TailCall(args) => {
             // 末尾再帰: TailCall(args) の args を一時変数に評価してから
@@ -462,24 +575,6 @@ fn emit_inst(
         }
     }
     Ok(())
-}
-
-/// IR 命令列に GlobalSet/GlobalGet が含まれるかを再帰的にチェック
-fn uses_globals(insts: &[IrInst]) -> bool {
-    for inst in insts {
-        match inst {
-            IrInst::GlobalSet(_, _) | IrInst::GlobalGet(_, _) => return true,
-            IrInst::CondBranch(_, arms) => {
-                for arm in arms {
-                    if uses_globals(&arm.body) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 /// IR 命令列に TailCall が含まれるかどうかを再帰的にチェック

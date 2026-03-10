@@ -729,6 +729,7 @@ fn run_build(args: &[String], no_check: bool) {
             run_build_wasm_min(
                 input_path,
                 output_path.as_deref(),
+                release_mode,
                 no_check,
                 diag_format,
                 &mut compile_stats,
@@ -1411,6 +1412,7 @@ fn run_build_native(
 fn run_build_wasm_min(
     input_path: &Path,
     output_path: Option<&str>,
+    release_mode: bool,
     no_check: bool,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
@@ -1503,6 +1505,15 @@ fn run_build_wasm_min(
             diag_format,
             compile_stats,
         );
+    }
+
+    // F-2: Release gate -- block TODO/Stub molds in --release builds
+    if release_mode {
+        let sites = scan_release_gate_sites(input_path);
+        if !sites.is_empty() {
+            report_release_gate_violations(sites, diag_format, compile_stats);
+            std::process::exit(1);
+        }
     }
 
     // Default output: .taida/build/wasm-min/{stem}.wasm (project-local)

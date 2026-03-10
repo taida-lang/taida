@@ -192,3 +192,82 @@ fn wasm_min_size_gate() {
     // Verify execution too
     let _ = wasmtime; // ensure wasmtime exists
 }
+
+// ---------------------------------------------------------------------------
+// F-1: Negative tests -- unsupported features should produce compile errors
+// ---------------------------------------------------------------------------
+
+/// Helper: attempt to compile a .td file with wasm-min and expect failure.
+/// Returns stderr output if compilation failed as expected, panics if it succeeded.
+fn expect_wasm_min_compile_failure(td_path: &Path) -> String {
+    let compile_output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-min")
+        .arg(td_path)
+        .arg("-o")
+        .arg(std::env::temp_dir().join("taida_wasm_neg_test.wasm"))
+        .output()
+        .expect("failed to run taida");
+
+    assert!(
+        !compile_output.status.success(),
+        "Expected wasm-min compile failure for {}, but it succeeded",
+        td_path.display()
+    );
+
+    let _ = std::fs::remove_file(std::env::temp_dir().join("taida_wasm_neg_test.wasm"));
+
+    String::from_utf8_lossy(&compile_output.stderr).to_string()
+}
+
+#[test]
+fn wasm_min_reject_buchipack() {
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/unsupported_pack.td");
+    let stderr = expect_wasm_min_compile_failure(&td_path);
+    assert!(
+        stderr.contains("wasm-min does not support"),
+        "Error should mention 'wasm-min does not support', got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("BuchiPack") || stderr.contains("Pack"),
+        "Error should mention BuchiPack/Pack, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn wasm_min_reject_closure() {
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/unsupported_closure.td");
+    let stderr = expect_wasm_min_compile_failure(&td_path);
+    assert!(
+        stderr.contains("wasm-min does not support"),
+        "Error should mention 'wasm-min does not support', got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("closure") || stderr.contains("Closure") || stderr.contains("MakeClosure"),
+        "Error should mention closures, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn wasm_min_reject_float() {
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/unsupported_float.td");
+    let stderr = expect_wasm_min_compile_failure(&td_path);
+    assert!(
+        stderr.contains("wasm-min does not support"),
+        "Error should mention 'wasm-min does not support', got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Float"),
+        "Error should mention Float, got: {}",
+        stderr
+    );
+}
