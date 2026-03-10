@@ -521,3 +521,100 @@ fn wasm_min_release_gate_negative() {
         stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// W-3f: Blocker regression tests
+// ---------------------------------------------------------------------------
+
+/// W-3f F-1: debug(Float) should handle small non-zero values (scientific notation).
+/// Compare against native backend (both use %g-equivalent formatting).
+#[test]
+fn wasm_min_float_small_values() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/float_small.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "float_small: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}
+
+/// W-3f F-2: String.length() should work via taida_polymorphic_length.
+#[test]
+fn wasm_min_str_length() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/str_length.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "str_length: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-3f F-2: Int.toString() should work via taida_polymorphic_to_string.
+#[test]
+fn wasm_min_int_to_string() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/int_to_string.td");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        interp, wasm,
+        "int_to_string: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
+    );
+}
+
+/// W-3f F-2: Int["str"]() ]=> should work via taida_int_mold_str + taida_generic_unmold.
+#[test]
+fn wasm_min_int_mold_str() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min tests");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/int_mold_str.td");
+    let native_output = run_native(&td_path).expect("native should succeed");
+    let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
+
+    assert_eq!(
+        native_output, wasm,
+        "int_mold_str: wasm-min output should match native (expected '{}', got '{}')",
+        native_output, wasm
+    );
+}

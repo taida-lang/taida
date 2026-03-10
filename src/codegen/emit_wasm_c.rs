@@ -314,6 +314,11 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_float_to_str" => "int64_t taida_float_to_str(int64_t a);".to_string(),
         "taida_int_abs" => "int64_t taida_int_abs(int64_t a);".to_string(),
         "taida_int_lte" => "int64_t taida_int_lte(int64_t a, int64_t b);".to_string(),
+        // W-3f: Polymorphic methods (wasm-min simplified versions)
+        "taida_polymorphic_length" => "int64_t taida_polymorphic_length(int64_t ptr);".to_string(),
+        "taida_polymorphic_to_string" => "int64_t taida_polymorphic_to_string(int64_t obj);".to_string(),
+        // W-3f: Int mold from string
+        "taida_int_mold_str" => "int64_t taida_int_mold_str(int64_t v);".to_string(),
         // ブール演算
         "taida_bool_and" | "taida_bool_or" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)

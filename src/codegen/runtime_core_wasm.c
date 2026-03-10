@@ -411,92 +411,152 @@ int64_t taida_float_sub(int64_t a, int64_t b) { return _d2l(_to_double(a) - _to_
 int64_t taida_float_mul(int64_t a, int64_t b) { return _d2l(_to_double(a) * _to_double(b)); }
 int64_t taida_float_neg(int64_t a) { return _d2l(-_to_double(a)); }
 
+/* ── W-3f: %g-equivalent float formatter ── */
+/* Implements printf("%g") behavior: 6 significant digits, scientific notation
+   when exponent < -4 or >= 6, trailing zeros trimmed. */
+
+static int fmt_g(double d, char *buf, int bufsize) {
+    int len = 0;
+
+    /* Handle negative */
+    if (d < 0) { buf[len++] = '-'; d = -d; }
+
+    /* NaN check: NaN != NaN */
+    if (d != d) { buf[len++]='N'; buf[len++]='a'; buf[len++]='N'; return len; }
+    /* Infinity */
+    if (d > 1e308) { buf[len++]='i'; buf[len++]='n'; buf[len++]='f'; return len; }
+
+    /* Zero */
+    if (d == 0.0) { buf[len++] = '0'; return len; }
+
+    /* Compute base-10 exponent */
+    int exp10 = 0;
+    double norm = d;
+    if (norm >= 10.0) {
+        while (norm >= 10.0) { norm /= 10.0; exp10++; }
+    } else if (norm < 1.0) {
+        while (norm < 1.0) { norm *= 10.0; exp10--; }
+    }
+    /* norm is in [1.0, 10.0) */
+
+    /* %g precision=6: use scientific if exp < -4 or exp >= 6 */
+    int use_sci = (exp10 < -4 || exp10 >= 6);
+
+    if (use_sci) {
+        /* Scientific notation: d.dddddde+/-dd */
+        /* Round norm to 6 significant digits */
+        double rounded = norm;
+        {
+            double factor = 1e5; /* 10^(6-1) */
+            rounded = (double)((uint64_t)(rounded * factor + 0.5)) / factor;
+            if (rounded >= 10.0) { rounded /= 10.0; exp10++; }
+        }
+
+        /* Extract digits: first digit . remaining */
+        int first = (int)rounded;
+        if (first > 9) first = 9;
+        buf[len++] = '0' + (char)first;
+
+        double frac = rounded - (double)first;
+        /* Up to 5 more significant digits */
+        int frac_start = len;
+        if (frac > 0.0000005) {
+            buf[len++] = '.';
+            frac_start = len;
+            for (int i = 0; i < 5; i++) {
+                frac *= 10.0;
+                int digit = (int)frac;
+                if (digit > 9) digit = 9;
+                frac -= (double)digit;
+                buf[len++] = '0' + (char)digit;
+            }
+            /* Round */
+            if (frac >= 0.5 && len > frac_start) {
+                int carry = 1;
+                for (int i = len - 1; i >= frac_start && carry; i--) {
+                    int d2 = (buf[i] - '0') + carry;
+                    if (d2 >= 10) { buf[i] = '0'; carry = 1; }
+                    else { buf[i] = '0' + (char)d2; carry = 0; }
+                }
+            }
+            /* Trim trailing zeros */
+            while (len > frac_start && buf[len-1] == '0') len--;
+            if (len == frac_start) len--; /* remove dot */
+        }
+
+        /* Exponent */
+        buf[len++] = 'e';
+        if (exp10 < 0) { buf[len++] = '-'; exp10 = -exp10; }
+        else { buf[len++] = '+'; }
+        if (exp10 >= 100) {
+            buf[len++] = '0' + (char)(exp10 / 100);
+            buf[len++] = '0' + (char)((exp10 / 10) % 10);
+            buf[len++] = '0' + (char)(exp10 % 10);
+        } else {
+            buf[len++] = '0' + (char)(exp10 / 10);
+            buf[len++] = '0' + (char)(exp10 % 10);
+        }
+    } else {
+        /* Fixed notation */
+        /* We have 6 significant digits total.
+           Number of integer digits = exp10 + 1.
+           Number of fractional significant digits = 6 - (exp10 + 1) = 5 - exp10 */
+
+        /* Round d to 6 significant digits */
+        {
+            double factor = 1.0;
+            for (int i = 0; i < 5 - exp10; i++) factor *= 10.0;
+            d = (double)((uint64_t)(d * factor + 0.5)) / factor;
+        }
+
+        uint64_t ipart = (uint64_t)d;
+        double frac = d - (double)ipart;
+
+        /* Integer part */
+        char itmp[21];
+        int ipos = 20;
+        itmp[ipos] = '\0';
+        if (ipart == 0) { itmp[--ipos] = '0'; }
+        else { while (ipart > 0) { itmp[--ipos] = '0' + (char)(ipart % 10); ipart /= 10; } }
+        for (int i = ipos; i < 20; i++) buf[len++] = itmp[i];
+
+        /* Fractional part */
+        int frac_digits = 5 - exp10;
+        if (frac_digits < 0) frac_digits = 0;
+        if (frac_digits > 0 && frac > 0.0000005) {
+            buf[len++] = '.';
+            int frac_start = len;
+            for (int i = 0; i < frac_digits; i++) {
+                frac *= 10.0;
+                int digit = (int)frac;
+                if (digit > 9) digit = 9;
+                frac -= (double)digit;
+                buf[len++] = '0' + (char)digit;
+            }
+            /* Round */
+            if (frac >= 0.5 && len > frac_start) {
+                int carry = 1;
+                for (int i = len - 1; i >= frac_start && carry; i--) {
+                    int d2 = (buf[i] - '0') + carry;
+                    if (d2 >= 10) { buf[i] = '0'; carry = 1; }
+                    else { buf[i] = '0' + (char)d2; carry = 0; }
+                }
+            }
+            /* Trim trailing zeros */
+            while (len > frac_start && buf[len-1] == '0') len--;
+            if (len == frac_start) len--; /* remove dot */
+        }
+    }
+
+    return len;
+}
+
 /* ── W-3: taida_debug_float: debug(Float) — f64 の文字列化 + stdout ── */
 
 int64_t taida_debug_float(int64_t val) {
     double d = _l2d(val);
-    /* Format as %g (same as native runtime's printf("%g\n", value)) */
-    /* Stack-local buffer, no heap needed */
     char buf[64];
-    int len = 0;
-
-    /* Handle negative */
-    if (d < 0) {
-        buf[len++] = '-';
-        d = -d;
-    }
-
-    /* Handle special cases */
-    /* NaN check: NaN != NaN */
-    if (d != d) {
-        buf[len++] = 'N'; buf[len++] = 'a'; buf[len++] = 'N';
-        write_stdout(buf, len);
-        write_stdout("\n", 1);
-        return 0;
-    }
-    /* Infinity: a very large value */
-    if (d > 1e308) {
-        buf[len++] = 'i'; buf[len++] = 'n'; buf[len++] = 'f';
-        write_stdout(buf, len);
-        write_stdout("\n", 1);
-        return 0;
-    }
-
-    /* Integer part */
-    uint64_t ipart = (uint64_t)d;
-    double frac = d - (double)ipart;
-
-    /* Convert integer part to string */
-    char itmp[21];
-    int ipos = 20;
-    itmp[ipos] = '\0';
-    if (ipart == 0) {
-        itmp[--ipos] = '0';
-    } else {
-        while (ipart > 0) {
-            itmp[--ipos] = '0' + (char)(ipart % 10);
-            ipart /= 10;
-        }
-    }
-    for (int i = ipos; i < 20; i++) buf[len++] = itmp[i];
-
-    /* Fractional part: up to 6 significant digits, trim trailing zeros */
-    /* Match %g behavior: no decimal point if fraction is zero */
-    if (frac > 0.0000005) {
-        buf[len++] = '.';
-        int frac_start = len;
-        int frac_digits = 0;
-        /* %g uses at most 6 significant figures total, but for simplicity
-           we print up to 6 fractional digits and trim trailing zeros */
-        for (int i = 0; i < 6; i++) {
-            frac *= 10.0;
-            int digit = (int)frac;
-            if (digit > 9) digit = 9;
-            frac -= (double)digit;
-            buf[len++] = '0' + (char)digit;
-            frac_digits++;
-        }
-        /* Round last digit */
-        if (frac >= 0.5 && len > frac_start) {
-            int carry = 1;
-            for (int i = len - 1; i >= frac_start && carry; i--) {
-                int d2 = (buf[i] - '0') + carry;
-                if (d2 >= 10) {
-                    buf[i] = '0';
-                    carry = 1;
-                } else {
-                    buf[i] = '0' + (char)d2;
-                    carry = 0;
-                }
-            }
-        }
-        /* Trim trailing zeros */
-        while (len > frac_start && buf[len - 1] == '0') len--;
-        /* If all fractional digits were trimmed, remove the dot too */
-        if (len == frac_start) len--;
-        (void)frac_digits;
-    }
-
+    int len = fmt_g(d, buf, 64);
     write_stdout(buf, len);
     write_stdout("\n", 1);
     return 0;
@@ -516,46 +576,40 @@ int64_t taida_float_to_int(int64_t a) {
 
 int64_t taida_float_to_str(int64_t val) {
     double d = _l2d(val);
-    /* Reuse debug_float formatting logic but write to heap buffer */
     char tmp[64];
-    int len = 0;
-
-    if (d < 0) { tmp[len++] = '-'; d = -d; }
-    if (d != d) { tmp[len++] = 'N'; tmp[len++] = 'a'; tmp[len++] = 'N'; }
-    else if (d > 1e308) { tmp[len++] = 'i'; tmp[len++] = 'n'; tmp[len++] = 'f'; }
-    else {
-        uint64_t ipart = (uint64_t)d;
-        double frac = d - (double)ipart;
-        char itmp2[21]; int ipos = 20; itmp2[ipos] = '\0';
-        if (ipart == 0) { itmp2[--ipos] = '0'; }
-        else { while (ipart > 0) { itmp2[--ipos] = '0' + (char)(ipart % 10); ipart /= 10; } }
-        for (int i = ipos; i < 20; i++) tmp[len++] = itmp2[i];
-        if (frac > 0.0000005) {
-            tmp[len++] = '.';
-            int frac_start = len;
-            for (int i = 0; i < 6; i++) {
-                frac *= 10.0; int digit = (int)frac;
-                if (digit > 9) digit = 9; frac -= (double)digit;
-                tmp[len++] = '0' + (char)digit;
-            }
-            if (frac >= 0.5 && len > frac_start) {
-                int carry = 1;
-                for (int i = len - 1; i >= frac_start && carry; i--) {
-                    int d2 = (tmp[i] - '0') + carry;
-                    if (d2 >= 10) { tmp[i] = '0'; carry = 1; }
-                    else { tmp[i] = '0' + (char)d2; carry = 0; }
-                }
-            }
-            while (len > frac_start && tmp[len - 1] == '0') len--;
-            if (len == frac_start) len--;
-        }
-    }
+    int len = fmt_g(d, tmp, 64);
 
     char *buf = (char *)wasm_alloc(len + 1);
     if (!buf) return 0;
     for (int i = 0; i < len; i++) buf[i] = tmp[i];
     buf[len] = '\0';
     return (int64_t)(intptr_t)buf;
+}
+
+/* ── W-3f: taida_polymorphic_length (wasm-min: string only) ── */
+
+int64_t taida_polymorphic_length(int64_t ptr) {
+    const char *s = (const char *)(intptr_t)ptr;
+    if (!s) return 0;
+    return (int64_t)wasm_strlen(s);
+}
+
+/* ── W-3f: taida_polymorphic_to_string (wasm-min: Int/Float/Bool/Str) ── */
+
+int64_t taida_polymorphic_to_string(int64_t obj) {
+    /* In wasm-min, values are either int64_t numbers or string pointers.
+       We use the same heuristic as _to_double: small values are integers. */
+    /* For string pointers, return as-is. For numbers, convert to string. */
+    /* Since wasm-min has no heap objects, we do a simple approach:
+       treat as integer and convert to string via taida_int_to_str. */
+    return taida_int_to_str(obj);
+}
+
+/* ── W-3f: taida_int_mold_str (wasm-min: parse string to int, simplified) ── */
+/* In native, this returns a Lax[Int]. In wasm-min, returns raw value (no Lax wrapper). */
+
+int64_t taida_int_mold_str(int64_t v) {
+    return taida_str_to_int(v);
 }
 
 /* ── RC no-ops (wasm-min ではヒープなし) ── */
