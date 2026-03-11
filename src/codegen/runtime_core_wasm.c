@@ -220,6 +220,9 @@ int64_t taida_debug_str(int64_t val_ptr) {
     return 0;
 }
 
+/* ── taida_debug_polymorphic: forward declaration (impl after _wasm_value_to_display_string) ── */
+int64_t taida_debug_polymorphic(int64_t val);
+
 /* ── taida_debug_bool: debug(Bool) ── */
 
 int64_t taida_debug_bool(int64_t val) {
@@ -1095,6 +1098,19 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
 
 int64_t taida_polymorphic_to_string(int64_t obj) {
     return _wasm_value_to_display_string(obj);
+}
+
+/* ── W-6: taida_debug_polymorphic implementation ── */
+
+int64_t taida_debug_polymorphic(int64_t val) {
+    int64_t str = _wasm_value_to_display_string(val);
+    const char *s = (const char *)(intptr_t)str;
+    if (s) {
+        int32_t len = wasm_strlen(s);
+        write_stdout(s, len);
+        write_stdout("\n", 1);
+    }
+    return 0;
 }
 
 /* ── W-3f: taida_int_mold_str (wasm-min: parse string to int, simplified) ── */

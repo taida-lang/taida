@@ -930,3 +930,87 @@ fn wasm_min_mold_fail() {
         native_output, wasm
     );
 }
+
+// ---------------------------------------------------------------------------
+// W-6: Parity test — all compilable examples must match native output
+// ---------------------------------------------------------------------------
+
+/// W-6: Comprehensive parity test.
+/// For every .td file in examples/ that successfully compiles with wasm-min,
+/// the wasm output must match the native backend output exactly.
+#[test]
+fn wasm_min_parity_all_examples() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-min parity test");
+            return;
+        }
+    };
+
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut td_files: Vec<_> = std::fs::read_dir(&examples_dir)
+        .expect("examples/ directory should exist")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |ext| ext == "td"))
+        .collect();
+    td_files.sort();
+
+    let mut parity_ok = Vec::new();
+    let mut parity_fail = Vec::new();
+    let mut compile_rejected = Vec::new();
+    let mut native_fail = Vec::new();
+
+    for td_path in &td_files {
+        let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
+
+        // Try native build first
+        let native_output = run_native(td_path);
+        if native_output.is_none() {
+            native_fail.push(stem.clone());
+            continue;
+        }
+        let native_out = native_output.unwrap();
+
+        // Try wasm-min compile + run
+        let wasm_output = compile_and_run_wasm(td_path, &wasmtime);
+        if wasm_output.is_none() {
+            compile_rejected.push(stem.clone());
+            continue;
+        }
+        let wasm_out = wasm_output.unwrap();
+
+        if native_out == wasm_out {
+            parity_ok.push(stem.clone());
+        } else {
+            parity_fail.push((stem.clone(), native_out, wasm_out));
+        }
+    }
+
+    eprintln!("W-6 Parity: {} OK, {} rejected, {} native-fail",
+        parity_ok.len(), compile_rejected.len(), native_fail.len());
+
+    if !parity_fail.is_empty() {
+        let mut msg = format!(
+            "W-6 PARITY FAILED for {} example(s):\n",
+            parity_fail.len()
+        );
+        for (stem, native, wasm) in &parity_fail {
+            msg.push_str(&format!(
+                "\n  {}: native='{}' vs wasm='{}'\n",
+                stem,
+                native.chars().take(100).collect::<String>(),
+                wasm.chars().take(100).collect::<String>()
+            ));
+        }
+        panic!("{}", msg);
+    }
+
+    // At least 20 examples should have parity (sanity check)
+    assert!(
+        parity_ok.len() >= 20,
+        "W-6: Expected at least 20 examples with parity, got {}",
+        parity_ok.len()
+    );
+}

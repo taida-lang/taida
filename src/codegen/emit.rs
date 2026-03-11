@@ -121,6 +121,7 @@ fn runtime_abi(name: &str) -> RuntimeAbi {
         "taida_debug_float" => RuntimeAbi { params: &[F64], returns: &[Val] },
         "taida_debug_bool" => RuntimeAbi { params: &[Val], returns: &[Val] },
         "taida_debug_str" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
+        "taida_debug_polymorphic" => RuntimeAbi { params: &[Val], returns: &[Val] },
         "taida_debug_list" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
         "taida_debug_json" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
         "taida_gorilla" => RuntimeAbi { params: &[], returns: &[] },

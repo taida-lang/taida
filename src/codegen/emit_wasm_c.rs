@@ -309,9 +309,9 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_io_stdout" | "taida_io_stderr" => {
             format!("int64_t {}(int64_t val);", name)
         }
-        // Debug 出力 (W-3: taida_debug_float 追加)
+        // Debug 出力 (W-3: taida_debug_float 追加, W-6: taida_debug_polymorphic 追加)
         "taida_debug_int" | "taida_debug_str" | "taida_debug_bool"
-        | "taida_debug_float" => {
+        | "taida_debug_float" | "taida_debug_polymorphic" => {
             format!("int64_t {}(int64_t val);", name)
         }
         // 整数演算 (2引数)

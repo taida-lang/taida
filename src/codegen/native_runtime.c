@@ -340,6 +340,15 @@ taida_val taida_debug_str(const char* ptr) {
     return 0;
 }
 
+// Polymorphic debug: convert any value to string and print
+// Uses taida_value_to_display_string (forward-declared above)
+taida_val taida_debug_polymorphic(taida_val val) {
+    taida_val str = taida_value_to_display_string(val);
+    const char *s = (const char *)(intptr_t)str;
+    if (s) printf("%s\n", s); else printf("\n");
+    return 0;
+}
+
 // Arithmetic runtime
 taida_val taida_int_add(taida_val a, taida_val b) { return a + b; }
 taida_val taida_int_sub(taida_val a, taida_val b) { return a - b; }
