@@ -22,11 +22,13 @@ use super::ir::*;
 
 /// WASM profile: determines which runtime functions are allowed.
 /// - `Min`: wasm-min baseline (no OS APIs)
-/// - `Wasi`: wasm-wasi (adds env, file read/write, exists)
+/// - `Wasi`: wasm-wasi (adds env, file read/write, exists via WASI imports)
+/// - `Edge`: wasm-edge (adds env via host imports, no file I/O)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmProfile {
     Min,
     Wasi,
+    Edge,
 }
 
 #[derive(Debug)]
@@ -518,7 +520,26 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_os_exists" if profile == WasmProfile::Wasi => {
             "int64_t taida_os_exists(int64_t path_ptr);".to_string()
         }
-        // wasm-wasi unsupported OS APIs: give a specific error message
+        // WE-2: wasm-edge OS API functions (env only, no file I/O)
+        "taida_os_env_var" if profile == WasmProfile::Edge => {
+            "int64_t taida_os_env_var(int64_t name_ptr);".to_string()
+        }
+        "taida_os_all_env" if profile == WasmProfile::Edge => {
+            "int64_t taida_os_all_env(void);".to_string()
+        }
+        // wasm-edge does not support file I/O
+        "taida_os_read" | "taida_os_write_file" | "taida_os_exists"
+            if profile == WasmProfile::Edge =>
+        {
+            return Err(WasmCEmitError {
+                message: format!(
+                    "wasm-edge does not support '{}'. \
+                     Use wasm-wasi or native backend instead.",
+                    name
+                ),
+            });
+        }
+        // wasm-min unsupported OS APIs: give a specific error message
         "taida_os_env_var" | "taida_os_all_env" | "taida_os_read"
         | "taida_os_write_file" | "taida_os_exists" if profile == WasmProfile::Min => {
             return Err(WasmCEmitError {
@@ -533,6 +554,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             let profile_name = match profile {
                 WasmProfile::Min => "wasm-min",
                 WasmProfile::Wasi => "wasm-wasi",
+                WasmProfile::Edge => "wasm-edge",
             };
             return Err(WasmCEmitError {
                 message: format!(

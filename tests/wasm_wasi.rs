@@ -548,12 +548,14 @@ fn wasm_wasi_parity_all_examples() {
     td_files.sort();
 
     // Skip files that need special wasmtime args (env injection, dir access)
+    // Also skip wasm_edge_* examples (different profile, tested in wasm_edge.rs)
     let skip_stems: Vec<&str> = vec![
         "wasm_wasi_env",             // needs --env
         "wasm_wasi_file_io",         // needs --dir, creates temp files
         "wasm_wasi_exists",          // needs --dir, creates temp files
         "wasm_wasi_write_failure",   // needs --dir
         "wasm_wasi_write_failure_shape", // needs --dir
+        "wasm_edge_env",             // wasm-edge profile, needs taida_host imports
     ];
 
     let mut parity_ok = Vec::new();
@@ -633,11 +635,77 @@ fn wasm_wasi_parity_all_examples() {
         panic!("{}", msg);
     }
 
-    // wasm-wasi should match at least as many examples as wasm-min (20+)
+    // --- Strict regression guards (exact counts, not thresholds) ---
+
+    // Expected allowlist: examples that wasm-wasi cannot compile (unsupported features).
+    // If this list shrinks, update the count — that's progress.
+    // If it grows, the test fails — that's a regression.
+    let expected_rejected: Vec<&str> = vec![
+        "06_lists", "09_modules", "10_list_operations", "11_introspection",
+        "13_async", "14_unmold_backward", "16_unmold_both_directions",
+        "17_gorillax_cage", "18_std_json", "27_prelude_result",
+        "28_prelude_collections", "30_class_like_methods", "api_client",
+        "compile_async", "compile_gorillax", "compile_hashmap_set",
+        "compile_hof_molds", "compile_json", "compile_lax", "compile_list",
+        "compile_list_map", "compile_list_molds", "compile_methods",
+        "compile_module", "compile_module_value", "compile_num_molds",
+        "compile_optional_result", "compile_pack_field_call", "compile_prelude",
+        "compile_rc", "compile_str_molds", "compile_type_conv", "todo_app",
+    ];
+
+    // Expected allowlist: examples where native backend itself fails.
+    let expected_native_fail: Vec<&str> = vec![
+        "26_prelude_optional", "compile_stream", "helper_val",
+        "module_math", "module_utils", "transpile_npm",
+    ];
+
+    // Detect regressions: any new rejected/native-fail example not in the allowlist
+    let unexpected_rejected: Vec<&String> = compile_rejected
+        .iter()
+        .filter(|s| !expected_rejected.contains(&s.as_str()))
+        .collect();
     assert!(
-        parity_ok.len() >= 20,
-        "WW-3: Expected at least 20 examples with parity, got {}",
-        parity_ok.len()
+        unexpected_rejected.is_empty(),
+        "WW-3 REGRESSION: unexpected compile_rejected examples: {:?}",
+        unexpected_rejected
+    );
+
+    let unexpected_native_fail: Vec<&String> = native_fail
+        .iter()
+        .filter(|s| !expected_native_fail.contains(&s.as_str()))
+        .collect();
+    assert!(
+        unexpected_native_fail.is_empty(),
+        "WW-3 REGRESSION: unexpected native_fail examples: {:?}",
+        unexpected_native_fail
+    );
+
+    // Exact parity count — if this changes, update deliberately.
+    // WE-2: wasm_edge_hello.td added (simple stdout, compilable by wasm-wasi too)
+    assert_eq!(
+        parity_ok.len(),
+        27,
+        "WW-3: Expected exactly 27 parity-OK examples, got {}. \
+         If parity improved, update the expected count. List: {:?}",
+        parity_ok.len(),
+        parity_ok
+    );
+
+    // Guard against allowlist growing (regressions)
+    assert!(
+        compile_rejected.len() <= expected_rejected.len(),
+        "WW-3: compile_rejected count ({}) exceeds expected allowlist ({}). \
+         A previously compilable example regressed.",
+        compile_rejected.len(),
+        expected_rejected.len()
+    );
+
+    assert!(
+        native_fail.len() <= expected_native_fail.len(),
+        "WW-3: native_fail count ({}) exceeds expected allowlist ({}). \
+         A previously working native example regressed.",
+        native_fail.len(),
+        expected_native_fail.len()
     );
 }
 
@@ -727,10 +795,12 @@ fn wasm_wasi_superset_of_wasm_min() {
         panic!("{}", msg);
     }
 
-    // Sanity: at least 20 examples should pass the superset check
-    assert!(
-        superset_ok >= 20,
-        "WW-3: Expected at least 20 superset-verified examples, got {}",
+    // Exact superset count — if this changes, update deliberately.
+    // WE-2: wasm_edge_hello.td added (simple stdout, compilable by both wasm-min and wasm-wasi)
+    assert_eq!(
+        superset_ok, 26,
+        "WW-3: Expected exactly 26 superset-verified examples, got {}. \
+         If superset coverage improved, update the expected count.",
         superset_ok
     );
 }
