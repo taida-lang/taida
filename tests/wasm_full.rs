@@ -27,12 +27,12 @@ fn wasmtime_bin() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    if let Ok(output) = Command::new("which").arg("wasmtime").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
+    if let Ok(output) = Command::new("which").arg("wasmtime").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
         }
     }
     None
@@ -744,7 +744,7 @@ fn wasm_full_parity_all_examples() {
         .expect("examples/ directory should exist")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "td"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "td"))
         .collect();
     td_files.sort();
 
@@ -937,7 +937,7 @@ fn wasm_full_superset_of_wasm_wasi() {
         .expect("examples/ directory should exist")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "td"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "td"))
         .collect();
     td_files.sort();
 
@@ -959,7 +959,7 @@ fn wasm_full_superset_of_wasm_wasi() {
             .arg("-o")
             .arg(&wasi_path)
             .output()
-            .map_or(false, |o| o.status.success());
+            .is_ok_and(|o| o.status.success());
         let _ = std::fs::remove_file(&wasi_path);
 
         if !wasi_ok {
@@ -972,7 +972,7 @@ fn wasm_full_superset_of_wasm_wasi() {
             .arg("-o")
             .arg(&full_path)
             .output()
-            .map_or(false, |o| o.status.success());
+            .is_ok_and(|o| o.status.success());
         let _ = std::fs::remove_file(&full_path);
 
         if !full_ok {

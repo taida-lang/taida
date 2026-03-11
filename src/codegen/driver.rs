@@ -221,12 +221,12 @@ fn link_objects_inner(
 /// wasm-ld の実行パスを検出する
 fn find_wasm_ld() -> Result<PathBuf, CompileError> {
     // 1. PATH 上の wasm-ld
-    if let Ok(output) = Command::new("which").arg("wasm-ld").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(PathBuf::from(path));
-            }
+    if let Ok(output) = Command::new("which").arg("wasm-ld").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
         }
     }
 
@@ -256,22 +256,22 @@ fn find_clang_for_wasm() -> Result<String, CompileError> {
     // バージョン付きの clang を優先的に検索
     for ver in &["17", "18", "19", "20"] {
         let name = format!("clang-{}", ver);
-        if let Ok(output) = Command::new("which").arg(&name).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-    // フォールバック: PATH 上の clang
-    if let Ok(output) = Command::new("which").arg("clang").output() {
-        if output.status.success() {
+        if let Ok(output) = Command::new("which").arg(&name).output()
+            && output.status.success()
+        {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return Ok(path);
             }
+        }
+    }
+    // フォールバック: PATH 上の clang
+    if let Ok(output) = Command::new("which").arg("clang").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(path);
         }
     }
 

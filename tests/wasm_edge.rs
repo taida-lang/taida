@@ -30,12 +30,12 @@ fn wasmtime_bin() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    if let Ok(output) = Command::new("which").arg("wasmtime").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
+    if let Ok(output) = Command::new("which").arg("wasmtime").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
         }
     }
     None
@@ -426,24 +426,24 @@ fn wasm_edge_glue_syntax_valid() {
 
     // Node.js syntax check: write to .mjs temp file and run `node --check`
     // This catches real JS errors (e.g., const re-assignment) that brace-counting misses.
-    if let Ok(node_output) = Command::new("node").arg("--version").output() {
-        if node_output.status.success() {
-            let mjs_path = std::env::temp_dir().join("taida_wasm_edge_glue_syntax_check.mjs");
-            std::fs::write(&mjs_path, &glue).expect("should write temp .mjs");
+    if let Ok(node_output) = Command::new("node").arg("--version").output()
+        && node_output.status.success()
+    {
+        let mjs_path = std::env::temp_dir().join("taida_wasm_edge_glue_syntax_check.mjs");
+        std::fs::write(&mjs_path, &glue).expect("should write temp .mjs");
 
-            let check = Command::new("node")
-                .arg("--check")
-                .arg(&mjs_path)
-                .output()
-                .expect("node --check should run");
-            let _ = std::fs::remove_file(&mjs_path);
+        let check = Command::new("node")
+            .arg("--check")
+            .arg(&mjs_path)
+            .output()
+            .expect("node --check should run");
+        let _ = std::fs::remove_file(&mjs_path);
 
-            assert!(
-                check.status.success(),
-                "JS glue has syntax errors (node --check failed): {}",
-                String::from_utf8_lossy(&check.stderr)
-            );
-        }
+        assert!(
+            check.status.success(),
+            "JS glue has syntax errors (node --check failed): {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
     }
 }
 

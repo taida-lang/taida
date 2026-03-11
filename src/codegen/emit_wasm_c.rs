@@ -53,7 +53,7 @@ pub fn validate_wasm_min_capabilities(ir_module: &IrModule) -> Result<(), WasmCE
     let mut unsupported = Vec::new();
 
     for func in &ir_module.functions {
-        collect_unsupported_insts(&func.body, &func.name, &mut unsupported);
+        collect_unsupported_insts(&func.body, &mut unsupported);
     }
 
     if unsupported.is_empty() {
@@ -73,7 +73,7 @@ pub fn validate_wasm_min_capabilities(ir_module: &IrModule) -> Result<(), WasmCE
     }
 }
 
-fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<String>) {
+fn collect_unsupported_insts(insts: &[IrInst], _out: &mut Vec<String>) {
     for inst in insts {
         match inst {
             // W-3: Float literals are now supported (f64 bits stored in int64_t via bitcast)
@@ -89,7 +89,7 @@ fn collect_unsupported_insts(insts: &[IrInst], _func_name: &str, out: &mut Vec<S
             IrInst::CallIndirect(_, _, _) => {}
             IrInst::CondBranch(_, arms) => {
                 for arm in arms {
-                    collect_unsupported_insts(&arm.body, _func_name, out);
+                    collect_unsupported_insts(&arm.body, _out);
                 }
             }
             // All other supported instructions (ConstFloat and Pack* are handled above)
@@ -661,10 +661,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             if profile == WasmProfile::Min =>
         {
             return Err(WasmCEmitError {
-                message: format!(
-                    "wasm-min does not support OS operations. \
-                     Use wasm-wasi or native backend.",
-                ),
+                message: "wasm-min does not support OS operations. \
+                          Use wasm-wasi or native backend."
+                    .to_string(),
             });
         }
         // WF-2: wasm-full extended runtime functions (Tier 1)
@@ -1051,7 +1050,7 @@ fn emit_function(
     if !func
         .body
         .last()
-        .map_or(false, |i| matches!(i, IrInst::Return(_)))
+        .is_some_and(|i| matches!(i, IrInst::Return(_)))
     {
         writeln!(c, "    return 0;").unwrap();
     }

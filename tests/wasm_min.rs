@@ -31,12 +31,12 @@ fn wasmtime_bin() -> Option<PathBuf> {
         }
     }
     // Check PATH
-    if let Ok(output) = Command::new("which").arg("wasmtime").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
+    if let Ok(output) = Command::new("which").arg("wasmtime").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
         }
     }
     None
@@ -269,34 +269,6 @@ fn wasm_min_size_gate_wado_comparison() {
     // Sanity: both should be non-zero and compile correctly
     assert!(hello_size > 0, "hello.wasm should not be empty");
     assert!(pi_size > 0, "pi.wasm should not be empty");
-}
-
-// ---------------------------------------------------------------------------
-// F-1: Negative tests -- unsupported features should produce compile errors
-// ---------------------------------------------------------------------------
-
-/// Helper: attempt to compile a .td file with wasm-min and expect failure.
-/// Returns stderr output if compilation failed as expected, panics if it succeeded.
-fn expect_wasm_min_compile_failure(td_path: &Path) -> String {
-    let compile_output = Command::new(taida_bin())
-        .arg("build")
-        .arg("--target")
-        .arg("wasm-min")
-        .arg(td_path)
-        .arg("-o")
-        .arg(std::env::temp_dir().join("taida_wasm_neg_test.wasm"))
-        .output()
-        .expect("failed to run taida");
-
-    assert!(
-        !compile_output.status.success(),
-        "Expected wasm-min compile failure for {}, but it succeeded",
-        td_path.display()
-    );
-
-    let _ = std::fs::remove_file(std::env::temp_dir().join("taida_wasm_neg_test.wasm"));
-
-    String::from_utf8_lossy(&compile_output.stderr).to_string()
 }
 
 // W-4: BuchiPack is now supported in wasm-min.
@@ -950,7 +922,7 @@ fn wasm_min_parity_all_examples() {
         .expect("examples/ directory should exist")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "td"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "td"))
         .collect();
     td_files.sort();
 
