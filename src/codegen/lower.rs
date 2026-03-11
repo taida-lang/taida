@@ -2661,6 +2661,11 @@ impl Lowering {
                     "taida_debug_str".to_string()
                 } else if self.bool_vars.contains(name) {
                     "taida_debug_bool".to_string()
+                } else if self.pack_vars.contains(name)
+                    || self.list_vars.contains(name)
+                    || self.closure_vars.contains(name)
+                {
+                    "taida_debug_polymorphic".to_string()
                 } else {
                     "taida_debug_int".to_string()
                 }
@@ -2674,8 +2679,50 @@ impl Lowering {
                     "taida_debug_int".to_string()
                 }
             }
-            // デフォルトは Int（関数呼び出し結果等）
-            _ => "taida_debug_int".to_string(),
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    if self.string_returning_funcs.contains(name.as_str()) {
+                        return "taida_debug_str".to_string();
+                    }
+                    if self.float_returning_funcs.contains(name.as_str()) {
+                        return "taida_debug_float".to_string();
+                    }
+                    if self.bool_returning_funcs.contains(name.as_str()) {
+                        return "taida_debug_bool".to_string();
+                    }
+                }
+                "taida_debug_int".to_string()
+            }
+            Expr::FieldAccess(receiver, _, _) => {
+                // Field access on a pack: use polymorphic to_string + debug_str
+                // because field types are not always tracked
+                if self.expr_is_string_full(expr) {
+                    "taida_debug_str".to_string()
+                } else if self.expr_returns_float(expr) {
+                    "taida_debug_float".to_string()
+                } else if self.expr_is_bool(expr) {
+                    "taida_debug_bool".to_string()
+                } else if self.expr_is_pack(receiver) || self.expr_is_list(receiver) {
+                    // Pack field or list: could be any type, use polymorphic
+                    "taida_debug_polymorphic".to_string()
+                } else {
+                    "taida_debug_int".to_string()
+                }
+            }
+            // Catch-all: use type detection helpers before defaulting to int
+            _ => {
+                if self.expr_is_string_full(expr) {
+                    "taida_debug_str".to_string()
+                } else if self.expr_returns_float(expr) {
+                    "taida_debug_float".to_string()
+                } else if self.expr_is_bool(expr) {
+                    "taida_debug_bool".to_string()
+                } else if self.expr_is_pack(expr) || self.expr_is_list(expr) {
+                    "taida_debug_polymorphic".to_string()
+                } else {
+                    "taida_debug_int".to_string()
+                }
+            }
         }
     }
 
@@ -4112,11 +4159,14 @@ impl Lowering {
                     ));
                     v
                 } else {
-                    // Default: Int or unknown — use taida_str_from_int
+                    // Default: polymorphic to_string (handles int, string pointers,
+                    // monadic types, etc.). This is safer than taida_str_from_int
+                    // because function parameters and condition branch results may
+                    // be string pointers that are not tracked in string_vars.
                     let v = func.alloc_var();
                     func.push(IrInst::Call(
                         v,
-                        "taida_str_from_int".to_string(),
+                        "taida_polymorphic_to_string".to_string(),
                         vec![name_var],
                     ));
                     v
@@ -4215,7 +4265,35 @@ impl Lowering {
             Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
                 self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs)
             }
+            // WF-2b: MoldInst string molds (CharAt, Upper, Lower, etc.) return strings
+            Expr::MoldInst(name, _, _, _) => matches!(
+                name.as_str(),
+                "Str"
+                    | "Upper"
+                    | "Lower"
+                    | "Trim"
+                    | "Replace"
+                    | "Slice"
+                    | "CharAt"
+                    | "Repeat"
+                    | "Reverse"
+                    | "Pad"
+                    | "Join"
+                    | "ToFixed"
+            ),
             Expr::BinaryOp(_, BinOp::Concat, _, _) => true,
+            Expr::CondBranch(arms, _) => {
+                // If ANY arm body's last expression is a string, the whole branch is string
+                arms.iter().any(|arm| {
+                    arm.body
+                        .last()
+                        .map(|stmt| match stmt {
+                            Statement::Expr(e) => self.expr_is_string_full(e),
+                            _ => false,
+                        })
+                        .unwrap_or(false)
+                })
+            }
             _ => false,
         }
     }
@@ -4272,6 +4350,8 @@ impl Lowering {
                     false
                 }
             }
+            // WFX-3: Exists[path]() returns Bool
+            Expr::MoldInst(name, _, _, _) if name == "Exists" => true,
             Expr::FieldAccess(obj, field, _) => {
                 // QF-34: hasValue フィールドは Lax/Result の Bool フィールド
                 if field == "hasValue" {

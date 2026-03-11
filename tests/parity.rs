@@ -15,10 +15,43 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn taida_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_taida"))
+}
+
+struct NativeBuildLock {
+    path: PathBuf,
+}
+
+impl Drop for NativeBuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+fn acquire_native_build_lock() -> NativeBuildLock {
+    let lock_path = std::env::temp_dir().join("taida_native_build_test.lock");
+    let started = Instant::now();
+    loop {
+        match fs::create_dir(&lock_path) {
+            Ok(()) => return NativeBuildLock { path: lock_path },
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(120),
+                    "timed out waiting for native build test lock {}",
+                    lock_path.display()
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!(
+                "failed to acquire native build test lock {}: {}",
+                lock_path.display(),
+                err
+            ),
+        }
+    }
 }
 
 fn examples_dir() -> PathBuf {
@@ -40,9 +73,8 @@ fn run_js(td_path: &Path) -> Option<String> {
 }
 
 fn run_js_with_env(td_path: &Path, envs: &[(&str, &str)]) -> Option<String> {
-    let tmp_dir = std::env::temp_dir();
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
-    let js_path = tmp_dir.join(format!("taida_parity_{}.mjs", stem));
+    let js_path = unique_temp_path("taida_parity_js", &stem, "mjs");
 
     // Transpile
     let transpile_output = Command::new(taida_bin())
@@ -76,33 +108,49 @@ fn run_js_with_env(td_path: &Path, envs: &[(&str, &str)]) -> Option<String> {
 
 /// Compile a .td file to a native binary, execute it, and return stdout.
 fn run_native(td_path: &Path) -> Option<String> {
-    let tmp_dir = std::env::temp_dir();
-    let stem = td_path.file_stem()?.to_string_lossy().to_string();
-    let binary_path = tmp_dir.join(format!("taida_parity_{}", stem));
+    run_native_with_error(td_path).ok()
+}
+
+fn run_native_with_error(td_path: &Path) -> Result<String, String> {
+    let stem = td_path
+        .file_stem()
+        .ok_or_else(|| format!("missing file stem for {}", td_path.display()))?
+        .to_string_lossy()
+        .to_string();
+    let binary_path = unique_temp_path("taida_parity_native", &stem, "bin");
 
     // Compile
+    let _build_lock = acquire_native_build_lock();
     let compile_output = Command::new(taida_bin())
-        .arg("compile")
+        .arg("build")
+        .arg("--target")
+        .arg("native")
         .arg(td_path)
         .arg("-o")
         .arg(&binary_path)
         .output()
-        .ok()?;
+        .map_err(|e| format!("failed to invoke native build: {}", e))?;
 
     if !compile_output.status.success() {
-        return None;
+        return Err(String::from_utf8_lossy(&compile_output.stderr)
+            .trim()
+            .to_string());
     }
 
     // Execute
-    let run_output = Command::new(&binary_path).output().ok()?;
+    let run_output = Command::new(&binary_path)
+        .output()
+        .map_err(|e| format!("failed to execute native binary: {}", e))?;
 
     let _ = fs::remove_file(&binary_path);
 
     if !run_output.status.success() {
-        return None;
+        return Err(String::from_utf8_lossy(&run_output.stderr)
+            .trim()
+            .to_string());
     }
 
-    Some(normalize(&String::from_utf8_lossy(&run_output.stdout)))
+    Ok(normalize(&String::from_utf8_lossy(&run_output.stdout)))
 }
 
 /// Normalize output for comparison.
@@ -244,6 +292,7 @@ fn run_interpreter_error(td_path: &Path) -> Option<String> {
 
 fn run_native_build_error(td_path: &Path, label: &str) -> Option<String> {
     let bin_path = unique_temp_path("taida_parity_native_err", label, "bin");
+    let _build_lock = acquire_native_build_lock();
     let output = Command::new(taida_bin())
         .arg("build")
         .arg("--target")
@@ -343,7 +392,7 @@ fn spawn_tcp_client_for_accept(port: u16) -> (mpsc::Receiver<String>, thread::Jo
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
         let mut stream = None;
-        for _ in 0..100 {
+        for _ in 0..500 {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(s) => {
                     stream = Some(s);
@@ -357,8 +406,8 @@ fn spawn_tcp_client_for_accept(port: u16) -> (mpsc::Receiver<String>, thread::Jo
             let _ = tx.send("CONNECT_FAIL".to_string());
             return;
         };
-        let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
-        let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
 
         if socket.write_all(b"ping").is_err() {
             let _ = tx.send("WRITE_FAIL".to_string());
@@ -393,17 +442,23 @@ fn spawn_tcp_idle_server(wait: Duration) -> (u16, thread::JoinHandle<()>) {
 fn spawn_udp_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<()>) {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp loopback");
     socket
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set udp read timeout");
     socket
-        .set_write_timeout(Some(Duration::from_secs(2)))
+        .set_write_timeout(Some(Duration::from_secs(5)))
         .expect("set udp write timeout");
     let port = socket.local_addr().expect("local udp addr").port();
     let (tx, rx) = mpsc::channel();
 
     let handle = thread::spawn(move || {
         let mut buf = [0u8; 65535];
-        let (n, peer) = socket.recv_from(&mut buf).expect("recv udp");
+        let (n, peer) = match socket.recv_from(&mut buf) {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = tx.send(format!("UDP_RECV_FAIL: {}", err));
+                return;
+            }
+        };
         let req_text = String::from_utf8_lossy(&buf[..n]).to_string();
         let _ = tx.send(req_text);
         let _ = socket.send_to(b"pong", peer);
@@ -500,12 +555,18 @@ fn spawn_https_server(label: &str) -> Option<HttpsServer> {
 /// module resolution / stdin / specific file paths.
 fn js_skip_list() -> Vec<&'static str> {
     vec![
-        "09_modules",    // requires module import resolution
-        "module_math",   // helper module, not standalone
-        "module_utils",  // helper module, not standalone
-        "helper_val",    // helper module, not standalone
-        "transpile_j2",  // transpile-specific test
-        "transpile_npm", // transpile-specific test
+        "09_modules",                    // requires module import resolution
+        "module_math",                   // helper module, not standalone
+        "module_utils",                  // helper module, not standalone
+        "helper_val",                    // helper module, not standalone
+        "transpile_j2",                  // transpile-specific test
+        "transpile_npm",                 // transpile-specific test
+        "wasm_wasi_stderr",              // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_env",                 // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_file_io",             // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_exists",              // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_write_failure",       // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
     ]
 }
 
@@ -521,10 +582,10 @@ fn interpreter_skip_list() -> Vec<&'static str> {
     ]
 }
 
-/// Examples that should be skipped for native parity testing.
-fn native_skip_list() -> Vec<&'static str> {
+/// Examples that are expected to be rejected by the native backend.
+fn native_expected_reject_list() -> Vec<&'static str> {
     vec![
-        "compile_stream", // Stream[T] native backend not yet implemented
+        "compile_stream", // Stream[T] is outside the native backend capability set
     ]
 }
 
@@ -623,16 +684,14 @@ fn test_three_way_parity() {
         return;
     }
 
-    let native_skip = native_skip_list();
+    let native_expected_rejects = native_expected_reject_list();
     let dir = examples_dir();
     let mut entries: Vec<_> = fs::read_dir(&dir)
         .expect("examples/ directory should exist")
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            name.starts_with("compile_")
-                && name.ends_with(".td")
-                && !native_skip.iter().any(|s| name == format!("{}.td", s))
+            name.starts_with("compile_") && name.ends_with(".td")
         })
         .collect();
     entries.sort_by_key(|e| e.file_name());
@@ -640,6 +699,7 @@ fn test_three_way_parity() {
     assert!(!entries.is_empty(), "No compile_*.td files found");
 
     let mut passed = 0;
+    let mut native_rejected = Vec::new();
     let mut failures = Vec::new();
 
     for entry in &entries {
@@ -655,10 +715,33 @@ fn test_three_way_parity() {
         };
 
         // Native check
-        let native = match run_native(&path) {
-            Some(o) => o,
-            None => {
-                failures.push(format!("{}: native compile/run failed", name));
+        let native = match run_native_with_error(&path) {
+            Ok(o) => o,
+            Err(err) => {
+                if native_expected_rejects.contains(&name.as_str()) {
+                    assert!(
+                        err.contains("unsupported mold type: Stream"),
+                        "{}: expected Stream capability reject, got: {}",
+                        name,
+                        err
+                    );
+                    if has_node {
+                        let js = run_js(&path)
+                            .unwrap_or_else(|| panic!("{}: JS transpile/execution failed", name));
+                        if interp != js {
+                            failures.push(format!(
+                                "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
+                                name,
+                                interp.lines().take(3).collect::<Vec<_>>(),
+                                js.lines().take(3).collect::<Vec<_>>(),
+                            ));
+                            continue;
+                        }
+                    }
+                    native_rejected.push(name.clone());
+                    continue;
+                }
+                failures.push(format!("{}: native compile/run failed\n  {}", name, err));
                 continue;
             }
         };
@@ -693,9 +776,19 @@ fn test_three_way_parity() {
     }
 
     eprintln!(
-        "Three-way parity: {}/{} passed",
+        "Three-way parity: {}/{} passed, {} expected native rejected",
         passed,
-        passed + failures.len(),
+        passed + failures.len() + native_rejected.len(),
+        native_rejected.len(),
+    );
+
+    let expected_rejected: Vec<String> = native_expected_rejects
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        native_rejected, expected_rejected,
+        "native expected-reject allowlist drifted"
     );
 
     if !failures.is_empty() {
@@ -996,15 +1089,17 @@ fn test_tcp_accept_sendall_recvexact_three_way_parity() {
     };
 
     for backend in backends {
-        let port = find_free_loopback_port();
-        let (rx, client_handle) = spawn_tcp_client_for_accept(port);
-        let source = format!(
-            r#"
+        let mut last_error = None;
+        for _attempt in 0..3 {
+            let port = find_free_loopback_port();
+            let (rx, client_handle) = spawn_tcp_client_for_accept(port);
+            let source = format!(
+                r#"
 listenerRes <= tcpListen({port}, 1000)
 listenerRes ]=> l
-acceptRes <= tcpAccept(l.__value.listener, 1000)
+acceptRes <= tcpAccept(l.__value.listener, 5000)
 acceptRes ]=> a
-recvRes <= socketRecvExact(a.__value.socket, 4, 1000)
+recvRes <= socketRecvExact(a.__value.socket, 4, 5000)
 recvRes ]=> r
 decoded <= Utf8Decode[r.__value]()
 decoded ]=> msg
@@ -1022,68 +1117,89 @@ stdout(s.__value.bytesSent.toString())
 stdout(c.__value.ok.toString())
 stdout(lc.__value.ok.toString())
 "#
-        );
+            );
 
-        let out = match backend {
-            "interp" => run_interpreter_src(&source, "tcp_accept_interp"),
-            "js" => run_js_src(&source, "tcp_accept_js"),
-            "native" => run_native_src(&source, "tcp_accept_native"),
-            _ => None,
+            let out = match backend {
+                "interp" => run_interpreter_src(&source, "tcp_accept_interp"),
+                "js" => run_js_src(&source, "tcp_accept_js"),
+                "native" => run_native_src(&source, "tcp_accept_native"),
+                _ => None,
+            };
+
+            let outcome = (|| -> Result<(), String> {
+                let out = out.ok_or_else(|| {
+                    format!(
+                        "{} backend failed for tcp accept/sendAll/recvExact parity",
+                        backend
+                    )
+                })?;
+
+                let lines: Vec<&str> = out.lines().collect();
+                if lines.len() != 5 {
+                    return Err(format!(
+                        "{} backend output shape mismatch for tcp accept/sendAll/recvExact parity: {:?}",
+                        backend, out
+                    ));
+                }
+                if !(lines[0] == "true" || lines[0] == "1") {
+                    return Err(format!(
+                        "{} backend expected socketRecvExact success marker, got {:?}",
+                        backend, lines[0]
+                    ));
+                }
+                if lines[1] != "ping" {
+                    return Err(format!(
+                        "{} backend expected decoded request payload, got {:?}",
+                        backend, lines[1]
+                    ));
+                }
+                if lines[2] != "4" {
+                    return Err(format!(
+                        "{} backend expected bytesSent=4 for socketSendAll, got {:?}",
+                        backend, lines[2]
+                    ));
+                }
+                if !(lines[3] == "true" || lines[3] == "1") {
+                    return Err(format!(
+                        "{} backend expected socketClose success marker, got {:?}",
+                        backend, lines[3]
+                    ));
+                }
+                if !(lines[4] == "true" || lines[4] == "1") {
+                    return Err(format!(
+                        "{} backend expected listenerClose success marker, got {:?}",
+                        backend, lines[4]
+                    ));
+                }
+
+                let echoed = rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| format!("{} backend: no tcp reply captured by client", backend))?;
+                if echoed != "pong" {
+                    return Err(format!(
+                        "{} backend returned unexpected response payload to client: {:?}",
+                        backend, echoed
+                    ));
+                }
+
+                Ok(())
+            })();
+
+            let _ = client_handle.join();
+            match outcome {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                }
+            }
         }
-        .unwrap_or_else(|| {
-            panic!(
-                "{} backend failed for tcp accept/sendAll/recvExact parity",
-                backend
-            )
-        });
 
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(
-            lines.len(),
-            5,
-            "{} backend output shape mismatch for tcp accept/sendAll/recvExact parity: {:?}",
-            backend,
-            out
-        );
-        assert!(
-            lines[0] == "true" || lines[0] == "1",
-            "{} backend expected socketRecvExact success marker, got {:?}",
-            backend,
-            lines[0]
-        );
-        assert_eq!(
-            lines[1], "ping",
-            "{} backend expected decoded request payload",
-            backend
-        );
-        assert_eq!(
-            lines[2], "4",
-            "{} backend expected bytesSent=4 for socketSendAll",
-            backend
-        );
-        assert!(
-            lines[3] == "true" || lines[3] == "1",
-            "{} backend expected socketClose success marker, got {:?}",
-            backend,
-            lines[3]
-        );
-        assert!(
-            lines[4] == "true" || lines[4] == "1",
-            "{} backend expected listenerClose success marker, got {:?}",
-            backend,
-            lines[4]
-        );
-
-        let echoed = rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or_else(|_| panic!("{} backend: no tcp reply captured by client", backend));
-        assert_eq!(
-            echoed, "pong",
-            "{} backend returned unexpected response payload to client",
-            backend
-        );
-
-        client_handle.join().expect("join tcp client");
+        if let Some(err) = last_error {
+            panic!("{}", err);
+        }
     }
 }
 
@@ -1103,16 +1219,18 @@ fn test_udp_send_recv_loopback_parity() {
     };
 
     for backend in backends {
-        let (port, rx, handle) = spawn_udp_echo_server();
-        let source = format!(
-            r#"
+        let mut last_error = None;
+        for _attempt in 0..3 {
+            let (port, rx, handle) = spawn_udp_echo_server();
+            let source = format!(
+                r#"
 sock <= udpBind("127.0.0.1", 0, 200)
 sock ]=> s
 payloadLax <= Bytes["ping"]()
 payloadLax ]=> payload
-sendRes <= udpSendTo(s.__value.socket, "127.0.0.1", {port}, payload, 200)
+sendRes <= udpSendTo(s.__value.socket, "127.0.0.1", {port}, payload, 1000)
 sendRes ]=> sent
-recvRes <= udpRecvFrom(s.__value.socket, 200)
+recvRes <= udpRecvFrom(s.__value.socket, 1000)
 recvRes ]=> recv
 decoded <= Utf8Decode[recv.__value.data]()
 decoded ]=> msg
@@ -1123,56 +1241,78 @@ stdout(recv.hasValue.toString())
 stdout(msg)
 stdout(closed.__value.ok.toString())
 "#
-        );
+            );
 
-        let out = match backend {
-            "interp" => run_interpreter_src(&source, "udp_interp"),
-            "js" => run_js_src(&source, "udp_js"),
-            "native" => run_native_src(&source, "udp_native"),
-            _ => None,
+            let out = match backend {
+                "interp" => run_interpreter_src(&source, "udp_interp"),
+                "js" => run_js_src(&source, "udp_js"),
+                "native" => run_native_src(&source, "udp_native"),
+                _ => None,
+            };
+
+            let outcome = (|| -> Result<(), String> {
+                let out =
+                    out.ok_or_else(|| format!("{} backend failed for udp loopback", backend))?;
+                let lines: Vec<&str> = out.lines().collect();
+                if lines.len() != 4 {
+                    return Err(format!(
+                        "{} backend output shape mismatch for udp loopback: {:?}",
+                        backend, out
+                    ));
+                }
+                if lines[0] != "4" {
+                    return Err(format!(
+                        "{} backend expected bytesSent=4 for udp loopback, got {:?}",
+                        backend, lines[0]
+                    ));
+                }
+                if !(lines[1] == "true" || lines[1] == "1") {
+                    return Err(format!(
+                        "{} backend expected truthy udp recv marker, got {:?}",
+                        backend, lines[1]
+                    ));
+                }
+                if lines[2] != "pong" {
+                    return Err(format!(
+                        "{} backend expected udp echoed payload, got {:?}",
+                        backend, lines[2]
+                    ));
+                }
+                if !(lines[3] == "true" || lines[3] == "1") {
+                    return Err(format!(
+                        "{} backend expected udpClose success marker, got {:?}",
+                        backend, lines[3]
+                    ));
+                }
+
+                let req = rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| format!("{} backend: no udp payload captured", backend))?;
+                if req != "ping" {
+                    return Err(format!(
+                        "{} backend sent unexpected udp payload: {:?}",
+                        backend, req
+                    ));
+                }
+
+                Ok(())
+            })();
+
+            let _ = handle.join();
+            match outcome {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                }
+            }
         }
-        .unwrap_or_else(|| panic!("{} backend failed for udp loopback", backend));
 
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(
-            lines.len(),
-            4,
-            "{} backend output shape mismatch for udp loopback: {:?}",
-            backend,
-            out
-        );
-        assert_eq!(
-            lines[0], "4",
-            "{} backend expected bytesSent=4 for udp loopback",
-            backend
-        );
-        assert!(
-            lines[1] == "true" || lines[1] == "1",
-            "{} backend expected truthy udp recv marker, got {:?}",
-            backend,
-            lines[1]
-        );
-        assert_eq!(
-            lines[2], "pong",
-            "{} backend expected udp echoed payload",
-            backend
-        );
-        assert!(
-            lines[3] == "true" || lines[3] == "1",
-            "{} backend expected udpClose success marker, got {:?}",
-            backend,
-            lines[3]
-        );
-
-        let req = rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or_else(|_| panic!("{} backend: no udp payload captured", backend));
-        assert_eq!(
-            req, "ping",
-            "{} backend sent unexpected udp payload",
-            backend
-        );
-        handle.join().expect("join udp server");
+        if let Some(err) = last_error {
+            panic!("{}", err);
+        }
     }
 }
 

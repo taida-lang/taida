@@ -36,3 +36,9 @@ examples/compile_types
 examples/compile_vars
 examples/.taida/
 examples/**/.taida/
+
+# Stray toolchain artifacts
+test/.rustup/
+
+# Local development notes (untracked)
+.dev/

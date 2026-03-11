@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use taida::auth;
 use taida::codegen;
@@ -39,7 +40,7 @@ Usage:
   taida <COMMAND> [OPTIONS]
 
 Commands:
-  build       Build JS or Native output
+  build       Build JS, Native, or WASM output
   compile     Deprecated alias for `build --target native`
   transpile   Deprecated alias for `build --target js`
   todo        Scan TODO/Stub molds
@@ -424,6 +425,10 @@ fn run_check_cmd(args: &[String]) {
 enum BuildTarget {
     Js,
     Native,
+    WasmMin,
+    WasmWasi,
+    WasmEdge,
+    WasmFull,
 }
 
 impl BuildTarget {
@@ -431,6 +436,10 @@ impl BuildTarget {
         match raw {
             "js" => Some(Self::Js),
             "native" => Some(Self::Native),
+            "wasm-min" => Some(Self::WasmMin),
+            "wasm-wasi" => Some(Self::WasmWasi),
+            "wasm-edge" => Some(Self::WasmEdge),
+            "wasm-full" => Some(Self::WasmFull),
             _ => None,
         }
     }
@@ -439,6 +448,10 @@ impl BuildTarget {
         match self {
             Self::Js => "js",
             Self::Native => "native",
+            Self::WasmMin => "wasm-min",
+            Self::WasmWasi => "wasm-wasi",
+            Self::WasmEdge => "wasm-edge",
+            Self::WasmFull => "wasm-full",
         }
     }
 }
@@ -598,10 +611,14 @@ fn run_transpile(args: &[String], no_check: bool) {
 
 fn print_build_usage_and_exit() -> ! {
     eprintln!(
-        "Usage: taida build [--target js|native] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>"
+        "Usage: taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>"
     );
     eprintln!("  js target: <PATH> accepts file/dir, -o is output file(or outdir for dir)");
     eprintln!("  native target: <PATH> accepts file/dir, --entry is dir-only (default: main.td)");
+    eprintln!("  wasm-min target: <PATH> accepts single file, -o is output .wasm path");
+    eprintln!("  wasm-wasi target: <PATH> accepts single file, -o is output .wasm path");
+    eprintln!("  wasm-edge target: <PATH> accepts single file, -o is output .wasm path");
+    eprintln!("  wasm-full target: <PATH> accepts single file, -o is output .wasm path");
     std::process::exit(1);
 }
 
@@ -624,7 +641,10 @@ fn run_build(args: &[String], no_check: bool) {
                 target = match BuildTarget::parse(args[i].as_str()) {
                     Some(v) => v,
                     None => {
-                        eprintln!("Unknown build target '{}'. Expected: js | native", args[i]);
+                        eprintln!(
+                            "Unknown build target '{}'. Expected: js | native | wasm-min | wasm-wasi | wasm-edge | wasm-full",
+                            args[i]
+                        );
                         std::process::exit(1);
                     }
                 };
@@ -721,6 +741,46 @@ fn run_build(args: &[String], no_check: bool) {
                 &mut compile_stats,
             );
         }
+        BuildTarget::WasmMin => {
+            run_build_wasm_min(
+                input_path,
+                output_path.as_deref(),
+                release_mode,
+                no_check,
+                diag_format,
+                &mut compile_stats,
+            );
+        }
+        BuildTarget::WasmWasi => {
+            run_build_wasm_wasi(
+                input_path,
+                output_path.as_deref(),
+                release_mode,
+                no_check,
+                diag_format,
+                &mut compile_stats,
+            );
+        }
+        BuildTarget::WasmEdge => {
+            run_build_wasm_edge(
+                input_path,
+                output_path.as_deref(),
+                release_mode,
+                no_check,
+                diag_format,
+                &mut compile_stats,
+            );
+        }
+        BuildTarget::WasmFull => {
+            run_build_wasm_full(
+                input_path,
+                output_path.as_deref(),
+                release_mode,
+                no_check,
+                diag_format,
+                &mut compile_stats,
+            );
+        }
     }
 
     if diag_format == DiagFormat::Jsonl {
@@ -757,6 +817,34 @@ fn run_build_js(
     }
 }
 
+fn js_stage_roots() -> &'static Mutex<Vec<PathBuf>> {
+    static JS_STAGE_ROOTS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+    JS_STAGE_ROOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register_js_stage_root(stage_root: &Path) {
+    let mut roots = js_stage_roots()
+        .lock()
+        .expect("js stage root registry mutex poisoned");
+    roots.push(stage_root.to_path_buf());
+}
+
+fn unregister_js_stage_root(stage_root: &Path) {
+    let mut roots = js_stage_roots()
+        .lock()
+        .expect("js stage root registry mutex poisoned");
+    roots.retain(|root| root != stage_root);
+}
+
+fn cleanup_registered_js_stage_roots() {
+    let mut roots = js_stage_roots()
+        .lock()
+        .expect("js stage root registry mutex poisoned");
+    for root in roots.drain(..) {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 fn emit_build_failure_and_exit(
     compile_stats: &mut CompileDiagStats,
     diag_format: DiagFormat,
@@ -764,6 +852,7 @@ fn emit_build_failure_and_exit(
     file: Option<&Path>,
     message: &str,
 ) -> ! {
+    cleanup_registered_js_stage_roots();
     if diag_format == DiagFormat::Jsonl {
         let file_label = file.map(|p| p.to_string_lossy().to_string());
         emit_compile_diag_jsonl(
@@ -794,6 +883,7 @@ fn transpile_js_source_to_output(
     source_label: &str,
     source_path: Option<&Path>,
     js_out: &Path,
+    import_base_out: Option<&Path>,
     no_check: bool,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
@@ -819,6 +909,7 @@ fn transpile_js_source_to_output(
                 eprintln!("{}: {}", source_label, err);
             }
         }
+        cleanup_registered_js_stage_roots();
         std::process::exit(1);
     }
 
@@ -828,7 +919,8 @@ fn transpile_js_source_to_output(
 
     let js_code = {
         let result = if let (Some(td_file), Some(root)) = (source_path, project_root) {
-            js::codegen::transpile_with_context(&program, td_file, root)
+            let import_out = import_base_out.unwrap_or(js_out);
+            js::codegen::transpile_with_context(&program, td_file, root, import_out)
         } else {
             let mut codegen = js::codegen::JsCodegen::new();
             codegen.generate(&program)
@@ -853,6 +945,7 @@ fn transpile_js_source_to_output(
                 } else {
                     eprintln!("Error transpiling '{}': {}", source_label, e);
                 }
+                cleanup_registered_js_stage_roots();
                 std::process::exit(1);
             }
         }
@@ -884,6 +977,7 @@ fn transpile_js_source_to_output(
 fn transpile_js_module_to_output(
     td_file: &Path,
     js_out: &Path,
+    import_base_out: Option<&Path>,
     no_check: bool,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
@@ -906,6 +1000,7 @@ fn transpile_js_module_to_output(
         &td_file.to_string_lossy(),
         Some(td_file),
         js_out,
+        import_base_out,
         no_check,
         diag_format,
         compile_stats,
@@ -990,6 +1085,7 @@ fn run_build_js_file(
             &input_path.to_string_lossy(),
             None,
             &main_out,
+            None,
             no_check,
             diag_format,
             compile_stats,
@@ -1026,6 +1122,7 @@ fn run_build_js_file(
         }
     }
 
+    let pkg_root = find_packages_tdm_from(&entry_path);
     let (main_out, out_root) = match output_path {
         Some(path) => {
             let explicit = PathBuf::from(path);
@@ -1045,7 +1142,8 @@ fn run_build_js_file(
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("output");
-            let build_dir = find_packages_tdm()
+            let build_dir = pkg_root
+                .clone()
                 .unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")).to_path_buf())
                 .join(".taida")
                 .join("build")
@@ -1055,10 +1153,12 @@ fn run_build_js_file(
     };
 
     let entry_root = entry_path.parent().unwrap_or(Path::new("."));
-    let pkg_root = find_packages_tdm();
+    let stage_root = unique_stage_root("file");
+    register_js_stage_root(&stage_root);
+    let mut staged_outputs = Vec::new();
     let mut count = 0usize;
     for td_file in &local_modules {
-        let js_out = if *td_file == entry_path {
+        let final_js_out = if *td_file == entry_path {
             main_out.clone()
         } else {
             let rel = td_file
@@ -1082,22 +1182,35 @@ fn run_build_js_file(
                 });
             out_root.join(rel.with_extension("mjs"))
         };
+        let stage_js_out = stage_output_path(&stage_root, &out_root, &final_js_out);
         transpile_js_module_to_output(
             td_file,
-            &js_out,
+            &stage_js_out,
+            Some(&final_js_out),
             no_check,
             diag_format,
             compile_stats,
             pkg_root.as_deref(),
         );
+        staged_outputs.push((stage_js_out, final_js_out));
         count += 1;
     }
 
-    // Transpile dependency .td files in .taida/deps/ to .mjs (in-place)
+    // Stage dependency .td files in .taida/deps/ alongside local outputs so
+    // failed builds can roll them back before anything becomes visible.
     if let Some(ref root) = pkg_root {
-        transpile_deps_in_place(root, no_check, diag_format, compile_stats);
+        stage_dep_js_outputs(
+            root,
+            &stage_root.join("deps"),
+            &mut staged_outputs,
+            no_check,
+            diag_format,
+            compile_stats,
+        );
     }
 
+    commit_staged_js_outputs(&staged_outputs, &stage_root);
+    unregister_js_stage_root(&stage_root);
     if diag_format == DiagFormat::Text {
         if count <= 1 {
             println!("Built (js): {}", main_out.display());
@@ -1112,9 +1225,12 @@ fn run_build_js_file(
     }
 }
 
-/// Transpile all .td files in .taida/deps/ to .mjs in-place (for package imports in JS output).
-fn transpile_deps_in_place(
+/// Stage all missing dependency .mjs files under .taida/deps/ so they can be
+/// committed atomically with the main JS outputs.
+fn stage_dep_js_outputs(
     project_root: &Path,
+    deps_stage_root: &Path,
+    staged_outputs: &mut Vec<(PathBuf, PathBuf)>,
     no_check: bool,
     diag_format: DiagFormat,
     compile_stats: &mut CompileDiagStats,
@@ -1125,19 +1241,178 @@ fn transpile_deps_in_place(
     }
     let td_files = collect_td_files(&deps_dir);
     for td_file in &td_files {
-        let mjs_out = td_file.with_extension("mjs");
-        if mjs_out.exists() {
+        let final_mjs_out = td_file.with_extension("mjs");
+        if final_mjs_out.exists() {
             continue; // already transpiled
         }
+        let stage_mjs_out = stage_output_path(deps_stage_root, &deps_dir, &final_mjs_out);
         transpile_js_module_to_output(
             td_file,
-            &mjs_out,
+            &stage_mjs_out,
+            Some(&final_mjs_out),
             no_check,
             diag_format,
             compile_stats,
             Some(project_root),
         );
+        staged_outputs.push((stage_mjs_out, final_mjs_out));
     }
+}
+
+fn unique_stage_root(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        ".taida_js_stage_{}_{}_{}",
+        label,
+        std::process::id(),
+        nanos
+    ))
+}
+
+fn stage_output_path(stage_root: &Path, out_root: &Path, final_out: &Path) -> PathBuf {
+    if let Ok(rel) = final_out.strip_prefix(out_root) {
+        stage_root.join(rel)
+    } else {
+        stage_root.join(
+            final_out
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output.mjs"),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct StagedJsCommit {
+    final_path: PathBuf,
+    temp_path: PathBuf,
+    backup_path: Option<PathBuf>,
+}
+
+fn commit_temp_path(final_path: &Path, commit_id: &str, idx: usize) -> PathBuf {
+    let file_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output.mjs");
+    final_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!(".{}.taida-stage-{}-{}", file_name, commit_id, idx))
+}
+
+fn commit_backup_path(final_path: &Path, commit_id: &str, idx: usize) -> PathBuf {
+    let file_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output.mjs");
+    final_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!(".{}.taida-backup-{}-{}", file_name, commit_id, idx))
+}
+
+fn commit_staged_js_outputs(staged_outputs: &[(PathBuf, PathBuf)], stage_root: &Path) {
+    let commit_id = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    );
+    let mut commits: Vec<StagedJsCommit> = Vec::with_capacity(staged_outputs.len());
+
+    for (idx, (stage_path, final_path)) in staged_outputs.iter().enumerate() {
+        if let Some(parent) = final_path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Error creating output directory '{}': {}",
+                parent.display(),
+                e
+            );
+            cleanup_registered_js_stage_roots();
+            std::process::exit(1);
+        }
+        let temp_path = commit_temp_path(final_path, &commit_id, idx);
+        let _ = fs::remove_file(&temp_path);
+        if let Err(e) = fs::copy(stage_path, &temp_path) {
+            for commit in &commits {
+                let _ = fs::remove_file(&commit.temp_path);
+            }
+            eprintln!(
+                "Error preparing staged JS output '{}' for '{}': {}",
+                stage_path.display(),
+                final_path.display(),
+                e
+            );
+            cleanup_registered_js_stage_roots();
+            std::process::exit(1);
+        }
+        commits.push(StagedJsCommit {
+            final_path: final_path.clone(),
+            temp_path,
+            backup_path: None,
+        });
+    }
+
+    for idx in 0..commits.len() {
+        if commits[idx].final_path.exists() {
+            let final_path = commits[idx].final_path.clone();
+            let backup_path = commit_backup_path(&final_path, &commit_id, idx);
+            let _ = fs::remove_file(&backup_path);
+            if let Err(e) = fs::rename(&final_path, &backup_path) {
+                for prior in &commits {
+                    let _ = fs::remove_file(&prior.temp_path);
+                }
+                for prior in commits.iter().take(idx) {
+                    if let Some(ref prior_backup) = prior.backup_path {
+                        let _ = fs::rename(prior_backup, &prior.final_path);
+                    }
+                }
+                eprintln!(
+                    "Error backing up existing JS output '{}' before staged commit: {}",
+                    final_path.display(),
+                    e,
+                );
+                cleanup_registered_js_stage_roots();
+                std::process::exit(1);
+            }
+            commits[idx].backup_path = Some(backup_path);
+        }
+    }
+
+    for idx in 0..commits.len() {
+        if let Err(e) = fs::rename(&commits[idx].temp_path, &commits[idx].final_path) {
+            for committed in &commits[..idx] {
+                let _ = fs::remove_file(&committed.final_path);
+            }
+            for commit in &commits {
+                let _ = fs::remove_file(&commit.temp_path);
+                if let Some(ref backup_path) = commit.backup_path {
+                    let _ = fs::rename(backup_path, &commit.final_path);
+                }
+            }
+            eprintln!(
+                "Error activating staged JS output '{}' to '{}': {}",
+                commits[idx].temp_path.display(),
+                commits[idx].final_path.display(),
+                e
+            );
+            cleanup_registered_js_stage_roots();
+            std::process::exit(1);
+        }
+    }
+
+    for commit in &commits {
+        if let Some(ref backup_path) = commit.backup_path {
+            let _ = fs::remove_file(backup_path);
+        }
+    }
+    let _ = fs::remove_dir_all(stage_root);
 }
 
 fn run_build_js_dir(
@@ -1176,9 +1451,11 @@ fn run_build_js_dir(
         }
     }
 
+    let pkg_root = find_packages_tdm_from(input_path);
     let out_dir = output_path.map(PathBuf::from).unwrap_or_else(|| {
         // Default: .taida/build/js/ (project-local)
-        find_packages_tdm()
+        pkg_root
+            .clone()
             .unwrap_or_else(|| input_path.parent().unwrap_or(Path::new(".")).to_path_buf())
             .join(".taida")
             .join("build")
@@ -1211,6 +1488,9 @@ fn run_build_js_dir(
         std::process::exit(1);
     }
 
+    let stage_root = unique_stage_root("dir");
+    register_js_stage_root(&stage_root);
+    let mut staged_outputs = Vec::new();
     let mut count = 0usize;
     for td_file in &td_files {
         if let Err(err) = module_graph::detect_local_import_cycle(td_file) {
@@ -1226,18 +1506,34 @@ fn run_build_js_dir(
 
     for td_file in &td_files {
         let rel = td_file.strip_prefix(input_path).unwrap_or(td_file);
-        let js_out = out_dir.join(rel.with_extension("mjs"));
+        let final_js_out = out_dir.join(rel.with_extension("mjs"));
+        let stage_js_out = stage_output_path(&stage_root, &out_dir, &final_js_out);
         transpile_js_module_to_output(
             td_file,
-            &js_out,
+            &stage_js_out,
+            Some(&final_js_out),
             no_check,
             diag_format,
             compile_stats,
-            find_packages_tdm().as_deref(),
+            pkg_root.as_deref(),
         );
+        staged_outputs.push((stage_js_out, final_js_out));
         count += 1;
     }
 
+    if let Some(ref root) = pkg_root {
+        stage_dep_js_outputs(
+            root,
+            &stage_root.join("deps"),
+            &mut staged_outputs,
+            no_check,
+            diag_format,
+            compile_stats,
+        );
+    }
+
+    commit_staged_js_outputs(&staged_outputs, &stage_root);
+    unregister_js_stage_root(&stage_root);
     write_js_package_json(&out_dir, diag_format, compile_stats);
 
     if diag_format == DiagFormat::Text {
@@ -1395,6 +1691,651 @@ fn run_build_native(
     }
 }
 
+fn run_build_wasm_min(
+    input_path: &Path,
+    output_path: Option<&str>,
+    release_mode: bool,
+    no_check: bool,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+) {
+    if input_path.is_dir() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "compile",
+                None,
+                "wasm-min target does not support directory input.",
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("wasm-min target does not support directory input.");
+        }
+        std::process::exit(1);
+    }
+
+    if !input_path.exists() || !input_path.is_file() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "io",
+                None,
+                &format!("Build input not found: {}", input_path.display()),
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("Build input not found: {}", input_path.display());
+        }
+        std::process::exit(1);
+    }
+
+    if !no_check {
+        let source = match fs::read_to_string(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                if diag_format == DiagFormat::Jsonl {
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "io",
+                        None,
+                        &format!("Error reading file '{}': {}", input_path.display(), e),
+                        Some(&input_path.to_string_lossy()),
+                        None,
+                        None,
+                        None,
+                    );
+                } else {
+                    eprintln!("Error reading file '{}': {}", input_path.display(), e);
+                }
+                std::process::exit(1);
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            for err in &parse_errors {
+                if diag_format == DiagFormat::Jsonl {
+                    let (code, suggestion) = split_diag_code_and_hint(&err.message);
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "parse",
+                        code,
+                        &err.message,
+                        Some(&input_path.to_string_lossy()),
+                        Some(err.span.line),
+                        Some(err.span.column),
+                        suggestion,
+                    );
+                } else {
+                    eprintln!("{}", err);
+                }
+            }
+            std::process::exit(1);
+        }
+        run_type_checks_and_warnings(
+            &program,
+            &input_path.to_string_lossy(),
+            diag_format,
+            compile_stats,
+        );
+    }
+
+    // F-2: Release gate -- block TODO/Stub molds in --release builds
+    if release_mode {
+        let sites = scan_release_gate_sites(input_path);
+        if !sites.is_empty() {
+            report_release_gate_violations(sites, diag_format, compile_stats);
+            std::process::exit(1);
+        }
+    }
+
+    // Default output: .taida/build/wasm-min/{stem}.wasm (project-local)
+    let default_wasm_output;
+    let output: Option<&Path> = if let Some(p) = output_path {
+        Some(Path::new(p))
+    } else {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let build_dir = find_packages_tdm()
+            .unwrap_or_else(|| input_path.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .join(".taida")
+            .join("build")
+            .join("wasm-min");
+        if let Err(e) = fs::create_dir_all(&build_dir) {
+            eprintln!(
+                "Error creating build directory '{}': {}",
+                build_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+        default_wasm_output = build_dir.join(format!("{}.wasm", stem));
+        Some(default_wasm_output.as_path())
+    };
+    match codegen::driver::compile_file_wasm(input_path, output) {
+        Ok(wasm_path) => {
+            if diag_format == DiagFormat::Text {
+                println!("Built (wasm-min): {}", wasm_path.display());
+            }
+        }
+        Err(e) => {
+            if diag_format == DiagFormat::Jsonl {
+                let message = e.to_string();
+                let (code, suggestion) = split_diag_code_and_hint(&message);
+                emit_compile_diag_jsonl(
+                    compile_stats,
+                    "ERROR",
+                    "codegen",
+                    code,
+                    &message,
+                    Some(&input_path.to_string_lossy()),
+                    None,
+                    None,
+                    suggestion,
+                );
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_build_wasm_wasi(
+    input_path: &Path,
+    output_path: Option<&str>,
+    release_mode: bool,
+    no_check: bool,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+) {
+    if input_path.is_dir() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "compile",
+                None,
+                "wasm-wasi target does not support directory input.",
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("wasm-wasi target does not support directory input.");
+        }
+        std::process::exit(1);
+    }
+
+    if !input_path.exists() || !input_path.is_file() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "io",
+                None,
+                &format!("Build input not found: {}", input_path.display()),
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("Build input not found: {}", input_path.display());
+        }
+        std::process::exit(1);
+    }
+
+    if !no_check {
+        let source = match fs::read_to_string(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                if diag_format == DiagFormat::Jsonl {
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "io",
+                        None,
+                        &format!("Error reading file '{}': {}", input_path.display(), e),
+                        Some(&input_path.to_string_lossy()),
+                        None,
+                        None,
+                        None,
+                    );
+                } else {
+                    eprintln!("Error reading file '{}': {}", input_path.display(), e);
+                }
+                std::process::exit(1);
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            for err in &parse_errors {
+                if diag_format == DiagFormat::Jsonl {
+                    let (code, suggestion) = split_diag_code_and_hint(&err.message);
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "parse",
+                        code,
+                        &err.message,
+                        Some(&input_path.to_string_lossy()),
+                        Some(err.span.line),
+                        Some(err.span.column),
+                        suggestion,
+                    );
+                } else {
+                    eprintln!("{}", err);
+                }
+            }
+            std::process::exit(1);
+        }
+        run_type_checks_and_warnings(
+            &program,
+            &input_path.to_string_lossy(),
+            diag_format,
+            compile_stats,
+        );
+    }
+
+    // F-2: Release gate -- block TODO/Stub molds in --release builds
+    if release_mode {
+        let sites = scan_release_gate_sites(input_path);
+        if !sites.is_empty() {
+            report_release_gate_violations(sites, diag_format, compile_stats);
+            std::process::exit(1);
+        }
+    }
+
+    // Default output: .taida/build/wasm-wasi/{stem}.wasm (project-local)
+    let default_wasm_output;
+    let output: Option<&Path> = if let Some(p) = output_path {
+        Some(Path::new(p))
+    } else {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let build_dir = find_packages_tdm()
+            .unwrap_or_else(|| input_path.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .join(".taida")
+            .join("build")
+            .join("wasm-wasi");
+        if let Err(e) = fs::create_dir_all(&build_dir) {
+            eprintln!(
+                "Error creating build directory '{}': {}",
+                build_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+        default_wasm_output = build_dir.join(format!("{}.wasm", stem));
+        Some(default_wasm_output.as_path())
+    };
+    match codegen::driver::compile_file_wasm_wasi(input_path, output) {
+        Ok(wasm_path) => {
+            if diag_format == DiagFormat::Text {
+                println!("Built (wasm-wasi): {}", wasm_path.display());
+            }
+        }
+        Err(e) => {
+            if diag_format == DiagFormat::Jsonl {
+                let message = e.to_string();
+                let (code, suggestion) = split_diag_code_and_hint(&message);
+                emit_compile_diag_jsonl(
+                    compile_stats,
+                    "ERROR",
+                    "codegen",
+                    code,
+                    &message,
+                    Some(&input_path.to_string_lossy()),
+                    None,
+                    None,
+                    suggestion,
+                );
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_build_wasm_edge(
+    input_path: &Path,
+    output_path: Option<&str>,
+    release_mode: bool,
+    no_check: bool,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+) {
+    if input_path.is_dir() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "compile",
+                None,
+                "wasm-edge target does not support directory input.",
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("wasm-edge target does not support directory input.");
+        }
+        std::process::exit(1);
+    }
+
+    if !input_path.exists() || !input_path.is_file() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "io",
+                None,
+                &format!("Build input not found: {}", input_path.display()),
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("Build input not found: {}", input_path.display());
+        }
+        std::process::exit(1);
+    }
+
+    if !no_check {
+        let source = match fs::read_to_string(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                if diag_format == DiagFormat::Jsonl {
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "io",
+                        None,
+                        &format!("Error reading file '{}': {}", input_path.display(), e),
+                        Some(&input_path.to_string_lossy()),
+                        None,
+                        None,
+                        None,
+                    );
+                } else {
+                    eprintln!("Error reading file '{}': {}", input_path.display(), e);
+                }
+                std::process::exit(1);
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            for err in &parse_errors {
+                if diag_format == DiagFormat::Jsonl {
+                    let (code, suggestion) = split_diag_code_and_hint(&err.message);
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "parse",
+                        code,
+                        &err.message,
+                        Some(&input_path.to_string_lossy()),
+                        Some(err.span.line),
+                        Some(err.span.column),
+                        suggestion,
+                    );
+                } else {
+                    eprintln!("{}", err);
+                }
+            }
+            std::process::exit(1);
+        }
+        run_type_checks_and_warnings(
+            &program,
+            &input_path.to_string_lossy(),
+            diag_format,
+            compile_stats,
+        );
+    }
+
+    // F-2: Release gate -- block TODO/Stub molds in --release builds
+    if release_mode {
+        let sites = scan_release_gate_sites(input_path);
+        if !sites.is_empty() {
+            report_release_gate_violations(sites, diag_format, compile_stats);
+            std::process::exit(1);
+        }
+    }
+
+    // Default output: .taida/build/wasm-edge/{stem}.wasm (project-local)
+    let default_wasm_output;
+    let output: Option<&Path> = if let Some(p) = output_path {
+        Some(Path::new(p))
+    } else {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let build_dir = find_packages_tdm()
+            .unwrap_or_else(|| input_path.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .join(".taida")
+            .join("build")
+            .join("wasm-edge");
+        if let Err(e) = fs::create_dir_all(&build_dir) {
+            eprintln!(
+                "Error creating build directory '{}': {}",
+                build_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+        default_wasm_output = build_dir.join(format!("{}.wasm", stem));
+        Some(default_wasm_output.as_path())
+    };
+    match codegen::driver::compile_file_wasm_edge(input_path, output) {
+        Ok(result) => {
+            if diag_format == DiagFormat::Text {
+                println!("Built (wasm-edge): {}", result.wasm_path.display());
+                println!("  JS glue: {}", result.glue_path.display());
+            }
+        }
+        Err(e) => {
+            if diag_format == DiagFormat::Jsonl {
+                let message = e.to_string();
+                let (code, suggestion) = split_diag_code_and_hint(&message);
+                emit_compile_diag_jsonl(
+                    compile_stats,
+                    "ERROR",
+                    "codegen",
+                    code,
+                    &message,
+                    Some(&input_path.to_string_lossy()),
+                    None,
+                    None,
+                    suggestion,
+                );
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_build_wasm_full(
+    input_path: &Path,
+    output_path: Option<&str>,
+    release_mode: bool,
+    no_check: bool,
+    diag_format: DiagFormat,
+    compile_stats: &mut CompileDiagStats,
+) {
+    if input_path.is_dir() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "compile",
+                None,
+                "wasm-full target does not support directory input.",
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("wasm-full target does not support directory input.");
+        }
+        std::process::exit(1);
+    }
+
+    if !input_path.exists() || !input_path.is_file() {
+        if diag_format == DiagFormat::Jsonl {
+            emit_compile_diag_jsonl(
+                compile_stats,
+                "ERROR",
+                "io",
+                None,
+                &format!("Build input not found: {}", input_path.display()),
+                Some(&input_path.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+        } else {
+            eprintln!("Build input not found: {}", input_path.display());
+        }
+        std::process::exit(1);
+    }
+
+    if !no_check {
+        let source = match fs::read_to_string(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                if diag_format == DiagFormat::Jsonl {
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "io",
+                        None,
+                        &format!("Error reading file '{}': {}", input_path.display(), e),
+                        Some(&input_path.to_string_lossy()),
+                        None,
+                        None,
+                        None,
+                    );
+                } else {
+                    eprintln!("Error reading file '{}': {}", input_path.display(), e);
+                }
+                std::process::exit(1);
+            }
+        };
+        let (program, parse_errors) = parse(&source);
+        if !parse_errors.is_empty() {
+            for err in &parse_errors {
+                if diag_format == DiagFormat::Jsonl {
+                    let (code, suggestion) = split_diag_code_and_hint(&err.message);
+                    emit_compile_diag_jsonl(
+                        compile_stats,
+                        "ERROR",
+                        "parse",
+                        code,
+                        &err.message,
+                        Some(&input_path.to_string_lossy()),
+                        Some(err.span.line),
+                        Some(err.span.column),
+                        suggestion,
+                    );
+                } else {
+                    eprintln!("{}", err);
+                }
+            }
+            std::process::exit(1);
+        }
+        run_type_checks_and_warnings(
+            &program,
+            &input_path.to_string_lossy(),
+            diag_format,
+            compile_stats,
+        );
+    }
+
+    // F-2: Release gate -- block TODO/Stub molds in --release builds
+    if release_mode {
+        let sites = scan_release_gate_sites(input_path);
+        if !sites.is_empty() {
+            report_release_gate_violations(sites, diag_format, compile_stats);
+            std::process::exit(1);
+        }
+    }
+
+    // Default output: .taida/build/wasm-full/{stem}.wasm (project-local)
+    let default_wasm_output;
+    let output: Option<&Path> = if let Some(p) = output_path {
+        Some(Path::new(p))
+    } else {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let build_dir = find_packages_tdm()
+            .unwrap_or_else(|| input_path.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .join(".taida")
+            .join("build")
+            .join("wasm-full");
+        if let Err(e) = fs::create_dir_all(&build_dir) {
+            eprintln!(
+                "Error creating build directory '{}': {}",
+                build_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+        default_wasm_output = build_dir.join(format!("{}.wasm", stem));
+        Some(default_wasm_output.as_path())
+    };
+    match codegen::driver::compile_file_wasm_full(input_path, output) {
+        Ok(wasm_path) => {
+            if diag_format == DiagFormat::Text {
+                println!("Built (wasm-full): {}", wasm_path.display());
+            }
+        }
+        Err(e) => {
+            if diag_format == DiagFormat::Jsonl {
+                let message = e.to_string();
+                let (code, suggestion) = split_diag_code_and_hint(&message);
+                emit_compile_diag_jsonl(
+                    compile_stats,
+                    "ERROR",
+                    "codegen",
+                    code,
+                    &message,
+                    Some(&input_path.to_string_lossy()),
+                    None,
+                    None,
+                    suggestion,
+                );
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
 fn resolve_native_entry_path(
     input_path: &Path,
     entry_path: Option<&str>,
@@ -1450,6 +2391,7 @@ fn run_type_checks_and_warnings(
                 eprintln!("{}", err);
             }
         }
+        cleanup_registered_js_stage_roots();
         std::process::exit(1);
     }
 
@@ -2850,8 +3792,12 @@ fn run_doc(args: &[String]) {
     }
 }
 
-fn find_packages_tdm() -> Option<PathBuf> {
-    let mut dir = env::current_dir().ok()?;
+fn find_packages_tdm_from(start: &Path) -> Option<PathBuf> {
+    let mut dir = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
     loop {
         if dir.join("packages.tdm").exists() {
             return Some(dir);
@@ -2860,6 +3806,11 @@ fn find_packages_tdm() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+fn find_packages_tdm() -> Option<PathBuf> {
+    let dir = env::current_dir().ok()?;
+    find_packages_tdm_from(&dir)
 }
 
 // ── LSP server ─────────────────────────────────────────
@@ -2965,6 +3916,7 @@ mod tests {
             "/dev/stdin",
             None,
             &out,
+            None,
             false,
             DiagFormat::Text,
             &mut stats,

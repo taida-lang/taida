@@ -24,6 +24,8 @@ pub struct JsCodegen {
     source_file: Option<std::path::PathBuf>,
     /// Project root directory (for finding .taida/deps/)
     project_root: Option<std::path::PathBuf>,
+    /// Output .mjs file path (for resolving package import paths relative to the final output)
+    output_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -62,17 +64,20 @@ impl JsCodegen {
             in_async_context: true, // top-level is async (ESM top-level await)
             source_file: None,
             project_root: None,
+            output_file: None,
         }
     }
 
-    /// Set the source file and project root for package import resolution.
+    /// Set the source file, project root, and output file for package import resolution.
     pub fn set_file_context(
         &mut self,
         source_file: &std::path::Path,
         project_root: &std::path::Path,
+        output_file: &std::path::Path,
     ) {
         self.source_file = Some(source_file.to_path_buf());
         self.project_root = Some(project_root.to_path_buf());
+        self.output_file = Some(output_file.to_path_buf());
     }
 
     /// Program 全体を JS に変換
@@ -1006,20 +1011,12 @@ impl JsCodegen {
         {
             // Package import (e.g. "shijimic/taida-package-test")
             // Resolve via .taida/deps/ and packages.tdm entry point
-            if let Some(js_path) = self.resolve_package_import_path(&import.path) {
-                self.write(&format!(
-                    "import {{ {} }} from '{}';\n",
-                    symbols.join(", "),
-                    js_path
-                ));
-            } else {
-                // Fallback: emit as-is (will fail at runtime but doesn't block compilation)
-                self.write(&format!(
-                    "import {{ {} }} from '{}.mjs';\n",
-                    symbols.join(", "),
-                    import.path
-                ));
-            }
+            let js_path = self.resolve_package_import_path(&import.path)?;
+            self.write(&format!(
+                "import {{ {} }} from '{}';\n",
+                symbols.join(", "),
+                js_path
+            ));
         } else {
             // ローカルモジュール — ESM import (.mjs)
             let js_path = if import.path.ends_with(".td") || import.path.ends_with(".tdjs") {
@@ -1041,12 +1038,28 @@ impl JsCodegen {
     /// Given "shijimic/taida-package-test", finds `.taida/deps/shijimic/taida-package-test/`,
     /// reads packages.tdm for entry point, and returns a relative path from the JS output
     /// to the package's .mjs file (transpiled in-place in .taida/deps/).
-    fn resolve_package_import_path(&self, import_path: &str) -> Option<String> {
-        let project_root = self.project_root.as_ref()?;
-        let source_file = self.source_file.as_ref()?;
+    fn resolve_package_import_path(&self, import_path: &str) -> Result<String, JsError> {
+        let project_root = self.project_root.as_ref().ok_or_else(|| JsError {
+            message: format!(
+                "Could not resolve package import '{}': project root context is unavailable.",
+                import_path
+            ),
+        })?;
+        let _source_file = self.source_file.as_ref().ok_or_else(|| JsError {
+            message: format!(
+                "Could not resolve package import '{}': source file context is unavailable.",
+                import_path
+            ),
+        })?;
 
         // Find the package directory using longest-prefix matching
-        let resolution = crate::pkg::resolver::resolve_package_module(project_root, import_path)?;
+        let resolution = crate::pkg::resolver::resolve_package_module(project_root, import_path)
+            .ok_or_else(|| JsError {
+                message: format!(
+                    "Could not resolve package import '{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
+                    import_path
+                ),
+            })?;
 
         // Determine the target .td file
         let td_path = match &resolution.submodule {
@@ -1065,25 +1078,35 @@ impl JsCodegen {
         // The dep .mjs is in-place next to the .td file in .taida/deps/
         let mjs_path = td_path.with_extension("mjs");
 
-        // JS output is at {project_root}/.taida/build/js/{source_relative}.mjs
-        // Compute source's relative path to project root
-        let source_rel = source_file.strip_prefix(project_root).ok()?;
-        let js_output_dir = project_root
-            .join(".taida")
-            .join("build")
-            .join("js")
-            .join(source_rel)
-            .parent()?
+        let output_file = self.output_file.as_ref().ok_or_else(|| JsError {
+            message: format!(
+                "Could not resolve package import '{}': JS output path is unavailable.",
+                import_path
+            ),
+        })?;
+        let js_output_dir = output_file
+            .parent()
+            .ok_or_else(|| JsError {
+                message: format!(
+                    "Could not resolve package import '{}': could not determine JS output directory.",
+                    import_path
+                ),
+            })?
             .to_path_buf();
 
-        let rel = pathdiff(&js_output_dir, &mjs_path)?;
+        let rel = pathdiff(&js_output_dir, &mjs_path).ok_or_else(|| JsError {
+            message: format!(
+                "Could not resolve package import '{}': failed to compute relative JS import path.",
+                import_path
+            ),
+        })?;
 
         // Ensure it starts with "./" for ESM
         let rel_str = rel.to_string_lossy().to_string();
         if rel_str.starts_with("./") || rel_str.starts_with("../") {
-            Some(rel_str)
+            Ok(rel_str)
         } else {
-            Some(format!("./{}", rel_str))
+            Ok(format!("./{}", rel_str))
         }
     }
 
@@ -2638,9 +2661,10 @@ pub fn transpile_with_context(
     program: &Program,
     source_file: &std::path::Path,
     project_root: &std::path::Path,
+    output_file: &std::path::Path,
 ) -> Result<String, JsError> {
     let mut codegen = JsCodegen::new();
-    codegen.set_file_context(source_file, project_root);
+    codegen.set_file_context(source_file, project_root, output_file);
     codegen.generate(program)
 }
 
@@ -2665,6 +2689,16 @@ mod tests {
     fn js_contains(source: &str, needle: &str) -> bool {
         let js = transpile(source).expect("transpile failed");
         js.contains(needle)
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 
     // ── Optional — ABOLISHED (v0.8.0) ──
@@ -3099,6 +3133,29 @@ waitWithTimeout p =
             "JSNew should still generate new: got {}",
             js
         );
+    }
+
+    #[test]
+    fn test_package_import_resolution_failure_is_codegen_error() {
+        let dir = unique_temp_dir("taida_js_missing_pkg");
+        let main = dir.join("main.td");
+        std::fs::write(&main, ">>> alice/missing => @(run)\nstdout(\"ok\")\n")
+            .expect("write main.td");
+
+        let source = std::fs::read_to_string(&main).expect("read main.td");
+        let (program, parse_errors) = crate::parser::parse(&source);
+        assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+        let err = transpile_with_context(&program, &main, &dir, &dir.join("out.mjs"))
+            .expect_err("unresolved package import should fail codegen");
+        assert!(
+            err.message
+                .contains("Could not resolve package import 'alice/missing'"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── JSSet tests ──

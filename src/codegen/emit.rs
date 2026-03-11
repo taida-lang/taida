@@ -11,438 +11,1536 @@ use target_lexicon::Triple;
 
 use super::ir::*;
 
-fn runtime_func_signature(name: &str) -> (Vec<clif::Type>, Vec<clif::Type>) {
+// ---------------------------------------------------------------------------
+// W-0a: コンパイルターゲットと ABI ヘルパー
+// ---------------------------------------------------------------------------
+
+/// コンパイルターゲット
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompileTarget {
+    /// ホストネイティブ（x86_64/aarch64, SystemV）
+    Native,
+    /// WASM32（wasm32-unknown-unknown, WasmBasicCAbi）
+    Wasm32,
+}
+
+/// ターゲット依存の型ヘルパー
+///
+/// W-0 では `CompileTarget::Native` のみ。全メソッドが I64 を返すため
+/// 出力は一切変わらない。コード上で「内部 boxed value」と「runtime ABI 上の
+/// pointer/fn pointer」の意味が明示される。
+#[derive(Clone, Copy)]
+struct AbiHelper {
+    target: CompileTarget,
+}
+
+impl AbiHelper {
+    fn new(target: CompileTarget) -> Self {
+        Self { target }
+    }
+
+    /// Taida の内部 boxed value 型。
+    /// user function / IrVar / CallUser / CallIndirect の境界では常に I64 を維持する。
+    fn value_ty(&self) -> clif::Type {
+        types::I64
+    }
+
+    /// ランタイム関数 ABI 上のヒープポインタ型
+    fn ptr_ty(&self) -> clif::Type {
+        match self.target {
+            CompileTarget::Native => types::I64,
+            CompileTarget::Wasm32 => types::I32,
+        }
+    }
+
+    /// ランタイム関数 ABI 上の関数ポインタ型
+    fn fn_ptr_ty(&self) -> clif::Type {
+        match self.target {
+            CompileTarget::Native => types::I64,
+            CompileTarget::Wasm32 => types::I32,
+        }
+    }
+
+    fn triple(&self) -> Triple {
+        match self.target {
+            CompileTarget::Native => Triple::host(),
+            CompileTarget::Wasm32 => "wasm32-unknown-unknown".parse().unwrap(),
+        }
+    }
+
+    fn call_conv(&self) -> CallConv {
+        // Cranelift 0.129.1 では WASM 用の専用 CallConv がないため、
+        // triple_default() に委譲する。wasm32 triple でも SystemV が返される
+        // （Cranelift が内部で WASM ABI を適用する）。
+        CallConv::triple_default(&self.triple())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W-0b: ABI 種別テーブル — runtime 関数の引数/戻り値を意味的に分類する
+// ---------------------------------------------------------------------------
+
+/// 引数/戻り値の ABI 種別
+///
+/// W-0 では `CompileTarget::Native` のみが有効であり、`resolve_abi()` は
+/// 全ての AbiKind に対して `I64`（Val/Ptr/FnPtr）または `F64` を返す。
+/// つまり生成コードは変わらないが、将来 Wasm32 ターゲットを追加した際に
+/// Ptr/FnPtr が I32 になる箇所が明示される。
+#[derive(Debug, Clone, Copy)]
+enum AbiKind {
+    /// 整数値 (Int, Bool, Hash, tag, count, index, dummy) → value_ty()
+    Val,
+    /// ヒープポインタ (Str, Pack, List, HashMap, Set, Async, Closure, Lax, Result, ...) → ptr_ty()
+    Ptr,
+    /// 関数ポインタ → fn_ptr_ty()
+    FnPtr,
+    /// Float（常に F64、ターゲット非依存）
+    F64,
+}
+
+/// ランタイム関数の ABI 定義
+struct RuntimeAbi {
+    params: &'static [AbiKind],
+    returns: &'static [AbiKind],
+}
+
+/// ランタイム関数名から ABI 定義を取得する
+///
+/// 全 120+ ランタイム関数を「引数/戻り値がポインタか値か」で分類。
+/// 分類基準:
+/// - Val: 数値・真偽値・ハッシュ・タグ・カウント・インデックス・ダミー戻り値
+/// - Ptr: ヒープ確保オブジェクト（Str, Pack, List, HashMap, Set, Async, Closure,
+///   Lax, Result, Gorillax, Bytes, JSON, Molten 等）
+/// - FnPtr: 関数ポインタ（クロージャ生成・list_map/filter 等のコールバック）
+/// - F64: 浮動小数点数（bitcast 経由で boxed value と変換される場合あり）
+fn runtime_abi(name: &str) -> RuntimeAbi {
+    use AbiKind::*;
     match name {
-        "taida_debug_int" => (vec![types::I64], vec![types::I64]),
-        "taida_debug_float" => (vec![types::F64], vec![types::I64]),
-        "taida_debug_bool" => (vec![types::I64], vec![types::I64]),
-        "taida_debug_str" => (vec![types::I64], vec![types::I64]),
-        "taida_gorilla" => (vec![], vec![]),
-        "taida_int_add" | "taida_int_sub" | "taida_int_mul" => {
-            (vec![types::I64, types::I64], vec![types::I64])
-        }
-        "taida_div_mold" | "taida_mod_mold" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => {
-            (vec![types::I64, types::I64], vec![types::I64])
-        }
-        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru" => {
-            (vec![types::I64, types::I64], vec![types::I64])
-        }
-        "taida_to_radix" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_bit_not" => (vec![types::I64], vec![types::I64]),
-        "taida_int_neg" => (vec![types::I64], vec![types::I64]),
-        "taida_float_neg" => (vec![types::F64], vec![types::F64]),
+        // ── Debug 出力 ──
+        "taida_debug_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_debug_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_debug_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_debug_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_debug_polymorphic" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_debug_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_debug_json" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_gorilla" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
+
+        // ── 整数演算 ──
+        "taida_int_add" | "taida_int_sub" | "taida_int_mul" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_div_mold" | "taida_mod_mold" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_to_radix" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bit_not" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_neg" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_float_neg" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+
+        // ── 比較演算 ──
+        // Note: taida_str_eq/neq は Ptr 比較だが、boxed I64 として渡すため Val として扱う。
+        // taida_poly_eq/neq は動的ディスパッチで型不明なため Val として扱う。
         "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq" | "taida_poly_eq"
-        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => {
-            (vec![types::I64, types::I64], vec![types::I64])
-        }
-        "taida_bool_and" | "taida_bool_or" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_bool_not" => (vec![types::I64], vec![types::I64]),
-        // ぶちパック操作
-        "taida_pack_new" => (vec![types::I64], vec![types::I64]), // (field_count) -> ptr
-        "taida_pack_set" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (ptr, index, value)
-        "taida_pack_get" => (vec![types::I64, types::I64], vec![types::I64]), // (ptr, field_hash) -> value
-        "taida_pack_get_idx" => (vec![types::I64, types::I64], vec![types::I64]), // (ptr, index) -> value
-        "taida_pack_set_hash" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (ptr, index, hash)
-        "taida_pack_set_tag" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (ptr, index, tag)
-        // BuchiPack field call (field get + invoke)
-        "taida_pack_call_field0" => (vec![types::I64, types::I64], vec![types::I64]), // (pack, hash) -> result
-        "taida_pack_call_field1" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (pack, hash, arg0)
-        "taida_pack_call_field2" => (
-            vec![types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ), // (pack, hash, arg0, arg1)
-        "taida_pack_call_field3" => (
-            vec![types::I64, types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ), // (pack, hash, arg0, arg1, arg2)
-        // クロージャ操作
-        "taida_closure_new" => (vec![types::I64, types::I64], vec![types::I64]), // (fn_ptr, env_ptr) -> closure_ptr
-        "taida_closure_get_fn" => (vec![types::I64], vec![types::I64]), // (closure_ptr) -> fn_ptr
-        "taida_closure_get_env" => (vec![types::I64], vec![types::I64]), // (closure_ptr) -> env_ptr
-        "taida_is_closure_value" => (vec![types::I64], vec![types::I64]), // (callable) -> bool
-        // グローバル変数テーブル
-        "taida_global_set" => (vec![types::I64, types::I64], vec![]), // (name_hash, value) -> void
-        "taida_global_get" => (vec![types::I64], vec![types::I64]),   // (name_hash) -> value
-        // リスト操作
-        "taida_list_new" => (vec![], vec![types::I64]),
-        "taida_list_set_elem_tag" => (vec![types::I64, types::I64], vec![]), // (list, tag) -> void
-        "taida_list_push" => (vec![types::I64, types::I64], vec![types::I64]), // (list, item) -> list
-        "taida_list_length" => (vec![types::I64], vec![types::I64]),
-        "taida_list_get" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_first" => (vec![types::I64], vec![types::I64]),
-        "taida_list_last" => (vec![types::I64], vec![types::I64]),
-        "taida_list_sum" => (vec![types::I64], vec![types::I64]),
-        "taida_list_reverse" => (vec![types::I64], vec![types::I64]),
-        "taida_list_contains" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_is_empty" => (vec![types::I64], vec![types::I64]),
-        "taida_list_map" => (vec![types::I64, types::I64], vec![types::I64]), // (list, fn_ptr) -> list
-        "taida_list_filter" => (vec![types::I64, types::I64], vec![types::I64]),
-        // 型変換
-        "taida_int_abs" => (vec![types::I64], vec![types::I64]),
-        "taida_int_to_str" => (vec![types::I64], vec![types::I64]),
-        "taida_int_to_float" => (vec![types::I64], vec![types::I64]),
-        "taida_int_clamp" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        // String operations
-        "taida_str_concat" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_length" => (vec![types::I64], vec![types::I64]),
-        "taida_str_char_at" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_slice" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_str_index_of" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_to_upper" => (vec![types::I64], vec![types::I64]),
-        "taida_str_to_lower" => (vec![types::I64], vec![types::I64]),
-        "taida_str_trim" => (vec![types::I64], vec![types::I64]),
-        "taida_str_split" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_replace" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_str_to_int" => (vec![types::I64], vec![types::I64]),
-        "taida_str_repeat" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_reverse" => (vec![types::I64], vec![types::I64]),
-        "taida_str_trim_start" => (vec![types::I64], vec![types::I64]),
-        "taida_str_trim_end" => (vec![types::I64], vec![types::I64]),
-        "taida_str_replace_first" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_str_pad" => (
-            vec![types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ),
-        "taida_str_from_int" => (vec![types::I64], vec![types::I64]),
-        "taida_str_from_float" => (vec![types::F64], vec![types::I64]),
-        "taida_str_from_bool" => (vec![types::I64], vec![types::I64]),
+        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+
+        // ── ブール演算 ──
+        "taida_bool_and" | "taida_bool_or" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_bool_not" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── ぶちパック操作 ──
+        "taida_pack_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_pack_set" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_pack_get" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_pack_get_idx" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_pack_set_hash" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_pack_set_tag" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        // BuchiPack field call (polymorphic dispatch: args are boxed values)
+        "taida_pack_call_field0" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_pack_call_field1" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Val],
+        },
+        "taida_pack_call_field2" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val],
+            returns: &[Val],
+        },
+        "taida_pack_call_field3" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val, Val],
+            returns: &[Val],
+        },
+
+        // ── クロージャ操作 ──
+        "taida_closure_new" => RuntimeAbi {
+            params: &[FnPtr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_closure_get_fn" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[FnPtr],
+        },
+        "taida_closure_get_env" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_is_closure_value" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── グローバル変数テーブル ──
+        "taida_global_set" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[],
+        },
+        "taida_global_get" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── リスト操作 ──
+        "taida_list_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_list_set_elem_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_list_push" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_list_get" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_first" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_last" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_sum" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_list_reverse" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_contains" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_list_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_list_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_filter" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+
+        // ── 型変換 (Int) ──
+        "taida_int_abs" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_to_str" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_int_to_float" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_clamp" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
+
+        // ── 文字列操作 ──
+        "taida_str_concat" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_str_char_at" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_slice" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_index_of" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_to_upper" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_to_lower" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_trim" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_split" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_replace" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_to_int" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_repeat" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_reverse" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_trim_start" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_trim_end" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_replace_first" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_pad" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_from_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_str_from_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_str_from_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // Str state check methods
-        "taida_str_contains" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_starts_with" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_ends_with" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_last_index_of" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_str_get" => (vec![types::I64, types::I64], vec![types::I64]),
+        "taida_str_contains" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_starts_with" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_ends_with" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_last_index_of" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_get" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
         // Str refcount
-        "taida_str_retain" => (vec![types::I64], vec![]), // (ptr) -> void
-        // Float operations
-        "taida_float_floor" => (vec![types::F64], vec![types::F64]),
-        "taida_float_ceil" => (vec![types::F64], vec![types::F64]),
-        "taida_float_round" => (vec![types::F64], vec![types::F64]),
-        "taida_float_abs" => (vec![types::F64], vec![types::F64]),
-        "taida_float_to_int" => (vec![types::F64], vec![types::I64]),
-        "taida_float_to_str" => (vec![types::F64], vec![types::I64]),
-        "taida_float_to_fixed" => (vec![types::F64, types::I64], vec![types::I64]),
-        "taida_float_clamp" => (vec![types::F64, types::F64, types::F64], vec![types::F64]),
+        "taida_str_retain" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[],
+        },
+
+        // ── Float 操作 ──
+        "taida_float_floor" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_ceil" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_round" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_abs" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_to_int" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_to_str" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_float_to_fixed" => RuntimeAbi {
+            params: &[F64, Val],
+            returns: &[Ptr],
+        },
+        "taida_float_clamp" => RuntimeAbi {
+            params: &[F64, F64, F64],
+            returns: &[F64],
+        },
         // Num state check methods (Int)
-        "taida_int_is_positive" => (vec![types::I64], vec![types::I64]),
-        "taida_int_is_negative" => (vec![types::I64], vec![types::I64]),
-        "taida_int_is_zero" => (vec![types::I64], vec![types::I64]),
+        "taida_int_is_positive" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_is_negative" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_is_zero" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         // Num state check methods (Float)
-        "taida_float_is_nan" => (vec![types::F64], vec![types::I64]),
-        "taida_float_is_infinite" => (vec![types::F64], vec![types::I64]),
-        "taida_float_is_finite_check" => (vec![types::F64], vec![types::I64]),
-        "taida_float_is_positive" => (vec![types::F64], vec![types::I64]),
-        "taida_float_is_negative" => (vec![types::F64], vec![types::I64]),
-        "taida_float_is_zero" => (vec![types::F64], vec![types::I64]),
-        // Bool operations
-        "taida_bool_to_str" => (vec![types::I64], vec![types::I64]),
-        "taida_bool_to_int" => (vec![types::I64], vec![types::I64]),
-        // Additional List operations
-        "taida_list_index_of" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_last_index_of" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_any" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_all" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_none" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_concat" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_join" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_sort" => (vec![types::I64], vec![types::I64]),
-        "taida_list_unique" => (vec![types::I64], vec![types::I64]),
-        "taida_list_flatten" => (vec![types::I64], vec![types::I64]),
-        "taida_list_max" => (vec![types::I64], vec![types::I64]),
-        "taida_list_min" => (vec![types::I64], vec![types::I64]),
+        "taida_float_is_nan" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_infinite" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_finite_check" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_positive" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_negative" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_zero" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+
+        // ── Bool 変換 ──
+        "taida_bool_to_str" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bool_to_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── 追加 List 操作 ──
+        "taida_list_index_of" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_list_last_index_of" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_list_any" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_all" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_none" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_concat" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_join" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_sort" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_unique" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_flatten" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_max" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_min" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // List mold operations
-        "taida_list_append" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_prepend" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_sort_desc" => (vec![types::I64], vec![types::I64]),
-        "taida_list_find" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_find_index" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_count" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_fold" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (list, init, fn_ptr) -> value
-        "taida_list_foldr" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (list, init, fn_ptr) -> value
-        "taida_list_take" => (vec![types::I64, types::I64], vec![types::I64]), // (list, n) -> list
-        "taida_list_take_while" => (vec![types::I64, types::I64], vec![types::I64]), // (list, fn_ptr) -> list
-        "taida_list_drop" => (vec![types::I64, types::I64], vec![types::I64]), // (list, n) -> list
-        "taida_list_drop_while" => (vec![types::I64, types::I64], vec![types::I64]), // (list, fn_ptr) -> list
-        "taida_list_zip" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_list_enumerate" => (vec![types::I64], vec![types::I64]),
-        // HashMap operations
-        "taida_hashmap_new" => (vec![], vec![types::I64]),
-        "taida_hashmap_set_value_tag" => (vec![types::I64, types::I64], vec![]),
-        "taida_hashmap_set" => (
-            vec![types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ),
-        "taida_hashmap_set_immut" => (
-            vec![types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ),
-        "taida_hashmap_get" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_hashmap_get_lax" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_hashmap_has" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_hashmap_remove" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_hashmap_remove_immut" => {
-            (vec![types::I64, types::I64, types::I64], vec![types::I64])
-        }
-        "taida_hashmap_keys" => (vec![types::I64], vec![types::I64]),
-        "taida_hashmap_values" => (vec![types::I64], vec![types::I64]),
-        "taida_hashmap_length" => (vec![types::I64], vec![types::I64]),
-        "taida_hashmap_is_empty" => (vec![types::I64], vec![types::I64]),
-        "taida_hashmap_entries" => (vec![types::I64], vec![types::I64]),
-        "taida_hashmap_merge" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_hashmap_to_string" => (vec![types::I64], vec![types::I64]),
-        "taida_str_hash" => (vec![types::I64], vec![types::I64]),
-        "taida_value_hash" => (vec![types::I64], vec![types::I64]),
-        // Set operations
-        "taida_set_new" => (vec![], vec![types::I64]),
-        "taida_set_set_elem_tag" => (vec![types::I64, types::I64], vec![]), // NO-2: (set, tag) -> void
-        "taida_set_from_list" => (vec![types::I64], vec![types::I64]),
-        "taida_set_add" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_set_remove" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_set_has" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_set_size" => (vec![types::I64], vec![types::I64]),
-        "taida_set_is_empty" => (vec![types::I64], vec![types::I64]),
-        "taida_set_to_list" => (vec![types::I64], vec![types::I64]),
-        "taida_set_union" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_set_intersect" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_set_diff" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_set_to_string" => (vec![types::I64], vec![types::I64]),
-        // Polymorphic collection methods
-        "taida_collection_get" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_collection_has" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_collection_remove" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_collection_size" => (vec![types::I64], vec![types::I64]),
-        "taida_polymorphic_length" => (vec![types::I64], vec![types::I64]),
-        // Error ceiling
-        "taida_error_ceiling_push" => (vec![], vec![types::I64]),
-        "taida_error_ceiling_pop" => (vec![], vec![]),
-        "taida_throw" => (vec![types::I64], vec![types::I64]),
-        "taida_error_setjmp" => (vec![types::I64], vec![types::I64]),
-        "taida_error_try_call" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_error_get_value" => (vec![types::I64], vec![types::I64]),
-        "taida_error_try_get_result" => (vec![types::I64], vec![types::I64]),
-        // Result[T, P] (v0.8.0 redesign — predicate support) — Optional abolished
-        "taida_result_create" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_result_is_ok" => (vec![types::I64], vec![types::I64]),
-        "taida_result_is_error" => (vec![types::I64], vec![types::I64]),
-        "taida_result_get_or_default" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_result_get_or_throw" => (vec![types::I64], vec![types::I64]),
-        "taida_result_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_result_flat_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_result_map_error" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_result_to_string" => (vec![types::I64], vec![types::I64]),
-        // Lax methods (map, flatMap, toString)
-        "taida_lax_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_lax_flat_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_lax_to_string" => (vec![types::I64], vec![types::I64]),
-        // Polymorphic monadic dispatch
-        "taida_polymorphic_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_polymorphic_contains" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_polymorphic_index_of" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_polymorphic_last_index_of" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_polymorphic_get_or_default" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_polymorphic_has_value" => (vec![types::I64], vec![types::I64]),
-        "taida_polymorphic_is_empty" => (vec![types::I64], vec![types::I64]),
-        "taida_polymorphic_to_string" => (vec![types::I64], vec![types::I64]),
-        "taida_monadic_flat_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_monadic_get_or_throw" => (vec![types::I64], vec![types::I64]),
-        // Async methods
-        "taida_async_map" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_async_get_or_default" => (vec![types::I64, types::I64], vec![types::I64]),
-        // Debug
-        "taida_debug_list" => (vec![types::I64], vec![types::I64]),
-        // 参照カウント
-        "taida_retain" => (vec![types::I64], vec![types::I64]),
-        "taida_release" => (vec![types::I64], vec![types::I64]),
-        // Async
-        "taida_async_ok" => (vec![types::I64], vec![types::I64]),
-        "taida_async_ok_tagged" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_async_err" => (vec![types::I64], vec![types::I64]),
-        "taida_async_set_value_tag" => (vec![types::I64, types::I64], vec![]), // NO-3: (async, tag) -> void
-        "taida_async_unmold" => (vec![types::I64], vec![types::I64]),
-        "taida_async_is_pending" => (vec![types::I64], vec![types::I64]),
-        "taida_async_is_fulfilled" => (vec![types::I64], vec![types::I64]),
-        "taida_async_is_rejected" => (vec![types::I64], vec![types::I64]),
-        "taida_async_get_value" => (vec![types::I64], vec![types::I64]),
-        "taida_async_get_error" => (vec![types::I64], vec![types::I64]),
-        "taida_async_all" => (vec![types::I64], vec![types::I64]),
-        "taida_async_race" => (vec![types::I64], vec![types::I64]),
-        "taida_async_spawn" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_async_cancel" => (vec![types::I64], vec![types::I64]),
-        // Lax
-        "taida_lax_new" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_lax_empty" => (vec![types::I64], vec![types::I64]),
-        "taida_lax_has_value" => (vec![types::I64], vec![types::I64]),
-        "taida_lax_get_or_default" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_lax_unmold" => (vec![types::I64], vec![types::I64]),
-        "taida_lax_is_empty" => (vec![types::I64], vec![types::I64]),
-        "taida_generic_unmold" => (vec![types::I64], vec![types::I64]),
-        // Gorillax / RelaxedGorillax
-        "taida_gorillax_new" => (vec![types::I64], vec![types::I64]),
-        "taida_molten_new" => (vec![], vec![types::I64]),
-        "taida_stub_new" => (vec![types::I64], vec![types::I64]),
-        "taida_todo_new" => (
-            vec![types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ),
-        "taida_cage_apply" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_gorillax_unmold" => (vec![types::I64], vec![types::I64]),
-        "taida_gorillax_relax" => (vec![types::I64], vec![types::I64]),
-        "taida_gorillax_to_string" => (vec![types::I64], vec![types::I64]),
-        "taida_relaxed_gorillax_unmold" => (vec![types::I64], vec![types::I64]),
-        "taida_relaxed_gorillax_to_string" => (vec![types::I64], vec![types::I64]),
-        // Type conversion molds (Str/Int/Float/Bool) — all return Lax (I64 ptr)
-        "taida_str_mold_int" => (vec![types::I64], vec![types::I64]),
-        "taida_str_mold_float" => (vec![types::F64], vec![types::I64]),
-        "taida_str_mold_bool" => (vec![types::I64], vec![types::I64]),
-        "taida_str_mold_str" => (vec![types::I64], vec![types::I64]),
-        "taida_int_mold_int" => (vec![types::I64], vec![types::I64]),
-        "taida_int_mold_float" => (vec![types::F64], vec![types::I64]),
-        "taida_int_mold_str" => (vec![types::I64], vec![types::I64]),
-        "taida_int_mold_auto" => (vec![types::I64], vec![types::I64]),
-        "taida_int_mold_str_base" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_int_mold_bool" => (vec![types::I64], vec![types::I64]),
-        "taida_float_mold_int" => (vec![types::I64], vec![types::I64]),
-        "taida_float_mold_float" => (vec![types::F64], vec![types::I64]),
-        "taida_float_mold_str" => (vec![types::I64], vec![types::I64]),
-        "taida_float_mold_bool" => (vec![types::I64], vec![types::I64]),
-        "taida_bool_mold_int" => (vec![types::I64], vec![types::I64]),
-        "taida_bool_mold_float" => (vec![types::F64], vec![types::I64]),
-        "taida_bool_mold_str" => (vec![types::I64], vec![types::I64]),
-        "taida_bool_mold_bool" => (vec![types::I64], vec![types::I64]),
-        "taida_uint8_mold" => (vec![types::I64], vec![types::I64]),
-        "taida_uint8_mold_float" => (vec![types::F64], vec![types::I64]),
+        "taida_list_append" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_prepend" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_sort_desc" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_find" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_find_index" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_count" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_fold" => RuntimeAbi {
+            params: &[Ptr, Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_foldr" => RuntimeAbi {
+            params: &[Ptr, Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_take" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_take_while" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_drop" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_drop_while" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_zip" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_enumerate" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── HashMap 操作 ──
+        "taida_hashmap_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_set_value_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_hashmap_set" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_set_immut" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_get" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_get_lax" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_has" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_remove" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_remove_immut" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_keys" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_values" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_entries" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_merge" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_hash" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_value_hash" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── Set 操作 ──
+        "taida_set_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_set_set_elem_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_set_from_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_add" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_set_remove" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_set_has" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_set_size" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_set_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_set_to_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_union" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_intersect" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_diff" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── Polymorphic collection methods ──
+        // These dispatch dynamically based on runtime type tag, so args are boxed Val.
+        "taida_collection_get" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_has" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_remove" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_size" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_length" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── Error ceiling ──
+        "taida_error_ceiling_push" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_error_ceiling_pop" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
+        "taida_throw" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_error_setjmp" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_error_try_call" => RuntimeAbi {
+            params: &[Ptr, FnPtr, Val],
+            returns: &[Ptr],
+        },
+        "taida_error_get_value" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_error_try_get_result" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── Result[T, P] ──
+        "taida_result_create" => RuntimeAbi {
+            params: &[Val, Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_is_ok" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_result_is_error" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_result_get_or_default" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_result_get_or_throw" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_result_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_flat_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_map_error" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── Lax methods ──
+        "taida_lax_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_lax_flat_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_lax_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── Polymorphic monadic dispatch ──
+        // These dispatch dynamically, so args are boxed Val.
+        "taida_polymorphic_map" => RuntimeAbi {
+            params: &[Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_polymorphic_contains" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_index_of" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_last_index_of" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_get_or_default" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_has_value" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_is_empty" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_to_string" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_monadic_flat_map" => RuntimeAbi {
+            params: &[Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_monadic_get_or_throw" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── Async methods ──
+        "taida_async_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_async_get_or_default" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+
+        // ── 参照カウント ──
+        "taida_retain" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_release" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+
+        // ── Async ──
+        "taida_async_ok" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_async_ok_tagged" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_async_err" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_set_value_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_async_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_is_pending" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_is_fulfilled" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_is_rejected" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_get_value" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_get_error" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_all" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_race" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_spawn" => RuntimeAbi {
+            params: &[FnPtr, Val],
+            returns: &[Ptr],
+        },
+        "taida_async_cancel" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── Lax ──
+        "taida_lax_new" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_lax_empty" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_lax_has_value" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_lax_get_or_default" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_lax_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_lax_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_generic_unmold" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+
+        // ── Gorillax / RelaxedGorillax ──
+        "taida_gorillax_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_molten_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_stub_new" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_todo_new" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_cage_apply" => RuntimeAbi {
+            params: &[Val, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_gorillax_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_gorillax_relax" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_gorillax_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_relaxed_gorillax_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_relaxed_gorillax_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── 型変換モールド (Str/Int/Float/Bool) — 全て Lax (Ptr) を返す ──
+        "taida_str_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_str_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_str_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_str_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_auto" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_str_base" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_uint8_mold" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_uint8_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
         "taida_u16be_mold" | "taida_u16le_mold" | "taida_u32be_mold" | "taida_u32le_mold" => {
-            (vec![types::I64], vec![types::I64])
+            RuntimeAbi {
+                params: &[Val],
+                returns: &[Ptr],
+            }
         }
         "taida_u16be_decode_mold"
         | "taida_u16le_decode_mold"
         | "taida_u32be_decode_mold"
-        | "taida_u32le_decode_mold" => (vec![types::I64], vec![types::I64]),
-        "taida_bytes_mold" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_bytes_set" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        "taida_bytes_to_list" => (vec![types::I64], vec![types::I64]),
-        "taida_bytes_cursor_new" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_bytes_cursor_remaining" => (vec![types::I64], vec![types::I64]),
-        "taida_bytes_cursor_take" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_bytes_cursor_u8" => (vec![types::I64], vec![types::I64]),
-        "taida_char_mold_int" => (vec![types::I64], vec![types::I64]),
-        "taida_char_mold_str" => (vec![types::I64], vec![types::I64]),
-        "taida_codepoint_mold_str" => (vec![types::I64], vec![types::I64]),
-        "taida_utf8_encode_mold" => (vec![types::I64], vec![types::I64]),
-        "taida_utf8_decode_mold" => (vec![types::I64], vec![types::I64]),
-        "taida_slice_mold" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        // JSON — Molten Iron (schema-based casting)
-        "taida_json_schema_cast" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_json_parse" => (vec![types::I64], vec![types::I64]),
-        "taida_json_from_int" => (vec![types::I64], vec![types::I64]),
-        "taida_json_from_str" => (vec![types::I64], vec![types::I64]),
-        "taida_json_unmold" => (vec![types::I64], vec![types::I64]),
-        "taida_json_stringify" => (vec![types::I64], vec![types::I64]),
-        "taida_json_to_str" => (vec![types::I64], vec![types::I64]),
-        "taida_json_to_int" => (vec![types::I64], vec![types::I64]),
-        "taida_json_size" => (vec![types::I64], vec![types::I64]),
-        "taida_json_has" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_json_empty" => (vec![], vec![types::I64]),
-        "taida_debug_json" => (vec![types::I64], vec![types::I64]),
-        // stdlib math (all operate on F64 encoded as I64 via bitcast)
-        // These take I64 (boxed float) and return I64 (boxed float)
-        "taida_math_sqrt" => (vec![types::I64], vec![types::I64]),
-        "taida_math_pow" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_math_abs" => (vec![types::I64], vec![types::I64]),
-        "taida_math_sin" => (vec![types::I64], vec![types::I64]),
-        "taida_math_cos" => (vec![types::I64], vec![types::I64]),
-        "taida_math_tan" => (vec![types::I64], vec![types::I64]),
-        "taida_math_asin" => (vec![types::I64], vec![types::I64]),
-        "taida_math_acos" => (vec![types::I64], vec![types::I64]),
-        "taida_math_atan" => (vec![types::I64], vec![types::I64]),
-        "taida_math_atan2" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_math_log" => (vec![types::I64], vec![types::I64]),
-        "taida_math_log10" => (vec![types::I64], vec![types::I64]),
-        "taida_math_exp" => (vec![types::I64], vec![types::I64]),
-        "taida_math_floor" => (vec![types::I64], vec![types::I64]),
-        "taida_math_ceil" => (vec![types::I64], vec![types::I64]),
-        "taida_math_round" => (vec![types::I64], vec![types::I64]),
-        "taida_math_truncate" => (vec![types::I64], vec![types::I64]),
-        "taida_math_max" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_math_min" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_math_clamp" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        // Float arithmetic
-        "taida_float_add" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_float_sub" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_float_mul" => (vec![types::I64, types::I64], vec![types::I64]),
-        // taida_float_div removed — use Div[x, y]() mold
-        // stdlib I/O
-        "taida_io_stdout" => (vec![types::I64], vec![types::I64]),
-        "taida_io_stderr" => (vec![types::I64], vec![types::I64]),
-        "taida_io_stdin" => (vec![types::I64], vec![types::I64]),
-        "taida_sha256" => (vec![types::I64], vec![types::I64]),
+        | "taida_u32le_decode_mold" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_mold" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_set" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_to_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_bytes_cursor_new" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_cursor_remaining" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_bytes_cursor_take" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_cursor_u8" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_char_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_char_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_codepoint_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_utf8_encode_mold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_utf8_decode_mold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_slice_mold" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+
+        // ── JSON — Molten Iron ──
+        "taida_json_schema_cast" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_parse" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_from_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_json_from_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_json_stringify" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_to_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_to_int" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_json_size" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_json_has" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_json_empty" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+
+        // ── stdlib math (boxed float as I64 via bitcast) ──
+        // These take/return boxed float (I64), not raw F64, because they
+        // receive bitcasted values at the user-function level.
+        "taida_math_sqrt"
+        | "taida_math_abs"
+        | "taida_math_sin"
+        | "taida_math_cos"
+        | "taida_math_tan"
+        | "taida_math_asin"
+        | "taida_math_acos"
+        | "taida_math_atan"
+        | "taida_math_log"
+        | "taida_math_log10"
+        | "taida_math_exp"
+        | "taida_math_floor"
+        | "taida_math_ceil"
+        | "taida_math_round"
+        | "taida_math_truncate" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_math_pow" | "taida_math_atan2" | "taida_math_max" | "taida_math_min" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_math_clamp" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
+        // Float arithmetic (boxed float as I64 via bitcast)
+        "taida_float_add" | "taida_float_sub" | "taida_float_mul" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+
+        // ── stdlib I/O ──
+        "taida_io_stdout" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_io_stderr" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_io_stdin" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_sha256" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // time prelude
-        "taida_time_now_ms" => (vec![], vec![types::I64]),
-        "taida_time_sleep" => (vec![types::I64], vec![types::I64]),
+        "taida_time_now_ms" => RuntimeAbi {
+            params: &[],
+            returns: &[Val],
+        },
+        "taida_time_sleep" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         // jsonEncode / jsonPretty
-        "taida_json_encode" => (vec![types::I64], vec![types::I64]),
-        "taida_json_pretty" => (vec![types::I64], vec![types::I64]),
+        "taida_json_encode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_json_pretty" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // Field name registry
-        "taida_register_field_name" => (vec![types::I64, types::I64], vec![types::I64]),
-        "taida_register_field_type" => (vec![types::I64, types::I64, types::I64], vec![types::I64]),
-        // taida-lang/os package — input molds
-        "taida_os_read" => (vec![types::I64], vec![types::I64]), // (path) -> Lax[Str]
-        "taida_os_read_bytes" => (vec![types::I64], vec![types::I64]), // (path) -> Lax[Bytes]
-        "taida_os_list_dir" => (vec![types::I64], vec![types::I64]), // (path) -> Lax[@[Str]]
-        "taida_os_stat" => (vec![types::I64], vec![types::I64]), // (path) -> Lax[@(size,modified,isDir)]
-        "taida_os_exists" => (vec![types::I64], vec![types::I64]), // (path) -> Bool
-        "taida_os_env_var" => (vec![types::I64], vec![types::I64]), // (name) -> Lax[Str]
+        "taida_register_field_name" => RuntimeAbi {
+            params: &[Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_register_field_type" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Val],
+        },
+
+        // ── taida-lang/os package — input molds ──
+        "taida_os_read" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_read_bytes" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_list_dir" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_stat" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_exists" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_os_env_var" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — side-effect functions
-        "taida_os_write_file" => (vec![types::I64, types::I64], vec![types::I64]), // (path, content) -> Result
-        "taida_os_write_bytes" => (vec![types::I64, types::I64], vec![types::I64]), // (path, content) -> Result
-        "taida_os_append_file" => (vec![types::I64, types::I64], vec![types::I64]), // (path, content) -> Result
-        "taida_os_remove" => (vec![types::I64], vec![types::I64]), // (path) -> Result
-        "taida_os_create_dir" => (vec![types::I64], vec![types::I64]), // (path) -> Result
-        "taida_os_rename" => (vec![types::I64, types::I64], vec![types::I64]), // (from, to) -> Result
-        "taida_os_run" => (vec![types::I64, types::I64], vec![types::I64]), // (program, args_list) -> Gorillax
-        "taida_os_exec_shell" => (vec![types::I64], vec![types::I64]),      // (command) -> Gorillax
+        "taida_os_write_file" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_write_bytes" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_append_file" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_remove" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_create_dir" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_rename" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_run" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_exec_shell" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — query function
-        "taida_os_all_env" => (vec![], vec![types::I64]), // () -> HashMap[Str, Str]
-        "taida_os_argv" => (vec![], vec![types::I64]),    // () -> @[Str]
+        "taida_os_all_env" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_os_argv" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — Phase 2: async APIs
-        "taida_os_read_async" => (vec![types::I64], vec![types::I64]), // (path) -> Async[Lax[Str]]
-        "taida_os_http_get" => (vec![types::I64], vec![types::I64]), // (url) -> Async[Lax[@(...)]]
-        "taida_os_http_post" => (vec![types::I64, types::I64], vec![types::I64]), // (url, body) -> Async[Lax[@(...)]]
-        "taida_os_http_request" => (
-            vec![types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ), // (method, url, headers, body) -> Async[Lax[@(...)]]
-        "taida_os_dns_resolve" => (vec![types::I64, types::I64], vec![types::I64]), // (host, timeoutMs) -> Async[Result]
-        "taida_os_tcp_connect" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (host, port, timeoutMs) -> Async[Result]
-        "taida_os_tcp_listen" => (vec![types::I64, types::I64], vec![types::I64]), // (port, timeoutMs) -> Async[Result]
-        "taida_os_tcp_accept" => (vec![types::I64, types::I64], vec![types::I64]), // (listener, timeoutMs) -> Async[Result]
-        "taida_os_socket_send" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (socket, data, timeoutMs) -> Async[Result]
-        "taida_os_socket_send_all" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (socket, data, timeoutMs) -> Async[Result]
-        "taida_os_socket_recv" => (vec![types::I64, types::I64], vec![types::I64]), // (socket, timeoutMs) -> Async[Lax[Str]]
-        "taida_os_socket_send_bytes" => {
-            (vec![types::I64, types::I64, types::I64], vec![types::I64])
-        } // (socket, data, timeoutMs) -> Async[Result]
-        "taida_os_socket_recv_bytes" => (vec![types::I64, types::I64], vec![types::I64]), // (socket, timeoutMs) -> Async[Lax[Bytes]]
-        "taida_os_socket_recv_exact" => {
-            (vec![types::I64, types::I64, types::I64], vec![types::I64])
-        } // (socket, size, timeoutMs) -> Async[Lax[Bytes]]
-        "taida_os_udp_bind" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (host, port, timeoutMs) -> Async[Result]
-        "taida_os_udp_send_to" => (
-            vec![types::I64, types::I64, types::I64, types::I64, types::I64],
-            vec![types::I64],
-        ), // (socket, host, port, data, timeoutMs) -> Async[Result]
-        "taida_os_udp_recv_from" => (vec![types::I64, types::I64], vec![types::I64]), // (socket, timeoutMs) -> Async[Lax[@(...)]]
-        "taida_os_socket_close" => (vec![types::I64], vec![types::I64]), // (socket) -> Async[Result]
-        "taida_os_listener_close" => (vec![types::I64], vec![types::I64]), // (listener) -> Async[Result]
-        // taida-lang/pool package
-        "taida_pool_create" => (vec![types::I64], vec![types::I64]), // (config) -> Result
-        "taida_pool_acquire" => (vec![types::I64, types::I64], vec![types::I64]), // (pool, timeoutMs) -> Async[Result]
-        "taida_pool_release" => (vec![types::I64, types::I64, types::I64], vec![types::I64]), // (pool, token, resource) -> Result
-        "taida_pool_close" => (vec![types::I64], vec![types::I64]), // (pool) -> Async[Result]
-        "taida_pool_health" => (vec![types::I64], vec![types::I64]), // (pool) -> @(open,idle,inUse,waiting)
+        "taida_os_read_async" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_http_get" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_http_post" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_http_request" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_dns_resolve" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_tcp_connect" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_tcp_listen" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_tcp_accept" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_send" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_send_all" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_recv" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_send_bytes" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_recv_bytes" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_recv_exact" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_udp_bind" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_udp_send_to" => RuntimeAbi {
+            params: &[Val, Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_udp_recv_from" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_close" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_os_listener_close" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+
+        // ── taida-lang/pool package ──
+        "taida_pool_create" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_pool_acquire" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_pool_release" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_pool_close" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_pool_health" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+
         _ => panic!("unknown runtime function: {}", name),
     }
+}
+
+/// ABI 定義 + AbiHelper から CLIF 型を解決する
+///
+/// W-0 では `CompileTarget::Native` のみが有効であり、全 AbiKind が I64 に解決
+/// されるため、旧 `runtime_func_signature()` と同一の結果を返す。
+fn resolve_abi(abi: &RuntimeAbi, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<clif::Type>) {
+    let resolve_kind = |k: &AbiKind| -> clif::Type {
+        match k {
+            AbiKind::Val => helper.value_ty(),
+            AbiKind::Ptr => helper.ptr_ty(),
+            AbiKind::FnPtr => helper.fn_ptr_ty(),
+            AbiKind::F64 => types::F64,
+        }
+    };
+    let params = abi.params.iter().map(resolve_kind).collect();
+    let returns = abi.returns.iter().map(resolve_kind).collect();
+    (params, returns)
+}
+
+/// runtime 関数シグネチャを ABI テーブル経由で解決する
+///
+/// W-0f: CompileTarget::Native 固定だったラッパーを廃止し、
+/// AbiHelper を受け取る形に変更。呼び出し元は self.abi を渡す。
+fn runtime_func_signature_for(
+    name: &str,
+    helper: &AbiHelper,
+) -> (Vec<clif::Type>, Vec<clif::Type>) {
+    let abi = runtime_abi(name);
+    resolve_abi(&abi, helper)
 }
 
 pub struct Emitter {
@@ -452,6 +1550,7 @@ pub struct Emitter {
     declared_funcs: HashMap<String, FuncId>,
     string_constants: Vec<(cranelift_module::DataId, Vec<u8>)>,
     user_func_sigs: HashMap<String, (Vec<clif::Type>, Vec<clif::Type>)>,
+    abi: AbiHelper,
 }
 
 /// emit_function 内で使うコンテキスト
@@ -464,6 +1563,14 @@ struct EmitCtx {
     tco_loop_block: Option<clif::Block>,
     /// TCO: パラメータ Variable のリスト（引数の再代入用）
     tco_param_vars: Vec<cranelift_frontend::Variable>,
+    /// ターゲットの呼出規約（CallIndirect 等で使用）
+    call_conv: CallConv,
+    /// Taida の内部 boxed value 型（AbiHelper::value_ty() のキャッシュ）。
+    /// ユーザー関数・IR 変数・内部 SSA の境界では常にこの型を使う。
+    /// W-0 では I64 固定。Wasm32 でも I64（案 A: 統一値表現）。
+    value_ty: clif::Type,
+    /// W-0f: ABI ヘルパー（runtime 関数シグネチャ解決に使用）
+    abi: AbiHelper,
 }
 
 #[derive(Debug)]
@@ -478,11 +1585,19 @@ impl std::fmt::Display for EmitError {
 }
 
 impl Emitter {
+    /// 既存互換: ホストネイティブターゲットで Emitter を生成
     pub fn new() -> Result<Self, EmitError> {
+        Self::new_with_target(CompileTarget::Native)
+    }
+
+    /// 指定ターゲットで Emitter を生成
+    pub fn new_with_target(target: CompileTarget) -> Result<Self, EmitError> {
+        let abi = AbiHelper::new(target);
+
         let shared_builder = settings::builder();
         let shared_flags = settings::Flags::new(shared_builder);
 
-        let triple = Triple::host();
+        let triple = abi.triple();
         let isa = cranelift_codegen::isa::lookup(triple.clone())
             .map_err(|e| EmitError {
                 message: format!("ISA lookup failed: {}", e),
@@ -510,6 +1625,7 @@ impl Emitter {
             declared_funcs: HashMap::new(),
             string_constants: Vec::new(),
             user_func_sigs: HashMap::new(),
+            abi,
         })
     }
 
@@ -530,7 +1646,7 @@ impl Emitter {
         for &r in returns {
             sig.returns.push(AbiParam::new(r));
         }
-        sig.call_conv = CallConv::SystemV;
+        sig.call_conv = self.abi.call_conv();
 
         let id = self
             .module
@@ -548,16 +1664,17 @@ impl Emitter {
             return Ok(id);
         }
 
+        let vty = self.abi.value_ty();
         let mut sig = self.module.make_signature();
         for _ in 0..param_count {
-            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(vty));
         }
-        sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.returns.push(AbiParam::new(vty));
+        sig.call_conv = self.abi.call_conv();
 
-        let params: Vec<clif::Type> = (0..param_count).map(|_| types::I64).collect();
+        let params: Vec<clif::Type> = (0..param_count).map(|_| vty).collect();
         self.user_func_sigs
-            .insert(name.to_string(), (params, vec![types::I64]));
+            .insert(name.to_string(), (params, vec![vty]));
 
         let id = self
             .module
@@ -578,16 +1695,17 @@ impl Emitter {
         if let Some(&id) = self.declared_funcs.get(name) {
             return Ok(id);
         }
+        let vty = self.abi.value_ty();
         let mut sig = self.module.make_signature();
         for _ in 0..param_count {
-            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(vty));
         }
-        sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.returns.push(AbiParam::new(vty));
+        sig.call_conv = self.abi.call_conv();
 
-        let params: Vec<clif::Type> = (0..param_count).map(|_| types::I64).collect();
+        let params: Vec<clif::Type> = (0..param_count).map(|_| vty).collect();
         self.user_func_sigs
-            .insert(name.to_string(), (params, vec![types::I64]));
+            .insert(name.to_string(), (params, vec![vty]));
 
         let id = self
             .module
@@ -607,16 +1725,17 @@ impl Emitter {
         if let Some(&id) = self.declared_funcs.get(name) {
             return Ok(id);
         }
+        let vty = self.abi.value_ty();
         let mut sig = self.module.make_signature();
         for _ in 0..param_count {
-            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(vty));
         }
-        sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.returns.push(AbiParam::new(vty));
+        sig.call_conv = self.abi.call_conv();
 
-        let params: Vec<clif::Type> = (0..param_count).map(|_| types::I64).collect();
+        let params: Vec<clif::Type> = (0..param_count).map(|_| vty).collect();
         self.user_func_sigs
-            .insert(name.to_string(), (params, vec![types::I64]));
+            .insert(name.to_string(), (params, vec![vty]));
 
         let id = self
             .module
@@ -641,7 +1760,7 @@ impl Emitter {
             match inst {
                 IrInst::Call(_, func_name, _) => {
                     if !self.declared_funcs.contains_key(func_name) {
-                        let (params, returns) = runtime_func_signature(func_name);
+                        let (params, returns) = runtime_func_signature_for(func_name, &self.abi);
                         self.declare_runtime_func(func_name, &params, &returns)?;
                     }
                 }
@@ -735,7 +1854,7 @@ impl Emitter {
 
     fn ensure_runtime_func(&mut self, name: &str) -> Result<(), EmitError> {
         if !self.declared_funcs.contains_key(name) {
-            let (params, returns) = runtime_func_signature(name);
+            let (params, returns) = runtime_func_signature_for(name, &self.abi);
             self.declare_runtime_func(name, &params, &returns)?;
         }
         Ok(())
@@ -784,8 +1903,8 @@ impl Emitter {
         for ir_func in &ir_module.functions {
             if ir_func.name == "_taida_main" {
                 let mut sig = self.module.make_signature();
-                sig.returns.push(AbiParam::new(types::I64));
-                sig.call_conv = CallConv::SystemV;
+                sig.returns.push(AbiParam::new(self.abi.value_ty()));
+                sig.call_conv = self.abi.call_conv();
 
                 let id = self
                     .module
@@ -898,12 +2017,13 @@ impl Emitter {
     fn emit_function(&mut self, ir_func: &IrFunction) -> Result<(), EmitError> {
         let func_id = self.declared_funcs[&ir_func.name];
 
+        let vty = self.abi.value_ty();
         let mut sig = self.module.make_signature();
         for _ in &ir_func.params {
-            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(vty));
         }
-        sig.returns.push(AbiParam::new(types::I64));
-        sig.call_conv = CallConv::SystemV;
+        sig.returns.push(AbiParam::new(vty));
+        sig.call_conv = self.abi.call_conv();
 
         self.ctx.func.signature = sig;
         self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0, func_id.as_u32());
@@ -933,6 +2053,9 @@ impl Emitter {
                 str_globals,
                 tco_loop_block: None,
                 tco_param_vars: Vec::new(),
+                call_conv: self.abi.call_conv(),
+                value_ty: self.abi.value_ty(),
+                abi: self.abi,
             };
 
             if has_tail_call {
@@ -941,7 +2064,7 @@ impl Emitter {
                 let block_params = builder.block_params(entry_block).to_vec();
 
                 for (i, param_name) in ir_func.params.iter().enumerate() {
-                    let var = builder.declare_var(types::I64);
+                    let var = builder.declare_var(vty);
                     builder.def_var(var, block_params[i]);
                     param_vars.push(var);
                     // IrVar のマッピングも設定
@@ -1008,7 +2131,7 @@ impl Emitter {
     fn emit_inst(builder: &mut FunctionBuilder, ectx: &mut EmitCtx, inst: &IrInst) {
         match inst {
             IrInst::ConstInt(dst, value) => {
-                let val = builder.ins().iconst(types::I64, *value);
+                let val = builder.ins().iconst(ectx.value_ty, *value);
                 ectx.val_map.insert(*dst, val);
             }
             IrInst::ConstFloat(dst, value) => {
@@ -1016,12 +2139,17 @@ impl Emitter {
                 ectx.val_map.insert(*dst, val);
             }
             IrInst::ConstStr(dst, _) => {
+                // W-0 note: ConstStr の結果は意味的にはヒープ参照（Ptr）だが、
+                // 案 A（統一値表現）により boxed value_ty として保持する。
+                // Wasm32 では runtime 境界呼び出し時に value_ty → ptr_ty の truncate が入る。
                 let global = ectx.str_globals[dst];
-                let ptr = builder.ins().global_value(types::I64, global);
+                let ptr = builder.ins().global_value(ectx.value_ty, global);
                 ectx.val_map.insert(*dst, ptr);
             }
             IrInst::ConstBool(dst, value) => {
-                let val = builder.ins().iconst(types::I64, if *value { 1 } else { 0 });
+                let val = builder
+                    .ins()
+                    .iconst(ectx.value_ty, if *value { 1 } else { 0 });
                 ectx.val_map.insert(*dst, val);
             }
             IrInst::DefVar(name, src) => {
@@ -1033,41 +2161,41 @@ impl Emitter {
                 if let Some(&val) = ectx.named_vars.get(name) {
                     ectx.val_map.insert(*dst, val);
                 } else {
-                    let val = builder.ins().iconst(types::I64, 0);
+                    let val = builder.ins().iconst(ectx.value_ty, 0);
                     ectx.val_map.insert(*dst, val);
                 }
             }
             IrInst::PackNew(dst, field_count) => {
-                // taida_pack_new(field_count) -> ptr
+                // taida_pack_new(field_count: Val) -> Ptr
                 let func_ref = ectx.func_refs["taida_pack_new"];
-                let count_val = builder.ins().iconst(types::I64, *field_count as i64);
+                let count_val = builder.ins().iconst(ectx.value_ty, *field_count as i64);
                 let call = builder.ins().call(func_ref, &[count_val]);
                 let results = builder.inst_results(call);
                 ectx.val_map.insert(*dst, results[0]);
             }
             IrInst::PackSet(pack_var, index, value_var) => {
-                // taida_pack_set(ptr, index, value) -> ptr
+                // taida_pack_set(Ptr, Val, Val) -> Ptr
                 let func_ref = ectx.func_refs["taida_pack_set"];
                 let pack_val = ectx.val_map[pack_var];
-                let idx_val = builder.ins().iconst(types::I64, *index as i64);
+                let idx_val = builder.ins().iconst(ectx.value_ty, *index as i64);
                 let value_val = ectx.val_map[value_var];
                 builder
                     .ins()
                     .call(func_ref, &[pack_val, idx_val, value_val]);
             }
             IrInst::PackSetTag(pack_var, index, tag) => {
-                // taida_pack_set_tag(ptr, index, tag) -> ptr
+                // taida_pack_set_tag(Ptr, Val, Val) -> Ptr
                 let func_ref = ectx.func_refs["taida_pack_set_tag"];
                 let pack_val = ectx.val_map[pack_var];
-                let idx_val = builder.ins().iconst(types::I64, *index as i64);
-                let tag_val = builder.ins().iconst(types::I64, *tag);
+                let idx_val = builder.ins().iconst(ectx.value_ty, *index as i64);
+                let tag_val = builder.ins().iconst(ectx.value_ty, *tag);
                 builder.ins().call(func_ref, &[pack_val, idx_val, tag_val]);
             }
             IrInst::PackGet(dst, pack_var, index) => {
-                // taida_pack_get_idx(ptr, index) -> value
+                // taida_pack_get_idx(Ptr, Val) -> Val
                 let func_ref = ectx.func_refs["taida_pack_get_idx"];
                 let pack_val = ectx.val_map[pack_var];
-                let idx_val = builder.ins().iconst(types::I64, *index as i64);
+                let idx_val = builder.ins().iconst(ectx.value_ty, *index as i64);
                 let call = builder.ins().call(func_ref, &[pack_val, idx_val]);
                 let results = builder.inst_results(call);
                 ectx.val_map.insert(*dst, results[0]);
@@ -1077,8 +2205,10 @@ impl Emitter {
                 if let Some(result) = Self::try_emit_intrinsic(builder, ectx, func_name, args) {
                     ectx.val_map.insert(*dst, result);
                 } else {
+                    // W-0f: runtime_func_signature_for() で ectx.abi ベースの解決に統一
                     let func_ref = ectx.func_refs[func_name];
-                    let (param_types, return_types) = runtime_func_signature(func_name);
+                    let runtime_abi_def = runtime_abi(func_name);
+                    let (param_types, return_types) = resolve_abi(&runtime_abi_def, &ectx.abi);
 
                     let arg_vals: Vec<clif::Value> = args
                         .iter()
@@ -1086,18 +2216,37 @@ impl Emitter {
                         .map(|(i, &arg)| {
                             let val = ectx.val_map[&arg];
                             let val_type = builder.func.dfg.value_type(val);
-                            let expected_type = param_types.get(i).copied().unwrap_or(types::I64);
+                            let expected_type =
+                                param_types.get(i).copied().unwrap_or(ectx.value_ty);
 
                             if val_type == expected_type {
                                 val
-                            } else if val_type == types::F64 && expected_type == types::I64 {
+                            } else if val_type == types::F64 && expected_type == ectx.value_ty {
+                                // F64 → boxed value: bitcast to I64
                                 builder
                                     .ins()
-                                    .bitcast(types::I64, clif::MemFlags::new(), val)
-                            } else if val_type == types::I64 && expected_type == types::F64 {
+                                    .bitcast(ectx.value_ty, clif::MemFlags::new(), val)
+                            } else if val_type == ectx.value_ty && expected_type == types::F64 {
+                                // boxed value → F64: bitcast
                                 builder
                                     .ins()
                                     .bitcast(types::F64, clif::MemFlags::new(), val)
+                            } else if val_type == ectx.value_ty
+                                && (expected_type == ectx.abi.ptr_ty()
+                                    || expected_type == ectx.abi.fn_ptr_ty())
+                                && val_type != expected_type
+                            {
+                                // W-0f F-2: boxed value_ty → ptr_ty/fn_ptr_ty (truncate)
+                                // Wasm32: I64 → I32
+                                builder.ins().ireduce(expected_type, val)
+                            } else if (val_type == ectx.abi.ptr_ty()
+                                || val_type == ectx.abi.fn_ptr_ty())
+                                && expected_type == ectx.value_ty
+                                && val_type != expected_type
+                            {
+                                // W-0f F-2: ptr_ty/fn_ptr_ty → boxed value_ty (extend)
+                                // Wasm32: I32 → I64
+                                builder.ins().uextend(expected_type, val)
                             } else {
                                 val
                             }
@@ -1107,11 +2256,22 @@ impl Emitter {
                     let call = builder.ins().call(func_ref, &arg_vals);
                     let results = builder.inst_results(call);
                     if !results.is_empty() {
-                        ectx.val_map.insert(*dst, results[0]);
+                        let result = results[0];
+                        let result_type = builder.func.dfg.value_type(result);
+                        // W-0f F-2: runtime 戻り値が ptr_ty/fn_ptr_ty の場合、boxed value_ty に変換
+                        let boxed = if result_type != ectx.value_ty
+                            && (result_type == ectx.abi.ptr_ty()
+                                || result_type == ectx.abi.fn_ptr_ty())
+                        {
+                            builder.ins().uextend(ectx.value_ty, result)
+                        } else {
+                            result
+                        };
+                        ectx.val_map.insert(*dst, boxed);
                     } else if return_types.is_empty() {
                         // void 関数: trap の代わりに 0 を返す
                         // (trap はブロック終端命令なので後続命令を追加できない)
-                        let dummy = builder.ins().iconst(types::I64, 0);
+                        let dummy = builder.ins().iconst(ectx.value_ty, 0);
                         ectx.val_map.insert(*dst, dummy);
                     }
                 }
@@ -1128,14 +2288,16 @@ impl Emitter {
                 }
             }
             IrInst::FuncAddr(dst, func_name) => {
+                // W-0 note: FuncAddr は意味的には関数ポインタ（FnPtr）だが、
+                // 案 A（統一値表現）により boxed value_ty として保持する。
                 let fn_ref = ectx.func_refs[func_name];
-                let fn_addr = builder.ins().func_addr(types::I64, fn_ref);
+                let fn_addr = builder.ins().func_addr(ectx.value_ty, fn_ref);
                 ectx.val_map.insert(*dst, fn_addr);
             }
             IrInst::MakeClosure(dst, func_name, captures) => {
                 // 1. 環境パックを作成（キャプチャ変数を格納）
                 let pack_new_ref = ectx.func_refs["taida_pack_new"];
-                let count_val = builder.ins().iconst(types::I64, captures.len() as i64);
+                let count_val = builder.ins().iconst(ectx.value_ty, captures.len() as i64);
                 let pack_call = builder.ins().call(pack_new_ref, &[count_val]);
                 let env_ptr = builder.inst_results(pack_call)[0];
 
@@ -1143,16 +2305,16 @@ impl Emitter {
                 let pack_set_ref = ectx.func_refs["taida_pack_set"];
                 for (i, cap_name) in captures.iter().enumerate() {
                     if let Some(&cap_val) = ectx.named_vars.get(cap_name) {
-                        let idx_val = builder.ins().iconst(types::I64, i as i64);
+                        let idx_val = builder.ins().iconst(ectx.value_ty, i as i64);
                         builder
                             .ins()
                             .call(pack_set_ref, &[env_ptr, idx_val, cap_val]);
                     }
                 }
 
-                // 2. 関数アドレスを取得
+                // 2. 関数アドレスを取得（boxed value_ty として保持）
                 let fn_ref = ectx.func_refs[func_name];
-                let fn_addr = builder.ins().func_addr(types::I64, fn_ref);
+                let fn_addr = builder.ins().func_addr(ectx.value_ty, fn_ref);
 
                 // 3. クロージャ構造体を作成
                 let closure_new_ref = ectx.func_refs["taida_closure_new"];
@@ -1162,8 +2324,9 @@ impl Emitter {
                 ectx.val_map.insert(*dst, closure_ptr);
             }
             IrInst::CallIndirect(dst, fn_var, args) => {
+                // CallIndirect: ユーザー関数 ABI（全値 value_ty）
                 let callable = ectx.val_map[fn_var];
-                let result_var = builder.declare_var(types::I64);
+                let result_var = builder.declare_var(ectx.value_ty);
                 let closure_block = builder.create_block();
                 let plain_block = builder.create_block();
                 let merge_block = builder.create_block();
@@ -1189,11 +2352,11 @@ impl Emitter {
                 for &arg in args {
                     closure_args.push(ectx.val_map[&arg]);
                 }
-                let mut closure_sig = clif::Signature::new(CallConv::SystemV);
+                let mut closure_sig = clif::Signature::new(ectx.call_conv);
                 for _ in &closure_args {
-                    closure_sig.params.push(AbiParam::new(types::I64));
+                    closure_sig.params.push(AbiParam::new(ectx.value_ty));
                 }
-                closure_sig.returns.push(AbiParam::new(types::I64));
+                closure_sig.returns.push(AbiParam::new(ectx.value_ty));
                 let closure_sig_ref = builder.import_signature(closure_sig);
                 let closure_call =
                     builder
@@ -1207,11 +2370,11 @@ impl Emitter {
                 builder.seal_block(plain_block);
                 let plain_args: Vec<clif::Value> =
                     args.iter().map(|&arg| ectx.val_map[&arg]).collect();
-                let mut plain_sig = clif::Signature::new(CallConv::SystemV);
+                let mut plain_sig = clif::Signature::new(ectx.call_conv);
                 for _ in &plain_args {
-                    plain_sig.params.push(AbiParam::new(types::I64));
+                    plain_sig.params.push(AbiParam::new(ectx.value_ty));
                 }
-                plain_sig.returns.push(AbiParam::new(types::I64));
+                plain_sig.returns.push(AbiParam::new(ectx.value_ty));
                 let plain_sig_ref = builder.import_signature(plain_sig);
                 let plain_call = builder
                     .ins()
@@ -1270,13 +2433,13 @@ impl Emitter {
                 builder.seal_block(next_block);
             }
             IrInst::GlobalSet(name_hash, value_var) => {
-                let hash_val = builder.ins().iconst(types::I64, *name_hash);
+                let hash_val = builder.ins().iconst(ectx.value_ty, *name_hash);
                 let val = ectx.val_map[value_var];
                 let func_ref = ectx.func_refs["taida_global_set"];
                 builder.ins().call(func_ref, &[hash_val, val]);
             }
             IrInst::GlobalGet(dst, name_hash) => {
-                let hash_val = builder.ins().iconst(types::I64, *name_hash);
+                let hash_val = builder.ins().iconst(ectx.value_ty, *name_hash);
                 let func_ref = ectx.func_refs["taida_global_get"];
                 let call = builder.ins().call(func_ref, &[hash_val]);
                 let result = builder.inst_results(call)[0];
@@ -1293,8 +2456,8 @@ impl Emitter {
         result_dst: IrVar,
         arms: &[CondArm],
     ) {
-        // 結果を格納する Variable
-        let result_var = builder.declare_var(types::I64);
+        // 結果を格納する Variable（boxed value_ty）
+        let result_var = builder.declare_var(ectx.value_ty);
 
         // マージブロック
         let merge_block = builder.create_block();
@@ -1342,7 +2505,7 @@ impl Emitter {
         // デフォルトケースがない場合のフォールバック
         let has_default = arms.iter().any(|a| a.condition.is_none());
         if !has_default {
-            let default_val = builder.ins().iconst(types::I64, 0);
+            let default_val = builder.ins().iconst(ectx.value_ty, 0);
             builder.def_var(result_var, default_val);
             builder.ins().jump(merge_block, &[]);
         }

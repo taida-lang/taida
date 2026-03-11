@@ -6,6 +6,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Get the path to the built taida binary.
 fn taida_bin() -> PathBuf {
@@ -34,14 +36,50 @@ fn run_interpreter(td_path: &Path) -> Option<String> {
     )
 }
 
+struct NativeBuildLock {
+    path: PathBuf,
+}
+
+impl Drop for NativeBuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+fn acquire_native_build_lock() -> NativeBuildLock {
+    let lock_path = std::env::temp_dir().join("taida_native_build_test.lock");
+    let started = Instant::now();
+    loop {
+        match fs::create_dir(&lock_path) {
+            Ok(()) => return NativeBuildLock { path: lock_path },
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(120),
+                    "timed out waiting for native build test lock {}",
+                    lock_path.display()
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!(
+                "failed to acquire native build test lock {}: {}",
+                lock_path.display(),
+                err
+            ),
+        }
+    }
+}
+
 /// Compile a .td file to a native binary, execute it, and return its stdout.
 fn compile_and_run(td_path: &Path) -> Option<String> {
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
     let binary_path = unique_temp_path(&format!("taida_test_{}", stem), "bin");
 
     // Compile
+    let _build_lock = acquire_native_build_lock();
     let compile_output = Command::new(taida_bin())
-        .arg("compile")
+        .arg("build")
+        .arg("--target")
+        .arg("native")
         .arg(td_path)
         .arg("-o")
         .arg(&binary_path)
@@ -140,6 +178,12 @@ fn assert_native_and_interpreter_reject_source(source: &str, label: &str) {
     );
 }
 
+fn expected_native_reject_examples() -> Vec<&'static str> {
+    vec![
+        "compile_stream", // Native backend does not provide Stream[T]
+    ]
+}
+
 /// Generate a test for each compile_*.td file.
 /// We use a single test function that iterates over all files and reports
 /// individual failures, rather than generating separate test functions,
@@ -162,8 +206,10 @@ fn test_native_compile_parity() {
         "No compile_*.td files found in examples/"
     );
 
+    let expected_rejects = expected_native_reject_examples();
     let mut passed = 0;
     let mut failed = 0;
+    let mut rejected = Vec::new();
     let mut failures = Vec::new();
 
     for entry in &entries {
@@ -172,8 +218,7 @@ fn test_native_compile_parity() {
 
         // Skip compile_module -- it requires module imports with relative paths
         // which may not resolve correctly from the temp directory
-        // Skip compile_stream -- Stream[T] native backend not yet implemented
-        if name == "compile_module" || name == "compile_stream" {
+        if name == "compile_module" {
             continue;
         }
 
@@ -189,6 +234,10 @@ fn test_native_compile_parity() {
         let native_output = match compile_and_run(&path) {
             Some(o) => o,
             None => {
+                if expected_rejects.contains(&name.as_str()) {
+                    rejected.push(name.clone());
+                    continue;
+                }
                 failures.push(format!("{}: compile/run failed", name));
                 failed += 1;
                 continue;
@@ -212,15 +261,57 @@ fn test_native_compile_parity() {
     }
 
     eprintln!(
-        "Native compile parity: {}/{} passed",
+        "Native compile parity: {}/{} passed, {} expected rejected",
         passed,
-        passed + failed
+        passed + failed + rejected.len(),
+        rejected.len()
+    );
+
+    let expected_rejected: Vec<String> = expected_rejects
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        rejected, expected_rejected,
+        "native expected-reject allowlist drifted"
     );
 
     if !failures.is_empty() {
         let msg = failures.join("\n\n");
         panic!("{} native compile test(s) failed:\n\n{}", failed, msg);
     }
+}
+
+#[test]
+fn test_native_stream_example_is_explicitly_rejected() {
+    let td_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("compile_stream.td");
+    let binary_path = unique_temp_path("taida_native_stream_reject", "bin");
+
+    let _build_lock = acquire_native_build_lock();
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .expect("build --target native compile_stream");
+
+    let _ = fs::remove_file(&binary_path);
+
+    assert!(
+        !output.status.success(),
+        "compile_stream should be rejected by native backend"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported mold type: Stream"),
+        "expected explicit Stream rejection, got: {}",
+        stderr
+    );
 }
 
 #[test]
