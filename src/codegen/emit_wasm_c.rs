@@ -604,10 +604,11 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         | "taida_str_alloc" | "taida_str_new_copy" => {
             format!("int64_t {}(int64_t s);", name)
         }
-        "taida_str_split" | "taida_str_replace" | "taida_str_replace_first"
-        | "taida_str_pad" => {
-            format!("int64_t {}(int64_t a, int64_t b);", name)
+        "taida_str_split" => "int64_t taida_str_split(int64_t s, int64_t sep);".to_string(),
+        "taida_str_replace" | "taida_str_replace_first" => {
+            format!("int64_t {}(int64_t s, int64_t from, int64_t to);", name)
         }
+        "taida_str_pad" => "int64_t taida_str_pad(int64_t s, int64_t target_len, int64_t pad_char, int64_t pad_end);".to_string(),
         "taida_str_slice" => "int64_t taida_str_slice(int64_t s, int64_t start, int64_t end);".to_string(),
         "taida_str_char_at" | "taida_str_get" => {
             format!("int64_t {}(int64_t s, int64_t idx);", name)
@@ -627,9 +628,8 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         | "taida_float_round" => {
             format!("int64_t {}(int64_t a);", name)
         }
-        "taida_float_to_fixed" | "taida_float_clamp" => {
-            format!("int64_t {}(int64_t a, int64_t b);", name)
-        }
+        "taida_float_to_fixed" => "int64_t taida_float_to_fixed(int64_t a, int64_t b);".to_string(),
+        "taida_float_clamp" => "int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi);".to_string(),
         "taida_float_is_nan" | "taida_float_is_infinite" | "taida_float_is_finite_check"
         | "taida_float_is_positive" | "taida_float_is_negative" | "taida_float_is_zero" => {
             format!("int64_t {}(int64_t a);", name)
@@ -741,9 +741,8 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of" => {
             format!("int64_t {}(int64_t ptr, int64_t item);", name)
         }
-        "taida_polymorphic_has_value" | "taida_polymorphic_map" => {
-            format!("int64_t {}(int64_t ptr, int64_t fn_ptr);", name)
-        }
+        "taida_polymorphic_has_value" => "int64_t taida_polymorphic_has_value(int64_t ptr);".to_string(),
+        "taida_polymorphic_map" => "int64_t taida_polymorphic_map(int64_t ptr, int64_t fn_ptr);".to_string(),
 
         // --- Monadic ---
         "taida_monadic_field_count" | "taida_monadic_get_or_throw"
@@ -822,7 +821,8 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         }
 
         // --- Bytes ---
-        "taida_bytes_mold" | "taida_bytes_clone" | "taida_bytes_len"
+        "taida_bytes_mold" => "int64_t taida_bytes_mold(int64_t v, int64_t fill);".to_string(),
+        "taida_bytes_clone" | "taida_bytes_len"
         | "taida_bytes_to_list" | "taida_bytes_to_display_string"
         | "taida_bytes_default_value" => {
             format!("int64_t {}(int64_t v);", name)
@@ -832,7 +832,7 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         "taida_bytes_get_lax" => "int64_t taida_bytes_get_lax(int64_t bytes, int64_t idx);".to_string(),
         "taida_bytes_set" => "int64_t taida_bytes_set(int64_t bytes, int64_t idx, int64_t val);".to_string(),
         // Bytes cursor
-        "taida_bytes_cursor_new" => "int64_t taida_bytes_cursor_new(int64_t bytes);".to_string(),
+        "taida_bytes_cursor_new" => "int64_t taida_bytes_cursor_new(int64_t bytes, int64_t offset);".to_string(),
         "taida_bytes_cursor_u8" | "taida_bytes_cursor_remaining" => {
             format!("int64_t {}(int64_t cursor);", name)
         }

@@ -4265,6 +4265,12 @@ impl Lowering {
             Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
                 self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs)
             }
+            // WF-2b: MoldInst string molds (CharAt, Upper, Lower, etc.) return strings
+            Expr::MoldInst(name, _, _, _) => matches!(
+                name.as_str(),
+                "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "CharAt"
+                    | "Repeat" | "Reverse" | "Pad" | "Join" | "ToFixed"
+            ),
             Expr::BinaryOp(_, BinOp::Concat, _, _) => true,
             Expr::CondBranch(arms, _) => {
                 // If ANY arm body's last expression is a string, the whole branch is string
