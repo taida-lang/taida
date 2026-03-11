@@ -351,6 +351,8 @@ int64_t taida_str_slice(int64_t s_raw, int64_t start_raw, int64_t end_raw) {
     int len = _wf_strlen(s);
     int start = (int)start_raw;
     int end = (int)end_raw;
+    /* Native normalizes negative end to len (e.g. end=-1 means "to end of string") */
+    if (end < 0) end = len;
     if (start < 0) start = 0;
     if (end > len) end = len;
     if (start >= end) { return taida_str_alloc(0); }
@@ -511,4 +513,316 @@ int64_t taida_slice_mold(int64_t value, int64_t start_raw, int64_t end_raw) {
     // Native uses type tags to distinguish; in WASM we check the value heuristically.
     // Since compile_str_molds.td only uses string Slice, this is sufficient for WF-2b.
     return taida_str_slice(value, start_raw, end_raw);
+}
+
+// ---------------------------------------------------------------------------
+// WF-2c: Number mold implementations
+// ---------------------------------------------------------------------------
+// In WASM, all parameters are int64_t (bit-punned for floats).
+// Use _to_double() / _d2l() for conversion.
+
+// ── Float math molds ─────────────────────────────────────
+
+/// Floor[f]() -- floor(x), returns float (bit-punned int64_t)
+int64_t taida_float_floor(int64_t a) {
+    double d = _to_double(a);
+    // Manual floor: truncate toward negative infinity
+    double t = (double)(long long)d;
+    if (t > d) t -= 1.0;
+    return _d2l(t);
+}
+
+/// Ceil[f]() -- ceil(x), returns float (bit-punned int64_t)
+int64_t taida_float_ceil(int64_t a) {
+    double d = _to_double(a);
+    double t = (double)(long long)d;
+    if (t < d) t += 1.0;
+    return _d2l(t);
+}
+
+/// Round[f]() -- round(x) to nearest, ties away from zero
+int64_t taida_float_round(int64_t a) {
+    double d = _to_double(a);
+    // round half away from zero
+    double t;
+    if (d >= 0.0) {
+        t = (double)(long long)(d + 0.5);
+    } else {
+        t = (double)(long long)(d - 0.5);
+    }
+    return _d2l(t);
+}
+
+/// Abs[f]() -- absolute value of float
+int64_t taida_float_abs(int64_t a) {
+    double d = _to_double(a);
+    return _d2l(d < 0.0 ? -d : d);
+}
+
+/// Clamp[f, lo, hi]() -- clamp float to range [lo, hi]
+int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi) {
+    double da = _to_double(a);
+    double dlo = _to_double(lo);
+    double dhi = _to_double(hi);
+    if (da < dlo) return lo;
+    if (da > dhi) return hi;
+    return a;
+}
+
+// --- Manual float-to-string helper for ToFixed ---
+
+/// Write the integer part of |val| into buf, return number of chars written.
+static int _wf_write_uint64(char *buf, uint64_t val) {
+    if (val == 0) { buf[0] = '0'; return 1; }
+    char tmp[20];
+    int n = 0;
+    while (val > 0) {
+        tmp[n++] = '0' + (int)(val % 10);
+        val /= 10;
+    }
+    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
+    return n;
+}
+
+/// ToFixed[f, digits]() -- format float to string with N decimal places
+int64_t taida_float_to_fixed(int64_t a, int64_t digits_raw) {
+    double d = _to_double(a);
+    int digits = (int)digits_raw;
+    if (digits < 0) digits = 0;
+    if (digits > 20) digits = 20;
+
+    // Handle NaN
+    // NaN: d != d
+    if (d != d) {
+        char *r = (char *)wasm_alloc(4);
+        r[0] = 'N'; r[1] = 'a'; r[2] = 'N'; r[3] = '\0';
+        return (int64_t)r;
+    }
+
+    int negative = 0;
+    if (d < 0.0) { negative = 1; d = -d; }
+
+    // Check infinity: d > 1e18 && d == d * 2 (heuristic)
+    // Actually: infinity is when d * 0.0 != 0.0
+    double zero_test = d * 0.0;
+    if (zero_test != 0.0 || (d > 0.0 && d == d + d)) {
+        // infinity
+        if (negative) {
+            char *r = (char *)wasm_alloc(5);
+            r[0] = '-'; r[1] = 'i'; r[2] = 'n'; r[3] = 'f'; r[4] = '\0';
+            return (int64_t)r;
+        } else {
+            char *r = (char *)wasm_alloc(4);
+            r[0] = 'i'; r[1] = 'n'; r[2] = 'f'; r[3] = '\0';
+            return (int64_t)r;
+        }
+    }
+
+    // Round to `digits` decimal places
+    double multiplier = 1.0;
+    for (int i = 0; i < digits; i++) multiplier *= 10.0;
+    double rounded = d * multiplier;
+    // Round half away from zero
+    rounded = (double)(long long)(rounded + 0.5);
+    // Now convert integer part and fractional part
+    uint64_t total = (uint64_t)rounded;
+    uint64_t int_part = total;
+    uint64_t frac_part = 0;
+    if (digits > 0) {
+        uint64_t divisor = (uint64_t)multiplier;
+        int_part = total / divisor;
+        frac_part = total % divisor;
+    }
+
+    char buf[80];
+    int pos = 0;
+    if (negative) buf[pos++] = '-';
+    pos += _wf_write_uint64(buf + pos, int_part);
+    if (digits > 0) {
+        buf[pos++] = '.';
+        // Write frac_part with leading zeros
+        for (int i = digits - 1; i >= 0; i--) {
+            uint64_t p = 1;
+            for (int j = 0; j < i; j++) p *= 10;
+            int digit = (int)((frac_part / p) % 10);
+            buf[pos++] = '0' + digit;
+        }
+    }
+    buf[pos] = '\0';
+
+    char *r = (char *)wasm_alloc((unsigned int)(pos + 1));
+    _wf_memcpy(r, buf, pos + 1);
+    return (int64_t)r;
+}
+
+// ── Float state check methods ────────────────────────────
+
+/// isNaN -- NaN != NaN
+int64_t taida_float_is_nan(int64_t a) {
+    double d = _to_double(a);
+    return d != d ? 1 : 0;
+}
+
+/// isInfinite -- d * 0 != 0 and not NaN
+int64_t taida_float_is_infinite(int64_t a) {
+    double d = _to_double(a);
+    if (d != d) return 0;  // NaN is not infinite
+    double z = d * 0.0;
+    return z != 0.0 ? 1 : 0;
+}
+
+/// isFinite -- not NaN and not infinite
+int64_t taida_float_is_finite_check(int64_t a) {
+    double d = _to_double(a);
+    if (d != d) return 0;  // NaN
+    double z = d * 0.0;
+    if (z != 0.0) return 0;  // infinity
+    return 1;
+}
+
+int64_t taida_float_is_positive(int64_t a) {
+    double d = _to_double(a);
+    return d > 0.0 ? 1 : 0;
+}
+
+int64_t taida_float_is_negative(int64_t a) {
+    double d = _to_double(a);
+    return d < 0.0 ? 1 : 0;
+}
+
+int64_t taida_float_is_zero(int64_t a) {
+    double d = _to_double(a);
+    return d == 0.0 ? 1 : 0;
+}
+
+// ── Int methods ──────────────────────────────────────────
+
+int64_t taida_int_clamp(int64_t a, int64_t lo, int64_t hi) {
+    if (a < lo) return lo;
+    if (a > hi) return hi;
+    return a;
+}
+
+int64_t taida_int_is_positive(int64_t a) { return a > 0 ? 1 : 0; }
+int64_t taida_int_is_negative(int64_t a) { return a < 0 ? 1 : 0; }
+int64_t taida_int_is_zero(int64_t a) { return a == 0 ? 1 : 0; }
+
+// ── Int mold auto / str_base ─────────────────────────────
+
+/// digit_to_char -- 0-9 -> '0'-'9', 10-35 -> 'a'-'z'
+static int64_t _wf_digit_to_char(int64_t digit) {
+    return (digit < 10) ? ('0' + digit) : ('a' + (digit - 10));
+}
+
+/// char_to_digit -- '0'-'9' -> 0-9, 'a'-'z' -> 10-35, 'A'-'Z' -> 10-35, else -1
+static int _wf_char_to_digit(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+/// Int[v]() auto-detect: tries to distinguish int, string, other
+int64_t taida_int_mold_auto(int64_t v) {
+    // Simple heuristic: if v looks like a small int, return it
+    // If v is 0, return Lax(0, 0)
+    if (v == 0) return taida_lax_new(0, 0);
+    if (v < 0 || v < 4096) return taida_lax_new(v, 0);
+
+    // Try to read as string
+    const char *s = (const char *)(intptr_t)v;
+    // Safety: check first byte is printable ASCII
+    // In WASM linear memory, all valid pointers are readable
+    char c = s[0];
+    if (c == '-' || c == '+' || (c >= '0' && c <= '9')) {
+        // Try parsing as integer string
+        int neg = 0;
+        int i = 0;
+        if (c == '-') { neg = 1; i = 1; }
+        else if (c == '+') { i = 1; }
+        int64_t acc = 0;
+        int found_digit = 0;
+        while (s[i] >= '0' && s[i] <= '9') {
+            acc = acc * 10 + (s[i] - '0');
+            found_digit = 1;
+            i++;
+        }
+        if (found_digit && s[i] == '\0') {
+            return taida_lax_new(neg ? -acc : acc, 0);
+        }
+    }
+
+    // Otherwise treat as raw int value
+    return taida_lax_new(v, 0);
+}
+
+/// Int[str, base]() -- parse string in given base
+int64_t taida_int_mold_str_base(int64_t v, int64_t base) {
+    if (base < 2 || base > 36) return taida_lax_empty(0);
+    const char *s = (const char *)(intptr_t)v;
+    if (!s || s[0] == '\0') return taida_lax_empty(0);
+    int len = _wf_strlen(s);
+
+    int negative = 0;
+    int i = 0;
+    if (s[0] == '-') {
+        negative = 1;
+        i = 1;
+        if (len == 1) return taida_lax_empty(0);
+    }
+
+    uint64_t acc = 0;
+    for (; i < len; i++) {
+        int d = _wf_char_to_digit((unsigned char)s[i]);
+        if (d < 0 || d >= (int)base) return taida_lax_empty(0);
+        acc = acc * (uint64_t)base + (uint64_t)d;
+    }
+
+    int64_t out;
+    if (negative) {
+        out = -(int64_t)acc;
+    } else {
+        out = (int64_t)acc;
+    }
+    return taida_lax_new(out, 0);
+}
+
+// ── to_radix ─────────────────────────────────────────────
+
+int64_t taida_digit_to_char(int64_t digit) {
+    return _wf_digit_to_char(digit);
+}
+
+int64_t taida_char_to_digit_fn(int64_t v) {
+    return _wf_char_to_digit((int)v);
+}
+
+/// ToRadix[value, base]() -- convert int to string in given base
+int64_t taida_to_radix(int64_t value, int64_t base) {
+    if (base < 2 || base > 36) return taida_lax_empty((int64_t)"");
+    if (value == 0) {
+        char *out = (char *)wasm_alloc(2);
+        out[0] = '0';
+        out[1] = '\0';
+        return taida_lax_new((int64_t)out, (int64_t)"");
+    }
+
+    uint64_t mag = value < 0
+        ? (uint64_t)(-(value + 1)) + 1
+        : (uint64_t)value;
+    char tmp[70];
+    int pos = 0;
+    while (mag > 0) {
+        uint64_t rem = mag % (uint64_t)base;
+        tmp[pos++] = (char)_wf_digit_to_char((int64_t)rem);
+        mag /= (uint64_t)base;
+    }
+    if (value < 0) tmp[pos++] = '-';
+
+    char *out = (char *)wasm_alloc((unsigned int)(pos + 1));
+    for (int i = 0; i < pos; i++) {
+        out[i] = tmp[pos - 1 - i];
+    }
+    out[pos] = '\0';
+    return taida_lax_new((int64_t)out, (int64_t)"");
 }
