@@ -372,6 +372,57 @@ fn wasm_full_list_map_parity() {
     );
 }
 
+/// Test: wasm-full compiles and runs compile_hashmap_set.td with native-parity output.
+#[test]
+fn wasm_full_hashmap_set_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full hashmap_set parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_hashmap_set.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_hashmap_set.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full hashmap_set should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full hashmap_set output should match native/interpreter output"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Non-regression tests
 // ---------------------------------------------------------------------------

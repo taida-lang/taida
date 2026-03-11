@@ -1415,3 +1415,409 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
 
 void taida_list_elem_retain(int64_t list) { (void)list; }
 void taida_list_elem_release(int64_t list) { (void)list; }
+
+// ---------------------------------------------------------------------------
+// WF-2e: HashMap/Set extensions
+// ---------------------------------------------------------------------------
+
+// WASM HashMap layout: [capacity, length, value_type_tag, type_marker, entries...]
+// Entry stride = 3: [key_hash, key_ptr, value]
+// Header = 4 slots (matching WASM_HM_HEADER)
+#define WF_HM_HEADER 4
+#define WF_HM_MARKER_VAL 0x484D4150LL  // must match WASM_HM_MARKER_VAL in core
+
+// WASM Set marker: slot[3] value
+#define WF_SET_MARKER_VAL 0x53455421LL  // must match WASM_SET_MARKER_VAL in core
+
+/// Helper: check if a pointer is a WASM hashmap (heuristic)
+static int _wf_is_hashmap(int64_t ptr) {
+    if (ptr == 0 || ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    // HashMap: type_marker at slot[3] == WF_HM_MARKER_VAL
+    return data[3] == WF_HM_MARKER_VAL;
+}
+
+/// Helper: check if a pointer is a WASM set (heuristic)
+static int _wf_is_set(int64_t ptr) {
+    if (ptr == 0 || ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    return data[3] == WF_SET_MARKER_VAL;
+}
+
+/// Helper: WASM Lax detection (pack with fc=4, hash0=HASH_HAS_VALUE)
+#define WF_HASH_HAS_VALUE   0x9e9c6dc733414d60LL
+#define WF_HASH___VALUE     0x0a7fc9f13472bbe0LL
+#define WF_HASH_THROW       0x5a5fe3720c9584cfLL
+
+static int _wf_is_valid_ptr(int64_t val, unsigned int min_bytes) {
+    if (val <= 0 || val > 0xFFFFFFFF) return 0;
+    unsigned int pages = __builtin_wasm_memory_size(0);
+    unsigned int mem_size = pages * 65536;
+    unsigned int addr = (unsigned int)val;
+    if (addr + min_bytes > mem_size) return 0;
+    return 1;
+}
+
+static int _wf_is_lax(int64_t val) {
+    if (!_wf_is_valid_ptr(val, 104)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if (p[0] == 4 && p[1] == WF_HASH_HAS_VALUE) return 1;
+    return 0;
+}
+
+static int _wf_is_result(int64_t val) {
+    if (!_wf_is_valid_ptr(val, 104)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if (p[0] == 4 && p[1] == WF_HASH___VALUE) {
+        int64_t hash2 = p[1 + 2 * 3]; // field 2 hash
+        if (hash2 == WF_HASH_THROW) return 1;
+    }
+    return 0;
+}
+
+// Forward declare from core for polymorphic functions
+extern int64_t taida_result_is_ok(int64_t result);
+extern int64_t taida_result_is_error(int64_t result);
+extern int64_t taida_can_throw_payload(int64_t val);
+
+/// HashMap.length() / HashMap.size() -- return number of entries
+int64_t taida_hashmap_length(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t count = 0;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WF_HM_HEADER + i * 3];
+        int64_t kp = hm[WF_HM_HEADER + i * 3 + 1];
+        if (kh != 0 || kp != 0) {
+            // Not empty and not tombstone (tombstone: hash=1, key=0)
+            if (!(kh == 1 && kp == 0)) count++;
+        }
+    }
+    return count;
+}
+
+/// HashMap.clone() -- deep clone a hashmap
+int64_t taida_hashmap_clone(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t total_slots = WF_HM_HEADER + cap * 3;
+    int64_t *new_hm = (int64_t *)wasm_alloc((unsigned int)(total_slots * 8));
+    for (int64_t i = 0; i < total_slots; i++) {
+        new_hm[i] = hm[i];
+    }
+    return (int64_t)(intptr_t)new_hm;
+}
+
+/// HashMap.toString() -- "HashMap({key: value, ...})"
+int64_t taida_hashmap_to_string(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+
+    // Build "HashMap({...})"
+    // First pass: collect key-value pairs
+    int total_len = 10; // "HashMap({" + "})"
+    int entry_count = 0;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WF_HM_HEADER + i * 3];
+        int64_t kp = hm[WF_HM_HEADER + i * 3 + 1];
+        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
+            entry_count++;
+        }
+    }
+
+    if (entry_count == 0) {
+        char *r = (char *)wasm_alloc(13);
+        _wf_memcpy(r, "HashMap({})", 12);
+        r[11] = '\0';
+        return (int64_t)r;
+    }
+
+    // Collect pairs as strings
+    int buf_size = 256;
+    char *buf = (char *)wasm_alloc((unsigned int)buf_size);
+    _wf_memcpy(buf, "HashMap({", 9);
+    int pos = 9;
+    int first = 1;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WF_HM_HEADER + i * 3];
+        int64_t kp = hm[WF_HM_HEADER + i * 3 + 1];
+        int64_t val = hm[WF_HM_HEADER + i * 3 + 2];
+        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
+            if (!first) { buf[pos++] = ','; buf[pos++] = ' '; }
+            first = 0;
+            // Key string
+            const char *ks = (const char *)(intptr_t)taida_polymorphic_to_string(kp);
+            int kl = _wf_strlen(ks);
+            // Value string
+            const char *vs = (const char *)(intptr_t)taida_polymorphic_to_string(val);
+            int vl = _wf_strlen(vs);
+            // Ensure buf is large enough
+            while (pos + kl + vl + 10 > buf_size) {
+                buf_size *= 2;
+                char *new_buf = (char *)wasm_alloc((unsigned int)buf_size);
+                _wf_memcpy(new_buf, buf, pos);
+                buf = new_buf;
+            }
+            _wf_memcpy(buf + pos, ks, kl); pos += kl;
+            buf[pos++] = ':'; buf[pos++] = ' ';
+            _wf_memcpy(buf + pos, vs, vl); pos += vl;
+        }
+    }
+    buf[pos++] = '}'; buf[pos++] = ')';
+    buf[pos] = '\0';
+    return (int64_t)buf;
+}
+
+/// HashMap.remove(key) -> new HashMap without that key (immutable)
+int64_t taida_hashmap_remove_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
+    // Clone and then remove in place
+    int64_t clone = taida_hashmap_clone(hm_ptr);
+    int64_t *hm = (int64_t *)(intptr_t)clone;
+    int64_t cap = hm[0];
+    // Find the key and tombstone it
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WF_HM_HEADER + i * 3];
+        int64_t kp = hm[WF_HM_HEADER + i * 3 + 1];
+        if (kh == key_hash && kp != 0) {
+            // Compare key strings
+            if (taida_str_eq(kp, key_ptr)) {
+                // Tombstone: hash=1, key=0
+                hm[WF_HM_HEADER + i * 3] = 1;
+                hm[WF_HM_HEADER + i * 3 + 1] = 0;
+                hm[WF_HM_HEADER + i * 3 + 2] = 0;
+                break;
+            }
+        }
+    }
+    return clone;
+}
+
+/// HashMap with initial capacity
+int64_t taida_hashmap_new_with_cap(int64_t cap) {
+    if (cap < 8) cap = 8;
+    int64_t total_slots = WF_HM_HEADER + cap * 3;
+    int64_t *hm = (int64_t *)wasm_alloc((unsigned int)(total_slots * 8));
+    for (int64_t i = 0; i < total_slots; i++) hm[i] = 0;
+    hm[0] = cap;
+    hm[1] = 0; // length
+    hm[2] = -1; // value_type_tag
+    hm[3] = WF_HM_MARKER_VAL;
+    return (int64_t)(intptr_t)hm;
+}
+
+/// HashMap internal helpers (needed for some code paths)
+int64_t taida_hashmap_adjust_hash(int64_t h) {
+    // Ensure hash is never 0 or 1 (reserved for empty/tombstone)
+    if (h == 0 || h == 1) return h + 2;
+    return h;
+}
+
+int64_t taida_hashmap_set_internal(int64_t hm, int64_t kh, int64_t kp, int64_t v, int64_t mode) {
+    // Delegate to taida_hashmap_set (mode is unused in simplified version)
+    (void)mode;
+    return taida_hashmap_set(hm, kh, kp, v);
+}
+
+int64_t taida_hashmap_resize(int64_t hm_ptr, int64_t new_cap) {
+    int64_t *old = (int64_t *)(intptr_t)hm_ptr;
+    int64_t old_cap = old[0];
+    int64_t new_hm = taida_hashmap_new_with_cap(new_cap);
+    // Re-insert all entries
+    for (int64_t i = 0; i < old_cap; i++) {
+        int64_t kh = old[WF_HM_HEADER + i * 3];
+        int64_t kp = old[WF_HM_HEADER + i * 3 + 1];
+        int64_t val = old[WF_HM_HEADER + i * 3 + 2];
+        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
+            new_hm = taida_hashmap_set(new_hm, kh, kp, val);
+        }
+    }
+    return new_hm;
+}
+
+int64_t taida_hashmap_key_eq(int64_t a, int64_t b) { return taida_str_eq(a, b); }
+int64_t taida_hashmap_key_retain(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_key_release(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_val_retain(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_val_release(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_key_valid(int64_t v) { return v != 0 ? 1 : 0; }
+
+// --- Set extensions ---
+
+int64_t taida_set_contains(int64_t set_ptr, int64_t item) {
+    return taida_set_has(set_ptr, item);
+}
+
+int64_t taida_set_is_empty(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    return list[1] == 0 ? 1 : 0;
+}
+
+int64_t taida_set_size(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    return list[1];
+}
+
+int64_t taida_set_to_string(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    if (len == 0) {
+        char *r = (char *)wasm_alloc(8);
+        _wf_memcpy(r, "Set({})", 8);
+        return (int64_t)r;
+    }
+    // Build "Set({elem, elem, ...})"
+    int buf_size = 128;
+    char *buf = (char *)wasm_alloc((unsigned int)buf_size);
+    _wf_memcpy(buf, "Set({", 5);
+    int pos = 5;
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
+        const char *vs = (const char *)(intptr_t)taida_polymorphic_to_string(list[WF_LIST_ELEMS + i]);
+        int vl = _wf_strlen(vs);
+        while (pos + vl + 10 > buf_size) {
+            buf_size *= 2;
+            char *new_buf = (char *)wasm_alloc((unsigned int)buf_size);
+            _wf_memcpy(new_buf, buf, pos);
+            buf = new_buf;
+        }
+        _wf_memcpy(buf + pos, vs, vl); pos += vl;
+    }
+    buf[pos++] = '}'; buf[pos++] = ')';
+    buf[pos] = '\0';
+    return (int64_t)buf;
+}
+
+// ---------------------------------------------------------------------------
+// WF-2f (partial): Polymorphic / type detection functions needed by WF-2e
+// ---------------------------------------------------------------------------
+
+/// Lax.getOrDefault(fallback)
+static int64_t _wf_lax_get_or_default(int64_t lax_ptr, int64_t fallback) {
+    if (taida_pack_get_idx(lax_ptr, 0)) {
+        return taida_pack_get_idx(lax_ptr, 1); // __value
+    }
+    return fallback;
+}
+
+/// Result.getOrDefault(fallback) -- using result_is_error from core
+static int64_t _wf_result_get_or_default(int64_t result, int64_t def) {
+    if (taida_result_is_ok(result)) {
+        return taida_pack_get_idx(result, 0); // __value
+    }
+    return def;
+}
+
+/// Polymorphic .getOrDefault(fallback) -- works on Result, Lax, raw values
+int64_t taida_polymorphic_get_or_default(int64_t obj, int64_t def) {
+    if (obj == 0) return def;
+    // Small ints: in WASM, these are raw values (not pointers to Lax/Result)
+    // But they could be valid int values (e.g. 14 from HashMap.get("age"))
+    // so for small ints, return obj (they are the value itself)
+    if (obj > 0 && obj < 4096) return obj;
+    if (obj < 0) return obj; // negative ints are valid values
+    if (_wf_is_result(obj)) return _wf_result_get_or_default(obj, def);
+    if (_wf_is_lax(obj)) return _wf_lax_get_or_default(obj, def);
+    // In WASM, hashmap_get returns raw values (not Lax-wrapped).
+    // If we reach here, obj is a valid non-zero pointer (e.g. string from hashmap).
+    // Return it as-is since it's the actual value.
+    return obj;
+}
+
+/// Polymorphic .hasValue()
+int64_t taida_polymorphic_has_value(int64_t obj) {
+    if (obj == 0 || obj < 4096) return 0;
+    if (_wf_is_lax(obj)) return taida_pack_get_idx(obj, 0);
+    return 0;
+}
+
+/// Polymorphic .contains()
+int64_t taida_polymorphic_contains(int64_t obj, int64_t needle) {
+    if (obj == 0 || obj < 4096) return 0;
+    if (_wf_is_hashmap(obj)) return taida_hashmap_has(obj, taida_value_hash(needle), needle);
+    if (_wf_is_set(obj)) return taida_set_has(obj, needle);
+    if (_wf_looks_like_list(obj)) return taida_list_contains(obj, needle);
+    // String contains
+    return taida_str_contains(obj, needle);
+}
+
+/// Polymorphic .indexOf()
+int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle) {
+    if (obj == 0 || obj < 4096) return -1;
+    if (_wf_looks_like_list(obj)) return taida_list_index_of(obj, needle);
+    return taida_str_index_of(obj, needle);
+}
+
+/// Polymorphic .lastIndexOf()
+int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
+    if (obj == 0 || obj < 4096) return -1;
+    if (_wf_looks_like_list(obj)) return taida_list_last_index_of(obj, needle);
+    return taida_str_last_index_of(obj, needle);
+}
+
+/// Polymorphic .map(fn)
+int64_t taida_polymorphic_map(int64_t obj, int64_t fn_ptr) {
+    if (obj == 0 || obj < 4096) return obj;
+    if (_wf_is_result(obj)) {
+        // Result.map: if success, apply fn to value
+        if (taida_result_is_ok(obj)) {
+            int64_t value = taida_pack_get_idx(obj, 0);
+            int64_t new_val = taida_invoke_callback1(fn_ptr, value);
+            return taida_result_create(new_val, 0, 0);
+        }
+        return obj;
+    }
+    if (_wf_is_lax(obj)) {
+        if (!taida_pack_get_idx(obj, 0)) return obj; // empty lax
+        int64_t value = taida_pack_get_idx(obj, 1);
+        int64_t def = taida_pack_get_idx(obj, 2);
+        int64_t result = taida_invoke_callback1(fn_ptr, value);
+        return taida_lax_new(result, def);
+    }
+    // Default: list.map
+    return taida_list_map(obj, fn_ptr);
+}
+
+/// Monadic field_count (for dispatch)
+int64_t taida_monadic_field_count(int64_t val) {
+    if (val == 0 || val < 4096) return 0;
+    if (_wf_is_result(val)) return 3;
+    if (_wf_is_lax(val)) return 4;
+    return 0;
+}
+
+/// Monadic .flatMap(fn)
+int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr) {
+    if (obj == 0 || obj < 4096) return obj;
+    if (_wf_is_result(obj)) {
+        if (!taida_result_is_ok(obj)) return obj;
+        int64_t value = taida_pack_get_idx(obj, 0);
+        return taida_invoke_callback1(fn_ptr, value);
+    }
+    if (_wf_is_lax(obj)) {
+        if (!taida_pack_get_idx(obj, 0)) return obj;
+        int64_t value = taida_pack_get_idx(obj, 1);
+        return taida_invoke_callback1(fn_ptr, value);
+    }
+    return obj;
+}
+
+/// Monadic .getOrThrow()
+int64_t taida_monadic_get_or_throw(int64_t obj) {
+    if (obj == 0 || obj < 4096) return obj;
+    if (_wf_is_result(obj)) {
+        if (taida_result_is_ok(obj)) return taida_pack_get_idx(obj, 0);
+        int64_t throw_val = taida_pack_get_idx(obj, 2);
+        if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+        int64_t error = taida_make_error(
+            (int64_t)(intptr_t)"ResultError",
+            (int64_t)(intptr_t)"Result predicate failed");
+        return taida_throw(error);
+    }
+    if (_wf_is_lax(obj)) return taida_lax_unmold(obj);
+    return obj;
+}
+
+/// Monadic .toString()
+int64_t taida_monadic_to_string(int64_t obj) {
+    return taida_polymorphic_to_string(obj);
+}
