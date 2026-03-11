@@ -20,6 +20,15 @@ use std::fmt::Write;
 
 use super::ir::*;
 
+/// WASM profile: determines which runtime functions are allowed.
+/// - `Min`: wasm-min baseline (no OS APIs)
+/// - `Wasi`: wasm-wasi (adds env, file read/write, exists)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmProfile {
+    Min,
+    Wasi,
+}
+
 #[derive(Debug)]
 pub struct WasmCEmitError {
     pub message: String,
@@ -176,10 +185,11 @@ fn c_string_literal(s: &str) -> String {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/// Taida IR モジュールを wasm-min 用 C ソースに変換する
+/// Taida IR モジュールを wasm 用 C ソースに変換する
 ///
 /// F-1: 事前に capability validation を実行し、未対応 IR は compile error にする。
-pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
+/// `profile` により許可する runtime 関数セットが変わる。
+pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, WasmCEmitError> {
     // F-1: capability validation (prevents silent miscompile)
     validate_wasm_min_capabilities(ir_module)?;
 
@@ -212,7 +222,7 @@ pub fn emit_c(ir_module: &IrModule) -> Result<String, WasmCEmitError> {
     }
 
     for name in &needed_funcs {
-        writeln!(c, "{}", runtime_func_prototype(name)?).unwrap();
+        writeln!(c, "{}", runtime_func_prototype(name, profile)?).unwrap();
     }
     if !needed_funcs.is_empty() {
         writeln!(c).unwrap();
@@ -303,7 +313,7 @@ fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
 ///
 /// wasm-min runtime では全値を int64_t (boxed value) として統一する。
 /// 文字列ポインタも int64_t にキャストして渡す。runtime 側で適切にキャストする。
-fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
+fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, WasmCEmitError> {
     let proto = match name {
         // I/O
         "taida_io_stdout" | "taida_io_stderr" => {
@@ -492,13 +502,43 @@ fn runtime_func_prototype(name: &str) -> Result<String, WasmCEmitError> {
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
         }
-        other => {
-            // F-1: unsupported runtime functions are compile errors, not silent stubs
+        // WW-2: wasm-wasi OS API functions (env, file I/O)
+        "taida_os_env_var" if profile == WasmProfile::Wasi => {
+            "int64_t taida_os_env_var(int64_t name_ptr);".to_string()
+        }
+        "taida_os_all_env" if profile == WasmProfile::Wasi => {
+            "int64_t taida_os_all_env(void);".to_string()
+        }
+        "taida_os_read" if profile == WasmProfile::Wasi => {
+            "int64_t taida_os_read(int64_t path_ptr);".to_string()
+        }
+        "taida_os_write_file" if profile == WasmProfile::Wasi => {
+            "int64_t taida_os_write_file(int64_t path_ptr, int64_t content_ptr);".to_string()
+        }
+        "taida_os_exists" if profile == WasmProfile::Wasi => {
+            "int64_t taida_os_exists(int64_t path_ptr);".to_string()
+        }
+        // wasm-wasi unsupported OS APIs: give a specific error message
+        "taida_os_env_var" | "taida_os_all_env" | "taida_os_read"
+        | "taida_os_write_file" | "taida_os_exists" if profile == WasmProfile::Min => {
             return Err(WasmCEmitError {
                 message: format!(
-                    "wasm-min does not support runtime function '{}'. \
+                    "wasm-min does not support OS operations. \
+                     Use wasm-wasi or native backend.",
+                ),
+            });
+        }
+        other => {
+            // F-1: unsupported runtime functions are compile errors, not silent stubs
+            let profile_name = match profile {
+                WasmProfile::Min => "wasm-min",
+                WasmProfile::Wasi => "wasm-wasi",
+            };
+            return Err(WasmCEmitError {
+                message: format!(
+                    "{} does not support runtime function '{}'. \
                      Use the interpreter or native backend instead.",
-                    other
+                    profile_name, other
                 ),
             });
         }

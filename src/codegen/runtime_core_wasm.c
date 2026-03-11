@@ -102,9 +102,12 @@ void *memset(void *dest, int c, unsigned long n) {
    Uses __builtin_wasm_memory_size and __builtin_wasm_memory_grow
    to manage WASM linear memory pages (64KB each). */
 
-static unsigned int bump_ptr = 0;  /* 0 = uninitialized */
+/* WW-2: bump_ptr and wasm_alloc are non-static so runtime_wasi_io.c can
+   share the same allocator. For wasm-min (which doesn't link runtime_wasi_io.c),
+   this change has zero behavioral effect. */
+unsigned int bump_ptr = 0;  /* 0 = uninitialized */
 
-static void *wasm_alloc(unsigned int size) {
+void *wasm_alloc(unsigned int size) {
     /* Align to 8 bytes */
     size = (size + 7) & ~7u;
 
@@ -773,14 +776,16 @@ static const char *_wasm_lookup_field_name(int64_t hash);
 static int64_t _wasm_lookup_field_type(int64_t hash);
 /* W-5f: Monadic type hash constants (FNV-1a hashes of field names).
    Centralized here for use by both display_string and the runtime constructors below. */
-#define WASM_HASH_HAS_VALUE   0x7c9515d6c843d1c0LL
-#define WASM_HASH___VALUE     0x7c9537dfed3ca530LL
-#define WASM_HASH___TYPE      0x7c9537e3ed3caf38LL
-#define WASM_HASH_IS_OK       0x7c9519b57ab70d1eLL
-#define WASM_HASH___ERROR     0x7c950f4ce4f47736LL
-#define WASM_HASH___DEFAULT   0x7c950e1c3b85a1c0LL
-#define WASM_HASH_THROW       0x7c9536adee0f6a14LL
-#define WASM_HASH___PREDICATE 0x7c952b0c14af9d98LL
+/* WFX-2: corrected FNV-1a hashes (previous values were wrong, causing
+   field access mismatch with compiler-generated hashes from simple_hash()) */
+#define WASM_HASH_HAS_VALUE   0x9e9c6dc733414d60LL  /* FNV-1a("hasValue") */
+#define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
+#define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
+#define WASM_HASH_IS_OK       0x6550c1c5b98b56bfLL  /* FNV-1a("isOk") */
+#define WASM_HASH___ERROR     0x15c3e6e41a99a6cbLL  /* FNV-1a("__error") */
+#define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
+#define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 
 /* W-4f2: Dynamic string buffer for building collection toString output */
 typedef struct {
@@ -923,9 +928,9 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
 
 /* W-5f: Detect Lax, Result, Gorillax, RelaxedGorillax by pack structure.
    These all have fc=4 with distinctive first-field hashes:
-   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x7c9515d6c843d1c0)
-   - Gorillax/Relaxed: hash0 = WASM_HASH_IS_OK     (0x7c9519b57ab70d1e)
-   - Result:           hash0 = WASM_HASH___VALUE    (0x7c9537dfed3ca530) */
+   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)
+   - Gorillax/Relaxed: hash0 = WASM_HASH_IS_OK     (0x6550c1c5b98b56bf)
+   - Result:           hash0 = WASM_HASH___VALUE    (0x0a7fc9f13472bbe0) */
 
 /* W-5g: Bounds-check helper for WASM32. On wasm32, intptr_t is 32-bit,
    so int64_t values that are bitcast floats (e.g. _d2l(3.14)) would be
@@ -1921,10 +1926,11 @@ int64_t taida_error_get_value(int64_t depth) {
 
 /* ── W-5: Error object creation ── */
 /* FNV-1a hashes for error BuchiPack fields (same as native_runtime.c) */
-#define WASM_HASH_TYPE      0x7c9537e3ed3caf38LL
-#define WASM_HASH_MESSAGE   0x7c95b116bce72d44LL
-#define WASM_HASH_FIELD     0x7c9512b6ebabfbccLL
-#define WASM_HASH_CODE      0x7c950c66ec05f5caLL
+/* WFX-2: corrected FNV-1a hashes for error fields */
+#define WASM_HASH_TYPE      0xa79439ef7bfa9c2dLL  /* FNV-1a("type") */
+#define WASM_HASH_MESSAGE   0x546401b5d2a8d2a4LL  /* FNV-1a("message") */
+#define WASM_HASH_FIELD     0x2c5d047ff4e6ffc7LL  /* FNV-1a("field") */
+#define WASM_HASH_CODE      0x0bb51791194b4414LL  /* FNV-1a("code") */
 
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
     int64_t pack = taida_pack_new(2);

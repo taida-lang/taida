@@ -506,6 +506,12 @@ fn js_skip_list() -> Vec<&'static str> {
         "helper_val",    // helper module, not standalone
         "transpile_j2",  // transpile-specific test
         "transpile_npm", // transpile-specific test
+        "wasm_wasi_stderr",              // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_env",                 // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_file_io",             // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_exists",              // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_write_failure",       // wasm-wasi specific (requires wasmtime)
+        "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
     ]
 }
 

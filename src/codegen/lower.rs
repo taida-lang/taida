@@ -4334,6 +4334,8 @@ impl Lowering {
                     false
                 }
             }
+            // WFX-3: Exists[path]() returns Bool
+            Expr::MoldInst(name, _, _, _) if name == "Exists" => true,
             Expr::FieldAccess(obj, field, _) => {
                 // QF-34: hasValue フィールドは Lax/Result の Bool フィールド
                 if field == "hasValue" {
