@@ -1892,9 +1892,10 @@ fn run_build_wasm_edge(
         Some(default_wasm_output.as_path())
     };
     match codegen::driver::compile_file_wasm_edge(input_path, output) {
-        Ok(wasm_path) => {
+        Ok(result) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-edge): {}", wasm_path.display());
+                println!("Built (wasm-edge): {}", result.wasm_path.display());
+                println!("  JS glue: {}", result.glue_path.display());
             }
         }
         Err(e) => {
