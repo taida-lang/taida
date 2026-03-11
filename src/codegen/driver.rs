@@ -280,6 +280,46 @@ fn find_clang_for_wasm() -> Result<String, CompileError> {
     })
 }
 
+fn wasm_clang_base_args() -> Vec<String> {
+    let mut args = vec![
+        "--target=wasm32-unknown-wasi".to_string(),
+        "-nostdlib".to_string(),
+        "-O2".to_string(),
+        "-c".to_string(),
+    ];
+
+    // On Debian/Ubuntu Linux runners, clang's wasm32 target may pick up
+    // /usr/include/stdint.h but miss the matching multiarch `bits/` headers.
+    // Add only the Linux multiarch include dir that provides those headers.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(dir) = linux_multiarch_include_dir() {
+            args.push("-isystem".to_string());
+            args.push(dir);
+        }
+    }
+
+    args
+}
+
+#[cfg(target_os = "linux")]
+fn linux_multiarch_include_dir() -> Option<String> {
+    let multiarch = ["cc", "gcc", "clang"].into_iter().find_map(|tool| {
+        let output = Command::new(tool).arg("-print-multiarch").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let triple = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if triple.is_empty() {
+            return None;
+        }
+        Some(triple)
+    })?;
+
+    let dir = format!("/usr/include/{}", multiarch);
+    Path::new(&dir).exists().then_some(dir)
+}
+
 /// .td ファイルを wasm-min ターゲットでコンパイルし .wasm を生成する
 ///
 /// wasm-min は単一ファイルのみ対応（モジュールインポート非対応）。
@@ -364,8 +404,10 @@ pub fn compile_file_wasm(
     let clang = find_clang_for_wasm()?;
 
     // 生成 C をコンパイル
+    let clang_args = wasm_clang_base_args();
+
     let gen_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -388,7 +430,7 @@ pub fn compile_file_wasm(
 
     // runtime をコンパイル
     let rt_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_c_path)
         .arg("-o")
         .arg(&rt_obj_path)
@@ -534,8 +576,10 @@ pub fn compile_file_wasm_wasi(
     let clang = find_clang_for_wasm()?;
 
     // 生成 C をコンパイル
+    let clang_args = wasm_clang_base_args();
+
     let gen_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -557,7 +601,7 @@ pub fn compile_file_wasm_wasi(
 
     // runtime core をコンパイル
     let rt_core_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_core_c_path)
         .arg("-o")
         .arg(&rt_core_obj_path)
@@ -578,7 +622,7 @@ pub fn compile_file_wasm_wasi(
 
     // runtime WASI I/O をコンパイル
     let rt_wasi_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_wasi_c_path)
         .arg("-o")
         .arg(&rt_wasi_obj_path)
@@ -727,8 +771,10 @@ pub fn compile_file_wasm_edge(
     let clang = find_clang_for_wasm()?;
 
     // 生成 C をコンパイル
+    let clang_args = wasm_clang_base_args();
+
     let gen_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -750,7 +796,7 @@ pub fn compile_file_wasm_edge(
 
     // runtime core をコンパイル
     let rt_core_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_core_c_path)
         .arg("-o")
         .arg(&rt_core_obj_path)
@@ -771,7 +817,7 @@ pub fn compile_file_wasm_edge(
 
     // runtime edge host をコンパイル
     let rt_edge_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_edge_c_path)
         .arg("-o")
         .arg(&rt_edge_obj_path)
@@ -938,8 +984,10 @@ pub fn compile_file_wasm_full(
     let clang = find_clang_for_wasm()?;
 
     // 生成 C をコンパイル
+    let clang_args = wasm_clang_base_args();
+
     let gen_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -962,7 +1010,7 @@ pub fn compile_file_wasm_full(
 
     // runtime core をコンパイル
     let rt_core_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_core_c_path)
         .arg("-o")
         .arg(&rt_core_obj_path)
@@ -984,7 +1032,7 @@ pub fn compile_file_wasm_full(
 
     // runtime WASI I/O をコンパイル
     let rt_wasi_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_wasi_c_path)
         .arg("-o")
         .arg(&rt_wasi_obj_path)
@@ -1007,7 +1055,7 @@ pub fn compile_file_wasm_full(
 
     // runtime full をコンパイル
     let rt_full_status = Command::new(&clang)
-        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
+        .args(&clang_args)
         .arg(&rt_full_c_path)
         .arg("-o")
         .arg(&rt_full_obj_path)
