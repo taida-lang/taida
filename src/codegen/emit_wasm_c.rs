@@ -14,7 +14,6 @@
 /// - FuncAddr, MakeClosure, CallIndirect (W-5)
 ///
 /// 未対応 IR は silent miscompile ではなく compile error を返す。
-
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -209,15 +208,31 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     // The generated C code calls the macro-redirected name; the override lives in
     // runtime_full_wasm.c alongside the other wasm-full extensions.
     if profile == WasmProfile::Full {
-        writeln!(c, "#define taida_polymorphic_is_empty taida_polymorphic_is_empty_full").unwrap();
+        writeln!(
+            c,
+            "#define taida_polymorphic_is_empty taida_polymorphic_is_empty_full"
+        )
+        .unwrap();
         writeln!(c, "#define taida_collection_get taida_collection_get_full").unwrap();
         // WF-3a: redirect field registration to full's shadow registry (for JSON lookup)
-        writeln!(c, "#define taida_register_field_name taida_register_field_name_full").unwrap();
-        writeln!(c, "#define taida_register_field_type taida_register_field_type_full").unwrap();
+        writeln!(
+            c,
+            "#define taida_register_field_name taida_register_field_name_full"
+        )
+        .unwrap();
+        writeln!(
+            c,
+            "#define taida_register_field_type taida_register_field_type_full"
+        )
+        .unwrap();
         // WF-3 fix: redirect polymorphic_to_string to full's version that properly handles
         // Gorillax/RelaxedGorillax type detection (core's version has > 4096 address threshold
         // that fails for data section strings at low addresses in wasm-full)
-        writeln!(c, "#define taida_polymorphic_to_string taida_polymorphic_to_string_full").unwrap();
+        writeln!(
+            c,
+            "#define taida_polymorphic_to_string taida_polymorphic_to_string_full"
+        )
+        .unwrap();
         // WF-3 fix: core's int_mold_str returns raw value, full needs Lax wrapper
         writeln!(c, "#define taida_int_mold_str taida_int_mold_str_full").unwrap();
     }
@@ -342,13 +357,16 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t val);", name)
         }
         // Debug 出力 (W-3: taida_debug_float 追加, W-6: taida_debug_polymorphic 追加)
-        "taida_debug_int" | "taida_debug_str" | "taida_debug_bool"
-        | "taida_debug_float" | "taida_debug_polymorphic" => {
+        "taida_debug_int"
+        | "taida_debug_str"
+        | "taida_debug_bool"
+        | "taida_debug_float"
+        | "taida_debug_polymorphic" => {
             format!("int64_t {}(int64_t val);", name)
         }
         // 整数演算 (2引数)
-        "taida_int_add" | "taida_int_sub" | "taida_int_mul" | "taida_int_eq"
-        | "taida_int_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => {
+        "taida_int_add" | "taida_int_sub" | "taida_int_mul" | "taida_int_eq" | "taida_int_neq"
+        | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
         // 整数演算 (1引数)
@@ -376,7 +394,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_int_lte" => "int64_t taida_int_lte(int64_t a, int64_t b);".to_string(),
         // W-3f: Polymorphic methods (wasm-min simplified versions)
         "taida_polymorphic_length" => "int64_t taida_polymorphic_length(int64_t ptr);".to_string(),
-        "taida_polymorphic_to_string" => "int64_t taida_polymorphic_to_string(int64_t obj);".to_string(),
+        "taida_polymorphic_to_string" => {
+            "int64_t taida_polymorphic_to_string(int64_t obj);".to_string()
+        }
         // W-3f: Int mold from string
         "taida_int_mold_str" => "int64_t taida_int_mold_str(int64_t v);".to_string(),
         // ブール演算
@@ -394,16 +414,34 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
         // W-4: Field registry (no-op in wasm-min, used for display in native)
-        "taida_register_field_name" => "int64_t taida_register_field_name(int64_t hash, int64_t name_ptr);".to_string(),
-        "taida_register_field_type" => "int64_t taida_register_field_type(int64_t hash, int64_t name_ptr, int64_t type_tag);".to_string(),
+        "taida_register_field_name" => {
+            "int64_t taida_register_field_name(int64_t hash, int64_t name_ptr);".to_string()
+        }
+        "taida_register_field_type" => {
+            "int64_t taida_register_field_type(int64_t hash, int64_t name_ptr, int64_t type_tag);"
+                .to_string()
+        }
         // W-4: BuchiPack runtime functions
         "taida_pack_new" => "int64_t taida_pack_new(int64_t field_count);".to_string(),
-        "taida_pack_set" => "int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);".to_string(),
-        "taida_pack_set_tag" => "int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);".to_string(),
-        "taida_pack_get_idx" => "int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);".to_string(),
-        "taida_pack_set_hash" => "int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash);".to_string(),
-        "taida_pack_get" => "int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);".to_string(),
-        "taida_pack_has_hash" => "int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);".to_string(),
+        "taida_pack_set" => {
+            "int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);".to_string()
+        }
+        "taida_pack_set_tag" => {
+            "int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);".to_string()
+        }
+        "taida_pack_get_idx" => {
+            "int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);".to_string()
+        }
+        "taida_pack_set_hash" => {
+            "int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash);"
+                .to_string()
+        }
+        "taida_pack_get" => {
+            "int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);".to_string()
+        }
+        "taida_pack_has_hash" => {
+            "int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);".to_string()
+        }
         // W-4: List runtime functions
         "taida_list_new" => "int64_t taida_list_new(void);".to_string(),
         "taida_list_push" => "int64_t taida_list_push(int64_t list_ptr, int64_t item);".to_string(),
@@ -415,12 +453,23 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // W-4: HashMap runtime functions
         "taida_hashmap_new" => "int64_t taida_hashmap_new(void);".to_string(),
-        "taida_hashmap_set" => "int64_t taida_hashmap_set(int64_t hm, int64_t kh, int64_t kp, int64_t v);".to_string(),
-        "taida_hashmap_set_immut" => "int64_t taida_hashmap_set_immut(int64_t hm, int64_t kh, int64_t kp, int64_t v);".to_string(),
-        "taida_hashmap_get" => "int64_t taida_hashmap_get(int64_t hm, int64_t kh, int64_t kp);".to_string(),
-        "taida_hashmap_has" => "int64_t taida_hashmap_has(int64_t hm, int64_t kh, int64_t kp);".to_string(),
+        "taida_hashmap_set" => {
+            "int64_t taida_hashmap_set(int64_t hm, int64_t kh, int64_t kp, int64_t v);".to_string()
+        }
+        "taida_hashmap_set_immut" => {
+            "int64_t taida_hashmap_set_immut(int64_t hm, int64_t kh, int64_t kp, int64_t v);"
+                .to_string()
+        }
+        "taida_hashmap_get" => {
+            "int64_t taida_hashmap_get(int64_t hm, int64_t kh, int64_t kp);".to_string()
+        }
+        "taida_hashmap_has" => {
+            "int64_t taida_hashmap_has(int64_t hm, int64_t kh, int64_t kp);".to_string()
+        }
         "taida_hashmap_is_empty" => "int64_t taida_hashmap_is_empty(int64_t hm);".to_string(),
-        "taida_hashmap_get_lax" => "int64_t taida_hashmap_get_lax(int64_t hm, int64_t kh, int64_t kp);".to_string(),
+        "taida_hashmap_get_lax" => {
+            "int64_t taida_hashmap_get_lax(int64_t hm, int64_t kh, int64_t kp);".to_string()
+        }
         "taida_hashmap_set_value_tag" => {
             "void taida_hashmap_set_value_tag(int64_t hm, int64_t tag);".to_string()
         }
@@ -434,14 +483,24 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // W-4f: Set operations (union/intersect/diff/toList/remove)
         "taida_set_union" => "int64_t taida_set_union(int64_t set_a, int64_t set_b);".to_string(),
-        "taida_set_intersect" => "int64_t taida_set_intersect(int64_t set_a, int64_t set_b);".to_string(),
+        "taida_set_intersect" => {
+            "int64_t taida_set_intersect(int64_t set_a, int64_t set_b);".to_string()
+        }
         "taida_set_diff" => "int64_t taida_set_diff(int64_t set_a, int64_t set_b);".to_string(),
         "taida_set_to_list" => "int64_t taida_set_to_list(int64_t set_ptr);".to_string(),
-        "taida_set_remove" => "int64_t taida_set_remove(int64_t set_ptr, int64_t item);".to_string(),
+        "taida_set_remove" => {
+            "int64_t taida_set_remove(int64_t set_ptr, int64_t item);".to_string()
+        }
         // W-4f: Polymorphic collection methods
-        "taida_collection_get" => "int64_t taida_collection_get(int64_t ptr, int64_t item);".to_string(),
-        "taida_collection_has" => "int64_t taida_collection_has(int64_t ptr, int64_t item);".to_string(),
-        "taida_collection_remove" => "int64_t taida_collection_remove(int64_t ptr, int64_t item);".to_string(),
+        "taida_collection_get" => {
+            "int64_t taida_collection_get(int64_t ptr, int64_t item);".to_string()
+        }
+        "taida_collection_has" => {
+            "int64_t taida_collection_has(int64_t ptr, int64_t item);".to_string()
+        }
+        "taida_collection_remove" => {
+            "int64_t taida_collection_remove(int64_t ptr, int64_t item);".to_string()
+        }
         "taida_collection_size" => "int64_t taida_collection_size(int64_t ptr);".to_string(),
         // W-4f: Value hash (polymorphic key hashing for HashMap/Set)
         "taida_value_hash" => "int64_t taida_value_hash(int64_t val);".to_string(),
@@ -449,28 +508,48 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_hashmap_keys" => "int64_t taida_hashmap_keys(int64_t hm);".to_string(),
         "taida_hashmap_values" => "int64_t taida_hashmap_values(int64_t hm);".to_string(),
         "taida_hashmap_entries" => "int64_t taida_hashmap_entries(int64_t hm);".to_string(),
-        "taida_hashmap_merge" => "int64_t taida_hashmap_merge(int64_t hm, int64_t other);".to_string(),
+        "taida_hashmap_merge" => {
+            "int64_t taida_hashmap_merge(int64_t hm, int64_t other);".to_string()
+        }
         // W-4f: Polymorphic isEmpty
-        "taida_polymorphic_is_empty" => "int64_t taida_polymorphic_is_empty(int64_t ptr);".to_string(),
+        "taida_polymorphic_is_empty" => {
+            "int64_t taida_polymorphic_is_empty(int64_t ptr);".to_string()
+        }
         // W-5: Closure runtime functions
-        "taida_closure_new" => "int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr, int64_t user_arity);".to_string(),
+        "taida_closure_new" => {
+            "int64_t taida_closure_new(int64_t fn_ptr, int64_t env_ptr, int64_t user_arity);"
+                .to_string()
+        }
         "taida_closure_get_fn" => "int64_t taida_closure_get_fn(int64_t closure_ptr);".to_string(),
-        "taida_closure_get_env" => "int64_t taida_closure_get_env(int64_t closure_ptr);".to_string(),
+        "taida_closure_get_env" => {
+            "int64_t taida_closure_get_env(int64_t closure_ptr);".to_string()
+        }
         "taida_is_closure_value" => "int64_t taida_is_closure_value(int64_t val);".to_string(),
         // W-5: Error ceiling runtime functions
         "taida_error_ceiling_push" => "int64_t taida_error_ceiling_push(void);".to_string(),
         "taida_error_ceiling_pop" => "void taida_error_ceiling_pop(void);".to_string(),
         "taida_throw" => "int64_t taida_throw(int64_t error_val);".to_string(),
-        "taida_error_try_call" => "int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);".to_string(),
-        "taida_error_try_get_result" => "int64_t taida_error_try_get_result(int64_t depth);".to_string(),
+        "taida_error_try_call" => {
+            "int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);"
+                .to_string()
+        }
+        "taida_error_try_get_result" => {
+            "int64_t taida_error_try_get_result(int64_t depth);".to_string()
+        }
         "taida_error_get_value" => "int64_t taida_error_get_value(int64_t depth);".to_string(),
         "taida_error_setjmp" => "int64_t taida_error_setjmp(int64_t depth);".to_string(),
-        "taida_make_error" => "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string(),
+        "taida_make_error" => {
+            "int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);".to_string()
+        }
         // W-5: Lax runtime functions
-        "taida_lax_new" => "int64_t taida_lax_new(int64_t value, int64_t default_value);".to_string(),
+        "taida_lax_new" => {
+            "int64_t taida_lax_new(int64_t value, int64_t default_value);".to_string()
+        }
         "taida_lax_empty" => "int64_t taida_lax_empty(int64_t default_value);".to_string(),
         "taida_lax_has_value" => "int64_t taida_lax_has_value(int64_t lax_ptr);".to_string(),
-        "taida_lax_get_or_default" => "int64_t taida_lax_get_or_default(int64_t lax_ptr, int64_t fallback);".to_string(),
+        "taida_lax_get_or_default" => {
+            "int64_t taida_lax_get_or_default(int64_t lax_ptr, int64_t fallback);".to_string()
+        }
         "taida_lax_unmold" => "int64_t taida_lax_unmold(int64_t lax_ptr);".to_string(),
         "taida_lax_is_empty" => "int64_t taida_lax_is_empty(int64_t lax_ptr);".to_string(),
         // W-5: Gorillax/Result runtime functions
@@ -480,17 +559,31 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_gorillax_get_value" => "int64_t taida_gorillax_get_value(int64_t gx);".to_string(),
         "taida_gorillax_get_error" => "int64_t taida_gorillax_get_error(int64_t gx);".to_string(),
         "taida_gorillax_relax" => "int64_t taida_gorillax_relax(int64_t gx);".to_string(),
-        "taida_relaxed_gorillax_new" => "int64_t taida_relaxed_gorillax_new(int64_t value);".to_string(),
-        "taida_relaxed_gorillax_err" => "int64_t taida_relaxed_gorillax_err(int64_t error);".to_string(),
-        "taida_result_create" => "int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);".to_string(),
+        "taida_relaxed_gorillax_new" => {
+            "int64_t taida_relaxed_gorillax_new(int64_t value);".to_string()
+        }
+        "taida_relaxed_gorillax_err" => {
+            "int64_t taida_relaxed_gorillax_err(int64_t error);".to_string()
+        }
+        "taida_result_create" => {
+            "int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);"
+                .to_string()
+        }
         "taida_result_is_ok" => "int64_t taida_result_is_ok(int64_t result);".to_string(),
         "taida_result_is_error" => "int64_t taida_result_is_error(int64_t result);".to_string(),
-        "taida_result_map_error" => "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string(),
-        "taida_cage_apply" => "int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr);".to_string(),
+        "taida_result_map_error" => {
+            "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string()
+        }
+        "taida_cage_apply" => {
+            "int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr);".to_string()
+        }
         // W-5: Error/Molten/Stub helpers
         "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
         "taida_stub_new" => "int64_t taida_stub_new(int64_t message);".to_string(),
-        "taida_todo_new" => "int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm);".to_string(),
+        "taida_todo_new" => {
+            "int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm);"
+                .to_string()
+        }
         // W-5: Type molds that return Lax
         "taida_str_mold_int" => "int64_t taida_str_mold_int(int64_t v);".to_string(),
         "taida_str_mold_float" => "int64_t taida_str_mold_float(int64_t v);".to_string(),
@@ -560,8 +653,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             });
         }
         // wasm-min unsupported OS APIs: give a specific error message
-        "taida_os_env_var" | "taida_os_all_env" | "taida_os_read"
-        | "taida_os_write_file" | "taida_os_exists" if profile == WasmProfile::Min => {
+        "taida_os_env_var"
+        | "taida_os_all_env"
+        | "taida_os_read"
+        | "taida_os_write_file"
+        | "taida_os_exists"
+            if profile == WasmProfile::Min =>
+        {
             return Err(WasmCEmitError {
                 message: format!(
                     "wasm-min does not support OS operations. \
@@ -929,13 +1027,7 @@ fn emit_function(
 
     // パラメータを named variables にコピー（IR は DefVar なしで UseVar("n") を使う）
     for (i, param_name) in func.params.iter().enumerate() {
-        writeln!(
-            c,
-            "    nv_{} = v_{};",
-            sanitize_name(param_name),
-            i
-        )
-        .unwrap();
+        writeln!(c, "    nv_{} = v_{};", sanitize_name(param_name), i).unwrap();
     }
 
     let fctx = FuncContext {
@@ -956,7 +1048,11 @@ fn emit_function(
     }
 
     // デフォルト return（最後の命令が Return でない場合）
-    if !func.body.last().map_or(false, |i| matches!(i, IrInst::Return(_))) {
+    if !func
+        .body
+        .last()
+        .map_or(false, |i| matches!(i, IrInst::Return(_)))
+    {
         writeln!(c, "    return 0;").unwrap();
     }
 
@@ -1033,11 +1129,14 @@ fn emit_inst(
         }
         IrInst::Call(dst, name, args) => {
             // void-returning functions: RC no-ops + tag setters
-            if name == "taida_retain" || name == "taida_release" || name == "taida_str_retain"
+            if name == "taida_retain"
+                || name == "taida_release"
+                || name == "taida_str_retain"
                 || name == "taida_list_set_elem_tag"
                 || name == "taida_hashmap_set_value_tag"
                 || name == "taida_set_set_elem_tag"
-                || name == "taida_error_ceiling_pop" {
+                || name == "taida_error_ceiling_pop"
+            {
                 write!(c, "{}{}(", indent, name).unwrap();
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -1077,13 +1176,7 @@ fn emit_inst(
                         writeln!(c, "{}{{", indent).unwrap();
                     }
                 } else if arm.condition.is_some() {
-                    writeln!(
-                        c,
-                        "{}}} else if (v_{}) {{",
-                        indent,
-                        arm.condition.unwrap()
-                    )
-                    .unwrap();
+                    writeln!(c, "{}}} else if (v_{}) {{", indent, arm.condition.unwrap()).unwrap();
                 } else {
                     writeln!(c, "{}}} else {{", indent).unwrap();
                 }
@@ -1104,56 +1197,123 @@ fn emit_inst(
         }
         // F-4: グローバル変数を名前ベースの C 変数で読み書き
         IrInst::GlobalSet(name_hash, value_var) => {
-            let var_name = fctx.global_map.get(name_hash).expect("global hash not in map");
+            let var_name = fctx
+                .global_map
+                .get(name_hash)
+                .expect("global hash not in map");
             writeln!(c, "{}{} = v_{};", indent, var_name, value_var).unwrap();
         }
         IrInst::GlobalGet(dst, name_hash) => {
-            let var_name = fctx.global_map.get(name_hash).expect("global hash not in map");
+            let var_name = fctx
+                .global_map
+                .get(name_hash)
+                .expect("global hash not in map");
             writeln!(c, "{}v_{} = {};", indent, dst, var_name).unwrap();
         }
         // W-4: BuchiPack operations
         IrInst::PackNew(dst, field_count) => {
-            writeln!(c, "{}v_{} = taida_pack_new({}LL);", indent, dst, field_count).unwrap();
+            writeln!(
+                c,
+                "{}v_{} = taida_pack_new({}LL);",
+                indent, dst, field_count
+            )
+            .unwrap();
         }
         IrInst::PackSet(pack_var, index, value_var) => {
-            writeln!(c, "{}taida_pack_set(v_{}, {}LL, v_{});", indent, pack_var, index, value_var).unwrap();
+            writeln!(
+                c,
+                "{}taida_pack_set(v_{}, {}LL, v_{});",
+                indent, pack_var, index, value_var
+            )
+            .unwrap();
         }
         IrInst::PackSetTag(pack_var, index, tag) => {
-            writeln!(c, "{}taida_pack_set_tag(v_{}, {}LL, {}LL);", indent, pack_var, index, tag).unwrap();
+            writeln!(
+                c,
+                "{}taida_pack_set_tag(v_{}, {}LL, {}LL);",
+                indent, pack_var, index, tag
+            )
+            .unwrap();
         }
         IrInst::PackGet(dst, pack_var, index) => {
-            writeln!(c, "{}v_{} = taida_pack_get_idx(v_{}, {}LL);", indent, dst, pack_var, index).unwrap();
+            writeln!(
+                c,
+                "{}v_{} = taida_pack_get_idx(v_{}, {}LL);",
+                indent, dst, pack_var, index
+            )
+            .unwrap();
         }
         // W-5: FuncAddr — get a function pointer as int64_t
         IrInst::FuncAddr(dst, func_name) => {
-            writeln!(c, "{}v_{} = (int64_t)(intptr_t)&{};", indent, dst, func_name).unwrap();
+            writeln!(
+                c,
+                "{}v_{} = (int64_t)(intptr_t)&{};",
+                indent, dst, func_name
+            )
+            .unwrap();
         }
         // W-5: MakeClosure — create a closure (env pack + function pointer)
         IrInst::MakeClosure(dst, func_name, captures) => {
             // 1. Create environment pack with captured variables
             let env_var = format!("_env_{}", dst);
-            writeln!(c, "{}int64_t {} = taida_pack_new({}LL);", indent, env_var, captures.len()).unwrap();
+            writeln!(
+                c,
+                "{}int64_t {} = taida_pack_new({}LL);",
+                indent,
+                env_var,
+                captures.len()
+            )
+            .unwrap();
             for (i, cap_name) in captures.iter().enumerate() {
                 // Set hash to 0 (not needed for index-based access)
-                writeln!(c, "{}taida_pack_set({}, {}LL, nv_{});", indent, env_var, i, sanitize_name(cap_name)).unwrap();
+                writeln!(
+                    c,
+                    "{}taida_pack_set({}, {}LL, nv_{});",
+                    indent,
+                    env_var,
+                    i,
+                    sanitize_name(cap_name)
+                )
+                .unwrap();
             }
             // 2. Create closure: taida_closure_new(fn_ptr, env_ptr, user_arity)
             // W-5g: user_arity is needed for WASM indirect call type matching
-            let user_arity = fctx.func_user_arity.get(func_name.as_str()).copied().unwrap_or(0);
-            writeln!(c, "{}v_{} = taida_closure_new((int64_t)(intptr_t)&{}, {}, {}LL);", indent, dst, func_name, env_var, user_arity).unwrap();
+            let user_arity = fctx
+                .func_user_arity
+                .get(func_name.as_str())
+                .copied()
+                .unwrap_or(0);
+            writeln!(
+                c,
+                "{}v_{} = taida_closure_new((int64_t)(intptr_t)&{}, {}, {}LL);",
+                indent, dst, func_name, env_var, user_arity
+            )
+            .unwrap();
         }
         // W-5: CallIndirect — indirect function call (closure or plain function pointer)
         IrInst::CallIndirect(dst, fn_var, args) => {
             // Check if it's a closure or a plain function pointer
             writeln!(c, "{}if (taida_is_closure_value(v_{})) {{", indent, fn_var).unwrap();
             // Closure path: extract fn_ptr and env_ptr, call with env as first arg
-            writeln!(c, "{}    int64_t _ci_fn = taida_closure_get_fn(v_{});", indent, fn_var).unwrap();
-            writeln!(c, "{}    int64_t _ci_env = taida_closure_get_env(v_{});", indent, fn_var).unwrap();
+            writeln!(
+                c,
+                "{}    int64_t _ci_fn = taida_closure_get_fn(v_{});",
+                indent, fn_var
+            )
+            .unwrap();
+            writeln!(
+                c,
+                "{}    int64_t _ci_env = taida_closure_get_env(v_{});",
+                indent, fn_var
+            )
+            .unwrap();
             // Build closure call: fn(env, arg0, arg1, ...)
             let closure_argc = args.len() + 1; // env + user args
             write!(c, "{}    v_{} = ((int64_t (*)(", indent, dst).unwrap();
             for i in 0..closure_argc {
-                if i > 0 { write!(c, ", ").unwrap(); }
+                if i > 0 {
+                    write!(c, ", ").unwrap();
+                }
                 write!(c, "int64_t").unwrap();
             }
             write!(c, "))(intptr_t)_ci_fn)(_ci_env").unwrap();
@@ -1165,7 +1325,9 @@ fn emit_inst(
             // Plain function pointer path: call directly
             write!(c, "{}    v_{} = ((int64_t (*)(", indent, dst).unwrap();
             for (i, _) in args.iter().enumerate() {
-                if i > 0 { write!(c, ", ").unwrap(); }
+                if i > 0 {
+                    write!(c, ", ").unwrap();
+                }
                 write!(c, "int64_t").unwrap();
             }
             if args.is_empty() {
@@ -1173,7 +1335,9 @@ fn emit_inst(
             }
             write!(c, "))(intptr_t)v_{})(", fn_var).unwrap();
             for (i, arg) in args.iter().enumerate() {
-                if i > 0 { write!(c, ", ").unwrap(); }
+                if i > 0 {
+                    write!(c, ", ").unwrap();
+                }
                 write!(c, "v_{}", arg).unwrap();
             }
             writeln!(c, ");").unwrap();
@@ -1231,6 +1395,12 @@ fn param_to_var_idx(_name: &str, idx: usize) -> u32 {
 /// 変数名を C 識別子として安全な形に変換
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

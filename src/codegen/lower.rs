@@ -4268,8 +4268,18 @@ impl Lowering {
             // WF-2b: MoldInst string molds (CharAt, Upper, Lower, etc.) return strings
             Expr::MoldInst(name, _, _, _) => matches!(
                 name.as_str(),
-                "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "CharAt"
-                    | "Repeat" | "Reverse" | "Pad" | "Join" | "ToFixed"
+                "Str"
+                    | "Upper"
+                    | "Lower"
+                    | "Trim"
+                    | "Replace"
+                    | "Slice"
+                    | "CharAt"
+                    | "Repeat"
+                    | "Reverse"
+                    | "Pad"
+                    | "Join"
+                    | "ToFixed"
             ),
             Expr::BinaryOp(_, BinOp::Concat, _, _) => true,
             Expr::CondBranch(arms, _) => {

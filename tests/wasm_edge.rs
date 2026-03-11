@@ -54,11 +54,7 @@ fn compile_wasm_edge(td_path: &Path, wasm_path: &Path) -> Option<String> {
     if output.status.success() {
         None // no error
     } else {
-        Some(
-            String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string(),
-        )
+        Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
@@ -197,8 +193,7 @@ fn wasm_edge_env_runtime_requires_host() {
 /// Test: wasm-edge rejects file I/O APIs with clear error message.
 #[test]
 fn wasm_edge_rejects_file_io() {
-    let td_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_wasi_file_io.td");
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_wasi_file_io.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_test_file_reject.wasm");
 
     let err = compile_wasm_edge(&td_path, &wasm_path);
@@ -216,8 +211,8 @@ fn wasm_edge_rejects_file_io() {
 /// Test: wasm-edge rejects process APIs (execShell) with clear error message.
 #[test]
 fn wasm_edge_rejects_process() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_edge/reject_process.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_edge/reject_process.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_test_process_reject.wasm");
 
     let err = compile_wasm_edge(&td_path, &wasm_path);
@@ -235,8 +230,8 @@ fn wasm_edge_rejects_process() {
 /// Test: wasm-edge rejects socket APIs (tcpConnect) with clear error message.
 #[test]
 fn wasm_edge_rejects_socket() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_edge/reject_socket.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_edge/reject_socket.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_edge_test_socket_reject.wasm");
 
     let err = compile_wasm_edge(&td_path, &wasm_path);
@@ -476,7 +471,10 @@ fn wasm_edge_env_generates_js_glue() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(glue_path.exists(), ".edge.js glue file should exist for env example");
+    assert!(
+        glue_path.exists(),
+        ".edge.js glue file should exist for env example"
+    );
 
     let _ = std::fs::remove_file(&wasm_path);
     let _ = std::fs::remove_file(&glue_path);

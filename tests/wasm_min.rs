@@ -190,9 +190,7 @@ fn compile_wasm_and_get_size(td_path: &Path, wasm_path: &Path) -> u64 {
         td_path.display(),
         String::from_utf8_lossy(&output.stderr)
     );
-    let size = std::fs::metadata(wasm_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(wasm_path).map(|m| m.len()).unwrap_or(0);
     let _ = std::fs::remove_file(wasm_path);
     size
 }
@@ -315,8 +313,8 @@ fn wasm_min_pack_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/pack_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/pack_basic.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -338,8 +336,8 @@ fn wasm_min_pack_nested() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/pack_nested.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/pack_nested.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -380,8 +378,8 @@ fn wasm_min_pack_accepted() {
 /// W-5: Closures should now be accepted by wasm-min.
 #[test]
 fn wasm_min_closure_accepted() {
-    let td_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/unsupported_closure.td");
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasm_min/unsupported_closure.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_closure_accepted.wasm");
 
     let output = Command::new(taida_bin())
@@ -420,8 +418,8 @@ fn wasm_min_multiple_globals() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/multiple_globals.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/multiple_globals.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -435,8 +433,8 @@ fn wasm_min_multiple_globals() {
 /// W-2: --release gate should work with wasm-min (positive case: no TODO/Stub).
 #[test]
 fn wasm_min_release_gate_positive() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/release_gate.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/release_gate.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_release_pos.wasm");
 
     // Compiling with --release should succeed (no TODO/Stub in source)
@@ -472,8 +470,8 @@ fn wasm_min_float_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/float_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/float_basic.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -495,8 +493,8 @@ fn wasm_min_float_arith() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/float_arith.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/float_arith.td");
     // Float formatting differs between interpreter and compiled backends
     // (e.g., "5.0" vs "5", "5.840400000000001" vs "5.8404").
     // Compare against native backend output instead.
@@ -521,8 +519,7 @@ fn wasm_min_str_ops() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/str_ops.td");
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/str_ops.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -536,8 +533,8 @@ fn wasm_min_str_ops() {
 /// W-3: Float is no longer rejected (was rejected in wasm-min v1).
 #[test]
 fn wasm_min_float_accepted() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/unsupported_float.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/unsupported_float.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_float_accepted.wasm");
 
     let output = Command::new(taida_bin())
@@ -560,8 +557,8 @@ fn wasm_min_float_accepted() {
 /// W-2: --release gate should reject TODO molds in wasm-min (negative case).
 #[test]
 fn wasm_min_release_gate_negative() {
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/release_gate_todo.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/release_gate_todo.td");
     let wasm_path = std::env::temp_dir().join("taida_wasm_release_neg.wasm");
 
     // Compiling with --release should fail (TODO mold present)
@@ -604,8 +601,8 @@ fn wasm_min_float_small_values() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/float_small.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/float_small.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -627,8 +624,8 @@ fn wasm_min_str_length() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/str_length.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/str_length.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -650,8 +647,8 @@ fn wasm_min_int_to_string() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/int_to_string.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/int_to_string.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -673,8 +670,8 @@ fn wasm_min_int_mold_str() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/int_mold_str.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/int_mold_str.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -700,8 +697,8 @@ fn wasm_min_list_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/list_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/list_basic.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -727,8 +724,8 @@ fn wasm_min_hashmap_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/hashmap_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/hashmap_basic.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -750,8 +747,8 @@ fn wasm_min_set_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/set_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/set_basic.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -777,8 +774,8 @@ fn wasm_min_closure_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/closure_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/closure_basic.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -800,8 +797,8 @@ fn wasm_min_error_ceiling() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/error_ceiling.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/error_ceiling.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -823,8 +820,8 @@ fn wasm_min_lax_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/lax_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/lax_basic.td");
     let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -850,8 +847,8 @@ fn wasm_min_lax_tostring() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/lax_tostring.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/lax_tostring.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -873,8 +870,8 @@ fn wasm_min_result_basic() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/result_basic.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/result_basic.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -896,8 +893,8 @@ fn wasm_min_result_predicate() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/result_predicate.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/result_predicate.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -919,8 +916,8 @@ fn wasm_min_mold_fail() {
         }
     };
 
-    let td_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm_min/mold_fail.td");
+    let td_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/mold_fail.td");
     let native_output = run_native(&td_path).expect("native should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
@@ -988,14 +985,15 @@ fn wasm_min_parity_all_examples() {
         }
     }
 
-    eprintln!("W-6 Parity: {} OK, {} rejected, {} native-fail",
-        parity_ok.len(), compile_rejected.len(), native_fail.len());
+    eprintln!(
+        "W-6 Parity: {} OK, {} rejected, {} native-fail",
+        parity_ok.len(),
+        compile_rejected.len(),
+        native_fail.len()
+    );
 
     if !parity_fail.is_empty() {
-        let mut msg = format!(
-            "W-6 PARITY FAILED for {} example(s):\n",
-            parity_fail.len()
-        );
+        let mut msg = format!("W-6 PARITY FAILED for {} example(s):\n", parity_fail.len());
         for (stem, native, wasm) in &parity_fail {
             msg.push_str(&format!(
                 "\n  {}: native='{}' vs wasm='{}'\n",

@@ -20,6 +20,14 @@ fn write_file(path: &Path, content: &str) {
     fs::write(path, content).expect("failed to write file");
 }
 
+fn node_available() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn test_taida_todo_json_reports_ids_and_stats() {
     let dir = unique_temp_dir("taida_todo_cli");
@@ -846,6 +854,267 @@ fn test_build_compile_transpile_stop_on_checker_error() {
         !js_out.exists(),
         "JS output should not exist when checker fails"
     );
+}
+
+#[test]
+fn test_build_js_and_transpile_fail_on_unresolved_package_import() {
+    let dir = unique_temp_dir("taida_missing_pkg_import");
+    let src = dir.join("main.td");
+    let build_js_out = dir.join("build_out.mjs");
+    let transpile_out_path = dir.join("transpile_out.mjs");
+
+    write_file(&src, ">>> alice/missing => @(run)\nstdout(\"ok\")\n");
+    write_file(&dir.join("packages.tdm"), ">>> alice/missing@a.1\n");
+
+    let build_js = Command::new(taida_bin())
+        .current_dir(&dir)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&src)
+        .arg("-o")
+        .arg(&build_js_out)
+        .output()
+        .expect("build --target js");
+
+    let transpile_out = Command::new(taida_bin())
+        .current_dir(&dir)
+        .arg("transpile")
+        .arg(&src)
+        .arg("-o")
+        .arg(&transpile_out_path)
+        .output()
+        .expect("transpile");
+
+    for (name, out) in &[
+        ("build --target js", &build_js),
+        ("transpile", &transpile_out),
+    ] {
+        assert!(
+            !out.status.success(),
+            "{} should fail on unresolved package import",
+            name
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Could not resolve package import 'alice/missing'"),
+            "{} should surface the unresolved package import, got: {}",
+            name,
+            stderr
+        );
+    }
+
+    assert!(
+        !build_js_out.exists(),
+        "build output should not exist when package import resolution fails"
+    );
+    assert!(
+        !transpile_out_path.exists(),
+        "transpile output should not exist when package import resolution fails"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_js_resolves_package_import_from_source_root_with_custom_output() {
+    if !node_available() {
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_pkg_import_success");
+    let project = dir.join("project");
+    let caller = dir.join("caller");
+    let dist = dir.join("dist");
+    let dep_dir = project
+        .join(".taida")
+        .join("deps")
+        .join("alice")
+        .join("pkg");
+    fs::create_dir_all(&caller).expect("create caller dir");
+    fs::create_dir_all(&dist).expect("create dist dir");
+    fs::create_dir_all(&dep_dir).expect("create dep dir");
+
+    write_file(&project.join("packages.tdm"), ">>> alice/pkg@a.1\n");
+    write_file(
+        &project.join("main.td"),
+        ">>> alice/pkg => @(greet)\nstdout(greet())\n",
+    );
+    write_file(
+        &dep_dir.join("main.td"),
+        "greet =\n  \"hello from pkg\"\n=> :Str\n\n<<< @(greet)\n",
+    );
+
+    let js_out = dist.join("app.mjs");
+    let build_out = Command::new(taida_bin())
+        .current_dir(&caller)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(project.join("main.td"))
+        .arg("-o")
+        .arg(&js_out)
+        .output()
+        .expect("build --target js with custom output");
+
+    assert!(
+        build_out.status.success(),
+        "build should succeed: {}",
+        String::from_utf8_lossy(&build_out.stderr)
+    );
+    assert!(js_out.exists(), "expected JS output to exist");
+    assert!(
+        dep_dir.join("main.mjs").exists(),
+        "dependency should be transpiled in-place"
+    );
+
+    let run_out = Command::new("node")
+        .arg(&js_out)
+        .output()
+        .expect("node run");
+    assert!(
+        run_out.status.success(),
+        "generated JS should run: {}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_out.stdout).trim(),
+        "hello from pkg"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_js_failure_does_not_leave_stale_local_module_outputs() {
+    let dir = unique_temp_dir("taida_pkg_import_no_stale");
+    let project = dir.join("project");
+    let dist = dir.join("dist");
+    fs::create_dir_all(&project).expect("create project dir");
+    fs::create_dir_all(&dist).expect("create dist dir");
+
+    write_file(&project.join("packages.tdm"), ">>> alice/missing@a.1\n");
+    write_file(
+        &project.join("main.td"),
+        ">>> ./ok => @(value)\n>>> ./helper => @(run)\nstdout(value)\n",
+    );
+    write_file(&project.join("ok.td"), "value <= \"ok\"\n<<< @(value)\n");
+    write_file(
+        &project.join("helper.td"),
+        ">>> alice/missing => @(missing)\nhelperValue =\n  \"bad\"\n=> :Str\n\n<<< @(helperValue)\n",
+    );
+
+    let build_out = Command::new(taida_bin())
+        .current_dir(&project)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(project.join("main.td"))
+        .arg("-o")
+        .arg(dist.join("app.mjs"))
+        .output()
+        .expect("build --target js with unresolved package import");
+
+    assert!(
+        !build_out.status.success(),
+        "build should fail on unresolved package import"
+    );
+    let stderr = String::from_utf8_lossy(&build_out.stderr);
+    assert!(
+        stderr.contains("Could not resolve package import 'alice/missing'"),
+        "expected unresolved package import error, got: {}",
+        stderr
+    );
+    assert!(
+        !dist.join("app.mjs").exists(),
+        "main output should not exist after failed build"
+    );
+    assert!(
+        !dist.join("ok.mjs").exists(),
+        "successfully staged earlier local module output should not leak after failed build"
+    );
+    assert!(
+        !dist.join("helper.mjs").exists(),
+        "local module output should not exist after failed build"
+    );
+
+    let emitted_mjs = fs::read_dir(&dist)
+        .expect("read dist dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("mjs"))
+        .count();
+    assert_eq!(emitted_mjs, 0, "no final .mjs outputs should remain");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_js_failure_does_not_leave_stale_dependency_outputs() {
+    let dir = unique_temp_dir("taida_pkg_import_no_stale_deps");
+    let project = dir.join("project");
+    let deps = project.join(".taida").join("deps").join("alice");
+    fs::create_dir_all(&deps).expect("create deps root");
+
+    write_file(
+        &project.join("packages.tdm"),
+        ">>> alice/good@a.1\n>>> alice/pkg@a.1\n>>> alice/missing@a.1\n",
+    );
+    write_file(
+        &project.join("main.td"),
+        ">>> alice/pkg => @(greet)\nstdout(greet())\n",
+    );
+
+    let good_dir = deps.join("good");
+    let pkg_dir = deps.join("pkg");
+    fs::create_dir_all(&good_dir).expect("create good dep dir");
+    fs::create_dir_all(&pkg_dir).expect("create pkg dep dir");
+
+    write_file(
+        &good_dir.join("main.td"),
+        "greet =\n  \"hello from good\"\n=> :Str\n\n<<< @(greet)\n",
+    );
+    write_file(
+        &pkg_dir.join("main.td"),
+        ">>> alice/good => @(greet)\n>>> alice/missing => @(missing)\n\nwelcome =\n  greet()\n=> :Str\n\n<<< @(welcome)\n",
+    );
+
+    let build_out = Command::new(taida_bin())
+        .current_dir(&project)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(project.join("main.td"))
+        .arg("-o")
+        .arg(project.join("dist").join("app.mjs"))
+        .output()
+        .expect("build --target js with bad dep graph");
+
+    assert!(
+        !build_out.status.success(),
+        "build should fail when a dependency import cannot be resolved"
+    );
+    let stderr = String::from_utf8_lossy(&build_out.stderr);
+    assert!(
+        stderr.contains("Could not resolve package import 'alice/missing'"),
+        "expected unresolved dependency import error, got: {}",
+        stderr
+    );
+
+    assert!(
+        !good_dir.join("main.mjs").exists(),
+        "successfully transpiled dependency output should not leak after failed build"
+    );
+    assert!(
+        !pkg_dir.join("main.mjs").exists(),
+        "failing dependency output should not exist after failed build"
+    );
+    assert!(
+        !project.join("dist").join("app.mjs").exists(),
+        "main output should not exist after failed build"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

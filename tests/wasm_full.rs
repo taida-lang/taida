@@ -51,11 +51,7 @@ fn compile_wasm_full(td_path: &Path, wasm_path: &Path) -> Option<String> {
     if output.status.success() {
         None // no error
     } else {
-        Some(
-            String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string(),
-        )
+        Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
@@ -147,9 +143,19 @@ fn wasm_full_env() {
 
     let stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines.len() >= 2, "wasm-full env output too short: {:?}", lines);
-    assert_eq!(lines[0], "hello", "EnvVar should resolve TAIDA_TEST_A=hello");
-    assert_eq!(lines[1], "2", "allEnv should see exactly 2 injected env vars");
+    assert!(
+        lines.len() >= 2,
+        "wasm-full env output too short: {:?}",
+        lines
+    );
+    assert_eq!(
+        lines[0], "hello",
+        "EnvVar should resolve TAIDA_TEST_A=hello"
+    );
+    assert_eq!(
+        lines[1], "2",
+        "allEnv should see exactly 2 injected env vars"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -749,8 +755,8 @@ fn wasm_full_parity_all_examples() {
         "wasm_wasi_file_io",
         "wasm_wasi_write_failure",
         "wasm_wasi_write_failure_shape",
-        "wasm_wasi_stderr",         // stderr goes to separate fd
-        "wasm_edge_env",            // edge profile, different env mechanism
+        "wasm_wasi_stderr", // stderr goes to separate fd
+        "wasm_edge_env",    // edge profile, different env mechanism
     ];
 
     let mut parity_ok = Vec::new();
@@ -773,8 +779,7 @@ fn wasm_full_parity_all_examples() {
         let native_out = native_output.unwrap();
 
         // wasm-full compile + run
-        let wasm_path =
-            std::env::temp_dir().join(format!("taida_wf5_parity_{}.wasm", stem));
+        let wasm_path = std::env::temp_dir().join(format!("taida_wf5_parity_{}.wasm", stem));
         let compile_output = Command::new(taida_bin())
             .args(["build", "--target", "wasm-full"])
             .arg(td_path)
@@ -828,10 +833,7 @@ fn wasm_full_parity_all_examples() {
     );
 
     if !parity_fail.is_empty() {
-        let mut msg = format!(
-            "WF-5 PARITY FAILED for {} example(s):\n",
-            parity_fail.len()
-        );
+        let mut msg = format!("WF-5 PARITY FAILED for {} example(s):\n", parity_fail.len());
         for (stem, native, wasm) in &parity_fail {
             msg.push_str(&format!(
                 "\n  {}: native='{}' vs wasm-full='{}'\n",
@@ -843,16 +845,24 @@ fn wasm_full_parity_all_examples() {
         panic!("{}", msg);
     }
 
-    // Expected compile_rejected: modules, async, native-only
+    // --- Strict regression guards (exact counts, not thresholds) ---
+
+    // Expected allowlist: examples that wasm-full cannot compile (unsupported features).
+    // Note: stems that fail at the native build/run stage go into native_fail, not here.
+    // If this list shrinks, update the count -- that's progress.
+    // If it grows, the test fails -- that's a regression.
     let expected_rejected: Vec<&str> = vec![
-        "09_modules", "13_async", "14_unmold_backward",
-        "api_client", "compile_async", "compile_module",
-        "compile_module_value", "compile_stream",
-        "helper_val", "module_math", "module_utils",
-        "transpile_npm",
+        "09_modules",
+        "13_async",
+        "14_unmold_backward",
+        "api_client",
+        "compile_async",
+        "compile_module",
+        "compile_module_value",
     ];
 
-    // Expected native_fail (native build or run fails for these)
+    // Expected allowlist: examples where native backend itself fails (build or run).
+    // These are checked before wasm-full compilation, so they never appear in compile_rejected.
     let expected_native_fail: Vec<&str> = vec![
         "26_prelude_optional",
         "compile_stream",
@@ -862,7 +872,7 @@ fn wasm_full_parity_all_examples() {
         "transpile_npm",
     ];
 
-    // Detect regressions
+    // Detect regressions: any new rejected example not in the allowlist
     let unexpected_rejected: Vec<&String> = compile_rejected
         .iter()
         .filter(|s| !expected_rejected.contains(&s.as_str()))
@@ -883,16 +893,35 @@ fn wasm_full_parity_all_examples() {
         unexpected_native_fail
     );
 
-    // Exact parity count: 49 examples match native output.
+    // Exact parity count -- if this changes, update deliberately.
     // Known non-parity (excluded from this count):
     //   06_lists: string Reverse mold produces different garbled output on native vs wasm
     //   11_introspection: pointer addresses differ between native and wasm memory layouts
     //   27_prelude_result: mapError toString differs (different error representation)
-    assert!(
-        parity_ok.len() >= 49,
-        "WF-5 REGRESSION: expected >= 49 parity, got {}. OK: {:?}",
+    assert_eq!(
+        parity_ok.len(),
+        49,
+        "WF-5: Expected exactly 49 parity-OK examples, got {}. \
+         If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
+    );
+
+    // Guard against allowlist growing (regressions)
+    assert!(
+        compile_rejected.len() <= expected_rejected.len(),
+        "WF-5: compile_rejected count ({}) exceeds expected allowlist ({}). \
+         A previously compilable example regressed.",
+        compile_rejected.len(),
+        expected_rejected.len()
+    );
+
+    assert!(
+        native_fail.len() <= expected_native_fail.len(),
+        "WF-5: native_fail count ({}) exceeds expected allowlist ({}). \
+         A previously working native example regressed.",
+        native_fail.len(),
+        expected_native_fail.len()
     );
 }
 

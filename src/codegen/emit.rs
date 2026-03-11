@@ -117,432 +117,1397 @@ fn runtime_abi(name: &str) -> RuntimeAbi {
     use AbiKind::*;
     match name {
         // ── Debug 出力 ──
-        "taida_debug_int" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_debug_float" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_debug_bool" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_debug_str" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_debug_polymorphic" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_debug_list" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_debug_json" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_gorilla" => RuntimeAbi { params: &[], returns: &[] },
+        "taida_debug_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_debug_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_debug_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_debug_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_debug_polymorphic" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_debug_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_debug_json" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_gorilla" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
 
         // ── 整数演算 ──
-        "taida_int_add" | "taida_int_sub" | "taida_int_mul" => {
-            RuntimeAbi { params: &[Val, Val], returns: &[Val] }
-        }
-        "taida_div_mold" | "taida_mod_mold" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => {
-            RuntimeAbi { params: &[Val, Val], returns: &[Val] }
-        }
-        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru" => {
-            RuntimeAbi { params: &[Val, Val], returns: &[Val] }
-        }
-        "taida_to_radix" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_bit_not" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_int_neg" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_float_neg" => RuntimeAbi { params: &[F64], returns: &[F64] },
+        "taida_int_add" | "taida_int_sub" | "taida_int_mul" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_div_mold" | "taida_mod_mold" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_to_radix" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bit_not" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_neg" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_float_neg" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
 
         // ── 比較演算 ──
         // Note: taida_str_eq/neq は Ptr 比較だが、boxed I64 として渡すため Val として扱う。
         // taida_poly_eq/neq は動的ディスパッチで型不明なため Val として扱う。
-        "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq"
-        | "taida_poly_eq" | "taida_poly_neq"
-        | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => {
-            RuntimeAbi { params: &[Val, Val], returns: &[Val] }
-        }
+        "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq" | "taida_poly_eq"
+        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
 
         // ── ブール演算 ──
-        "taida_bool_and" | "taida_bool_or" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_bool_not" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_bool_and" | "taida_bool_or" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_bool_not" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── ぶちパック操作 ──
-        "taida_pack_new" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_pack_set" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_pack_get" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_pack_get_idx" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_pack_set_hash" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_pack_set_tag" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
+        "taida_pack_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_pack_set" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_pack_get" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_pack_get_idx" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_pack_set_hash" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_pack_set_tag" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
         // BuchiPack field call (polymorphic dispatch: args are boxed values)
-        "taida_pack_call_field0" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_pack_call_field1" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Val] },
-        "taida_pack_call_field2" => RuntimeAbi { params: &[Ptr, Val, Val, Val], returns: &[Val] },
-        "taida_pack_call_field3" => RuntimeAbi { params: &[Ptr, Val, Val, Val, Val], returns: &[Val] },
+        "taida_pack_call_field0" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_pack_call_field1" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Val],
+        },
+        "taida_pack_call_field2" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val],
+            returns: &[Val],
+        },
+        "taida_pack_call_field3" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val, Val],
+            returns: &[Val],
+        },
 
         // ── クロージャ操作 ──
-        "taida_closure_new" => RuntimeAbi { params: &[FnPtr, Ptr], returns: &[Ptr] },
-        "taida_closure_get_fn" => RuntimeAbi { params: &[Ptr], returns: &[FnPtr] },
-        "taida_closure_get_env" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_is_closure_value" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_closure_new" => RuntimeAbi {
+            params: &[FnPtr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_closure_get_fn" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[FnPtr],
+        },
+        "taida_closure_get_env" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_is_closure_value" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── グローバル変数テーブル ──
-        "taida_global_set" => RuntimeAbi { params: &[Val, Val], returns: &[] },
-        "taida_global_get" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_global_set" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[],
+        },
+        "taida_global_get" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── リスト操作 ──
-        "taida_list_new" => RuntimeAbi { params: &[], returns: &[Ptr] },
-        "taida_list_set_elem_tag" => RuntimeAbi { params: &[Ptr, Val], returns: &[] },
-        "taida_list_push" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_list_length" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_list_get" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_list_first" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_last" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_sum" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_list_reverse" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_contains" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_list_is_empty" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_list_map" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_list_filter" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
+        "taida_list_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_list_set_elem_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_list_push" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_list_get" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_first" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_last" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_sum" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_list_reverse" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_contains" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_list_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_list_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_filter" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
 
         // ── 型変換 (Int) ──
-        "taida_int_abs" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_int_to_str" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_int_to_float" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_int_clamp" => RuntimeAbi { params: &[Val, Val, Val], returns: &[Val] },
+        "taida_int_abs" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_to_str" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_int_to_float" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_clamp" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
 
         // ── 文字列操作 ──
-        "taida_str_concat" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_str_length" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_str_char_at" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_str_slice" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_str_index_of" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Val] },
-        "taida_str_to_upper" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_to_lower" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_trim" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_split" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_str_replace" => RuntimeAbi { params: &[Ptr, Ptr, Ptr], returns: &[Ptr] },
-        "taida_str_to_int" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_repeat" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_str_reverse" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_trim_start" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_trim_end" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_replace_first" => RuntimeAbi { params: &[Ptr, Ptr, Ptr], returns: &[Ptr] },
-        "taida_str_pad" => RuntimeAbi { params: &[Ptr, Val, Ptr, Val], returns: &[Ptr] },
-        "taida_str_from_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_str_from_float" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
-        "taida_str_from_bool" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
+        "taida_str_concat" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_str_char_at" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_slice" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_index_of" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_to_upper" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_to_lower" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_trim" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_split" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_replace" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_to_int" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_repeat" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_reverse" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_trim_start" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_trim_end" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_replace_first" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_pad" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_from_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_str_from_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_str_from_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // Str state check methods
-        "taida_str_contains" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Val] },
-        "taida_str_starts_with" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Val] },
-        "taida_str_ends_with" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Val] },
-        "taida_str_last_index_of" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Val] },
-        "taida_str_get" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
+        "taida_str_contains" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_starts_with" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_ends_with" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_last_index_of" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_str_get" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
         // Str refcount
-        "taida_str_retain" => RuntimeAbi { params: &[Ptr], returns: &[] },
+        "taida_str_retain" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[],
+        },
 
         // ── Float 操作 ──
-        "taida_float_floor" => RuntimeAbi { params: &[F64], returns: &[F64] },
-        "taida_float_ceil" => RuntimeAbi { params: &[F64], returns: &[F64] },
-        "taida_float_round" => RuntimeAbi { params: &[F64], returns: &[F64] },
-        "taida_float_abs" => RuntimeAbi { params: &[F64], returns: &[F64] },
-        "taida_float_to_int" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_float_to_str" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
-        "taida_float_to_fixed" => RuntimeAbi { params: &[F64, Val], returns: &[Ptr] },
-        "taida_float_clamp" => RuntimeAbi { params: &[F64, F64, F64], returns: &[F64] },
+        "taida_float_floor" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_ceil" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_round" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_abs" => RuntimeAbi {
+            params: &[F64],
+            returns: &[F64],
+        },
+        "taida_float_to_int" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_to_str" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_float_to_fixed" => RuntimeAbi {
+            params: &[F64, Val],
+            returns: &[Ptr],
+        },
+        "taida_float_clamp" => RuntimeAbi {
+            params: &[F64, F64, F64],
+            returns: &[F64],
+        },
         // Num state check methods (Int)
-        "taida_int_is_positive" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_int_is_negative" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_int_is_zero" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_int_is_positive" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_is_negative" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_int_is_zero" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         // Num state check methods (Float)
-        "taida_float_is_nan" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_float_is_infinite" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_float_is_finite_check" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_float_is_positive" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_float_is_negative" => RuntimeAbi { params: &[F64], returns: &[Val] },
-        "taida_float_is_zero" => RuntimeAbi { params: &[F64], returns: &[Val] },
+        "taida_float_is_nan" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_infinite" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_finite_check" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_positive" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_negative" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
+        "taida_float_is_zero" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Val],
+        },
 
         // ── Bool 変換 ──
-        "taida_bool_to_str" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_bool_to_int" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_bool_to_str" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bool_to_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── 追加 List 操作 ──
-        "taida_list_index_of" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_list_last_index_of" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_list_any" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Val] },
-        "taida_list_all" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Val] },
-        "taida_list_none" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Val] },
-        "taida_list_concat" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_list_join" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_list_sort" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_unique" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_flatten" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_max" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_min" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_list_index_of" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_list_last_index_of" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_list_any" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_all" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_none" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_concat" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_join" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_sort" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_unique" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_flatten" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_max" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_min" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // List mold operations
-        "taida_list_append" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_list_prepend" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_list_sort_desc" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_list_find" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_list_find_index" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_list_count" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Val] },
-        "taida_list_fold" => RuntimeAbi { params: &[Ptr, Val, FnPtr], returns: &[Val] },
-        "taida_list_foldr" => RuntimeAbi { params: &[Ptr, Val, FnPtr], returns: &[Val] },
-        "taida_list_take" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_list_take_while" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_list_drop" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_list_drop_while" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_list_zip" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_list_enumerate" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_list_append" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_prepend" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_sort_desc" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_find" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_find_index" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_count" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_fold" => RuntimeAbi {
+            params: &[Ptr, Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_foldr" => RuntimeAbi {
+            params: &[Ptr, Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_list_take" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_take_while" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_drop" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_drop_while" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_zip" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_list_enumerate" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── HashMap 操作 ──
-        "taida_hashmap_new" => RuntimeAbi { params: &[], returns: &[Ptr] },
-        "taida_hashmap_set_value_tag" => RuntimeAbi { params: &[Ptr, Val], returns: &[] },
-        "taida_hashmap_set" => RuntimeAbi { params: &[Ptr, Val, Ptr, Val], returns: &[Ptr] },
-        "taida_hashmap_set_immut" => RuntimeAbi { params: &[Ptr, Val, Ptr, Val], returns: &[Ptr] },
-        "taida_hashmap_get" => RuntimeAbi { params: &[Ptr, Val, Ptr], returns: &[Val] },
-        "taida_hashmap_get_lax" => RuntimeAbi { params: &[Ptr, Val, Ptr], returns: &[Ptr] },
-        "taida_hashmap_has" => RuntimeAbi { params: &[Ptr, Val, Ptr], returns: &[Val] },
-        "taida_hashmap_remove" => RuntimeAbi { params: &[Ptr, Val, Ptr], returns: &[Ptr] },
-        "taida_hashmap_remove_immut" => RuntimeAbi { params: &[Ptr, Val, Ptr], returns: &[Ptr] },
-        "taida_hashmap_keys" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_hashmap_values" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_hashmap_length" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_hashmap_is_empty" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_hashmap_entries" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_hashmap_merge" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_hashmap_to_string" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_str_hash" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_value_hash" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_hashmap_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_set_value_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_hashmap_set" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_set_immut" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_get" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_get_lax" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_has" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_remove" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_remove_immut" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_keys" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_values" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_hashmap_entries" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_merge" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_hash" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_value_hash" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── Set 操作 ──
-        "taida_set_new" => RuntimeAbi { params: &[], returns: &[Ptr] },
-        "taida_set_set_elem_tag" => RuntimeAbi { params: &[Ptr, Val], returns: &[] },
-        "taida_set_from_list" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_set_add" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_set_remove" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_set_has" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_set_size" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_set_is_empty" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_set_to_list" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_set_union" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_set_intersect" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_set_diff" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_set_to_string" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_set_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_set_set_elem_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_set_from_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_add" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_set_remove" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_set_has" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_set_size" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_set_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_set_to_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_union" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_intersect" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_diff" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_set_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── Polymorphic collection methods ──
         // These dispatch dynamically based on runtime type tag, so args are boxed Val.
-        "taida_collection_get" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_collection_has" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_collection_remove" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_collection_size" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_polymorphic_length" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_collection_get" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_has" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_remove" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_size" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_length" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── Error ceiling ──
-        "taida_error_ceiling_push" => RuntimeAbi { params: &[], returns: &[Ptr] },
-        "taida_error_ceiling_pop" => RuntimeAbi { params: &[], returns: &[] },
-        "taida_throw" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_error_setjmp" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_error_try_call" => RuntimeAbi { params: &[Ptr, FnPtr, Val], returns: &[Ptr] },
-        "taida_error_get_value" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_error_try_get_result" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_error_ceiling_push" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_error_ceiling_pop" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
+        "taida_throw" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_error_setjmp" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_error_try_call" => RuntimeAbi {
+            params: &[Ptr, FnPtr, Val],
+            returns: &[Ptr],
+        },
+        "taida_error_get_value" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_error_try_get_result" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── Result[T, P] ──
-        "taida_result_create" => RuntimeAbi { params: &[Val, Ptr, FnPtr], returns: &[Ptr] },
-        "taida_result_is_ok" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_result_is_error" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_result_get_or_default" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_result_get_or_throw" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_result_map" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_result_flat_map" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_result_map_error" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_result_to_string" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_result_create" => RuntimeAbi {
+            params: &[Val, Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_is_ok" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_result_is_error" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_result_get_or_default" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_result_get_or_throw" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_result_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_flat_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_map_error" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── Lax methods ──
-        "taida_lax_map" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_lax_flat_map" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_lax_to_string" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_lax_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_lax_flat_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_lax_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── Polymorphic monadic dispatch ──
         // These dispatch dynamically, so args are boxed Val.
-        "taida_polymorphic_map" => RuntimeAbi { params: &[Val, FnPtr], returns: &[Val] },
-        "taida_polymorphic_contains" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_polymorphic_index_of" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_polymorphic_last_index_of" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_polymorphic_get_or_default" => RuntimeAbi { params: &[Val, Val], returns: &[Val] },
-        "taida_polymorphic_has_value" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_polymorphic_is_empty" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_polymorphic_to_string" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_monadic_flat_map" => RuntimeAbi { params: &[Val, FnPtr], returns: &[Val] },
-        "taida_monadic_get_or_throw" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_polymorphic_map" => RuntimeAbi {
+            params: &[Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_polymorphic_contains" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_index_of" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_last_index_of" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_get_or_default" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_has_value" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_is_empty" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_polymorphic_to_string" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_monadic_flat_map" => RuntimeAbi {
+            params: &[Val, FnPtr],
+            returns: &[Val],
+        },
+        "taida_monadic_get_or_throw" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── Async methods ──
-        "taida_async_map" => RuntimeAbi { params: &[Ptr, FnPtr], returns: &[Ptr] },
-        "taida_async_get_or_default" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
+        "taida_async_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_async_get_or_default" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
 
         // ── 参照カウント ──
-        "taida_retain" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_release" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
+        "taida_retain" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_release" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
 
         // ── Async ──
-        "taida_async_ok" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_async_ok_tagged" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_async_err" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_async_set_value_tag" => RuntimeAbi { params: &[Ptr, Val], returns: &[] },
-        "taida_async_unmold" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_async_is_pending" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_async_is_fulfilled" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_async_is_rejected" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_async_get_value" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_async_get_error" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_async_all" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_async_race" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_async_spawn" => RuntimeAbi { params: &[FnPtr, Val], returns: &[Ptr] },
-        "taida_async_cancel" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_async_ok" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_async_ok_tagged" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_async_err" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_set_value_tag" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_async_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_is_pending" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_is_fulfilled" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_is_rejected" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_get_value" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_async_get_error" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_all" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_race" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_spawn" => RuntimeAbi {
+            params: &[FnPtr, Val],
+            returns: &[Ptr],
+        },
+        "taida_async_cancel" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── Lax ──
-        "taida_lax_new" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_lax_empty" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_lax_has_value" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_lax_get_or_default" => RuntimeAbi { params: &[Ptr, Val], returns: &[Val] },
-        "taida_lax_unmold" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_lax_is_empty" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_generic_unmold" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_lax_new" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_lax_empty" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_lax_has_value" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_lax_get_or_default" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_lax_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_lax_is_empty" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_generic_unmold" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
 
         // ── Gorillax / RelaxedGorillax ──
-        "taida_gorillax_new" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_molten_new" => RuntimeAbi { params: &[], returns: &[Ptr] },
-        "taida_stub_new" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_todo_new" => RuntimeAbi { params: &[Ptr, Ptr, Ptr, Ptr], returns: &[Ptr] },
-        "taida_cage_apply" => RuntimeAbi { params: &[Val, FnPtr], returns: &[Ptr] },
-        "taida_gorillax_unmold" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_gorillax_relax" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_gorillax_to_string" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_relaxed_gorillax_unmold" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_relaxed_gorillax_to_string" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_gorillax_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_molten_new" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_stub_new" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_todo_new" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_cage_apply" => RuntimeAbi {
+            params: &[Val, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_gorillax_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_gorillax_relax" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_gorillax_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_relaxed_gorillax_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_relaxed_gorillax_to_string" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         // ── 型変換モールド (Str/Int/Float/Bool) — 全て Lax (Ptr) を返す ──
-        "taida_str_mold_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_str_mold_float" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
-        "taida_str_mold_bool" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_str_mold_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_int_mold_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_int_mold_float" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
-        "taida_int_mold_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_int_mold_auto" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_int_mold_str_base" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_int_mold_bool" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_float_mold_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_float_mold_float" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
-        "taida_float_mold_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_float_mold_bool" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_bool_mold_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_bool_mold_float" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
-        "taida_bool_mold_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_bool_mold_bool" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_uint8_mold" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_uint8_mold_float" => RuntimeAbi { params: &[F64], returns: &[Ptr] },
+        "taida_str_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_str_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_str_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_str_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_auto" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_str_base" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_int_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_float_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_bool_mold_bool" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_uint8_mold" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_uint8_mold_float" => RuntimeAbi {
+            params: &[F64],
+            returns: &[Ptr],
+        },
         "taida_u16be_mold" | "taida_u16le_mold" | "taida_u32be_mold" | "taida_u32le_mold" => {
-            RuntimeAbi { params: &[Val], returns: &[Ptr] }
+            RuntimeAbi {
+                params: &[Val],
+                returns: &[Ptr],
+            }
         }
-        "taida_u16be_decode_mold" | "taida_u16le_decode_mold"
-        | "taida_u32be_decode_mold" | "taida_u32le_decode_mold" => {
-            RuntimeAbi { params: &[Val], returns: &[Ptr] }
-        }
-        "taida_bytes_mold" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_bytes_set" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_bytes_to_list" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_bytes_cursor_new" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_bytes_cursor_remaining" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_bytes_cursor_take" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_bytes_cursor_u8" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_char_mold_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_char_mold_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_codepoint_mold_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_utf8_encode_mold" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_utf8_decode_mold" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_slice_mold" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
+        "taida_u16be_decode_mold"
+        | "taida_u16le_decode_mold"
+        | "taida_u32be_decode_mold"
+        | "taida_u32le_decode_mold" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_mold" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_set" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_to_list" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_bytes_cursor_new" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_cursor_remaining" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_bytes_cursor_take" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_bytes_cursor_u8" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_char_mold_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_char_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_codepoint_mold_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_utf8_encode_mold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_utf8_decode_mold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_slice_mold" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
 
         // ── JSON — Molten Iron ──
-        "taida_json_schema_cast" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_json_parse" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_json_from_int" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_json_from_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_json_unmold" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_json_stringify" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_json_to_str" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_json_to_int" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_json_size" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_json_has" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Val] },
-        "taida_json_empty" => RuntimeAbi { params: &[], returns: &[Ptr] },
+        "taida_json_schema_cast" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_parse" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_from_int" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_json_from_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_unmold" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_json_stringify" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_to_str" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_to_int" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_json_size" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_json_has" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_json_empty" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
 
         // ── stdlib math (boxed float as I64 via bitcast) ──
         // These take/return boxed float (I64), not raw F64, because they
         // receive bitcasted values at the user-function level.
-        "taida_math_sqrt" | "taida_math_abs" | "taida_math_sin" | "taida_math_cos"
-        | "taida_math_tan" | "taida_math_asin" | "taida_math_acos" | "taida_math_atan"
-        | "taida_math_log" | "taida_math_log10" | "taida_math_exp" | "taida_math_floor"
-        | "taida_math_ceil" | "taida_math_round" | "taida_math_truncate" => {
-            RuntimeAbi { params: &[Val], returns: &[Val] }
-        }
-        "taida_math_pow" | "taida_math_atan2" | "taida_math_max" | "taida_math_min" => {
-            RuntimeAbi { params: &[Val, Val], returns: &[Val] }
-        }
-        "taida_math_clamp" => RuntimeAbi { params: &[Val, Val, Val], returns: &[Val] },
+        "taida_math_sqrt"
+        | "taida_math_abs"
+        | "taida_math_sin"
+        | "taida_math_cos"
+        | "taida_math_tan"
+        | "taida_math_asin"
+        | "taida_math_acos"
+        | "taida_math_atan"
+        | "taida_math_log"
+        | "taida_math_log10"
+        | "taida_math_exp"
+        | "taida_math_floor"
+        | "taida_math_ceil"
+        | "taida_math_round"
+        | "taida_math_truncate" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_math_pow" | "taida_math_atan2" | "taida_math_max" | "taida_math_min" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_math_clamp" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
         // Float arithmetic (boxed float as I64 via bitcast)
-        "taida_float_add" | "taida_float_sub" | "taida_float_mul" => {
-            RuntimeAbi { params: &[Val, Val], returns: &[Val] }
-        }
+        "taida_float_add" | "taida_float_sub" | "taida_float_mul" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
 
         // ── stdlib I/O ──
-        "taida_io_stdout" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_io_stderr" => RuntimeAbi { params: &[Val], returns: &[Val] },
-        "taida_io_stdin" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_sha256" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
+        "taida_io_stdout" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_io_stderr" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_io_stdin" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_sha256" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // time prelude
-        "taida_time_now_ms" => RuntimeAbi { params: &[], returns: &[Val] },
-        "taida_time_sleep" => RuntimeAbi { params: &[Val], returns: &[Val] },
+        "taida_time_now_ms" => RuntimeAbi {
+            params: &[],
+            returns: &[Val],
+        },
+        "taida_time_sleep" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         // jsonEncode / jsonPretty
-        "taida_json_encode" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_json_pretty" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
+        "taida_json_encode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_json_pretty" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // Field name registry
-        "taida_register_field_name" => RuntimeAbi { params: &[Val, Ptr], returns: &[Val] },
-        "taida_register_field_type" => RuntimeAbi { params: &[Val, Ptr, Val], returns: &[Val] },
+        "taida_register_field_name" => RuntimeAbi {
+            params: &[Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_register_field_type" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Val],
+        },
 
         // ── taida-lang/os package — input molds ──
-        "taida_os_read" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_read_bytes" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_list_dir" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_stat" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_exists" => RuntimeAbi { params: &[Ptr], returns: &[Val] },
-        "taida_os_env_var" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_os_read" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_read_bytes" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_list_dir" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_stat" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_exists" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_os_env_var" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — side-effect functions
-        "taida_os_write_file" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_write_bytes" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_append_file" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_remove" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_create_dir" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_rename" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_run" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_exec_shell" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_os_write_file" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_write_bytes" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_append_file" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_remove" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_create_dir" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_rename" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_run" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_exec_shell" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — query function
-        "taida_os_all_env" => RuntimeAbi { params: &[], returns: &[Ptr] },
-        "taida_os_argv" => RuntimeAbi { params: &[], returns: &[Ptr] },
+        "taida_os_all_env" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
+        "taida_os_argv" => RuntimeAbi {
+            params: &[],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — Phase 2: async APIs
-        "taida_os_read_async" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_http_get" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_os_http_post" => RuntimeAbi { params: &[Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_http_request" => RuntimeAbi { params: &[Ptr, Ptr, Ptr, Ptr], returns: &[Ptr] },
-        "taida_os_dns_resolve" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_os_tcp_connect" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_os_tcp_listen" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_os_tcp_accept" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_os_socket_send" => RuntimeAbi { params: &[Val, Ptr, Val], returns: &[Ptr] },
-        "taida_os_socket_send_all" => RuntimeAbi { params: &[Val, Ptr, Val], returns: &[Ptr] },
-        "taida_os_socket_recv" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_os_socket_send_bytes" => RuntimeAbi { params: &[Val, Ptr, Val], returns: &[Ptr] },
-        "taida_os_socket_recv_bytes" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_os_socket_recv_exact" => RuntimeAbi { params: &[Val, Val, Val], returns: &[Ptr] },
-        "taida_os_udp_bind" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_os_udp_send_to" => RuntimeAbi { params: &[Val, Ptr, Val, Ptr, Val], returns: &[Ptr] },
-        "taida_os_udp_recv_from" => RuntimeAbi { params: &[Val, Val], returns: &[Ptr] },
-        "taida_os_socket_close" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
-        "taida_os_listener_close" => RuntimeAbi { params: &[Val], returns: &[Ptr] },
+        "taida_os_read_async" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_http_get" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_http_post" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_http_request" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_dns_resolve" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_tcp_connect" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_tcp_listen" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_tcp_accept" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_send" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_send_all" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_recv" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_send_bytes" => RuntimeAbi {
+            params: &[Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_recv_bytes" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_recv_exact" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_udp_bind" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_udp_send_to" => RuntimeAbi {
+            params: &[Val, Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_udp_recv_from" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_os_socket_close" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_os_listener_close" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
 
         // ── taida-lang/pool package ──
-        "taida_pool_create" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_pool_acquire" => RuntimeAbi { params: &[Ptr, Val], returns: &[Ptr] },
-        "taida_pool_release" => RuntimeAbi { params: &[Ptr, Val, Val], returns: &[Ptr] },
-        "taida_pool_close" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
-        "taida_pool_health" => RuntimeAbi { params: &[Ptr], returns: &[Ptr] },
+        "taida_pool_create" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_pool_acquire" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_pool_release" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_pool_close" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_pool_health" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
 
         _ => panic!("unknown runtime function: {}", name),
     }
@@ -570,7 +1535,10 @@ fn resolve_abi(abi: &RuntimeAbi, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<cl
 ///
 /// W-0f: CompileTarget::Native 固定だったラッパーを廃止し、
 /// AbiHelper を受け取る形に変更。呼び出し元は self.abi を渡す。
-fn runtime_func_signature_for(name: &str, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<clif::Type>) {
+fn runtime_func_signature_for(
+    name: &str,
+    helper: &AbiHelper,
+) -> (Vec<clif::Type>, Vec<clif::Type>) {
     let abi = runtime_abi(name);
     resolve_abi(&abi, helper)
 }
@@ -1179,7 +2147,9 @@ impl Emitter {
                 ectx.val_map.insert(*dst, ptr);
             }
             IrInst::ConstBool(dst, value) => {
-                let val = builder.ins().iconst(ectx.value_ty, if *value { 1 } else { 0 });
+                let val = builder
+                    .ins()
+                    .iconst(ectx.value_ty, if *value { 1 } else { 0 });
                 ectx.val_map.insert(*dst, val);
             }
             IrInst::DefVar(name, src) => {

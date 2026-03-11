@@ -322,9 +322,12 @@ pub fn compile_file_wasm(
     rc_opt::optimize(&mut ir_module);
 
     // IR → C ソースコード
-    let generated_c = emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Min).map_err(|e| CompileError {
-        message: format!("wasm-min C emission failed: {}", e),
-    })?;
+    let generated_c =
+        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Min).map_err(|e| {
+            CompileError {
+                message: format!("wasm-min C emission failed: {}", e),
+            }
+        })?;
 
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -362,12 +365,7 @@ pub fn compile_file_wasm(
 
     // 生成 C をコンパイル
     let gen_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -390,12 +388,7 @@ pub fn compile_file_wasm(
 
     // runtime をコンパイル
     let rt_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_c_path)
         .arg("-o")
         .arg(&rt_obj_path)
@@ -438,10 +431,7 @@ pub fn compile_file_wasm(
 
     if !ld_status.success() {
         return Err(CompileError {
-            message: format!(
-                "wasm-ld failed with exit code: {:?}",
-                ld_status.code()
-            ),
+            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
         });
     }
 
@@ -494,9 +484,12 @@ pub fn compile_file_wasm_wasi(
     rc_opt::optimize(&mut ir_module);
 
     // IR → C ソースコード (wasm-wasi profile: OS API prototypes allowed)
-    let generated_c = emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Wasi).map_err(|e| CompileError {
-        message: format!("wasm-wasi C emission failed: {}", e),
-    })?;
+    let generated_c =
+        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Wasi).map_err(|e| {
+            CompileError {
+                message: format!("wasm-wasi C emission failed: {}", e),
+            }
+        })?;
 
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
@@ -542,12 +535,7 @@ pub fn compile_file_wasm_wasi(
 
     // 生成 C をコンパイル
     let gen_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -569,12 +557,7 @@ pub fn compile_file_wasm_wasi(
 
     // runtime core をコンパイル
     let rt_core_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_core_c_path)
         .arg("-o")
         .arg(&rt_core_obj_path)
@@ -595,12 +578,7 @@ pub fn compile_file_wasm_wasi(
 
     // runtime WASI I/O をコンパイル
     let rt_wasi_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_wasi_c_path)
         .arg("-o")
         .arg(&rt_wasi_obj_path)
@@ -648,10 +626,7 @@ pub fn compile_file_wasm_wasi(
 
     if !ld_status.success() {
         return Err(CompileError {
-            message: format!(
-                "wasm-ld failed with exit code: {:?}",
-                ld_status.code()
-            ),
+            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
         });
     }
 
@@ -753,12 +728,7 @@ pub fn compile_file_wasm_edge(
 
     // 生成 C をコンパイル
     let gen_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -780,12 +750,7 @@ pub fn compile_file_wasm_edge(
 
     // runtime core をコンパイル
     let rt_core_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_core_c_path)
         .arg("-o")
         .arg(&rt_core_obj_path)
@@ -806,12 +771,7 @@ pub fn compile_file_wasm_edge(
 
     // runtime edge host をコンパイル
     let rt_edge_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_edge_c_path)
         .arg("-o")
         .arg(&rt_edge_obj_path)
@@ -859,10 +819,7 @@ pub fn compile_file_wasm_edge(
 
     if !ld_status.success() {
         return Err(CompileError {
-            message: format!(
-                "wasm-ld failed with exit code: {:?}",
-                ld_status.code()
-            ),
+            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
         });
     }
 
@@ -982,12 +939,7 @@ pub fn compile_file_wasm_full(
 
     // 生成 C をコンパイル
     let gen_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&gen_c_path)
         .arg("-o")
         .arg(&gen_obj_path)
@@ -1010,12 +962,7 @@ pub fn compile_file_wasm_full(
 
     // runtime core をコンパイル
     let rt_core_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_core_c_path)
         .arg("-o")
         .arg(&rt_core_obj_path)
@@ -1037,12 +984,7 @@ pub fn compile_file_wasm_full(
 
     // runtime WASI I/O をコンパイル
     let rt_wasi_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_wasi_c_path)
         .arg("-o")
         .arg(&rt_wasi_obj_path)
@@ -1065,12 +1007,7 @@ pub fn compile_file_wasm_full(
 
     // runtime full をコンパイル
     let rt_full_status = Command::new(&clang)
-        .args([
-            "--target=wasm32-unknown-wasi",
-            "-nostdlib",
-            "-O2",
-            "-c",
-        ])
+        .args(["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"])
         .arg(&rt_full_c_path)
         .arg("-o")
         .arg(&rt_full_obj_path)
@@ -1122,10 +1059,7 @@ pub fn compile_file_wasm_full(
 
     if !ld_status.success() {
         return Err(CompileError {
-            message: format!(
-                "wasm-ld failed with exit code: {:?}",
-                ld_status.code()
-            ),
+            message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
         });
     }
 

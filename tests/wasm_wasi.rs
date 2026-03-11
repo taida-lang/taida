@@ -123,7 +123,10 @@ fn wasm_wasi_stderr() {
     let wasm =
         compile_and_run_wasm_wasi(&td_path, &wasmtime, &[]).expect("wasm-wasi should succeed");
 
-    assert_eq!(interp, wasm, "wasm-wasi stderr output should match interpreter");
+    assert_eq!(
+        interp, wasm,
+        "wasm-wasi stderr output should match interpreter"
+    );
 }
 
 /// Test: wasm-wasi EnvVar + allEnv.
@@ -187,18 +190,26 @@ fn wasm_wasi_env() {
         "wasmtime failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let wasm = String::from_utf8_lossy(&run.stdout)
-        .trim_end()
-        .to_string();
+    let wasm = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
 
     // Line 1: EnvVar unmold value
     let wasm_lines: Vec<&str> = wasm.lines().collect();
-    assert!(wasm_lines.len() >= 2, "wasm output too short: {:?}", wasm_lines);
-    assert_eq!(wasm_lines[0], "hello", "EnvVar should resolve TAIDA_TEST_A=hello");
+    assert!(
+        wasm_lines.len() >= 2,
+        "wasm output too short: {:?}",
+        wasm_lines
+    );
+    assert_eq!(
+        wasm_lines[0], "hello",
+        "EnvVar should resolve TAIDA_TEST_A=hello"
+    );
 
     // Line 2: allEnv().size() — wasmtime --env injects exactly 2 vars
     // Interpreter may see more host env vars, so we only check wasm side
-    assert_eq!(wasm_lines[1], "2", "allEnv should see exactly 2 injected env vars");
+    assert_eq!(
+        wasm_lines[1], "2",
+        "allEnv should see exactly 2 injected env vars"
+    );
 }
 
 /// Test: wasm-wasi file I/O (Read, writeFile, Exists).
@@ -249,13 +260,18 @@ fn wasm_wasi_file_io() {
         "wasmtime failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let wasm = String::from_utf8_lossy(&run.stdout)
-        .trim_end()
-        .to_string();
+    let wasm = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
 
     // Verify writeFile + Read round-trip works
-    assert_eq!(wasm.trim(), "hello from wasi", "wasm-wasi file I/O should write and read back content");
-    assert_eq!(interp, wasm, "wasm-wasi file I/O output should match interpreter");
+    assert_eq!(
+        wasm.trim(),
+        "hello from wasi",
+        "wasm-wasi file I/O should write and read back content"
+    );
+    assert_eq!(
+        interp, wasm,
+        "wasm-wasi file I/O output should match interpreter"
+    );
 }
 
 /// Test: wasm-wasi Exists[path]() — verifies both existing and non-existing paths.
@@ -306,15 +322,16 @@ fn wasm_wasi_exists() {
         "wasmtime failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let wasm = String::from_utf8_lossy(&run.stdout)
-        .trim_end()
-        .to_string();
+    let wasm = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
 
     assert_eq!(
         wasm, "true\nfalse",
         "Exists should return true for existing file and false for non-existing"
     );
-    assert_eq!(interp, wasm, "wasm-wasi Exists output should match interpreter");
+    assert_eq!(
+        interp, wasm,
+        "wasm-wasi Exists output should match interpreter"
+    );
 }
 
 /// Test: wasm-wasi writeFile failure path — non-existent directory.
@@ -328,14 +345,16 @@ fn wasm_wasi_write_failure() {
         }
     };
 
-    let td_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_wasi_write_failure.td");
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_wasi_write_failure.td");
 
     // Compile and run wasm-wasi
     let wasm = compile_and_run_wasm_wasi(&td_path, &wasmtime, &["--dir=."])
         .expect("wasm-wasi should succeed");
 
-    assert_eq!(wasm, "true", "writeFile to non-existent dir should report isError() = true");
+    assert_eq!(
+        wasm, "true",
+        "writeFile to non-existent dir should report isError() = true"
+    );
 }
 
 /// Test: wasm-wasi writeFile failure shape — validates throw field is set in Result toString.
@@ -358,10 +377,17 @@ fn wasm_wasi_write_failure_shape() {
         .expect("wasm-wasi should succeed");
 
     let wasm_lines: Vec<&str> = wasm.lines().collect();
-    assert!(wasm_lines.len() >= 2, "wasm output too short: {:?}", wasm_lines);
+    assert!(
+        wasm_lines.len() >= 2,
+        "wasm output too short: {:?}",
+        wasm_lines
+    );
 
     // Line 1: isError() should be true
-    assert_eq!(wasm_lines[0], "true", "writeFile to non-existent dir should report isError() = true");
+    assert_eq!(
+        wasm_lines[0], "true",
+        "writeFile to non-existent dir should report isError() = true"
+    );
 
     // Line 2: toString() should show Result with throw set (validates error shape exists)
     // Note: both Native and wasm-wasi show "Result(throw <= @())" because error pack field names
@@ -454,10 +480,7 @@ fn compile_wasm_and_get_size(td_path: &Path, target: &str, wasm_path: &Path) -> 
 }
 
 /// Compile a .td file to wasm-wasi and run with wasmtime (unique temp path for superset test).
-fn compile_and_run_wasm_wasi_superset(
-    td_path: &Path,
-    wasmtime: &Path,
-) -> Option<String> {
+fn compile_and_run_wasm_wasi_superset(td_path: &Path, wasmtime: &Path) -> Option<String> {
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
     let wasm_path = std::env::temp_dir().join(format!("taida_ww3_superset_wasi_{}.wasm", stem));
 
@@ -550,12 +573,12 @@ fn wasm_wasi_parity_all_examples() {
     // Skip files that need special wasmtime args (env injection, dir access)
     // Also skip wasm_edge_* examples (different profile, tested in wasm_edge.rs)
     let skip_stems: Vec<&str> = vec![
-        "wasm_wasi_env",             // needs --env
-        "wasm_wasi_file_io",         // needs --dir, creates temp files
-        "wasm_wasi_exists",          // needs --dir, creates temp files
-        "wasm_wasi_write_failure",   // needs --dir
+        "wasm_wasi_env",                 // needs --env
+        "wasm_wasi_file_io",             // needs --dir, creates temp files
+        "wasm_wasi_exists",              // needs --dir, creates temp files
+        "wasm_wasi_write_failure",       // needs --dir
         "wasm_wasi_write_failure_shape", // needs --dir
-        "wasm_edge_env",             // wasm-edge profile, needs taida_host imports
+        "wasm_edge_env",                 // wasm-edge profile, needs taida_host imports
     ];
 
     let mut parity_ok = Vec::new();
@@ -592,7 +615,10 @@ fn wasm_wasi_parity_all_examples() {
             if !co.status.success() {
                 return None;
             }
-            let run = Command::new(&wasmtime).arg(&parity_wasm_path).output().ok()?;
+            let run = Command::new(&wasmtime)
+                .arg(&parity_wasm_path)
+                .output()
+                .ok()?;
             let _ = std::fs::remove_file(&parity_wasm_path);
             if !run.status.success() {
                 return None;
@@ -620,10 +646,7 @@ fn wasm_wasi_parity_all_examples() {
     );
 
     if !parity_fail.is_empty() {
-        let mut msg = format!(
-            "WW-3 PARITY FAILED for {} example(s):\n",
-            parity_fail.len()
-        );
+        let mut msg = format!("WW-3 PARITY FAILED for {} example(s):\n", parity_fail.len());
         for (stem, native, wasm) in &parity_fail {
             msg.push_str(&format!(
                 "\n  {}: native='{}' vs wasm-wasi='{}'\n",
@@ -641,22 +664,49 @@ fn wasm_wasi_parity_all_examples() {
     // If this list shrinks, update the count — that's progress.
     // If it grows, the test fails — that's a regression.
     let expected_rejected: Vec<&str> = vec![
-        "06_lists", "09_modules", "10_list_operations", "11_introspection",
-        "13_async", "14_unmold_backward", "16_unmold_both_directions",
-        "17_gorillax_cage", "18_std_json", "27_prelude_result",
-        "28_prelude_collections", "30_class_like_methods", "api_client",
-        "compile_async", "compile_gorillax", "compile_hashmap_set",
-        "compile_hof_molds", "compile_json", "compile_lax", "compile_list",
-        "compile_list_map", "compile_list_molds", "compile_methods",
-        "compile_module", "compile_module_value", "compile_num_molds",
-        "compile_optional_result", "compile_pack_field_call", "compile_prelude",
-        "compile_rc", "compile_str_molds", "compile_type_conv", "todo_app",
+        "06_lists",
+        "09_modules",
+        "10_list_operations",
+        "11_introspection",
+        "13_async",
+        "14_unmold_backward",
+        "16_unmold_both_directions",
+        "17_gorillax_cage",
+        "18_std_json",
+        "27_prelude_result",
+        "28_prelude_collections",
+        "30_class_like_methods",
+        "api_client",
+        "compile_async",
+        "compile_gorillax",
+        "compile_hashmap_set",
+        "compile_hof_molds",
+        "compile_json",
+        "compile_lax",
+        "compile_list",
+        "compile_list_map",
+        "compile_list_molds",
+        "compile_methods",
+        "compile_module",
+        "compile_module_value",
+        "compile_num_molds",
+        "compile_optional_result",
+        "compile_pack_field_call",
+        "compile_prelude",
+        "compile_rc",
+        "compile_str_molds",
+        "compile_type_conv",
+        "todo_app",
     ];
 
     // Expected allowlist: examples where native backend itself fails.
     let expected_native_fail: Vec<&str> = vec![
-        "26_prelude_optional", "compile_stream", "helper_val",
-        "module_math", "module_utils", "transpile_npm",
+        "26_prelude_optional",
+        "compile_stream",
+        "helper_val",
+        "module_math",
+        "module_utils",
+        "transpile_npm",
     ];
 
     // Detect regressions: any new rejected/native-fail example not in the allowlist
