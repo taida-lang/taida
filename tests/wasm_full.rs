@@ -694,6 +694,209 @@ fn wasm_full_json_full_parity() {
 }
 
 // ---------------------------------------------------------------------------
+// WF-5a: Comprehensive parity test
+// ---------------------------------------------------------------------------
+
+/// Run native binary for a .td file, return stdout or None on failure.
+fn run_native(td_path: &Path) -> Option<String> {
+    let native_path = std::env::temp_dir().join(format!(
+        "taida_wf5_native_{}",
+        td_path.file_stem()?.to_string_lossy()
+    ));
+    let build = Command::new(taida_bin())
+        .args(["build", "--target", "native"])
+        .arg(td_path)
+        .arg("-o")
+        .arg(&native_path)
+        .output()
+        .ok()?;
+    if !build.status.success() {
+        return None;
+    }
+    let run = Command::new(&native_path).output().ok()?;
+    let _ = std::fs::remove_file(&native_path);
+    if !run.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&run.stdout).trim_end().to_string())
+}
+
+/// WF-5a: For every .td file that compiles with wasm-full,
+/// the output must match the native backend output exactly.
+#[test]
+fn wasm_full_parity_all_examples() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full parity test");
+            return;
+        }
+    };
+
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut td_files: Vec<_> = std::fs::read_dir(&examples_dir)
+        .expect("examples/ directory should exist")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |ext| ext == "td"))
+        .collect();
+    td_files.sort();
+
+    // Skip: WASI tests needing --env/--dir, edge tests needing host imports
+    let skip_stems: Vec<&str> = vec![
+        "wasm_wasi_env",
+        "wasm_wasi_exists",
+        "wasm_wasi_file_io",
+        "wasm_wasi_write_failure",
+        "wasm_wasi_write_failure_shape",
+        "wasm_wasi_stderr",         // stderr goes to separate fd
+        "wasm_edge_env",            // edge profile, different env mechanism
+    ];
+
+    let mut parity_ok = Vec::new();
+    let mut parity_fail = Vec::new();
+    let mut compile_rejected = Vec::new();
+    let mut native_fail = Vec::new();
+
+    for td_path in &td_files {
+        let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
+        if skip_stems.contains(&stem.as_str()) {
+            continue;
+        }
+
+        // Native build + run
+        let native_output = run_native(td_path);
+        if native_output.is_none() {
+            native_fail.push(stem.clone());
+            continue;
+        }
+        let native_out = native_output.unwrap();
+
+        // wasm-full compile + run
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_wf5_parity_{}.wasm", stem));
+        let compile_output = Command::new(taida_bin())
+            .args(["build", "--target", "wasm-full"])
+            .arg(td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .ok();
+        let wasm_output = compile_output.and_then(|co| {
+            if !co.status.success() {
+                return None;
+            }
+            let run = Command::new(&wasmtime)
+                .arg("run")
+                .arg("--")
+                .arg(&wasm_path)
+                .output()
+                .ok()?;
+            let _ = std::fs::remove_file(&wasm_path);
+            if !run.status.success() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&run.stdout).trim_end().to_string())
+        });
+        if wasm_output.is_none() {
+            compile_rejected.push(stem.clone());
+            continue;
+        }
+        let wasm_out = wasm_output.unwrap();
+
+        // Known non-parity examples (pre-existing bugs in native/wasm, not wasm-full regressions)
+        let known_mismatch: Vec<&str> = vec![
+            "06_lists",          // string Reverse mold garbled on both backends differently
+            "11_introspection",  // pointer addresses differ between memory layouts
+            "27_prelude_result", // mapError toString differs (different error representation)
+        ];
+
+        if native_out == wasm_out {
+            parity_ok.push(stem.clone());
+        } else if known_mismatch.contains(&stem.as_str()) {
+            // Expected mismatch, skip
+        } else {
+            parity_fail.push((stem.clone(), native_out, wasm_out));
+        }
+    }
+
+    eprintln!(
+        "WF-5 Parity: {} OK, {} rejected, {} native-fail",
+        parity_ok.len(),
+        compile_rejected.len(),
+        native_fail.len()
+    );
+
+    if !parity_fail.is_empty() {
+        let mut msg = format!(
+            "WF-5 PARITY FAILED for {} example(s):\n",
+            parity_fail.len()
+        );
+        for (stem, native, wasm) in &parity_fail {
+            msg.push_str(&format!(
+                "\n  {}: native='{}' vs wasm-full='{}'\n",
+                stem,
+                native.chars().take(100).collect::<String>(),
+                wasm.chars().take(100).collect::<String>()
+            ));
+        }
+        panic!("{}", msg);
+    }
+
+    // Expected compile_rejected: modules, async, native-only
+    let expected_rejected: Vec<&str> = vec![
+        "09_modules", "13_async", "14_unmold_backward",
+        "api_client", "compile_async", "compile_module",
+        "compile_module_value", "compile_stream",
+        "helper_val", "module_math", "module_utils",
+        "transpile_npm",
+    ];
+
+    // Expected native_fail (native build or run fails for these)
+    let expected_native_fail: Vec<&str> = vec![
+        "26_prelude_optional",
+        "compile_stream",
+        "helper_val",
+        "module_math",
+        "module_utils",
+        "transpile_npm",
+    ];
+
+    // Detect regressions
+    let unexpected_rejected: Vec<&String> = compile_rejected
+        .iter()
+        .filter(|s| !expected_rejected.contains(&s.as_str()))
+        .collect();
+    assert!(
+        unexpected_rejected.is_empty(),
+        "WF-5 REGRESSION: unexpected compile_rejected: {:?}",
+        unexpected_rejected
+    );
+
+    let unexpected_native_fail: Vec<&String> = native_fail
+        .iter()
+        .filter(|s| !expected_native_fail.contains(&s.as_str()))
+        .collect();
+    assert!(
+        unexpected_native_fail.is_empty(),
+        "WF-5 REGRESSION: unexpected native_fail: {:?}",
+        unexpected_native_fail
+    );
+
+    // Exact parity count: 49 examples match native output.
+    // Known non-parity (excluded from this count):
+    //   06_lists: string Reverse mold produces different garbled output on native vs wasm
+    //   11_introspection: pointer addresses differ between native and wasm memory layouts
+    //   27_prelude_result: mapError toString differs (different error representation)
+    assert!(
+        parity_ok.len() >= 49,
+        "WF-5 REGRESSION: expected >= 49 parity, got {}. OK: {:?}",
+        parity_ok.len(),
+        parity_ok
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Non-regression tests
 // ---------------------------------------------------------------------------
 

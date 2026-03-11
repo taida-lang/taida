@@ -760,6 +760,29 @@ int64_t taida_int_mold_auto(int64_t v) {
     return taida_lax_new(v, 0);
 }
 
+/// Int[str]() -- parse string to int, returning Lax[Int]
+/// This overrides core's version which returns raw value (no Lax wrapper).
+/// Linked via #define redirect: taida_int_mold_str -> _full.
+int64_t taida_int_mold_str_full(int64_t v) {
+    const char *s = (const char *)(intptr_t)v;
+    if (!s || s[0] == '\0') return taida_lax_empty(0);
+    int neg = 0;
+    int i = 0;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    else if (s[0] == '+') { i = 1; }
+    int64_t acc = 0;
+    int found_digit = 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        acc = acc * 10 + (s[i] - '0');
+        found_digit = 1;
+        i++;
+    }
+    if (found_digit && s[i] == '\0') {
+        return taida_lax_new(neg ? -acc : acc, 0);
+    }
+    return taida_lax_empty(0); // parse failed
+}
+
 /// Int[str, base]() -- parse string in given base
 int64_t taida_int_mold_str_base(int64_t v, int64_t base) {
     if (base < 2 || base > 36) return taida_lax_empty(0);
@@ -1751,9 +1774,14 @@ int64_t taida_polymorphic_get_or_default(int64_t obj, int64_t def) {
 }
 
 /// Polymorphic .hasValue()
+/// Works for Lax (hasValue at idx 0), Gorillax/RelaxedGorillax (isOk at idx 0),
+/// and Result (hasValue at idx 0). All fc=4 monadic types store a boolean
+/// "does this have a value" indicator at index 0.
 int64_t taida_polymorphic_has_value(int64_t obj) {
     if (obj == 0 || obj < 4096) return 0;
-    if (_wf_is_lax(obj)) return taida_pack_get_idx(obj, 0);
+    if (!_wf_is_valid_ptr(obj, 104)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)obj;
+    if (p[0] == 4) return taida_pack_get_idx(obj, 0); // fc=4: Lax/Gorillax/Result
     return 0;
 }
 
@@ -1782,14 +1810,18 @@ int64_t taida_collection_get_full(int64_t ptr, int64_t item) {
 
 /// Polymorphic .isEmpty() — wasm-full override.
 /// The core version (runtime_core_wasm.c) only handles List/Set/HashMap/String.
-/// This version adds Lax and Result support.
+/// This version adds Lax, Gorillax, and Result support.
 /// Linked via #define redirect in generated C: taida_polymorphic_is_empty -> _full.
 int64_t taida_polymorphic_is_empty_full(int64_t ptr) {
     if (ptr == 0) return 1;
-    // Lax: field 0 = hasValue; isEmpty = !hasValue
-    if (_wf_is_lax(ptr)) return taida_pack_get_idx(ptr, 0) ? 0 : 1;
-    // Result: isEmpty if error state (isError)
-    if (_wf_is_result(ptr)) return taida_result_is_error(ptr);
+    if (!_wf_is_valid_ptr(ptr, 8)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)ptr;
+    // fc=4 monadic types: Lax/Gorillax/RelaxedGorillax/Result
+    // field 0 = hasValue/isOk; isEmpty = !field0
+    if (p[0] == 4) {
+        if (_wf_is_result(ptr)) return taida_result_is_error(ptr);
+        return taida_pack_get_idx(ptr, 0) ? 0 : 1; // Lax/Gorillax
+    }
     // HashMap/Set
     if (_wf_is_hashmap(ptr)) {
         int64_t *data = (int64_t *)(intptr_t)ptr;
@@ -1902,9 +1934,67 @@ int64_t taida_monadic_get_or_throw(int64_t obj) {
     return obj;
 }
 
+/// Detect Gorillax type: 0 = unknown, 1 = Gorillax, 2 = RelaxedGorillax
+/// Unlike core's version, this does not use > 4096 threshold for the __type string.
+/// In wasm-full, data section strings can be at any address.
+static int _wf_gorillax_type(int64_t gx) {
+    int64_t *p = (int64_t *)(intptr_t)gx;
+    // __type field is at index 3: p[1 + 3*3 + 2] = p[12]
+    int64_t type_str = p[1 + 3 * 3 + 2];
+    if (type_str > 0 && _wf_looks_like_string(type_str)) {
+        const char *s = (const char *)(intptr_t)type_str;
+        if (s[0] == 'R') return 2; // "RelaxedGorillax"
+        if (s[0] == 'G') return 1; // "Gorillax"
+    }
+    return 1; // default
+}
+
+/// Gorillax/RelaxedGorillax toString with proper type detection
+static int64_t _wf_gorillax_to_str(int64_t gx) {
+    int64_t is_ok = taida_pack_get_idx(gx, 0);
+    int gtype = _wf_gorillax_type(gx);
+    const char *prefix = (gtype == 2) ? "RelaxedGorillax(" : "Gorillax(";
+    int prefix_len = (gtype == 2) ? 16 : 9;
+    if (is_ok) {
+        int64_t value = taida_pack_get_idx(gx, 1);
+        int64_t value_str = taida_polymorphic_to_string(value);
+        const char *vs = (const char *)(intptr_t)value_str;
+        int vlen = _wf_strlen(vs);
+        int need = prefix_len + vlen + 2;
+        char *buf = (char *)wasm_alloc((unsigned int)(need));
+        _wf_memcpy(buf, prefix, prefix_len);
+        _wf_memcpy(buf + prefix_len, vs, vlen);
+        buf[prefix_len + vlen] = ')';
+        buf[prefix_len + vlen + 1] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    if (gtype == 2) {
+        return (int64_t)(intptr_t)"RelaxedGorillax(escaped)";
+    }
+    return (int64_t)(intptr_t)"Gorillax(><)";
+}
+
+/// Polymorphic .toString() — wasm-full override.
+/// Fixes Gorillax/RelaxedGorillax type detection that fails in core due to
+/// the > 4096 address threshold for data section strings.
+/// Linked via #define redirect: taida_polymorphic_to_string -> _full.
+int64_t taida_polymorphic_to_string_full(int64_t obj) {
+    if (obj == 0) return (int64_t)(intptr_t)"0";
+    // Check Gorillax BEFORE delegating to core (core's gorillax type detection
+    // has the > 4096 threshold issue)
+    if (_wf_is_valid_ptr(obj, 104)) {
+        int64_t *p = (int64_t *)(intptr_t)obj;
+        if (p[0] == 4 && p[1] == 0x6550c1c5b98b56bfLL) { // WASM_HASH_IS_OK
+            return _wf_gorillax_to_str(obj);
+        }
+    }
+    // Delegate everything else to core
+    return taida_polymorphic_to_string(obj);
+}
+
 /// Monadic .toString()
 int64_t taida_monadic_to_string(int64_t obj) {
-    return taida_polymorphic_to_string(obj);
+    return taida_polymorphic_to_string_full(obj);
 }
 
 // ===========================================================================

@@ -214,6 +214,12 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
         // WF-3a: redirect field registration to full's shadow registry (for JSON lookup)
         writeln!(c, "#define taida_register_field_name taida_register_field_name_full").unwrap();
         writeln!(c, "#define taida_register_field_type taida_register_field_type_full").unwrap();
+        // WF-3 fix: redirect polymorphic_to_string to full's version that properly handles
+        // Gorillax/RelaxedGorillax type detection (core's version has > 4096 address threshold
+        // that fails for data section strings at low addresses in wasm-full)
+        writeln!(c, "#define taida_polymorphic_to_string taida_polymorphic_to_string_full").unwrap();
+        // WF-3 fix: core's int_mold_str returns raw value, full needs Lax wrapper
+        writeln!(c, "#define taida_int_mold_str taida_int_mold_str_full").unwrap();
     }
 
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)
