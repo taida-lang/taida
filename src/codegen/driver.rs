@@ -876,6 +876,263 @@ pub fn compile_file_wasm_edge(
 }
 
 // ---------------------------------------------------------------------------
+// WF-2: wasm-full -- extended runtime profile (superset of wasm-wasi)
+// ---------------------------------------------------------------------------
+
+/// wasm-full: 拡張 runtime profile
+///
+/// wasm-wasi の上位互換として、文字列/数値 molds, 拡張 list/hashmap/set,
+/// JSON, bytes, bitwise 等の重い runtime を追加する。
+///
+/// パイプライン: .td -> parse -> IR -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
+///
+/// リンク構成: gen.o + rt_core.o + rt_wasi.o + rt_full.o -> wasm-ld -> output.wasm
+pub fn compile_file_wasm_full(
+    input_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<PathBuf, CompileError> {
+    let source = fs::read_to_string(input_path).map_err(|e| CompileError {
+        message: format!("failed to read '{}': {}", input_path.display(), e),
+    })?;
+
+    let (program, parse_errors) = parse(&source);
+    if !parse_errors.is_empty() {
+        let msgs: Vec<String> = parse_errors.iter().map(|e| format!("{}", e)).collect();
+        return Err(CompileError {
+            message: format!("parse errors:\n{}", msgs.join("\n")),
+        });
+    }
+
+    let mut lowering = Lowering::new();
+    if let Some(parent) = input_path.parent() {
+        lowering.set_source_dir(parent.to_path_buf());
+    }
+    lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
+        message: format!("{}", e),
+    })?;
+
+    // wasm-full でもモジュールインポートは未対応
+    if !ir_module.imports.is_empty() {
+        return Err(CompileError {
+            message: "wasm-full does not support module imports.".to_string(),
+        });
+    }
+
+    // RC 最適化パス
+    rc_opt::optimize(&mut ir_module);
+
+    // IR -> C ソースコード (wasm-full profile)
+    let generated_c =
+        emit_wasm_c::emit_c(&ir_module, emit_wasm_c::WasmProfile::Full).map_err(|e| {
+            CompileError {
+                message: format!("wasm-full C emission failed: {}", e),
+            }
+        })?;
+
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    // 出力パスの決定
+    let wasm_path = match output_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let stem = input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            base_dir.join(format!("{}.wasm", stem))
+        }
+    };
+
+    // 一時ファイルパスの生成
+    let tmp_base = wasm_path.with_extension("_wasm_full_tmp");
+    let gen_c_path = tmp_base.with_extension("gen.c");
+    let gen_obj_path = tmp_base.with_extension("gen.o");
+    let rt_core_c_path = tmp_base.with_extension("rt_core.c");
+    let rt_core_obj_path = tmp_base.with_extension("rt_core.o");
+    let rt_wasi_c_path = tmp_base.with_extension("rt_wasi.c");
+    let rt_wasi_obj_path = tmp_base.with_extension("rt_wasi.o");
+    let rt_full_c_path = tmp_base.with_extension("rt_full.c");
+    let rt_full_obj_path = tmp_base.with_extension("rt_full.o");
+
+    // 生成された C ソースを書き出し
+    fs::write(&gen_c_path, &generated_c).map_err(|e| CompileError {
+        message: format!("failed to write generated C: {}", e),
+    })?;
+
+    // runtime_core_wasm.c (凍結)
+    let rt_core_source = include_str!("runtime_core_wasm.c");
+    fs::write(&rt_core_c_path, rt_core_source).map_err(|e| CompileError {
+        message: format!("failed to write wasm core runtime source: {}", e),
+    })?;
+
+    // runtime_wasi_io.c (wasm-wasi I/O 層)
+    let rt_wasi_source = include_str!("runtime_wasi_io.c");
+    fs::write(&rt_wasi_c_path, rt_wasi_source).map_err(|e| CompileError {
+        message: format!("failed to write wasm WASI I/O source: {}", e),
+    })?;
+
+    // runtime_full_wasm.c (wasm-full 拡張層)
+    let rt_full_source = include_str!("runtime_full_wasm.c");
+    fs::write(&rt_full_c_path, rt_full_source).map_err(|e| CompileError {
+        message: format!("failed to write wasm full runtime source: {}", e),
+    })?;
+
+    let clang = find_clang_for_wasm()?;
+
+    // 生成 C をコンパイル
+    let gen_status = Command::new(&clang)
+        .args([
+            "--target=wasm32-unknown-wasi",
+            "-nostdlib",
+            "-O2",
+            "-c",
+        ])
+        .arg(&gen_c_path)
+        .arg("-o")
+        .arg(&gen_obj_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("clang invocation failed: {}", e),
+        })?;
+
+    if !gen_status.success() {
+        let _ = fs::remove_file(&rt_core_c_path);
+        let _ = fs::remove_file(&rt_wasi_c_path);
+        let _ = fs::remove_file(&rt_full_c_path);
+        return Err(CompileError {
+            message: format!(
+                "clang wasm32 compilation of generated code failed (source preserved at: {})",
+                gen_c_path.display()
+            ),
+        });
+    }
+
+    // runtime core をコンパイル
+    let rt_core_status = Command::new(&clang)
+        .args([
+            "--target=wasm32-unknown-wasi",
+            "-nostdlib",
+            "-O2",
+            "-c",
+        ])
+        .arg(&rt_core_c_path)
+        .arg("-o")
+        .arg(&rt_core_obj_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("clang invocation failed: {}", e),
+        })?;
+
+    if !rt_core_status.success() {
+        let _ = fs::remove_file(&gen_c_path);
+        let _ = fs::remove_file(&gen_obj_path);
+        let _ = fs::remove_file(&rt_core_c_path);
+        let _ = fs::remove_file(&rt_wasi_c_path);
+        let _ = fs::remove_file(&rt_full_c_path);
+        return Err(CompileError {
+            message: "clang wasm32 compilation of core runtime failed.".to_string(),
+        });
+    }
+
+    // runtime WASI I/O をコンパイル
+    let rt_wasi_status = Command::new(&clang)
+        .args([
+            "--target=wasm32-unknown-wasi",
+            "-nostdlib",
+            "-O2",
+            "-c",
+        ])
+        .arg(&rt_wasi_c_path)
+        .arg("-o")
+        .arg(&rt_wasi_obj_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("clang invocation failed: {}", e),
+        })?;
+
+    if !rt_wasi_status.success() {
+        let _ = fs::remove_file(&gen_c_path);
+        let _ = fs::remove_file(&gen_obj_path);
+        let _ = fs::remove_file(&rt_core_obj_path);
+        let _ = fs::remove_file(&rt_core_c_path);
+        let _ = fs::remove_file(&rt_wasi_c_path);
+        let _ = fs::remove_file(&rt_full_c_path);
+        return Err(CompileError {
+            message: "clang wasm32 compilation of WASI I/O runtime failed.".to_string(),
+        });
+    }
+
+    // runtime full をコンパイル
+    let rt_full_status = Command::new(&clang)
+        .args([
+            "--target=wasm32-unknown-wasi",
+            "-nostdlib",
+            "-O2",
+            "-c",
+        ])
+        .arg(&rt_full_c_path)
+        .arg("-o")
+        .arg(&rt_full_obj_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("clang invocation failed: {}", e),
+        })?;
+
+    // 一時 C ソースを削除
+    let _ = fs::remove_file(&gen_c_path);
+    let _ = fs::remove_file(&rt_core_c_path);
+    let _ = fs::remove_file(&rt_wasi_c_path);
+    let _ = fs::remove_file(&rt_full_c_path);
+
+    if !rt_full_status.success() {
+        let _ = fs::remove_file(&gen_obj_path);
+        let _ = fs::remove_file(&rt_core_obj_path);
+        let _ = fs::remove_file(&rt_wasi_obj_path);
+        return Err(CompileError {
+            message: "clang wasm32 compilation of full runtime failed.".to_string(),
+        });
+    }
+
+    // wasm-ld でリンク（4 object: gen.o + rt_core.o + rt_wasi.o + rt_full.o）
+    let wasm_ld = find_wasm_ld()?;
+    let ld_status = Command::new(&wasm_ld)
+        .args([
+            "--no-entry",
+            "--export=_start",
+            "--strip-all",
+            "--gc-sections",
+        ])
+        .arg(&rt_core_obj_path)
+        .arg(&rt_wasi_obj_path)
+        .arg(&rt_full_obj_path)
+        .arg(&gen_obj_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .status()
+        .map_err(|e| CompileError {
+            message: format!("wasm-ld invocation failed: {}", e),
+        })?;
+
+    // 一時ファイルの削除
+    let _ = fs::remove_file(&gen_obj_path);
+    let _ = fs::remove_file(&rt_core_obj_path);
+    let _ = fs::remove_file(&rt_wasi_obj_path);
+    let _ = fs::remove_file(&rt_full_obj_path);
+
+    if !ld_status.success() {
+        return Err(CompileError {
+            message: format!(
+                "wasm-ld failed with exit code: {:?}",
+                ld_status.code()
+            ),
+        });
+    }
+
+    Ok(wasm_path)
+}
+
+// ---------------------------------------------------------------------------
 // WE-2d: JS glue generation for Cloudflare Workers
 // ---------------------------------------------------------------------------
 
@@ -929,7 +1186,7 @@ export default {{
     const stdoutChunks = [];
     const stderrChunks = [];
 
-    const memory = new WebAssembly.Memory({{ initial: 2 }});
+    let memory = new WebAssembly.Memory({{ initial: 2 }});
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
 
