@@ -2259,24 +2259,28 @@ int64_t taida_float_mold_str(int64_t v) {
         return taida_lax_empty(_d2l(0.0));
 
     double result = 0.0;
+    int has_int_digits = 0;
     /* Integer part */
     while (s[i] >= '0' && s[i] <= '9') {
         result = result * 10.0 + (s[i] - '0');
+        has_int_digits = 1;
         i++;
     }
     /* Fractional part */
+    int has_frac_digits = 0;
     if (s[i] == '.') {
         i++;
         double frac = 0.1;
-        int has_frac = 0;
         while (s[i] >= '0' && s[i] <= '9') {
             result += (s[i] - '0') * frac;
             frac *= 0.1;
-            has_frac = 1;
+            has_frac_digits = 1;
             i++;
         }
-        (void)has_frac;
     }
+    /* "." alone (no digits before or after dot) is invalid */
+    if (!has_int_digits && !has_frac_digits)
+        return taida_lax_empty(_d2l(0.0));
     /* Exponent part (e/E) */
     if (s[i] == 'e' || s[i] == 'E') {
         i++;
@@ -2284,10 +2288,14 @@ int64_t taida_float_mold_str(int64_t v) {
         if (s[i] == '-') { exp_neg = 1; i++; }
         else if (s[i] == '+') { i++; }
         int exp = 0;
+        int has_exp_digits = 0;
         while (s[i] >= '0' && s[i] <= '9') {
             exp = exp * 10 + (s[i] - '0');
+            has_exp_digits = 1;
             i++;
         }
+        /* "1e", "1e+", "1e-" (no exponent digits) is invalid */
+        if (!has_exp_digits) return taida_lax_empty(_d2l(0.0));
         double multiplier = 1.0;
         for (int e = 0; e < exp; e++) multiplier *= 10.0;
         if (exp_neg) result /= multiplier;

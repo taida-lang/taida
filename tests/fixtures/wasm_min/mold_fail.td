@@ -1,12 +1,13 @@
-// W-5g F-2: Type mold failures should return empty Lax
-// Float["bad"]() should be Lax(default: 0)
+// W-5g: Type mold failures should return empty Lax
 stdout(Float["bad"]().toString())
-
-// Bool["bad"]() should be Lax(default: 0)
 stdout(Bool["bad"]().toString())
 
-// Float["3.14"]() should succeed
-stdout(Float["3.14"]().toString())
+// Boundary cases: partially-valid tokens must also fail
+stdout(Float["1e"]().toString())
+stdout(Float["1e+"]().toString())
+stdout(Float["."]().toString())
 
-// Bool["true"]() should succeed
+// Valid cases
+stdout(Float["3.14"]().toString())
+stdout(Float["1e2"]().toString())
 stdout(Bool["true"]().toString())
