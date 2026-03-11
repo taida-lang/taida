@@ -826,3 +826,592 @@ int64_t taida_to_radix(int64_t value, int64_t base) {
     out[pos] = '\0';
     return taida_lax_new((int64_t)out, (int64_t)"");
 }
+
+// ---------------------------------------------------------------------------
+// WF-2d: Extended list operations
+// ---------------------------------------------------------------------------
+// WASM list layout: [capacity, length, elem_type_tag, type_marker, item0, item1, ...]
+// Header offset for items = 4 (WASM_LIST_ELEMS).
+// In WASM, retain/release are no-ops (bump allocator).
+
+// Additional extern declarations for core helpers used by list ops
+extern int64_t taida_list_set_elem_tag(int64_t list_ptr, int64_t tag);
+extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
+
+// WASM list constants
+#define WF_LIST_ELEMS 4
+
+// FNV-1a hashes for Zip/Enumerate BuchiPack fields
+#define WF_HASH_FIRST  0x89d7ed7f996f1d41ULL
+#define WF_HASH_SECOND 0xa49985ef4cee20bdULL
+#define WF_HASH_INDEX  0x83cf8e8f9081468bULL
+#define WF_HASH_VALUE  0x7ce4fd9430e80ceaULL
+
+// --- Callback invoke ---
+
+/// Invoke a callback (plain function or closure) with 1 argument.
+int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
+    if (taida_is_closure_value(fn_ptr)) {
+        int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
+        int64_t user_arity = closure[3];
+        if (user_arity == 0) {
+            // Zero-param lambda: call with env only, ignore arg0
+            typedef int64_t (*closure_fn0_t)(int64_t);
+            closure_fn0_t func = (closure_fn0_t)(intptr_t)closure[1];
+            return func(closure[2]);
+        }
+        // 1+ param lambda: call with env + arg0
+        typedef int64_t (*closure_fn1_t)(int64_t, int64_t);
+        closure_fn1_t func = (closure_fn1_t)(intptr_t)closure[1];
+        return func(closure[2], arg0);
+    }
+    typedef int64_t (*fn_t)(int64_t);
+    fn_t func = (fn_t)(intptr_t)fn_ptr;
+    return func(arg0);
+}
+
+/// Invoke a callback (plain function or closure) with 2 arguments.
+int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t arg0, int64_t arg1) {
+    if (taida_is_closure_value(fn_ptr)) {
+        int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
+        // Closure with 2 user args: call with env + arg0 + arg1
+        typedef int64_t (*closure_fn2_t)(int64_t, int64_t, int64_t);
+        closure_fn2_t func = (closure_fn2_t)(intptr_t)closure[1];
+        return func(closure[2], arg0, arg1);
+    }
+    typedef int64_t (*fn_t)(int64_t, int64_t);
+    fn_t func = (fn_t)(intptr_t)fn_ptr;
+    return func(arg0, arg1);
+}
+
+// --- List map/filter ---
+
+int64_t taida_list_map(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t new_list = taida_list_new();
+    // map may change element type, so leave elem_tag as UNKNOWN
+    for (int64_t i = 0; i < len; i++) {
+        int64_t result = taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i]);
+        new_list = taida_list_push(new_list, result);
+    }
+    return new_list;
+}
+
+int64_t taida_list_filter(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = 0; i < len; i++) {
+        if (taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) {
+            new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+        }
+    }
+    return new_list;
+}
+
+// --- fold / foldr ---
+
+int64_t taida_list_fold(int64_t list_ptr, int64_t init, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t acc = init;
+    for (int64_t i = 0; i < len; i++) {
+        acc = taida_invoke_callback2(fn_ptr, acc, list[WF_LIST_ELEMS + i]);
+    }
+    return acc;
+}
+
+int64_t taida_list_foldr(int64_t list_ptr, int64_t init, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t acc = init;
+    for (int64_t i = len - 1; i >= 0; i--) {
+        acc = taida_invoke_callback2(fn_ptr, acc, list[WF_LIST_ELEMS + i]);
+    }
+    return acc;
+}
+
+// --- find / find_index ---
+
+int64_t taida_list_find(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        int64_t item = list[WF_LIST_ELEMS + i];
+        if (taida_invoke_callback1(fn_ptr, item)) {
+            return taida_lax_new(item, 0);
+        }
+    }
+    return taida_lax_empty(0);
+}
+
+int64_t taida_list_find_index(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) return i;
+    }
+    return -1;
+}
+
+// --- index_of / last_index_of / contains ---
+
+int64_t taida_list_index_of(int64_t list_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (list[WF_LIST_ELEMS + i] == item) return i;
+    }
+    return -1;
+}
+
+int64_t taida_list_last_index_of(int64_t list_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = len - 1; i >= 0; i--) {
+        if (list[WF_LIST_ELEMS + i] == item) return i;
+    }
+    return -1;
+}
+
+int64_t taida_list_contains(int64_t list_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (list[WF_LIST_ELEMS + i] == item) return 1;
+    }
+    return 0;
+}
+
+// --- first / last / min / max / sum ---
+
+int64_t taida_list_first(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (len == 0) return taida_lax_empty(0);
+    return taida_lax_new(list[WF_LIST_ELEMS], 0);
+}
+
+int64_t taida_list_last(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (len == 0) return taida_lax_empty(0);
+    return taida_lax_new(list[WF_LIST_ELEMS + len - 1], 0);
+}
+
+int64_t taida_list_min(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (len == 0) return taida_lax_empty(0);
+    int64_t min_val = list[WF_LIST_ELEMS];
+    for (int64_t i = 1; i < len; i++) {
+        if (list[WF_LIST_ELEMS + i] < min_val) min_val = list[WF_LIST_ELEMS + i];
+    }
+    return taida_lax_new(min_val, 0);
+}
+
+int64_t taida_list_max(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (len == 0) return taida_lax_empty(0);
+    int64_t max_val = list[WF_LIST_ELEMS];
+    for (int64_t i = 1; i < len; i++) {
+        if (list[WF_LIST_ELEMS + i] > max_val) max_val = list[WF_LIST_ELEMS + i];
+    }
+    return taida_lax_new(max_val, 0);
+}
+
+int64_t taida_list_sum(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t sum = 0;
+    for (int64_t i = 0; i < len; i++) {
+        sum += list[WF_LIST_ELEMS + i];
+    }
+    return sum;
+}
+
+// --- sort / sort_desc ---
+
+int64_t taida_list_sort(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    // Copy items into temp array (on bump allocator)
+    int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
+    for (int64_t i = 0; i < len; i++) items[i] = list[WF_LIST_ELEMS + i];
+    // Insertion sort ascending
+    for (int64_t i = 1; i < len; i++) {
+        int64_t key = items[i];
+        int64_t j = i - 1;
+        while (j >= 0 && items[j] > key) { items[j+1] = items[j]; j--; }
+        items[j+1] = key;
+    }
+    for (int64_t i = 0; i < len; i++) {
+        new_list = taida_list_push(new_list, items[i]);
+    }
+    return new_list;
+}
+
+int64_t taida_list_sort_desc(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
+    for (int64_t i = 0; i < len; i++) items[i] = list[WF_LIST_ELEMS + i];
+    // Insertion sort descending
+    for (int64_t i = 1; i < len; i++) {
+        int64_t key = items[i];
+        int64_t j = i - 1;
+        while (j >= 0 && items[j] < key) { items[j+1] = items[j]; j--; }
+        items[j+1] = key;
+    }
+    for (int64_t i = 0; i < len; i++) {
+        new_list = taida_list_push(new_list, items[i]);
+    }
+    return new_list;
+}
+
+// --- unique / flatten / reverse ---
+
+int64_t taida_list_unique(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl_init = (int64_t *)(intptr_t)new_list;
+    nl_init[2] = elem_tag;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t item = list[WF_LIST_ELEMS + i];
+        // Check if already in new_list
+        int64_t *nl = (int64_t *)(intptr_t)new_list;
+        int64_t nlen = nl[1];
+        int64_t found = 0;
+        for (int64_t j = 0; j < nlen; j++) {
+            if (nl[WF_LIST_ELEMS + j] == item) { found = 1; break; }
+        }
+        if (!found) {
+            new_list = taida_list_push(new_list, item);
+        }
+    }
+    return new_list;
+}
+
+/// Helper: check if a pointer looks like a WASM list (same heuristic as core)
+static int _wf_looks_like_list(int64_t ptr) {
+    if (ptr == 0) return 0;
+    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
+    int64_t *data = (int64_t *)(intptr_t)ptr;
+    int64_t cap = data[0];
+    int64_t len = data[1];
+    if (cap >= 8 && cap <= 65536 && len >= 0 && len <= cap) return 1;
+    return 0;
+}
+
+int64_t taida_list_flatten(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t new_list = taida_list_new();
+    for (int64_t i = 0; i < len; i++) {
+        int64_t item = list[WF_LIST_ELEMS + i];
+        if (_wf_looks_like_list(item)) {
+            int64_t *sub = (int64_t *)(intptr_t)item;
+            int64_t slen = sub[1];
+            // Propagate inner list's elem_tag to result
+            if (i == 0) {
+                int64_t *nl = (int64_t *)(intptr_t)new_list;
+                nl[2] = sub[2];
+            }
+            for (int64_t j = 0; j < slen; j++) {
+                new_list = taida_list_push(new_list, sub[WF_LIST_ELEMS + j]);
+            }
+        } else {
+            new_list = taida_list_push(new_list, item);
+        }
+    }
+    return new_list;
+}
+
+int64_t taida_list_reverse(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = len - 1; i >= 0; i--) {
+        new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+    }
+    return new_list;
+}
+
+// --- join ---
+
+int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (len == 0) return taida_str_alloc(0);
+    const char *sep = (const char *)(intptr_t)sep_raw;
+    if (!sep) sep = "";
+    int sep_len = _wf_strlen(sep);
+
+    // Convert each element through polymorphic_to_string
+    // Allocate a temp pointer array on bump allocator
+    const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
+    int total = 0;
+    for (int64_t i = 0; i < len; i++) {
+        strs[i] = (const char *)(intptr_t)taida_polymorphic_to_string(list[WF_LIST_ELEMS + i]);
+        total += _wf_strlen(strs[i]);
+        if (i > 0) total += sep_len;
+    }
+
+    char *r = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *dst = r;
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0 && sep_len > 0) { _wf_memcpy(dst, sep, sep_len); dst += sep_len; }
+        int sl = _wf_strlen(strs[i]);
+        _wf_memcpy(dst, strs[i], sl);
+        dst += sl;
+    }
+    *dst = '\0';
+    return (int64_t)r;
+}
+
+// --- concat / append / prepend ---
+
+int64_t taida_list_concat(int64_t list1, int64_t list2) {
+    int64_t *l1 = (int64_t *)(intptr_t)list1;
+    int64_t *l2 = (int64_t *)(intptr_t)list2;
+    int64_t len1 = l1[1], len2 = l2[1];
+    int64_t elem_tag = l1[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = 0; i < len1; i++) {
+        new_list = taida_list_push(new_list, l1[WF_LIST_ELEMS + i]);
+    }
+    for (int64_t i = 0; i < len2; i++) {
+        new_list = taida_list_push(new_list, l2[WF_LIST_ELEMS + i]);
+    }
+    return new_list;
+}
+
+int64_t taida_list_append(int64_t list_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = 0; i < len; i++) {
+        new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+    }
+    new_list = taida_list_push(new_list, item);
+    return new_list;
+}
+
+int64_t taida_list_prepend(int64_t list_ptr, int64_t item) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    new_list = taida_list_push(new_list, item);
+    for (int64_t i = 0; i < len; i++) {
+        new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+    }
+    return new_list;
+}
+
+// --- count ---
+
+int64_t taida_list_count(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) count++;
+    }
+    return count;
+}
+
+// --- take / take_while / drop / drop_while ---
+
+int64_t taida_list_take(int64_t list_ptr, int64_t n) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t take_n = n < len ? n : len;
+    if (take_n < 0) take_n = 0;
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = 0; i < take_n; i++) {
+        new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+    }
+    return new_list;
+}
+
+int64_t taida_list_take_while(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = 0; i < len; i++) {
+        if (taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) {
+            new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+        } else {
+            break;
+        }
+    }
+    return new_list;
+}
+
+int64_t taida_list_drop(int64_t list_ptr, int64_t n) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t skip = n < len ? n : len;
+    if (skip < 0) skip = 0;
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    for (int64_t i = skip; i < len; i++) {
+        new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+    }
+    return new_list;
+}
+
+int64_t taida_list_drop_while(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    int64_t dropping = 1;
+    for (int64_t i = 0; i < len; i++) {
+        if (dropping && taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) {
+            continue;
+        }
+        dropping = 0;
+        new_list = taida_list_push(new_list, list[WF_LIST_ELEMS + i]);
+    }
+    return new_list;
+}
+
+// --- enumerate / zip ---
+
+int64_t taida_list_enumerate(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t new_list = taida_list_new();
+    for (int64_t i = 0; i < len; i++) {
+        int64_t pair = taida_pack_new(2);
+        taida_pack_set_hash(pair, 0, (int64_t)WF_HASH_INDEX);
+        taida_pack_set(pair, 0, i);
+        taida_pack_set_hash(pair, 1, (int64_t)WF_HASH_VALUE);
+        taida_pack_set(pair, 1, list[WF_LIST_ELEMS + i]);
+        new_list = taida_list_push(new_list, pair);
+    }
+    return new_list;
+}
+
+int64_t taida_list_zip(int64_t list1, int64_t list2) {
+    int64_t *l1 = (int64_t *)(intptr_t)list1;
+    int64_t *l2 = (int64_t *)(intptr_t)list2;
+    int64_t len1 = l1[1], len2 = l2[1];
+    int64_t min_len = len1 < len2 ? len1 : len2;
+    int64_t new_list = taida_list_new();
+    for (int64_t i = 0; i < min_len; i++) {
+        int64_t pair = taida_pack_new(2);
+        taida_pack_set_hash(pair, 0, (int64_t)WF_HASH_FIRST);
+        taida_pack_set(pair, 0, l1[WF_LIST_ELEMS + i]);
+        taida_pack_set_hash(pair, 1, (int64_t)WF_HASH_SECOND);
+        taida_pack_set(pair, 1, l2[WF_LIST_ELEMS + i]);
+        new_list = taida_list_push(new_list, pair);
+    }
+    return new_list;
+}
+
+// --- any / all / none ---
+
+int64_t taida_list_any(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) return 1;
+    }
+    return 0;
+}
+
+int64_t taida_list_all(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (!taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) return 0;
+    }
+    return 1;
+}
+
+int64_t taida_list_none(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (taida_invoke_callback1(fn_ptr, list[WF_LIST_ELEMS + i])) return 0;
+    }
+    return 1;
+}
+
+// --- to_display_string ---
+
+int64_t taida_list_to_display_string(int64_t list_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    if (len == 0) {
+        char *r = (char *)wasm_alloc(3);
+        r[0] = '@'; r[1] = '['; r[2] = ']';
+        char *result = (char *)wasm_alloc(4);
+        _wf_memcpy(result, "@[]", 4);
+        return (int64_t)result;
+    }
+    // Build "@[elem, elem, ...]"
+    // First pass: convert all elements to strings
+    const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
+    int total = 3; // "@[" + "]"
+    for (int64_t i = 0; i < len; i++) {
+        strs[i] = (const char *)(intptr_t)taida_polymorphic_to_string(list[WF_LIST_ELEMS + i]);
+        total += _wf_strlen(strs[i]);
+        if (i > 0) total += 2; // ", "
+    }
+    char *r = (char *)wasm_alloc((unsigned int)(total + 1));
+    r[0] = '@'; r[1] = '[';
+    char *dst = r + 2;
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) { dst[0] = ','; dst[1] = ' '; dst += 2; }
+        int sl = _wf_strlen(strs[i]);
+        _wf_memcpy(dst, strs[i], sl);
+        dst += sl;
+    }
+    *dst++ = ']';
+    *dst = '\0';
+    return (int64_t)r;
+}
+
+// --- elem_retain / elem_release (no-ops in WASM) ---
+
+void taida_list_elem_retain(int64_t list) { (void)list; }
+void taida_list_elem_release(int64_t list) { (void)list; }

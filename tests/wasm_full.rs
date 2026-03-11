@@ -268,6 +268,110 @@ fn wasm_full_num_molds_parity() {
     );
 }
 
+/// Test: wasm-full compiles and runs compile_list_molds.td with native-parity output.
+/// This validates extended list operations in runtime_full_wasm.c:
+/// Join, Sum, Concat, Append, Prepend, Sort, Sort(reverse), Unique, Flatten, FindIndex, Count.
+#[test]
+fn wasm_full_list_molds_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full list_molds parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_list_molds.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_list_molds.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full list_molds should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full list_molds output should match native/interpreter output"
+    );
+}
+
+/// Test: wasm-full compiles and runs compile_list_map.td with native-parity output.
+#[test]
+fn wasm_full_list_map_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full list_map parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_list_map.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_list_map.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full list_map should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full list_map output should match native/interpreter output"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Non-regression tests
 // ---------------------------------------------------------------------------
