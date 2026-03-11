@@ -424,6 +424,276 @@ fn wasm_full_hashmap_set_parity() {
 }
 
 // ---------------------------------------------------------------------------
+// WF-2f: Polymorphic dispatch + Lax/Result parity tests
+// ---------------------------------------------------------------------------
+
+/// Test: wasm-full compile_methods.td matches interpreter output.
+/// Validates: string contains/indexOf/lastIndexOf on static strings (low-address data section),
+/// list.get() returning Lax, list.hasValue() on Lax, and all other state-check methods.
+#[test]
+fn wasm_full_methods_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full methods parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_methods.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_methods.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full methods should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full methods output should match interpreter output"
+    );
+}
+
+/// Test: wasm-full compile_optional_result.td matches interpreter output.
+/// Validates: Lax.isEmpty(), Lax.hasValue(), Div[0,0]().isEmpty() = true,
+/// Result methods (isSuccess, isError, getOrDefault, map, flatMap).
+#[test]
+fn wasm_full_optional_result_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full optional_result parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_optional_result.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_optional_result.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full optional_result should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full optional_result output should match interpreter output"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WF-3a: JSON runtime parity tests
+// ---------------------------------------------------------------------------
+
+/// Test: wasm-full compiles and runs compile_json.td with native-parity output.
+/// Validates JSON[raw, Schema]() schema cast with all rules.
+#[test]
+fn wasm_full_json_schema_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full json_schema parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_json.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_json_schema.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full json_schema should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full json_schema output should match interpreter output"
+    );
+}
+
+/// Test: wasm-full compiles and runs compile_prelude.td with native-parity output.
+/// Validates jsonEncode/jsonPretty serialization.
+#[test]
+fn wasm_full_json_encode_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full json_encode parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/compile_prelude.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_json_encode.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full json_encode should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full json_encode output should match interpreter output"
+    );
+}
+
+/// Test: wasm-full compiles and runs 18_std_json.td with native-parity output.
+/// Validates full JSON workflow: schema cast + encode + pretty + nested + list.
+#[test]
+fn wasm_full_json_full_parity() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full json_full parity test");
+            return;
+        }
+    };
+
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/18_std_json.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_full_json_full.wasm");
+
+    let err = compile_wasm_full(&td_path, &wasm_path);
+    assert!(
+        err.is_none(),
+        "wasm-full json_full should compile, got: {:?}",
+        err
+    );
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    let _ = std::fs::remove_file(&wasm_path);
+
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let wasm_stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+
+    let native_run = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("interpreter should run");
+    let native_stdout = String::from_utf8_lossy(&native_run.stdout)
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        wasm_stdout, native_stdout,
+        "wasm-full json_full output should match interpreter output"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Non-regression tests
 // ---------------------------------------------------------------------------
 

@@ -204,6 +204,18 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     writeln!(c, "#include <stdint.h>").unwrap();
     writeln!(c).unwrap();
 
+    // WF-2f: wasm-full overrides for polymorphic functions whose core implementations
+    // do not handle Lax/Result (runtime_core_wasm.c is FROZEN).
+    // The generated C code calls the macro-redirected name; the override lives in
+    // runtime_full_wasm.c alongside the other wasm-full extensions.
+    if profile == WasmProfile::Full {
+        writeln!(c, "#define taida_polymorphic_is_empty taida_polymorphic_is_empty_full").unwrap();
+        writeln!(c, "#define taida_collection_get taida_collection_get_full").unwrap();
+        // WF-3a: redirect field registration to full's shadow registry (for JSON lookup)
+        writeln!(c, "#define taida_register_field_name taida_register_field_name_full").unwrap();
+        writeln!(c, "#define taida_register_field_type taida_register_field_type_full").unwrap();
+    }
+
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)
     writeln!(c, "static int64_t _d2l(double v) {{ union {{ int64_t l; double d; }} u; u.d = v; return u.l; }}").unwrap();
     writeln!(c).unwrap();
