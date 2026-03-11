@@ -897,7 +897,69 @@ fn wasm_full_parity_all_examples() {
 }
 
 // ---------------------------------------------------------------------------
-// Non-regression tests
+// WF-5b: Superset property verification
+// ---------------------------------------------------------------------------
+
+/// WF-5b: Every example that wasm-wasi can compile should also compile with wasm-full.
+#[test]
+fn wasm_full_superset_of_wasm_wasi() {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut td_files: Vec<_> = std::fs::read_dir(&examples_dir)
+        .expect("examples/ directory should exist")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |ext| ext == "td"))
+        .collect();
+    td_files.sort();
+
+    let mut wasi_ok_full_fail = Vec::new();
+
+    for td_path in &td_files {
+        let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
+        // Skip edge-only examples
+        if stem.starts_with("wasm_edge_") {
+            continue;
+        }
+
+        let wasi_path = std::env::temp_dir().join(format!("taida_wf5b_wasi_{}.wasm", stem));
+        let full_path = std::env::temp_dir().join(format!("taida_wf5b_full_{}.wasm", stem));
+
+        let wasi_ok = Command::new(taida_bin())
+            .args(["build", "--target", "wasm-wasi"])
+            .arg(td_path)
+            .arg("-o")
+            .arg(&wasi_path)
+            .output()
+            .map_or(false, |o| o.status.success());
+        let _ = std::fs::remove_file(&wasi_path);
+
+        if !wasi_ok {
+            continue; // wasm-wasi can't compile this, skip
+        }
+
+        let full_ok = Command::new(taida_bin())
+            .args(["build", "--target", "wasm-full"])
+            .arg(td_path)
+            .arg("-o")
+            .arg(&full_path)
+            .output()
+            .map_or(false, |o| o.status.success());
+        let _ = std::fs::remove_file(&full_path);
+
+        if !full_ok {
+            wasi_ok_full_fail.push(stem);
+        }
+    }
+
+    assert!(
+        wasi_ok_full_fail.is_empty(),
+        "WF-5b SUPERSET VIOLATION: wasm-wasi compiles but wasm-full rejects: {:?}",
+        wasi_ok_full_fail
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WF-5c: Non-regression tests
 // ---------------------------------------------------------------------------
 
 /// Test: wasm-min still works after wasm-full additions.
