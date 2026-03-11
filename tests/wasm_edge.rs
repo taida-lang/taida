@@ -428,6 +428,28 @@ fn wasm_edge_glue_syntax_valid() {
         glue.starts_with("//"),
         "glue should start with a JS comment"
     );
+
+    // Node.js syntax check: write to .mjs temp file and run `node --check`
+    // This catches real JS errors (e.g., const re-assignment) that brace-counting misses.
+    if let Ok(node_output) = Command::new("node").arg("--version").output() {
+        if node_output.status.success() {
+            let mjs_path = std::env::temp_dir().join("taida_wasm_edge_glue_syntax_check.mjs");
+            std::fs::write(&mjs_path, &glue).expect("should write temp .mjs");
+
+            let check = Command::new("node")
+                .arg("--check")
+                .arg(&mjs_path)
+                .output()
+                .expect("node --check should run");
+            let _ = std::fs::remove_file(&mjs_path);
+
+            assert!(
+                check.status.success(),
+                "JS glue has syntax errors (node --check failed): {}",
+                String::from_utf8_lossy(&check.stderr)
+            );
+        }
+    }
 }
 
 /// Test: wasm-edge env example also produces JS glue.
