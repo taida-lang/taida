@@ -844,7 +844,6 @@ fn run_transpile(args: &[String], no_check: bool) {
 
 fn print_build_usage_and_exit() -> ! {
     eprintln!(
-        "{}",
         "\
 Usage:
   taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
