@@ -541,50 +541,70 @@ impl Parser {
         let start_span = self.current_span();
         self.expect_ident()?; // consume "Mold"
         self.expect(&TokenKind::LBracket)?;
-
-        // Parse type parameters
-        let mut type_params = Vec::new();
-        loop {
-            let tp_name = self.expect_ident()?;
-            let constraint = if self.check(&TokenKind::LtEq) {
-                self.advance();
-                Some(self.parse_type_expr()?)
-            } else {
-                None
-            };
-            type_params.push(TypeParam {
-                name: tp_name,
-                constraint,
-            });
-            if !self.match_token(&TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(&TokenKind::RBracket)?;
+        let mold_args = self.parse_mold_header_args()?;
+        let type_params = Self::collect_mold_type_params(&mold_args);
         self.expect(&TokenKind::FatArrow)?;
 
         let name = self.expect_ident()?;
-
-        // Parse type parameter names in brackets `[T, E]`
-        if self.check(&TokenKind::LBracket) {
+        let name_args = if self.check(&TokenKind::LBracket) {
             self.advance();
-            // Skip type param references (they should match what was declared)
-            while !self.check(&TokenKind::RBracket) && !self.is_at_end() {
-                self.advance();
-            }
-            self.expect(&TokenKind::RBracket)?;
-        }
+            Some(self.parse_mold_header_args()?)
+        } else {
+            None
+        };
 
         self.expect(&TokenKind::Eq)?;
         let fields = self.parse_buchi_pack_fields()?;
 
         Ok(Statement::MoldDef(MoldDef {
             name,
+            mold_args,
+            name_args,
             type_params,
             fields,
             doc_comments,
             span: start_span,
         }))
+    }
+
+    fn parse_mold_header_args(&mut self) -> Result<Vec<MoldHeaderArg>, ParseError> {
+        let mut args = Vec::new();
+        if self.check(&TokenKind::RBracket) {
+            self.advance();
+            return Ok(args);
+        }
+
+        loop {
+            let arg = if self.match_token(&TokenKind::Colon) {
+                MoldHeaderArg::Concrete(self.parse_type_expr()?)
+            } else {
+                let name = self.expect_ident()?;
+                let constraint = if self.check(&TokenKind::LtEq) {
+                    self.advance();
+                    self.expect(&TokenKind::Colon)?;
+                    Some(self.parse_type_expr()?)
+                } else {
+                    None
+                };
+                MoldHeaderArg::TypeParam(TypeParam { name, constraint })
+            };
+            args.push(arg);
+            if !self.match_token(&TokenKind::Comma) {
+                break;
+            }
+        }
+
+        self.expect(&TokenKind::RBracket)?;
+        Ok(args)
+    }
+
+    fn collect_mold_type_params(args: &[MoldHeaderArg]) -> Vec<TypeParam> {
+        args.iter()
+            .filter_map(|arg| match arg {
+                MoldHeaderArg::TypeParam(tp) => Some(tp.clone()),
+                MoldHeaderArg::Concrete(_) => None,
+            })
+            .collect()
     }
 
     fn parse_import(&mut self) -> Result<Statement, ParseError> {

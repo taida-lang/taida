@@ -44,6 +44,8 @@ pub struct TypeChecker {
     /// Custom mold field definitions (name -> raw AST fields).
     /// Used for `[]` / `()` binding validation.
     mold_field_defs: HashMap<String, Vec<FieldDef>>,
+    /// Custom mold header declarations (name -> raw header args from `Mold[...]`).
+    mold_header_args: HashMap<String, Vec<MoldHeaderArg>>,
     /// Whether we are currently inside a pipeline expression.
     /// Used to allow `_` (Placeholder) in pipeline context while rejecting it elsewhere.
     in_pipeline: bool,
@@ -59,6 +61,7 @@ impl TypeChecker {
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
             mold_field_defs: HashMap::new(),
+            mold_header_args: HashMap::new(),
             in_pipeline: false,
         }
     }
@@ -327,6 +330,7 @@ impl TypeChecker {
             }
             Statement::MoldDef(md) => {
                 self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
+                self.validate_mold_header_consistency(md);
                 self.validate_mold_type_param_bindings(md);
                 let type_params: Vec<String> =
                     md.type_params.iter().map(|tp| tp.name.clone()).collect();
@@ -344,6 +348,8 @@ impl TypeChecker {
                     })
                     .collect();
                 self.registry.register_mold(&md.name, type_params, fields);
+                self.mold_header_args
+                    .insert(md.name.clone(), md.mold_args.clone());
                 self.mold_field_defs
                     .insert(md.name.clone(), md.fields.clone());
             }
@@ -439,6 +445,83 @@ impl TypeChecker {
                     span: field.span.clone(),
                 });
             }
+        }
+    }
+
+    fn resolve_mold_header_type(&self, ty: &TypeExpr, bound_types: &HashMap<String, Type>) -> Type {
+        match ty {
+            TypeExpr::Named(name) => bound_types
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.registry.resolve_type(ty)),
+            TypeExpr::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| {
+                        let field_ty = field
+                            .type_annotation
+                            .as_ref()
+                            .map(|ty| self.resolve_mold_header_type(ty, bound_types))
+                            .unwrap_or(Type::Unknown);
+                        (field.name.clone(), field_ty)
+                    })
+                    .collect(),
+            ),
+            TypeExpr::List(inner) => {
+                Type::List(Box::new(self.resolve_mold_header_type(inner, bound_types)))
+            }
+            TypeExpr::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.resolve_mold_header_type(arg, bound_types))
+                    .collect(),
+            ),
+            TypeExpr::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.resolve_mold_header_type(param, bound_types))
+                    .collect(),
+                Box::new(self.resolve_mold_header_type(ret, bound_types)),
+            ),
+        }
+    }
+
+    fn mold_header_type_compatible(&self, actual: &Type, expected: &Type) -> bool {
+        match (actual, expected) {
+            (_, Type::Unknown) | (Type::Unknown, _) => true,
+            (
+                Type::Function(actual_params, actual_ret),
+                Type::Function(expected_params, expected_ret),
+            ) => {
+                actual_params.len() == expected_params.len()
+                    && actual_params.iter().zip(expected_params.iter()).all(
+                        |(actual_param, expected_param)| {
+                            self.mold_header_type_compatible(actual_param, expected_param)
+                                && self.mold_header_type_compatible(expected_param, actual_param)
+                        },
+                    )
+                    && self.mold_header_type_compatible(actual_ret, expected_ret)
+            }
+            _ => self.registry.is_subtype_of(actual, expected),
+        }
+    }
+
+    fn validate_mold_header_consistency(&mut self, md: &MoldDef) {
+        let Some(name_args) = md.name_args.as_ref() else {
+            return;
+        };
+        if name_args != &md.mold_args {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "MoldDef '{}' must use the same header on both sides of `=>` when `Name[...]` is explicit",
+                        md.name
+                    ),
+                    "Make `Name[...]` match `Mold[...]` exactly, or omit `Name[...]` entirely.",
+                ),
+                span: md.span.clone(),
+            });
         }
     }
 
@@ -584,6 +667,62 @@ defaulted fields must be provided via `()`",
                     ),
                     span: field.span.clone(),
                 });
+            }
+        }
+    }
+
+    fn validate_mold_header_constraints(&mut self, name: &str, type_args: &[Expr], span: &Span) {
+        let Some(header_args) = self.mold_header_args.get(name).cloned() else {
+            return;
+        };
+
+        let mut bound_types = HashMap::<String, Type>::new();
+        for (idx, (header_arg, actual_expr)) in header_args.iter().zip(type_args.iter()).enumerate()
+        {
+            let actual = self.infer_expr_type(actual_expr);
+            match header_arg {
+                MoldHeaderArg::TypeParam(tp) => {
+                    if let Some(constraint) = &tp.constraint {
+                        let expected = self.resolve_mold_header_type(constraint, &bound_types);
+                        if !self.mold_header_type_compatible(&actual, &expected) {
+                            self.errors.push(TypeError {
+                                message: Self::binding_diag(
+                                    "E1409",
+                                    format!(
+                                        "MoldInst '{}' positional `[]` argument {} violates constraint on '{}': expected {}, got {}",
+                                        name,
+                                        idx + 1,
+                                        tp.name,
+                                        expected,
+                                        actual
+                                    ),
+                                    "Pass a value whose inferred type satisfies the constrained mold header.",
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                    bound_types.insert(tp.name.clone(), actual);
+                }
+                MoldHeaderArg::Concrete(concrete) => {
+                    let expected = self.resolve_mold_header_type(concrete, &bound_types);
+                    if !self.mold_header_type_compatible(&actual, &expected) {
+                        self.errors.push(TypeError {
+                            message: Self::binding_diag(
+                                "E1408",
+                                format!(
+                                    "MoldInst '{}' positional `[]` argument {} is fixed to {}, got {}",
+                                    name,
+                                    idx + 1,
+                                    expected,
+                                    actual
+                                ),
+                                "Pass a value whose inferred type matches the concrete mold header.",
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -1252,6 +1391,7 @@ defaulted fields must be provided via `()`",
                 }
 
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
+                self.validate_mold_header_constraints(name, type_args, mold_span);
                 match name.as_str() {
                     // JSON[raw, Schema]() returns Lax (wrapping the schema type)
                     "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),

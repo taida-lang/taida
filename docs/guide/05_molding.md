@@ -12,7 +12,7 @@
 
 ```taida
 // 鋳型の定義
-Mold[T] => Result[T, P] = @(throw: Error)
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
 // P は述語 :T => :Bool（成功条件を定義）
 
 // 値を流し込みます（_ = true は常に真を返す無名関数）
@@ -26,7 +26,7 @@ boxed ]=> value  // 42
 
 ## Mold 基底クラス
 
-すべてのモールディング型は `Mold[T]` を継承して定義します。
+すべてのモールディング型は `Mold[...]` を継承して定義します。
 
 ```taida
 // 基本形式
@@ -39,9 +39,16 @@ Mold[T] => MyMold[T] = @(
 )
 
 // 例
-Mold[T] => Result[T, P] = @(throw: Error)  // P: :T => :Bool
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
 Mold[T] => Lax[T] = @(hasValue: Bool)
 ```
+
+header 記法:
+
+- `T` = 型変数
+- `:Int` = concrete type
+- `T <= :Int` = concrete type 制約付き型変数
+- `Name[...]` を明示する場合は `Mold[...]` と一致させる。省略時は `Mold[...]` と同じ header を使う
 
 ### solidify / unmold フック
 
@@ -79,7 +86,7 @@ Mold[T] => Lax[T] = @(hasValue: Bool)
 さらに、通常フィールドは `field: Type` または `field <= value` のどちらかが必要です（`field` 単独は不可）。
 
 ```taida
-Mold[T] => Div[T, U] = @(
+Mold[T, U] => Div[T, U] = @(
   divisor: U
   solidify _ =
     | divisor == 0 |> Lax[T](hasValue <= false)
@@ -90,7 +97,7 @@ Mold[T] => Div[T, U] = @(
 Div[10, 3]()  // filling=10, divisor=3
 Div[10]()     // コンパイルエラー: divisor が不足
 
-Mold[T] => Broken[T, U] = @(
+Mold[T, U] => Broken[T, U] = @(
   solidify _ = filling
   => :T
 )
@@ -435,7 +442,7 @@ empty.toString()          // "Lax(default: 0)"
 成功/失敗を**述語（P: :T => :Bool）**で判定するモールド型です。`]=>` でアンモールディングすると述語が評価され、成功なら値 T を返し、失敗なら throw が発動します。
 
 ```taida
-Mold[T] => Result[T, P] = @(throw: Error)
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
 // P は :T => :Bool（成功条件を定義する述語）
 
 // 使用例
@@ -761,7 +768,7 @@ value => Abs[_]() => Clamp[_, 0, 100]() => Round[_]() => result
 `Mold[T]` を継承して独自のモールディング型を定義できます。
 
 ```taida
-Mold[T] => Container[@(x: Int, y: Int)] = @(
+Mold[:@(x: Int, y: Int)] => Container = @(
   count: Int
   name: Str
   unmold _ =

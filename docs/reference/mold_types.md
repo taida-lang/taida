@@ -28,7 +28,7 @@ MoldInst(String, Vec<Expr>, Vec<BuchiField>, Span)
 
 ## Mold基底クラス
 
-すべてのモールディング型は `Mold[T]` を継承して定義します。
+すべてのモールディング型は `Mold[...]` を継承して定義します。
 
 ```taida
 // 基本形式
@@ -40,8 +40,15 @@ Mold[T] => MyMold[T] = @(
 )
 
 // 例
-Mold[T] => Result[T, P] = @(throw: Error)  // P: :T => :Bool（述語付き操作モールド）
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)  // 述語付き操作モールド
 ```
+
+header 記法:
+
+- `T` = 型変数
+- `:Int` = concrete type
+- `T <= :Int` = concrete type 制約付き型変数
+- `Name[...]` を明示する場合は `Mold[...]` と完全一致させる。省略時は `Mold[...]` と同じ header を暗黙に使う
 
 ### solidify / unmold（正式仕様）
 
@@ -604,7 +611,7 @@ Lax[42]().hasValue     // true
 述語付き操作モールドです。`]=>` で述語 P を評価し、真なら値 T を返し、偽なら throw が発動します。
 
 ```taida
-Mold[T] => Result[T, P] = @(throw: Error)
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
 // P: :T => :Bool（成功条件を定義する述語）
 
 Result[42, _ = true]()                                          // 成功（_ = true は常に真）

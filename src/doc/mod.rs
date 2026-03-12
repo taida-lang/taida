@@ -1117,6 +1117,13 @@ mod tests {
         let program = Program {
             statements: vec![Statement::MoldDef(MoldDef {
                 name: "Container".to_string(),
+                mold_args: vec![crate::parser::MoldHeaderArg::TypeParam(
+                    crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: None,
+                    },
+                )],
+                name_args: None,
                 type_params: vec![crate::parser::TypeParam {
                     name: "T".to_string(),
                     constraint: None,

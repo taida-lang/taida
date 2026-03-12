@@ -748,6 +748,66 @@ p <= Pair[1, 2](flag <= true)"#;
     );
 }
 
+#[test]
+fn test_mold_explicit_name_header_must_match_left_header() {
+    let source = r#"Mold[:Int] => IntBox[T] = @()
+box <= IntBox[1]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1407]") && e.message.contains("same header")),
+        "Expected mold header mismatch error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_concrete_header_type_is_enforced() {
+    let source = r#"Mold[:Int] => IntBox = @()
+box <= IntBox["oops"]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1408]")
+                && e.message
+                    .contains("positional `[]` argument 1 is fixed to Int")
+        }),
+        "Expected concrete mold header type error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_constraint_can_reference_previous_header_type() {
+    let source = r#"Mold[T, P <= :T => :Bool] => Guard = @(
+  predicate: P
+)
+box <= Guard[1, _ value = value > 0]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected constrained mold header to accept matching lambda, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_custom_mold_constraint_is_enforced() {
+    let source = r#"Mold[T, P <= :T => :Bool] => Guard = @(
+  predicate: P
+)
+box <= Guard[1, _ value = "nope"]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1409]") && e.message.contains("violates constraint on 'P'")
+        }),
+        "Expected constrained mold header error, got: {:?}",
+        errors
+    );
+}
+
 // ── E1501: Same-scope name collision ──
 
 #[test]

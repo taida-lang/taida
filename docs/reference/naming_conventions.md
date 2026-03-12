@@ -29,7 +29,7 @@ Pilot = @(
 )
 
 // モールディング型
-Mold[T] => Result[T, P] = @(throw: Error)  // P: :T => :Bool
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
 
 // エラー型（Errorを継承）
 Error => ValidationError = @(field: Str)

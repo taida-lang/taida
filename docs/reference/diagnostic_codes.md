@@ -45,12 +45,15 @@
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
 | `E1400` | TypeDef/Mold フィールド名の重複 | TypeChecker |
-| `E1401` | フィールドの型注釈に未定義の型名が使われている | TypeChecker |
+| `E1401` | MoldDef の追加型変数に束縛先がない | TypeChecker |
 | `E1402` | MoldInst の `[]` 必須引数が不足 | TypeChecker |
 | `E1403` | MoldInst の `[]` 引数が宣言数を超過 | TypeChecker |
 | `E1404` | MoldInst の `()` オプションに同一名が重複 | TypeChecker |
 | `E1405` | 必須フィールドが `()` オプション側に渡されている | TypeChecker |
 | `E1406` | MoldInst の `()` に未定義のオプションが渡されている | TypeChecker |
+| `E1407` | MoldDef の `Name[...]` header が `Mold[...]` と不一致 | TypeChecker |
+| `E1408` | MoldInst の `[]` 引数が concrete header 型に一致しない | TypeChecker |
+| `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
 
 ### 定義・意味論エラー (`E15xx`)
 
