@@ -106,6 +106,54 @@ fn run_js_with_env(td_path: &Path, envs: &[(&str, &str)]) -> Option<String> {
     Some(normalize(&String::from_utf8_lossy(&run_output.stdout)))
 }
 
+/// Build a multi-module .td entrypoint to JS and execute the emitted main module.
+fn run_js_project(td_path: &Path, label: &str) -> Option<String> {
+    run_js_project_with_env(td_path, label, &[])
+}
+
+fn run_js_project_with_env(td_path: &Path, label: &str, envs: &[(&str, &str)]) -> Option<String> {
+    let stem = td_path.file_stem()?.to_string_lossy().to_string();
+    let out_dir = unique_temp_path("taida_parity_js_project", label, "dir");
+    fs::create_dir_all(&out_dir).ok()?;
+    let main_out = out_dir.join(format!("{}.mjs", stem));
+
+    let build_output = match Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(td_path)
+        .arg("-o")
+        .arg(&main_out)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => {
+            let _ = fs::remove_dir_all(&out_dir);
+            return None;
+        }
+    };
+
+    if !build_output.status.success() {
+        let _ = fs::remove_dir_all(&out_dir);
+        return None;
+    }
+
+    let mut node = Command::new("node");
+    for (k, v) in envs {
+        node.env(k, v);
+    }
+    let run_output = node.arg(&main_out).output();
+
+    let _ = fs::remove_dir_all(&out_dir);
+
+    let run_output = run_output.ok()?;
+    if !run_output.status.success() {
+        return None;
+    }
+
+    Some(normalize(&String::from_utf8_lossy(&run_output.stdout)))
+}
+
 /// Compile a .td file to a native binary, execute it, and return stdout.
 fn run_native(td_path: &Path) -> Option<String> {
     run_native_with_error(td_path).ok()
@@ -3128,9 +3176,15 @@ stdout(result)
         interp, native
     );
 
-    // JS: multi-module transpile requires all modules to be transpiled separately,
-    // which the current `run_js` helper doesn't support. Skip JS parity for now.
-    // The single-module jsonEncode parity is already covered by other tests.
+    if node_available() {
+        let js = run_js_project(&main_path, "f52_module_closure")
+            .expect("F-52 parity: js should succeed");
+        assert_eq!(
+            interp, js,
+            "F-52 parity: interpreter/js mismatch — interp='{}', js='{}'",
+            interp, js
+        );
+    }
 
     let _ = fs::remove_dir_all(&dir);
 }
