@@ -1932,7 +1932,24 @@ int64_t taida_error_get_value(int64_t depth) {
 #define WASM_HASH_FIELD     0x2c5d047ff4e6ffc7LL  /* FNV-1a("field") */
 #define WASM_HASH_CODE      0x0bb51791194b4414LL  /* FNV-1a("code") */
 
+static void _wasm_register_builtin_error_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+
+    taida_register_field_name(WASM_HASH_TYPE, (int64_t)(intptr_t)"type");
+    taida_register_field_name(WASM_HASH_MESSAGE, (int64_t)(intptr_t)"message");
+    taida_register_field_name(WASM_HASH_FIELD, (int64_t)(intptr_t)"field");
+    taida_register_field_name(WASM_HASH_CODE, (int64_t)(intptr_t)"code");
+    taida_register_field_name(
+        taida_str_hash((int64_t)(intptr_t)"kind"),
+        (int64_t)(intptr_t)"kind"
+    );
+}
+
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
+    _wasm_register_builtin_error_field_names();
+
     int64_t pack = taida_pack_new(2);
     taida_pack_set_hash(pack, 0, WASM_HASH_TYPE);
     taida_pack_set(pack, 0, type_ptr);

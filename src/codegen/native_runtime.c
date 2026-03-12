@@ -412,7 +412,21 @@ taida_val taida_to_radix(taida_val value, taida_val base) {
 #define HASH_TYPE    0xa79439ef7bfa9c2dULL
 #define HASH_MESSAGE 0x546401b5d2a8d2a4ULL
 
+static void taida_register_builtin_error_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+
+    taida_register_field_name((taida_val)HASH_TYPE, (taida_val)"type");
+    taida_register_field_name((taida_val)HASH_MESSAGE, (taida_val)"message");
+    taida_register_field_name(taida_str_hash((taida_val)"field"), (taida_val)"field");
+    taida_register_field_name(taida_str_hash((taida_val)"code"), (taida_val)"code");
+    taida_register_field_name(taida_str_hash((taida_val)"kind"), (taida_val)"kind");
+}
+
 static taida_val taida_make_error(const char *error_type, const char *error_msg) {
+    taida_register_builtin_error_field_names();
+
     taida_val pack = taida_pack_new(2);
     // Set hash for "type" field (index 0)
     taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
@@ -520,6 +534,8 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg) {
 }
 
 static taida_val taida_make_io_error(int err_code, const char *err_msg) {
+    taida_register_builtin_error_field_names();
+
     const char *message = err_msg ? err_msg : "unknown io error";
     const char *kind = taida_os_error_kind(err_code, message);
 
