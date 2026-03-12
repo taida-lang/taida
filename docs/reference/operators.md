@@ -208,7 +208,7 @@ add x: Int y: Int =
 => :Int
 
 // モールディング型定義（Mold基底クラスから継承）
-Mold[T] => Result[T, P] = @(throw: Error)  // P: :T => :Bool
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
 
 // エラー天井定義
 |== error: MyError =

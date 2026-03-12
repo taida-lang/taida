@@ -771,6 +771,7 @@ impl Lowering {
             let helper_raw = Self::mold_solidify_helper_name(&mold_def.name);
             let synthetic = crate::parser::FuncDef {
                 name: helper_raw,
+                type_params: Vec::new(),
                 params,
                 body: solidify_method.body.clone(),
                 return_type: solidify_method.return_type.clone(),

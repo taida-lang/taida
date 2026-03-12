@@ -3,6 +3,55 @@ pub mod token;
 
 use token::{delete_token, load_token, save_token};
 
+fn is_help_flag(raw: &str) -> bool {
+    matches!(raw, "--help" | "-h")
+}
+
+fn print_auth_help() {
+    println!(
+        "\
+Usage:
+  taida auth <login|logout|status>
+
+Examples:
+  taida auth login
+  taida auth status"
+    );
+}
+
+fn print_auth_login_help() {
+    println!(
+        "\
+Usage:
+  taida auth login
+
+Behavior:
+  Start the GitHub Device Authorization Flow and store the resulting token locally."
+    );
+}
+
+fn print_auth_logout_help() {
+    println!(
+        "\
+Usage:
+  taida auth logout
+
+Behavior:
+  Delete the locally stored authentication token, if present."
+    );
+}
+
+fn print_auth_status_help() {
+    println!(
+        "\
+Usage:
+  taida auth status
+
+Behavior:
+  Print the currently authenticated user and token creation timestamp, if logged in."
+    );
+}
+
 pub fn run_auth(args: &[String]) {
     if args.is_empty() {
         eprintln!("Usage: taida auth <login|logout|status>");
@@ -10,9 +59,10 @@ pub fn run_auth(args: &[String]) {
     }
 
     match args[0].as_str() {
-        "login" => run_login(),
-        "logout" => run_logout(),
-        "status" => run_status(),
+        "--help" | "-h" => print_auth_help(),
+        "login" => run_login(&args[1..]),
+        "logout" => run_logout(&args[1..]),
+        "status" => run_status(&args[1..]),
         other => {
             eprintln!("Unknown auth command: {}", other);
             eprintln!("Usage: taida auth <login|logout|status>");
@@ -21,7 +71,19 @@ pub fn run_auth(args: &[String]) {
     }
 }
 
-fn run_login() {
+fn run_login(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_auth_login_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida auth login");
+            std::process::exit(1);
+        }
+    }
+
     // すでにログイン済みか確認
     if let Some(existing) = load_token() {
         println!(
@@ -84,7 +146,19 @@ fn run_login() {
     }
 }
 
-fn run_logout() {
+fn run_logout(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_auth_logout_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida auth logout");
+            std::process::exit(1);
+        }
+    }
+
     match load_token() {
         Some(token) => match delete_token() {
             Ok(()) => println!("Logged out (was {}).", token.username),
@@ -99,7 +173,19 @@ fn run_logout() {
     }
 }
 
-fn run_status() {
+fn run_status(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_auth_status_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida auth status");
+            std::process::exit(1);
+        }
+    }
+
     match load_token() {
         Some(token) => {
             println!("Logged in as {}.", token.username);

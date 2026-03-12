@@ -63,7 +63,7 @@ Global options:
   --version, -V  Show version
   --no-check     Skip type checking where supported
 
-Use `taida graph --help` for graph-specific usage.",
+Use `taida <COMMAND> --help` for command-specific usage.",
         cli_version_label()
     );
 }
@@ -76,12 +76,233 @@ Usage:
   taida graph summary [--type TYPE] <PATH>
   taida graph query --type TYPE --query EXPR <PATH>
 
+Options:
+  --type, -t      dataflow | module | type-hierarchy | error | call
+  --format, -f    text | json | mermaid | dot
+  --query         Query expression for `graph query`
+  --output, -o    Output path (bare filename writes into .taida/graph/)
+
 Types:
   dataflow | module | type-hierarchy | error | call
 
 Formats:
-  text | json | mermaid | dot"
+  text | json | mermaid | dot
+
+Examples:
+  taida graph --type call examples/04_functions.td
+  taida graph query --type dataflow --query 'nodes()' examples/04_functions.td"
     );
+}
+
+fn print_check_help() {
+    println!(
+        "\
+Usage:
+  taida check [--json] <PATH>
+
+Options:
+  --json          Print `taida.check.v1` JSON diagnostics
+
+Examples:
+  taida check src
+  taida check --json main.td"
+    );
+}
+
+fn print_build_help() {
+    println!(
+        "\
+Usage:
+  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+
+Options:
+  --target        Build target (default: js)
+  --output, -o    Output file or directory
+  --outdir        Alias of `--output`
+  --entry         Native dir entry override (default: main.td)
+  --release, -r   Fail if TODO/Stub remains in source
+  --diag-format   text | jsonl
+
+Examples:
+  taida build --target js src
+  taida build --target native --release app.td
+
+Notes:
+  `--no-check` is a global option and applies here."
+    );
+}
+
+fn print_compile_help() {
+    println!(
+        "\
+Usage:
+  taida compile [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+
+Deprecated alias:
+  Equivalent to `taida build --target native ...`
+
+Example:
+  taida compile app.td -o app_bin"
+    );
+}
+
+fn print_transpile_help() {
+    println!(
+        "\
+Usage:
+  taida transpile [--release] [--diag-format text|jsonl] [-o OUTPUT] <PATH>
+
+Deprecated alias:
+  Equivalent to `taida build --target js ...`
+
+Example:
+  taida transpile src -o dist"
+    );
+}
+
+fn print_todo_help() {
+    println!(
+        "\
+Usage:
+  taida todo [--format text|json] [PATH]
+
+Options:
+  --format, -f    text | json
+
+Examples:
+  taida todo
+  taida todo --format json src"
+    );
+}
+
+fn print_verify_help() {
+    println!(
+        "\
+Usage:
+  taida verify [--check CHECK] [--format FORMAT] <PATH>
+
+Options:
+  --check, -c     Run a specific check (repeatable)
+  --format, -f    text | json | jsonl | sarif
+
+Examples:
+  taida verify src
+  taida verify --check error-coverage --format jsonl main.td"
+    );
+}
+
+fn print_inspect_help() {
+    println!(
+        "\
+Usage:
+  taida inspect [--format text|json|sarif] <PATH>
+
+Options:
+  --format, -f    text | json | sarif
+
+Examples:
+  taida inspect main.td
+  taida inspect --format sarif main.td"
+    );
+}
+
+fn print_init_help() {
+    println!(
+        "\
+Usage:
+  taida init [DIR]
+
+Example:
+  taida init hello-taida"
+    );
+}
+
+fn print_deps_help() {
+    println!(
+        "\
+Usage:
+  taida deps
+
+Behavior:
+  Resolve dependencies strictly and stop before install/lockfile update on any error.
+
+Example:
+  taida deps"
+    );
+}
+
+fn print_install_help() {
+    println!(
+        "\
+Usage:
+  taida install
+
+Behavior:
+  Install resolved dependencies and generate/update `.taida/taida.lock`.
+
+Example:
+  taida install"
+    );
+}
+
+fn print_update_help() {
+    println!(
+        "\
+Usage:
+  taida update
+
+Behavior:
+  Resolve dependencies with remote-preferred generation lookup, then reinstall and update lockfile.
+
+Example:
+  taida update"
+    );
+}
+
+fn print_publish_help() {
+    println!(
+        "\
+Usage:
+  taida publish [--label LABEL] [--dry-run]
+
+Options:
+  --label         Append a version label, for example `rc`
+  --dry-run       Print the publish plan without changing files or git state
+
+Examples:
+  taida publish --dry-run
+  taida publish --label rc"
+    );
+}
+
+fn print_doc_help() {
+    println!(
+        "\
+Usage:
+  taida doc generate [-o OUTPUT] <PATH>
+
+Options:
+  --output, -o    Output path (stdout when omitted)
+
+Examples:
+  taida doc generate src
+  taida doc generate -o docs/api.md src"
+    );
+}
+
+fn print_lsp_help() {
+    println!(
+        "\
+Usage:
+  taida lsp
+
+Behavior:
+  Start the Taida language server over stdio."
+    );
+}
+
+fn is_help_flag(raw: &str) -> bool {
+    matches!(raw, "--help" | "-h")
 }
 
 fn parse_graph_view_or_exit(raw: &str) -> GraphView {
@@ -126,7 +347,7 @@ fn main() {
         match filtered_args[1].as_str() {
             "--help" | "-h" | "help" => print_cli_help(),
             "--version" | "-V" | "version" => print_cli_version(),
-            "lsp" => run_lsp(),
+            "lsp" => run_lsp(&filtered_args[2..]),
             "check" => run_check_cmd(&filtered_args[2..]),
             "compile" => run_compile(&filtered_args[2..], no_check),
             "transpile" => run_transpile(&filtered_args[2..], no_check),
@@ -233,6 +454,10 @@ fn run_check_cmd(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print_check_help();
+                return;
+            }
             "--json" => json_mode = true,
             raw if raw.starts_with('-') => {
                 eprintln!("Unknown option for check: {}", raw);
@@ -596,6 +821,10 @@ fn emit_deprecation_warning(command: &str, replacement: &str) {
 }
 
 fn run_compile(args: &[String], no_check: bool) {
+    if args.len() == 1 && is_help_flag(args[0].as_str()) {
+        print_compile_help();
+        return;
+    }
     emit_deprecation_warning("taida compile", "taida build --target native");
     let mut forwarded = vec!["--target".to_string(), "native".to_string()];
     forwarded.extend(args.iter().cloned());
@@ -603,6 +832,10 @@ fn run_compile(args: &[String], no_check: bool) {
 }
 
 fn run_transpile(args: &[String], no_check: bool) {
+    if args.len() == 1 && is_help_flag(args[0].as_str()) {
+        print_transpile_help();
+        return;
+    }
     emit_deprecation_warning("taida transpile", "taida build --target js");
     let mut forwarded = vec!["--target".to_string(), "js".to_string()];
     forwarded.extend(args.iter().cloned());
@@ -611,14 +844,18 @@ fn run_transpile(args: &[String], no_check: bool) {
 
 fn print_build_usage_and_exit() -> ! {
     eprintln!(
-        "Usage: taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>"
+        "\
+Usage:
+  taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+
+Options:
+  --target        Build target (default: js)
+  --output, -o    Output file or directory
+  --outdir        Alias of `--output`
+  --entry         Native dir entry override (default: main.td)
+  --release, -r   Fail if TODO/Stub remains in source
+  --diag-format   text | jsonl"
     );
-    eprintln!("  js target: <PATH> accepts file/dir, -o is output file(or outdir for dir)");
-    eprintln!("  native target: <PATH> accepts file/dir, --entry is dir-only (default: main.td)");
-    eprintln!("  wasm-min target: <PATH> accepts single file, -o is output .wasm path");
-    eprintln!("  wasm-wasi target: <PATH> accepts single file, -o is output .wasm path");
-    eprintln!("  wasm-edge target: <PATH> accepts single file, -o is output .wasm path");
-    eprintln!("  wasm-full target: <PATH> accepts single file, -o is output .wasm path");
     std::process::exit(1);
 }
 
@@ -633,6 +870,10 @@ fn run_build(args: &[String], no_check: bool) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print_build_help();
+                return;
+            }
             "--target" => {
                 i += 1;
                 if i >= args.len() {
@@ -2772,16 +3013,29 @@ fn run_todo(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print_todo_help();
+                return;
+            }
             "--format" | "-f" => {
                 i += 1;
-                if i < args.len() {
-                    format_type = args[i].clone();
+                if i >= args.len() {
+                    eprintln!("Usage: taida todo [--format text|json] [PATH]");
+                    std::process::exit(1);
                 }
+                format_type = args[i].clone();
+            }
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for todo: {}", raw);
+                eprintln!("Usage: taida todo [--format text|json] [PATH]");
+                std::process::exit(1);
             }
             _ => {
-                if !args[i].starts_with('-') {
-                    path = Some(args[i].clone());
+                if path.is_some() {
+                    eprintln!("Only one [PATH] is accepted for taida todo.");
+                    std::process::exit(1);
                 }
+                path = Some(args[i].clone());
             }
         }
         i += 1;
@@ -3048,22 +3302,37 @@ fn run_verify(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print_verify_help();
+                return;
+            }
             "--check" | "-c" => {
                 i += 1;
-                if i < args.len() {
-                    checks.push(args[i].clone());
+                if i >= args.len() {
+                    eprintln!("Usage: taida verify [--check CHECK] [--format FORMAT] <PATH>");
+                    std::process::exit(1);
                 }
+                checks.push(args[i].clone());
             }
             "--format" | "-f" => {
                 i += 1;
-                if i < args.len() {
-                    format_type = args[i].clone();
+                if i >= args.len() {
+                    eprintln!("Usage: taida verify [--check CHECK] [--format FORMAT] <PATH>");
+                    std::process::exit(1);
                 }
+                format_type = args[i].clone();
+            }
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for verify: {}", raw);
+                eprintln!("Usage: taida verify [--check CHECK] [--format FORMAT] <PATH>");
+                std::process::exit(1);
             }
             _ => {
-                if !args[i].starts_with('-') {
-                    path = Some(args[i].clone());
+                if path.is_some() {
+                    eprintln!("Only one <PATH> is accepted for taida verify.");
+                    std::process::exit(1);
                 }
+                path = Some(args[i].clone());
             }
         }
         i += 1;
@@ -3153,16 +3422,29 @@ fn run_inspect(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print_inspect_help();
+                return;
+            }
             "--format" | "-f" => {
                 i += 1;
-                if i < args.len() {
-                    format_type = args[i].clone();
+                if i >= args.len() {
+                    eprintln!("Usage: taida inspect [--format FORMAT] <PATH>");
+                    std::process::exit(1);
                 }
+                format_type = args[i].clone();
+            }
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for inspect: {}", raw);
+                eprintln!("Usage: taida inspect [--format FORMAT] <PATH>");
+                std::process::exit(1);
             }
             _ => {
-                if !args[i].starts_with('-') {
-                    path = Some(args[i].clone());
+                if path.is_some() {
+                    eprintln!("Only one <PATH> is accepted for taida inspect.");
+                    std::process::exit(1);
                 }
+                path = Some(args[i].clone());
             }
         }
         i += 1;
@@ -3249,7 +3531,23 @@ fn run_inspect(args: &[String]) {
 // ── Init subcommand ──────────────────────────────────────
 
 fn run_init(args: &[String]) {
-    let dir_name = args.first().map(|s| s.as_str()).unwrap_or(".");
+    let dir_name = match args {
+        [] => ".",
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_init_help();
+            return;
+        }
+        [arg] if !arg.starts_with('-') => arg.as_str(),
+        [arg] => {
+            eprintln!("Unknown option for init: {}", arg);
+            eprintln!("Usage: taida init [DIR]");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("Usage: taida init [DIR]");
+            std::process::exit(1);
+        }
+    };
     let dir = Path::new(dir_name);
 
     // Determine project name from directory name
@@ -3328,7 +3626,19 @@ fn run_init(args: &[String]) {
 
 // ── Deps subcommand ──────────────────────────────────────
 
-fn run_deps(_args: &[String]) {
+fn run_deps(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_deps_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida deps");
+            std::process::exit(1);
+        }
+    }
+
     // Find project root by looking for packages.tdm
     let project_dir = find_packages_tdm().unwrap_or_else(|| {
         eprintln!("No packages.tdm found in current directory or parent directories.");
@@ -3398,7 +3708,19 @@ fn run_deps(_args: &[String]) {
 
 // ── Install subcommand ──────────────────────────────────
 
-fn run_install(_args: &[String]) {
+fn run_install(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_install_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida install");
+            std::process::exit(1);
+        }
+    }
+
     // Find project root by looking for packages.tdm
     let project_dir = find_packages_tdm().unwrap_or_else(|| {
         eprintln!("No packages.tdm found in current directory or parent directories.");
@@ -3484,7 +3806,19 @@ fn run_install(_args: &[String]) {
 
 // ── Update subcommand ──────────────────────────────────
 
-fn run_update(_args: &[String]) {
+fn run_update(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_update_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida update");
+            std::process::exit(1);
+        }
+    }
+
     // Find project root by looking for packages.tdm
     let project_dir = find_packages_tdm().unwrap_or_else(|| {
         eprintln!("No packages.tdm found in current directory or parent directories.");
@@ -3567,6 +3901,10 @@ fn run_publish(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => {
+                print_publish_help();
+                return;
+            }
             "--label" => {
                 i += 1;
                 if i >= args.len() {
@@ -3690,6 +4028,11 @@ fn run_publish(args: &[String]) {
 // ── Doc subcommand ──────────────────────────────────────
 
 fn run_doc(args: &[String]) {
+    if args.len() == 1 && is_help_flag(args[0].as_str()) {
+        print_doc_help();
+        return;
+    }
+
     if args.is_empty() || args[0] != "generate" {
         eprintln!("Usage: taida doc generate [-o OUTPUT] <PATH>");
         std::process::exit(1);
@@ -3703,16 +4046,29 @@ fn run_doc(args: &[String]) {
     let mut i = 0;
     while i < gen_args.len() {
         match gen_args[i].as_str() {
+            "--help" | "-h" => {
+                print_doc_help();
+                return;
+            }
             "-o" | "--output" => {
                 i += 1;
-                if i < gen_args.len() {
-                    output_path = Some(gen_args[i].clone());
+                if i >= gen_args.len() {
+                    eprintln!("Usage: taida doc generate [-o OUTPUT] <PATH>");
+                    std::process::exit(1);
                 }
+                output_path = Some(gen_args[i].clone());
+            }
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for doc generate: {}", raw);
+                eprintln!("Usage: taida doc generate [-o OUTPUT] <PATH>");
+                std::process::exit(1);
             }
             _ => {
-                if !gen_args[i].starts_with('-') {
-                    input_path = Some(gen_args[i].clone());
+                if input_path.is_some() {
+                    eprintln!("Only one <PATH> is accepted for taida doc generate.");
+                    std::process::exit(1);
                 }
+                input_path = Some(gen_args[i].clone());
             }
         }
         i += 1;
@@ -3815,7 +4171,19 @@ fn find_packages_tdm() -> Option<PathBuf> {
 
 // ── LSP server ─────────────────────────────────────────
 
-fn run_lsp() {
+fn run_lsp(args: &[String]) {
+    match args {
+        [] => {}
+        [arg] if is_help_flag(arg.as_str()) => {
+            print_lsp_help();
+            return;
+        }
+        _ => {
+            eprintln!("Usage: taida lsp");
+            std::process::exit(1);
+        }
+    }
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     rt.block_on(taida::lsp::server::run_server());
 }

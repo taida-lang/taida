@@ -50,6 +50,7 @@ extern int64_t taida_hashmap_new(void);
 extern int64_t taida_hashmap_set(int64_t hm, int64_t key_hash, int64_t key_ptr, int64_t value);
 extern void taida_hashmap_set_value_tag(int64_t hm, int64_t tag);
 extern int64_t taida_str_hash(int64_t str_ptr);
+extern int64_t taida_register_field_name(int64_t hash, int64_t name_ptr);
 
 /* Pack (for Result inner) */
 extern int64_t taida_pack_new(int64_t field_count);
@@ -422,6 +423,18 @@ int64_t taida_os_read(int64_t path_ptr) {
 #define WASI_HASH_CODE    0x0bb51791194b4414ULL  /* FNV-1a("code") */
 #define WASI_HASH_MESSAGE 0x546401b5d2a8d2a4ULL  /* FNV-1a("message") */
 
+static void wasi_register_builtin_io_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+
+    taida_register_field_name(taida_str_hash((int64_t)(intptr_t)"type"), (int64_t)(intptr_t)"type");
+    taida_register_field_name(WASI_HASH_OK, (int64_t)(intptr_t)"ok");
+    taida_register_field_name(WASI_HASH_CODE, (int64_t)(intptr_t)"code");
+    taida_register_field_name(WASI_HASH_MESSAGE, (int64_t)(intptr_t)"message");
+    taida_register_field_name(taida_str_hash((int64_t)(intptr_t)"kind"), (int64_t)(intptr_t)"kind");
+}
+
 /* WASI errno → error kind mapping (matches native taida_os_error_kind) */
 static const char *wasi_error_kind(int32_t wasi_errno, const char *msg) {
     switch (wasi_errno) {
@@ -450,6 +463,8 @@ static const char *wasi_error_kind(int32_t wasi_errno, const char *msg) {
 
 /* Build IoError pack — 4 fields matching native taida_make_io_error */
 static int64_t wasi_make_io_error(int32_t wasi_errno, const char *msg) {
+    wasi_register_builtin_io_field_names();
+
     const char *message = msg ? msg : "unknown io error";
     const char *kind = wasi_error_kind(wasi_errno, message);
 
@@ -477,6 +492,8 @@ static int64_t wasi_make_io_error(int32_t wasi_errno, const char *msg) {
 
 /* Build os ok inner @(ok=true, code=0, message="") — matches Native */
 static int64_t wasi_os_ok_inner(void) {
+    wasi_register_builtin_io_field_names();
+
     int64_t inner = taida_pack_new(3);
     taida_pack_set_hash(inner, 0, WASI_HASH_OK);
     taida_pack_set(inner, 0, 1);  /* true */
@@ -494,6 +511,8 @@ static int64_t wasi_os_result_success(void) {
 
 /* Build os Result failure — matches Native taida_os_result_failure shape */
 static int64_t wasi_os_result_failure_code(int32_t wasi_errno, const char *msg) {
+    wasi_register_builtin_io_field_names();
+
     const char *message = msg ? msg : "unknown io error";
     const char *kind = wasi_error_kind(wasi_errno, message);
 

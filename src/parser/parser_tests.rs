@@ -159,10 +159,56 @@ fn test_parse_mold_def() {
     match first_stmt("Mold[T] => Optional[T] = @(hasValue: Bool)") {
         Statement::MoldDef(md) => {
             assert_eq!(md.name, "Optional");
+            assert_eq!(md.mold_args.len(), 1);
+            assert_eq!(md.name_args.as_ref(), Some(&md.mold_args));
             assert_eq!(md.type_params.len(), 1);
             assert_eq!(md.type_params[0].name, "T");
             assert_eq!(md.fields.len(), 1);
             assert_eq!(md.fields[0].name, "hasValue");
+        }
+        other => panic!("Expected MoldDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_mold_def_with_concrete_and_constrained_header_args() {
+    match first_stmt("Mold[:Int, T <= :Int] => IntBox[:Int, T <= :Int] = @(count: Int)") {
+        Statement::MoldDef(md) => {
+            assert_eq!(md.name, "IntBox");
+            assert_eq!(md.mold_args.len(), 2);
+            assert_eq!(md.name_args.as_ref(), Some(&md.mold_args));
+            assert_eq!(md.type_params.len(), 1);
+            assert_eq!(md.type_params[0].name, "T");
+            assert_eq!(
+                md.type_params[0].constraint,
+                Some(TypeExpr::Named("Int".to_string()))
+            );
+            assert!(matches!(
+                &md.mold_args[0],
+                MoldHeaderArg::Concrete(TypeExpr::Named(name)) if name == "Int"
+            ));
+            assert!(matches!(
+                &md.mold_args[1],
+                MoldHeaderArg::TypeParam(TypeParam { name, constraint: Some(TypeExpr::Named(bound)) })
+                    if name == "T" && bound == "Int"
+            ));
+        }
+        other => panic!("Expected MoldDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_mold_def_with_implicit_name_header() {
+    match first_stmt("Mold[:Int] => IntBox = @()") {
+        Statement::MoldDef(md) => {
+            assert_eq!(md.name, "IntBox");
+            assert_eq!(md.mold_args.len(), 1);
+            assert!(md.name_args.is_none());
+            assert!(md.type_params.is_empty());
+            assert!(matches!(
+                &md.mold_args[0],
+                MoldHeaderArg::Concrete(TypeExpr::Named(name)) if name == "Int"
+            ));
         }
         other => panic!("Expected MoldDef, got {:?}", other),
     }
@@ -188,6 +234,7 @@ fn test_parse_function_def() {
     match first_stmt(source) {
         Statement::FuncDef(fd) => {
             assert_eq!(fd.name, "add");
+            assert!(fd.type_params.is_empty());
             assert_eq!(fd.params.len(), 2);
             assert_eq!(fd.params[0].name, "x");
             assert_eq!(fd.params[1].name, "y");
@@ -196,6 +243,30 @@ fn test_parse_function_def() {
                 Some(TypeExpr::Named(n)) => assert_eq!(n, "Int"),
                 other => panic!("Expected Named(Int), got {:?}", other),
             }
+        }
+        other => panic!("Expected FuncDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_generic_function_def() {
+    let source = "id[T <= :Int] x: T =\n  x\n=> :T";
+    match first_stmt(source) {
+        Statement::FuncDef(fd) => {
+            assert_eq!(fd.name, "id");
+            assert_eq!(fd.type_params.len(), 1);
+            assert_eq!(fd.type_params[0].name, "T");
+            assert_eq!(
+                fd.type_params[0].constraint,
+                Some(TypeExpr::Named("Int".to_string()))
+            );
+            assert_eq!(fd.params.len(), 1);
+            assert_eq!(fd.params[0].name, "x");
+            assert_eq!(
+                fd.params[0].type_annotation,
+                Some(TypeExpr::Named("T".to_string()))
+            );
+            assert_eq!(fd.return_type, Some(TypeExpr::Named("T".to_string())));
         }
         other => panic!("Expected FuncDef, got {:?}", other),
     }

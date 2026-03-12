@@ -41,9 +41,19 @@ pub struct TypeChecker {
     func_param_counts: HashMap<String, usize>,
     /// Function parameter types (name -> param types). Used for partial application type inference.
     func_param_types: HashMap<String, Vec<Type>>,
+    /// Generic function definitions keyed by function name.
+    generic_func_defs: HashMap<String, FuncDef>,
+    /// Function definitions rejected during registration.
+    invalid_func_defs: HashSet<String>,
+    /// Function names already seen during first-pass registration.
+    seen_func_defs: HashSet<String>,
+    /// Concrete type-like names declared anywhere in the current program.
+    declared_concrete_type_names: HashSet<String>,
     /// Custom mold field definitions (name -> raw AST fields).
     /// Used for `[]` / `()` binding validation.
     mold_field_defs: HashMap<String, Vec<FieldDef>>,
+    /// Custom mold header declarations (name -> raw header args from `Mold[...]`).
+    mold_header_args: HashMap<String, Vec<MoldHeaderArg>>,
     /// Whether we are currently inside a pipeline expression.
     /// Used to allow `_` (Placeholder) in pipeline context while rejecting it elsewhere.
     in_pipeline: bool,
@@ -58,13 +68,108 @@ impl TypeChecker {
             func_types: HashMap::new(),
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
+            generic_func_defs: HashMap::new(),
+            invalid_func_defs: HashSet::new(),
+            seen_func_defs: HashSet::new(),
+            declared_concrete_type_names: HashSet::new(),
             mold_field_defs: HashMap::new(),
+            mold_header_args: HashMap::new(),
             in_pipeline: false,
         }
     }
 
     fn binding_diag(code: &str, message: String, hint: &str) -> String {
         format!("[{}] {} Hint: {}", code, message, hint)
+    }
+
+    fn type_expr_mentions_type_param(ty: &TypeExpr, name: &str) -> bool {
+        match ty {
+            TypeExpr::Named(type_name) => type_name == name,
+            TypeExpr::BuchiPack(fields) => fields.iter().any(|field| {
+                field
+                    .type_annotation
+                    .as_ref()
+                    .is_some_and(|field_ty| Self::type_expr_mentions_type_param(field_ty, name))
+            }),
+            TypeExpr::List(inner) => Self::type_expr_mentions_type_param(inner, name),
+            TypeExpr::Generic(type_name, args) => {
+                type_name == name
+                    || args
+                        .iter()
+                        .any(|arg| Self::type_expr_mentions_type_param(arg, name))
+            }
+            TypeExpr::Function(params, ret) => {
+                params
+                    .iter()
+                    .any(|param| Self::type_expr_mentions_type_param(param, name))
+                    || Self::type_expr_mentions_type_param(ret, name)
+            }
+        }
+    }
+
+    fn type_param_name_is_reserved(&self, name: &str) -> bool {
+        self.declared_concrete_type_names.contains(name)
+            || self.registry.type_defs.contains_key(name)
+            || self.registry.mold_defs.contains_key(name)
+            || !matches!(
+                self.registry.resolve_type(&TypeExpr::Named(name.to_string())),
+                Type::Named(ref resolved) if resolved == name
+            )
+    }
+
+    fn validate_generic_function_bindability(&mut self, fd: &FuncDef) -> bool {
+        let reserved: Vec<String> = fd
+            .type_params
+            .iter()
+            .filter(|tp| self.type_param_name_is_reserved(&tp.name))
+            .map(|tp| tp.name.clone())
+            .collect();
+        if !reserved.is_empty() {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1510",
+                    format!(
+                        "Generic function '{}' uses reserved concrete type name(s) as type parameter(s): {}",
+                        fd.name,
+                        reserved.join(", ")
+                    ),
+                    "Rename generic type parameters so they do not shadow built-in or concrete type names.",
+                ),
+                span: fd.span.clone(),
+            });
+            return false;
+        }
+
+        let uninferable: Vec<String> = fd
+            .type_params
+            .iter()
+            .filter(|tp| {
+                !fd.params.iter().any(|param| {
+                    param
+                        .type_annotation
+                        .as_ref()
+                        .is_some_and(|ty| Self::type_expr_mentions_type_param(ty, &tp.name))
+                })
+            })
+            .map(|tp| tp.name.clone())
+            .collect();
+        if uninferable.is_empty() {
+            return true;
+        }
+
+        self.errors.push(TypeError {
+            message: Self::binding_diag(
+                "E1510",
+                format!(
+                    "Generic function '{}' has uninferable type parameter(s): {}",
+                    fd.name,
+                    uninferable.join(", ")
+                ),
+                "In inference-only generic functions, every type parameter must appear in a parameter type annotation.",
+            ),
+            span: fd.span.clone(),
+        });
+        false
     }
 
     fn find_forbidden_default_ref(expr: &Expr, forbidden: &HashSet<String>) -> Option<String> {
@@ -279,6 +384,23 @@ impl TypeChecker {
     /// Check an entire program. Collects type definitions first,
     /// then checks all statements.
     pub fn check_program(&mut self, program: &Program) {
+        self.seen_func_defs.clear();
+        self.declared_concrete_type_names.clear();
+        for stmt in &program.statements {
+            match stmt {
+                Statement::TypeDef(td) => {
+                    self.declared_concrete_type_names.insert(td.name.clone());
+                }
+                Statement::MoldDef(md) => {
+                    self.declared_concrete_type_names.insert(md.name.clone());
+                }
+                Statement::InheritanceDef(inh) => {
+                    self.declared_concrete_type_names.insert(inh.child.clone());
+                }
+                _ => {}
+            }
+        }
+
         // First pass: register all type definitions and function signatures
         for stmt in &program.statements {
             self.register_types(stmt);
@@ -327,6 +449,7 @@ impl TypeChecker {
             }
             Statement::MoldDef(md) => {
                 self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
+                self.validate_mold_header_consistency(md);
                 self.validate_mold_type_param_bindings(md);
                 let type_params: Vec<String> =
                     md.type_params.iter().map(|tp| tp.name.clone()).collect();
@@ -344,6 +467,8 @@ impl TypeChecker {
                     })
                     .collect();
                 self.registry.register_mold(&md.name, type_params, fields);
+                self.mold_header_args
+                    .insert(md.name.clone(), md.mold_args.clone());
                 self.mold_field_defs
                     .insert(md.name.clone(), md.fields.clone());
             }
@@ -383,27 +508,51 @@ impl TypeChecker {
                 }
             }
             Statement::FuncDef(fd) => {
-                // Register function return type for later lookup
-                let ret_ty = fd
-                    .return_type
-                    .as_ref()
-                    .map(|t| self.registry.resolve_type(t))
-                    .unwrap_or(Type::Unknown);
-                self.func_types.insert(fd.name.clone(), ret_ty);
-                self.func_param_counts
-                    .insert(fd.name.clone(), fd.params.len());
-                // Register parameter types for partial application type inference
-                let param_types: Vec<Type> = fd
-                    .params
-                    .iter()
-                    .map(|p| {
-                        p.type_annotation
-                            .as_ref()
-                            .map(|t| self.registry.resolve_type(t))
-                            .unwrap_or(Type::Unknown)
-                    })
-                    .collect();
-                self.func_param_types.insert(fd.name.clone(), param_types);
+                let duplicate_func_name = !self.seen_func_defs.insert(fd.name.clone());
+                let generic_is_inferable = if fd.type_params.is_empty() {
+                    true
+                } else {
+                    self.validate_generic_function_bindability(fd)
+                };
+                if duplicate_func_name {
+                    self.invalid_func_defs.insert(fd.name.clone());
+                    self.func_types.remove(&fd.name);
+                    self.func_param_counts.remove(&fd.name);
+                    self.func_param_types.remove(&fd.name);
+                    self.generic_func_defs.remove(&fd.name);
+                } else if fd.type_params.is_empty() || generic_is_inferable {
+                    self.invalid_func_defs.remove(&fd.name);
+                    // Register function return type for later lookup
+                    let ret_ty = fd
+                        .return_type
+                        .as_ref()
+                        .map(|t| self.registry.resolve_type(t))
+                        .unwrap_or(Type::Unknown);
+                    self.func_types.insert(fd.name.clone(), ret_ty);
+                    self.func_param_counts
+                        .insert(fd.name.clone(), fd.params.len());
+                    // Register parameter types for partial application type inference
+                    let param_types: Vec<Type> = fd
+                        .params
+                        .iter()
+                        .map(|p| {
+                            p.type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown)
+                        })
+                        .collect();
+                    self.func_param_types.insert(fd.name.clone(), param_types);
+                    if !fd.type_params.is_empty() {
+                        self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                    }
+                } else {
+                    self.invalid_func_defs.insert(fd.name.clone());
+                    self.func_types.remove(&fd.name);
+                    self.func_param_counts.remove(&fd.name);
+                    self.func_param_types.remove(&fd.name);
+                    self.generic_func_defs.remove(&fd.name);
+                }
             }
             Statement::Import(imp) => {
                 // Core bundled package signatures (imported symbol path).
@@ -442,38 +591,136 @@ impl TypeChecker {
         }
     }
 
-    /// Validate mold type parameter binding targets at definition time.
-    /// `filling` always binds to the first type parameter.
-    /// Additional type parameters must have corresponding non-default fields.
-    fn validate_mold_type_param_bindings(&mut self, md: &MoldDef) {
-        let additional_params: Vec<String> = md
-            .type_params
-            .iter()
-            .skip(1)
-            .map(|tp| tp.name.clone())
-            .collect();
-        if additional_params.is_empty() {
-            return;
+    fn resolve_mold_header_type(&self, ty: &TypeExpr, bound_types: &HashMap<String, Type>) -> Type {
+        match ty {
+            TypeExpr::Named(name) => bound_types
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.registry.resolve_type(ty)),
+            TypeExpr::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| {
+                        let field_ty = field
+                            .type_annotation
+                            .as_ref()
+                            .map(|ty| self.resolve_mold_header_type(ty, bound_types))
+                            .unwrap_or(Type::Unknown);
+                        (field.name.clone(), field_ty)
+                    })
+                    .collect(),
+            ),
+            TypeExpr::List(inner) => {
+                Type::List(Box::new(self.resolve_mold_header_type(inner, bound_types)))
+            }
+            TypeExpr::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.resolve_mold_header_type(arg, bound_types))
+                    .collect(),
+            ),
+            TypeExpr::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.resolve_mold_header_type(param, bound_types))
+                    .collect(),
+                Box::new(self.resolve_mold_header_type(ret, bound_types)),
+            ),
         }
+    }
 
+    fn mold_header_type_compatible(&self, actual: &Type, expected: &Type) -> bool {
+        match (actual, expected) {
+            (_, Type::Unknown) | (Type::Unknown, _) => true,
+            (
+                Type::Function(actual_params, actual_ret),
+                Type::Function(expected_params, expected_ret),
+            ) => {
+                actual_params.len() == expected_params.len()
+                    && actual_params.iter().zip(expected_params.iter()).all(
+                        |(actual_param, expected_param)| {
+                            self.mold_header_type_compatible(actual_param, expected_param)
+                                && self.mold_header_type_compatible(expected_param, actual_param)
+                        },
+                    )
+                    && self.mold_header_type_compatible(actual_ret, expected_ret)
+            }
+            _ => self.registry.is_subtype_of(actual, expected),
+        }
+    }
+
+    fn validate_mold_header_consistency(&mut self, md: &MoldDef) {
+        let Some(name_args) = md.name_args.as_ref() else {
+            return;
+        };
+        if name_args != &md.mold_args {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "MoldDef '{}' must use the same header on both sides of `=>` when `Name[...]` is explicit",
+                        md.name
+                    ),
+                    "Make `Name[...]` match `Mold[...]` exactly, or omit `Name[...]` entirely.",
+                ),
+                span: md.span.clone(),
+            });
+        }
+    }
+
+    /// Validate mold type parameter binding targets at definition time.
+    /// A type variable in the first header slot is bound by `filling`.
+    /// Any later header arguments must have corresponding non-default fields.
+    fn validate_mold_type_param_bindings(&mut self, md: &MoldDef) {
         let positional_field_count = md
             .fields
             .iter()
             .filter(|f| !f.is_method && f.default_value.is_none() && f.name != "filling")
             .count();
 
-        if additional_params.len() > positional_field_count {
-            let unbound = additional_params[positional_field_count..].join(", ");
-            self.errors.push(TypeError {
-                message: Self::binding_diag(
-                    "E1401",
+        let mut remaining_field_slots = positional_field_count;
+        let mut unbound_type_params = Vec::new();
+        let mut unbound_header_args = Vec::new();
+        for arg in md.mold_args.iter().skip(1) {
+            if remaining_field_slots > 0 {
+                remaining_field_slots -= 1;
+                continue;
+            }
+            match arg {
+                MoldHeaderArg::TypeParam(tp) => {
+                    unbound_type_params.push(tp.name.clone());
+                    unbound_header_args.push(tp.name.clone());
+                }
+                MoldHeaderArg::Concrete(ty) => {
+                    unbound_header_args.push(format!(":{}", Self::type_expr_to_string(ty)));
+                }
+            }
+        }
+
+        if !unbound_header_args.is_empty() {
+            let (message, hint) = if unbound_type_params.len() == unbound_header_args.len() {
+                (
                     format!(
                         "MoldDef '{}' has unbound type parameter(s): {}. \
-additional type parameters must map to non-default fields after `filling`",
-                        md.name, unbound
+additional header arguments must map to non-default fields after `filling`",
+                        md.name,
+                        unbound_type_params.join(", ")
                     ),
-                    "Add required non-default fields after `filling` so every extra type parameter has a binding target."
-                ),
+                    "Add required non-default fields after `filling` so every extra type parameter has a binding target.",
+                )
+            } else {
+                (
+                    format!(
+                        "MoldDef '{}' has header argument(s) without binding target(s): {}. \
+additional header arguments must map to non-default fields after `filling`",
+                        md.name,
+                        unbound_header_args.join(", ")
+                    ),
+                    "Add required non-default fields after `filling` so every extra header argument has a binding target.",
+                )
+            };
+            self.errors.push(TypeError {
+                message: Self::binding_diag("E1401", message, hint),
                 span: md.span.clone(),
             });
         }
@@ -588,6 +835,333 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    fn validate_mold_header_constraints(&mut self, name: &str, type_args: &[Expr], span: &Span) {
+        let Some(header_args) = self.mold_header_args.get(name).cloned() else {
+            return;
+        };
+
+        let mut bound_types = HashMap::<String, Type>::new();
+        for (idx, (header_arg, actual_expr)) in header_args.iter().zip(type_args.iter()).enumerate()
+        {
+            let actual = self.infer_expr_type(actual_expr);
+            match header_arg {
+                MoldHeaderArg::TypeParam(tp) => {
+                    if let Some(constraint) = &tp.constraint {
+                        let expected = self.resolve_mold_header_type(constraint, &bound_types);
+                        if !self.mold_header_type_compatible(&actual, &expected) {
+                            self.errors.push(TypeError {
+                                message: Self::binding_diag(
+                                    "E1409",
+                                    format!(
+                                        "MoldInst '{}' positional `[]` argument {} violates constraint on '{}': expected {}, got {}",
+                                        name,
+                                        idx + 1,
+                                        tp.name,
+                                        expected,
+                                        actual
+                                    ),
+                                    "Pass a value whose inferred type satisfies the constrained mold header.",
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                    bound_types.insert(tp.name.clone(), actual);
+                }
+                MoldHeaderArg::Concrete(concrete) => {
+                    let expected = self.resolve_mold_header_type(concrete, &bound_types);
+                    if !self.mold_header_type_compatible(&actual, &expected) {
+                        self.errors.push(TypeError {
+                            message: Self::binding_diag(
+                                "E1408",
+                                format!(
+                                    "MoldInst '{}' positional `[]` argument {} is fixed to {}, got {}",
+                                    name,
+                                    idx + 1,
+                                    expected,
+                                    actual
+                                ),
+                                "Pass a value whose inferred type matches the concrete mold header.",
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn bind_generic_type_pattern(
+        &self,
+        pattern: &Type,
+        actual: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &mut HashMap<String, Type>,
+    ) -> bool {
+        match pattern {
+            Type::Named(name) if generic_names.contains(name) => {
+                if actual == &Type::Unknown {
+                    return true;
+                }
+                if let Some(bound) = bindings.get(name) {
+                    self.mold_header_type_compatible(actual, bound)
+                        && self.mold_header_type_compatible(bound, actual)
+                } else {
+                    bindings.insert(name.clone(), actual.clone());
+                    true
+                }
+            }
+            Type::List(pattern_inner) => match actual {
+                Type::List(actual_inner) => self.bind_generic_type_pattern(
+                    pattern_inner,
+                    actual_inner,
+                    generic_names,
+                    bindings,
+                ),
+                _ => false,
+            },
+            Type::Generic(pattern_name, pattern_args) => match actual {
+                Type::Generic(actual_name, actual_args)
+                    if pattern_name == actual_name && pattern_args.len() == actual_args.len() =>
+                {
+                    pattern_args
+                        .iter()
+                        .zip(actual_args.iter())
+                        .all(|(pattern_arg, actual_arg)| {
+                            self.bind_generic_type_pattern(
+                                pattern_arg,
+                                actual_arg,
+                                generic_names,
+                                bindings,
+                            )
+                        })
+                }
+                _ => false,
+            },
+            Type::BuchiPack(pattern_fields) => match actual {
+                Type::BuchiPack(actual_fields) => {
+                    pattern_fields.iter().all(|(pattern_name, pattern_ty)| {
+                        actual_fields
+                            .iter()
+                            .find(|(actual_name, _)| actual_name == pattern_name)
+                            .is_some_and(|(_, actual_ty)| {
+                                self.bind_generic_type_pattern(
+                                    pattern_ty,
+                                    actual_ty,
+                                    generic_names,
+                                    bindings,
+                                )
+                            })
+                    })
+                }
+                _ => false,
+            },
+            Type::Function(pattern_params, pattern_ret) => match actual {
+                Type::Function(actual_params, actual_ret)
+                    if pattern_params.len() == actual_params.len() =>
+                {
+                    pattern_params.iter().zip(actual_params.iter()).all(
+                        |(pattern_param, actual_param)| {
+                            self.bind_generic_type_pattern(
+                                pattern_param,
+                                actual_param,
+                                generic_names,
+                                bindings,
+                            )
+                        },
+                    ) && self.bind_generic_type_pattern(
+                        pattern_ret,
+                        actual_ret,
+                        generic_names,
+                        bindings,
+                    )
+                }
+                _ => false,
+            },
+            _ => self.registry.is_subtype_of(actual, pattern),
+        }
+    }
+
+    fn type_expr_to_string(ty: &TypeExpr) -> String {
+        match ty {
+            TypeExpr::Named(name) => name.clone(),
+            TypeExpr::BuchiPack(fields) => {
+                let rendered_fields: Vec<String> = fields
+                    .iter()
+                    .map(|field| match &field.type_annotation {
+                        Some(field_ty) => {
+                            format!("{}: {}", field.name, Self::type_expr_to_string(field_ty))
+                        }
+                        None => field.name.clone(),
+                    })
+                    .collect();
+                format!("@({})", rendered_fields.join(", "))
+            }
+            TypeExpr::List(inner) => format!("@[{}]", Self::type_expr_to_string(inner)),
+            TypeExpr::Generic(name, args) => {
+                let rendered_args: Vec<String> =
+                    args.iter().map(Self::type_expr_to_string).collect();
+                format!("{}[{}]", name, rendered_args.join(", "))
+            }
+            TypeExpr::Function(params, ret) => {
+                let rendered_params: Vec<String> =
+                    params.iter().map(Self::type_expr_to_string).collect();
+                match rendered_params.as_slice() {
+                    [single] => format!("{} => :{}", single, Self::type_expr_to_string(ret)),
+                    _ => format!(
+                        "({}) => :{}",
+                        rendered_params.join(", "),
+                        Self::type_expr_to_string(ret)
+                    ),
+                }
+            }
+        }
+    }
+
+    fn substitute_generic_type(
+        &self,
+        pattern: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        match pattern {
+            Type::Named(name) if generic_names.contains(name) => bindings
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| pattern.clone()),
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            self.substitute_generic_type(ty, generic_names, bindings),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::List(inner) => Type::List(Box::new(self.substitute_generic_type(
+                inner,
+                generic_names,
+                bindings,
+            ))),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.substitute_generic_type(arg, generic_names, bindings))
+                    .collect(),
+            ),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.substitute_generic_type(param, generic_names, bindings))
+                    .collect(),
+                Box::new(self.substitute_generic_type(ret, generic_names, bindings)),
+            ),
+            _ => pattern.clone(),
+        }
+    }
+
+    fn instantiate_generic_type(
+        &self,
+        pattern: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        match pattern {
+            Type::Named(name) if generic_names.contains(name) => {
+                bindings.get(name).cloned().unwrap_or(Type::Unknown)
+            }
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            self.instantiate_generic_type(ty, generic_names, bindings),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::List(inner) => Type::List(Box::new(self.instantiate_generic_type(
+                inner,
+                generic_names,
+                bindings,
+            ))),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.instantiate_generic_type(arg, generic_names, bindings))
+                    .collect(),
+            ),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.instantiate_generic_type(param, generic_names, bindings))
+                    .collect(),
+                Box::new(self.instantiate_generic_type(ret, generic_names, bindings)),
+            ),
+            _ => pattern.clone(),
+        }
+    }
+
+    fn validate_generic_function_bindings(
+        &mut self,
+        fd: &FuncDef,
+        bindings: &HashMap<String, Type>,
+        span: &Span,
+    ) {
+        for type_param in &fd.type_params {
+            let Some(actual) = bindings.get(&type_param.name) else {
+                continue;
+            };
+            let Some(constraint) = &type_param.constraint else {
+                continue;
+            };
+            let expected = self.resolve_mold_header_type(constraint, bindings);
+            if !self.mold_header_type_compatible(actual, &expected) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1509] Generic function type parameter '{}' violates its constraint: expected {}, got {}. Hint: Pass arguments that satisfy the declared generic constraint.",
+                        type_param.name, expected, actual
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+
+    fn validate_generic_function_inference(
+        &mut self,
+        fd: &FuncDef,
+        bindings: &HashMap<String, Type>,
+        span: &Span,
+    ) -> bool {
+        let missing: Vec<String> = fd
+            .type_params
+            .iter()
+            .filter(|tp| !bindings.contains_key(&tp.name))
+            .map(|tp| tp.name.clone())
+            .collect();
+        if missing.is_empty() {
+            return true;
+        }
+
+        self.errors.push(TypeError {
+            message: Self::binding_diag(
+                "E1510",
+                format!(
+                    "Generic function '{}' could not infer type parameter(s): {}",
+                    fd.name,
+                    missing.join(", ")
+                ),
+                "Pass arguments whose annotated parameter types determine every generic type parameter.",
+            ),
+            span: span.clone(),
+        });
+        false
+    }
+
     fn validate_function_param_defaults(&mut self, fd: &FuncDef, param_types: &[Type]) {
         let param_names: Vec<String> = fd.params.iter().map(|p| p.name.clone()).collect();
 
@@ -667,7 +1241,6 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::FuncDef(fd) => {
-                // Register function as a variable (for first-class functions)
                 let ret_ty = fd
                     .return_type
                     .as_ref()
@@ -683,11 +1256,14 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown)
                     })
                     .collect();
-                self.define_var_with_span(
-                    &fd.name,
-                    Type::Function(param_types.clone(), Box::new(ret_ty.clone())),
-                    Some(&fd.span),
-                );
+                // Register the name in scope so duplicate detection still works.
+                // Invalid generic functions stay non-callable by using `Unknown`.
+                let function_value_ty = if self.invalid_func_defs.contains(&fd.name) {
+                    Type::Unknown
+                } else {
+                    Type::Function(param_types.clone(), Box::new(ret_ty.clone()))
+                };
+                self.define_var_with_span(&fd.name, function_value_ty, Some(&fd.span));
 
                 // Push new scope for function body
                 self.push_scope();
@@ -923,6 +1499,118 @@ defaulted fields must be provided via `()`",
 
                 // Try to resolve return type from function name
                 if let Expr::Ident(name, _) = func.as_ref() {
+                    if let Some(fd) = self.generic_func_defs.get(name).cloned() {
+                        let param_patterns: Vec<Type> = fd
+                            .params
+                            .iter()
+                            .map(|param| {
+                                param
+                                    .type_annotation
+                                    .as_ref()
+                                    .map(|ty| self.registry.resolve_type(ty))
+                                    .unwrap_or(Type::Unknown)
+                            })
+                            .collect();
+                        let ret_pattern = fd
+                            .return_type
+                            .as_ref()
+                            .map(|ty| self.registry.resolve_type(ty))
+                            .unwrap_or(Type::Unknown);
+                        let generic_names: HashSet<String> =
+                            fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+                        let mut bindings = HashMap::<String, Type>::new();
+
+                        if args.len() > fd.params.len() {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
+                                    name,
+                                    fd.params.len(),
+                                    args.len()
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        if hole_count > 0 && args.len() != fd.params.len() {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] Partial application of '{}' requires exactly {} slot(s) (got {}). \
+                                     Hint: Provide a value or empty slot for each parameter.",
+                                    name,
+                                    fd.params.len(),
+                                    args.len()
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+
+                        for (i, arg) in args.iter().enumerate() {
+                            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                continue;
+                            }
+                            let Some(pattern) = param_patterns.get(i) else {
+                                continue;
+                            };
+                            let actual_ty = self.infer_expr_type(arg);
+                            if actual_ty == Type::Unknown {
+                                continue;
+                            }
+                            if !self.bind_generic_type_pattern(
+                                pattern,
+                                &actual_ty,
+                                &generic_names,
+                                &mut bindings,
+                            ) {
+                                let expected_ty = self.substitute_generic_type(
+                                    pattern,
+                                    &generic_names,
+                                    &bindings,
+                                );
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                                         Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                        i + 1,
+                                        name,
+                                        actual_ty,
+                                        expected_ty
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+
+                        if !self.validate_generic_function_inference(&fd, &bindings, span) {
+                            return Type::Unknown;
+                        }
+                        self.validate_generic_function_bindings(&fd, &bindings, span);
+                        let resolved_ret =
+                            self.instantiate_generic_type(&ret_pattern, &generic_names, &bindings);
+
+                        if hole_count > 0 {
+                            let hole_param_types: Vec<Type> = args
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, arg)| matches!(arg, Expr::Hole(_)))
+                                .map(|(i, _)| {
+                                    param_patterns
+                                        .get(i)
+                                        .map(|pattern| {
+                                            self.instantiate_generic_type(
+                                                pattern,
+                                                &generic_names,
+                                                &bindings,
+                                            )
+                                        })
+                                        .unwrap_or(Type::Unknown)
+                                })
+                                .collect();
+                            return Type::Function(hole_param_types, Box::new(resolved_ret));
+                        }
+
+                        return resolved_ret;
+                    }
+
                     // First check func_types (registered function return types)
                     if let Some(ret_ty) = self.func_types.get(name).cloned() {
                         if let Some(expected) = self.func_param_counts.get(name).copied() {
@@ -1252,6 +1940,7 @@ defaulted fields must be provided via `()`",
                 }
 
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
+                self.validate_mold_header_constraints(name, type_args, mold_span);
                 match name.as_str() {
                     // JSON[raw, Schema]() returns Lax (wrapping the schema type)
                     "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),

@@ -178,6 +178,38 @@ fn assert_native_and_interpreter_reject_source(source: &str, label: &str) {
     );
 }
 
+#[test]
+fn test_native_write_failure_shape_preserves_error_field_names() {
+    let bad_path = unique_temp_dir("taida_native_write_failure_shape")
+        .join("missing")
+        .join("file.txt");
+    let source = format!(
+        "\
+result <= writeFile(\"{}\", \"data\")
+stdout(result.isError().toString())
+stdout(result.toString())
+",
+        bad_path.display()
+    );
+
+    let native =
+        compile_and_run_src(&source, "write_failure_shape").expect("native backend should succeed");
+    let native_lines: Vec<&str> = native.lines().collect();
+    assert!(
+        native_lines.len() >= 2,
+        "native output too short: {:?}",
+        native_lines
+    );
+    assert_eq!(native_lines[0], "true");
+    assert!(
+        native_lines[1].contains("type <=")
+            && native_lines[1].contains("message <=")
+            && native_lines[1].contains("kind <="),
+        "native Result toString should preserve error field names, got: {}",
+        native_lines[1]
+    );
+}
+
 fn expected_native_reject_examples() -> Vec<&'static str> {
     vec![
         "compile_stream", // Native backend does not provide Stream[T]

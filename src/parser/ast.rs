@@ -76,6 +76,8 @@ pub enum TypeExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncDef {
     pub name: String,
+    /// Generic type parameters declared on the function, e.g. `id[T]`.
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub body: Vec<Statement>,
     pub return_type: Option<TypeExpr>,
@@ -102,10 +104,24 @@ pub struct Assignment {
     pub span: Span,
 }
 
-/// Mold type definition: `Mold[T] => Name[T, ...] = @(...)`
+/// Mold header argument in `Mold[...]` / `Name[...]`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MoldHeaderArg {
+    /// Type variable, optionally with a constraint.
+    TypeParam(TypeParam),
+    /// Concrete type expression introduced with `:`.
+    Concrete(TypeExpr),
+}
+
+/// Mold type definition: `Mold[...] => Name[...] = @(...)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoldDef {
     pub name: String,
+    /// Header arguments declared on the `Mold[...]` side.
+    pub mold_args: Vec<MoldHeaderArg>,
+    /// Header arguments declared on the `Name[...]` side, if explicitly present.
+    pub name_args: Option<Vec<MoldHeaderArg>>,
+    /// Declared type variables extracted from `mold_args`.
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDef>,
     /// Documentation comments (`///@`) attached to this mold definition.

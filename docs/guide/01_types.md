@@ -202,7 +202,7 @@ asuka <= Pilot(name <= "Asuka", age <= 14, active <= true)
 
 ```taida
 // 鋳型の定義
-Mold[T] => Result[T, P] = @(throw: Error)  // P: :T => :Bool（述語付き操作モールド）
+Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)  // 述語付き操作モールド
 Mold[T] => Lax[T] = @(hasValue: Bool)   // 安全モールド
 ```
 

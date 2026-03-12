@@ -57,14 +57,25 @@ jobs:
     env:
       TAIDA_RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.release_ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.job }}-
+            ${{ runner.os }}-cargo-
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
       - run: cargo fmt --all -- --check
@@ -107,11 +118,22 @@ jobs:
             archive_ext: zip
             binary_path: target/release/taida.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.release_ref }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-build-
       - name: Build release binary
         run: cargo build --locked --release
       - name: Package Unix archive
@@ -135,7 +157,7 @@ jobs:
             -Tag "${env:RELEASE_TAG}" `
             -Target "${{ matrix.target }}" `
             -OutDir "dist"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
           path: dist/taida-${{ needs.prepare.outputs.release_tag }}-${{ matrix.target }}.${{ matrix.archive_ext }}
@@ -150,7 +172,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true

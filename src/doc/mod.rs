@@ -3,7 +3,8 @@
 //! Extracts doc comments (`///@`) from AST nodes and generates Markdown documentation.
 
 use crate::parser::{
-    ExportStmt, FieldDef, FuncDef, InheritanceDef, MoldDef, Program, Statement, TypeDef, TypeExpr,
+    ExportStmt, FieldDef, FuncDef, InheritanceDef, MoldDef, MoldHeaderArg, Program, Statement,
+    TypeDef, TypeExpr, TypeParam,
 };
 
 // ── Data structures ─────────────────────────────────────────────────
@@ -66,6 +67,7 @@ pub struct TypeDoc {
 #[derive(Debug, Clone)]
 pub struct FuncDoc {
     pub name: String,
+    pub type_params: Vec<String>,
     pub tags: DocTags,
     pub params: Vec<(String, Option<String>)>,
     pub return_type: Option<String>,
@@ -75,7 +77,7 @@ pub struct FuncDoc {
 #[derive(Debug, Clone)]
 pub struct MoldDoc {
     pub name: String,
-    pub type_params: Vec<String>,
+    pub header_args: Vec<String>,
     pub tags: DocTags,
     pub fields: Vec<FieldDoc>,
 }
@@ -271,8 +273,27 @@ pub fn format_type_expr(te: &TypeExpr) -> String {
         }
         TypeExpr::Function(args, ret) => {
             let as_: Vec<String> = args.iter().map(format_type_expr).collect();
-            format!("({}) => :{}", as_.join(", "), format_type_expr(ret))
+            let args_str = if as_.len() == 1 {
+                as_[0].clone()
+            } else {
+                format!("({})", as_.join(", "))
+            };
+            format!("{} => :{}", args_str, format_type_expr(ret))
         }
+    }
+}
+
+fn format_type_param(tp: &TypeParam) -> String {
+    match &tp.constraint {
+        Some(constraint) => format!("{} <= :{}", tp.name, format_type_expr(constraint)),
+        None => tp.name.clone(),
+    }
+}
+
+fn format_mold_header_arg(arg: &MoldHeaderArg) -> String {
+    match arg {
+        MoldHeaderArg::TypeParam(tp) => format_type_param(tp),
+        MoldHeaderArg::Concrete(ty) => format!(":{}", format_type_expr(ty)),
     }
 }
 
@@ -308,12 +329,19 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
                 }
             }
             Statement::FuncDef(fd) => {
-                if !fd.doc_comments.is_empty() || !fd.params.is_empty() {
+                if !fd.doc_comments.is_empty()
+                    || !fd.params.is_empty()
+                    || !fd.type_params.is_empty()
+                {
                     doc.functions.push(extract_func_doc(fd));
                 }
             }
             Statement::MoldDef(md) => {
-                if !md.doc_comments.is_empty() || !md.fields.is_empty() {
+                if !md.doc_comments.is_empty()
+                    || !md.fields.is_empty()
+                    || !md.mold_args.is_empty()
+                    || md.name_args.as_ref().is_some_and(|args| !args.is_empty())
+                {
                     doc.molds.push(extract_mold_doc(md));
                 }
             }
@@ -354,6 +382,7 @@ fn extract_func_doc(fd: &FuncDef) -> FuncDoc {
 
     FuncDoc {
         name: fd.name.clone(),
+        type_params: fd.type_params.iter().map(format_type_param).collect(),
         tags: parse_doc_tags(&fd.doc_comments),
         params,
         return_type,
@@ -363,7 +392,13 @@ fn extract_func_doc(fd: &FuncDef) -> FuncDoc {
 fn extract_mold_doc(md: &MoldDef) -> MoldDoc {
     MoldDoc {
         name: md.name.clone(),
-        type_params: md.type_params.iter().map(|tp| tp.name.clone()).collect(),
+        header_args: md
+            .name_args
+            .as_ref()
+            .unwrap_or(&md.mold_args)
+            .iter()
+            .map(format_mold_header_arg)
+            .collect(),
         tags: parse_doc_tags(&md.doc_comments),
         fields: md.fields.iter().map(extract_field_doc).collect(),
     }
@@ -453,7 +488,12 @@ fn render_type_doc(out: &mut String, td: &TypeDoc) {
 }
 
 fn render_func_doc(out: &mut String, fd: &FuncDoc) {
-    out.push_str(&format!("### {}\n\n", fd.name));
+    let type_params_str = if fd.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", fd.type_params.join(", "))
+    };
+    out.push_str(&format!("### {}{}\n\n", fd.name, type_params_str));
     render_tags_header(out, &fd.tags);
 
     // Parameters table (merge AST params with @Params tag descriptions)
@@ -490,12 +530,12 @@ fn render_func_doc(out: &mut String, fd: &FuncDoc) {
 }
 
 fn render_mold_doc(out: &mut String, md: &MoldDoc) {
-    let type_params_str = if md.type_params.is_empty() {
+    let header_args_str = if md.header_args.is_empty() {
         String::new()
     } else {
-        format!("[{}]", md.type_params.join(", "))
+        format!("[{}]", md.header_args.join(", "))
     };
-    out.push_str(&format!("### {}{}\n\n", md.name, type_params_str));
+    out.push_str(&format!("### {}{}\n\n", md.name, header_args_str));
     render_tags_header(out, &md.tags);
 
     if !md.fields.is_empty() {
@@ -879,6 +919,7 @@ mod tests {
                 }),
                 Statement::FuncDef(FuncDef {
                     name: "greet".to_string(),
+                    type_params: vec![],
                     params: vec![crate::parser::Param {
                         name: "name".to_string(),
                         type_annotation: Some(TypeExpr::Named("Str".to_string())),
@@ -969,6 +1010,7 @@ mod tests {
             types: vec![],
             functions: vec![FuncDoc {
                 name: "search".to_string(),
+                type_params: vec!["T".to_string()],
                 tags: DocTags {
                     purpose: Some("Search for items".to_string()),
                     params: vec![("query".to_string(), "Search query".to_string())],
@@ -984,7 +1026,7 @@ mod tests {
         };
 
         let md = render_markdown(&doc);
-        assert!(md.contains("### search"));
+        assert!(md.contains("### search[T]"));
         assert!(md.contains("> Search for items"));
         assert!(md.contains("| `query` | `Str` | Search query |"));
         assert!(md.contains("**Returns**: `@[Item]` - List of results"));
@@ -998,7 +1040,7 @@ mod tests {
             functions: vec![],
             molds: vec![MoldDoc {
                 name: "ApiResult".to_string(),
-                type_params: vec!["T".to_string()],
+                header_args: vec!["T".to_string(), "P <= :T => :Bool".to_string()],
                 tags: DocTags {
                     purpose: Some("Wraps API response".to_string()),
                     ..DocTags::default()
@@ -1014,7 +1056,7 @@ mod tests {
         };
 
         let md = render_markdown(&doc);
-        assert!(md.contains("### ApiResult[T]"));
+        assert!(md.contains("### ApiResult[T, P <= :T => :Bool]"));
         assert!(md.contains("> Wraps API response"));
         assert!(md.contains("| `success` | `Bool` | Whether request succeeded |"));
     }
@@ -1072,6 +1114,7 @@ mod tests {
             types: vec![],
             functions: vec![FuncDoc {
                 name: "process".to_string(),
+                type_params: vec![],
                 tags: DocTags {
                     purpose: Some("Process data".to_string()),
                     ai_category: Some("data-processing".to_string()),
@@ -1117,6 +1160,13 @@ mod tests {
         let program = Program {
             statements: vec![Statement::MoldDef(MoldDef {
                 name: "Container".to_string(),
+                mold_args: vec![crate::parser::MoldHeaderArg::TypeParam(
+                    crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: None,
+                    },
+                )],
+                name_args: None,
                 type_params: vec![crate::parser::TypeParam {
                     name: "T".to_string(),
                     constraint: None,
@@ -1138,11 +1188,124 @@ mod tests {
         let doc = extract_docs(&program, "container.td");
         assert_eq!(doc.molds.len(), 1);
         assert_eq!(doc.molds[0].name, "Container");
-        assert_eq!(doc.molds[0].type_params, vec!["T".to_string()]);
+        assert_eq!(doc.molds[0].header_args, vec!["T".to_string()]);
         assert_eq!(
             doc.molds[0].tags.purpose,
             Some("A generic container".to_string())
         );
+    }
+
+    #[test]
+    fn test_extract_docs_keeps_generic_function_and_mold_headers() {
+        use crate::lexer::Span;
+        let span = Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        };
+
+        let program = Program {
+            statements: vec![
+                Statement::FuncDef(FuncDef {
+                    name: "id".to_string(),
+                    type_params: vec![crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: Some(TypeExpr::Named("Num".to_string())),
+                    }],
+                    params: vec![crate::parser::Param {
+                        name: "value".to_string(),
+                        type_annotation: Some(TypeExpr::Named("T".to_string())),
+                        default_value: None,
+                        span: span.clone(),
+                    }],
+                    body: vec![],
+                    return_type: Some(TypeExpr::Named("T".to_string())),
+                    doc_comments: vec![],
+                    span: span.clone(),
+                }),
+                Statement::MoldDef(MoldDef {
+                    name: "IntBox".to_string(),
+                    mold_args: vec![
+                        crate::parser::MoldHeaderArg::Concrete(TypeExpr::Named("Int".to_string())),
+                        crate::parser::MoldHeaderArg::TypeParam(crate::parser::TypeParam {
+                            name: "T".to_string(),
+                            constraint: Some(TypeExpr::Named("Int".to_string())),
+                        }),
+                    ],
+                    name_args: None,
+                    type_params: vec![crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: Some(TypeExpr::Named("Int".to_string())),
+                    }],
+                    fields: vec![FieldDef {
+                        name: "count".to_string(),
+                        type_annotation: Some(TypeExpr::Named("Int".to_string())),
+                        default_value: None,
+                        is_method: false,
+                        method_def: None,
+                        doc_comments: vec![],
+                        span: span.clone(),
+                    }],
+                    doc_comments: vec!["@Purpose: int wrapper".to_string()],
+                    span,
+                }),
+            ],
+        };
+
+        let doc = extract_docs(&program, "headers.td");
+        assert_eq!(doc.functions[0].type_params, vec!["T <= :Num".to_string()]);
+        assert_eq!(
+            doc.molds[0].header_args,
+            vec![":Int".to_string(), "T <= :Int".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_extract_docs_keeps_header_only_declarations() {
+        use crate::lexer::Span;
+        let span = Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        };
+
+        let program = Program {
+            statements: vec![
+                Statement::FuncDef(FuncDef {
+                    name: "make".to_string(),
+                    type_params: vec![crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: None,
+                    }],
+                    params: vec![],
+                    body: vec![],
+                    return_type: Some(TypeExpr::Named("T".to_string())),
+                    doc_comments: vec![],
+                    span: span.clone(),
+                }),
+                Statement::MoldDef(MoldDef {
+                    name: "Box".to_string(),
+                    mold_args: vec![crate::parser::MoldHeaderArg::Concrete(TypeExpr::Named(
+                        "Int".to_string(),
+                    ))],
+                    name_args: None,
+                    type_params: vec![],
+                    fields: vec![],
+                    doc_comments: vec![],
+                    span,
+                }),
+            ],
+        };
+
+        let doc = extract_docs(&program, "header-only.td");
+        assert_eq!(doc.functions.len(), 1);
+        assert_eq!(doc.functions[0].name, "make");
+        assert_eq!(doc.functions[0].type_params, vec!["T".to_string()]);
+        assert_eq!(doc.molds.len(), 1);
+        assert_eq!(doc.molds[0].name, "Box");
+        assert_eq!(doc.molds[0].header_args, vec![":Int".to_string()]);
     }
 
     #[test]

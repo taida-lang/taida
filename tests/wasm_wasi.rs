@@ -357,8 +357,8 @@ fn wasm_wasi_write_failure() {
     );
 }
 
-/// Test: wasm-wasi writeFile failure shape — validates throw field is set in Result toString.
-/// WFX-S1: ensures error shape (message, kind) is not silently broken.
+/// Test: wasm-wasi writeFile failure shape — validates error field names survive Result toString.
+/// WFX-S1: ensures error shape (type, message, kind) is not silently broken.
 #[test]
 fn wasm_wasi_write_failure_shape() {
     let wasmtime = match wasmtime_bin() {
@@ -389,12 +389,12 @@ fn wasm_wasi_write_failure_shape() {
         "writeFile to non-existent dir should report isError() = true"
     );
 
-    // Line 2: toString() should show Result with throw set (validates error shape exists)
-    // Note: both Native and wasm-wasi show "Result(throw <= @())" because error pack field names
-    // are not registered in the field registry. This is a cross-backend limitation, not wasm-specific.
+    // Line 2: toString() should preserve the inner error pack field names.
     assert!(
-        wasm_lines[1].starts_with("Result(throw <= "),
-        "Result toString should show throw is set, got: {}",
+        wasm_lines[1].contains("type <=")
+            && wasm_lines[1].contains("message <=")
+            && wasm_lines[1].contains("kind <="),
+        "Result toString should preserve error field names, got: {}",
         wasm_lines[1]
     );
 }

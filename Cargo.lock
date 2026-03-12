@@ -1274,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "taida"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
