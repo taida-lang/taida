@@ -493,6 +493,126 @@ fn test_generic_function_constraint_is_enforced() {
 }
 
 #[test]
+fn test_generic_function_requires_inferable_type_param() {
+    let source = "make[T] =\n  1\n=> :T\n\nvalue <= make()";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): T")
+        }),
+        "Expected generic inference error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_rejected_generic_function_does_not_emit_spurious_non_generic_call_error() {
+    let source = "pair[T, U] x: T =\n  x\n=> :U\n\nvalue <= pair(1)";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+        }),
+        "Expected generic definition error, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().all(|e| !e.message.contains("[E1506]")),
+        "Did not expect fallback non-generic argument mismatch error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_function_does_not_treat_unknown_binding_as_inferred() {
+    let source = "accept[T] fn: T => :Bool =\n  true\n=> :Bool\n\nok <= accept(_ y = true)";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message.contains("could not infer type parameter(s): T")
+        }),
+        "Expected higher-order generic inference error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_function_type_param_cannot_shadow_builtin_type_name() {
+    let source = "id[Int] x: Int =\n  x\n=> :Int\n\nvalue <= id(1)";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Int")
+        }),
+        "Expected generic type parameter name collision error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_function_type_param_cannot_shadow_declared_type_name() {
+    let source = "User = @(name: Str)\n\nid[User] x: User =\n  x\n=> :User";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): User")
+        }),
+        "Expected declared type name collision error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_function_type_param_cannot_shadow_later_declared_type_name() {
+    let source = "id[Point] x: Point =\n  x\n=> :Point\n\nPoint = @(x: Int)";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Point")
+        }),
+        "Expected forward-declared type name collision error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_function_type_param_cannot_shadow_declared_mold_name() {
+    let source = "Mold[T] => Box[T] = @()\n\nid[Box] x: Box =\n  x\n=> :Box";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Box")
+        }),
+        "Expected declared mold name collision error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_function_type_param_cannot_shadow_later_declared_mold_name() {
+    let source = "id[Box] x: Box =\n  x\n=> :Box\n\nMold[T] => Box[T] = @()";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Box")
+        }),
+        "Expected forward-declared mold name collision error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_stdin_returns_str() {
     let source = "input <= stdin(\"prompt: \")";
     let (checker, _errors) = check(source);
@@ -693,6 +813,51 @@ fn test_mold_type_params_without_binding_target_is_error() {
 }
 
 #[test]
+fn test_mold_type_param_after_concrete_filling_without_binding_target_is_error() {
+    let source = r#"Mold[:Int, U] => Broken = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1401]")
+                && e.message.contains("unbound type parameter(s): U")),
+        "Expected concrete-first mold header to preserve unbound type parameter error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_type_param_after_concrete_slots_without_binding_target_is_error() {
+    let source = r#"Mold[:Int, :Str, U] => Broken = @(
+  tail: Int
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1401]")
+                && e.message.contains("unbound type parameter(s): U")),
+        "Expected later concrete mold header args to consume field slots before type params, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_concrete_header_arg_without_binding_target_is_error() {
+    let source = r#"Mold[T, :Int] => Broken = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1401]")
+                && e.message
+                    .contains("header argument(s) without binding target(s): :Int")
+        }),
+        "Expected concrete mold header arg without binding target error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_custom_mold_inst_missing_required_positional_args_is_error() {
     let source = r#"Mold[T, U] => Pair[T, U] = @(
   second: U
@@ -866,6 +1031,70 @@ fn test_same_scope_function_overload_is_error() {
     assert!(
         errors.iter().any(|e| e.message.contains("[E1501]")),
         "Expected E1501 function overload error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_invalid_generic_function_still_triggers_same_scope_duplicate_error() {
+    let source = "id[T] x: T =\n  x\n=> :T\n\nid[T, U] x: T =\n  x\n=> :U";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected E1501 duplicate-name error with invalid generic overload, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+        }),
+        "Expected E1510 for the invalid generic overload, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_invalid_generic_duplicate_clears_stale_callable_metadata() {
+    let source = "id[T] x: T =\n  x\n=> :T\n\nid[T, U] x: T =\n  x\n=> :U\n\ny: Str <= id(1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected duplicate-name error, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+        }),
+        "Expected invalid generic definition error, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().all(|e| !e.message.contains("Type mismatch")),
+        "Did not expect stale callable metadata to trigger downstream type mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_invalid_then_valid_duplicate_still_clears_callable_metadata() {
+    let source = "id[T, U] x: T =\n  x\n=> :U\n\nid[T] x: T =\n  x\n=> :T\n\ny: Str <= id(1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1501]")),
+        "Expected duplicate-name error, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+        }),
+        "Expected invalid generic definition error, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().all(|e| !e.message.contains("Type mismatch")),
+        "Did not expect duplicate order to leave callable metadata behind, got: {:?}",
         errors
     );
 }

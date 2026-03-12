@@ -43,6 +43,12 @@ pub struct TypeChecker {
     func_param_types: HashMap<String, Vec<Type>>,
     /// Generic function definitions keyed by function name.
     generic_func_defs: HashMap<String, FuncDef>,
+    /// Function definitions rejected during registration.
+    invalid_func_defs: HashSet<String>,
+    /// Function names already seen during first-pass registration.
+    seen_func_defs: HashSet<String>,
+    /// Concrete type-like names declared anywhere in the current program.
+    declared_concrete_type_names: HashSet<String>,
     /// Custom mold field definitions (name -> raw AST fields).
     /// Used for `[]` / `()` binding validation.
     mold_field_defs: HashMap<String, Vec<FieldDef>>,
@@ -63,6 +69,9 @@ impl TypeChecker {
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
             generic_func_defs: HashMap::new(),
+            invalid_func_defs: HashSet::new(),
+            seen_func_defs: HashSet::new(),
+            declared_concrete_type_names: HashSet::new(),
             mold_field_defs: HashMap::new(),
             mold_header_args: HashMap::new(),
             in_pipeline: false,
@@ -71,6 +80,96 @@ impl TypeChecker {
 
     fn binding_diag(code: &str, message: String, hint: &str) -> String {
         format!("[{}] {} Hint: {}", code, message, hint)
+    }
+
+    fn type_expr_mentions_type_param(ty: &TypeExpr, name: &str) -> bool {
+        match ty {
+            TypeExpr::Named(type_name) => type_name == name,
+            TypeExpr::BuchiPack(fields) => fields.iter().any(|field| {
+                field
+                    .type_annotation
+                    .as_ref()
+                    .is_some_and(|field_ty| Self::type_expr_mentions_type_param(field_ty, name))
+            }),
+            TypeExpr::List(inner) => Self::type_expr_mentions_type_param(inner, name),
+            TypeExpr::Generic(type_name, args) => {
+                type_name == name
+                    || args
+                        .iter()
+                        .any(|arg| Self::type_expr_mentions_type_param(arg, name))
+            }
+            TypeExpr::Function(params, ret) => {
+                params
+                    .iter()
+                    .any(|param| Self::type_expr_mentions_type_param(param, name))
+                    || Self::type_expr_mentions_type_param(ret, name)
+            }
+        }
+    }
+
+    fn type_param_name_is_reserved(&self, name: &str) -> bool {
+        self.declared_concrete_type_names.contains(name)
+            || self.registry.type_defs.contains_key(name)
+            || self.registry.mold_defs.contains_key(name)
+            || !matches!(
+                self.registry.resolve_type(&TypeExpr::Named(name.to_string())),
+                Type::Named(ref resolved) if resolved == name
+            )
+    }
+
+    fn validate_generic_function_bindability(&mut self, fd: &FuncDef) -> bool {
+        let reserved: Vec<String> = fd
+            .type_params
+            .iter()
+            .filter(|tp| self.type_param_name_is_reserved(&tp.name))
+            .map(|tp| tp.name.clone())
+            .collect();
+        if !reserved.is_empty() {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1510",
+                    format!(
+                        "Generic function '{}' uses reserved concrete type name(s) as type parameter(s): {}",
+                        fd.name,
+                        reserved.join(", ")
+                    ),
+                    "Rename generic type parameters so they do not shadow built-in or concrete type names.",
+                ),
+                span: fd.span.clone(),
+            });
+            return false;
+        }
+
+        let uninferable: Vec<String> = fd
+            .type_params
+            .iter()
+            .filter(|tp| {
+                !fd.params.iter().any(|param| {
+                    param
+                        .type_annotation
+                        .as_ref()
+                        .is_some_and(|ty| Self::type_expr_mentions_type_param(ty, &tp.name))
+                })
+            })
+            .map(|tp| tp.name.clone())
+            .collect();
+        if uninferable.is_empty() {
+            return true;
+        }
+
+        self.errors.push(TypeError {
+            message: Self::binding_diag(
+                "E1510",
+                format!(
+                    "Generic function '{}' has uninferable type parameter(s): {}",
+                    fd.name,
+                    uninferable.join(", ")
+                ),
+                "In inference-only generic functions, every type parameter must appear in a parameter type annotation.",
+            ),
+            span: fd.span.clone(),
+        });
+        false
     }
 
     fn find_forbidden_default_ref(expr: &Expr, forbidden: &HashSet<String>) -> Option<String> {
@@ -285,6 +384,23 @@ impl TypeChecker {
     /// Check an entire program. Collects type definitions first,
     /// then checks all statements.
     pub fn check_program(&mut self, program: &Program) {
+        self.seen_func_defs.clear();
+        self.declared_concrete_type_names.clear();
+        for stmt in &program.statements {
+            match stmt {
+                Statement::TypeDef(td) => {
+                    self.declared_concrete_type_names.insert(td.name.clone());
+                }
+                Statement::MoldDef(md) => {
+                    self.declared_concrete_type_names.insert(md.name.clone());
+                }
+                Statement::InheritanceDef(inh) => {
+                    self.declared_concrete_type_names.insert(inh.child.clone());
+                }
+                _ => {}
+            }
+        }
+
         // First pass: register all type definitions and function signatures
         for stmt in &program.statements {
             self.register_types(stmt);
@@ -392,29 +508,50 @@ impl TypeChecker {
                 }
             }
             Statement::FuncDef(fd) => {
-                // Register function return type for later lookup
-                let ret_ty = fd
-                    .return_type
-                    .as_ref()
-                    .map(|t| self.registry.resolve_type(t))
-                    .unwrap_or(Type::Unknown);
-                self.func_types.insert(fd.name.clone(), ret_ty);
-                self.func_param_counts
-                    .insert(fd.name.clone(), fd.params.len());
-                // Register parameter types for partial application type inference
-                let param_types: Vec<Type> = fd
-                    .params
-                    .iter()
-                    .map(|p| {
-                        p.type_annotation
-                            .as_ref()
-                            .map(|t| self.registry.resolve_type(t))
-                            .unwrap_or(Type::Unknown)
-                    })
-                    .collect();
-                self.func_param_types.insert(fd.name.clone(), param_types);
-                if !fd.type_params.is_empty() {
-                    self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                let duplicate_func_name = !self.seen_func_defs.insert(fd.name.clone());
+                let generic_is_inferable = if fd.type_params.is_empty() {
+                    true
+                } else {
+                    self.validate_generic_function_bindability(fd)
+                };
+                if duplicate_func_name {
+                    self.invalid_func_defs.insert(fd.name.clone());
+                    self.func_types.remove(&fd.name);
+                    self.func_param_counts.remove(&fd.name);
+                    self.func_param_types.remove(&fd.name);
+                    self.generic_func_defs.remove(&fd.name);
+                } else if fd.type_params.is_empty() || generic_is_inferable {
+                    self.invalid_func_defs.remove(&fd.name);
+                    // Register function return type for later lookup
+                    let ret_ty = fd
+                        .return_type
+                        .as_ref()
+                        .map(|t| self.registry.resolve_type(t))
+                        .unwrap_or(Type::Unknown);
+                    self.func_types.insert(fd.name.clone(), ret_ty);
+                    self.func_param_counts
+                        .insert(fd.name.clone(), fd.params.len());
+                    // Register parameter types for partial application type inference
+                    let param_types: Vec<Type> = fd
+                        .params
+                        .iter()
+                        .map(|p| {
+                            p.type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown)
+                        })
+                        .collect();
+                    self.func_param_types.insert(fd.name.clone(), param_types);
+                    if !fd.type_params.is_empty() {
+                        self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                    }
+                } else {
+                    self.invalid_func_defs.insert(fd.name.clone());
+                    self.func_types.remove(&fd.name);
+                    self.func_param_counts.remove(&fd.name);
+                    self.func_param_types.remove(&fd.name);
+                    self.generic_func_defs.remove(&fd.name);
                 }
             }
             Statement::Import(imp) => {
@@ -532,37 +669,58 @@ impl TypeChecker {
     }
 
     /// Validate mold type parameter binding targets at definition time.
-    /// `filling` always binds to the first type parameter.
-    /// Additional type parameters must have corresponding non-default fields.
+    /// A type variable in the first header slot is bound by `filling`.
+    /// Any later header arguments must have corresponding non-default fields.
     fn validate_mold_type_param_bindings(&mut self, md: &MoldDef) {
-        let additional_params: Vec<String> = md
-            .type_params
-            .iter()
-            .skip(1)
-            .map(|tp| tp.name.clone())
-            .collect();
-        if additional_params.is_empty() {
-            return;
-        }
-
         let positional_field_count = md
             .fields
             .iter()
             .filter(|f| !f.is_method && f.default_value.is_none() && f.name != "filling")
             .count();
 
-        if additional_params.len() > positional_field_count {
-            let unbound = additional_params[positional_field_count..].join(", ");
-            self.errors.push(TypeError {
-                message: Self::binding_diag(
-                    "E1401",
+        let mut remaining_field_slots = positional_field_count;
+        let mut unbound_type_params = Vec::new();
+        let mut unbound_header_args = Vec::new();
+        for arg in md.mold_args.iter().skip(1) {
+            if remaining_field_slots > 0 {
+                remaining_field_slots -= 1;
+                continue;
+            }
+            match arg {
+                MoldHeaderArg::TypeParam(tp) => {
+                    unbound_type_params.push(tp.name.clone());
+                    unbound_header_args.push(tp.name.clone());
+                }
+                MoldHeaderArg::Concrete(ty) => {
+                    unbound_header_args.push(format!(":{}", Self::type_expr_to_string(ty)));
+                }
+            }
+        }
+
+        if !unbound_header_args.is_empty() {
+            let (message, hint) = if unbound_type_params.len() == unbound_header_args.len() {
+                (
                     format!(
                         "MoldDef '{}' has unbound type parameter(s): {}. \
-additional type parameters must map to non-default fields after `filling`",
-                        md.name, unbound
+additional header arguments must map to non-default fields after `filling`",
+                        md.name,
+                        unbound_type_params.join(", ")
                     ),
-                    "Add required non-default fields after `filling` so every extra type parameter has a binding target."
-                ),
+                    "Add required non-default fields after `filling` so every extra type parameter has a binding target.",
+                )
+            } else {
+                (
+                    format!(
+                        "MoldDef '{}' has header argument(s) without binding target(s): {}. \
+additional header arguments must map to non-default fields after `filling`",
+                        md.name,
+                        unbound_header_args.join(", ")
+                    ),
+                    "Add required non-default fields after `filling` so every extra header argument has a binding target.",
+                )
+            };
+            self.errors.push(TypeError {
+                message: Self::binding_diag("E1401", message, hint),
                 span: md.span.clone(),
             });
         }
@@ -742,6 +900,9 @@ defaulted fields must be provided via `()`",
     ) -> bool {
         match pattern {
             Type::Named(name) if generic_names.contains(name) => {
+                if actual == &Type::Unknown {
+                    return true;
+                }
                 if let Some(bound) = bindings.get(name) {
                     self.mold_header_type_compatible(actual, bound)
                         && self.mold_header_type_compatible(bound, actual)
@@ -821,6 +982,42 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    fn type_expr_to_string(ty: &TypeExpr) -> String {
+        match ty {
+            TypeExpr::Named(name) => name.clone(),
+            TypeExpr::BuchiPack(fields) => {
+                let rendered_fields: Vec<String> = fields
+                    .iter()
+                    .map(|field| match &field.type_annotation {
+                        Some(field_ty) => {
+                            format!("{}: {}", field.name, Self::type_expr_to_string(field_ty))
+                        }
+                        None => field.name.clone(),
+                    })
+                    .collect();
+                format!("@({})", rendered_fields.join(", "))
+            }
+            TypeExpr::List(inner) => format!("@[{}]", Self::type_expr_to_string(inner)),
+            TypeExpr::Generic(name, args) => {
+                let rendered_args: Vec<String> =
+                    args.iter().map(Self::type_expr_to_string).collect();
+                format!("{}[{}]", name, rendered_args.join(", "))
+            }
+            TypeExpr::Function(params, ret) => {
+                let rendered_params: Vec<String> =
+                    params.iter().map(Self::type_expr_to_string).collect();
+                match rendered_params.as_slice() {
+                    [single] => format!("{} => :{}", single, Self::type_expr_to_string(ret)),
+                    _ => format!(
+                        "({}) => :{}",
+                        rendered_params.join(", "),
+                        Self::type_expr_to_string(ret)
+                    ),
+                }
+            }
+        }
+    }
+
     fn substitute_generic_type(
         &self,
         pattern: &Type,
@@ -865,7 +1062,50 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    fn validate_generic_function_constraints(
+    fn instantiate_generic_type(
+        &self,
+        pattern: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        match pattern {
+            Type::Named(name) if generic_names.contains(name) => {
+                bindings.get(name).cloned().unwrap_or(Type::Unknown)
+            }
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            self.instantiate_generic_type(ty, generic_names, bindings),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::List(inner) => Type::List(Box::new(self.instantiate_generic_type(
+                inner,
+                generic_names,
+                bindings,
+            ))),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.instantiate_generic_type(arg, generic_names, bindings))
+                    .collect(),
+            ),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.instantiate_generic_type(param, generic_names, bindings))
+                    .collect(),
+                Box::new(self.instantiate_generic_type(ret, generic_names, bindings)),
+            ),
+            _ => pattern.clone(),
+        }
+    }
+
+    fn validate_generic_function_bindings(
         &mut self,
         fd: &FuncDef,
         bindings: &HashMap<String, Type>,
@@ -889,6 +1129,37 @@ defaulted fields must be provided via `()`",
                 });
             }
         }
+    }
+
+    fn validate_generic_function_inference(
+        &mut self,
+        fd: &FuncDef,
+        bindings: &HashMap<String, Type>,
+        span: &Span,
+    ) -> bool {
+        let missing: Vec<String> = fd
+            .type_params
+            .iter()
+            .filter(|tp| !bindings.contains_key(&tp.name))
+            .map(|tp| tp.name.clone())
+            .collect();
+        if missing.is_empty() {
+            return true;
+        }
+
+        self.errors.push(TypeError {
+            message: Self::binding_diag(
+                "E1510",
+                format!(
+                    "Generic function '{}' could not infer type parameter(s): {}",
+                    fd.name,
+                    missing.join(", ")
+                ),
+                "Pass arguments whose annotated parameter types determine every generic type parameter.",
+            ),
+            span: span.clone(),
+        });
+        false
     }
 
     fn validate_function_param_defaults(&mut self, fd: &FuncDef, param_types: &[Type]) {
@@ -970,7 +1241,6 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::FuncDef(fd) => {
-                // Register function as a variable (for first-class functions)
                 let ret_ty = fd
                     .return_type
                     .as_ref()
@@ -986,11 +1256,14 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown)
                     })
                     .collect();
-                self.define_var_with_span(
-                    &fd.name,
-                    Type::Function(param_types.clone(), Box::new(ret_ty.clone())),
-                    Some(&fd.span),
-                );
+                // Register the name in scope so duplicate detection still works.
+                // Invalid generic functions stay non-callable by using `Unknown`.
+                let function_value_ty = if self.invalid_func_defs.contains(&fd.name) {
+                    Type::Unknown
+                } else {
+                    Type::Function(param_types.clone(), Box::new(ret_ty.clone()))
+                };
+                self.define_var_with_span(&fd.name, function_value_ty, Some(&fd.span));
 
                 // Push new scope for function body
                 self.push_scope();
@@ -1307,9 +1580,12 @@ defaulted fields must be provided via `()`",
                             }
                         }
 
-                        self.validate_generic_function_constraints(&fd, &bindings, span);
+                        if !self.validate_generic_function_inference(&fd, &bindings, span) {
+                            return Type::Unknown;
+                        }
+                        self.validate_generic_function_bindings(&fd, &bindings, span);
                         let resolved_ret =
-                            self.substitute_generic_type(&ret_pattern, &generic_names, &bindings);
+                            self.instantiate_generic_type(&ret_pattern, &generic_names, &bindings);
 
                         if hole_count > 0 {
                             let hole_param_types: Vec<Type> = args
@@ -1320,7 +1596,7 @@ defaulted fields must be provided via `()`",
                                     param_patterns
                                         .get(i)
                                         .map(|pattern| {
-                                            self.substitute_generic_type(
+                                            self.instantiate_generic_type(
                                                 pattern,
                                                 &generic_names,
                                                 &bindings,

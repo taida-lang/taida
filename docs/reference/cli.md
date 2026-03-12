@@ -1,6 +1,6 @@
 # Taida CLI リファレンス
 
-> 更新日: 2026-03-05  
+> 更新日: 2026-03-12  
 > 実装正本: `src/main.rs`
 
 このページは Taida CLI の単一リファレンスです。  
@@ -70,11 +70,15 @@ taida help
 | `deps` | 依存解決 + install + lockfile（strict） |
 | `install` | 依存インストール + lockfile生成 |
 | `update` | リモート優先で依存更新 + lockfile更新 |
+| `publish` | package publish の準備と push |
 | `doc generate` | doc comments から Markdown 生成 |
 | `lsp` | LSP サーバー起動（stdio） |
+| `auth` | 認証状態の管理 |
+| `community` | community API へのアクセス |
 
 補足:
 - 表のサブコマンドは `--help` / `-h` を受理し、各節の usage を stdout に出して exit code `0` で終了します。
+- `auth` / `community` の下位 verb も `taida auth login --help`, `taida community posts --help` のように個別 help を受理します。
 - 実行モードは `taida <FILE>` であり、独立した `taida run` subcommand は現状ありません。
 
 ---
@@ -82,12 +86,12 @@ taida help
 ## `taida build`
 
 ```bash
-taida build [--target js|native] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
-| `--target <js\|native>` | - | 生成ターゲット（既定: `js`） |
+| `--target <js\|native\|wasm-min\|wasm-wasi\|wasm-edge\|wasm-full>` | - | 生成ターゲット（既定: `js`） |
 | `--output <PATH>` / `--outdir <DIR>` | `-o` | 出力先（file入力時はファイル、dir入力時はディレクトリ） |
 | `--entry <PATH>` | - | Native + dir入力時のエントリ上書き（既定: `main.td`） |
 | `--release` | `-r` | TODO/Stub 残存時に失敗 |
@@ -102,6 +106,9 @@ taida build [--target js|native] [--release] [--diag-format text|jsonl] [-o OUTP
 - `--target native`:
   - file入力: そのファイルをエントリに Native バイナリ生成（既定 `src/foo.td -> src/foo`）
   - dir入力: 既定エントリ `<PATH>/main.td`、`--entry` で上書き可能
+- `--target wasm-*`:
+  - `.wasm` 成果物を生成します。
+  - 対応ターゲットは `wasm-min`, `wasm-wasi`, `wasm-edge`, `wasm-full` です。
 - 既定では parse + type check を実行します（`--no-check` で type check をスキップ）。
 - `--release` では `TODO` / `Stub` を検出すると終了します（file入力時は import 依存も再帰走査）。
 - `--diag-format jsonl` では compile 診断を `taida.diagnostic.v1` JSONL で出力します（parse/type/verify/codegen/io）。
@@ -111,7 +118,7 @@ taida build [--target js|native] [--release] [--diag-format text|jsonl] [-o OUTP
 ## `taida compile`（非推奨互換）
 
 ```bash
-taida compile [--release] [--diag-format text|jsonl] [-o OUTPUT] <FILE_OR_DIR>
+taida compile [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 ```
 
 挙動:
@@ -125,7 +132,7 @@ taida compile [--release] [--diag-format text|jsonl] [-o OUTPUT] <FILE_OR_DIR>
 ## `taida transpile`（非推奨互換）
 
 ```bash
-taida transpile [--release] [--diag-format text|jsonl] [-o OUTPUT] <FILE_OR_DIR>
+taida transpile [--release] [--diag-format text|jsonl] [-o OUTPUT] <PATH>
 ```
 
 挙動:
@@ -351,3 +358,37 @@ taida lsp
 
 挙動:
 - Tokio runtime 上で LSP サーバーを起動します（stdio transport）。
+
+---
+
+## `taida auth`
+
+```bash
+taida auth <login|logout|status>
+taida auth <login|logout|status> --help
+```
+
+挙動:
+- `login`, `logout`, `status` を提供します。
+- `taida auth login --help` などの nested help は stdout に usage を表示し、exit code `0` で終了します。
+- `login` は GitHub Device Authorization Flow を開始し、成功した token を保存します。
+- `logout` は保存済み token を削除します。
+- `status` は現在の認証状態を表示します。
+
+---
+
+## `taida community`
+
+```bash
+taida community <posts|post|messages|message|author>
+taida community <posts|post|messages|message|author> --help
+```
+
+挙動:
+- `posts`, `post`, `messages`, `message`, `author` を提供します。
+- `taida community posts --help` などの nested help は stdout に usage を表示し、exit code `0` で終了します。
+- `posts` は公開投稿を一覧表示します。
+- `post` は認証済みユーザーとして公開投稿を作成します。本文に `--help` のような literal flag を含めたい場合は `--` 以降を本文として扱います。
+- `messages` は自分宛の公開メッセージ一覧を取得します。
+- `message` は `--to <user>` を使って公開メッセージを送信します。本文に `--help` のような literal flag を含めたい場合は `--` 以降を本文として扱います。
+- `author` は著者プロフィールを表示します。引数省略時は認証済みユーザー自身を表示します。

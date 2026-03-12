@@ -44,8 +44,8 @@
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
-| `E1400` | TypeDef/Mold フィールド名の重複 | TypeChecker |
-| `E1401` | MoldDef の追加型変数に束縛先がない | TypeChecker |
+| `E1400` | TypeDef/Mold/Inheritance フィールドに型注釈または default がない | TypeChecker |
+| `E1401` | MoldDef の追加 header 引数に束縛先がない | TypeChecker |
 | `E1402` | MoldInst の `[]` 必須引数が不足 | TypeChecker |
 | `E1403` | MoldInst の `[]` 引数が宣言数を超過 | TypeChecker |
 | `E1404` | MoldInst の `()` オプションに同一名が重複 | TypeChecker |
@@ -68,6 +68,7 @@
 | `E1507` | ビルトイン関数の引数個数が arity 範囲外 | TypeChecker | — |
 | `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker | — |
 | `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker | — |
+| `E1510` | inference-only generic function の型変数が parameter annotation / call から束縛・推論できない、または concrete type 名と衝突する | TypeChecker | — |
 
 ## 帯域ルール
 

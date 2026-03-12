@@ -419,9 +419,44 @@ fn test_subcommand_help_prints_usage_and_exits_zero() {
         ),
         (&["lsp", "--help"][..], "taida lsp"),
         (&["auth", "--help"][..], "taida auth <login|logout|status>"),
+        (&["auth", "login", "--help"][..], "taida auth login"),
+        (&["auth", "logout", "--help"][..], "taida auth logout"),
+        (&["auth", "status", "--help"][..], "taida auth status"),
         (
             &["community", "--help"][..],
             "taida community <posts|post|messages|message|author>",
+        ),
+        (
+            &["community", "posts", "--help"][..],
+            "taida community posts [--tag <tag>] [--by <author>]",
+        ),
+        (
+            &["community", "post", "--help"][..],
+            "taida community post \"content\" [--tag <tag>...]",
+        ),
+        (
+            &["community", "post", "hello", "--help"][..],
+            "taida community post \"content\" [--tag <tag>...]",
+        ),
+        (
+            &["community", "messages", "--help"][..],
+            "taida community messages",
+        ),
+        (
+            &["community", "message", "--help"][..],
+            "taida community message --to <user> \"content\"",
+        ),
+        (
+            &["community", "message", "--to", "alice", "hi", "--help"][..],
+            "taida community message --to <user> \"content\"",
+        ),
+        (
+            &["community", "author", "--help"][..],
+            "taida community author [NAME]",
+        ),
+        (
+            &["community", "author", "alice", "--help"][..],
+            "taida community author [NAME]",
         ),
     ];
 

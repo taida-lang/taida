@@ -3,6 +3,9 @@
 # GitHub applies the last matching rule.
 # Keep release / CI trust-boundary files explicitly owned.
 
+# Ownership policy itself
+/.github/CODEOWNERS @shijimic
+
 # Release / CI workflows
 /.github/workflows/* @shijimic
 
@@ -15,4 +18,3 @@
 
 # Branch / release operation docs
 /.dev/RELEASE_PREP.md @shijimic
-
