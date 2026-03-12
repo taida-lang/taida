@@ -1,0 +1,18 @@
+# Taida Lang CODEOWNERS
+#
+# GitHub applies the last matching rule.
+# Keep release / CI trust-boundary files explicitly owned.
+
+# Release / CI workflows
+/.github/workflows/* @shijimic
+
+# Release packaging scripts
+/scripts/release/* @shijimic
+
+# Required check entrypoints
+/tests/run_backend_parity.sh @shijimic
+/tests/e2e_smoke.sh @shijimic
+
+# Branch / release operation docs
+/.dev/RELEASE_PREP.md @shijimic
+

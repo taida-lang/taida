@@ -50,7 +50,7 @@ taida help
 挙動:
 - 使用方法、主要サブコマンド、グローバルフラグを表示します。
 - exit code は `0` です。
-- `taida graph --help` のようなサブコマンド個別ヘルプへの導線を含みます。
+- `taida <COMMAND> --help` のようなサブコマンド個別ヘルプへの導線を含みます。
 
 ---
 
@@ -72,6 +72,10 @@ taida help
 | `update` | リモート優先で依存更新 + lockfile更新 |
 | `doc generate` | doc comments から Markdown 生成 |
 | `lsp` | LSP サーバー起動（stdio） |
+
+補足:
+- 表のサブコマンドは `--help` / `-h` を受理し、各節の usage を stdout に出して exit code `0` で終了します。
+- 実行モードは `taida <FILE>` であり、独立した `taida run` subcommand は現状ありません。
 
 ---
 

@@ -3,6 +3,18 @@ pub mod token;
 
 use token::{delete_token, load_token, save_token};
 
+fn print_auth_help() {
+    println!(
+        "\
+Usage:
+  taida auth <login|logout|status>
+
+Examples:
+  taida auth login
+  taida auth status"
+    );
+}
+
 pub fn run_auth(args: &[String]) {
     if args.is_empty() {
         eprintln!("Usage: taida auth <login|logout|status>");
@@ -10,6 +22,7 @@ pub fn run_auth(args: &[String]) {
     }
 
     match args[0].as_str() {
+        "--help" | "-h" => print_auth_help(),
         "login" => run_login(),
         "logout" => run_logout(),
         "status" => run_status(),

@@ -369,6 +369,94 @@ fn test_top_level_help_prints_usage_and_commands() {
 }
 
 #[test]
+fn test_subcommand_help_prints_usage_and_exits_zero() {
+    let workdir = unique_temp_dir("taida_subcommand_help");
+    let cases = [
+        (&["check", "--help"][..], "taida check [--json] <PATH>"),
+        (
+            &["build", "--help"][..],
+            "taida build [--target js|native|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
+        ),
+        (
+            &["compile", "--help"][..],
+            "taida compile [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>",
+        ),
+        (
+            &["transpile", "--help"][..],
+            "taida transpile [--release] [--diag-format text|jsonl] [-o OUTPUT] <PATH>",
+        ),
+        (
+            &["todo", "--help"][..],
+            "taida todo [--format text|json] [PATH]",
+        ),
+        (
+            &["graph", "--help"][..],
+            "taida graph [--type TYPE] [--format FORMAT] [-o OUTPUT] <PATH>",
+        ),
+        (
+            &["verify", "--help"][..],
+            "taida verify [--check CHECK] [--format FORMAT] <PATH>",
+        ),
+        (
+            &["inspect", "--help"][..],
+            "taida inspect [--format text|json|sarif] <PATH>",
+        ),
+        (&["init", "--help"][..], "taida init [DIR]"),
+        (&["deps", "--help"][..], "taida deps"),
+        (&["install", "--help"][..], "taida install"),
+        (&["update", "--help"][..], "taida update"),
+        (
+            &["publish", "--help"][..],
+            "taida publish [--label LABEL] [--dry-run]",
+        ),
+        (
+            &["doc", "--help"][..],
+            "taida doc generate [-o OUTPUT] <PATH>",
+        ),
+        (
+            &["doc", "generate", "--help"][..],
+            "taida doc generate [-o OUTPUT] <PATH>",
+        ),
+        (&["lsp", "--help"][..], "taida lsp"),
+        (&["auth", "--help"][..], "taida auth <login|logout|status>"),
+        (
+            &["community", "--help"][..],
+            "taida community <posts|post|messages|message|author>",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let output = Command::new(taida_bin())
+            .current_dir(&workdir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|_| panic!("failed to run {}", args.join(" ")));
+
+        assert!(
+            output.status.success(),
+            "{} should succeed: stderr={}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(expected),
+            "unexpected help output for {}: {}",
+            args.join(" "),
+            stdout
+        );
+    }
+
+    assert!(
+        !workdir.join("--help").exists(),
+        "init --help must not create a directory named --help"
+    );
+
+    let _ = fs::remove_dir_all(&workdir);
+}
+
+#[test]
 fn test_graph_invalid_type_fails_instead_of_fallback() {
     let output = Command::new(taida_bin())
         .arg("graph")

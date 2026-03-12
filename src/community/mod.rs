@@ -3,6 +3,18 @@ pub mod display;
 
 use crate::auth::token::load_token;
 
+fn print_community_help() {
+    println!(
+        "\
+Usage:
+  taida community <posts|post|messages|message|author>
+
+Examples:
+  taida community posts --tag wasm
+  taida community author shijimic"
+    );
+}
+
 pub fn run_community(args: &[String]) {
     if args.is_empty() {
         eprintln!("Usage: taida community <posts|post|messages|message|author>");
@@ -10,6 +22,7 @@ pub fn run_community(args: &[String]) {
     }
 
     match args[0].as_str() {
+        "--help" | "-h" => print_community_help(),
         "posts" => run_posts(&args[1..]),
         "post" => run_post(&args[1..]),
         "messages" => run_messages(),
