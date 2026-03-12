@@ -50,6 +50,37 @@ getDefaultPilot =
 => :@(name: Str, age: Int, role: Str)
 ```
 
+### generic function
+
+generic function は「計算手続きの抽象化」に限定します。`Mold` がデータ/solidify/unmold の抽象化を担うのに対し、generic function は inference-first で関数本体の型を共有するための仕組みです。
+
+```taida
+id[T] x: T =
+  x
+=> :T
+
+first[T] xs: @[T] =
+  xs.get(0)
+=> :Lax[T]
+
+mapValue[T, U] value: T fn: T => :U =
+  fn(value)
+=> :U
+
+id(1)                              // Int
+first(@["a", "b"]).unmold()        // "a"
+mapValue(1, _ x = x.toString())    // "1"
+```
+
+制約が必要な場合は `T <= :Num` のように書きます。
+
+```taida
+clampMin[T <= :Num] x: T min: T =
+  | x < min |> min
+  | _ |> x
+=> :T
+```
+
 ---
 
 ## 型注釈

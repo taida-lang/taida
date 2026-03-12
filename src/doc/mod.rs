@@ -879,6 +879,7 @@ mod tests {
                 }),
                 Statement::FuncDef(FuncDef {
                     name: "greet".to_string(),
+                    type_params: vec![],
                     params: vec![crate::parser::Param {
                         name: "name".to_string(),
                         type_annotation: Some(TypeExpr::Named("Str".to_string())),

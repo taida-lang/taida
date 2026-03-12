@@ -810,7 +810,7 @@ Mold[T] => Container[T] = @(
     `Container(${label}): ${unmold().toString()}`
   => :Str
 
-  mapValue fn :T => :U =
+  mapValue fn: T => :U =
     Container[fn(unmold())](label <= label)
   => :Container[U]
 )

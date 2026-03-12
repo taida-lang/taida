@@ -67,6 +67,7 @@
 | `E1506` | 関数引数の型が宣言されたパラメータ型と不一致 | TypeChecker | — |
 | `E1507` | ビルトイン関数の引数個数が arity 範囲外 | TypeChecker | — |
 | `E1508` | メソッド呼び出しの引数個数または型が不一致 | TypeChecker | — |
+| `E1509` | generic function の型変数が declared constraint を満たさない | TypeChecker | — |
 
 ## 帯域ルール
 

@@ -234,6 +234,7 @@ fn test_parse_function_def() {
     match first_stmt(source) {
         Statement::FuncDef(fd) => {
             assert_eq!(fd.name, "add");
+            assert!(fd.type_params.is_empty());
             assert_eq!(fd.params.len(), 2);
             assert_eq!(fd.params[0].name, "x");
             assert_eq!(fd.params[1].name, "y");
@@ -242,6 +243,30 @@ fn test_parse_function_def() {
                 Some(TypeExpr::Named(n)) => assert_eq!(n, "Int"),
                 other => panic!("Expected Named(Int), got {:?}", other),
             }
+        }
+        other => panic!("Expected FuncDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_generic_function_def() {
+    let source = "id[T <= :Int] x: T =\n  x\n=> :T";
+    match first_stmt(source) {
+        Statement::FuncDef(fd) => {
+            assert_eq!(fd.name, "id");
+            assert_eq!(fd.type_params.len(), 1);
+            assert_eq!(fd.type_params[0].name, "T");
+            assert_eq!(
+                fd.type_params[0].constraint,
+                Some(TypeExpr::Named("Int".to_string()))
+            );
+            assert_eq!(fd.params.len(), 1);
+            assert_eq!(fd.params[0].name, "x");
+            assert_eq!(
+                fd.params[0].type_annotation,
+                Some(TypeExpr::Named("T".to_string()))
+            );
+            assert_eq!(fd.return_type, Some(TypeExpr::Named("T".to_string())));
         }
         other => panic!("Expected FuncDef, got {:?}", other),
     }

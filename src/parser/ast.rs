@@ -76,6 +76,8 @@ pub enum TypeExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncDef {
     pub name: String,
+    /// Generic type parameters declared on the function, e.g. `id[T]`.
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub body: Vec<Statement>,
     pub return_type: Option<TypeExpr>,

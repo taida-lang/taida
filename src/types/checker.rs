@@ -41,6 +41,8 @@ pub struct TypeChecker {
     func_param_counts: HashMap<String, usize>,
     /// Function parameter types (name -> param types). Used for partial application type inference.
     func_param_types: HashMap<String, Vec<Type>>,
+    /// Generic function definitions keyed by function name.
+    generic_func_defs: HashMap<String, FuncDef>,
     /// Custom mold field definitions (name -> raw AST fields).
     /// Used for `[]` / `()` binding validation.
     mold_field_defs: HashMap<String, Vec<FieldDef>>,
@@ -60,6 +62,7 @@ impl TypeChecker {
             func_types: HashMap::new(),
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
+            generic_func_defs: HashMap::new(),
             mold_field_defs: HashMap::new(),
             mold_header_args: HashMap::new(),
             in_pipeline: false,
@@ -410,6 +413,9 @@ impl TypeChecker {
                     })
                     .collect();
                 self.func_param_types.insert(fd.name.clone(), param_types);
+                if !fd.type_params.is_empty() {
+                    self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                }
             }
             Statement::Import(imp) => {
                 // Core bundled package signatures (imported symbol path).
@@ -723,6 +729,164 @@ defaulted fields must be provided via `()`",
                         });
                     }
                 }
+            }
+        }
+    }
+
+    fn bind_generic_type_pattern(
+        &self,
+        pattern: &Type,
+        actual: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &mut HashMap<String, Type>,
+    ) -> bool {
+        match pattern {
+            Type::Named(name) if generic_names.contains(name) => {
+                if let Some(bound) = bindings.get(name) {
+                    self.mold_header_type_compatible(actual, bound)
+                        && self.mold_header_type_compatible(bound, actual)
+                } else {
+                    bindings.insert(name.clone(), actual.clone());
+                    true
+                }
+            }
+            Type::List(pattern_inner) => match actual {
+                Type::List(actual_inner) => self.bind_generic_type_pattern(
+                    pattern_inner,
+                    actual_inner,
+                    generic_names,
+                    bindings,
+                ),
+                _ => false,
+            },
+            Type::Generic(pattern_name, pattern_args) => match actual {
+                Type::Generic(actual_name, actual_args)
+                    if pattern_name == actual_name && pattern_args.len() == actual_args.len() =>
+                {
+                    pattern_args
+                        .iter()
+                        .zip(actual_args.iter())
+                        .all(|(pattern_arg, actual_arg)| {
+                            self.bind_generic_type_pattern(
+                                pattern_arg,
+                                actual_arg,
+                                generic_names,
+                                bindings,
+                            )
+                        })
+                }
+                _ => false,
+            },
+            Type::BuchiPack(pattern_fields) => match actual {
+                Type::BuchiPack(actual_fields) => {
+                    pattern_fields.iter().all(|(pattern_name, pattern_ty)| {
+                        actual_fields
+                            .iter()
+                            .find(|(actual_name, _)| actual_name == pattern_name)
+                            .is_some_and(|(_, actual_ty)| {
+                                self.bind_generic_type_pattern(
+                                    pattern_ty,
+                                    actual_ty,
+                                    generic_names,
+                                    bindings,
+                                )
+                            })
+                    })
+                }
+                _ => false,
+            },
+            Type::Function(pattern_params, pattern_ret) => match actual {
+                Type::Function(actual_params, actual_ret)
+                    if pattern_params.len() == actual_params.len() =>
+                {
+                    pattern_params.iter().zip(actual_params.iter()).all(
+                        |(pattern_param, actual_param)| {
+                            self.bind_generic_type_pattern(
+                                pattern_param,
+                                actual_param,
+                                generic_names,
+                                bindings,
+                            )
+                        },
+                    ) && self.bind_generic_type_pattern(
+                        pattern_ret,
+                        actual_ret,
+                        generic_names,
+                        bindings,
+                    )
+                }
+                _ => false,
+            },
+            _ => self.registry.is_subtype_of(actual, pattern),
+        }
+    }
+
+    fn substitute_generic_type(
+        &self,
+        pattern: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        match pattern {
+            Type::Named(name) if generic_names.contains(name) => bindings
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| pattern.clone()),
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            self.substitute_generic_type(ty, generic_names, bindings),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::List(inner) => Type::List(Box::new(self.substitute_generic_type(
+                inner,
+                generic_names,
+                bindings,
+            ))),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.substitute_generic_type(arg, generic_names, bindings))
+                    .collect(),
+            ),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.substitute_generic_type(param, generic_names, bindings))
+                    .collect(),
+                Box::new(self.substitute_generic_type(ret, generic_names, bindings)),
+            ),
+            _ => pattern.clone(),
+        }
+    }
+
+    fn validate_generic_function_constraints(
+        &mut self,
+        fd: &FuncDef,
+        bindings: &HashMap<String, Type>,
+        span: &Span,
+    ) {
+        for type_param in &fd.type_params {
+            let Some(actual) = bindings.get(&type_param.name) else {
+                continue;
+            };
+            let Some(constraint) = &type_param.constraint else {
+                continue;
+            };
+            let expected = self.resolve_mold_header_type(constraint, bindings);
+            if !self.mold_header_type_compatible(actual, &expected) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1509] Generic function type parameter '{}' violates its constraint: expected {}, got {}. Hint: Pass arguments that satisfy the declared generic constraint.",
+                        type_param.name, expected, actual
+                    ),
+                    span: span.clone(),
+                });
             }
         }
     }
@@ -1062,6 +1226,115 @@ defaulted fields must be provided via `()`",
 
                 // Try to resolve return type from function name
                 if let Expr::Ident(name, _) = func.as_ref() {
+                    if let Some(fd) = self.generic_func_defs.get(name).cloned() {
+                        let param_patterns: Vec<Type> = fd
+                            .params
+                            .iter()
+                            .map(|param| {
+                                param
+                                    .type_annotation
+                                    .as_ref()
+                                    .map(|ty| self.registry.resolve_type(ty))
+                                    .unwrap_or(Type::Unknown)
+                            })
+                            .collect();
+                        let ret_pattern = fd
+                            .return_type
+                            .as_ref()
+                            .map(|ty| self.registry.resolve_type(ty))
+                            .unwrap_or(Type::Unknown);
+                        let generic_names: HashSet<String> =
+                            fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+                        let mut bindings = HashMap::<String, Type>::new();
+
+                        if args.len() > fd.params.len() {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
+                                    name,
+                                    fd.params.len(),
+                                    args.len()
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        if hole_count > 0 && args.len() != fd.params.len() {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1505] Partial application of '{}' requires exactly {} slot(s) (got {}). \
+                                     Hint: Provide a value or empty slot for each parameter.",
+                                    name,
+                                    fd.params.len(),
+                                    args.len()
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+
+                        for (i, arg) in args.iter().enumerate() {
+                            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                continue;
+                            }
+                            let Some(pattern) = param_patterns.get(i) else {
+                                continue;
+                            };
+                            let actual_ty = self.infer_expr_type(arg);
+                            if actual_ty == Type::Unknown {
+                                continue;
+                            }
+                            if !self.bind_generic_type_pattern(
+                                pattern,
+                                &actual_ty,
+                                &generic_names,
+                                &mut bindings,
+                            ) {
+                                let expected_ty = self.substitute_generic_type(
+                                    pattern,
+                                    &generic_names,
+                                    &bindings,
+                                );
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                                         Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                        i + 1,
+                                        name,
+                                        actual_ty,
+                                        expected_ty
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+
+                        self.validate_generic_function_constraints(&fd, &bindings, span);
+                        let resolved_ret =
+                            self.substitute_generic_type(&ret_pattern, &generic_names, &bindings);
+
+                        if hole_count > 0 {
+                            let hole_param_types: Vec<Type> = args
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, arg)| matches!(arg, Expr::Hole(_)))
+                                .map(|(i, _)| {
+                                    param_patterns
+                                        .get(i)
+                                        .map(|pattern| {
+                                            self.substitute_generic_type(
+                                                pattern,
+                                                &generic_names,
+                                                &bindings,
+                                            )
+                                        })
+                                        .unwrap_or(Type::Unknown)
+                                })
+                                .collect();
+                            return Type::Function(hole_param_types, Box::new(resolved_ret));
+                        }
+
+                        return resolved_ret;
+                    }
+
                     // First check func_types (registered function return types)
                     if let Some(ret_ty) = self.func_types.get(name).cloned() {
                         if let Some(expected) = self.func_param_counts.get(name).copied() {

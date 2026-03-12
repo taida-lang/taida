@@ -455,6 +455,44 @@ fn test_func_with_return_type_annotation() {
 }
 
 #[test]
+fn test_generic_function_id_infers_argument_type() {
+    let source = "id[T] x: T =\n  x\n=> :T\n\nvalue <= id(1)";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("value"), Some(Type::Int));
+}
+
+#[test]
+fn test_generic_function_first_preserves_inner_type() {
+    let source =
+        "first[T] xs: @[T] =\n  xs.get(0)\n=> :Lax[T]\n\nvalue <= first(@[1, 2, 3]).unmold()";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("value"), Some(Type::Int));
+}
+
+#[test]
+fn test_generic_function_map_value_infers_return_type() {
+    let source = "mapValue[T, U] value: T fn: T => :U =\n  fn(value)\n=> :U\n\ntext <= mapValue(1, _ x = x.toString())";
+    let (checker, errors) = check(source);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("text"), Some(Type::Str));
+}
+
+#[test]
+fn test_generic_function_constraint_is_enforced() {
+    let source = "idNum[T <= :Num] x: T =\n  x\n=> :T\n\nvalue <= idNum(\"nope\")";
+    let (_checker, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1509]") && e.message.contains("violates its constraint")),
+        "Expected generic function constraint error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_stdin_returns_str() {
     let source = "input <= stdin(\"prompt: \")";
     let (checker, _errors) = check(source);

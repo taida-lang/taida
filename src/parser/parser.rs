@@ -328,6 +328,7 @@ impl Parser {
                     };
                     Ok(Statement::FuncDef(FuncDef {
                         name,
+                        type_params: Vec::new(),
                         params: Vec::new(),
                         body,
                         return_type,
@@ -463,6 +464,12 @@ impl Parser {
 
             // Anything else: parse the rest as an expression + check for pipeline
             _ => {
+                if matches!(self.peek_kind(), TokenKind::LBracket)
+                    && self.looks_like_generic_func_def()
+                {
+                    self.pos = save_pos;
+                    return self.parse_func_def_with_docs(doc_comments);
+                }
                 self.pos = save_pos;
                 let expr = self.parse_expression()?;
                 self.finish_expr_as_statement(expr, start_span)
@@ -476,6 +483,12 @@ impl Parser {
     ) -> Result<Statement, ParseError> {
         let start_span = self.current_span();
         let name = self.expect_ident()?;
+        let type_params = if self.check(&TokenKind::LBracket) {
+            self.advance();
+            self.parse_func_type_params()?
+        } else {
+            Vec::new()
+        };
 
         // Parse parameters: `name: Type name: Type ...`
         let mut params = Vec::new();
@@ -526,12 +539,67 @@ impl Parser {
 
         Ok(Statement::FuncDef(FuncDef {
             name,
+            type_params,
             params,
             body,
             return_type,
             doc_comments,
             span: start_span,
         }))
+    }
+
+    fn parse_func_type_params(&mut self) -> Result<Vec<TypeParam>, ParseError> {
+        let mut type_params = Vec::new();
+        if self.check(&TokenKind::RBracket) {
+            self.advance();
+            return Ok(type_params);
+        }
+
+        loop {
+            let name = self.expect_ident()?;
+            let constraint = if self.check(&TokenKind::LtEq) {
+                self.advance();
+                self.expect(&TokenKind::Colon)?;
+                Some(self.parse_type_expr()?)
+            } else {
+                None
+            };
+            type_params.push(TypeParam { name, constraint });
+            if !self.match_token(&TokenKind::Comma) {
+                break;
+            }
+        }
+
+        self.expect(&TokenKind::RBracket)?;
+        Ok(type_params)
+    }
+
+    fn looks_like_generic_func_def(&self) -> bool {
+        if !self.check(&TokenKind::LBracket) {
+            return false;
+        }
+
+        let mut i = self.pos;
+        let mut depth = 0usize;
+        while let Some(token) = self.tokens.get(i) {
+            match &token.kind {
+                TokenKind::LBracket => depth += 1,
+                TokenKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(i + 1).map(|token| &token.kind),
+                            Some(TokenKind::Ident(_)) | Some(TokenKind::Eq)
+                        );
+                    }
+                }
+                TokenKind::Eof => break,
+                _ => {}
+            }
+            i += 1;
+        }
+
+        false
     }
 
     fn parse_mold_def_with_docs(
@@ -1179,6 +1247,7 @@ impl Parser {
                     is_method: true,
                     method_def: Some(FuncDef {
                         name: "unmold".to_string(),
+                        type_params: Vec::new(),
                         params: Vec::new(), // no explicit params; filling is accessed by name
                         body,
                         return_type,
@@ -1276,6 +1345,7 @@ impl Parser {
                     is_method: true,
                     method_def: Some(FuncDef {
                         name: field_name,
+                        type_params: Vec::new(),
                         params,
                         body,
                         return_type,
