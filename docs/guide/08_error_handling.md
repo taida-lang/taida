@@ -290,7 +290,7 @@ Div[10, 0]() ]=> result  // 0 (プログラムは止まりません)
 Result は「成功条件を述語で定義する」モールド型です。`]=>` でアンモールディングすると述語 P が評価され、真なら値 T を返し、偽なら throw が発動します。
 
 ```taida
-Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
+Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 // P: :T => :Bool（成功条件を定義する述語）
 ```
 

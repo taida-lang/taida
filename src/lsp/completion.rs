@@ -12,8 +12,8 @@ use tower_lsp::lsp_types::{
     MarkupContent, MarkupKind,
 };
 
-use crate::parser::{FuncDef, Statement, parse};
-use crate::types::TypeChecker;
+use crate::parser::{FuncDef, MoldHeaderArg, Statement, TypeExpr, parse};
+use crate::types::{Type, TypeChecker};
 
 /// Generate completion items based on context.
 pub fn get_completions(params: &CompletionParams, source: Option<&str>) -> Vec<CompletionItem> {
@@ -50,6 +50,115 @@ pub fn get_completions(params: &CompletionParams, source: Option<&str>) -> Vec<C
     items.extend(type_completions());
 
     items
+}
+
+fn format_type_expr(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Named(name) => name.clone(),
+        TypeExpr::BuchiPack(fields) => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|field| match &field.type_annotation {
+                    Some(ty) => format!("{}: {}", field.name, format_type_expr(ty)),
+                    None => field.name.clone(),
+                })
+                .collect();
+            format!("@({})", fields.join(", "))
+        }
+        TypeExpr::List(inner) => format!("@[{}]", format_type_expr(inner)),
+        TypeExpr::Generic(name, args) => format!(
+            "{}[{}]",
+            name,
+            args.iter()
+                .map(format_type_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeExpr::Function(args, ret) => format!(
+            "({}) => :{}",
+            args.iter()
+                .map(format_type_expr)
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_type_expr(ret)
+        ),
+    }
+}
+
+fn format_mold_header_arg(arg: &MoldHeaderArg) -> String {
+    match arg {
+        MoldHeaderArg::TypeParam(tp) => match &tp.constraint {
+            Some(constraint) => format!("{} <= :{}", tp.name, format_type_expr(constraint)),
+            None => tp.name.clone(),
+        },
+        MoldHeaderArg::Concrete(ty) => format!(":{}", format_type_expr(ty)),
+    }
+}
+
+fn format_mold_header_suffix(args: &[MoldHeaderArg]) -> String {
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            args.iter()
+                .map(format_mold_header_arg)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn format_named_mold_header(name: &str, args: &[MoldHeaderArg]) -> String {
+    format!("{}{}", name, format_mold_header_suffix(args))
+}
+
+fn format_registry_fields(fields: &[(String, Type)]) -> String {
+    fields
+        .iter()
+        .map(|(name, ty)| format!("{}: {}", name, ty))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn find_user_mold_detail(
+    statements: &[Statement],
+    name: &str,
+    fields: &[(String, Type)],
+) -> String {
+    let fields_str = format_registry_fields(fields);
+    for stmt in statements {
+        match stmt {
+            Statement::MoldDef(md) if md.name == name => {
+                let child_args = md.name_args.as_deref().unwrap_or(md.mold_args.as_slice());
+                return format!(
+                    "{} => {} = @({})",
+                    format_named_mold_header("Mold", &md.mold_args),
+                    format_named_mold_header(&md.name, child_args),
+                    fields_str
+                );
+            }
+            Statement::InheritanceDef(inh) if inh.child == name => {
+                let child_args = inh
+                    .child_args
+                    .as_deref()
+                    .or(inh.parent_args.as_deref())
+                    .unwrap_or(&[]);
+                let parent_header = match inh.parent_args.as_deref() {
+                    Some(args) => format_named_mold_header(&inh.parent, args),
+                    None => inh.parent.clone(),
+                };
+                return format!(
+                    "{} => {} = @({})",
+                    parent_header,
+                    format_named_mold_header(&inh.child, child_args),
+                    fields_str
+                );
+            }
+            _ => {}
+        }
+    }
+    format!("{} = @({})", name, fields_str)
 }
 
 /// Check if the trigger is a dot (for field/method completion).
@@ -132,15 +241,11 @@ fn source_completions(source: &str) -> Vec<CompletionItem> {
 
     // User-defined mold types
     for (name, (type_params, fields)) in &checker.registry.mold_defs {
-        let tp_str = type_params.join(", ");
-        let fields_str: Vec<String> = fields
-            .iter()
-            .map(|(n, t)| format!("{}: {}", n, t))
-            .collect();
+        let _ = type_params;
         items.push(CompletionItem {
             label: name.clone(),
             kind: Some(CompletionItemKind::CLASS),
-            detail: Some(format!("Mold[{}] = @({})", tp_str, fields_str.join(", "))),
+            detail: Some(find_user_mold_detail(&program.statements, name, fields)),
             documentation: find_mold_doc_comments(&program.statements, name),
             ..Default::default()
         });
@@ -192,10 +297,38 @@ fn partial_source_completions(statements: &[Statement]) -> Vec<CompletionItem> {
                 });
             }
             Statement::InheritanceDef(inh) => {
+                let detail = match (&inh.parent_args, &inh.child_args) {
+                    (Some(parent_args), Some(child_args)) => format!(
+                        "{}[{}] => {}[{}]",
+                        inh.parent,
+                        parent_args
+                            .iter()
+                            .map(format_mold_header_arg)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        inh.child,
+                        child_args
+                            .iter()
+                            .map(format_mold_header_arg)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    (Some(parent_args), None) => format!(
+                        "{}[{}] => {}",
+                        inh.parent,
+                        parent_args
+                            .iter()
+                            .map(format_mold_header_arg)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        inh.child
+                    ),
+                    _ => format!("{} => {}", inh.parent, inh.child),
+                };
                 items.push(CompletionItem {
                     label: inh.child.clone(),
                     kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(format!("{} => {}", inh.parent, inh.child)),
+                    detail: Some(detail),
                     documentation: format_doc_comments(&inh.doc_comments),
                     ..Default::default()
                 });
@@ -868,10 +1001,14 @@ fn find_type_doc_comments(statements: &[Statement], name: &str) -> Option<Docume
 /// Find doc_comments for a MoldDef by name.
 fn find_mold_doc_comments(statements: &[Statement], name: &str) -> Option<Documentation> {
     for stmt in statements {
-        if let Statement::MoldDef(md) = stmt
-            && md.name == name
-        {
-            return format_doc_comments(&md.doc_comments);
+        match stmt {
+            Statement::MoldDef(md) if md.name == name => {
+                return format_doc_comments(&md.doc_comments);
+            }
+            Statement::InheritanceDef(inh) if inh.child == name => {
+                return format_doc_comments(&inh.doc_comments);
+            }
+            _ => {}
         }
     }
     None
@@ -986,6 +1123,44 @@ mod tests {
         let items = source_completions(source);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"Person"), "Should include type Person");
+    }
+
+    #[test]
+    fn test_source_completions_mold_defs_include_effective_headers() {
+        let source = r#"
+always_true x: Int =
+  true
+=> :Bool
+
+Mold[T] => Result[T, P <= :T => :Bool] = @(
+  pred: P
+)
+"#;
+        let items = source_completions(source);
+        let result_item = items
+            .iter()
+            .find(|item| item.label == "Result" && item.kind == Some(CompletionItemKind::CLASS))
+            .expect("Result completion should exist");
+        let detail = result_item.detail.as_deref().expect("detail should exist");
+        assert!(detail.contains("Mold[T] => Result["));
+        assert!(detail.contains("P <="));
+    }
+
+    #[test]
+    fn test_source_completions_inherited_molds_include_effective_headers() {
+        let source = r#"
+Mold[:Int] => Base[:Int] = @()
+Base[:Int] => Child[:Int, U] = @(
+  extra: U
+)
+"#;
+        let items = source_completions(source);
+        let child_item = items
+            .iter()
+            .find(|item| item.label == "Child" && item.kind == Some(CompletionItemKind::CLASS))
+            .expect("Child completion should exist");
+        let detail = child_item.detail.as_deref().expect("detail should exist");
+        assert!(detail.contains("Base[:Int] => Child[:Int, U] = @("));
     }
 
     #[test]

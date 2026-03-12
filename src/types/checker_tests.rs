@@ -800,7 +800,7 @@ fn test_mold_field_without_type_and_default_is_error() {
 
 #[test]
 fn test_mold_type_params_without_binding_target_is_error() {
-    let source = r#"Mold[T, U] => Broken[T, U] = @()"#;
+    let source = r#"Mold[T] => Broken[T, U] = @()"#;
     let (_, errors) = check(source);
     assert!(
         errors
@@ -814,7 +814,7 @@ fn test_mold_type_params_without_binding_target_is_error() {
 
 #[test]
 fn test_mold_type_param_after_concrete_filling_without_binding_target_is_error() {
-    let source = r#"Mold[:Int, U] => Broken = @()"#;
+    let source = r#"Mold[:Int] => Broken[:Int, U] = @()"#;
     let (_, errors) = check(source);
     assert!(
         errors
@@ -828,7 +828,7 @@ fn test_mold_type_param_after_concrete_filling_without_binding_target_is_error()
 
 #[test]
 fn test_mold_type_param_after_concrete_slots_without_binding_target_is_error() {
-    let source = r#"Mold[:Int, :Str, U] => Broken = @(
+    let source = r#"Mold[:Int] => Broken[:Int, :Str, U] = @(
   tail: Int
 )"#;
     let (_, errors) = check(source);
@@ -844,7 +844,7 @@ fn test_mold_type_param_after_concrete_slots_without_binding_target_is_error() {
 
 #[test]
 fn test_mold_concrete_header_arg_without_binding_target_is_error() {
-    let source = r#"Mold[T, :Int] => Broken = @()"#;
+    let source = r#"Mold[T] => Broken[T, :Int] = @()"#;
     let (_, errors) = check(source);
     assert!(
         errors.iter().any(|e| {
@@ -859,7 +859,7 @@ fn test_mold_concrete_header_arg_without_binding_target_is_error() {
 
 #[test]
 fn test_custom_mold_inst_missing_required_positional_args_is_error() {
-    let source = r#"Mold[T, U] => Pair[T, U] = @(
+    let source = r#"Mold[T] => Pair[T, U] = @(
   second: U
 )
 p <= Pair[1]()"#;
@@ -877,7 +877,7 @@ p <= Pair[1]()"#;
 
 #[test]
 fn test_custom_mold_inst_too_many_positional_args_is_error() {
-    let source = r#"Mold[T, U] => Pair[T, U] = @(
+    let source = r#"Mold[T] => Pair[T, U] = @(
   second: U
   flag: Bool <= false
 )
@@ -896,7 +896,7 @@ p <= Pair[1, 2, true]()"#;
 
 #[test]
 fn test_custom_mold_inst_required_field_in_named_options_is_error() {
-    let source = r#"Mold[T, U] => Pair[T, U] = @(
+    let source = r#"Mold[T] => Pair[T, U] = @(
   second: U
   flag: Bool <= false
 )
@@ -914,7 +914,7 @@ p <= Pair[1](second <= 2)"#;
 
 #[test]
 fn test_custom_mold_inst_duplicate_and_undefined_options_are_errors() {
-    let source = r#"Mold[T, U] => Pair[T, U] = @(
+    let source = r#"Mold[T] => Pair[T, U] = @(
   second: U
   flag: Bool <= false
 )
@@ -938,7 +938,7 @@ p <= Pair[1, 2](flag <= true, flag <= false, nope <= true)"#;
 
 #[test]
 fn test_custom_mold_inst_with_valid_binding_rules_has_no_errors() {
-    let source = r#"Mold[T, U] => Pair[T, U] = @(
+    let source = r#"Mold[T] => Pair[T, U] = @(
   second: U
   flag: Bool <= false
 )
@@ -952,15 +952,14 @@ p <= Pair[1, 2](flag <= true)"#;
 }
 
 #[test]
-fn test_mold_explicit_name_header_must_match_left_header() {
-    let source = r#"Mold[:Int] => IntBox[T] = @()
+fn test_mold_explicit_name_header_must_preserve_inherited_prefix() {
+    let source = r#"Mold[:Int] => IntBox[T, U] = @()
 box <= IntBox[1]()"#;
     let (_, errors) = check(source);
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("[E1407]") && e.message.contains("same header")),
-        "Expected mold header mismatch error, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1407]")
+            && e.message.contains("must preserve inherited header slot 1")),
+        "Expected inherited prefix preservation error, got: {:?}",
         errors
     );
 }
@@ -983,7 +982,7 @@ box <= IntBox["oops"]()"#;
 
 #[test]
 fn test_custom_mold_constraint_can_reference_previous_header_type() {
-    let source = r#"Mold[T, P <= :T => :Bool] => Guard = @(
+    let source = r#"Mold[T] => Guard[T, P <= :T => :Bool] = @(
   predicate: P
 )
 box <= Guard[1, _ value = value > 0]()"#;
@@ -996,8 +995,74 @@ box <= Guard[1, _ value = value > 0]()"#;
 }
 
 #[test]
+fn test_mold_root_cannot_extend_parent_arity_directly() {
+    let source = r#"Mold[T, P <= :T => :Bool] => Guard[T, P] = @(
+  predicate: P
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message
+                    .contains("must keep the built-in parent `Mold` header at arity 1")
+        }),
+        "Expected direct Mold arity extension to be rejected, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_child_header_cannot_reuse_type_param_names() {
+    let source = r#"Mold[T] => Guard[T, T] = @(
+  predicate: T
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message
+                    .contains("reuses header type parameter name(s): T")
+        }),
+        "Expected duplicate child header type parameter names to be rejected, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_mold_child_header_must_preserve_inherited_prefix() {
+    let source = r#"Mold[T] => Guard[T, P <= :T => :Bool] = @(
+  predicate: P
+)
+Guard[T, P <= :T => :Bool] => GuardAlias[T, Pred] = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message.contains("must preserve inherited header slot 2")
+        }),
+        "Expected inherited prefix rename/rewrite to be rejected, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_inheritance_can_extend_with_constrained_child_slot() {
+    let source = r#"Mold[T] => Guard[T] = @()
+Guard[T] => GuardWithPredicate[T, P <= :T => :Bool] = @(
+  predicate: P
+)
+box <= GuardWithPredicate[1, _ value = value > 0]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected child mold inheritance to extend with constrained slot, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_custom_mold_constraint_is_enforced() {
-    let source = r#"Mold[T, P <= :T => :Bool] => Guard = @(
+    let source = r#"Mold[T] => Guard[T, P <= :T => :Bool] = @(
   predicate: P
 )
 box <= Guard[1, _ value = "nope"]()"#;
@@ -1007,6 +1072,90 @@ box <= Guard[1, _ value = "nope"]()"#;
             e.message.contains("[E1409]") && e.message.contains("violates constraint on 'P'")
         }),
         "Expected constrained mold header error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_inheritance_child_constraint_is_enforced() {
+    let source = r#"Mold[T] => Guard[T] = @()
+Guard[T] => GuardWithPredicate[T, P <= :T => :Bool] = @(
+  predicate: P
+)
+box <= GuardWithPredicate[1, _ value = "nope"]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1409]") && e.message.contains("violates constraint on 'P'")
+        }),
+        "Expected child-side constraint to be enforced, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_inheritance_can_extend_parent_header_arity() {
+    let source = r#"Mold[T] => Parent[T] = @()
+Parent[T] => Child[T, U] = @(
+  extra: U
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected child generic inheritance to extend parent header arity, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_inheritance_headers_require_mold_like_parent() {
+    let source = r#"Base = @(value: Int)
+Base[T] => Child[T, U] = @(
+  extra: U
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message
+                    .contains("can only declare `Parent[...] => Child[...]` headers")
+                && e.message.contains("parent 'Base' is a mold-like type")
+        }),
+        "Expected non-mold parent headers to be rejected, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_inheritance_can_reference_forward_declared_mold_parent() {
+    let source = r#"Parent[T] => Child[T, U] = @(
+  extra: U
+)
+Mold[T] => Parent[T] = @()
+child <= Child[1, 2]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Expected forward-declared mold parent inheritance to succeed, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_generic_inheritance_cannot_shrink_parent_header_arity() {
+    let source = r#"Mold[T] => Parent[T] = @()
+Parent[T] => Expanded[T, U] = @(
+  extra: U
+)
+Expanded[T, U] => Child[T] = @()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1407]")
+                && e.message
+                    .contains("cannot shrink header arity below parent")
+        }),
+        "Expected child generic inheritance shrink to be rejected, got: {:?}",
         errors
     );
 }

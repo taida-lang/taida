@@ -11,6 +11,8 @@ pub struct JsCodegen {
     current_tco_funcs: std::collections::HashSet<String>,
     /// Registry of TypeDef field names for InheritanceDef parent field resolution
     type_field_registry: std::collections::HashMap<String, Vec<String>>,
+    /// Registry of mold field definitions for mold-aware inheritance codegen.
+    mold_field_registry: std::collections::HashMap<String, Vec<FieldDef>>,
     /// Set of function names that need trampoline wrapping (self or mutual recursion)
     trampoline_funcs: std::collections::HashSet<String>,
     /// Set of function names that contain ]=> (unmold) and need `async function` generation
@@ -59,6 +61,7 @@ impl JsCodegen {
             indent: 0,
             current_tco_funcs: std::collections::HashSet::new(),
             type_field_registry: std::collections::HashMap::new(),
+            mold_field_registry: std::collections::HashMap::new(),
             trampoline_funcs: std::collections::HashSet::new(),
             async_funcs: std::collections::HashSet::new(),
             in_async_context: true, // top-level is async (ESM top-level await)
@@ -766,6 +769,31 @@ impl JsCodegen {
     }
 
     fn gen_inheritance_def(&mut self, inh_def: &InheritanceDef) -> Result<(), JsError> {
+        if let Some(parent_mold_fields) = self.mold_field_registry.get(&inh_def.parent).cloned() {
+            let merged_fields = merge_field_defs(&parent_mold_fields, &inh_def.fields);
+            let header_args = inh_def
+                .child_args
+                .as_ref()
+                .or(inh_def.parent_args.as_ref())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let prev_async_context = self.in_async_context;
+            self.in_async_context = false;
+            self.gen_custom_mold_factory(&inh_def.child, header_args, &merged_fields)?;
+            let all_fields: Vec<String> = merged_fields
+                .iter()
+                .filter(|field| !field.is_method)
+                .map(|field| field.name.clone())
+                .collect();
+            self.type_field_registry
+                .insert(inh_def.child.clone(), all_fields);
+            self.mold_field_registry
+                .insert(inh_def.child.clone(), merged_fields);
+
+            self.in_async_context = prev_async_context;
+            return Ok(());
+        }
+
         // B6: Inheritance with prototype chain
         let child_fields: Vec<&FieldDef> = inh_def.fields.iter().filter(|f| !f.is_method).collect();
         let field_names: Vec<&str> = child_fields.iter().map(|f| f.name.as_str()).collect();
@@ -846,14 +874,37 @@ impl JsCodegen {
     }
 
     fn gen_mold_def(&mut self, mold_def: &MoldDef) -> Result<(), JsError> {
-        // B4: Mold with actual transformation semantics
-        let type_params: Vec<String> = mold_def
-            .type_params
+        // MoldDef factory function and methods are sync context
+        let prev_async_context = self.in_async_context;
+        self.in_async_context = false;
+        let header_args = mold_def.name_args.as_ref().unwrap_or(&mold_def.mold_args);
+        self.gen_custom_mold_factory(&mold_def.name, header_args, &mold_def.fields)?;
+        self.mold_field_registry
+            .insert(mold_def.name.clone(), mold_def.fields.clone());
+
+        // Restore async context
+        self.in_async_context = prev_async_context;
+        Ok(())
+    }
+
+    fn collect_mold_type_param_names(header_args: &[MoldHeaderArg]) -> Vec<String> {
+        header_args
             .iter()
-            .map(|p| p.name.clone())
-            .collect();
-        let non_method_fields: Vec<&FieldDef> =
-            mold_def.fields.iter().filter(|f| !f.is_method).collect();
+            .filter_map(|arg| match arg {
+                MoldHeaderArg::TypeParam(tp) => Some(tp.name.clone()),
+                MoldHeaderArg::Concrete(_) => None,
+            })
+            .collect()
+    }
+
+    fn gen_custom_mold_factory(
+        &mut self,
+        name: &str,
+        header_args: &[MoldHeaderArg],
+        fields: &[FieldDef],
+    ) -> Result<(), JsError> {
+        let type_params = Self::collect_mold_type_param_names(header_args);
+        let non_method_fields: Vec<&FieldDef> = fields.iter().filter(|f| !f.is_method).collect();
         let required_fields: Vec<&FieldDef> = non_method_fields
             .iter()
             .copied()
@@ -868,17 +919,12 @@ impl JsCodegen {
         let positional_params: Vec<String> = std::iter::once("filling".to_string())
             .chain(required_fields.iter().map(|f| f.name.clone()))
             .collect();
-
-        let methods: Vec<&FieldDef> = mold_def.fields.iter().filter(|f| f.is_method).collect();
-
-        // MoldDef factory function and methods are sync context
-        let prev_async_context = self.in_async_context;
-        self.in_async_context = false;
+        let methods: Vec<&FieldDef> = fields.iter().filter(|f| f.is_method).collect();
 
         self.write_indent();
         self.write(&format!(
             "function {}({}, fields) {{\n",
-            mold_def.name,
+            name,
             positional_params.join(", ")
         ));
         self.indent += 1;
@@ -893,8 +939,7 @@ impl JsCodegen {
         }
         self.writeln("const obj = {");
         self.indent += 1;
-        self.writeln(&format!("__type: '{}',", mold_def.name));
-        // Store type args for unmolding
+        self.writeln(&format!("__type: '{}',", name));
         let type_arg_bindings: Vec<String> = std::iter::once("filling".to_string())
             .chain(required_fields.iter().map(|f| f.name.clone()))
             .collect();
@@ -916,7 +961,6 @@ impl JsCodegen {
             self.writeln(&format!("{},", field.name));
         }
         self.writeln("unmold() { return this.__value; },");
-        // Methods
         for method_field in &methods {
             if let Some(ref func_def) = method_field.method_def {
                 let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
@@ -950,9 +994,6 @@ impl JsCodegen {
         self.writeln("return Object.freeze(obj);");
         self.indent -= 1;
         self.writeln("}\n");
-
-        // Restore async context
-        self.in_async_context = prev_async_context;
         Ok(())
     }
 
@@ -2256,6 +2297,21 @@ impl JsCodegen {
         self.write("})()");
         Ok(())
     }
+}
+
+fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {
+    let mut merged = parent.to_vec();
+    for child_field in child {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|field| field.name == child_field.name)
+        {
+            *existing = child_field.clone();
+        } else {
+            merged.push(child_field.clone());
+        }
+    }
+    merged
 }
 
 /// Collect function names that are called in tail position from the given function body.

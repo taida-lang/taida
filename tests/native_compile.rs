@@ -375,7 +375,7 @@ stdout(PlusOne[41]().toString())
 #[test]
 fn test_native_custom_mold_required_positional_binding_matches_interpreter() {
     let source = r#"
-Mold[T, U] => Pair[T, U] = @(
+Mold[T] => Pair[T, U] = @(
   second: U
   solidify =
     filling + second
@@ -384,6 +384,38 @@ Mold[T, U] => Pair[T, U] = @(
 stdout(Pair[40, 2]().toString())
 "#;
     assert_native_matches_interpreter(source, "native_custom_mold_required_positional");
+}
+
+#[test]
+fn test_native_inherited_custom_mold_required_positional_binding_matches_interpreter() {
+    let source = r#"
+Mold[T] => PairBase[T] = @()
+PairBase[T] => Pair[T, U] = @(
+  second: U
+  solidify =
+    filling + second
+  => :Int
+)
+stdout(Pair[40, 2]().toString())
+"#;
+    assert_native_matches_interpreter(source, "native_inherited_custom_mold_required_positional");
+}
+
+#[test]
+fn test_native_inherited_custom_mold_override_parent_field_matches_interpreter() {
+    let source = r#"
+Mold[T] => Base[T] = @(
+  bonus: Int <= 0
+  solidify =
+    filling + bonus
+  => :Int
+)
+Base[T] => Child[T] = @(
+  bonus: Int
+)
+stdout(Child[40, 2]().toString())
+"#;
+    assert_native_matches_interpreter(source, "native_inherited_custom_mold_override_parent_field");
 }
 
 #[test]
@@ -430,7 +462,7 @@ Mold[T] => BadField[T] = @(
         (
             "native_custom_mold_def_unbound_type_param",
             r#"
-Mold[T, U] => BadBind[T, U] = @()
+Mold[T] => BadBind[T, U] = @()
 "#,
         ),
     ];

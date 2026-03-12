@@ -715,7 +715,7 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 
 ## Result — モナディック型メソッド
 
-`Result[T, P]` は `Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)` として定義されます。述語 P が真を返す場合は成功、偽を返す場合は失敗（throw 発動）を表します。
+`Result[T, P]` は `Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)` として定義されます。述語 P が真を返す場合は成功、偽を返す場合は失敗（throw 発動）を表します。
 
 ### Result
 

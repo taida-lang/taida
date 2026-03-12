@@ -40,7 +40,7 @@ Mold[T] => MyMold[T] = @(
 )
 
 // 例
-Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)  // 述語付き操作モールド
+Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)  // 述語付き操作モールド
 ```
 
 header 記法:
@@ -48,7 +48,34 @@ header 記法:
 - `T` = 型変数
 - `:Int` = concrete type
 - `T <= :Int` = concrete type 制約付き型変数
-- `Name[...]` を明示する場合は `Mold[...]` と完全一致させる。省略時は `Mold[...]` と同じ header を暗黙に使う
+- `Mold[...]` は親ヘッダー、`Name[...]` は子ヘッダー
+- `Mold[...]` の親側は常に 1 slot のまま保つ
+- 追加 slot は子ヘッダー側にだけ書く
+- 子ヘッダーは親ヘッダーを exact prefix として保持し、末尾にだけ slot を追加できる
+
+ヘッダースロット束縛規則:
+
+1. `Mold[...]` の1つ目は常に `filling`
+2. 2つ目以降は、`@(...)` の「デフォルト値なしフィールド」に宣言順で対応
+3. `T` だけでなく `:Int` のような具象型スロットも1つのフィールドスロットを消費する
+4. どれか1つでも束縛先が足りないと `E1401`
+5. `Name[...]` を明示する場合は、`Mold[...]` を exact prefix に保ったまま、同数またはそれ以上の slot 数でなければ `E1407`
+
+例:
+
+```taida
+Mold[:Int] => IntBox = @()
+IntBox[1]()       // OK
+IntBox["x"]()     // E1408: 具象型ヘッダー型不一致
+
+Mold[:Int] => IntPair[:Int, T] = @(
+  second: T
+)
+IntPair[1, "x"]() // OK
+
+Mold[:Int] => Broken[:Int, T] = @()
+// E1401: 2つ目のヘッダースロットに対応するフィールドが無い
+```
 
 ### solidify / unmold（正式仕様）
 
@@ -611,7 +638,7 @@ Lax[42]().hasValue     // true
 述語付き操作モールドです。`]=>` で述語 P を評価し、真なら値 T を返し、偽なら throw が発動します。
 
 ```taida
-Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
+Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 // P: :T => :Bool（成功条件を定義する述語）
 
 Result[42, _ = true]()                                          // 成功（_ = true は常に真）
