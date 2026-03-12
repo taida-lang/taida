@@ -51,7 +51,7 @@
 | `E1404` | MoldInst の `()` オプションに同一名が重複 | TypeChecker |
 | `E1405` | 必須フィールドが `()` オプション側に渡されている | TypeChecker |
 | `E1406` | MoldInst の `()` に未定義のオプションが渡されている | TypeChecker |
-| `E1407` | MoldDef の `Name[...]` header が `Mold[...]` と不一致 | TypeChecker |
+| `E1407` | Mold / Inheritance header の arity・prefix・重複・親種別が不正 | TypeChecker |
 | `E1408` | MoldInst の `[]` 引数が concrete header 型に一致しない | TypeChecker |
 | `E1409` | MoldInst の `[]` 引数が constrained header 型に一致しない | TypeChecker |
 

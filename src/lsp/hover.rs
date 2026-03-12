@@ -40,6 +40,104 @@ fn format_type_expr(te: &TypeExpr) -> String {
     }
 }
 
+fn format_mold_header_arg(arg: &crate::parser::MoldHeaderArg) -> String {
+    match arg {
+        crate::parser::MoldHeaderArg::TypeParam(tp) => match &tp.constraint {
+            Some(constraint) => format!("{} <= :{}", tp.name, format_type_expr(constraint)),
+            None => tp.name.clone(),
+        },
+        crate::parser::MoldHeaderArg::Concrete(ty) => format!(":{}", format_type_expr(ty)),
+    }
+}
+
+fn format_mold_header_suffix(args: &[crate::parser::MoldHeaderArg]) -> String {
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            args.iter()
+                .map(format_mold_header_arg)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn format_named_mold_header(name: &str, args: &[crate::parser::MoldHeaderArg]) -> String {
+    format!("{}{}", name, format_mold_header_suffix(args))
+}
+
+fn format_registered_fields(fields: &[(String, crate::types::Type)]) -> String {
+    fields
+        .iter()
+        .map(|(name, ty)| format!("  {}: {}", name, ty))
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
+fn format_mold_hover_block(
+    signature: &str,
+    fields: &[(String, crate::types::Type)],
+    doc: &str,
+) -> String {
+    if fields.is_empty() {
+        format!("```taida\n{} = @()\n```{}", signature, doc)
+    } else {
+        format!(
+            "```taida\n{} = @(\n{}\n)\n```{}",
+            signature,
+            format_registered_fields(fields),
+            doc
+        )
+    }
+}
+
+fn find_user_mold_hover_info(
+    statements: &[Statement],
+    name: &str,
+    checker: &TypeChecker,
+) -> Option<String> {
+    if !checker.registry.mold_defs.contains_key(name) {
+        return None;
+    }
+    let fields = checker.registry.get_type_fields(name).unwrap_or_default();
+    for stmt in statements {
+        match stmt {
+            Statement::MoldDef(md) if md.name == name => {
+                let child_args = md.name_args.as_deref().unwrap_or(md.mold_args.as_slice());
+                let signature = format!(
+                    "{} => {}",
+                    format_named_mold_header("Mold", &md.mold_args),
+                    format_named_mold_header(&md.name, child_args)
+                );
+                let doc = format_doc_comments(&md.doc_comments);
+                return Some(format_mold_hover_block(&signature, &fields, &doc));
+            }
+            Statement::InheritanceDef(inh) if inh.child == name => {
+                let parent_header = match inh.parent_args.as_deref() {
+                    Some(args) => format_named_mold_header(&inh.parent, args),
+                    None => inh.parent.clone(),
+                };
+                let child_args = inh
+                    .child_args
+                    .as_deref()
+                    .or(inh.parent_args.as_deref())
+                    .unwrap_or(&[]);
+                let signature = format!(
+                    "{} => {}",
+                    parent_header,
+                    format_named_mold_header(&inh.child, child_args)
+                );
+                let doc = format_doc_comments(&inh.doc_comments);
+                return Some(format_mold_hover_block(&signature, &fields, &doc));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Format doc_comments into a markdown string.
 fn format_doc_comments(doc_comments: &[String]) -> String {
     if doc_comments.is_empty() {
@@ -84,13 +182,13 @@ fn find_hover_in_statement(
     checker: &TypeChecker,
     all_stmts: &[Statement],
 ) -> Option<String> {
-    let _ = all_stmts;
     match stmt {
         Statement::Assignment(assign) => {
             // Check if cursor is on the variable name (target)
             if assign.span.line == line {
                 // Check if cursor is on the value expression
-                if let Some(info) = find_hover_in_expr(&assign.value, line, col, checker) {
+                if let Some(info) = find_hover_in_expr(&assign.value, line, col, checker, all_stmts)
+                {
                     return Some(info);
                 }
                 // Check if cursor is near the target name
@@ -178,8 +276,15 @@ fn find_hover_in_statement(
                 && md.span.column <= col
                 && col <= md.span.column + md.name.len()
             {
-                let type_params: Vec<String> =
-                    md.type_params.iter().map(|tp| tp.name.clone()).collect();
+                let parent_args: Vec<String> =
+                    md.mold_args.iter().map(format_mold_header_arg).collect();
+                let child_args: Vec<String> = md
+                    .name_args
+                    .as_ref()
+                    .unwrap_or(&md.mold_args)
+                    .iter()
+                    .map(format_mold_header_arg)
+                    .collect();
                 let fields: Vec<String> = md
                     .fields
                     .iter()
@@ -195,9 +300,9 @@ fn find_hover_in_statement(
                 let doc = format_doc_comments(&md.doc_comments);
                 return Some(format!(
                     "```taida\nMold[{}] => {}[{}] = @(\n{}\n)\n```{}",
-                    type_params.join(", "),
+                    parent_args.join(", "),
                     md.name,
-                    type_params.join(", "),
+                    child_args.join(", "),
                     fields.join(",\n"),
                     doc
                 ));
@@ -208,6 +313,34 @@ fn find_hover_in_statement(
             // Check if cursor is on the child type name
             if inh.span.line == line {
                 // Check child name position (appears after "Parent => ")
+                let parent_header = inh
+                    .parent_args
+                    .as_ref()
+                    .map(|args| {
+                        format!(
+                            "{}[{}]",
+                            inh.parent,
+                            args.iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .unwrap_or_else(|| inh.parent.clone());
+                let child_header = inh
+                    .child_args
+                    .as_ref()
+                    .map(|args| {
+                        format!(
+                            "{}[{}]",
+                            inh.child,
+                            args.iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .unwrap_or_else(|| inh.child.clone());
                 let fields: Vec<String> = inh
                     .fields
                     .iter()
@@ -235,15 +368,15 @@ fn find_hover_in_statement(
                 let doc = format_doc_comments(&inh.doc_comments);
                 return Some(format!(
                     "```taida\n{} => {} = @(\n{}\n)\n```{}",
-                    inh.parent,
-                    inh.child,
+                    parent_header,
+                    child_header,
                     all_fields.join(",\n"),
                     doc
                 ));
             }
             None
         }
-        Statement::Expr(expr) => find_hover_in_expr(expr, line, col, checker),
+        Statement::Expr(expr) => find_hover_in_expr(expr, line, col, checker, all_stmts),
         Statement::ErrorCeiling(ec) => {
             for body_stmt in &ec.handler_body {
                 if let Some(info) =
@@ -264,6 +397,7 @@ fn find_hover_in_expr(
     line: usize,
     col: usize,
     checker: &TypeChecker,
+    all_stmts: &[Statement],
 ) -> Option<String> {
     match expr {
         Expr::Ident(name, span) => {
@@ -287,14 +421,14 @@ fn find_hover_in_expr(
                     obj_type, method, obj_type
                 ));
             }
-            find_hover_in_expr(obj, line, col, checker)
+            find_hover_in_expr(obj, line, col, checker, all_stmts)
         }
         Expr::FuncCall(func, args, span) => {
-            if let Some(info) = find_hover_in_expr(func, line, col, checker) {
+            if let Some(info) = find_hover_in_expr(func, line, col, checker, all_stmts) {
                 return Some(info);
             }
             for arg in args {
-                if let Some(info) = find_hover_in_expr(arg, line, col, checker) {
+                if let Some(info) = find_hover_in_expr(arg, line, col, checker, all_stmts) {
                     return Some(info);
                 }
             }
@@ -309,10 +443,10 @@ fn find_hover_in_expr(
             None
         }
         Expr::BinaryOp(left, _op, right, _span) => {
-            if let Some(info) = find_hover_in_expr(left, line, col, checker) {
+            if let Some(info) = find_hover_in_expr(left, line, col, checker, all_stmts) {
                 return Some(info);
             }
-            find_hover_in_expr(right, line, col, checker)
+            find_hover_in_expr(right, line, col, checker, all_stmts)
         }
         Expr::FieldAccess(obj, field, span) => {
             if span.line == line {
@@ -342,24 +476,12 @@ fn find_hover_in_expr(
                     field, type_info, obj_type
                 ));
             }
-            find_hover_in_expr(obj, line, col, checker)
+            find_hover_in_expr(obj, line, col, checker, all_stmts)
         }
         Expr::MoldInst(name, _type_args, _fields, span) => {
             if span.line == line && span.column <= col && col < span.column + name.len() {
-                // Look up mold definition
-                if let Some((type_params, fields)) = checker.registry.mold_defs.get(name) {
-                    let tp_str = type_params.join(", ");
-                    let fields_str: Vec<String> = fields
-                        .iter()
-                        .map(|(n, t)| format!("{}: {}", n, t))
-                        .collect();
-                    return Some(format!(
-                        "```taida\nMold[{}] => {}[{}] = @({})\n```",
-                        tp_str,
-                        name,
-                        tp_str,
-                        fields_str.join(", ")
-                    ));
+                if let Some(info) = find_user_mold_hover_info(all_stmts, name, checker) {
+                    return Some(info);
                 }
                 // Built-in mold
                 return Some(format!("```taida\n{}[...]\n```", name));
@@ -490,6 +612,48 @@ mod tests {
             },
         );
         assert!(result.is_none(), "Should return None on parse error");
+    }
+
+    #[test]
+    fn test_hover_mold_inst_uses_declared_mold_headers() {
+        let source = r#"always_true x: Int =
+  true
+=> :Bool
+
+Mold[T] => Result[T, P <= :T => :Bool] = @(
+  pred: P
+)
+value <= Result[1, always_true]()
+"#;
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 7,
+                character: 9,
+            },
+        );
+        let info = result.expect("Should get hover info for mold instantiation");
+        assert!(info.contains("Mold[T] => Result["));
+        assert!(info.contains("P <="));
+    }
+
+    #[test]
+    fn test_hover_inherited_mold_inst_uses_effective_child_headers() {
+        let source = r#"Mold[:Int] => Base[:Int] = @()
+Base[:Int] => Child[:Int, U] = @(
+  extra: U
+)
+value <= Child[1, 2]()
+"#;
+        let result = get_hover_info(
+            source,
+            Position {
+                line: 4,
+                character: 9,
+            },
+        );
+        let info = result.expect("Should get hover info for inherited mold instantiation");
+        assert!(info.contains("Base[:Int] => Child[:Int, U] = @("));
     }
 
     #[test]

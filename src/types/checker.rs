@@ -11,6 +11,17 @@ use crate::parser::*;
 /// - Scope-aware type inference
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone)]
+struct MoldHeaderSpec {
+    header_args: Vec<MoldHeaderArg>,
+}
+
+struct MoldBindingDef<'a> {
+    kind: &'a str,
+    name: &'a str,
+    span: &'a Span,
+}
+
 /// Type checking error.
 #[derive(Debug, Clone)]
 pub struct TypeError {
@@ -52,8 +63,10 @@ pub struct TypeChecker {
     /// Custom mold field definitions (name -> raw AST fields).
     /// Used for `[]` / `()` binding validation.
     mold_field_defs: HashMap<String, Vec<FieldDef>>,
-    /// Custom mold header declarations (name -> raw header args from `Mold[...]`).
-    mold_header_args: HashMap<String, Vec<MoldHeaderArg>>,
+    /// Custom mold header declarations (name -> formal header args).
+    mold_header_specs: HashMap<String, MoldHeaderSpec>,
+    /// Declared formal header arity for named types/molds.
+    declared_header_arities: HashMap<String, usize>,
     /// Whether we are currently inside a pipeline expression.
     /// Used to allow `_` (Placeholder) in pipeline context while rejecting it elsewhere.
     in_pipeline: bool,
@@ -73,7 +86,8 @@ impl TypeChecker {
             seen_func_defs: HashSet::new(),
             declared_concrete_type_names: HashSet::new(),
             mold_field_defs: HashMap::new(),
-            mold_header_args: HashMap::new(),
+            mold_header_specs: HashMap::new(),
+            declared_header_arities: HashMap::new(),
             in_pipeline: false,
         }
     }
@@ -115,6 +129,406 @@ impl TypeChecker {
                 self.registry.resolve_type(&TypeExpr::Named(name.to_string())),
                 Type::Named(ref resolved) if resolved == name
             )
+    }
+
+    fn effective_mold_header_args(md: &MoldDef) -> Vec<MoldHeaderArg> {
+        md.name_args
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| md.mold_args.clone())
+    }
+
+    fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {
+        let mut merged = parent.to_vec();
+        for child_field in child {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|field| field.name == child_field.name)
+            {
+                *existing = child_field.clone();
+            } else {
+                merged.push(child_field.clone());
+            }
+        }
+        merged
+    }
+
+    fn header_arg_label(arg: &MoldHeaderArg) -> String {
+        match arg {
+            MoldHeaderArg::TypeParam(tp) => match &tp.constraint {
+                Some(constraint) => {
+                    format!("{} <= :{}", tp.name, Self::type_expr_to_string(constraint))
+                }
+                None => tp.name.clone(),
+            },
+            MoldHeaderArg::Concrete(ty) => format!(":{}", Self::type_expr_to_string(ty)),
+        }
+    }
+
+    fn validate_mold_root_header(&mut self, md: &MoldDef, header_args: &[MoldHeaderArg]) {
+        if md.mold_args.len() != 1 {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "MoldDef '{}' must keep the built-in parent `Mold` header at arity 1, got {}",
+                        md.name,
+                        md.mold_args.len()
+                    ),
+                    "Write `Mold[T] => Child[T, U, ...] = @(...)`; extend header slots on the child side, not on `Mold` itself.",
+                ),
+                span: md.span.clone(),
+            });
+        }
+
+        self.validate_child_header_prefix(
+            "MoldDef",
+            &md.name,
+            "Mold",
+            &md.mold_args,
+            header_args,
+            &md.span,
+        );
+        self.validate_unique_mold_type_param_names("MoldDef", &md.name, header_args, &md.span);
+    }
+
+    fn validate_child_header_prefix(
+        &mut self,
+        kind: &str,
+        child_name: &str,
+        parent_name: &str,
+        parent_args: &[MoldHeaderArg],
+        child_args: &[MoldHeaderArg],
+        span: &Span,
+    ) {
+        if child_args.len() < parent_args.len() {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "{} '{}' cannot shrink header arity below parent '{}' (child: {}, parent: {})",
+                        kind,
+                        child_name,
+                        parent_name,
+                        child_args.len(),
+                        parent_args.len()
+                    ),
+                    "Keep inherited header slots intact and append any new slots on the child side.",
+                ),
+                span: span.clone(),
+            });
+            return;
+        }
+
+        for (idx, parent_arg) in parent_args.iter().enumerate() {
+            if child_args.get(idx) != Some(parent_arg) {
+                self.errors.push(TypeError {
+                    message: Self::binding_diag(
+                        "E1407",
+                        format!(
+                            "{} '{}' must preserve inherited header slot {} from '{}' exactly; expected {}, got {}",
+                            kind,
+                            child_name,
+                            idx + 1,
+                            parent_name,
+                            Self::header_arg_label(parent_arg),
+                            child_args
+                                .get(idx)
+                                .map(Self::header_arg_label)
+                                .unwrap_or_else(|| "<missing>".to_string())
+                        ),
+                        "Keep inherited header slots as an exact prefix and append new slots only after the parent header.",
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+
+    fn validate_unique_mold_type_param_names(
+        &mut self,
+        kind: &str,
+        name: &str,
+        header_args: &[MoldHeaderArg],
+        span: &Span,
+    ) {
+        let mut seen = HashSet::<String>::new();
+        let mut duplicates = Vec::<String>::new();
+        for arg in header_args {
+            if let MoldHeaderArg::TypeParam(tp) = arg
+                && !seen.insert(tp.name.clone())
+                && !duplicates.contains(&tp.name)
+            {
+                duplicates.push(tp.name.clone());
+            }
+        }
+
+        if !duplicates.is_empty() {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "{} '{}' reuses header type parameter name(s): {}",
+                        kind,
+                        name,
+                        duplicates.join(", ")
+                    ),
+                    "Use each header type parameter name at most once; append new child slots with distinct names.",
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    fn validate_mold_extension_bindings(
+        &mut self,
+        def: MoldBindingDef<'_>,
+        parent_arity: usize,
+        header_args: &[MoldHeaderArg],
+        fields: &[FieldDef],
+        inherited_field_names: &HashSet<String>,
+    ) {
+        let positional_field_count = fields
+            .iter()
+            .filter(|f| {
+                !f.is_method
+                    && f.default_value.is_none()
+                    && f.name != "filling"
+                    && !inherited_field_names.contains(&f.name)
+            })
+            .count();
+
+        let extra_args = header_args.len().saturating_sub(parent_arity);
+        let mut remaining_field_slots = positional_field_count;
+        let mut unbound_type_params = Vec::new();
+        let mut unbound_header_args = Vec::new();
+        for arg in header_args.iter().skip(parent_arity) {
+            if remaining_field_slots > 0 {
+                remaining_field_slots -= 1;
+                continue;
+            }
+            match arg {
+                MoldHeaderArg::TypeParam(tp) => {
+                    unbound_type_params.push(tp.name.clone());
+                    unbound_header_args.push(tp.name.clone());
+                }
+                MoldHeaderArg::Concrete(ty) => {
+                    unbound_header_args.push(format!(":{}", Self::type_expr_to_string(ty)));
+                }
+            }
+        }
+
+        if extra_args > 0 && !unbound_header_args.is_empty() {
+            let (message, hint) = if unbound_type_params.len() == unbound_header_args.len() {
+                (
+                    format!(
+                        "{} '{}' has unbound type parameter(s): {}. additional child-side header arguments must map to new non-default fields after the inherited prefix",
+                        def.kind,
+                        def.name,
+                        unbound_type_params.join(", ")
+                    ),
+                    "Add new required non-default fields on the child definition so every appended type parameter has a binding target.",
+                )
+            } else {
+                (
+                    format!(
+                        "{} '{}' has header argument(s) without binding target(s): {}. additional child-side header arguments must map to new non-default fields after the inherited prefix",
+                        def.kind,
+                        def.name,
+                        unbound_header_args.join(", ")
+                    ),
+                    "Add new required non-default fields on the child definition so every appended header argument has a binding target.",
+                )
+            };
+            self.errors.push(TypeError {
+                message: Self::binding_diag("E1401", message, hint),
+                span: def.span.clone(),
+            });
+        }
+    }
+
+    fn collect_mold_type_param_names(args: &[MoldHeaderArg]) -> Vec<String> {
+        args.iter()
+            .filter_map(|arg| match arg {
+                MoldHeaderArg::TypeParam(tp) => Some(tp.name.clone()),
+                MoldHeaderArg::Concrete(_) => None,
+            })
+            .collect()
+    }
+
+    fn inheritance_uses_headers(inh: &InheritanceDef) -> bool {
+        inh.parent_args.is_some() || inh.child_args.is_some()
+    }
+
+    fn inheritance_child_arity(&self, inh: &InheritanceDef, parent_arity: usize) -> usize {
+        inh.child_args
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| inh.parent_args.as_ref().map(Vec::len))
+            .unwrap_or(parent_arity)
+    }
+
+    fn validate_inheritance_header_arities(
+        &mut self,
+        inh: &InheritanceDef,
+        parent_header: Option<&[MoldHeaderArg]>,
+    ) {
+        if Self::inheritance_uses_headers(inh) && parent_header.is_none() {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "InheritanceDef '{}' can only declare `Parent[...] => Child[...]` headers when parent '{}' is a mold-like type",
+                        inh.child, inh.parent
+                    ),
+                    "Use header syntax only when inheriting from `Mold[...]` or another mold-derived child header.",
+                ),
+                span: inh.span.clone(),
+            });
+            return;
+        }
+
+        let parent_arity = parent_header.map(|args| args.len()).unwrap_or_else(|| {
+            self.declared_header_arities
+                .get(&inh.parent)
+                .copied()
+                .unwrap_or(0)
+        });
+
+        if let Some(parent_args) = &inh.parent_args
+            && parent_args.len() != parent_arity
+        {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "InheritanceDef '{}' must spell the parent header for '{}' with {} slot(s), got {}",
+                        inh.child,
+                        inh.parent,
+                        parent_arity,
+                        parent_args.len()
+                    ),
+                    "Use the parent type's formal header arity when writing `Parent[...] => Child[...]`.",
+                ),
+                span: inh.span.clone(),
+            });
+        }
+
+        let child_arity = self.inheritance_child_arity(inh, parent_arity);
+        if child_arity < parent_arity {
+            self.errors.push(TypeError {
+                message: Self::binding_diag(
+                    "E1407",
+                    format!(
+                        "InheritanceDef '{}' cannot shrink header arity below parent '{}' (child: {}, parent: {})",
+                        inh.child, inh.parent, child_arity, parent_arity
+                    ),
+                    "Keep inherited header slots intact and append any new slots on the child side.",
+                ),
+                span: inh.span.clone(),
+            });
+        }
+
+        if let Some(parent_header) = parent_header {
+            let parent_args = inh.parent_args.as_deref().unwrap_or(parent_header);
+            self.validate_child_header_prefix(
+                "InheritanceDef",
+                &inh.child,
+                &inh.parent,
+                parent_header,
+                parent_args,
+                &inh.span,
+            );
+            let child_args = inh.child_args.as_deref().unwrap_or(parent_args);
+            self.validate_child_header_prefix(
+                "InheritanceDef",
+                &inh.child,
+                &inh.parent,
+                parent_header,
+                child_args,
+                &inh.span,
+            );
+        }
+    }
+
+    fn predeclare_header_metadata(&mut self, statements: &[Statement]) {
+        self.mold_header_specs.clear();
+        self.declared_header_arities.clear();
+
+        for stmt in statements {
+            match stmt {
+                Statement::TypeDef(td) => {
+                    self.declared_header_arities.insert(td.name.clone(), 0);
+                }
+                Statement::MoldDef(md) => {
+                    let header_args = Self::effective_mold_header_args(md);
+                    self.mold_header_specs.insert(
+                        md.name.clone(),
+                        MoldHeaderSpec {
+                            header_args: header_args.clone(),
+                        },
+                    );
+                    self.declared_header_arities
+                        .insert(md.name.clone(), header_args.len());
+                }
+                _ => {}
+            }
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for stmt in statements {
+                let Statement::InheritanceDef(inh) = stmt else {
+                    continue;
+                };
+
+                let parent_header = self
+                    .mold_header_specs
+                    .get(&inh.parent)
+                    .map(|spec| spec.header_args.clone());
+                let parent_arity = parent_header
+                    .as_ref()
+                    .map(Vec::len)
+                    .or_else(|| self.declared_header_arities.get(&inh.parent).copied());
+
+                if let Some(parent_header) = parent_header {
+                    let child_header = inh
+                        .child_args
+                        .clone()
+                        .or_else(|| inh.parent_args.clone())
+                        .unwrap_or_else(|| parent_header.clone());
+                    if self
+                        .mold_header_specs
+                        .get(&inh.child)
+                        .map(|spec| spec.header_args.as_slice())
+                        != Some(child_header.as_slice())
+                    {
+                        self.mold_header_specs.insert(
+                            inh.child.clone(),
+                            MoldHeaderSpec {
+                                header_args: child_header.clone(),
+                            },
+                        );
+                        changed = true;
+                    }
+
+                    let child_arity = child_header.len();
+                    if self.declared_header_arities.get(&inh.child) != Some(&child_arity) {
+                        self.declared_header_arities
+                            .insert(inh.child.clone(), child_arity);
+                        changed = true;
+                    }
+                } else if !Self::inheritance_uses_headers(inh)
+                    && let Some(parent_arity) = parent_arity
+                    && self.declared_header_arities.get(&inh.child) != Some(&parent_arity)
+                {
+                    self.declared_header_arities
+                        .insert(inh.child.clone(), parent_arity);
+                    changed = true;
+                }
+            }
+        }
     }
 
     fn validate_generic_function_bindability(&mut self, fd: &FuncDef) -> bool {
@@ -401,9 +815,45 @@ impl TypeChecker {
             }
         }
 
-        // First pass: register all type definitions and function signatures
+        // Predeclare header metadata so generic inheritance validation is not source-order dependent.
+        self.predeclare_header_metadata(&program.statements);
+
+        // First pass: register base type definitions and function signatures before inheritances.
         for stmt in &program.statements {
-            self.register_types(stmt);
+            if !matches!(stmt, Statement::InheritanceDef(_)) {
+                self.register_types(stmt);
+            }
+        }
+
+        // Register inheritances only after their mold-like parents have field metadata available.
+        let mut pending_inheritances: Vec<&Statement> = program
+            .statements
+            .iter()
+            .filter(|stmt| matches!(stmt, Statement::InheritanceDef(_)))
+            .collect();
+        while !pending_inheritances.is_empty() {
+            let mut next_round = Vec::new();
+            let mut made_progress = false;
+            for stmt in pending_inheritances {
+                let Statement::InheritanceDef(inh) = stmt else {
+                    continue;
+                };
+                let parent_is_mold_like = self.mold_header_specs.contains_key(&inh.parent);
+                if !parent_is_mold_like || self.mold_field_defs.contains_key(&inh.parent) {
+                    self.register_types(stmt);
+                    made_progress = true;
+                } else {
+                    next_round.push(stmt);
+                }
+            }
+
+            if !made_progress {
+                for stmt in next_round {
+                    self.register_types(stmt);
+                }
+                break;
+            }
+            pending_inheritances = next_round;
         }
 
         // Second pass: type-check statements
@@ -446,13 +896,24 @@ impl TypeChecker {
                     })
                     .collect();
                 self.registry.register_type(&td.name, fields);
+                self.declared_header_arities.insert(td.name.clone(), 0);
             }
             Statement::MoldDef(md) => {
                 self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
-                self.validate_mold_header_consistency(md);
-                self.validate_mold_type_param_bindings(md);
-                let type_params: Vec<String> =
-                    md.type_params.iter().map(|tp| tp.name.clone()).collect();
+                let header_args = Self::effective_mold_header_args(md);
+                self.validate_mold_root_header(md, &header_args);
+                self.validate_mold_extension_bindings(
+                    MoldBindingDef {
+                        kind: "MoldDef",
+                        name: &md.name,
+                        span: &md.span,
+                    },
+                    1,
+                    &header_args,
+                    &md.fields,
+                    &HashSet::new(),
+                );
+                let type_params = Self::collect_mold_type_param_names(&header_args);
                 let fields: Vec<(String, Type)> = md
                     .fields
                     .iter()
@@ -466,14 +927,23 @@ impl TypeChecker {
                         (f.name.clone(), ty)
                     })
                     .collect();
-                self.registry.register_mold(&md.name, type_params, fields);
-                self.mold_header_args
-                    .insert(md.name.clone(), md.mold_args.clone());
+                self.registry
+                    .register_mold(&md.name, type_params, fields.clone());
+                self.registry.register_type(&md.name, fields);
+                self.mold_header_specs
+                    .insert(md.name.clone(), MoldHeaderSpec { header_args });
                 self.mold_field_defs
                     .insert(md.name.clone(), md.fields.clone());
+                self.declared_header_arities
+                    .insert(md.name.clone(), Self::effective_mold_header_args(md).len());
             }
             Statement::InheritanceDef(inh) => {
                 self.validate_class_like_fields("InheritanceDef", &inh.child, &inh.fields);
+                let parent_header = self
+                    .mold_header_specs
+                    .get(&inh.parent)
+                    .map(|spec| spec.header_args.clone());
+                self.validate_inheritance_header_arities(inh, parent_header.as_deref());
                 if self.registry.is_error_type(&inh.parent) {
                     let extra_fields: Vec<(String, Type)> = inh
                         .fields
@@ -506,6 +976,81 @@ impl TypeChecker {
                     self.registry
                         .register_inheritance(&inh.parent, &inh.child, extra_fields);
                 }
+
+                if let Some(ref parent_header) = parent_header {
+                    let child_header = inh
+                        .child_args
+                        .clone()
+                        .or_else(|| inh.parent_args.clone())
+                        .unwrap_or_else(|| parent_header.clone());
+                    self.validate_unique_mold_type_param_names(
+                        "InheritanceDef",
+                        &inh.child,
+                        &child_header,
+                        &inh.span,
+                    );
+                    let parent_field_defs = self
+                        .mold_field_defs
+                        .get(&inh.parent)
+                        .cloned()
+                        .unwrap_or_default();
+                    let inherited_field_names: HashSet<String> = parent_field_defs
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect();
+                    self.validate_mold_extension_bindings(
+                        MoldBindingDef {
+                            kind: "InheritanceDef",
+                            name: &inh.child,
+                            span: &inh.span,
+                        },
+                        parent_header.len(),
+                        &child_header,
+                        &inh.fields,
+                        &inherited_field_names,
+                    );
+
+                    let merged_field_defs = Self::merge_field_defs(&parent_field_defs, &inh.fields);
+                    let merged_fields: Vec<(String, Type)> = merged_field_defs
+                        .iter()
+                        .filter(|f| !f.is_method)
+                        .map(|f| {
+                            let ty = f
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown);
+                            (f.name.clone(), ty)
+                        })
+                        .collect();
+                    self.registry.register_mold(
+                        &inh.child,
+                        Self::collect_mold_type_param_names(&child_header),
+                        merged_fields.clone(),
+                    );
+                    self.registry.register_type(&inh.child, merged_fields);
+                    self.mold_header_specs.insert(
+                        inh.child.clone(),
+                        MoldHeaderSpec {
+                            header_args: child_header.clone(),
+                        },
+                    );
+                    self.mold_field_defs
+                        .insert(inh.child.clone(), merged_field_defs);
+                }
+
+                let parent_arity = parent_header
+                    .as_ref()
+                    .map(Vec::len)
+                    .or_else(|| self.declared_header_arities.get(&inh.parent).copied())
+                    .unwrap_or(0);
+                let child_arity = if parent_header.is_some() {
+                    self.inheritance_child_arity(inh, parent_arity)
+                } else {
+                    parent_arity
+                };
+                self.declared_header_arities
+                    .insert(inh.child.clone(), child_arity);
             }
             Statement::FuncDef(fd) => {
                 let duplicate_func_name = !self.seen_func_defs.insert(fd.name.clone());
@@ -649,83 +1194,6 @@ impl TypeChecker {
         }
     }
 
-    fn validate_mold_header_consistency(&mut self, md: &MoldDef) {
-        let Some(name_args) = md.name_args.as_ref() else {
-            return;
-        };
-        if name_args != &md.mold_args {
-            self.errors.push(TypeError {
-                message: Self::binding_diag(
-                    "E1407",
-                    format!(
-                        "MoldDef '{}' must use the same header on both sides of `=>` when `Name[...]` is explicit",
-                        md.name
-                    ),
-                    "Make `Name[...]` match `Mold[...]` exactly, or omit `Name[...]` entirely.",
-                ),
-                span: md.span.clone(),
-            });
-        }
-    }
-
-    /// Validate mold type parameter binding targets at definition time.
-    /// A type variable in the first header slot is bound by `filling`.
-    /// Any later header arguments must have corresponding non-default fields.
-    fn validate_mold_type_param_bindings(&mut self, md: &MoldDef) {
-        let positional_field_count = md
-            .fields
-            .iter()
-            .filter(|f| !f.is_method && f.default_value.is_none() && f.name != "filling")
-            .count();
-
-        let mut remaining_field_slots = positional_field_count;
-        let mut unbound_type_params = Vec::new();
-        let mut unbound_header_args = Vec::new();
-        for arg in md.mold_args.iter().skip(1) {
-            if remaining_field_slots > 0 {
-                remaining_field_slots -= 1;
-                continue;
-            }
-            match arg {
-                MoldHeaderArg::TypeParam(tp) => {
-                    unbound_type_params.push(tp.name.clone());
-                    unbound_header_args.push(tp.name.clone());
-                }
-                MoldHeaderArg::Concrete(ty) => {
-                    unbound_header_args.push(format!(":{}", Self::type_expr_to_string(ty)));
-                }
-            }
-        }
-
-        if !unbound_header_args.is_empty() {
-            let (message, hint) = if unbound_type_params.len() == unbound_header_args.len() {
-                (
-                    format!(
-                        "MoldDef '{}' has unbound type parameter(s): {}. \
-additional header arguments must map to non-default fields after `filling`",
-                        md.name,
-                        unbound_type_params.join(", ")
-                    ),
-                    "Add required non-default fields after `filling` so every extra type parameter has a binding target.",
-                )
-            } else {
-                (
-                    format!(
-                        "MoldDef '{}' has header argument(s) without binding target(s): {}. \
-additional header arguments must map to non-default fields after `filling`",
-                        md.name,
-                        unbound_header_args.join(", ")
-                    ),
-                    "Add required non-default fields after `filling` so every extra header argument has a binding target.",
-                )
-            };
-            self.errors.push(TypeError {
-                message: Self::binding_diag("E1401", message, hint),
-                span: md.span.clone(),
-            });
-        }
-    }
-
     /// Validate custom mold instantiation binding rules for `[]` and `()`.
     fn validate_custom_mold_inst_bindings(
         &mut self,
@@ -836,56 +1304,88 @@ defaulted fields must be provided via `()`",
     }
 
     fn validate_mold_header_constraints(&mut self, name: &str, type_args: &[Expr], span: &Span) {
-        let Some(header_args) = self.mold_header_args.get(name).cloned() else {
+        let Some(spec) = self.mold_header_specs.get(name).cloned() else {
             return;
         };
 
         let mut bound_types = HashMap::<String, Type>::new();
-        for (idx, (header_arg, actual_expr)) in header_args.iter().zip(type_args.iter()).enumerate()
-        {
+        for (idx, actual_expr) in type_args.iter().enumerate() {
             let actual = self.infer_expr_type(actual_expr);
-            match header_arg {
-                MoldHeaderArg::TypeParam(tp) => {
-                    if let Some(constraint) = &tp.constraint {
-                        let expected = self.resolve_mold_header_type(constraint, &bound_types);
-                        if !self.mold_header_type_compatible(&actual, &expected) {
-                            self.errors.push(TypeError {
-                                message: Self::binding_diag(
-                                    "E1409",
-                                    format!(
-                                        "MoldInst '{}' positional `[]` argument {} violates constraint on '{}': expected {}, got {}",
-                                        name,
-                                        idx + 1,
-                                        tp.name,
-                                        expected,
-                                        actual
-                                    ),
-                                    "Pass a value whose inferred type satisfies the constrained mold header.",
-                                ),
-                                span: span.clone(),
-                            });
-                        }
-                    }
-                    bound_types.insert(tp.name.clone(), actual);
-                }
-                MoldHeaderArg::Concrete(concrete) => {
-                    let expected = self.resolve_mold_header_type(concrete, &bound_types);
-                    if !self.mold_header_type_compatible(&actual, &expected) {
+            let Some(header_arg) = spec.header_args.get(idx) else {
+                continue;
+            };
+            self.validate_single_mold_header_arg(
+                name,
+                idx,
+                &actual,
+                header_arg,
+                &bound_types,
+                span,
+            );
+            self.bind_mold_header_arg(header_arg, &actual, &mut bound_types);
+        }
+    }
+
+    fn bind_mold_header_arg(
+        &self,
+        arg: &MoldHeaderArg,
+        actual: &Type,
+        bound_types: &mut HashMap<String, Type>,
+    ) {
+        if let MoldHeaderArg::TypeParam(tp) = arg {
+            bound_types.insert(tp.name.clone(), actual.clone());
+        }
+    }
+
+    fn validate_single_mold_header_arg(
+        &mut self,
+        name: &str,
+        idx: usize,
+        actual: &Type,
+        header_arg: &MoldHeaderArg,
+        bound_types: &HashMap<String, Type>,
+        span: &Span,
+    ) {
+        match header_arg {
+            MoldHeaderArg::TypeParam(tp) => {
+                if let Some(constraint) = &tp.constraint {
+                    let expected = self.resolve_mold_header_type(constraint, bound_types);
+                    if !self.mold_header_type_compatible(actual, &expected) {
                         self.errors.push(TypeError {
                             message: Self::binding_diag(
-                                "E1408",
+                                "E1409",
                                 format!(
-                                    "MoldInst '{}' positional `[]` argument {} is fixed to {}, got {}",
+                                    "MoldInst '{}' positional `[]` argument {} violates constraint on '{}': expected {}, got {}",
                                     name,
                                     idx + 1,
+                                    tp.name,
                                     expected,
                                     actual
                                 ),
-                                "Pass a value whose inferred type matches the concrete mold header.",
+                                "Pass a value whose inferred type satisfies the constrained mold header.",
                             ),
                             span: span.clone(),
                         });
                     }
+                }
+            }
+            MoldHeaderArg::Concrete(concrete) => {
+                let expected = self.resolve_mold_header_type(concrete, bound_types);
+                if !self.mold_header_type_compatible(actual, &expected) {
+                    self.errors.push(TypeError {
+                        message: Self::binding_diag(
+                            "E1408",
+                            format!(
+                                "MoldInst '{}' positional `[]` argument {} is fixed to {}, got {}",
+                                name,
+                                idx + 1,
+                                expected,
+                                actual
+                            ),
+                            "Pass a value whose inferred type matches the concrete mold header.",
+                        ),
+                        span: span.clone(),
+                    });
                 }
             }
         }

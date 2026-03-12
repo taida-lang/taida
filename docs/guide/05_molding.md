@@ -12,7 +12,7 @@
 
 ```taida
 // 鋳型の定義
-Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
+Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 // P は述語 :T => :Bool（成功条件を定義）
 
 // 値を流し込みます（_ = true は常に真を返す無名関数）
@@ -39,7 +39,7 @@ Mold[T] => MyMold[T] = @(
 )
 
 // 例
-Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
+Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 Mold[T] => Lax[T] = @(hasValue: Bool)
 ```
 
@@ -48,7 +48,31 @@ header 記法:
 - `T` = 型変数
 - `:Int` = concrete type
 - `T <= :Int` = concrete type 制約付き型変数
-- `Name[...]` を明示する場合は `Mold[...]` と一致させる。省略時は `Mold[...]` と同じ header を使う
+- `Mold[...]` は親ヘッダー、`Name[...]` は子ヘッダー
+- `Mold[...]` の親側は常に 1 slot のまま保つ
+- 追加 slot は `Name[...]` または `Parent[...] => Child[...]` の子側にだけ書く
+- 子ヘッダーは親ヘッダーを exact prefix として保持し、末尾にだけ slot を追加できる
+
+ヘッダースロットの意味:
+
+- 1つ目のスロットは常に `filling` に対応します
+- 2つ目以降のスロットは、`@(...)` 内の「デフォルト値なしフィールド」に宣言順で対応します
+- この対応は `T` だけでなく `:Int` のような具象型スロットでも同じです
+- つまり、具象型スロットを途中に置いた場合も、そのスロットは1つの束縛先フィールドを消費します
+
+```taida
+Mold[:Int] => IntBox = @()
+ok_box <= IntBox[1]()
+// IntBox["x"]() はコンパイルエラー: 1つ目のスロットは具象型 Int
+
+Mold[:Int] => IntPair[:Int, T] = @(
+  second: T
+)
+pair <= IntPair[1, "x"]()
+
+Mold[:Int] => Broken[:Int, T] = @()
+// コンパイルエラー: 2つ目のヘッダースロットに対応するフィールドが無い
+```
 
 ### solidify / unmold フック
 
@@ -86,7 +110,7 @@ header 記法:
 さらに、通常フィールドは `field: Type` または `field <= value` のどちらかが必要です（`field` 単独は不可）。
 
 ```taida
-Mold[T, U] => Div[T, U] = @(
+Mold[T] => Div[T, U] = @(
   divisor: U
   solidify _ =
     | divisor == 0 |> Lax[T](hasValue <= false)
@@ -97,11 +121,14 @@ Mold[T, U] => Div[T, U] = @(
 Div[10, 3]()  // filling=10, divisor=3
 Div[10]()     // コンパイルエラー: divisor が不足
 
-Mold[T, U] => Broken[T, U] = @(
+Mold[T] => Broken[T, U] = @(
   solidify _ = filling
   => :T
 )
 // コンパイルエラー: U の束縛先が無い
+
+Mold[:Int] => AlsoBroken[:Int, U] = @()
+// コンパイルエラー: 具象型スロットもフィールドスロットを消費するため、U の束縛先が無い
 
 Mold[T] => BrokenField[T] = @(
   count
@@ -442,7 +469,7 @@ empty.toString()          // "Lax(default: 0)"
 成功/失敗を**述語（P: :T => :Bool）**で判定するモールド型です。`]=>` でアンモールディングすると述語が評価され、成功なら値 T を返し、失敗なら throw が発動します。
 
 ```taida
-Mold[T, P <= :T => :Bool] => Result[T, P] = @(throw: Error)
+Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 // P は :T => :Bool（成功条件を定義する述語）
 
 // 使用例

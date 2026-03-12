@@ -392,11 +392,26 @@ impl Parser {
                 self.parse_func_def_with_docs(doc_comments)
             }
 
-            // `Mold[T] => Name[T] = @(...)` -> Mold definition
-            // Already consumed name, check if it's "Mold"
+            // `Mold[T] => Name[...] = @(...)` -> Mold definition
+            // `Parent[T] => Child[...] = @(...)` -> generic inheritance
             TokenKind::LBracket if name == "Mold" => {
                 self.pos = save_pos;
                 self.parse_mold_def_with_docs(doc_comments)
+            }
+            TokenKind::LBracket => {
+                if self.looks_like_generic_func_def() {
+                    self.pos = save_pos;
+                    return self.parse_func_def_with_docs(doc_comments);
+                }
+                self.pos = save_pos;
+                match self.try_parse_inheritance_with_headers(doc_comments.clone()) {
+                    Ok(stmt) => Ok(stmt),
+                    Err(_) => {
+                        self.pos = save_pos;
+                        let expr = self.parse_expression()?;
+                        self.finish_expr_as_statement(expr, start_span)
+                    }
+                }
             }
 
             // `name => ...` -> could be pipeline or inheritance
@@ -413,7 +428,9 @@ impl Parser {
                         let fields = self.parse_buchi_pack_fields()?;
                         return Ok(Statement::InheritanceDef(InheritanceDef {
                             parent: name,
+                            parent_args: None,
                             child: next_name,
+                            child_args: None,
                             fields,
                             doc_comments,
                             span: start_span,
@@ -629,6 +646,38 @@ impl Parser {
             mold_args,
             name_args,
             type_params,
+            fields,
+            doc_comments,
+            span: start_span,
+        }))
+    }
+
+    fn try_parse_inheritance_with_headers(
+        &mut self,
+        doc_comments: Vec<String>,
+    ) -> Result<Statement, ParseError> {
+        let start_span = self.current_span();
+        let parent = self.expect_ident()?;
+        self.expect(&TokenKind::LBracket)?;
+        let parent_args = self.parse_mold_header_args()?;
+        self.expect(&TokenKind::FatArrow)?;
+
+        let child = self.expect_ident()?;
+        let child_args = if self.check(&TokenKind::LBracket) {
+            self.advance();
+            Some(self.parse_mold_header_args()?)
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Eq)?;
+        let fields = self.parse_buchi_pack_fields()?;
+
+        Ok(Statement::InheritanceDef(InheritanceDef {
+            parent,
+            parent_args: Some(parent_args),
+            child,
+            child_args,
             fields,
             doc_comments,
             span: start_span,

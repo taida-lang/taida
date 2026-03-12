@@ -339,6 +339,7 @@ impl Interpreter {
                     self.type_methods.insert(md.name.clone(), methods);
                 }
                 // Store MoldDef field definitions for filling/unmold lookup
+                self.type_defs.insert(md.name.clone(), md.fields.clone());
                 self.mold_defs.insert(md.name.clone(), md.fields.clone());
                 Ok(Signal::Value(Value::Unit))
             }
@@ -362,13 +363,27 @@ impl Interpreter {
                 }
                 // Register child type fields for type instantiation defaults:
                 // parent fields + child fields (child override wins by name).
-                let mut merged_fields =
-                    self.type_defs.get(&inh.parent).cloned().unwrap_or_default();
+                let mut merged_fields = self
+                    .type_defs
+                    .get(&inh.parent)
+                    .cloned()
+                    .or_else(|| self.mold_defs.get(&inh.parent).cloned())
+                    .unwrap_or_default();
                 for child_field in &inh.fields {
-                    merged_fields.retain(|f| f.name != child_field.name);
-                    merged_fields.push(child_field.clone());
+                    if let Some(existing) = merged_fields
+                        .iter_mut()
+                        .find(|field| field.name == child_field.name)
+                    {
+                        *existing = child_field.clone();
+                    } else {
+                        merged_fields.push(child_field.clone());
+                    }
                 }
                 self.type_defs.insert(inh.child.clone(), merged_fields);
+                if self.mold_defs.contains_key(&inh.parent) {
+                    self.mold_defs
+                        .insert(inh.child.clone(), self.type_defs[&inh.child].clone());
+                }
                 // InheritanceDef 名もシンボルとして環境に登録（<<< @(ChildType) で export 可能にする）
                 let _ = self.env.define(
                     &inh.child,

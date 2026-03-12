@@ -293,13 +293,55 @@ fn test_js_exec_custom_mold_required_positional_binding() {
     assert_parity(
         "custom_mold_required_positional",
         r#"
-Mold[T, U] => Pair[T, U] = @(
+Mold[T] => Pair[T, U] = @(
   second: U
   solidify =
     filling + second
   => :Int
 )
 stdout(Pair[40, 2]().toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_inherited_custom_mold_required_positional_binding() {
+    if !node_available() {
+        return;
+    }
+    assert_parity(
+        "inherited_custom_mold_required_positional",
+        r#"
+Mold[T] => PairBase[T] = @()
+PairBase[T] => Pair[T, U] = @(
+  second: U
+  solidify =
+    filling + second
+  => :Int
+)
+stdout(Pair[40, 2]().toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_inherited_custom_mold_override_parent_field() {
+    if !node_available() {
+        return;
+    }
+    assert_parity(
+        "inherited_custom_mold_override_parent_field",
+        r#"
+Mold[T] => Base[T] = @(
+  bonus: Int <= 0
+  solidify =
+    filling + bonus
+  => :Int
+)
+Base[T] => Child[T] = @(
+  bonus: Int
+)
+stdout(Child[40, 2]().toString())
 "#,
     );
 }

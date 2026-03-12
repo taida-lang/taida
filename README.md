@@ -80,7 +80,7 @@ Build outputs:
 
 The canonical public release identifier is the Taida version, not the Rust package semver.
 
-- Canonical public release identifier: `@a.1.alpha`
-- `Cargo.toml` version `1.0.0`: semver metadata for Rust tooling
+- Canonical public release identifier: `@a.4.alpha`
+- `Cargo.toml` version `1.1.1`: semver metadata for Rust tooling
 
-In release notes and public communication, `@a.1.alpha` is the primary version. `1.0.0` is supplementary.
+In release notes and public communication, `@a.4.alpha` is the primary version. `1.1.1` is supplementary.

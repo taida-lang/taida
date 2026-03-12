@@ -146,9 +146,34 @@ fn test_parse_inheritance() {
     match first_stmt("Person => Employee = @(department: Str)") {
         Statement::InheritanceDef(inh) => {
             assert_eq!(inh.parent, "Person");
+            assert!(inh.parent_args.is_none());
             assert_eq!(inh.child, "Employee");
+            assert!(inh.child_args.is_none());
             assert_eq!(inh.fields.len(), 1);
             assert_eq!(inh.fields[0].name, "department");
+        }
+        other => panic!("Expected InheritanceDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_generic_inheritance_headers() {
+    match first_stmt("Parent[T] => Child[T, U <= :T] = @(value: T)") {
+        Statement::InheritanceDef(inh) => {
+            assert_eq!(inh.parent, "Parent");
+            assert_eq!(inh.child, "Child");
+            assert!(matches!(
+                inh.parent_args.as_ref().and_then(|args| args.first()),
+                Some(MoldHeaderArg::TypeParam(TypeParam { name, constraint: None })) if name == "T"
+            ));
+            assert_eq!(inh.child_args.as_ref().map(Vec::len), Some(2));
+            assert!(matches!(
+                inh.child_args.as_ref().and_then(|args| args.get(1)),
+                Some(MoldHeaderArg::TypeParam(TypeParam { name, constraint: Some(TypeExpr::Named(bound)) }))
+                    if name == "U" && bound == "T"
+            ));
+            assert_eq!(inh.fields.len(), 1);
+            assert_eq!(inh.fields[0].name, "value");
         }
         other => panic!("Expected InheritanceDef, got {:?}", other),
     }

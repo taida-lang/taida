@@ -86,7 +86,9 @@ pub struct MoldDoc {
 #[derive(Debug, Clone)]
 pub struct InheritDoc {
     pub parent: String,
+    pub parent_header_args: Vec<String>,
     pub child: String,
+    pub child_header_args: Vec<String>,
     pub tags: DocTags,
     pub fields: Vec<FieldDoc>,
 }
@@ -405,9 +407,26 @@ fn extract_mold_doc(md: &MoldDef) -> MoldDoc {
 }
 
 fn extract_inherit_doc(id: &InheritanceDef) -> InheritDoc {
+    let parent_header_args: Vec<String> = id
+        .parent_args
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(format_mold_header_arg)
+        .collect();
+    let child_header_args: Vec<String> = id
+        .child_args
+        .as_ref()
+        .or(id.parent_args.as_ref())
+        .into_iter()
+        .flatten()
+        .map(format_mold_header_arg)
+        .collect();
     InheritDoc {
         parent: id.parent.clone(),
+        parent_header_args,
         child: id.child.clone(),
+        child_header_args,
         tags: parse_doc_tags(&id.doc_comments),
         fields: id.fields.iter().map(extract_field_doc).collect(),
     }
@@ -553,7 +572,17 @@ fn render_mold_doc(out: &mut String, md: &MoldDoc) {
 }
 
 fn render_inherit_doc(out: &mut String, id: &InheritDoc) {
-    out.push_str(&format!("### {} => {}\n\n", id.parent, id.child));
+    let parent_header = if id.parent_header_args.is_empty() {
+        id.parent.clone()
+    } else {
+        format!("{}[{}]", id.parent, id.parent_header_args.join(", "))
+    };
+    let child_header = if id.child_header_args.is_empty() {
+        id.child.clone()
+    } else {
+        format!("{}[{}]", id.child, id.child_header_args.join(", "))
+    };
+    out.push_str(&format!("### {} => {}\n\n", parent_header, child_header));
     render_tags_header(out, &id.tags);
 
     if !id.fields.is_empty() {
@@ -1069,10 +1098,12 @@ mod tests {
             functions: vec![],
             molds: vec![],
             inheritances: vec![InheritDoc {
-                parent: "Animal".to_string(),
-                child: "Dog".to_string(),
+                parent: "Base".to_string(),
+                parent_header_args: vec!["T".to_string()],
+                child: "Derived".to_string(),
+                child_header_args: vec!["T".to_string(), "U <= :T => :Bool".to_string()],
                 tags: DocTags {
-                    purpose: Some("A dog is an animal".to_string()),
+                    purpose: Some("Derived extends Base with a predicate slot".to_string()),
                     ..DocTags::default()
                 },
                 fields: vec![FieldDoc {
@@ -1085,8 +1116,8 @@ mod tests {
         };
 
         let md = render_markdown(&doc);
-        assert!(md.contains("### Animal => Dog"));
-        assert!(md.contains("> A dog is an animal"));
+        assert!(md.contains("### Base[T] => Derived[T, U <= :T => :Bool]"));
+        assert!(md.contains("> Derived extends Base with a predicate slot"));
         assert!(md.contains("| `breed` | `Str` | Dog breed |"));
     }
 
@@ -1321,7 +1352,26 @@ mod tests {
         let program = Program {
             statements: vec![Statement::InheritanceDef(InheritanceDef {
                 parent: "Base".to_string(),
+                parent_args: Some(vec![crate::parser::MoldHeaderArg::TypeParam(
+                    crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: None,
+                    },
+                )]),
                 child: "Derived".to_string(),
+                child_args: Some(vec![
+                    crate::parser::MoldHeaderArg::TypeParam(crate::parser::TypeParam {
+                        name: "T".to_string(),
+                        constraint: None,
+                    }),
+                    crate::parser::MoldHeaderArg::TypeParam(crate::parser::TypeParam {
+                        name: "U".to_string(),
+                        constraint: Some(TypeExpr::Function(
+                            vec![TypeExpr::Named("T".to_string())],
+                            Box::new(TypeExpr::Named("Bool".to_string())),
+                        )),
+                    }),
+                ]),
                 fields: vec![FieldDef {
                     name: "extra".to_string(),
                     type_annotation: Some(TypeExpr::Named("Int".to_string())),
@@ -1340,5 +1390,13 @@ mod tests {
         assert_eq!(doc.inheritances.len(), 1);
         assert_eq!(doc.inheritances[0].parent, "Base");
         assert_eq!(doc.inheritances[0].child, "Derived");
+        assert_eq!(
+            doc.inheritances[0].parent_header_args,
+            vec!["T".to_string()]
+        );
+        assert_eq!(
+            doc.inheritances[0].child_header_args,
+            vec!["T".to_string(), "U <= :T => :Bool".to_string()]
+        );
     }
 }

@@ -78,12 +78,33 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
+      - name: Secret scan
+        run: ./scripts/release/secret-scan.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
       - run: ./tests/run_backend_parity.sh
       - run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
+      - name: Write release gate summary
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          cat <<EOF | tee release-gate-summary.md >> "${GITHUB_STEP_SUMMARY}"
+          ## Release Gate
+
+          - Decision: `Go`
+          - Tag: \`${RELEASE_TAG}\`
+          - Distribution channel: \`install.sh\` via \`taida.dev\`
+          - Release assets: GitHub Release archives + \`SHA256SUMS\`
+          - Canary policy: one-host private canary before announcement
+          - Rollback policy: delete release/tag and revert merge commit on \`main\` if stop conditions hit
+          EOF
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-gate-summary
+          path: release-gate-summary.md
+          if-no-files-found: error
 
   build:
     name: Build ${{ matrix.label }}

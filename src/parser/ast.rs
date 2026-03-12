@@ -140,7 +140,11 @@ pub struct TypeParam {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InheritanceDef {
     pub parent: String,
+    /// Header arguments declared on the `Parent[...]` side, if present.
+    pub parent_args: Option<Vec<MoldHeaderArg>>,
     pub child: String,
+    /// Header arguments declared on the `Child[...]` side, if present.
+    pub child_args: Option<Vec<MoldHeaderArg>>,
     pub fields: Vec<FieldDef>,
     /// Documentation comments (`///@`) attached to this inheritance definition.
     pub doc_comments: Vec<String>,

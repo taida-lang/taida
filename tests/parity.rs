@@ -2538,7 +2538,7 @@ stdout(PlusOne[41]().toString())
 #[test]
 fn test_custom_mold_required_positional_binding_three_way_parity() {
     let source = r#"
-Mold[T, U] => Pair[T, U] = @(
+Mold[T] => Pair[T, U] = @(
   second: U
   solidify =
     filling + second
@@ -2549,6 +2549,56 @@ stdout(Pair[40, 2]().toString())
     assert_backend_parity_for_source(source, "custom_mold_required_positional_binding_three_way");
     let out = run_interpreter_src(source, "custom_mold_required_positional_binding_expected")
         .expect("interpreter output should exist");
+    assert_eq!(out, "42");
+}
+
+#[test]
+fn test_inherited_custom_mold_required_positional_binding_three_way_parity() {
+    let source = r#"
+Mold[T] => PairBase[T] = @()
+PairBase[T] => Pair[T, U] = @(
+  second: U
+  solidify =
+    filling + second
+  => :Int
+)
+stdout(Pair[40, 2]().toString())
+"#;
+    assert_backend_parity_for_source(
+        source,
+        "inherited_custom_mold_required_positional_binding_three_way",
+    );
+    let out = run_interpreter_src(
+        source,
+        "inherited_custom_mold_required_positional_binding_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "42");
+}
+
+#[test]
+fn test_inherited_custom_mold_override_parent_field_three_way_parity() {
+    let source = r#"
+Mold[T] => Base[T] = @(
+  bonus: Int <= 0
+  solidify =
+    filling + bonus
+  => :Int
+)
+Base[T] => Child[T] = @(
+  bonus: Int
+)
+stdout(Child[40, 2]().toString())
+"#;
+    assert_backend_parity_for_source(
+        source,
+        "inherited_custom_mold_override_parent_field_three_way",
+    );
+    let out = run_interpreter_src(
+        source,
+        "inherited_custom_mold_override_parent_field_expected",
+    )
+    .expect("interpreter output should exist");
     assert_eq!(out, "42");
 }
 
@@ -2588,7 +2638,7 @@ Mold[T] => BadField[T] = @(
         (
             "custom_mold_def_unbound_type_param",
             r#"
-Mold[T, U] => BadBind[T, U] = @()
+Mold[T] => BadBind[T, U] = @()
 "#,
         ),
     ];

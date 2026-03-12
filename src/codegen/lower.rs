@@ -973,6 +973,35 @@ impl Lowering {
                         self.type_method_defs
                             .insert(inh_def.child.clone(), all_methods);
                     }
+                    if let Some(parent_mold) = self.mold_defs.get(&inh_def.parent).cloned() {
+                        let mut merged_mold_fields = parent_mold.fields.clone();
+                        for child_field in &inh_def.fields {
+                            if let Some(existing) = merged_mold_fields
+                                .iter_mut()
+                                .find(|field| field.name == child_field.name)
+                            {
+                                *existing = child_field.clone();
+                            } else {
+                                merged_mold_fields.push(child_field.clone());
+                            }
+                        }
+                        self.mold_defs.insert(
+                            inh_def.child.clone(),
+                            crate::parser::MoldDef {
+                                name: inh_def.child.clone(),
+                                mold_args: parent_mold.mold_args.clone(),
+                                name_args: inh_def
+                                    .child_args
+                                    .clone()
+                                    .or_else(|| inh_def.parent_args.clone())
+                                    .or(parent_mold.name_args.clone()),
+                                type_params: parent_mold.type_params.clone(),
+                                fields: merged_mold_fields,
+                                doc_comments: inh_def.doc_comments.clone(),
+                                span: inh_def.span.clone(),
+                            },
+                        );
+                    }
                 }
                 Statement::Export(export_stmt) => {
                     for sym in &export_stmt.symbols {
@@ -1843,6 +1872,35 @@ impl Lowering {
                 if !all_methods.is_empty() {
                     self.type_method_defs
                         .insert(inh_def.child.clone(), all_methods);
+                }
+                if let Some(parent_mold) = self.mold_defs.get(&inh_def.parent).cloned() {
+                    let mut merged_mold_fields = parent_mold.fields.clone();
+                    for child_field in &inh_def.fields {
+                        if let Some(existing) = merged_mold_fields
+                            .iter_mut()
+                            .find(|field| field.name == child_field.name)
+                        {
+                            *existing = child_field.clone();
+                        } else {
+                            merged_mold_fields.push(child_field.clone());
+                        }
+                    }
+                    self.mold_defs.insert(
+                        inh_def.child.clone(),
+                        crate::parser::MoldDef {
+                            name: inh_def.child.clone(),
+                            mold_args: parent_mold.mold_args.clone(),
+                            name_args: inh_def
+                                .child_args
+                                .clone()
+                                .or_else(|| inh_def.parent_args.clone())
+                                .or(parent_mold.name_args.clone()),
+                            type_params: parent_mold.type_params.clone(),
+                            fields: merged_mold_fields,
+                            doc_comments: inh_def.doc_comments.clone(),
+                            span: inh_def.span.clone(),
+                        },
+                    );
                 }
                 Ok(())
             }
