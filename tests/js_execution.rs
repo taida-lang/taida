@@ -761,3 +761,218 @@ stdout(isEven(100000))
 "#,
     );
 }
+
+// =========================================================================
+// FL-12: Template literal backtick escaping regression
+// =========================================================================
+
+#[test]
+fn test_js_exec_template_lit_backtick_escape() {
+    if !node_available() {
+        return;
+    }
+    // Backtick inside a template literal must be escaped in JS output
+    assert_parity(
+        "template_lit_backtick",
+        "msg <= `has backtick: \\``\nstdout(msg)",
+    );
+}
+
+#[test]
+fn test_js_exec_template_lit_backslash_escape() {
+    if !node_available() {
+        return;
+    }
+    // Backslash inside a template literal must be escaped in JS output
+    assert_parity(
+        "template_lit_backslash",
+        "msg <= `has backslash: \\\\`\nstdout(msg)",
+    );
+}
+
+#[test]
+fn test_js_exec_template_lit_interpolation_preserved() {
+    if !node_available() {
+        return;
+    }
+    // ${...} interpolation must still work after escaping
+    assert_parity(
+        "template_lit_interpolation",
+        "name <= \"Taida\"\nmsg <= `Hello ${name}!`\nstdout(msg)",
+    );
+}
+
+// =========================================================================
+// FL-13: HashMap/Set toString string escaping regression
+// =========================================================================
+
+#[test]
+fn test_js_exec_hashmap_tostring_basic() {
+    if !node_available() {
+        return;
+    }
+    // Basic HashMap toString parity
+    assert_parity(
+        "hashmap_tostring_basic",
+        r#"
+h <= hashMap(@[
+  @(key <= "a", value <= "b")
+])
+stdout(h.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_set_tostring_basic() {
+    if !node_available() {
+        return;
+    }
+    // Basic Set toString parity
+    assert_parity(
+        "set_tostring_basic",
+        r#"
+s <= setOf(@["hello", "world"])
+stdout(s.toString())
+"#,
+    );
+}
+
+// FL-13: HashMap/Set toString with escape characters
+// =========================================================================
+
+#[test]
+fn test_js_exec_hashmap_tostring_special_chars() {
+    if !node_available() {
+        return;
+    }
+    // HashMap toString with special characters in keys/values
+    assert_parity(
+        "hashmap_tostring_special_chars",
+        r#"
+h <= hashMap(@[
+  @(key <= "greeting", value <= "hello world"),
+  @(key <= "symbol", value <= "a+b=c"),
+  @(key <= "empty", value <= "")
+])
+stdout(h.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_hashmap_tostring_numeric_values() {
+    if !node_available() {
+        return;
+    }
+    // HashMap toString with numeric values
+    assert_parity(
+        "hashmap_tostring_numeric_values",
+        r#"
+h <= hashMap(@[
+  @(key <= "x", value <= 42),
+  @(key <= "y", value <= 0)
+])
+stdout(h.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_set_tostring_special_chars() {
+    if !node_available() {
+        return;
+    }
+    // Set toString with various string values
+    assert_parity(
+        "set_tostring_special_chars",
+        r#"
+s <= setOf(@["alpha", "beta", "gamma"])
+stdout(s.toString())
+"#,
+    );
+}
+
+// =========================================================================
+// FL-14: Div/Mod Number.isInteger regression
+// =========================================================================
+
+#[test]
+fn test_js_exec_div_integer() {
+    if !node_available() {
+        return;
+    }
+    // Integer division should use truncation
+    assert_parity(
+        "div_integer",
+        r#"
+d <= Div[7, 2]()
+d ]=> v
+stdout(v.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_div_by_zero() {
+    if !node_available() {
+        return;
+    }
+    // Division by zero returns Lax default
+    assert_parity(
+        "div_by_zero",
+        r#"
+d <= Div[10, 0]()
+d ]=> v
+stdout(v.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_div_float() {
+    if !node_available() {
+        return;
+    }
+    // Float division with non-integer result
+    assert_parity(
+        "div_float",
+        r#"
+d <= Div[7.5, 2.0]()
+d ]=> v
+stdout(v.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_div_mixed_int_float() {
+    if !node_available() {
+        return;
+    }
+    // Mixed integer and float division with non-integer result
+    assert_parity(
+        "div_mixed_int_float",
+        r#"
+d <= Div[7, 2.0]()
+d ]=> v
+stdout(v.toString())
+"#,
+    );
+}
+
+#[test]
+fn test_js_exec_mod_integer() {
+    if !node_available() {
+        return;
+    }
+    // Integer modulo
+    assert_parity(
+        "mod_integer",
+        r#"
+m <= Mod[7, 3]()
+m ]=> v
+stdout(v.toString())
+"#,
+    );
+}

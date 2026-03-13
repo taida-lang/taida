@@ -27,6 +27,10 @@ function __taida_ensureNotNull(value, defaultValue) {
   return (value === null || value === undefined) ? defaultValue : value;
 }
 
+function __taida_escape_str(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t').replace(/\0/g, '\\0');
+}
+
 function __taida_solidify(value) {
   if (value && typeof value === 'object' && typeof value.solidify === 'function') {
     return value.solidify();
@@ -667,16 +671,17 @@ function Cage_mold(cageValue, cageFn) {
 // ── Div/Mod Mold types (safe division returning Lax) ──
 function Div_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = typeof a === 'number' && (String(a).includes('.') || typeof b === 'number' && String(b).includes('.'));
+  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
   if (b === 0) return Lax(null, def);
+  if (isFloat) return Lax(a / b);
   const result = Number.isInteger(a) && Number.isInteger(b) ? Math.trunc(a / b) : a / b;
   const lax = Lax(result);
   return lax;
 }
 function Mod_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = typeof a === 'number' && (String(a).includes('.') || typeof b === 'number' && String(b).includes('.'));
+  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
   if (b === 0) return Lax(null, def);
   return Lax(a % b);
@@ -1605,8 +1610,8 @@ function __taida_createHashMap(entries) {
     },
     toString() {
       const pairs = _entries.map(e => {
-        const k = typeof e.key === 'string' ? '"' + e.key + '"' : String(e.key);
-        const v = typeof e.value === 'string' ? '"' + e.value + '"' : String(e.value);
+        const k = typeof e.key === 'string' ? '"' + __taida_escape_str(e.key) + '"' : String(e.key);
+        const v = typeof e.value === 'string' ? '"' + __taida_escape_str(e.value) + '"' : String(e.value);
         return k + ': ' + v;
       });
       return 'HashMap({' + pairs.join(', ') + '})';
@@ -1687,7 +1692,7 @@ function __taida_createSet(items) {
       return _items.length === 0;
     },
     toString() {
-      const strs = _items.map(i => typeof i === 'string' ? '"' + i + '"' : String(i));
+      const strs = _items.map(i => typeof i === 'string' ? '"' + __taida_escape_str(i) + '"' : String(i));
       return 'Set({' + strs.join(', ') + '})';
     },
   };

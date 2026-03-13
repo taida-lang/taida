@@ -1896,14 +1896,25 @@ impl JsCodegen {
                         }
                         self.gen_expr(arg)?;
                     }
-                    if !fields.is_empty() {
+                    // Check if any type arg is a FloatLit — JS Number.isInteger(2.0) is true,
+                    // so we pass a __floatHint flag to preserve Taida's float semantics.
+                    let has_float_arg = type_args.iter().any(|a| matches!(a, Expr::FloatLit(..)));
+                    if !fields.is_empty() || has_float_arg {
                         self.write(", { ");
+                        let mut wrote = false;
                         for (i, field) in fields.iter().enumerate() {
                             if i > 0 {
                                 self.write(", ");
                             }
                             self.write(&format!("{}: ", field.name));
                             self.gen_expr(&field.value)?;
+                            wrote = true;
+                        }
+                        if has_float_arg {
+                            if wrote {
+                                self.write(", ");
+                            }
+                            self.write("__floatHint: true");
                         }
                         self.write(" }");
                     }
@@ -2038,10 +2049,34 @@ impl JsCodegen {
     /// テンプレートリテラル内の Taida 構文を JS 構文に変換
     fn convert_template_list_literals(template: &str) -> String {
         // Template literals: convert Taida syntax to JS.
-        // Only @[ list literals and .length() need conversion.
-        // Operation methods (sort, reverse, find, etc.) are now standalone mold functions
-        // and should not appear as method calls in template literals.
-        template
+        // Segment the template so that escaping is only applied to text outside ${...}
+        // interpolation blocks. Inside ${...}, the expression is passed through as-is.
+        //
+        // Escaping applied to text segments:
+        //   - `\` → `\\`  (backslash)
+        //   - `` ` `` → `\``  (backtick)
+        //   - `@[` → `[`  (list literal)
+        //   - `.length()` → `.length_()`  (avoid JS property collision)
+        let mut result = String::new();
+        let mut rest = template;
+        while let Some(start) = rest.find("${") {
+            // Escape the text before ${
+            result.push_str(&Self::escape_template_text(&rest[..start]));
+            if let Some(end) = rest[start..].find('}') {
+                result.push_str(&rest[start..start + end + 1]); // ${...} as-is
+                rest = &rest[start + end + 1..];
+            } else {
+                break;
+            }
+        }
+        result.push_str(&Self::escape_template_text(rest));
+        result
+    }
+
+    /// テンプレートリテラルのテキスト部分（${...} の外側）にエスケープを適用
+    fn escape_template_text(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('`', "\\`")
             .replace("@[", "[")
             .replace(".length()", ".length_()")
     }
