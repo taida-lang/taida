@@ -5,6 +5,13 @@ use super::value::Value;
 /// Contains `eval_pipeline_step`, `eval_binary_op`, and `eval_cond_branch`.
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
+///
+/// Pipeline scope management:
+/// Each pipeline step uses explicit `push_scope()` / `pop_scope()` pairs rather
+/// than a RAII guard. This is acceptable because `eval_expr` propagates errors
+/// via `Result` (not panics), so `pop_scope()` is always reached. A RAII guard
+/// would be preferable for panic-safety, but since interpreter panics terminate
+/// the process, scope leaks have no observable effect.
 use crate::parser::*;
 
 impl Interpreter {

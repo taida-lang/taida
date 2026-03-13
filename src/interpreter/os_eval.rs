@@ -2,6 +2,16 @@ use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, ErrorValue, PendingState, Value};
 use crate::parser::Expr;
 use std::sync::atomic::Ordering;
+
+/// Return a human-readable name for a Signal variant (for error diagnostics).
+fn signal_name(sig: &Signal) -> &'static str {
+    match sig {
+        Signal::Value(_) => "Value",
+        Signal::Throw(_) => "Throw",
+        Signal::Gorilla => "Gorilla",
+        Signal::TailCall(_) => "TailCall",
+    }
+}
 /// OS package evaluation for the Taida interpreter.
 ///
 /// Implements the 34 APIs of `taida-lang/os` (core-bundled):
@@ -2330,10 +2340,10 @@ impl Interpreter {
                     func_name, field_name, v
                 ),
             }),
-            _ => Err(RuntimeError {
+            other => Err(RuntimeError {
                 message: format!(
-                    "{}: unexpected signal evaluating '{}'",
-                    func_name, field_name
+                    "{}: unexpected signal evaluating '{}': {}",
+                    func_name, field_name, signal_name(&other)
                 ),
             }),
         }
@@ -2355,8 +2365,11 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be a string, got {}", func_name, arg_name, v),
             }),
-            _ => Err(RuntimeError {
-                message: format!("{}: unexpected signal evaluating '{}'", func_name, arg_name),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal evaluating '{}': {}",
+                    func_name, arg_name, signal_name(&other)
+                ),
             }),
         }
     }
@@ -2379,8 +2392,11 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be Bytes, got {}", func_name, arg_name, v),
             }),
-            _ => Err(RuntimeError {
-                message: format!("{}: unexpected signal evaluating '{}'", func_name, arg_name),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal evaluating '{}': {}",
+                    func_name, arg_name, signal_name(&other)
+                ),
             }),
         }
     }
@@ -2407,8 +2423,11 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: timeoutMs must be an Int, got {}", func_name, v),
             }),
-            _ => Err(RuntimeError {
-                message: format!("{}: unexpected signal evaluating 'timeoutMs'", func_name),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal evaluating 'timeoutMs': {}",
+                    func_name, signal_name(&other)
+                ),
             }),
         }
     }
@@ -2499,11 +2518,10 @@ mod tests {
         let val = make_result_success(ok_inner());
         assert!(result_is_success(&val));
         let inner = result_inner(&val);
-        if let Value::Bool(b) = pack_field(inner, "ok") {
-            assert!(b);
-        } else {
-            panic!("Expected Bool for ok field");
-        }
+        let Value::Bool(b) = pack_field(inner, "ok") else {
+            unreachable!("Expected Bool for ok field");
+        };
+        assert!(b);
     }
 
     #[test]
@@ -2535,7 +2553,7 @@ mod tests {
         let mut interp = Interpreter::new();
         match interp.eval_program(&program) {
             Ok(_) => {}
-            Err(e) => panic!("Runtime error: {}", e),
+            Err(e) => unreachable!("Unexpected runtime error: {}", e),
         }
         interp.output.clone()
     }

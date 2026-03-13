@@ -39,8 +39,13 @@ impl Environment {
 
     /// Define a variable in the current (innermost) scope.
     /// Returns an error if the variable is already defined in the same scope.
+    ///
+    /// # Invariant
+    /// `scopes` is never empty: `new()` initializes with one scope, and
+    /// `pop_scope()` guards against popping the last element.
     pub fn define(&mut self, name: &str, value: Value) -> Result<(), String> {
-        let scope = self.scopes.last_mut().unwrap();
+        // SAFETY: scopes is always non-empty (invariant enforced by new/pop_scope)
+        let scope = self.scopes.last_mut().expect("scope stack must be non-empty");
         if scope.contains_key(name) {
             return Err(format!(
                 "Variable '{}' is already defined in this scope",
@@ -53,8 +58,12 @@ impl Environment {
 
     /// Define or overwrite a variable in the current scope.
     /// Used for built-in definitions that may be redefined.
+    ///
+    /// # Invariant
+    /// See `define()` — scopes is always non-empty.
     pub fn define_force(&mut self, name: &str, value: Value) {
-        let scope = self.scopes.last_mut().unwrap();
+        // SAFETY: scopes is always non-empty (invariant enforced by new/pop_scope)
+        let scope = self.scopes.last_mut().expect("scope stack must be non-empty");
         scope.insert(name.to_string(), value);
     }
 
