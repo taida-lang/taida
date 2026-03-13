@@ -384,6 +384,7 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-14 | Phase 14 VERIFIED (N-59〜N-75)。Phase Gate 通過: cargo test 1536 pass / 0 fail、run_backend_parity.sh 66 pass / 0 fail、e2e_smoke.sh 73 pass / 0 fail |
 | 2026-03-14 | Phase 16 全完了 (R-01〜R-11, 9件)。横断レビュー指摘: utf8_decode_mold に len<=0 ガード追加、taida_safe_malloc で size==0 を 1 に正規化、parser advance() に debug_assert 追加、checker_tests 3件に具体的 assertion 追加、lax_result テストから None 許容除去、hashmap/set_to_string の strcat をオフセットベース memcpy に変換、charAt の unwrap_or_default を expect に変更、自明な N-XX コメント削除 (7件)、固定文字列 snprintf を memcpy に統一 (4箇所) |
 | 2026-03-14 | Phase 14 全完了 (N-59〜N-75)。Type checker/Tests: test panic→assert 統一、unwrap→expect 変換 (checker_tests 3箇所+types.rs 1箇所+todo_cli 2箇所)、check_program/check_statement catch-all 意図ドキュメント、checker_methods 未知 receiver スキップ理由ドキュメント、unwrap_or(Type::Unknown) 設計規約をモジュール docstring に記述、エラーコード一覧ドキュメント、循環型依存/自己参照型テスト追加、ジェネリック制約エッジケーステスト追加、@[] 負テスト追加、typecheck_examples 行番号コメント、Optional/Result migration marker テスト追加、resolve_type キャッシュ不使用の理由ドキュメント、scope_stack 非空不変条件ドキュメント |
+| 2026-03-14 | Phase 17a 全完了 (M-00,M-01,M-03,M-06,M-07,M-09,M-10,M-16)。native_runtime.c 整数オーバーフロー防御: taida_safe_mul/taida_safe_add ヘルパー導入、taida_pack_new に負値+オーバーフローガード、taida_hashmap_clone に NULL+cap ガード、taida_list_join に malloc NULL+len*sizeof オーバーフロー+total size_t 化+safe_add、taida_list_sort/sort_desc に len==0 早期リターン+safe_mul+NULL チェック、taida_str_alloc に len 上限ガード (SIZE_MAX-17)、taida_str_concat に la+lb safe_add。cargo test 1536 pass / 0 fail |
 
 ---
 
@@ -414,6 +415,44 @@ Phase 9-15 のコードレビューで検出された修正項目。
 | R-04 | minor | `methods.rs` の `unwrap_or_default` を `expect("bounds checked above")` に変更 | `src/interpreter/methods.rs` | `VERIFIED` |
 | R-06 | nit | 自明な N-XX コメント削除（情報量ゼロのもの） | 複数ファイル | `VERIFIED` |
 | R-11 | nit | `snprintf` → `memcpy` に統一（固定文字列コピー） | `src/codegen/native_runtime.c` | `VERIFIED` |
+
+---
+
+## Phase 17: 巨大 malloc / 整数オーバーフロー防御 (16件)
+
+native_runtime.c の malloc サイズ計算における整数オーバーフロー・負値・巨大値の網羅的防御。
+横断的に `taida_safe_mul` / `taida_safe_add` ヘルパーを導入し、全箇所に適用する。
+
+### Phase 17a: インフラ + Critical (Must Fix)
+
+| ID | severity | 概要 | ファイル | 状態 |
+|----|----------|------|---------|------|
+| M-00 | infra | `taida_safe_mul` / `taida_safe_add` ヘルパー導入 | `src/codegen/native_runtime.c` | `DONE` |
+| M-01 | critical | `taida_pack_new`: 負の `field_count` で整数オーバーフロー → ヒープ破壊 | `src/codegen/native_runtime.c` | `DONE` |
+| M-03 | critical | `taida_hashmap_clone`: `cap` オーバーフロー + NULL チェック欠如 | `src/codegen/native_runtime.c` | `DONE` |
+| M-06 | critical | `taida_list_join`: malloc に NULL チェックなし + `len * sizeof` オーバーフロー | `src/codegen/native_runtime.c` | `DONE` |
+| M-07 | critical | `taida_list_sort` / `sort_desc`: malloc NULL チェックなし + オーバーフロー | `src/codegen/native_runtime.c` | `DONE` |
+| M-09 | critical | `taida_str_alloc`: `len + 17` の size_t オーバーフロー → ヒープ破壊 | `src/codegen/native_runtime.c` | `DONE` |
+| M-10 | critical | `taida_str_concat`: `la + lb` の size_t オーバーフロー → ヒープ破壊 | `src/codegen/native_runtime.c` | `DONE` |
+| M-16 | critical | `taida_list_join`: total の int64_t オーバーフロー → ヒープ破壊 | `src/codegen/native_runtime.c` | `DONE` |
+
+### Phase 17b: Should Fix
+
+| ID | severity | 概要 | ファイル | 状態 |
+|----|----------|------|---------|------|
+| M-02 | major | `taida_hashmap_new_with_cap`: `cap` 上限ガード欠如 | `src/codegen/native_runtime.c` | `TODO` |
+| M-04 | major | `taida_bytes_new_filled`: `len` 上限ガード欠如（巨大正値で OOM） | `src/codegen/native_runtime.c` | `TODO` |
+| M-05 | major | `taida_list_push`: realloc の `cap * 2` オーバーフロー | `src/codegen/native_runtime.c` | `TODO` |
+| M-11 | major | `taida_os_socket_recv_exact`: `size` 上限ガード欠如 | `src/codegen/native_runtime.c` | `TODO` |
+| M-15 | major | Bytes 系 send 関数: `len` 上限ガード欠如 | `src/codegen/native_runtime.c` | `TODO` |
+
+### Phase 17c: Nice to Have
+
+| ID | severity | 概要 | ファイル | 状態 |
+|----|----------|------|---------|------|
+| M-08 | minor | `taida_sha256` Bytes 分岐: 上限ガード追加 | `src/codegen/native_runtime.c` | `TODO` |
+| M-12 | minor | `taida_os_list_dir`: capacity オーバーフロー防御 | `src/codegen/native_runtime.c` | `TODO` |
+| M-14 | minor | NULL チェックなしの raw malloc を TAIDA_MALLOC に統一 | `src/codegen/native_runtime.c` | `TODO` |
 
 ---
 
