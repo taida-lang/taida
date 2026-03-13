@@ -202,11 +202,11 @@ strcpy パターン、フォールバック、コメント整理。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 74 | N-40 | `strcpy()` 使用（mkdir_p 以外の3箇所） | [P] | `DONE` | `src/codegen/native_runtime.c` |
-| 75 | N-41 | `unwrap_or(Path::new("."))` 等 (15箇所) | [E] | `DONE` | `src/codegen/driver.rs` |
-| 76 | N-42 | TODO コメント残存 (unmold channel) | [M] | `DONE` | `src/codegen/native_runtime.c:4896` |
-| 77 | N-43 | malloc NULL チェックの一貫性不足 | [E] | `DONE` | `src/codegen/native_runtime.c` |
-| 78 | N-44 | ABI テーブル保守性 | [M] | `DONE` | `src/codegen/emit.rs:1512` |
+| 74 | N-40 | `strcpy()` 使用（mkdir_p 以外の3箇所） | [P] | `VERIFIED` | `src/codegen/native_runtime.c` |
+| 75 | N-41 | `unwrap_or(Path::new("."))` 等 (15箇所) | [E] | `VERIFIED` | `src/codegen/driver.rs` |
+| 76 | N-42 | TODO コメント残存 (unmold channel) | [M] | `VERIFIED` | `src/codegen/native_runtime.c:4896` |
+| 77 | N-43 | malloc NULL チェックの一貫性不足 | [E] | `VERIFIED` | `src/codegen/native_runtime.c` |
+| 78 | N-44 | ABI テーブル保守性 | [M] | `VERIFIED` | `src/codegen/emit.rs:1512` |
 
 ---
 
