@@ -360,6 +360,8 @@ impl Lexer {
 
     fn scan_number(&mut self, start: usize, start_line: usize, start_col: usize) {
         // Prefixed integer literal: 0x / 0o / 0b
+        // SAFETY: `start` is the position of the digit that triggered this call,
+        // so it is always a valid index into `self.source`.
         let first = self.source[start];
         if first == '0' {
             let prefix = self.peek();
@@ -558,6 +560,10 @@ impl Lexer {
                             start_line,
                             start_col,
                         );
+                        // Keep the literal character (without backslash) for
+                        // error recovery: the token is still emitted so that
+                        // downstream parsing can continue and report further
+                        // errors instead of aborting at the first bad escape.
                         value.push(escaped);
                     }
                 }
@@ -604,6 +610,14 @@ impl Lexer {
                     '`' => value.push('`'),
                     '$' => value.push('$'),
                     _ => {
+                        // Mirror the regular string's behaviour: report the
+                        // unknown escape but keep scanning for more errors.
+                        self.error(
+                            &format!("Invalid escape sequence in template string: \\{}", escaped),
+                            start,
+                            start_line,
+                            start_col,
+                        );
                         value.push('\\');
                         value.push(escaped);
                     }
@@ -1531,5 +1545,57 @@ alice <= Person(name <= "Alice", age <= 30)
         assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
         // Just verify it tokenizes without errors
         assert!(tokens.len() > 10);
+    }
+
+    // ── N-10 / N-11: Escape sequence error reporting ────────
+
+    #[test]
+    fn test_invalid_escape_in_string_reports_error() {
+        let (tokens, errors) = tokenize(r#""hello \q world""#);
+        // Error is reported for the invalid escape
+        assert!(
+            !errors.is_empty(),
+            "Expected error for invalid escape \\q in string"
+        );
+        assert!(errors[0].message.contains("Invalid escape sequence"));
+        // Token is still emitted for error recovery (literal char without backslash)
+        let string_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, StringLiteral(_)))
+            .collect();
+        assert_eq!(string_tokens.len(), 1);
+        if let StringLiteral(ref val) = string_tokens[0].kind {
+            assert!(
+                val.contains('q'),
+                "Recovery should keep the escaped char literal"
+            );
+        }
+    }
+
+    #[test]
+    fn test_invalid_escape_in_template_reports_error() {
+        let (tokens, errors) = tokenize(r#"`template \q text`"#);
+        // Error is now reported for template strings too (N-11 fix)
+        assert!(
+            !errors.is_empty(),
+            "Expected error for invalid escape \\q in template string"
+        );
+        assert!(
+            errors[0]
+                .message
+                .contains("Invalid escape sequence in template string")
+        );
+        // Token is still emitted for error recovery
+        let tmpl_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, TemplateLiteral(_)))
+            .collect();
+        assert_eq!(tmpl_tokens.len(), 1);
+        if let TemplateLiteral(ref val) = tmpl_tokens[0].kind {
+            assert!(
+                val.contains("\\q"),
+                "Template recovery keeps backslash + char"
+            );
+        }
     }
 }

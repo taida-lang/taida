@@ -34,13 +34,13 @@ impl Interpreter {
     /// If the async is already resolved (Fulfilled/Rejected), returns as-is.
     /// If pending with a task, uses tokio runtime to block_on the receiver.
     pub(crate) fn resolve_async(&self, a: &AsyncValue) -> Result<AsyncValue, RuntimeError> {
-        // Already resolved — return immediately
-        if a.status != AsyncStatus::Pending || a.task.is_none() {
-            return Ok(a.clone());
-        }
+        // Already resolved or no task — return immediately
+        let task_arc = match (a.status == AsyncStatus::Pending, a.task.as_ref()) {
+            (true, Some(arc)) => arc.clone(),
+            _ => return Ok(a.clone()),
+        };
 
         // Pending with a task — block on the receiver
-        let task_arc = a.task.as_ref().unwrap().clone();
         let mut guard = task_arc.lock().map_err(|e| RuntimeError {
             message: format!("Async task lock poisoned: {}", e),
         })?;
@@ -101,12 +101,11 @@ impl Interpreter {
         a: &AsyncValue,
         timeout_ms: u64,
     ) -> Result<Option<AsyncValue>, RuntimeError> {
-        // Already resolved — return immediately
-        if a.status != AsyncStatus::Pending || a.task.is_none() {
-            return Ok(Some(a.clone()));
-        }
-
-        let task_arc = a.task.as_ref().unwrap().clone();
+        // Already resolved or no task — return immediately
+        let task_arc = match (a.status == AsyncStatus::Pending, a.task.as_ref()) {
+            (true, Some(arc)) => arc.clone(),
+            _ => return Ok(Some(a.clone())),
+        };
         let mut guard = task_arc.lock().map_err(|e| RuntimeError {
             message: format!("Async task lock poisoned: {}", e),
         })?;
@@ -260,7 +259,8 @@ impl Interpreter {
                         }
                     });
 
-                // TODO: `]=>` returns the `unm` channel when present.
+                // TODO[T] unmold: `]=>` returns the `unm` channel when present,
+                // otherwise falls back to the default for the `sol` type.
                 if type_name == Some("TODO") {
                     if let Some((_, unm_val)) =
                         fields.iter().find(|(k, _)| k == "unm" || k == "__default")

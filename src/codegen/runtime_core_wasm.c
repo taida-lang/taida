@@ -272,8 +272,11 @@ int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);
 int64_t taida_throw(int64_t error_val);
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
 int64_t taida_can_throw_payload(int64_t val);
+int64_t taida_int_to_str(int64_t a);      /* NTH-5: forward decl for poly_add */
+int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr);  /* NTH-5: forward decl for poly_add */
 static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
 static int64_t _wasm_result_is_error_check(int64_t result);
+static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes);  /* NTH-4: forward decl */
 
 /* ── Hash constants needed by taida_generic_unmold (full definitions in W-5) ── */
 #define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
@@ -297,6 +300,11 @@ int64_t taida_mod_mold(int64_t a, int64_t b) {
 /* ── generic_unmold — W-5g: Lax/Result/Gorillax-aware, predicate-evaluated ── */
 
 int64_t taida_generic_unmold(int64_t val) {
+    /* NTH-4: Guard against non-pointer values (negative integers, small ints, etc.)
+       that would cause OOB when dereferenced as pack pointers.
+       _wasm_is_valid_ptr already handles this for is_lax/result/gorillax, but
+       taida_pack_has_hash (called later) does not. Guard early. */
+    if (!_wasm_is_valid_ptr(val, 8)) return val;
     if (_wasm_is_lax(val)) {
         return taida_lax_unmold(val);
     }
@@ -388,13 +396,44 @@ int64_t taida_generic_unmold(int64_t val) {
     return val;
 }
 
-/* ── FL-16: 多態加算 (polymorphic add) ── */
-/* wasm-min: integer-only add. String concatenation in Taida is handled
-   by taida_str_concat which the compiler emits explicitly for string
-   operands. poly_add is only reached when the compiler cannot determine
-   the operand type at compile time, and in wasm-min all such values
-   are integers (wasm-min has no heap string detection mechanism). */
+/* ── FL-16 / NTH-5: 多態加算 (polymorphic add) — string-aware ── */
+/* Heuristic string detection for wasm: a value is considered a string pointer if
+   it lies within the wasm data segment (where static string literals reside) or
+   within the dynamic heap (>= __heap_base, < bump_ptr).
+   Small integer values (< 1024) are never treated as string pointers to avoid
+   false positives from small numeric literals. */
+static int _wasm_is_string_ptr(int64_t v) {
+    if (v <= 1024 || v > 0xFFFFFFFFLL) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)v;
+    /* Check within wasm linear memory bounds */
+    unsigned int mem_bytes = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+    if (addr >= mem_bytes) return 0;
+    /* Require the address to be in a known region: either the data segment
+       (static string literals, typically at low addresses before __heap_base)
+       or the dynamic heap (between __heap_base and bump_ptr).
+       We check: if it's a dynamically allocated object, it must be < bump_ptr. */
+    extern unsigned int __heap_base;
+    unsigned int heap_start = (unsigned int)(unsigned long)&__heap_base;
+    if (addr >= heap_start && (bump_ptr == 0 || addr >= bump_ptr)) return 0;
+    /* Finally, peek at the first byte: must be a printable ASCII char (0x20..0x7E).
+       NUL (empty string at address) is excluded since it's indistinguishable from
+       zeroed memory.  Integer values that happen to be valid addresses with a
+       printable first byte will still false-positive, but with the > 1024 guard
+       and heap range check, this is rare. */
+    unsigned char first = *(const unsigned char *)(intptr_t)v;
+    return first >= 0x20 && first <= 0x7E;
+}
+
 int64_t taida_poly_add(int64_t a, int64_t b) {
+    int a_str = _wasm_is_string_ptr(a);
+    int b_str = _wasm_is_string_ptr(b);
+    if (a_str || b_str) {
+        /* At least one operand is a string — concatenate.
+           Convert non-string operand to its string representation. */
+        int64_t sa = a_str ? a : taida_int_to_str(a);
+        int64_t sb = b_str ? b : taida_int_to_str(b);
+        return taida_str_concat(sa, sb);
+    }
     return a + b;
 }
 
@@ -479,19 +518,23 @@ int64_t taida_int_to_str(int64_t a) {
     return (int64_t)(intptr_t)buf;
 }
 
+/* NTH-4: Use uint64_t for accumulation to avoid signed overflow UB
+   when parsing INT64_MIN ("-9223372036854775808"). */
 int64_t taida_str_to_int(int64_t s_ptr) {
     const char *s = (const char *)(intptr_t)s_ptr;
     if (!s) return 0;
-    int64_t result = 0;
+    uint64_t result = 0;
     int negative = 0;
     int i = 0;
     if (s[i] == '-') { negative = 1; i++; }
     else if (s[i] == '+') { i++; }
     while (s[i] >= '0' && s[i] <= '9') {
-        result = result * 10 + (s[i] - '0');
+        result = result * 10 + (uint64_t)(s[i] - '0');
         i++;
     }
-    return negative ? -result : result;
+    /* For negative: -(uint64_t) is well-defined modular arithmetic,
+       producing the correct two's complement representation. */
+    return negative ? -(int64_t)result : (int64_t)result;
 }
 
 int64_t taida_str_from_bool(int64_t v) {

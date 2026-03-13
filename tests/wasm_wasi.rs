@@ -663,9 +663,10 @@ fn wasm_wasi_parity_all_examples() {
     // Expected allowlist: examples that wasm-wasi cannot compile (unsupported features).
     // If this list shrinks, update the count — that's progress.
     // If it grows, the test fails — that's a regression.
+    // NTH-6: allowlist reduced after NTH-5 poly_add string support enabled
+    // 3 examples (07_closures, compile_lambda, wasm_min_pi_approx) now pass parity.
     let expected_rejected: Vec<&str> = vec![
         "06_lists",
-        "07_closures",
         "09_modules",
         "10_list_operations",
         "11_introspection",
@@ -683,7 +684,6 @@ fn wasm_wasi_parity_all_examples() {
         "compile_hashmap_set",
         "compile_hof_molds",
         "compile_json",
-        "compile_lambda",
         "compile_lax",
         "compile_list",
         "compile_list_map",
@@ -699,7 +699,6 @@ fn wasm_wasi_parity_all_examples() {
         "compile_str_molds",
         "compile_type_conv",
         "todo_app",
-        "wasm_min_pi_approx",
     ];
 
     // Expected allowlist: examples where native backend itself fails.
@@ -735,10 +734,11 @@ fn wasm_wasi_parity_all_examples() {
 
     // Exact parity count — if this changes, update deliberately.
     // WE-2: wasm_edge_hello.td added (simple stdout, compilable by wasm-wasi too)
+    // NTH-6: updated from 24 to 27 after NTH-5 poly_add string support
     assert_eq!(
         parity_ok.len(),
-        24,
-        "WW-3: Expected exactly 24 parity-OK examples, got {}. \
+        27,
+        "WW-3: Expected exactly 27 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -850,9 +850,10 @@ fn wasm_wasi_superset_of_wasm_min() {
 
     // Exact superset count — if this changes, update deliberately.
     // WE-2: wasm_edge_hello.td added (simple stdout, compilable by both wasm-min and wasm-wasi)
+    // NTH-6: updated from 23 to 26 after NTH-5 poly_add string support
     assert_eq!(
-        superset_ok, 23,
-        "WW-3: Expected exactly 23 superset-verified examples, got {}. \
+        superset_ok, 26,
+        "WW-3: Expected exactly 26 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

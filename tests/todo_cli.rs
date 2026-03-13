@@ -567,7 +567,11 @@ risky x =
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
-    assert!(!lines.is_empty(), "jsonl output should not be empty");
+    // Verify at least one diagnostic line exists and each line has the expected JSON structure
+    assert!(
+        !lines.is_empty(),
+        "jsonl output should contain at least one diagnostic line"
+    );
     for line in &lines {
         let value: serde_json::Value =
             serde_json::from_str(line).expect("each jsonl line should be valid json");
@@ -1350,7 +1354,12 @@ fn test_check_json_regression_clean_file() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
     assert_eq!(value["schema"], "taida.check.v1");
     assert_eq!(value["summary"]["errors"].as_u64(), Some(0));
-    assert!(value["diagnostics"].as_array().unwrap().is_empty());
+    assert!(
+        value["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be a JSON array")
+            .is_empty()
+    );
 }
 
 #[test]

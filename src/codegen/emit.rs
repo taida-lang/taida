@@ -1509,6 +1509,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // N-44: ABI table maintenance note
+        // When adding a new runtime function in lower.rs, a corresponding entry
+        // MUST be added here. The match is exhaustive by design — an unknown
+        // function name returns a user-friendly error instead of panicking.
+        // To add a new entry:
+        //   1. Identify the C signature in native_runtime.c
+        //   2. Map each parameter to AbiKind: Val (i64), Ptr (heap ptr), FnPtr, F64
+        //   3. Add a `"taida_<name>" => RuntimeAbi { params: &[...], returns: &[...] }` arm above
         _ => {
             return Err(format!(
                 "unknown runtime function: '{}'. Add it to the ABI table in emit.rs runtime_abi().",
@@ -2097,7 +2105,7 @@ impl Emitter {
                 ectx.tco_loop_block = Some(loop_block);
                 ectx.tco_param_vars = param_vars;
 
-                Self::emit_instructions(&mut builder, &mut ectx, &ir_func.body);
+                Self::emit_instructions(&mut builder, &mut ectx, &ir_func.body)?;
 
                 // ループブロックを seal（全ての predecessor が確定した後）
                 builder.seal_block(loop_block);
@@ -2112,7 +2120,7 @@ impl Emitter {
                     ectx.named_vars.insert(param_name.clone(), param_val);
                 }
 
-                Self::emit_instructions(&mut builder, &mut ectx, &ir_func.body);
+                Self::emit_instructions(&mut builder, &mut ectx, &ir_func.body)?;
             }
 
             builder.finalize();
@@ -2129,13 +2137,23 @@ impl Emitter {
     }
 
     /// 命令列を現在のブロックに emit する
-    fn emit_instructions(builder: &mut FunctionBuilder, ectx: &mut EmitCtx, insts: &[IrInst]) {
+    /// NTH-3: Result 伝播対応 — runtime_abi 解決失敗時に panic ではなく EmitError を返す
+    fn emit_instructions(
+        builder: &mut FunctionBuilder,
+        ectx: &mut EmitCtx,
+        insts: &[IrInst],
+    ) -> Result<(), EmitError> {
         for inst in insts {
-            Self::emit_inst(builder, ectx, inst);
+            Self::emit_inst(builder, ectx, inst)?;
         }
+        Ok(())
     }
 
-    fn emit_inst(builder: &mut FunctionBuilder, ectx: &mut EmitCtx, inst: &IrInst) {
+    fn emit_inst(
+        builder: &mut FunctionBuilder,
+        ectx: &mut EmitCtx,
+        inst: &IrInst,
+    ) -> Result<(), EmitError> {
         match inst {
             IrInst::ConstInt(dst, value) => {
                 let val = builder.ins().iconst(ectx.value_ty, *value);
@@ -2214,10 +2232,14 @@ impl Emitter {
                 } else {
                     // W-0f: runtime_func_signature_for() で ectx.abi ベースの解決に統一
                     let func_ref = ectx.func_refs[func_name];
-                    // FL-11: runtime_abi already validated in predeclare_runtime_funcs_recursive,
-                    // so this should not fail. Use expect with descriptive message as defensive fallback.
-                    let runtime_abi_def =
-                        runtime_abi(func_name).unwrap_or_else(|e| panic!("BUG: {}", e));
+                    // FL-11 / NTH-3: runtime_abi already validated in predeclare_runtime_funcs_recursive.
+                    // Propagate error via Result instead of panicking.
+                    let runtime_abi_def = runtime_abi(func_name).map_err(|e| EmitError {
+                        message: format!(
+                            "BUG: runtime_abi lookup failed for '{}': {}",
+                            func_name, e
+                        ),
+                    })?;
                     let (param_types, return_types) = resolve_abi(&runtime_abi_def, &ectx.abi);
 
                     let arg_vals: Vec<clif::Value> = args
@@ -2433,7 +2455,7 @@ impl Emitter {
                 }
             }
             IrInst::CondBranch(dst, arms) => {
-                Self::emit_cond_branch(builder, ectx, *dst, arms);
+                Self::emit_cond_branch(builder, ectx, *dst, arms)?;
             }
             IrInst::Return(var) => {
                 let val = ectx.val_map[var];
@@ -2456,6 +2478,7 @@ impl Emitter {
                 ectx.val_map.insert(*dst, result);
             }
         }
+        Ok(())
     }
 
     /// 条件分岐を CLIF ブロックに変換
@@ -2465,7 +2488,7 @@ impl Emitter {
         ectx: &mut EmitCtx,
         result_dst: IrVar,
         arms: &[CondArm],
-    ) {
+    ) -> Result<(), EmitError> {
         // 結果を格納する Variable（boxed value_ty）
         let result_var = builder.declare_var(ectx.value_ty);
 
@@ -2491,7 +2514,7 @@ impl Emitter {
                     // then ブロック
                     builder.switch_to_block(then_block);
                     builder.seal_block(then_block);
-                    Self::emit_instructions(builder, ectx, &arm.body);
+                    Self::emit_instructions(builder, ectx, &arm.body)?;
                     let result_val = ectx.val_map[&arm.result];
                     builder.def_var(result_var, result_val);
                     builder.ins().jump(merge_block, &[]);
@@ -2504,7 +2527,7 @@ impl Emitter {
                 }
                 None => {
                     // デフォルトケース (| _ |>)
-                    Self::emit_instructions(builder, ectx, &arm.body);
+                    Self::emit_instructions(builder, ectx, &arm.body)?;
                     let result_val = ectx.val_map[&arm.result];
                     builder.def_var(result_var, result_val);
                     builder.ins().jump(merge_block, &[]);
@@ -2525,6 +2548,7 @@ impl Emitter {
 
         let result = builder.use_var(result_var);
         ectx.val_map.insert(result_dst, result);
+        Ok(())
     }
 
     /// Simple integer/bool operations → native Cranelift instructions.

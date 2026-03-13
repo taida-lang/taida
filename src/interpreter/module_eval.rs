@@ -18,6 +18,7 @@ impl Interpreter {
         let path = if import_path.starts_with("./") || import_path.starts_with("../") {
             // Relative path
             if let Some(current) = &self.current_file {
+                // Falls back to "." if current_file has no parent (e.g., bare filename)
                 let base = current.parent().unwrap_or(Path::new("."));
                 base.join(import_path)
             } else {
@@ -86,6 +87,7 @@ impl Interpreter {
     /// Looks for `packages.tdm`, `taida.toml`, `.taida` (project-local), or `.git`.
     pub(crate) fn find_project_root(&self) -> PathBuf {
         let start = if let Some(current) = &self.current_file {
+            // Falls back to "." if current_file has no parent (e.g., bare filename)
             current.parent().unwrap_or(Path::new(".")).to_path_buf()
         } else {
             PathBuf::from(".")
@@ -377,6 +379,10 @@ impl Interpreter {
                 module_exports
                     .into_keys()
                     .map(|name| {
+                        // Falls back to Unit if export symbol is declared but not
+                        // defined in the environment (e.g., forward-declared but
+                        // never assigned). This matches Taida's null-exclusion
+                        // philosophy where Unit serves as the universal default.
                         let enriched_val = enriched_env.get(&name).cloned().unwrap_or(Value::Unit);
                         (name, enriched_val)
                     })

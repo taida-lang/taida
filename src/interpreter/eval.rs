@@ -136,7 +136,9 @@ impl Interpreter {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("Failed to create Tokio runtime for interpreter"),
+                .expect(
+                    "Failed to create Tokio runtime for interpreter: system resource exhaustion",
+                ),
         );
 
         Self {

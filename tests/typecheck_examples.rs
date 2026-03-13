@@ -39,6 +39,8 @@ fn test_all_examples_pass_typecheck() {
                 msg.push_str(&format!("  {}\n", err));
             }
         }
+        // N-72: Error messages include line/column via TypeError's Display impl,
+        // so the output below shows "Type error at line X, column Y: ..." for each error.
         panic!("{} example files had type errors:{}", failures.len(), msg);
     }
 }

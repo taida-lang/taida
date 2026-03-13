@@ -40,27 +40,33 @@ impl Parser {
             })
             .collect();
 
-        // Handle line continuation: Backslash + Newline (+ optional Indent) -> removed
-        // This joins logical lines before parsing, so `\` at end of line
-        // makes the next line a continuation of the current line.
+        // ── Line continuation ──────────────────────────────────
+        //
+        // A backslash at the end of a line (`\` + Newline) joins the next
+        // physical line into the current logical line.  This pass removes the
+        // backslash, the newline, and any leading indent tokens on the
+        // continuation line.
+        //
+        // The algorithm is a single forward scan with an auxiliary index `j`
+        // that peeks ahead when a Backslash is encountered:
+        //   1. If Backslash is followed by Newline (+ optional Indent*),
+        //      skip all of them and resume from `j`.
+        //   2. Otherwise keep the Backslash (defensive; lexer should not
+        //      produce bare backslashes outside of strings).
         let mut filtered = Vec::with_capacity(tokens.len());
         let mut i = 0;
         while i < tokens.len() {
             if tokens[i].kind == TokenKind::Backslash {
-                // Look ahead: skip Backslash, then skip Newline and Indent tokens
                 let mut j = i + 1;
-                // Skip the newline after backslash
                 if j < tokens.len() && matches!(tokens[j].kind, TokenKind::Newline) {
                     j += 1;
-                    // Skip any indent on the continuation line
                     while j < tokens.len() && matches!(tokens[j].kind, TokenKind::Indent(_)) {
                         j += 1;
                     }
-                    // Successfully consumed line continuation; skip all these tokens
                     i = j;
                     continue;
                 }
-                // Backslash not followed by newline — keep it (shouldn't normally happen)
+                // Backslash not followed by newline — keep it
                 filtered.push(tokens[i].clone());
                 i += 1;
             } else {
@@ -103,7 +109,10 @@ impl Parser {
         if self.pos < self.tokens.len() {
             &self.tokens[self.pos]
         } else {
-            self.tokens.last().unwrap() // Should be Eof
+            // Token stream always ends with Eof; empty stream is a lexer bug.
+            self.tokens
+                .last()
+                .expect("token stream must contain at least an Eof token")
         }
     }
 
@@ -111,18 +120,35 @@ impl Parser {
         &self.peek().kind
     }
 
+    /// Look ahead by `offset` tokens.  There is no hard cap on `offset` because
+    /// the token stream is finite (bounded by source length) and all callers use
+    /// small constant offsets (0, 1, or 2).  `saturating_add` prevents overflow.
     fn peek_at(&self, offset: usize) -> &Token {
-        let idx = self.pos + offset;
+        let idx = self.pos.saturating_add(offset);
         if idx < self.tokens.len() {
             &self.tokens[idx]
         } else {
-            self.tokens.last().unwrap()
+            // Token stream always ends with Eof; empty stream is a lexer bug.
+            self.tokens
+                .last()
+                .expect("token stream must contain at least an Eof token")
         }
     }
 
     fn advance(&mut self) -> &Token {
-        let token = &self.tokens[self.pos];
-        if self.pos < self.tokens.len() - 1 {
+        // Safety: callers gate on `!is_at_end()` / `peek()` before advancing.
+        // The `min` clamp prevents OOB if invariants are violated.
+        // R-05: debug_assert catches callers that advance past the end during
+        // development; the clamp still prevents UB in release builds.
+        debug_assert!(
+            self.pos < self.tokens.len(),
+            "advance() called at pos {} but token stream length is {} — caller should check is_at_end()",
+            self.pos,
+            self.tokens.len()
+        );
+        let pos = self.pos.min(self.tokens.len().saturating_sub(1));
+        let token = &self.tokens[pos];
+        if self.pos < self.tokens.len().saturating_sub(1) {
             self.pos += 1;
         }
         token
@@ -218,8 +244,13 @@ impl Parser {
         }
     }
 
+    /// Error recovery: skip tokens until the next newline (statement boundary).
+    ///
+    /// Taida is indentation-based, so a newline always terminates the current
+    /// (logical) line.  This is intentionally simpler than brace-delimited
+    /// languages that must skip to `;` or `}` — here, newline sync is sufficient
+    /// because each logical line is a complete statement.
     fn synchronize(&mut self) {
-        // Skip to next statement boundary
         while !self.is_at_end() {
             if matches!(self.peek_kind(), TokenKind::Newline) {
                 self.advance();
@@ -766,6 +797,9 @@ impl Parser {
                 TokenKind::Placeholder => path.push('_'),
                 TokenKind::Gt => path.push('>'),
                 _ => {
+                    // Unexpected token inside import path — stringify for
+                    // recovery.  A parse error for the overall import is
+                    // reported separately, so this is best-effort.
                     let text = format!("{:?}", tok.kind);
                     path.push_str(&text);
                 }
@@ -868,12 +902,23 @@ impl Parser {
 
     /// Parse a version string in `@gen.num` or `@gen` format.
     ///
-    /// - `@a.3` → "a.3" (exact: generation a, publish #3)
-    /// - `@b`   → "b"   (generation-only: latest in generation b)
-    /// - `@aa.12` → "aa.12" (multi-letter generation)
+    /// Grammar (state machine):
+    /// ```text
+    ///   start ──Ident(gen)──> gen_only ──Dot──Int(num)──> exact
+    ///                                                       │
+    ///                                            Dot──label──> labeled
+    ///   start ──Float/Int──> legacy_semver ──Dot──Int(patch)──> semver_full
+    /// ```
+    ///
+    /// Examples:
+    /// - `@a.3` -> "a.3" (exact: generation a, publish #3)
+    /// - `@b`   -> "b"   (generation-only: latest in generation b)
+    /// - `@aa.12` -> "aa.12" (multi-letter generation)
+    /// - `@a.1.beta` -> "a.1.beta" (labeled release)
+    /// - `@a.3.gen-2-stable` -> "a.3.gen-2-stable" (hyphenated label)
     ///
     /// Also supports legacy SemVer format for backward compatibility:
-    /// - `@1.0.0` → "1.0.0"
+    /// - `@1.0.0` -> "1.0.0"
     fn parse_version_string(&mut self) -> Result<String, ParseError> {
         let mut ver = String::new();
 
@@ -1069,6 +1114,15 @@ impl Parser {
     }
 
     // ── Block parsing ────────────────────────────────────────
+    //
+    // Taida uses indentation-sensitive block parsing.  The lexer emits
+    // `Indent(n)` tokens at the start of every non-blank line, and the
+    // parser uses these to decide when a block begins and ends:
+    //   1. `detect_block_indent()` skips leading newlines and reads the
+    //      first `Indent(n)` token to establish the block's indentation level.
+    //   2. Each iteration checks `current_line_indent()`: if the indent is
+    //      less than the block level the block is considered closed (dedent).
+    //   3. `skip_blank_lines()` absorbs consecutive newlines between statements.
 
     fn parse_block(&mut self) -> Result<Vec<Statement>, ParseError> {
         let mut stmts = Vec::new();
