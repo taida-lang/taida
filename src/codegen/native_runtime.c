@@ -23,6 +23,16 @@
     (ptr) = _tmp; \
 } while(0)
 
+// N-43: Safe malloc wrapper — aborts on NULL with a diagnostic message.
+// Usage: void *p = TAIDA_MALLOC(size, context_label);
+// Returns the allocated pointer; on failure, prints OOM message and exits.
+static inline void *taida_safe_malloc(size_t size, const char *label) {
+    void *p = malloc(size);
+    if (!p) { fprintf(stderr, "taida: out of memory (%s)\n", label); exit(1); }
+    return p;
+}
+#define TAIDA_MALLOC(size, label) taida_safe_malloc((size), (label))
+
 // ---------------------------------------------------------------------------
 // W-0d/W-0f: ABI 正規化 — 値型・ポインタ型・関数ポインタ型の typedef
 //
@@ -1435,7 +1445,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty((taida_val)"");
     taida_val *bytes = (taida_val*)value;
     taida_val len = bytes[1];
-    unsigned char *raw = (unsigned char*)malloc((size_t)len);
+    unsigned char *raw = (unsigned char*)TAIDA_MALLOC((size_t)len, "bytes_decode");
     for (taida_val i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
 
     size_t pos = 0;
@@ -3566,8 +3576,9 @@ taida_val taida_hashmap_to_string(taida_val hm_ptr) {
     taida_val cap = hm[1];
 
     size_t buf_size = 256;
-    char *buf = (char*)malloc(buf_size);
-    strcpy(buf, "HashMap({");
+    char *buf = (char*)TAIDA_MALLOC(buf_size, "hm_to_string");
+    // N-40: strcpy → memcpy with known-length literal for safety
+    memcpy(buf, "HashMap({", 10); /* 9 chars + '\0' */
     taida_val count = 0;
 
     for (taida_val i = 0; i < cap; i++) {
@@ -3783,8 +3794,9 @@ taida_val taida_set_to_string(taida_val set_ptr) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
     size_t buf_size = 128;
-    char *buf = (char*)malloc(buf_size);
-    strcpy(buf, "Set({");
+    char *buf = (char*)TAIDA_MALLOC(buf_size, "set_to_string");
+    // N-40: strcpy → memcpy with known-length literal for safety
+    memcpy(buf, "Set({", 6); /* 5 chars + '\0' */
     for (taida_val i = 0; i < len; i++) {
         if (i > 0) strcat(buf, ", ");
         char item_str[64];
@@ -4329,7 +4341,7 @@ static taida_val taida_list_to_display_string(taida_val list_ptr) {
     taida_val list_len = list[2];
     size_t cap = 64;
     size_t len = 0;
-    char *buf = (char*)malloc(cap);
+    char *buf = (char*)TAIDA_MALLOC(cap, "list_to_string");
     buf[0] = '\0';
     // Append "@["
     { const char *s = "@["; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
@@ -4361,7 +4373,7 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
     taida_val len_bytes = bytes[1];
     size_t cap = 64;
     size_t len = 0;
-    char *buf = (char*)malloc(cap);
+    char *buf = (char*)TAIDA_MALLOC(cap, "bytes_to_string");
     buf[0] = '\0';
     const char *prefix = "Bytes[@[";
     size_t pl = strlen(prefix);
@@ -4406,7 +4418,7 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     taida_val fc = pack[1];
     size_t cap = 128;
     size_t len = 0;
-    char *buf = (char*)malloc(cap);
+    char *buf = (char*)TAIDA_MALLOC(cap, "pack_to_display_string");
     buf[0] = '\0';
     // Append "@("
     { const char *s = "@("; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
@@ -4937,7 +4949,8 @@ taida_val taida_generic_unmold(taida_val ptr) {
         return taida_lax_unmold(ptr);
     }
 
-    // TODO unmold: return `unm` channel when present.
+    // N-42: TODO mold unmold — check __type tag and extract via unm/default/sol/value channels.
+    // The `unm` channel is returned when present (priority: unm > __default > sol > __value).
     if (taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
         taida_val type_ptr = taida_pack_get(ptr, (taida_val)HASH___TYPE);
         int is_todo = 0;
@@ -5124,7 +5137,7 @@ static char *json_parse_string_raw(const char **p) {
         len++;
     }
     // Allocate and copy with escape handling
-    char *buf = (char*)malloc(len + 1);
+    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_parse_str");
     int out = 0;
     while (**p && **p != '"') {
         if (**p == '\\') {
@@ -5314,7 +5327,7 @@ static taida_val json_default_value_for_desc(const char *desc) {
         case 'i': return 0;
         case 'f': return _d2l(0.0);
         case 's': {
-            char *empty = (char*)malloc(1);
+            char *empty = (char*)TAIDA_MALLOC(1, "json_default_str");
             empty[0] = '\0';
             return (taida_val)empty;
         }
@@ -5393,7 +5406,7 @@ static taida_val json_to_str(json_val *jv) {
             return (taida_val)taida_str_alloc(0);
         }
         default: {
-            char *e = (char*)malloc(1); e[0]='\0'; return (taida_val)e;
+            char *e = (char*)TAIDA_MALLOC(1, "json_default_empty"); e[0]='\0'; return (taida_val)e;
         }
     }
 }
@@ -5431,7 +5444,7 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
         case 's': {
             *desc = d + 1;
             if (!jval || jval->type == JSON_NULL) {
-                char *e = (char*)malloc(1); e[0]='\0'; return (taida_val)e;
+                char *e = (char*)TAIDA_MALLOC(1, "json_null_str"); e[0]='\0'; return (taida_val)e;
             }
             return json_to_str(jval);
         }
@@ -5501,7 +5514,7 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
             // Add __type field
             uint64_t type_hash = fnv1a("__type", 6);
             taida_pack_set_hash(pack, idx, (taida_val)type_hash);
-            char *type_str = (char*)malloc(tn_len + 1);
+            char *type_str = (char*)TAIDA_MALLOC(tn_len + 1, "json_type_str");
             memcpy(type_str, type_name, tn_len + 1);
             taida_pack_set(pack, idx, (taida_val)type_str);
 
@@ -5515,7 +5528,7 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
             // Find closing brace
             int inner_len = schema_find_closing_brace(d);
             // Make a copy of the inner descriptor for repeated use
-            char *inner_desc = (char*)malloc(inner_len + 1);
+            char *inner_desc = (char*)TAIDA_MALLOC(inner_len + 1, "json_inner_desc");
             memcpy(inner_desc, d, inner_len);
             inner_desc[inner_len] = '\0';
 
@@ -5599,13 +5612,13 @@ taida_val taida_json_parse(taida_val str_ptr) {
     const char *src = (const char*)str_ptr;
     if (!src) src = "{}";
     size_t len = strlen(src);
-    char *buf = (char*)malloc(len + 1);
+    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_parse");
     memcpy(buf, src, len + 1);
     return (taida_val)buf;
 }
 
 taida_val taida_json_empty(void) {
-    char *buf = (char*)malloc(3);
+    char *buf = (char*)TAIDA_MALLOC(3, "json_empty");
     buf[0] = '{'; buf[1] = '}'; buf[2] = '\0';
     return (taida_val)buf;
 }
@@ -5614,7 +5627,7 @@ taida_val taida_json_from_int(taida_val value) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%" PRId64 "", value);
     size_t len = strlen(buf);
-    char *result = (char*)malloc(len + 1);
+    char *result = (char*)TAIDA_MALLOC(len + 1, "json_from_int");
     memcpy(result, buf, len + 1);
     return (taida_val)result;
 }
@@ -5624,7 +5637,7 @@ taida_val taida_json_from_str(taida_val str_ptr) {
     if (!src) src = "";
     size_t src_len = strlen(src);
     size_t new_len = src_len + 2;
-    char *buf = (char*)malloc(new_len + 1);
+    char *buf = (char*)TAIDA_MALLOC(new_len + 1, "json_from_str");
     buf[0] = '"';
     memcpy(buf + 1, src, src_len);
     buf[new_len - 1] = '"';
@@ -5634,9 +5647,9 @@ taida_val taida_json_from_str(taida_val str_ptr) {
 
 taida_val taida_json_unmold(taida_val json_ptr) {
     const char *src = (const char*)json_ptr;
-    if (!src) { char *e = (char*)malloc(1); e[0]='\0'; return (taida_val)e; }
+    if (!src) { char *e = (char*)TAIDA_MALLOC(1, "json_unmold_empty"); e[0]='\0'; return (taida_val)e; }
     size_t len = strlen(src);
-    char *buf = (char*)malloc(len + 1);
+    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_unmold");
     memcpy(buf, src, len + 1);
     return (taida_val)buf;
 }
@@ -6002,7 +6015,7 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
 taida_val taida_json_encode(taida_val val) {
     size_t cap = 256;
     size_t len = 0;
-    char *buf = (char*)malloc(cap);
+    char *buf = (char*)TAIDA_MALLOC(cap, "json_encode");
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 0, 0, 0);
     return (taida_val)buf;
@@ -6011,7 +6024,7 @@ taida_val taida_json_encode(taida_val val) {
 taida_val taida_json_pretty(taida_val val) {
     size_t cap = 256;
     size_t len = 0;
-    char *buf = (char*)malloc(cap);
+    char *buf = (char*)TAIDA_MALLOC(cap, "json_pretty");
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 2, 0, 0);
     return (taida_val)buf;
@@ -6466,7 +6479,8 @@ taida_val taida_os_stat(taida_val path_ptr) {
     if (tm_utc) {
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", tm_utc);
     } else {
-        strcpy(time_buf, "1970-01-01T00:00:00Z");
+        // N-40: strcpy → snprintf for bounded write
+        snprintf(time_buf, sizeof(time_buf), "%s", "1970-01-01T00:00:00Z");
     }
     char *time_str = taida_str_new_copy(time_buf);
 
@@ -6526,7 +6540,7 @@ taida_val taida_os_write_bytes(taida_val path_ptr, taida_val content_ptr) {
         taida_val *bytes = (taida_val*)content_ptr;
         taida_val len = bytes[1];
         if (len < 0) return taida_os_result_failure(EINVAL, "writeBytes: invalid bytes payload");
-        payload_buf = (unsigned char*)malloc((size_t)len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "writeBytes_payload");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
@@ -6535,7 +6549,7 @@ taida_val taida_os_write_bytes(taida_val path_ptr, taida_val content_ptr) {
         if (!taida_read_cstr_len_safe(content, 65536, &content_len)) {
             return taida_os_result_failure(EINVAL, "writeBytes: invalid data");
         }
-        payload_buf = (unsigned char*)malloc(content_len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC(content_len, "writeBytes_payload");
         memcpy(payload_buf, content, content_len);
         payload_len = content_len;
     }
@@ -6588,7 +6602,7 @@ static int taida_os_remove_recursive(const char *path) {
         while ((entry = readdir(dir)) != NULL) {
             if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
             size_t pathlen = strlen(path) + strlen(entry->d_name) + 2;
-            char *child = (char*)malloc(pathlen);
+            char *child = (char*)TAIDA_MALLOC(pathlen, "remove_recursive");
             snprintf(child, pathlen, "%s/%s", path, entry->d_name);
             int r = taida_os_remove_recursive(child);
             free(child);
@@ -6705,7 +6719,7 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
 
     // Read stdout
     size_t out_cap = 4096, out_len = 0;
-    char *out_buf = (char*)malloc(out_cap);
+    char *out_buf = (char*)TAIDA_MALLOC(out_cap, "os_run_stdout");
     ssize_t n;
     while ((n = read(stdout_pipe[0], out_buf + out_len, out_cap - out_len - 1)) > 0) {
         out_len += n;
@@ -6719,7 +6733,7 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
 
     // Read stderr
     size_t err_cap = 4096, err_len = 0;
-    char *err_buf = (char*)malloc(err_cap);
+    char *err_buf = (char*)TAIDA_MALLOC(err_cap, "os_run_stderr");
     while ((n = read(stderr_pipe[0], err_buf + err_len, err_cap - err_len - 1)) > 0) {
         err_len += n;
         if (err_len >= err_cap - 1) {
@@ -6782,7 +6796,7 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
     close(stderr_pipe[1]);
 
     size_t out_cap = 4096, out_len = 0;
-    char *out_buf = (char*)malloc(out_cap);
+    char *out_buf = (char*)TAIDA_MALLOC(out_cap, "execShell_stdout");
     ssize_t n;
     while ((n = read(stdout_pipe[0], out_buf + out_len, out_cap - out_len - 1)) > 0) {
         out_len += n;
@@ -6792,7 +6806,7 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
     close(stdout_pipe[0]);
 
     size_t err_cap = 4096, err_len = 0;
-    char *err_buf = (char*)malloc(err_cap);
+    char *err_buf = (char*)TAIDA_MALLOC(err_cap, "execShell_stderr");
     while ((n = read(stderr_pipe[0], err_buf + err_len, err_cap - err_len - 1)) > 0) {
         err_len += n;
         if (err_len >= err_cap - 1) { err_cap *= 2; TAIDA_REALLOC(err_buf, err_cap, "execShell_stderr"); }
@@ -6907,7 +6921,7 @@ static taida_val taida_os_http_failure_lax(void) {
 
 static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
     if (!headers_ptr || !taida_is_buchi_pack(headers_ptr)) {
-        char *empty = (char*)malloc(1);
+        char *empty = (char*)TAIDA_MALLOC(1, "http_headers_empty");
         empty[0] = '\0';
         return empty;
     }
@@ -6916,7 +6930,7 @@ static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
     taida_val fc = pack[1];
     size_t cap = 128;
     size_t len = 0;
-    char *buf = (char*)malloc(cap);
+    char *buf = (char*)TAIDA_MALLOC(cap, "http_headers");
     buf[0] = '\0';
 
     for (taida_val i = 0; i < fc; i++) {
@@ -6939,7 +6953,7 @@ static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
         taida_str_release(value_str_ptr);
         if (n < 0) {
             free(buf);
-            char *empty = (char*)malloc(1);
+            char *empty = (char*)TAIDA_MALLOC(1, "http_headers_err");
             empty[0] = '\0';
             return empty;
         }
@@ -6975,7 +6989,7 @@ static taida_val taida_os_http_parse_headers(const char *header_start, const cha
         const char *colon = memchr(scan, ':', (size_t)(line_end - scan));
         if (colon) {
             size_t key_len = (size_t)(colon - scan);
-            char *key = (char*)malloc(key_len + 1);
+            char *key = (char*)TAIDA_MALLOC(key_len + 1, "http_header_key");
             for (size_t i = 0; i < key_len; i++) {
                 char c = scan[i];
                 if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
@@ -6986,7 +7000,7 @@ static taida_val taida_os_http_parse_headers(const char *header_start, const cha
             const char *value_start = colon + 1;
             while (value_start < line_end && (*value_start == ' ' || *value_start == '\t')) value_start++;
             size_t value_len = (size_t)(line_end - value_start);
-            char *value = (char*)malloc(value_len + 1);
+            char *value = (char*)TAIDA_MALLOC(value_len + 1, "http_header_value");
             memcpy(value, value_start, value_len);
             value[value_len] = '\0';
 
@@ -7282,7 +7296,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     size_t body_len = strlen(body_str);
     size_t header_lines_len = strlen(header_lines);
     size_t req_cap = strlen(method_str) + strlen(path) + strlen(host_buf) + header_lines_len + body_len + 256;
-    char *request = (char*)malloc(req_cap);
+    char *request = (char*)TAIDA_MALLOC(req_cap, "http_request");
 
     int req_len;
     if (body_len > 0) {
@@ -7319,7 +7333,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     free(request);
 
     size_t buf_cap = 65536;
-    char *resp_buf = (char*)malloc(buf_cap);
+    char *resp_buf = (char*)TAIDA_MALLOC(buf_cap, "http_recv");
     size_t resp_len = 0;
     ssize_t n;
     while ((n = recv(sockfd, resp_buf + resp_len, buf_cap - resp_len - 1, 0)) > 0) {
@@ -7346,7 +7360,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
 
     char *resp_body = header_end + 4;
     size_t resp_body_len = resp_len - (size_t)(resp_body - resp_buf);
-    char *body_copy = (char*)malloc(resp_body_len + 1);
+    char *body_copy = (char*)TAIDA_MALLOC(resp_body_len + 1, "http_body");
     memcpy(body_copy, resp_body, resp_body_len);
     body_copy[resp_body_len] = '\0';
 
@@ -7584,7 +7598,7 @@ taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_va
         taida_val *bytes = (taida_val*)data_ptr;
         taida_val len = bytes[1];
         if (len < 0) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSend: invalid data"));
-        payload_buf = (unsigned char*)malloc((size_t)len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "socketSend_bytes");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
@@ -7593,7 +7607,7 @@ taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_va
         if (!taida_read_cstr_len_safe(data, 65536, &data_len)) {
             return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSend: invalid data"));
         }
-        payload_buf = (unsigned char*)malloc(data_len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC(data_len, "socketSend_str");
         memcpy(payload_buf, data, data_len);
         payload_len = data_len;
     }
@@ -7623,7 +7637,7 @@ taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taid
         taida_val *bytes = (taida_val*)data_ptr;
         taida_val len = bytes[1];
         if (len < 0) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSendAll: invalid data"));
-        payload_buf = (unsigned char*)malloc((size_t)len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "socketSendAll_bytes");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
@@ -7632,7 +7646,7 @@ taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taid
         if (!taida_read_cstr_len_safe(data, 65536, &data_len)) {
             return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSendAll: invalid data"));
         }
-        payload_buf = (unsigned char*)malloc(data_len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC(data_len, "socketSendAll_payload");
         memcpy(payload_buf, data, data_len);
         payload_len = data_len;
     }
@@ -7814,7 +7828,7 @@ taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_va
         if (len < 0) {
             return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: invalid bytes payload"));
         }
-        payload_buf = (unsigned char*)malloc((size_t)len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "udpSendTo_bytes");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
     } else {
@@ -7823,7 +7837,7 @@ taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_va
         if (!taida_read_cstr_len_safe(data, 65536, &data_len)) {
             return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: invalid data"));
         }
-        payload_buf = (unsigned char*)malloc(data_len);
+        payload_buf = (unsigned char*)TAIDA_MALLOC(data_len, "socketSend_payload");
         memcpy(payload_buf, data, data_len);
         payload_len = data_len;
     }
