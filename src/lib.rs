@@ -11,3 +11,4 @@ pub mod module_graph;
 pub mod parser;
 pub mod pkg;
 pub mod types;
+pub mod util;

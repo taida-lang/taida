@@ -39,7 +39,7 @@ impl Default for GlobalStore {
 impl GlobalStore {
     /// Create a new GlobalStore using the default location (`~/.taida/store/`).
     pub fn new() -> Self {
-        let home = crate::auth::token::taida_home_dir()
+        let home = crate::util::taida_home_dir()
             .unwrap_or_else(|_| std::env::temp_dir());
         GlobalStore {
             root: home.join(".taida").join("store"),
@@ -485,16 +485,7 @@ mod tests {
     /// execution. Run with `cargo test --test-threads=1` if it fails intermittently.
     #[test]
     fn test_global_store_fallback_uses_temp_dir() {
-        use std::sync::Mutex;
-        use std::sync::OnceLock;
-
-        // Environment variable tests need serialization
-        fn store_env_lock() -> &'static Mutex<()> {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            LOCK.get_or_init(|| Mutex::new(()))
-        }
-
-        let _guard = store_env_lock().lock().unwrap();
+        let _guard = crate::util::env_test_lock().lock().unwrap();
 
         let original_home = std::env::var("HOME").ok();
         let original_userprofile = std::env::var("USERPROFILE").ok();

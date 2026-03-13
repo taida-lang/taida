@@ -9,22 +9,14 @@ pub struct AuthToken {
     pub created_at: String,
 }
 
-/// ホームディレクトリを解決する共通関数。
-/// HOME -> USERPROFILE の順で検索し、いずれも未設定の場合はエラーを返す。
-pub fn taida_home_dir() -> Result<PathBuf, String> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .map_err(|_| {
-            "Home directory not found: neither HOME nor USERPROFILE is set".to_string()
-        })
-}
+/// Re-export for backward compatibility.
+pub use crate::util::taida_home_dir;
 
 /// ~/.taida/auth.json のパスを返す。
 /// HOME -> USERPROFILE の順でホームディレクトリを検索し、
 /// いずれも未設定の場合はエラーを返す。
 pub fn auth_json_path() -> Result<PathBuf, String> {
-    Ok(taida_home_dir()?.join(".taida").join("auth.json"))
+    Ok(crate::util::taida_home_dir()?.join(".taida").join("auth.json"))
 }
 
 /// 保存された認証トークンを読み込む。存在しなければ None を返す。
@@ -147,18 +139,10 @@ fn chrono_rfc3339_now() -> String {
 mod tests {
     use super::*;
     use std::env;
-    use std::sync::Mutex;
-
-    /// 環境変数を操作するテスト間の競合を防ぐためのロック
-    fn auth_env_lock() -> &'static Mutex<()> {
-        use std::sync::OnceLock;
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn test_auth_json_path_home() {
-        let _guard = auth_env_lock().lock().unwrap();
+        let _guard = crate::util::env_test_lock().lock().unwrap();
         // HOME が設定されている場合はそれを使う
         let path = auth_json_path().expect("auth_json_path should succeed when HOME is set");
         assert!(path.to_string_lossy().ends_with(".taida/auth.json"));
@@ -166,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_auth_json_path_userprofile_fallback() {
-        let _guard = auth_env_lock().lock().unwrap();
+        let _guard = crate::util::env_test_lock().lock().unwrap();
 
         let original_home = env::var("HOME").ok();
         let tmp = env::temp_dir().join("taida_test_userprofile");
@@ -201,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_auth_json_path_no_home_no_userprofile() {
-        let _guard = auth_env_lock().lock().unwrap();
+        let _guard = crate::util::env_test_lock().lock().unwrap();
 
         let original_home = env::var("HOME").ok();
         let original_userprofile = env::var("USERPROFILE").ok();
@@ -260,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_save_token_sets_permissions() {
-        let _guard = auth_env_lock().lock().unwrap();
+        let _guard = crate::util::env_test_lock().lock().unwrap();
 
         let tmp = env::temp_dir().join("taida_test_auth_perms");
         let _ = fs::remove_dir_all(&tmp);

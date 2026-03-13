@@ -332,7 +332,7 @@ impl CoreBundledProvider {
 
     /// Get the global bundled directory (`~/.taida/bundled/`).
     fn global_bundled_root() -> PathBuf {
-        let home = crate::auth::token::taida_home_dir()
+        let home = crate::util::taida_home_dir()
             .unwrap_or_else(|_| std::env::temp_dir());
         home.join(".taida").join("bundled")
     }
