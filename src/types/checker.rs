@@ -9,6 +9,17 @@ use crate::parser::*;
 /// - No implicit type conversion
 /// - Structural subtyping (width subtyping)
 /// - Scope-aware type inference
+///
+/// ## Type inference convention: `unwrap_or(Type::Unknown)` (N-67)
+///
+/// Throughout this module, `.unwrap_or(Type::Unknown)` is the standard fallback
+/// when type information is unavailable (e.g., unresolved generics, missing
+/// function parameter types, cross-module imports). `Type::Unknown` is **not**
+/// an error type -- it is a valid propagation signal meaning "the checker cannot
+/// determine this type statically." Unknown propagates silently through
+/// expressions, and downstream checks skip validation when either operand is
+/// Unknown. This prevents cascading false-positive errors while still catching
+/// errors where types are fully known.
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -23,6 +34,31 @@ struct MoldBindingDef<'a> {
 }
 
 /// Type checking error.
+///
+/// ## Error code convention (N-68)
+///
+/// Error codes follow the pattern `[EXXXX]` where:
+/// - `E1301` -- arity errors (too many/few arguments)
+/// - `E1302` -- default parameter reference errors
+/// - `E1303` -- default parameter type mismatch
+/// - `E1501` -- same-scope redefinition
+/// - `E1502` -- undefined variable / deprecated syntax
+/// - `E1503` -- unsupported partial application
+/// - `E1504` -- placeholder outside pipeline
+/// - `E1505` -- partial application slot count mismatch
+/// - `E1506` -- argument type mismatch
+/// - `E1507` -- builtin arity mismatch
+/// - `E1508` -- method argument error
+/// - `E1509` -- unknown method / generic constraint violation
+/// - `E1510` -- non-callable invocation
+/// - `E1601` -- return type mismatch
+/// - `E1605` -- comparison type mismatch
+/// - `E1606` -- logical operator type mismatch
+/// - `E1607` -- unary operator type mismatch
+///
+/// Some internal diagnostic messages (e.g., inheritance validation, mold binding
+/// checks) do not yet carry error codes. These are emitted during registration
+/// and are not user-facing in the same way as expression-level diagnostics.
 #[derive(Debug, Clone)]
 pub struct TypeError {
     pub message: String,
@@ -687,6 +723,17 @@ impl TypeChecker {
     }
 
     /// Define a variable in the current scope.
+    ///
+    /// ## Scope stack invariant (N-75)
+    ///
+    /// `scope_stack` is **always non-empty** after construction. The global scope
+    /// is pushed in `TypeChecker::new()` as `vec![HashMap::new()]`, and
+    /// `pop_scope()` only removes inner scopes pushed by `push_scope()`.
+    /// No code path calls `pop_scope()` without a preceding `push_scope()`,
+    /// so the global scope is never popped. Methods like `define_var`,
+    /// `define_var_with_span`, `lookup_var`, and `all_visible_vars` all rely
+    /// on this invariant via `.last_mut()` / `.iter().rev()`.
+    ///
     /// If `span` is provided and the name already exists in the current scope,
     /// a compile error is reported (same-scope redefinition is forbidden).
     /// Shadowing across scopes (inner scope redefines outer) is allowed.
@@ -811,6 +858,10 @@ impl TypeChecker {
                 Statement::InheritanceDef(inh) => {
                     self.declared_concrete_type_names.insert(inh.child.clone());
                 }
+                // N-64: Intentional catch-all — the first pass only collects TypeDef,
+                // MoldDef, and InheritanceDef names for forward-reference resolution.
+                // All other statement kinds (Assignment, FuncDef, Expr, etc.) are
+                // processed in the second pass by check_statement().
                 _ => {}
             }
         }
@@ -1881,7 +1932,10 @@ defaulted fields must be provided via `()`",
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
             }
-            // Type defs are handled in first pass
+            // N-65: Intentional catch-all — TypeDef, MoldDef, and InheritanceDef
+            // are registered in the first pass of check_program(). Additional
+            // statement kinds (e.g., future AST variants) will need explicit arms
+            // added here when introduced.
             _ => {}
         }
     }
