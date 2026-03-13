@@ -173,7 +173,13 @@ impl JsCodegen {
                 }
                 if on_stack.contains(target.as_str()) {
                     // Found a cycle! Mark all functions in the cycle for trampolining
-                    let cycle_start = path.iter().position(|n| n == target).unwrap();
+                    // SAFETY: `on_stack` and `path` are maintained in lockstep —
+                    // every element pushed to `on_stack` is also pushed to `path`,
+                    // so `on_stack.contains(target)` guarantees `path` contains `target`.
+                    let cycle_start = path
+                        .iter()
+                        .position(|n| n == target)
+                        .expect("on_stack/path invariant: target must exist in path");
                     for func_in_cycle in &path[cycle_start..] {
                         self.trampoline_funcs.insert(func_in_cycle.clone());
                     }
@@ -879,6 +885,11 @@ impl JsCodegen {
         self.in_async_context = false;
         let header_args = mold_def.name_args.as_ref().unwrap_or(&mold_def.mold_args);
         self.gen_custom_mold_factory(&mold_def.name, header_args, &mold_def.fields)?;
+        // Register fields for later use by inheritance lookups. This is populated
+        // only when `gen_mold_def()` runs, so the registry depends on definition
+        // order. The parser guarantees that base mold definitions precede derived
+        // ones within the same file, which is the only ordering this registry
+        // relies on.
         self.mold_field_registry
             .insert(mold_def.name.clone(), mold_def.fields.clone());
 
@@ -940,6 +951,12 @@ impl JsCodegen {
         self.writeln("const obj = {");
         self.indent += 1;
         self.writeln(&format!("__type: '{}',", name));
+        // Map type parameters to their corresponding field bindings.
+        // The first type param maps to `filling`, subsequent ones map to
+        // required fields in order. If a mold declares more type params
+        // than there are fields + filling, the excess params fall back to
+        // `"undefined"` — this is a defensive default since the type checker
+        // should reject such definitions before codegen runs.
         let type_arg_bindings: Vec<String> = std::iter::once("filling".to_string())
             .chain(required_fields.iter().map(|f| f.name.clone()))
             .collect();
@@ -1106,10 +1123,26 @@ impl JsCodegen {
         let td_path = match &resolution.submodule {
             Some(submodule) => resolution.pkg_dir.join(submodule),
             None => {
-                // Read packages.tdm for entry point
+                // Read packages.tdm for entry point.
+                // If the manifest is missing or unreadable, fall back to "main.td"
+                // which is the conventional default entry point for Taida packages.
                 let entry = match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
                     Ok(Some(manifest)) => manifest.entry,
-                    _ => "main.td".to_string(),
+                    Ok(None) => {
+                        eprintln!(
+                            "Warning: no packages.tdm found in '{}', using 'main.td' as entry point",
+                            resolution.pkg_dir.display()
+                        );
+                        "main.td".to_string()
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: failed to read packages.tdm in '{}': {}, using 'main.td' as entry point",
+                            resolution.pkg_dir.display(),
+                            e
+                        );
+                        "main.td".to_string()
+                    }
                 };
                 let entry_clean = entry.strip_prefix("./").unwrap_or(&entry);
                 resolution.pkg_dir.join(entry_clean)
@@ -1841,6 +1874,9 @@ impl JsCodegen {
                     return Ok(());
                 }
                 // TODO[T](id <= ..., task <= ..., sol <= ..., unm <= ...)
+                // The runtime uses `__type: 'TODO'` as the discriminant marker,
+                // matching the mold name in source. This is consistent with how
+                // other mold types (Lax, Result, etc.) use their name as `__type`.
                 if name == "TODO" {
                     self.write("__taida_todo_mold(");
                     if let Some(arg0) = type_args.first() {
@@ -2047,6 +2083,18 @@ impl JsCodegen {
     }
 
     /// テンプレートリテラル内の Taida 構文を JS 構文に変換
+    ///
+    /// Handles two categories of conversion:
+    /// 1. **Text segments** (outside `${...}`): escape `\`, `` ` ``, and convert
+    ///    `@[` to `[` and `.length()` to `.length_()`.
+    /// 2. **Interpolation segments** (`${...}`): convert `@[` and `.length()` only,
+    ///    without adding escape sequences.
+    ///
+    /// Limitation: nested `${...}` and complex expressions inside interpolation
+    /// blocks are handled by simple brace matching (first `}` closes the block).
+    /// Deeply nested braces (e.g. `${fn(@(a <= 1))}`) would be mis-split. In
+    /// practice, Taida's template interpolation is single-expression, so this
+    /// suffices for all current use cases.
     fn convert_template_list_literals(template: &str) -> String {
         // Template literals: convert Taida syntax to JS.
         // Segment the template so that escaping is only applied to text outside ${...}
@@ -2091,6 +2139,10 @@ impl JsCodegen {
             return Ok(());
         }
 
+        // Pipeline is wrapped in an IIFE `(() => { ... })()`, so the `__p`
+        // accumulator variable is scoped to the IIFE and cannot collide with
+        // user-defined variables in the surrounding scope. The `__` prefix is
+        // a defensive convention to avoid shadowing within the pipeline body.
         self.write("(() => {\n");
         self.indent += 1;
 
