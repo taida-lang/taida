@@ -266,11 +266,21 @@ static int _wasm_is_lax(int64_t val);
 static int _wasm_is_result(int64_t val);
 static int _wasm_is_gorillax(int64_t val);
 int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);
+int64_t taida_pack_new(int64_t field_count);
+int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
+int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);
 int64_t taida_throw(int64_t error_val);
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
 int64_t taida_can_throw_payload(int64_t val);
 static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
 static int64_t _wasm_result_is_error_check(int64_t result);
+
+/* ── Hash constants needed by taida_generic_unmold (full definitions in W-5) ── */
+#define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
+#define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
+#define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
+#define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
 
 /* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
@@ -812,18 +822,28 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
 /* WFX-2: corrected FNV-1a hashes (previous values were wrong, causing
    field access mismatch with compiler-generated hashes from simple_hash()) */
 #define WASM_HASH_HAS_VALUE   0x9e9c6dc733414d60LL  /* FNV-1a("hasValue") */
+#ifndef WASM_HASH___VALUE
 #define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
+#endif
+#ifndef WASM_HASH___TYPE
 #define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
+#endif
 #define WASM_HASH_IS_OK       0x6550c1c5b98b56bfLL  /* FNV-1a("isOk") */
 #define WASM_HASH___ERROR     0x15c3e6e41a99a6cbLL  /* FNV-1a("__error") */
+#ifndef WASM_HASH___DEFAULT
 #define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#endif
 #define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
 #define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 /* BE-WASM-1: TODO field hashes (matching native_runtime.c) */
 #define WASM_HASH_TODO_ID     0x08b72e07b55c3ac0LL  /* FNV-1a("id") */
 #define WASM_HASH_TODO_TASK   0xd9603bef07a9524cLL  /* FNV-1a("task") */
+#ifndef WASM_HASH_TODO_SOL
 #define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
+#endif
+#ifndef WASM_HASH_TODO_UNM
 #define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
+#endif
 
 /* W-4f2: Dynamic string buffer for building collection toString output */
 typedef struct {
