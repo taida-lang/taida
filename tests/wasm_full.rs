@@ -851,23 +851,15 @@ fn wasm_full_parity_all_examples() {
     // Note: stems that fail at the native build/run stage go into native_fail, not here.
     // If this list shrinks, update the count -- that's progress.
     // If it grows, the test fails -- that's a regression.
+    // NTH-6: allowlist reduced after NTH-5 poly_add string support enabled
+    // 10 examples that previously failed now compile and pass parity.
     let expected_rejected: Vec<&str> = vec![
-        "07_closures",
         "09_modules",
-        "10_list_operations",
-        "11_introspection",
         "13_async",
         "14_unmold_backward",
-        "16_unmold_both_directions",
-        "30_class_like_methods",
-        "api_client",
         "compile_async",
-        "compile_hof_molds",
-        "compile_lambda",
         "compile_module",
         "compile_module_value",
-        "compile_pack_field_call",
-        "wasm_min_pi_approx",
     ];
 
     // Expected allowlist: examples where native backend itself fails (build or run).
@@ -907,10 +899,11 @@ fn wasm_full_parity_all_examples() {
     //   06_lists: string Reverse mold produces different garbled output on native vs wasm
     //   11_introspection: pointer addresses differ between native and wasm memory layouts
     //   27_prelude_result: mapError toString differs (different error representation)
+    // NTH-6: updated from 42 to 51 after NTH-5 poly_add string support
     assert_eq!(
         parity_ok.len(),
-        42,
-        "WF-5: Expected exactly 42 parity-OK examples, got {}. \
+        51,
+        "WF-5: Expected exactly 51 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
