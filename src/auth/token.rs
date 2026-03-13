@@ -82,13 +82,15 @@ pub fn save_token(github_token: &str, username: &str) -> Result<(), String> {
 }
 
 /// 認証トークンファイルを削除する。
+/// NTH-2: TOCTOU 解消 — exists() チェックを行わず直接 remove_file() を呼び、
+/// NotFound は正常終了として扱う。
 pub fn delete_token() -> Result<(), String> {
     let path = auth_json_path()?;
-    if path.exists() {
-        fs::remove_file(&path)
-            .map_err(|e| format!("Failed to delete {}: {}", path.display(), e))?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to delete {}: {}", path.display(), e)),
     }
-    Ok(())
 }
 
 /// Unix エポックからの秒数を RFC 3339 タイムスタンプ文字列に変換する。
