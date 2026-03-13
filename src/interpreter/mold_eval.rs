@@ -169,6 +169,11 @@ impl Interpreter {
 
     /// Try to evaluate a new operation mold type (Str/Num/List molds with fields support).
     /// Returns None if the name is not a recognized operation mold.
+    ///
+    /// This match has many arms because it covers every built-in mold in the
+    /// language. Each arm is a self-contained handler; splitting into separate
+    /// functions would lose the ability to return `Result<Option<Signal>>` directly
+    /// and would increase indirection without reducing complexity.
     pub(crate) fn try_operation_mold(
         &mut self,
         name: &str,
@@ -790,7 +795,8 @@ impl Interpreter {
                     "ShiftL" => Value::Int(x.wrapping_shl(n as u32)),
                     "ShiftR" => Value::Int(x >> n),
                     "ShiftRU" => Value::Int(((x as u64) >> (n as u32)) as i64),
-                    _ => unreachable!(),
+                    // SAFETY: match arm covers only "ShiftL"/"ShiftR"/"ShiftRU" names
+                    _ => unreachable!("only ShiftL/ShiftR/ShiftRU reach this arm"),
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
@@ -1709,8 +1715,15 @@ impl Interpreter {
             }
 
             // TODO[T](): executable todo annotation wrapper.
-            // - `sol` is stored as the solidify channel (`__value`)
-            // - `unm` is returned by `]=>` (see unmold.rs)
+            //
+            // Layout:
+            //   id   — task identifier (optional)
+            //   task — description of the pending work
+            //   sol  — solidify channel (`__value`): the current placeholder value
+            //   unm  — unmold channel (`__default`): the value returned by `]=>`
+            //
+            // When T is provided, both `sol` and `unm` default to `default_for_type(T)`.
+            // See unmold.rs for the unmold (`]=>`) behavior.
             "TODO" => {
                 let type_default = if let Some(arg) = type_args.first() {
                     self.todo_default_from_type_arg(arg)?

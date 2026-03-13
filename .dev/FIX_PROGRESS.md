@@ -136,19 +136,19 @@ WASM profile の意味論不一致。beta では WASM は experimental 扱いで
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 35 | N-1 | `body_expr()` の非式 arm で `panic!()` | [P] | `DONE` | `src/parser/ast.rs:307` |
-| 36 | N-2 | `peek_at()` が `tokens.last().unwrap()` | [P] | `DONE` | `src/parser/parser.rs:119` |
-| 37 | N-3 | `advance()` 境界チェックなし | [P] | `DONE` | `src/parser/parser.rs:124` |
-| 38 | N-4 | `scan_number()` の直接インデックス | [P] | `DONE` | `src/lexer/lexer.rs:363` |
-| 39 | N-5 | バージョン文字列パーサーの状態機械が複雑 | [M] | `DONE` | `src/parser/parser.rs:869-1031` |
-| 40 | N-6 | Mold 判別のバックトラック | [L] | `DONE` | `src/parser/parser_expr.rs:244-306` |
-| 41 | N-7 | ブロック境界のインデント検出 | [L] | `DONE` | `src/parser/parser.rs:1073-1148` |
-| 42 | N-8 | `synchronize()` のスキップ範囲 | [L] | `DONE` | `src/parser/parser.rs:221-231` |
-| 43 | N-9 | import パス未知トークンのデバッグ文字列化 | [E] | `DONE` | `src/parser/parser.rs:768-771` |
-| 44 | N-10 | 不正エスケープがトークンに含まれたまま | [E] | `DONE` | `src/lexer/lexer.rs:554-562` |
-| 45 | N-11 | テンプレート文字列の不明エスケープがログなし | [E] | `DONE` | `src/lexer/lexer.rs:606-609` |
-| 46 | N-12 | `peek_at(offset)` にルックアヘッド上限なし | [L] | `DONE` | `src/parser/parser.rs` |
-| 47 | N-13 | 行継続の前処理が複雑 | [M] | `DONE` | `src/parser/parser.rs:43-70` |
+| 35 | N-1 | `body_expr()` の非式 arm で `panic!()` | [P] | `VERIFIED` | `src/parser/ast.rs:307` |
+| 36 | N-2 | `peek_at()` が `tokens.last().unwrap()` | [P] | `VERIFIED` | `src/parser/parser.rs:119` |
+| 37 | N-3 | `advance()` 境界チェックなし | [P] | `VERIFIED` | `src/parser/parser.rs:124` |
+| 38 | N-4 | `scan_number()` の直接インデックス | [P] | `VERIFIED` | `src/lexer/lexer.rs:363` |
+| 39 | N-5 | バージョン文字列パーサーの状態機械が複雑 | [M] | `VERIFIED` | `src/parser/parser.rs:869-1031` |
+| 40 | N-6 | Mold 判別のバックトラック | [L] | `VERIFIED` | `src/parser/parser_expr.rs:244-306` |
+| 41 | N-7 | ブロック境界のインデント検出 | [L] | `VERIFIED` | `src/parser/parser.rs:1073-1148` |
+| 42 | N-8 | `synchronize()` のスキップ範囲 | [L] | `VERIFIED` | `src/parser/parser.rs:221-231` |
+| 43 | N-9 | import パス未知トークンのデバッグ文字列化 | [E] | `VERIFIED` | `src/parser/parser.rs:768-771` |
+| 44 | N-10 | 不正エスケープがトークンに含まれたまま | [E] | `VERIFIED` | `src/lexer/lexer.rs:554-562` |
+| 45 | N-11 | テンプレート文字列の不明エスケープがログなし | [E] | `VERIFIED` | `src/lexer/lexer.rs:606-609` |
+| 46 | N-12 | `peek_at(offset)` にルックアヘッド上限なし | [L] | `VERIFIED` | `src/parser/parser.rs` |
+| 47 | N-13 | 行継続の前処理が複雑 | [M] | `VERIFIED` | `src/parser/parser.rs:43-70` |
 
 ---
 
@@ -158,24 +158,24 @@ unwrap パターン、silent default、テストコードの改善。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 48 | N-14 | `chars().nth(idx).unwrap()` (charAt) | [P] | `TODO` | `src/interpreter/methods.rs:1055` |
-| 49 | N-15 | `scopes.last_mut().unwrap()` (define) | [P] | `TODO` | `src/interpreter/env.rs:43` |
-| 50 | N-16 | `scopes.last_mut().unwrap()` (define_force) | [P] | `TODO` | `src/interpreter/env.rs:57` |
-| 51 | N-17 | async resolve の check-then-unwrap | [P] | `TODO` | `src/interpreter/unmold.rs:43` |
-| 52 | N-18 | async resolve の check-then-unwrap (別箇所) | [P] | `TODO` | `src/interpreter/unmold.rs:109` |
-| 53 | N-19 | テスト内の `panic!("Expected ...")` (11箇所) | [T] | `TODO` | `src/interpreter/json.rs` |
-| 54 | N-20 | 統合テストの `panic!("Expected Bool...")` | [T] | `TODO` | `src/interpreter/os_eval.rs:2505,2538` |
-| 55 | N-21 | `unreachable!()` にコメントなし | [M] | `TODO` | `src/interpreter/mold_eval.rs:793` |
-| 56 | N-22 | check-then-unwrap アンチパターン | [M] | `TODO` | `src/interpreter/unmold.rs:43,109` |
-| 57 | N-23 | JSON パース失敗時の silent default | [E] | `TODO` | `src/interpreter/json.rs:254,260,264,274` |
-| 58 | N-24 | `parent().unwrap_or(Path::new("."))` | [E] | `TODO` | `src/interpreter/module_eval.rs:21,89` |
-| 59 | N-25 | export シンボル不在時の silent fallback | [E] | `TODO` | `src/interpreter/module_eval.rs:380` |
-| 60 | N-26 | TODO コメント残存 (`]=>` channel) | [M] | `TODO` | `src/interpreter/unmold.rs:263` |
-| 61 | N-27 | TODO mold コメントが探索的実装を示唆 | [M] | `TODO` | `src/interpreter/mold_eval.rs:1711-1738` |
-| 62 | N-28 | "unexpected signal" にシグナル型が含まれない | [E] | `TODO` | `src/interpreter/os_eval.rs` |
-| 63 | N-29 | Tokio runtime の `expect()` | [P] | `TODO` | `src/interpreter/eval.rs:139` |
-| 64 | N-30 | Pipeline scope の RAII ガードなし | [L] | `TODO` | `src/interpreter/control_flow.rs:32-55` |
-| 65 | N-31 | `eval_mold()` の match arm が巨大 | [M] | `TODO` | `src/interpreter/mold_eval.rs` |
+| 48 | N-14 | `chars().nth(idx).unwrap()` (charAt) | [P] | `DONE` | `src/interpreter/methods.rs:1055` |
+| 49 | N-15 | `scopes.last_mut().unwrap()` (define) | [P] | `DONE` | `src/interpreter/env.rs:43` |
+| 50 | N-16 | `scopes.last_mut().unwrap()` (define_force) | [P] | `DONE` | `src/interpreter/env.rs:57` |
+| 51 | N-17 | async resolve の check-then-unwrap | [P] | `DONE` | `src/interpreter/unmold.rs:43` |
+| 52 | N-18 | async resolve の check-then-unwrap (別箇所) | [P] | `DONE` | `src/interpreter/unmold.rs:109` |
+| 53 | N-19 | テスト内の `panic!("Expected ...")` (11箇所) | [T] | `DONE` | `src/interpreter/json.rs` |
+| 54 | N-20 | 統合テストの `panic!("Expected Bool...")` | [T] | `DONE` | `src/interpreter/os_eval.rs:2505,2538` |
+| 55 | N-21 | `unreachable!()` にコメントなし | [M] | `DONE` | `src/interpreter/mold_eval.rs:793` |
+| 56 | N-22 | check-then-unwrap アンチパターン | [M] | `DONE` | `src/interpreter/unmold.rs:43,109` |
+| 57 | N-23 | JSON パース失敗時の silent default | [E] | `DONE` | `src/interpreter/json.rs:254,260,264,274` |
+| 58 | N-24 | `parent().unwrap_or(Path::new("."))` | [E] | `DONE` | `src/interpreter/module_eval.rs:21,89` |
+| 59 | N-25 | export シンボル不在時の silent fallback | [E] | `DONE` | `src/interpreter/module_eval.rs:380` |
+| 60 | N-26 | TODO コメント残存 (`]=>` channel) | [M] | `DONE` | `src/interpreter/unmold.rs:263` |
+| 61 | N-27 | TODO mold コメントが探索的実装を示唆 | [M] | `DONE` | `src/interpreter/mold_eval.rs:1711-1738` |
+| 62 | N-28 | "unexpected signal" にシグナル型が含まれない | [E] | `DONE` | `src/interpreter/os_eval.rs` |
+| 63 | N-29 | Tokio runtime の `expect()` | [P] | `DONE` | `src/interpreter/eval.rs:139` |
+| 64 | N-30 | Pipeline scope の RAII ガードなし | [L] | `DONE` | `src/interpreter/control_flow.rs:32-55` |
+| 65 | N-31 | `eval_mold()` の match arm が巨大 | [M] | `DONE` | `src/interpreter/mold_eval.rs` |
 
 ---
 
@@ -296,15 +296,15 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | Phase | 名称 | 件数 | 完了 | 残り |
 |-------|------|------|------|------|
 | 9 | Parser/Lexer | 13 | 13 | 0 |
-| 10 | Interpreter | 18 | 0 | 18 |
+| 10 | Interpreter | 18 | 18 | 0 |
 | 11 | JS codegen | 8 | 0 | 8 |
 | 12 | Native codegen | 5 | 0 | 5 |
 | 13 | CLI/pkg/auth | 14 | 0 | 14 |
 | 14 | Type checker/Tests | 17 | 0 | 17 |
 | 15 | WASM/Runtime Hardening | 6 | 6 | 0 |
-| **小計** | | **81** | **19** | **62** |
+| **小計** | | **81** | **37** | **44** |
 
-| | | **総計 115** | **53** | **62** |
+| | | **総計 115** | **71** | **44** |
 
 ---
 
@@ -376,6 +376,7 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-13 | 横断レビュー Should Fix 3件修正: taida_home_dir() を util.rs に移動、module_graph.rs の HOME 直接参照を統一、環境変数テストのロック共通化 |
 | 2026-03-14 | Phase 15 全完了 (NTH-1〜NTH-6)。WASM/Runtime Hardening: native poly_add に float heuristic 追加、delete_token TOCTOU 解消、emit.rs panic を Result 伝播に変更、wasm generic_unmold に非ポインタ値ガード追加+str_to_int 符号なしオーバーフロー修正、wasm poly_add に文字列検出追加 (parity: wasm-full 42→51, wasm-wasi 24→27)、allowlist 縮小 |
 | 2026-03-14 | Phase 9 全完了 (N-1〜N-13)。Parser/Lexer: body_expr panic メッセージ改善、peek_at/advance 境界チェック強化 (expect+saturating_add+min clamp)、scan_number SAFETY コメント、バージョンパーサー状態機械ドキュメント、Mold バックトラックコメント、ブロックパーサー/synchronize/行継続コメント補強、import パス未知トークンコメント、不正エスケープ error recovery コメント、テンプレート文字列不明エスケープにエラー報告追加 (通常文字列との一貫性)、peek_at ルックアヘッドドキュメント、lexer テスト2件追加 |
+| 2026-03-14 | Phase 10 全完了 (N-14〜N-31)。Interpreter: charAt unwrap_or_default 化、env.rs scope 非空不変条件ドキュメント+expect メッセージ、unmold.rs check-then-unwrap を match 統合に変更、json.rs テスト panic→let-else 変換 (11箇所)、os_eval.rs テスト panic→unreachable 変換+signal_name ヘルパー追加で unexpected signal にシグナル型を含める、mold_eval.rs unreachable にコメント追加+TODO mold ドキュメント整理+eval_mold match 巨大さのドキュメント、json.rs silent default の哲学準拠コメント、module_eval.rs parent/export フォールバックコメント、eval.rs expect メッセージ改善、control_flow.rs pipeline scope RAII 不使用の理由ドキュメント |
 
 ---
 

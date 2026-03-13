@@ -238,6 +238,12 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
 }
 
 /// Convert a JSON value to a primitive Taida value.
+///
+/// Philosophy I: "null/undefined の完全排除 — 全ての型にデフォルト値を保証"
+/// Parse failures and type mismatches silently fall back to the type's default
+/// value (0, 0.0, "", false). This is intentional per Taida's null-exclusion
+/// philosophy, though it means parse errors are indistinguishable from legitimate
+/// zero/empty values.
 fn json_to_primitive(json: &serde_json::Value, prim: &PrimitiveType) -> Value {
     match prim {
         PrimitiveType::Int => match json {
@@ -337,35 +343,32 @@ mod tests {
             ("age".to_string(), Value::Int(30)),
         ]);
         let result = stdlib_json_encode(&[pack]).unwrap();
-        if let Value::Str(s) = result {
-            assert!(s.contains("\"name\":\"Alice\""));
-            assert!(s.contains("\"age\":30"));
-        } else {
-            panic!("Expected Str");
-        }
+        let Value::Str(s) = result else {
+            unreachable!("Expected Str from json_encode");
+        };
+        assert!(s.contains("\"name\":\"Alice\""));
+        assert!(s.contains("\"age\":30"));
     }
 
     #[test]
     fn test_json_pretty() {
         let pack = Value::BuchiPack(vec![("x".to_string(), Value::Int(1))]);
         let result = stdlib_json_pretty(&[pack]).unwrap();
-        if let Value::Str(s) = result {
-            assert!(s.contains('\n')); // Pretty printed should have newlines
-            assert!(s.contains("\"x\": 1"));
-        } else {
-            panic!("Expected Str");
-        }
+        let Value::Str(s) = result else {
+            unreachable!("Expected Str from json_pretty");
+        };
+        assert!(s.contains('\n')); // Pretty printed should have newlines
+        assert!(s.contains("\"x\": 1"));
     }
 
     #[test]
     fn test_json_encode_accepts_json_value() {
         let json = Value::Json(serde_json::json!({"x": 42}));
         let result = stdlib_json_encode(&[json]).unwrap();
-        if let Value::Str(s) = result {
-            assert!(s.contains("\"x\":42") || s.contains("\"x\": 42"));
-        } else {
-            panic!("Expected Str");
-        }
+        let Value::Str(s) = result else {
+            unreachable!("Expected Str from json_encode");
+        };
+        assert!(s.contains("\"x\":42") || s.contains("\"x\": 42"));
     }
 
     #[test]
@@ -377,20 +380,19 @@ mod tests {
             "data": null
         });
         let result = json_to_taida_value(&json);
-        if let Value::BuchiPack(fields) = result {
-            assert!(
-                fields
-                    .iter()
-                    .any(|(k, v)| k == "name" && *v == Value::Str("Alice".to_string()))
-            );
-            assert!(
-                fields
-                    .iter()
-                    .any(|(k, v)| k == "data" && *v == Value::Str(String::new()))
-            );
-        } else {
-            panic!("Expected BuchiPack");
-        }
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("Expected BuchiPack from json_to_taida_value");
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "name" && *v == Value::Str("Alice".to_string()))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "data" && *v == Value::Str(String::new()))
+        );
     }
 
     #[test]
@@ -450,27 +452,26 @@ mod tests {
         );
         let json = serde_json::json!({"name": "Asuka", "age": 14, "extra": "ignored"});
         let result = json_to_typed_value(&json, &schema);
-        if let Value::BuchiPack(fields) = result {
-            assert!(
-                fields
-                    .iter()
-                    .any(|(k, v)| k == "name" && *v == Value::Str("Asuka".to_string()))
-            );
-            assert!(
-                fields
-                    .iter()
-                    .any(|(k, v)| k == "age" && *v == Value::Int(14))
-            );
-            assert!(
-                fields
-                    .iter()
-                    .any(|(k, v)| k == "__type" && *v == Value::Str("User".to_string()))
-            );
-            // "extra" should NOT be present
-            assert!(!fields.iter().any(|(k, _)| k == "extra"));
-        } else {
-            panic!("Expected BuchiPack, got {:?}", result);
-        }
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("Expected BuchiPack from schema typedef");
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "name" && *v == Value::Str("Asuka".to_string()))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "age" && *v == Value::Int(14))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "__type" && *v == Value::Str("User".to_string()))
+        );
+        // "extra" should NOT be present
+        assert!(!fields.iter().any(|(k, _)| k == "extra"));
     }
 
     #[test]
@@ -494,18 +495,17 @@ mod tests {
         );
         let json = serde_json::json!({"name": "Asuka"});
         let result = json_to_typed_value(&json, &schema);
-        if let Value::BuchiPack(fields) = result {
-            assert_eq!(
-                fields.iter().find(|(k, _)| k == "age").unwrap().1,
-                Value::Int(0)
-            );
-            assert_eq!(
-                fields.iter().find(|(k, _)| k == "email").unwrap().1,
-                Value::Str(String::new())
-            );
-        } else {
-            panic!("Expected BuchiPack");
-        }
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("Expected BuchiPack from schema missing fields");
+        };
+        assert_eq!(
+            fields.iter().find(|(k, _)| k == "age").unwrap().1,
+            Value::Int(0)
+        );
+        assert_eq!(
+            fields.iter().find(|(k, _)| k == "email").unwrap().1,
+            Value::Str(String::new())
+        );
     }
 
     #[test]
@@ -519,14 +519,13 @@ mod tests {
         );
         let json = serde_json::json!({"age": "not a number"});
         let result = json_to_typed_value(&json, &schema);
-        if let Value::BuchiPack(fields) = result {
-            assert_eq!(
-                fields.iter().find(|(k, _)| k == "age").unwrap().1,
-                Value::Int(0)
-            );
-        } else {
-            panic!("Expected BuchiPack");
-        }
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("Expected BuchiPack from schema type mismatch");
+        };
+        assert_eq!(
+            fields.iter().find(|(k, _)| k == "age").unwrap().1,
+            Value::Int(0)
+        );
     }
 
     #[test]
@@ -546,18 +545,17 @@ mod tests {
         );
         let json = serde_json::json!({"name": null, "age": null});
         let result = json_to_typed_value(&json, &schema);
-        if let Value::BuchiPack(fields) = result {
-            assert_eq!(
-                fields.iter().find(|(k, _)| k == "name").unwrap().1,
-                Value::Str(String::new())
-            );
-            assert_eq!(
-                fields.iter().find(|(k, _)| k == "age").unwrap().1,
-                Value::Int(0)
-            );
-        } else {
-            panic!("Expected BuchiPack");
-        }
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("Expected BuchiPack from schema null defaults");
+        };
+        assert_eq!(
+            fields.iter().find(|(k, _)| k == "name").unwrap().1,
+            Value::Str(String::new())
+        );
+        assert_eq!(
+            fields.iter().find(|(k, _)| k == "age").unwrap().1,
+            Value::Int(0)
+        );
     }
 
     #[test]
@@ -590,21 +588,19 @@ mod tests {
         let json =
             serde_json::json!({"name": "Asuka", "address": {"city": "Tokyo-3", "zip": "999"}});
         let result = json_to_typed_value(&json, &schema);
-        if let Value::BuchiPack(fields) = result {
-            if let Some((_, Value::BuchiPack(addr_fields))) =
-                fields.iter().find(|(k, _)| k == "address")
-            {
-                assert!(
-                    addr_fields
-                        .iter()
-                        .any(|(k, v)| k == "city" && *v == Value::Str("Tokyo-3".to_string()))
-                );
-            } else {
-                panic!("Expected address to be BuchiPack");
-            }
-        } else {
-            panic!("Expected BuchiPack");
-        }
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("Expected BuchiPack from nested schema");
+        };
+        let Some((_, Value::BuchiPack(addr_fields))) =
+            fields.iter().find(|(k, _)| k == "address")
+        else {
+            unreachable!("Expected address to be BuchiPack");
+        };
+        assert!(
+            addr_fields
+                .iter()
+                .any(|(k, v)| k == "city" && *v == Value::Str("Tokyo-3".to_string()))
+        );
     }
 
     #[test]
@@ -627,17 +623,16 @@ mod tests {
             {"name": "Rei", "syncRate": 65}
         ]);
         let result = json_to_typed_value(&json, &schema);
-        if let Value::List(items) = result {
-            assert_eq!(items.len(), 2);
-            if let Value::BuchiPack(fields) = &items[0] {
-                assert!(
-                    fields
-                        .iter()
-                        .any(|(k, v)| k == "name" && *v == Value::Str("Asuka".to_string()))
-                );
-            }
-        } else {
-            panic!("Expected List");
+        let Value::List(items) = result else {
+            unreachable!("Expected List from schema list");
+        };
+        assert_eq!(items.len(), 2);
+        if let Value::BuchiPack(fields) = &items[0] {
+            assert!(
+                fields
+                    .iter()
+                    .any(|(k, v)| k == "name" && *v == Value::Str("Asuka".to_string()))
+            );
         }
     }
 
