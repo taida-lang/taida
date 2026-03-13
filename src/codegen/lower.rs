@@ -1280,6 +1280,30 @@ impl Lowering {
             }
         }
 
+        // 戻り値型注釈から型注釈なしパラメータの型を推論登録
+        // 例: `sumTo n acc = ... => :Int` の場合、n, acc を int_vars に登録
+        // これにより poly_add 等のヒューリスティック関数の誤発火を防ぐ
+        if let Some(ref rt) = func_def.return_type {
+            let inferred_numeric = matches!(
+                rt,
+                crate::parser::TypeExpr::Named(name) if name == "Int" || name == "Num"
+            );
+            if inferred_numeric {
+                for param in &func_def.params {
+                    if param.type_annotation.is_none()
+                        && !self.string_vars.contains(&param.name)
+                        && !self.float_vars.contains(&param.name)
+                        && !self.bool_vars.contains(&param.name)
+                        && !self.pack_vars.contains(&param.name)
+                        && !self.list_vars.contains(&param.name)
+                        && !self.closure_vars.contains(&param.name)
+                    {
+                        self.int_vars.insert(param.name.clone());
+                    }
+                }
+            }
+        }
+
         // ローカル関数定義の前処理: 関数本体内の FuncDef を先に IR 化して登録する。
         // 内部関数が親スコープの変数を参照する場合はクロージャとして生成する。
         for stmt in &func_def.body {
