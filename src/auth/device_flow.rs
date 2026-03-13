@@ -52,11 +52,13 @@ pub fn start_device_flow() -> Result<DeviceFlowResponse, String> {
         .map_err(|e| format!("Failed to start device flow: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "GitHub returned status {}: {}",
-            resp.status(),
-            resp.text().unwrap_or_default()
-        ));
+        let status = resp.status();
+        // N-46: preserve response body for debugging; unwrap_or explains
+        // why the body might be absent (network error after status read)
+        let body = resp
+            .text()
+            .unwrap_or_else(|e| format!("<failed to read response body: {}>", e));
+        return Err(format!("GitHub returned status {}: {}", status, body));
     }
 
     resp.json::<DeviceFlowResponse>()
@@ -131,11 +133,12 @@ pub fn get_github_username(token: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to fetch GitHub user: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "GitHub API returned status {}: {}",
-            resp.status(),
-            resp.text().unwrap_or_default()
-        ));
+        let status = resp.status();
+        // N-46: preserve response body for debugging
+        let body = resp
+            .text()
+            .unwrap_or_else(|e| format!("<failed to read response body: {}>", e));
+        return Err(format!("GitHub API returned status {}: {}", status, body));
     }
 
     let user: GitHubUser = resp
