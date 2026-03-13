@@ -613,10 +613,7 @@ impl Lexer {
                         // Mirror the regular string's behaviour: report the
                         // unknown escape but keep scanning for more errors.
                         self.error(
-                            &format!(
-                                "Invalid escape sequence in template string: \\{}",
-                                escaped
-                            ),
+                            &format!("Invalid escape sequence in template string: \\{}", escaped),
                             start,
                             start_line,
                             start_col,
@@ -1583,7 +1580,11 @@ alice <= Person(name <= "Alice", age <= 30)
             !errors.is_empty(),
             "Expected error for invalid escape \\q in template string"
         );
-        assert!(errors[0].message.contains("Invalid escape sequence in template string"));
+        assert!(
+            errors[0]
+                .message
+                .contains("Invalid escape sequence in template string")
+        );
         // Token is still emitted for error recovery
         let tmpl_tokens: Vec<_> = tokens
             .iter()
