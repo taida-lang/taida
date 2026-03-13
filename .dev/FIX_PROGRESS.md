@@ -395,25 +395,25 @@ Phase 9-15 のコードレビューで検出された修正項目。
 
 | ID | severity | 概要 | ファイル | 状態 |
 |----|----------|------|---------|------|
-| R-01 | critical | `taida_utf8_decode_mold` に `len < 0` ガード欠如 — 負値で巨大 malloc → OOM abort | `src/codegen/native_runtime.c` | `DONE` |
-| R-02 | major | `taida_safe_malloc` で `size == 0` のとき `malloc(0)` → NULL → exit(1) — `size = 1` に正規化 | `src/codegen/native_runtime.c` | `DONE` |
+| R-01 | critical | `taida_utf8_decode_mold` に `len < 0` ガード欠如 — 負値で巨大 malloc → OOM abort | `src/codegen/native_runtime.c` | `VERIFIED` |
+| R-02 | major | `taida_safe_malloc` で `size == 0` のとき `malloc(0)` → NULL → exit(1) — `size = 1` に正規化 | `src/codegen/native_runtime.c` | `VERIFIED` |
 
 ### Should Fix
 
 | ID | severity | 概要 | ファイル | 状態 |
 |----|----------|------|---------|------|
-| R-05 | minor | `parser.rs` `advance()` に `debug_assert!` 追加（防御的クランプが不正状態を隠す） | `src/parser/parser.rs` | `DONE` |
-| R-09 | minor | 新規テスト3件の assertion が弱い（パニックしないことだけ検証）— 具体的 assertion 追加 | `src/types/checker_tests.rs` | `DONE` |
-| R-10 | minor | `test_lax_result_current_behavior_stable` で `None` 許容が広すぎ — 除去 | `src/types/checker_tests.rs` | `DONE` |
+| R-05 | minor | `parser.rs` `advance()` に `debug_assert!` 追加（防御的クランプが不正状態を隠す） | `src/parser/parser.rs` | `VERIFIED` |
+| R-09 | minor | 新規テスト3件の assertion が弱い（パニックしないことだけ検証）— 具体的 assertion 追加 | `src/types/checker_tests.rs` | `VERIFIED` |
+| R-10 | minor | `test_lax_result_current_behavior_stable` で `None` 許容が広すぎ — 除去 | `src/types/checker_tests.rs` | `VERIFIED` |
 
 ### Nice to Have
 
 | ID | severity | 概要 | ファイル | 状態 |
 |----|----------|------|---------|------|
-| R-03 | minor | `hashmap_to_string` / `set_to_string` 内の `strcat` が残存 — 安全パターンに置換 | `src/codegen/native_runtime.c` | `DONE` |
-| R-04 | minor | `methods.rs` の `unwrap_or_default` を `expect("bounds checked above")` に変更 | `src/interpreter/methods.rs` | `DONE` |
-| R-06 | nit | 自明な N-XX コメント削除（情報量ゼロのもの） | 複数ファイル | `DONE` |
-| R-11 | nit | `snprintf` → `memcpy` に統一（固定文字列コピー） | `src/codegen/native_runtime.c` | `DONE` |
+| R-03 | minor | `hashmap_to_string` / `set_to_string` 内の `strcat` が残存 — 安全パターンに置換 | `src/codegen/native_runtime.c` | `VERIFIED` |
+| R-04 | minor | `methods.rs` の `unwrap_or_default` を `expect("bounds checked above")` に変更 | `src/interpreter/methods.rs` | `VERIFIED` |
+| R-06 | nit | 自明な N-XX コメント削除（情報量ゼロのもの） | 複数ファイル | `VERIFIED` |
+| R-11 | nit | `snprintf` → `memcpy` に統一（固定文字列コピー） | `src/codegen/native_runtime.c` | `VERIFIED` |
 
 ---
 
