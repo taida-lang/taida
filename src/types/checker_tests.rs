@@ -152,7 +152,6 @@ fn test_list_type_inference() {
 fn test_type_registration() {
     let (checker, errors) = check("Person = @(name: Str, age: Int)");
     assert!(errors.is_empty());
-    // N-60: Use expect() instead of unwrap() for clearer test failure messages
     let fields = checker
         .registry
         .get_type_fields("Person")
@@ -168,7 +167,6 @@ fn test_error_type_registration() {
     let (checker, errors) = check(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert!(checker.registry.is_error_type("ValidationError"));
-    // N-60: Use expect() instead of unwrap() for clearer test failure messages
     let fields = checker
         .registry
         .get_type_fields("ValidationError")
@@ -181,7 +179,6 @@ fn test_inheritance_registration() {
     let source = "Person = @(name: Str, age: Int)\nPerson => Employee = @(department: Str)";
     let (checker, errors) = check(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
-    // N-60: Use expect() instead of unwrap() for clearer test failure messages
     let emp_fields = checker
         .registry
         .get_type_fields("Employee")
@@ -691,7 +688,6 @@ fn test_string_mold_type() {
 fn test_hof_mold_type() {
     let source = "nums <= @[1, 2, 3]\nresult <= Filter[nums, _ x = x > 1]()";
     let (checker, _errors) = check(source);
-    // N-59: Use assert! instead of panic! for test assertions
     assert!(
         matches!(checker.lookup_var("result"), Some(Type::List(_))),
         "Expected List type, got {:?}",
@@ -2539,18 +2535,30 @@ fn test_generic_constraint_type_mismatch() {
     // Passing a string argument to a generic mold that expects Int should
     // ideally produce a diagnostic (constraint violation).
     let source = "Mold[T] => Box[T] = @(value: T)\nb <= Box[\"hello\"]()";
-    let (_, errors) = check(source);
-    // Even if the checker cannot fully validate generic constraints yet,
-    // it should not panic on this input.
-    let _ = errors; // Compiler-level check: no panic occurred
+    let (checker, errors) = check(source);
+    // R-09: Verify the checker produces a concrete result rather than just
+    // asserting no-panic.  `b` should be assigned some type (Generic or Unknown).
+    let b_ty = checker.lookup_var("b");
+    assert!(
+        b_ty.is_some(),
+        "Variable 'b' should be registered in the type environment, got None"
+    );
+    // No errors is acceptable — full generic constraint checking is future work.
+    let _ = errors;
 }
 
 #[test]
 fn test_generic_multi_param_mold() {
     // Multi-parameter generic mold should parse and check without panic.
     let source = "Mold[T, P] => Pair[T, P] = @(first: T, second: P)\np <= Pair[1, \"hi\"]()";
-    let (_, errors) = check(source);
-    let _ = errors; // No panic
+    let (checker, errors) = check(source);
+    // R-09: Verify `p` is registered and has a concrete type.
+    let p_ty = checker.lookup_var("p");
+    assert!(
+        p_ty.is_some(),
+        "Variable 'p' should be registered in the type environment, got None"
+    );
+    let _ = errors;
 }
 
 // ── N-71: @[] type parameter inference negative tests ──
@@ -2571,8 +2579,20 @@ fn test_list_mixed_types_inference() {
     // A list with mixed types should infer based on the first element.
     // The checker should not panic regardless of type mixing.
     let source = "items <= @[1, \"hello\", true]";
-    let (_, _errors) = check(source);
-    // No panic is the primary assertion for this edge case.
+    let (checker, errors) = check(source);
+    // R-09: Verify `items` is registered and inferred as a List type.
+    let items_ty = checker.lookup_var("items");
+    assert!(
+        items_ty.is_some(),
+        "Variable 'items' should be registered in the type environment"
+    );
+    // The first element is Int, so the list type should be List(Int) or similar.
+    assert!(
+        matches!(items_ty, Some(Type::List(_))),
+        "items should be inferred as a List type, got {:?}",
+        items_ty
+    );
+    let _ = errors;
 }
 
 // ── N-73: Optional/Result redesign migration marker ──
@@ -2589,10 +2609,16 @@ fn test_lax_result_current_behavior_stable() {
     let source = "x <= Lax[42]()\ny <= Result[1, \"ok\"]()";
     let (checker, _errors) = check(source);
     // Lax and Result should resolve to Generic types
+    // R-10: `x` must be present in the environment — None would indicate a
+    // checker regression where the variable was never registered.
     let x_ty = checker.lookup_var("x");
     assert!(
+        x_ty.is_some(),
+        "Variable 'x' should be registered in the type environment, got None"
+    );
+    assert!(
         matches!(x_ty, Some(Type::Generic(ref n, _)) if n == "Lax")
-            || matches!(x_ty, Some(Type::Unknown) | None),
+            || matches!(x_ty, Some(Type::Unknown)),
         "Lax should resolve to Generic(Lax, ...) or Unknown, got {:?}",
         x_ty
     );

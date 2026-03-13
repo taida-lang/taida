@@ -470,7 +470,6 @@ mod tests {
             vec![("department".to_string(), Type::Str)],
         );
 
-        // N-61: Use expect() instead of unwrap() for clearer test failure messages
         let emp_fields = reg
             .get_type_fields("Employee")
             .expect("Employee type should be registered after inheritance");
