@@ -591,8 +591,7 @@ mod tests {
         let Value::BuchiPack(fields) = result else {
             unreachable!("Expected BuchiPack from nested schema");
         };
-        let Some((_, Value::BuchiPack(addr_fields))) =
-            fields.iter().find(|(k, _)| k == "address")
+        let Some((_, Value::BuchiPack(addr_fields))) = fields.iter().find(|(k, _)| k == "address")
         else {
             unreachable!("Expected address to be BuchiPack");
         };
