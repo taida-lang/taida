@@ -1,3 +1,24 @@
+// N-55: Error handling conventions in this CLI binary
+//
+// This file uses three error handling patterns, chosen by context:
+//
+// 1. `expect("message")` / `unwrap()` — for invariants that indicate
+//    programmer error or a fundamentally broken system (e.g. system clock
+//    before epoch, Tokio runtime creation). Panic is acceptable because
+//    no meaningful recovery is possible.
+//
+// 2. `unwrap_or` / `unwrap_or_else` — for fallible operations with safe
+//    defaults (e.g. path canonicalization falling back to the original
+//    path, `option_env!` falling back to `CARGO_PKG_VERSION`).
+//
+// 3. `eprintln!` + `process::exit(1)` — for user-facing errors that
+//    should produce a diagnostic and terminate (e.g. missing input file,
+//    parse errors, build failures). These are not panics.
+//
+// Library code (`src/lib.rs` and sub-modules) uses `Result<T, String>`
+// for error propagation. The CLI layer in this file converts those into
+// pattern 3 at the boundary.
+
 use serde_json::json;
 use std::env;
 use std::fs;
@@ -21,6 +42,11 @@ use taida::parser::{BuchiField, Expr, FieldDef, FuncDef, Program, Statement, par
 use taida::pkg;
 use taida::types::TypeChecker;
 
+/// Return the CLI version label.
+/// N-52: Both `option_env!` and `env!` are resolved at compile time, so
+/// `unwrap_or` here has zero runtime cost and cannot fail. When built via
+/// the release workflow, `TAIDA_RELEASE_TAG` (e.g. "@a.4.beta") is set;
+/// otherwise falls back to `CARGO_PKG_VERSION` from Cargo.toml.
 fn cli_version_label() -> &'static str {
     option_env!("TAIDA_RELEASE_TAG").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -1312,11 +1338,12 @@ fn run_build_js_file(
         let main_out = match output_path {
             Some(path) => PathBuf::from(path),
             None => {
-                let build_root = find_packages_tdm()
-                    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-                    .join(".taida")
-                    .join("build")
-                    .join("js");
+                // N-47: flatten nested unwrap_or_else for clarity.
+                // Fallback chain: packages.tdm root -> cwd -> "."
+                let project_root = find_packages_tdm()
+                    .or_else(|| env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let build_root = project_root.join(".taida").join("build").join("js");
                 build_root.join("stdin.mjs")
             }
         };
@@ -1339,6 +1366,10 @@ fn run_build_js_file(
         return;
     }
 
+    // N-49: canonicalize resolves symlinks and produces absolute paths.
+    // Falls back to the original path when the file system rejects it
+    // (e.g. nonexistent intermediate directory), which is safe because
+    // subsequent I/O will surface the real error.
     let entry_path = input_path
         .canonicalize()
         .unwrap_or_else(|_| input_path.to_path_buf());
@@ -1402,12 +1433,16 @@ fn run_build_js_file(
         let final_js_out = if *td_file == entry_path {
             main_out.clone()
         } else {
+            // N-51: Multi-stage relative path resolution for modules
+            // outside the entry root. The fallback chain preserves as much
+            // directory structure as possible in the output tree:
+            //   1. Try strip_prefix from entry_root (same directory tree)
+            //   2. Try strip_prefix from entry_root's parent (sibling tree)
+            //   3. Fall back to just the file name (disjoint tree)
             let rel = td_file
                 .strip_prefix(entry_root)
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|_| {
-                    // entry_root 外のモジュール: 共通祖先からの相対パスを計算
-                    // 親ディレクトリからの strip を試みてディレクトリ構造を保持
                     let entry_parent = entry_root.parent().unwrap_or(entry_root);
                     td_file
                         .strip_prefix(entry_parent)
@@ -1501,9 +1536,12 @@ fn stage_dep_js_outputs(
 }
 
 fn unique_stage_root(label: &str) -> PathBuf {
+    // N-53: duration_since(UNIX_EPOCH) fails only if the system clock
+    // is set before 1970-01-01, which indicates a severely misconfigured
+    // system. The expect message documents this invariant.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock should be after unix epoch")
+        .expect("system clock must be after 1970-01-01 (UNIX epoch)")
         .as_nanos();
     std::env::temp_dir().join(format!(
         ".taida_js_stage_{}_{}_{}",
@@ -1561,7 +1599,7 @@ fn commit_staged_js_outputs(staged_outputs: &[(PathBuf, PathBuf)], stage_root: &
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
+            .expect("system clock must be after 1970-01-01 (UNIX epoch)")
             .as_nanos()
     );
     let mut commits: Vec<StagedJsCommit> = Vec::with_capacity(staged_outputs.len());
@@ -1579,8 +1617,12 @@ fn commit_staged_js_outputs(staged_outputs: &[(PathBuf, PathBuf)], stage_root: &
             std::process::exit(1);
         }
         let temp_path = commit_temp_path(final_path, &commit_id, idx);
+        // N-57: Remove stale temp file from a previous interrupted build.
+        // NotFound is expected (normal case); other errors (permission denied)
+        // will surface as a copy failure on the next line.
         let _ = fs::remove_file(&temp_path);
         if let Err(e) = fs::copy(stage_path, &temp_path) {
+            // Best-effort cleanup of already-prepared temp files
             for commit in &commits {
                 let _ = fs::remove_file(&commit.temp_path);
             }
@@ -1604,6 +1646,7 @@ fn commit_staged_js_outputs(staged_outputs: &[(PathBuf, PathBuf)], stage_root: &
         if commits[idx].final_path.exists() {
             let final_path = commits[idx].final_path.clone();
             let backup_path = commit_backup_path(&final_path, &commit_id, idx);
+            // N-57: Remove stale backup; NotFound is the expected case
             let _ = fs::remove_file(&backup_path);
             if let Err(e) = fs::rename(&final_path, &backup_path) {
                 for prior in &commits {
@@ -2919,11 +2962,15 @@ fn collect_release_scan_files(target_path: &Path) -> Vec<PathBuf> {
             continue;
         }
 
+        // N-48: parent() returns None only for root or prefix-less paths,
+        // which cannot occur for resolved .td file paths. "." is a safe default.
         let base_dir = file.parent().unwrap_or(Path::new("."));
         for stmt in &program.statements {
             if let Statement::Import(import) = stmt {
                 let dep = resolve_local_import_path(base_dir, &import.path);
                 if dep.exists() && dep.is_file() {
+                    // Canonicalize for dedup; fall back to the joined path if
+                    // the file system rejects it (e.g. dangling symlink).
                     pending.push(dep.canonicalize().unwrap_or(dep));
                 }
             }
@@ -3596,8 +3643,17 @@ fn run_init(args: &[String]) {
     }
 
     // Create .taida directory
+    // N-56: Report directory creation failure as a warning rather than
+    // silently ignoring. The .taida/ directory is not strictly required
+    // for project init to succeed — it will be created on first build.
     let taida_dir = dir.join(".taida");
-    let _ = fs::create_dir_all(&taida_dir);
+    if let Err(e) = fs::create_dir_all(&taida_dir) {
+        eprintln!(
+            "Warning: could not create .taida directory '{}': {}",
+            taida_dir.display(),
+            e
+        );
+    }
 
     // Write .gitignore if it doesn't exist
     let gitignore_path = dir.join(".gitignore");
@@ -3609,7 +3665,9 @@ fn run_init(args: &[String]) {
 .taida/graph/
 # .taida/taida.lock is tracked (not inside ignored dirs)
 ";
-        let _ = fs::write(&gitignore_path, gitignore_content);
+        if let Err(e) = fs::write(&gitignore_path, gitignore_content) {
+            eprintln!("Warning: could not write .gitignore: {}", e);
+        }
     }
 
     println!(
@@ -3748,6 +3806,8 @@ fn run_install(args: &[String]) {
         let lockfile = pkg::lockfile::Lockfile::from_resolved(&[]);
         let lock_path = project_dir.join(".taida").join("taida.lock");
         if let Some(parent) = lock_path.parent() {
+            // N-56: directory creation error is caught by the subsequent
+            // lockfile.write() call, which will report a clear error.
             let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = lockfile.write(&lock_path) {
@@ -4196,7 +4256,11 @@ fn run_lsp(args: &[String]) {
         }
     }
 
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    // N-54: Tokio runtime creation fails only under severe resource
+    // exhaustion (e.g. file descriptor limit reached). In such cases
+    // there is no meaningful recovery, so panic with a clear message.
+    let rt = tokio::runtime::Runtime::new()
+        .expect("failed to create Tokio runtime for LSP server (possible fd/resource exhaustion)");
     rt.block_on(taida::lsp::server::run_server());
 }
 
@@ -4207,7 +4271,12 @@ fn repl(no_check: bool) {
 
     loop {
         print!("taida> ");
-        io::stdout().flush().unwrap();
+        // N-45: REPL stdout flush — failure means the output pipe is broken
+        // (e.g. piped into a closed process), in which case continuing the
+        // REPL loop is pointless. Use `ok()` to silently exit on next read.
+        if io::stdout().flush().is_err() {
+            break;
+        }
 
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {

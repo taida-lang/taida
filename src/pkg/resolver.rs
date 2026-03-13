@@ -62,6 +62,11 @@ fn dep_decl_identity(dep: &Dependency, declared_from_root: &Path) -> String {
             } else {
                 declared_from_root.join(path)
             };
+            // N-50: canonicalize normalizes `..` segments and symlinks for
+            // identity comparison. Falls back to the joined path when the
+            // target does not yet exist (e.g. first install). Path traversal
+            // is not a practical risk because package resolution starts from
+            // the project root and local path dependencies are author-controlled.
             let canonical = joined.canonicalize().unwrap_or(joined);
             format!("path:{}", canonical.display())
         }

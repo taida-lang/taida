@@ -72,6 +72,12 @@ pub fn save_token(github_token: &str, username: &str) -> Result<(), String> {
             })
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     }
+    // N-58: On non-Unix platforms (Windows), there is no direct equivalent
+    // of POSIX file modes. The token file inherits the default ACL of
+    // the .taida/ directory. Windows user profile directories are
+    // typically restricted to the owning user, so this is acceptable.
+    // A future improvement could use Windows ACL APIs via `windows-acl`
+    // crate if multi-user Windows environments become a target.
     #[cfg(not(unix))]
     {
         fs::write(&path, &json)
