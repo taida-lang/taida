@@ -1491,22 +1491,37 @@ taida_val taida_poly_neq(taida_val a, taida_val b) {
         return strcmp((char*)a, (char*)b) != 0 ? 1 : 0;
     return a != b ? 1 : 0;
 }
+// NTH-1: Helper — format a taida_val as a string for poly_add concatenation.
+// If the value is a heap string, return it directly.
+// If it looks like a bitcast float (outside small-integer range), format as %g.
+// Otherwise format as integer.
+static const char *_poly_val_to_str(taida_val v, char *buf, int bufsz) {
+    if (taida_is_string_value(v)) return (const char *)v;
+    // Heuristic: values outside [-1048576, 1048576] that are not valid pointers
+    // are likely bitcast floats. This matches _to_double() in the float section.
+    if (v < -1048576 || v > 1048576) {
+        // Additional guard: skip if the value looks like a heap pointer
+        if (!taida_is_string_value(v) && !taida_ptr_is_readable(v, 8)) {
+            union { taida_val l; double d; } u;
+            u.l = v;
+            // Sanity: only treat as float if the double is finite
+            if (u.d == u.d && u.d != (1.0/0.0) && u.d != -(1.0/0.0)) {
+                snprintf(buf, bufsz, "%g", u.d);
+                return buf;
+            }
+        }
+    }
+    snprintf(buf, bufsz, "%lld", (long long)v);
+    return buf;
+}
+
 // FL-16: Polymorphic add — dispatches to str_concat or int_add at runtime
 taida_val taida_poly_add(taida_val a, taida_val b) {
     if (taida_is_string_value(a) || taida_is_string_value(b)) {
         // Convert both to strings and concatenate
-        const char *sa = taida_is_string_value(a) ? (const char*)a : "";
-        const char *sb = taida_is_string_value(b) ? (const char*)b : "";
-        // If one side is not a string, convert it
-        char buf_a[32], buf_b[32];
-        if (!taida_is_string_value(a)) {
-            snprintf(buf_a, sizeof(buf_a), "%lld", (long long)a);
-            sa = buf_a;
-        }
-        if (!taida_is_string_value(b)) {
-            snprintf(buf_b, sizeof(buf_b), "%lld", (long long)b);
-            sb = buf_b;
-        }
+        char buf_a[64], buf_b[64];
+        const char *sa = _poly_val_to_str(a, buf_a, sizeof(buf_a));
+        const char *sb = _poly_val_to_str(b, buf_b, sizeof(buf_b));
         return taida_str_concat(sa, sb);
     }
     return a + b;
