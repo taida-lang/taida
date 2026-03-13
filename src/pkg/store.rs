@@ -39,11 +39,10 @@ impl Default for GlobalStore {
 impl GlobalStore {
     /// Create a new GlobalStore using the default location (`~/.taida/store/`).
     pub fn new() -> Self {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".to_string());
+        let home = crate::auth::token::taida_home_dir()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"));
         GlobalStore {
-            root: PathBuf::from(home).join(".taida").join("store"),
+            root: home.join(".taida").join("store"),
         }
     }
 
