@@ -1832,9 +1832,51 @@ defaulted fields must be provided via `()`",
             Expr::Placeholder(_) => Type::Unknown,
             Expr::Hole(_) => Type::Unknown,
 
-            Expr::Ident(name, _) => {
+            Expr::Ident(name, span) => {
                 // Look up variable in scope
-                self.lookup_var(name).unwrap_or(Type::Unknown)
+                if let Some(ty) = self.lookup_var(name) {
+                    ty
+                } else if self.func_types.contains_key(name)
+                    || self.generic_func_defs.contains_key(name)
+                    || self.declared_concrete_type_names.contains(name)
+                    || self.registry.mold_defs.contains_key(name)
+                    || matches!(
+                        name.as_str(),
+                        "debug"
+                            | "toString"
+                            | "toStr"
+                            | "typeOf"
+                            | "typeof"
+                            | "jsonEncode"
+                            | "jsonPretty"
+                            | "nowMs"
+                            | "assert"
+                            | "range"
+                            | "enumerate"
+                            | "zip"
+                            | "hashMap"
+                            | "setOf"
+                            | "stdout"
+                            | "stderr"
+                            | "exit"
+                            | "stdin"
+                            | "argv"
+                            | "sleep"
+                    )
+                {
+                    // Known function/type/mold name used as value reference
+                    Type::Unknown
+                } else {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1502] Undefined variable '{}'. \
+                             Hint: Check the variable name for typos, or define it before use.",
+                            name
+                        ),
+                        span: span.clone(),
+                    });
+                    Type::Unknown
+                }
             }
 
             Expr::BuchiPack(fields, _) => {
@@ -2239,6 +2281,20 @@ defaulted fields must be provided via `()`",
                         }
                         return *ret;
                     }
+                    // FL-23: Check if variable is a non-function type being called
+                    if let Some(var_ty) = self.lookup_var(name) {
+                        if !matches!(var_ty, Type::Unknown) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1510] Cannot call '{}' of type {} as a function. \
+                                     Hint: Only functions and molds can be called.",
+                                    name, var_ty
+                                ),
+                                span: span.clone(),
+                            });
+                            return Type::Unknown;
+                        }
+                    }
                     // Check if it's a known builtin
                     // E1507: Builtin arity check
                     // (name, min_args, max_args)
@@ -2346,7 +2402,19 @@ defaulted fields must be provided via `()`",
                             }
                             *ret
                         }
-                        _ => Type::Unknown,
+                        Type::Unknown => Type::Unknown,
+                        _ => {
+                            // FL-23: non-function call
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1510] Cannot call non-function value of type {}. \
+                                     Hint: Only functions and molds can be called.",
+                                    func_type
+                                ),
+                                span: span.clone(),
+                            });
+                            Type::Unknown
+                        }
                     }
                 }
             }
@@ -2752,8 +2820,14 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown)
                     })
                     .collect();
+                // Push scope with lambda params so body references don't trigger E1502
+                self.push_scope();
+                for (i, p) in params.iter().enumerate() {
+                    self.define_var(&p.name, param_types.get(i).cloned().unwrap_or(Type::Unknown));
+                }
                 // Try to infer return type from the body expression
                 let ret_type = self.infer_expr_type(body);
+                self.pop_scope();
                 Type::Function(param_types, Box::new(ret_type))
             }
 

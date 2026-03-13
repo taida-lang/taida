@@ -89,6 +89,31 @@ impl TypeChecker {
             }
         };
 
+        // FL-22: Emit error for unknown methods on known concrete types
+        if method_sig.is_none() && method != "toString" {
+            let is_known_type = matches!(
+                obj_type,
+                Type::Str
+                    | Type::Int
+                    | Type::Float
+                    | Type::Num
+                    | Type::Bool
+                    | Type::Bytes
+                    | Type::List(_)
+            ) || matches!(obj_type, Type::Named(n) if n == "HashMap" || n == "Set")
+                || matches!(obj_type, Type::Generic(n, _) if n == "Lax" || n == "Result");
+            if is_known_type {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1509] Unknown method '{}' on type {}. \
+                         Hint: Check the method name for typos, or use a mold instead.",
+                        method, obj_type
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+
         if let Some((min_args, max_args, param_types)) = method_sig {
             // Check arity
             if args.len() < min_args || args.len() > max_args {
