@@ -2083,8 +2083,15 @@ taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item) {
     taida_val cap = list[1];
     taida_val len = list[2];
     if (len >= cap) {
+        // M-05: Guard against cap * 2 overflow and (4 + new_cap) * sizeof overflow.
         taida_val new_cap = cap * 2;
-        taida_val *tmp = (taida_val*)realloc(list, (4 + new_cap) * sizeof(taida_val));
+        if (new_cap < cap || new_cap <= 0) {
+            // Signed overflow detected — cap was already huge.
+            fprintf(stderr, "taida: list capacity overflow (taida_list_push): %" PRId64 "\n", cap);
+            exit(1);
+        }
+        size_t realloc_size = taida_safe_mul(taida_safe_add(4, (size_t)new_cap, "list_push slots"), sizeof(taida_val), "list_push bytes");
+        taida_val *tmp = (taida_val*)realloc(list, realloc_size);
         if (!tmp) { fprintf(stderr, "taida: out of memory (taida_list_push)\n"); exit(1); }
         list = tmp;
         list[0] = rc;       // preserve refcount
@@ -2194,7 +2201,14 @@ taida_val taida_list_filter(taida_val list_ptr, taida_val fn_ptr) {
 
 static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill) {
     if (len < 0) len = 0;
-    taida_val *bytes = (taida_val*)malloc((2 + len) * sizeof(taida_val));
+    // M-04: Guard against huge len values that could cause OOM or overflow
+    // in (2 + len) * sizeof(taida_val). Limit to ~128M entries.
+    if (len > (taida_val)(SIZE_MAX / sizeof(taida_val) - 2)) {
+        fprintf(stderr, "taida: bytes length too large (taida_bytes_new_filled): %" PRId64 "\n", len);
+        exit(1);
+    }
+    size_t alloc_size = taida_safe_mul(taida_safe_add(2, (size_t)len, "bytes_new_filled slots"), sizeof(taida_val), "bytes_new_filled bytes");
+    taida_val *bytes = (taida_val*)malloc(alloc_size);
     if (!bytes) { fprintf(stderr, "taida: out of memory (taida_bytes_new_filled)\n"); exit(1); }
     bytes[0] = TAIDA_BYTES_MAGIC | 1;
     bytes[1] = len;
@@ -3296,7 +3310,11 @@ static int taida_hashmap_key_eq(taida_val key_a, taida_val key_b) {
 }
 
 static taida_val taida_hashmap_new_with_cap(taida_val cap) {
-    taida_val *hm = (taida_val*)calloc(HM_HEADER + cap * 3, sizeof(taida_val));
+    // M-02: Guard against non-positive cap and cap * 3 overflow.
+    if (cap <= 0) cap = 16;
+    size_t slots = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_new_with_cap slots"), "hm_new_with_cap total");
+    size_t alloc_size = taida_safe_mul(slots, sizeof(taida_val), "hm_new_with_cap bytes");
+    taida_val *hm = (taida_val*)calloc(1, alloc_size);
     if (!hm) { fprintf(stderr, "taida: out of memory (taida_hashmap_new_with_cap)\n"); exit(1); }
     hm[0] = TAIDA_HMAP_MAGIC | 1;  // Magic + refcount
     hm[1] = cap;  // capacity
@@ -6612,6 +6630,8 @@ taida_val taida_os_write_bytes(taida_val path_ptr, taida_val content_ptr) {
         taida_val *bytes = (taida_val*)content_ptr;
         taida_val len = bytes[1];
         if (len < 0) return taida_os_result_failure(EINVAL, "writeBytes: invalid bytes payload");
+        // M-15: Cap bytes len to 256MB to prevent unbounded malloc.
+        if (len > (taida_val)(256 * 1024 * 1024)) return taida_os_result_failure(EINVAL, "writeBytes: payload too large");
         payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "writeBytes_payload");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
@@ -7670,6 +7690,8 @@ taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_va
         taida_val *bytes = (taida_val*)data_ptr;
         taida_val len = bytes[1];
         if (len < 0) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSend: invalid data"));
+        // M-15: Cap bytes len to 256MB to prevent unbounded malloc.
+        if (len > (taida_val)(256 * 1024 * 1024)) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSend: payload too large"));
         payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "socketSend_bytes");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
@@ -7709,6 +7731,8 @@ taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taid
         taida_val *bytes = (taida_val*)data_ptr;
         taida_val len = bytes[1];
         if (len < 0) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSendAll: invalid data"));
+        // M-15: Cap bytes len to 256MB to prevent unbounded malloc.
+        if (len > (taida_val)(256 * 1024 * 1024)) return taida_async_resolved(taida_os_result_failure(EINVAL, "socketSendAll: payload too large"));
         payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "socketSendAll_bytes");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
         payload_len = (size_t)len;
@@ -7787,6 +7811,10 @@ taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_
     if (size == 0) {
         taida_val empty = taida_bytes_default_value();
         return taida_async_resolved(taida_lax_new(empty, empty));
+    }
+    // M-11: Cap recv size to 256MB to prevent unbounded malloc from user input.
+    if (size > (taida_val)(256 * 1024 * 1024)) {
+        return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
     }
 
     unsigned char *buf = (unsigned char*)malloc((size_t)size);
@@ -7899,6 +7927,10 @@ taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_va
         taida_val len = bytes[1];
         if (len < 0) {
             return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: invalid bytes payload"));
+        }
+        // M-15: Cap bytes len to 256MB to prevent unbounded malloc.
+        if (len > (taida_val)(256 * 1024 * 1024)) {
+            return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: payload too large"));
         }
         payload_buf = (unsigned char*)TAIDA_MALLOC((size_t)len, "udpSendTo_bytes");
         for (taida_val i = 0; i < len; i++) payload_buf[i] = (unsigned char)bytes[2 + i];
