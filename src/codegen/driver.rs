@@ -22,6 +22,15 @@ static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Return a unique .o path derived from `input_path` by appending PID and a
 /// monotonic counter.  This prevents races when two threads (or two processes)
 /// compile the same .td file concurrently.
+///
+/// N-41: `unwrap_or` usage in driver.rs
+/// Throughout this module, `.parent().unwrap_or(Path::new("."))` and similar
+/// fallbacks are used intentionally.  `Path::parent()` returns `None` only for
+/// root-less single-component paths (e.g. `Path::new("file.td")`), so falling
+/// back to `"."` (the current working directory) is the correct behaviour —
+/// it matches the user's expectation that output artifacts land next to the
+/// source file.  The same reasoning applies to `.file_stem()` / `.to_str()`
+/// fallbacks elsewhere in this file.
 fn unique_obj_path(input_path: &Path) -> PathBuf {
     let pid = std::process::id();
     let seq = OBJ_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -29,7 +38,7 @@ fn unique_obj_path(input_path: &Path) -> PathBuf {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("taida_obj");
-    let dir = input_path.parent().unwrap_or(Path::new("."));
+    let dir = input_path.parent().unwrap_or(Path::new(".")); // see doc above
     dir.join(format!("{}.{}.{}.o", stem, pid, seq))
 }
 

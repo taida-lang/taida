@@ -202,11 +202,11 @@ strcpy パターン、フォールバック、コメント整理。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 74 | N-40 | `strcpy()` 使用（mkdir_p 以外の3箇所） | [P] | `TODO` | `src/codegen/native_runtime.c` |
-| 75 | N-41 | `unwrap_or(Path::new("."))` 等 (15箇所) | [E] | `TODO` | `src/codegen/driver.rs` |
-| 76 | N-42 | TODO コメント残存 (unmold channel) | [M] | `TODO` | `src/codegen/native_runtime.c:4896` |
-| 77 | N-43 | malloc NULL チェックの一貫性不足 | [E] | `TODO` | `src/codegen/native_runtime.c` |
-| 78 | N-44 | ABI テーブル保守性 | [M] | `TODO` | `src/codegen/emit.rs:1512` |
+| 74 | N-40 | `strcpy()` 使用（mkdir_p 以外の3箇所） | [P] | `DONE` | `src/codegen/native_runtime.c` |
+| 75 | N-41 | `unwrap_or(Path::new("."))` 等 (15箇所) | [E] | `DONE` | `src/codegen/driver.rs` |
+| 76 | N-42 | TODO コメント残存 (unmold channel) | [M] | `DONE` | `src/codegen/native_runtime.c:4896` |
+| 77 | N-43 | malloc NULL チェックの一貫性不足 | [E] | `DONE` | `src/codegen/native_runtime.c` |
+| 78 | N-44 | ABI テーブル保守性 | [M] | `DONE` | `src/codegen/emit.rs:1512` |
 
 ---
 
@@ -298,13 +298,13 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 9 | Parser/Lexer | 13 | 13 | 0 |
 | 10 | Interpreter | 18 | 18 | 0 |
 | 11 | JS codegen | 8 | 8 | 0 |
-| 12 | Native codegen | 5 | 0 | 5 |
+| 12 | Native codegen | 5 | 5 | 0 |
 | 13 | CLI/pkg/auth | 14 | 0 | 14 |
 | 14 | Type checker/Tests | 17 | 0 | 17 |
 | 15 | WASM/Runtime Hardening | 6 | 6 | 0 |
-| **小計** | | **81** | **45** | **36** |
+| **小計** | | **81** | **50** | **31** |
 
-| | | **総計 115** | **79** | **36** |
+| | | **総計 115** | **84** | **31** |
 
 ---
 
@@ -378,6 +378,7 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-14 | Phase 9 全完了 (N-1〜N-13)。Parser/Lexer: body_expr panic メッセージ改善、peek_at/advance 境界チェック強化 (expect+saturating_add+min clamp)、scan_number SAFETY コメント、バージョンパーサー状態機械ドキュメント、Mold バックトラックコメント、ブロックパーサー/synchronize/行継続コメント補強、import パス未知トークンコメント、不正エスケープ error recovery コメント、テンプレート文字列不明エスケープにエラー報告追加 (通常文字列との一貫性)、peek_at ルックアヘッドドキュメント、lexer テスト2件追加 |
 | 2026-03-14 | Phase 10 全完了 (N-14〜N-31)。Interpreter: charAt unwrap_or_default 化、env.rs scope 非空不変条件ドキュメント+expect メッセージ、unmold.rs check-then-unwrap を match 統合に変更、json.rs テスト panic→let-else 変換 (11箇所)、os_eval.rs テスト panic→unreachable 変換+signal_name ヘルパー追加で unexpected signal にシグナル型を含める、mold_eval.rs unreachable にコメント追加+TODO mold ドキュメント整理+eval_mold match 巨大さのドキュメント、json.rs silent default の哲学準拠コメント、module_eval.rs parent/export フォールバックコメント、eval.rs expect メッセージ改善、control_flow.rs pipeline scope RAII 不使用の理由ドキュメント |
 | 2026-03-14 | Phase 11 全完了 (N-32〜N-39)。JS codegen: 相互再帰 position().unwrap() に SAFETY コメント+expect メッセージ、テンプレートリテラル変換の制限事項ドキュメント、Mold フィールドレジストリ更新タイミングコメント、manifest 読み込み失敗時に eprintln 警告追加 (silent fallback 解消)、Pipeline __p 変数の IIFE スコープ安全性ドキュメント、TODO mold __type マーカー命名規則コメント (codegen+runtime 両方)、HashMap/Set toString() フォーマットドキュメント、型引数不足時の undefined フォールバック理由ドキュメント |
+| 2026-03-14 | Phase 12 全完了 (N-40〜N-44)。Native codegen: strcpy→memcpy/snprintf 変換 (3箇所)、driver.rs unwrap_or(Path) の安全性ドキュメント、native_runtime.c の stale TODO コメント更新、TAIDA_MALLOC マクロ導入+未チェック malloc 一括変換 (30箇所以上)、emit.rs ABI テーブル保守ガイドコメント追加 |
 
 ---
 

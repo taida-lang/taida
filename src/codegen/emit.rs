@@ -1509,6 +1509,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // N-44: ABI table maintenance note
+        // When adding a new runtime function in lower.rs, a corresponding entry
+        // MUST be added here. The match is exhaustive by design — an unknown
+        // function name returns a user-friendly error instead of panicking.
+        // To add a new entry:
+        //   1. Identify the C signature in native_runtime.c
+        //   2. Map each parameter to AbiKind: Val (i64), Ptr (heap ptr), FnPtr, F64
+        //   3. Add a `"taida_<name>" => RuntimeAbi { params: &[...], returns: &[...] }` arm above
         _ => {
             return Err(format!(
                 "unknown runtime function: '{}'. Add it to the ABI table in emit.rs runtime_abi().",
