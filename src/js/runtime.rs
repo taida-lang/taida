@@ -1173,11 +1173,13 @@ function __taida_stdin(prompt) {
     if (prompt) process.stdout.write(prompt);
     try {
       const buf = Buffer.alloc(1024); let line = '';
-      const fd = __taida_fs.openSync('/dev/stdin', 'r');
+      // Use fd 0 (process.stdin.fd) for cross-platform compatibility.
+      // Use fd instead of /dev/stdin for Windows compatibility.
+      // Note: Do NOT close this fd — it is process.stdin.fd, not a newly opened handle.
+      const fd = process.stdin.fd ?? 0;
       let n; while ((n = __taida_fs.readSync(fd, buf, 0, 1)) > 0) {
         const ch = buf.toString('utf-8', 0, n); if (ch === '\n') break; line += ch;
       }
-      __taida_fs.closeSync(fd);
       return line.replace(/\r$/, '');
     } catch(e) { return ''; }
   }
@@ -2898,3 +2900,26 @@ function sha256(value) {
   return '';
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FL-28: Verify stdin does not use /dev/stdin (Windows incompatible)
+    #[test]
+    fn test_stdin_no_dev_stdin_hardcode() {
+        assert!(
+            !RUNTIME_JS.contains("'/dev/stdin'"),
+            "JS runtime should not hardcode '/dev/stdin' -- use process.stdin.fd for cross-platform compatibility"
+        );
+        assert!(
+            !RUNTIME_JS.contains("\"/dev/stdin\""),
+            "JS runtime should not hardcode \"/dev/stdin\""
+        );
+        // Verify the cross-platform approach is used
+        assert!(
+            RUNTIME_JS.contains("process.stdin.fd"),
+            "JS runtime should use process.stdin.fd for cross-platform stdin"
+        );
+    }
+}

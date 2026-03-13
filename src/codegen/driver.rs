@@ -212,13 +212,39 @@ fn link_objects_inner(
         message: format!("failed to write C wrapper: {}", e),
     })?;
 
-    // cc でコンパイル + リンク（-no-pie で PIE 警告を回避）
-    let mut cmd = Command::new("cc");
-    cmd.arg("-no-pie").arg(&c_path);
-    for obj in obj_paths {
-        cmd.arg(obj);
-    }
-    cmd.arg("-o").arg(bin_path).arg("-lm").arg("-lpthread");
+    // コンパイル + リンク（プラットフォーム別）
+    #[cfg(windows)]
+    let mut cmd = {
+        // Windows: clang または cl.exe を使用
+        let compiler = find_native_compiler_windows()?;
+        let mut c = Command::new(&compiler);
+        c.arg(&c_path);
+        for obj in obj_paths {
+            c.arg(obj);
+        }
+        // clang の場合は Unix 風オプション、cl.exe の場合は MSVC オプション
+        if compiler.contains("clang") {
+            // -lm is not needed on Windows (included in MSVC CRT).
+            // -lpthread is required: native_runtime.c uses pthread for Async support.
+            c.arg("-o").arg(bin_path).arg("-lpthread");
+        } else {
+            // cl.exe: pthread is not natively available; native_runtime.c's pthread
+            // usage will need a pthreads-win32 library or Windows threads adaptation.
+            c.arg(&format!("/Fe:{}", bin_path.display()));
+        }
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        // Unix: cc でコンパイル + リンク（-no-pie で PIE 警告を回避）
+        let mut c = Command::new("cc");
+        c.arg("-no-pie").arg(&c_path);
+        for obj in obj_paths {
+            c.arg(obj);
+        }
+        c.arg("-o").arg(bin_path).arg("-lm").arg("-lpthread");
+        c
+    };
 
     let status = cmd.status().map_err(|e| CompileError {
         message: format!("linker invocation failed: {}", e),
@@ -236,6 +262,40 @@ fn link_objects_inner(
     Ok(())
 }
 
+/// Windows で native コンパイラ（clang または cl.exe）を検出する
+#[cfg(windows)]
+fn find_native_compiler_windows() -> Result<String, CompileError> {
+    if let Some(path) = which_command("clang") {
+        return Ok(path);
+    }
+    if let Some(path) = which_command("cl.exe") {
+        return Ok(path);
+    }
+    Err(CompileError {
+        message: "C compiler not found. Install clang or Visual Studio Build Tools (cl.exe)."
+            .to_string(),
+    })
+}
+
+/// `which` (Unix) / `where.exe` (Windows) でコマンドの絶対パスを検索する
+fn which_command(name: &str) -> Option<String> {
+    let which_cmd = if cfg!(windows) { "where.exe" } else { "which" };
+    if let Ok(output) = Command::new(which_cmd).arg(name).output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // W-1: wasm-min コンパイルパス
 // ---------------------------------------------------------------------------
@@ -243,17 +303,13 @@ fn link_objects_inner(
 /// wasm-ld の実行パスを検出する
 fn find_wasm_ld() -> Result<PathBuf, CompileError> {
     // 1. PATH 上の wasm-ld
-    if let Ok(output) = Command::new("which").arg("wasm-ld").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
+    if let Some(path) = which_command("wasm-ld") {
+        return Ok(PathBuf::from(path));
     }
 
-    // 2. 既知の LLVM インストール先を探索
-    let candidates = [
+    // 2. 既知の LLVM インストール先を探索（プラットフォーム別）
+    #[cfg(not(windows))]
+    let candidates: &[&str] = &[
         "/opt/rocm-6.4.2/lib/llvm/bin/wasm-ld",
         "/usr/lib/llvm-17/bin/wasm-ld",
         "/usr/lib/llvm-18/bin/wasm-ld",
@@ -261,44 +317,53 @@ fn find_wasm_ld() -> Result<PathBuf, CompileError> {
         "/usr/lib/llvm-20/bin/wasm-ld",
         "/usr/local/bin/wasm-ld",
     ];
-    for candidate in &candidates {
+    #[cfg(windows)]
+    let candidates: &[&str] = &[
+        "C:\\Program Files\\LLVM\\bin\\wasm-ld.exe",
+        "C:\\Program Files (x86)\\LLVM\\bin\\wasm-ld.exe",
+    ];
+
+    for candidate in candidates {
         let p = PathBuf::from(candidate);
         if p.exists() {
             return Ok(p);
         }
     }
 
+    let install_hint = if cfg!(windows) {
+        "wasm-ld not found. Install LLVM (https://releases.llvm.org/) and ensure wasm-ld.exe is on PATH."
+    } else {
+        "wasm-ld not found. Install LLVM/LLD (e.g. `apt install lld-17`)."
+    };
     Err(CompileError {
-        message: "wasm-ld not found. Install LLVM/LLD (e.g. `apt install lld-17`).".to_string(),
+        message: install_hint.to_string(),
     })
 }
 
 /// clang の実行パスを検出する（wasm32 クロスコンパイル用）
 fn find_clang_for_wasm() -> Result<String, CompileError> {
-    // バージョン付きの clang を優先的に検索
-    for ver in &["17", "18", "19", "20"] {
-        let name = format!("clang-{}", ver);
-        if let Ok(output) = Command::new("which").arg(&name).output()
-            && output.status.success()
-        {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
+    // バージョン付きの clang を優先的に検索（Unix のみ、Windows は clang.exe 一択）
+    #[cfg(not(windows))]
+    {
+        for ver in &["17", "18", "19", "20"] {
+            let name = format!("clang-{}", ver);
+            if let Some(path) = which_command(&name) {
                 return Ok(path);
             }
         }
     }
     // フォールバック: PATH 上の clang
-    if let Ok(output) = Command::new("which").arg("clang").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Ok(path);
-        }
+    if let Some(path) = which_command("clang") {
+        return Ok(path);
     }
 
+    let install_hint = if cfg!(windows) {
+        "clang not found. Install LLVM (https://releases.llvm.org/) and ensure clang.exe is on PATH."
+    } else {
+        "clang not found. Install clang (e.g. `apt install clang-17`)."
+    };
     Err(CompileError {
-        message: "clang not found. Install clang (e.g. `apt install clang-17`).".to_string(),
+        message: install_hint.to_string(),
     })
 }
 
@@ -1442,4 +1507,69 @@ function concat(arrays) {{
         stem = stem,
         wasm_filename = wasm_filename,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FL-27: which_command should find common executables on the current platform
+    #[test]
+    fn test_which_command_finds_existing_binary() {
+        if cfg!(windows) {
+            let result = which_command("cmd.exe");
+            assert!(
+                result.is_some(),
+                "which_command should find 'cmd.exe' on Windows"
+            );
+        } else {
+            // `ls` exists on all Unix systems
+            let result = which_command("ls");
+            assert!(
+                result.is_some(),
+                "which_command should find 'ls' on Unix"
+            );
+            assert!(
+                result.unwrap().contains("ls"),
+                "which_command result should contain 'ls'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_which_command_returns_none_for_nonexistent() {
+        let result = which_command("__taida_nonexistent_binary_12345__");
+        assert!(
+            result.is_none(),
+            "which_command should return None for nonexistent binaries"
+        );
+    }
+
+    /// FL-27: find_wasm_ld error message should be platform-appropriate
+    #[test]
+    fn test_find_wasm_ld_error_message() {
+        if which_command("wasm-ld").is_some() {
+            return; // skip — tool is installed, can't test error path
+        }
+        let err = find_wasm_ld().unwrap_err();
+        if cfg!(windows) {
+            assert!(!err.message.contains("apt"));
+        } else {
+            assert!(err.message.contains("apt"));
+        }
+    }
+
+    /// FL-27: find_clang_for_wasm error message should be platform-appropriate
+    #[test]
+    fn test_find_clang_error_message() {
+        if which_command("clang").is_some() {
+            return; // skip — tool is installed, can't test error path
+        }
+        let err = find_clang_for_wasm().unwrap_err();
+        if cfg!(windows) {
+            assert!(!err.message.contains("apt"));
+        } else {
+            assert!(err.message.contains("apt"));
+        }
+    }
 }
