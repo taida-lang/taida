@@ -388,6 +388,16 @@ int64_t taida_generic_unmold(int64_t val) {
     return val;
 }
 
+/* ── FL-16: 多態加算 (polymorphic add) ── */
+/* wasm-min: integer-only add. String concatenation in Taida is handled
+   by taida_str_concat which the compiler emits explicitly for string
+   operands. poly_add is only reached when the compiler cannot determine
+   the operand type at compile time, and in wasm-min all such values
+   are integers (wasm-min has no heap string detection mechanism). */
+int64_t taida_poly_add(int64_t a, int64_t b) {
+    return a + b;
+}
+
 /* ── 多態比較 (wasm-min: 整数比較のみ) ── */
 
 int64_t taida_poly_eq(int64_t a, int64_t b) { return a == b ? 1 : 0; }

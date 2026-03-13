@@ -602,6 +602,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_bool_mold_float" => "int64_t taida_bool_mold_float(int64_t v);".to_string(),
         "taida_bool_mold_str" => "int64_t taida_bool_mold_str(int64_t v);".to_string(),
         "taida_bool_mold_bool" => "int64_t taida_bool_mold_bool(int64_t v);".to_string(),
+        // FL-16: Polymorphic add (fallback to string concat or int add)
+        "taida_poly_add" => "int64_t taida_poly_add(int64_t a, int64_t b);".to_string(),
         // W-5: Float div/mod molds
         "taida_float_div_mold" => "int64_t taida_float_div_mold(int64_t a, int64_t b);".to_string(),
         "taida_float_mod_mold" => "int64_t taida_float_mod_mold(int64_t a, int64_t b);".to_string(),
