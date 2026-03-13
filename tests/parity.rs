@@ -15,43 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn taida_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_taida"))
-}
-
-struct NativeBuildLock {
-    path: PathBuf,
-}
-
-impl Drop for NativeBuildLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
-    }
-}
-
-fn acquire_native_build_lock() -> NativeBuildLock {
-    let lock_path = std::env::temp_dir().join("taida_native_build_test.lock");
-    let started = Instant::now();
-    loop {
-        match fs::create_dir(&lock_path) {
-            Ok(()) => return NativeBuildLock { path: lock_path },
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                assert!(
-                    started.elapsed() < Duration::from_secs(120),
-                    "timed out waiting for native build test lock {}",
-                    lock_path.display()
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(err) => panic!(
-                "failed to acquire native build test lock {}: {}",
-                lock_path.display(),
-                err
-            ),
-        }
-    }
 }
 
 fn examples_dir() -> PathBuf {
@@ -167,8 +134,7 @@ fn run_native_with_error(td_path: &Path) -> Result<String, String> {
         .to_string();
     let binary_path = unique_temp_path("taida_parity_native", &stem, "bin");
 
-    // Compile
-    let _build_lock = acquire_native_build_lock();
+    // Compile (no global lock needed -- FL-7 ensures unique .o paths)
     let compile_output = Command::new(taida_bin())
         .arg("build")
         .arg("--target")
@@ -340,7 +306,6 @@ fn run_interpreter_error(td_path: &Path) -> Option<String> {
 
 fn run_native_build_error(td_path: &Path, label: &str) -> Option<String> {
     let bin_path = unique_temp_path("taida_parity_native_err", label, "bin");
-    let _build_lock = acquire_native_build_lock();
     let output = Command::new(taida_bin())
         .arg("build")
         .arg("--target")
@@ -844,6 +809,124 @@ fn test_three_way_parity() {
             "{} three-way parity test(s) failed:\n\n{}",
             failures.len(),
             failures.join("\n\n"),
+        );
+    }
+}
+
+// =========================================================================
+// Test 3: Interpreter vs Native parity for numbered examples (FL-17)
+// =========================================================================
+
+/// Numbered examples with known native backend output mismatches.
+/// These are tracked as native backend issues and should be fixed eventually.
+/// When fixed, remove from this list so the parity test catches regressions.
+fn native_numbered_known_failures() -> Vec<&'static str> {
+    vec![
+        "03_buchi_pack",            // template literal field access emits 0
+        "04_functions",             // recursive function results emit 0
+        "06_lists",                 // .length() returns 0
+        "07_closures",              // closure captured variables emit 0
+        "15_noarg_functions",       // no-arg function calls return 0
+        "26_prelude_optional",      // segfault (exit 139)
+        "27_prelude_result",        // Error toString format mismatch
+    ]
+}
+
+#[test]
+fn test_numbered_examples_native_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping numbered examples native parity");
+        return;
+    }
+
+    let known_failures = native_numbered_known_failures();
+    let skip = interpreter_skip_list();
+    let dir = examples_dir();
+    let mut entries: Vec<_> = fs::read_dir(&dir)
+        .expect("examples/ directory should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            // Numbered examples: start with a digit, end with .td
+            name.ends_with(".td")
+                && name.starts_with(|c: char| c.is_ascii_digit())
+                && !skip.iter().any(|s| name == format!("{}.td", s))
+        })
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    assert!(
+        !entries.is_empty(),
+        "No numbered example .td files found in examples/"
+    );
+
+    let mut passed = 0;
+    let mut expected_failed = 0;
+    let mut unexpected_failures = Vec::new();
+    let mut unexpected_passes = Vec::new();
+
+    for entry in &entries {
+        let path = entry.path();
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let is_known_failure = known_failures.contains(&name.as_str());
+
+        let interp = match run_interpreter(&path) {
+            Some(o) => o,
+            None => continue, // interpreter failure = skip (not a native issue)
+        };
+
+        let native = match run_native(&path) {
+            Some(o) => o,
+            None => {
+                if is_known_failure {
+                    expected_failed += 1;
+                    continue;
+                }
+                unexpected_failures.push(format!(
+                    "{}: native compile/run failed",
+                    name,
+                ));
+                continue;
+            }
+        };
+
+        if interp == native {
+            if is_known_failure {
+                unexpected_passes.push(name.clone());
+            }
+            passed += 1;
+        } else if is_known_failure {
+            expected_failed += 1;
+        } else {
+            unexpected_failures.push(format!(
+                "{}: output mismatch\n  interp:  {:?}\n  native:  {:?}",
+                name,
+                interp.lines().take(3).collect::<Vec<_>>(),
+                native.lines().take(3).collect::<Vec<_>>(),
+            ));
+        }
+    }
+
+    eprintln!(
+        "Numbered-examples native parity: {}/{} passed, {} known failures",
+        passed,
+        passed + unexpected_failures.len() + expected_failed,
+        expected_failed,
+    );
+
+    if !unexpected_passes.is_empty() {
+        panic!(
+            "{} examples in known-failures list now PASS -- remove from allowlist: {:?}",
+            unexpected_passes.len(),
+            unexpected_passes,
+        );
+    }
+
+    if !unexpected_failures.is_empty() {
+        panic!(
+            "{} numbered-example native parity test(s) failed:\n\n{}",
+            unexpected_failures.len(),
+            unexpected_failures.join("\n\n"),
         );
     }
 }

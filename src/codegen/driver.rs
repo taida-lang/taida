@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::emit::Emitter;
 use super::emit_wasm_c;
@@ -14,6 +15,23 @@ use crate::module_graph;
 use crate::parser::parse;
 
 type ModuleImports = Vec<(String, Vec<String>)>;
+
+/// Process-wide counter to produce unique .o file names.
+static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Return a unique .o path derived from `input_path` by appending PID and a
+/// monotonic counter.  This prevents races when two threads (or two processes)
+/// compile the same .td file concurrently.
+fn unique_obj_path(input_path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let seq = OBJ_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("taida_obj");
+    let dir = input_path.parent().unwrap_or(Path::new("."));
+    dir.join(format!("{}.{}.{}.o", stem, pid, seq))
+}
 
 #[derive(Debug)]
 pub struct CompileError {
@@ -74,7 +92,7 @@ fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), Comp
         message: format!("object emission failed: {}", e),
     })?;
 
-    let obj_path = input_path.with_extension("o");
+    let obj_path = unique_obj_path(input_path);
     fs::write(&obj_path, &obj_bytes).map_err(|e| CompileError {
         message: format!("failed to write '{}': {}", obj_path.display(), e),
     })?;
@@ -111,44 +129,48 @@ pub fn compile_file(
         .into_iter()
         .map(|(p, s)| (p, s, base_dir.to_path_buf()))
         .collect();
-    while let Some((module_path, _symbols, importer_dir)) = pending_imports.pop() {
-        let dep_path = resolve_module_path(&importer_dir, &module_path);
-        let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
-        if compiled.contains(&canonical) {
-            continue;
+
+    let result = (|| -> Result<PathBuf, CompileError> {
+        while let Some((module_path, _symbols, importer_dir)) = pending_imports.pop() {
+            let dep_path = resolve_module_path(&importer_dir, &module_path);
+            let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
+            if compiled.contains(&canonical) {
+                continue;
+            }
+            compiled.insert(canonical);
+
+            let dep_dir = dep_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let (obj_path, sub_imports) = compile_to_object(&dep_path)?;
+            all_objs.push(obj_path);
+            pending_imports.extend(
+                sub_imports
+                    .into_iter()
+                    .map(|(p, s)| (p, s, dep_dir.clone())),
+            );
         }
-        compiled.insert(canonical);
 
-        let dep_dir = dep_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let (obj_path, sub_imports) = compile_to_object(&dep_path)?;
-        all_objs.push(obj_path);
-        pending_imports.extend(
-            sub_imports
-                .into_iter()
-                .map(|(p, s)| (p, s, dep_dir.clone())),
-        );
-    }
+        // リンカ呼び出し
+        let bin_path = match output_path {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let stem = input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output");
+                base_dir.join(stem)
+            }
+        };
 
-    // リンカ呼び出し
-    let bin_path = match output_path {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let stem = input_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output");
-            base_dir.join(stem)
-        }
-    };
+        link_objects(&all_objs, &bin_path)?;
+        Ok(bin_path)
+    })();
 
-    link_objects(&all_objs, &bin_path)?;
-
-    // .o ファイルを削除
+    // .o ファイルを削除（エラー時も確実にクリーンアップ）
     for obj in &all_objs {
         let _ = fs::remove_file(obj);
     }
 
-    Ok(bin_path)
+    result
 }
 
 /// モジュールパスの解決: "./math" → "./math.td"
