@@ -185,14 +185,14 @@ unwrap パターン、silent default、テストコードの改善。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 66 | N-32 | 相互再帰検出の `position().unwrap()` | [P] | `DONE` | `src/js/codegen.rs:176` |
-| 67 | N-33 | テンプレートリテラル変換の限定 | [L] | `DONE` | `src/js/codegen.rs:2039-2047` |
-| 68 | N-34 | Mold フィールドレジストリの更新タイミング | [L] | `DONE` | `src/js/codegen.rs:882-883` |
-| 69 | N-35 | manifest 読み込み失敗時の silent fallback | [E] | `DONE` | `src/js/codegen.rs:1109-1115` |
-| 70 | N-36 | Pipeline の `__p` ハードコード変数名 | [L] | `DONE` | `src/js/codegen.rs:2054-2064` |
-| 71 | N-37 | TODO mold の `__type: 'TODO'` マーカー名 | [M] | `DONE` | `src/js/codegen.rs:1843`, `src/js/runtime.rs:618` |
-| 72 | N-38 | HashMap/Set toString() フォーマット不統一 | [L] | `DONE` | `src/js/runtime.rs:1606-1612,1689-1691` |
-| 73 | N-39 | 型引数不足時の `"undefined"` フォールバック | [E] | `DONE` | `src/js/codegen.rs:946-951` |
+| 66 | N-32 | 相互再帰検出の `position().unwrap()` | [P] | `VERIFIED` | `src/js/codegen.rs:176` |
+| 67 | N-33 | テンプレートリテラル変換の限定 | [L] | `VERIFIED` | `src/js/codegen.rs:2039-2047` |
+| 68 | N-34 | Mold フィールドレジストリの更新タイミング | [L] | `VERIFIED` | `src/js/codegen.rs:882-883` |
+| 69 | N-35 | manifest 読み込み失敗時の silent fallback | [E] | `VERIFIED` | `src/js/codegen.rs:1109-1115` |
+| 70 | N-36 | Pipeline の `__p` ハードコード変数名 | [L] | `VERIFIED` | `src/js/codegen.rs:2054-2064` |
+| 71 | N-37 | TODO mold の `__type: 'TODO'` マーカー名 | [M] | `VERIFIED` | `src/js/codegen.rs:1843`, `src/js/runtime.rs:618` |
+| 72 | N-38 | HashMap/Set toString() フォーマット不統一 | [L] | `VERIFIED` | `src/js/runtime.rs:1606-1612,1689-1691` |
+| 73 | N-39 | 型引数不足時の `"undefined"` フォールバック | [E] | `VERIFIED` | `src/js/codegen.rs:946-951` |
 
 ---
 
