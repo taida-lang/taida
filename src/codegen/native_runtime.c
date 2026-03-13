@@ -1760,8 +1760,7 @@ static char* taida_str_alloc(size_t len) {
         fprintf(stderr, "taida: string length overflow in taida_str_alloc: %zu\n", len);
         exit(1);
     }
-    taida_val *hdr = (taida_val*)malloc(sizeof(taida_val) * 2 + len + 1);
-    if (!hdr) { fprintf(stderr, "taida: out of memory (taida_str_alloc)\n"); exit(1); }
+    taida_val *hdr = (taida_val*)TAIDA_MALLOC(sizeof(taida_val) * 2 + len + 1, "str_alloc");
     hdr[0] = TAIDA_STR_MAGIC | 1;  // magic + refcount = 1
     hdr[1] = (taida_val)len;
     char *bytes = (char*)(hdr + 2);
@@ -1835,8 +1834,7 @@ taida_ptr taida_pack_new(taida_val field_count) {
     size_t fc = (size_t)field_count;
     size_t slots = taida_safe_add(2, taida_safe_mul(fc, 3, "pack_new fields"), "pack_new header");
     size_t alloc_size = taida_safe_mul(slots, sizeof(taida_val), "pack_new bytes");
-    taida_val *pack = (taida_val*)malloc(alloc_size);
-    if (!pack) { fprintf(stderr, "taida: out of memory (taida_pack_new)\n"); exit(1); }
+    taida_val *pack = (taida_val*)TAIDA_MALLOC(alloc_size, "pack_new");
     pack[0] = TAIDA_PACK_MAGIC | 1;  // Magic + refcount
     pack[1] = field_count;
     // Initialize tag slots to TAIDA_TAG_INT (0) by default
@@ -1929,8 +1927,7 @@ taida_val taida_global_get(taida_val name_hash) {
 // Closure layout: [magic+refcount, fn_ptr, env_ptr]
 
 taida_ptr taida_closure_new(taida_fn_ptr fn_ptr, taida_ptr env_ptr) {
-    taida_val *closure = (taida_val*)malloc(3 * sizeof(taida_val));
-    if (!closure) { fprintf(stderr, "taida: out of memory (taida_closure_new)\n"); exit(1); }
+    taida_val *closure = (taida_val*)TAIDA_MALLOC(3 * sizeof(taida_val), "closure_new");
     closure[0] = TAIDA_CLOSURE_MAGIC | 1;
     closure[1] = (taida_val)fn_ptr;
     closure[2] = (taida_val)env_ptr;
@@ -2064,8 +2061,7 @@ static void taida_list_elem_release(taida_val elem, taida_val elem_tag) {
 }
 
 taida_ptr taida_list_new(void) {
-    taida_val *list = (taida_val*)malloc((4 + 16) * sizeof(taida_val));
-    if (!list) { fprintf(stderr, "taida: out of memory (taida_list_new)\n"); exit(1); }
+    taida_val *list = (taida_val*)TAIDA_MALLOC((4 + 16) * sizeof(taida_val), "list_new");
     list[0] = TAIDA_LIST_MAGIC | 1;   // Magic + refcount
     list[1] = 16;  // capacity
     list[2] = 0;   // length
@@ -2208,8 +2204,7 @@ static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill) {
         exit(1);
     }
     size_t alloc_size = taida_safe_mul(taida_safe_add(2, (size_t)len, "bytes_new_filled slots"), sizeof(taida_val), "bytes_new_filled bytes");
-    taida_val *bytes = (taida_val*)malloc(alloc_size);
-    if (!bytes) { fprintf(stderr, "taida: out of memory (taida_bytes_new_filled)\n"); exit(1); }
+    taida_val *bytes = (taida_val*)TAIDA_MALLOC(alloc_size, "bytes_new_filled");
     bytes[0] = TAIDA_BYTES_MAGIC | 1;
     bytes[1] = len;
     for (taida_val i = 0; i < len; i++) {
@@ -2771,8 +2766,7 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
     // This avoids pointer heuristics and keeps behavior consistent.
     // M-06: Overflow guard on len * sizeof + NULL check.
     size_t strs_size = taida_safe_mul((size_t)len, sizeof(const char*), "list_join strs");
-    const char **strs = (const char**)malloc(strs_size);
-    if (!strs) { fprintf(stderr, "taida: out of memory (taida_list_join strs)\n"); exit(1); }
+    const char **strs = (const char**)TAIDA_MALLOC(strs_size, "list_join_strs");
     // M-16: Use size_t for total with overflow guards to prevent wrap-around.
     size_t total = 0;
     for (taida_val i = 0; i < len; i++) {
@@ -2810,8 +2804,7 @@ taida_val taida_list_sort(taida_val list_ptr) {
     if (len == 0) return new_list;
     // M-07: Overflow guard + NULL check on items allocation.
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort items");
-    taida_val *items = (taida_val*)malloc(items_size);
-    if (!items) { fprintf(stderr, "taida: out of memory (taida_list_sort)\n"); exit(1); }
+    taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort");
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Simple insertion sort
     for (taida_val i = 1; i < len; i++) {
@@ -2947,8 +2940,7 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
     if (len == 0) return new_list;
     // M-07: Overflow guard + NULL check on items allocation.
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_desc items");
-    taida_val *items = (taida_val*)malloc(items_size);
-    if (!items) { fprintf(stderr, "taida: out of memory (taida_list_sort_desc)\n"); exit(1); }
+    taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_desc");
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Insertion sort descending
     for (taida_val i = 1; i < len; i++) {
@@ -3559,8 +3551,7 @@ static taida_val taida_hashmap_clone(taida_val hm_ptr) {
     }
     size_t total = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_clone slots"), "hm_clone total");
     size_t alloc_size = taida_safe_mul(total, sizeof(taida_val), "hm_clone bytes");
-    taida_val *new_hm = (taida_val*)malloc(alloc_size);
-    if (!new_hm) { fprintf(stderr, "taida: out of memory (taida_hashmap_clone)\n"); exit(1); }
+    taida_val *new_hm = (taida_val*)TAIDA_MALLOC(alloc_size, "hashmap_clone");
     memcpy(new_hm, hm, alloc_size);
     new_hm[0] = TAIDA_HMAP_MAGIC | 1;  // preserve magic + reset rc
     // Retain all keys and values in the clone (shared ownership)
@@ -4743,7 +4734,8 @@ taida_val taida_async_get_or_default(taida_val async_ptr, taida_val def) {
 //   error_tag: type tag for error (usually TAIDA_TAG_PACK from taida_make_error)
 
 taida_val taida_async_ok_tagged(taida_val value, taida_val value_tag) {
-    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
+    // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
+    taida_val *obj = (taida_val*)TAIDA_MALLOC(7 * sizeof(taida_val), "async_ok_tagged");
     obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
     obj[1] = 1;  // fulfilled
     obj[2] = value;
@@ -4759,7 +4751,8 @@ taida_val taida_async_ok_tagged(taida_val value, taida_val value_tag) {
 
 taida_val taida_async_ok(taida_val value) {
     // Legacy wrapper: uses UNKNOWN tag (conservative — no retain/release for children)
-    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
+    // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
+    taida_val *obj = (taida_val*)TAIDA_MALLOC(7 * sizeof(taida_val), "async_ok");
     obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
     obj[1] = 1;  // fulfilled
     obj[2] = value;
@@ -4771,7 +4764,8 @@ taida_val taida_async_ok(taida_val value) {
 }
 
 taida_val taida_async_err(taida_val error) {
-    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
+    // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
+    taida_val *obj = (taida_val*)TAIDA_MALLOC(7 * sizeof(taida_val), "async_err");
     obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
     obj[1] = 2;  // rejected
     obj[2] = 0;  // no value
@@ -4824,10 +4818,8 @@ taida_val taida_async_unmold(taida_val async_ptr) {
 
 // Spawn a function in a background pthread. Returns Async[pending] with thread_handle.
 taida_val taida_async_spawn(taida_val fn_ptr, taida_val arg) {
-    taida_thread_arg *ta = (taida_thread_arg*)malloc(sizeof(taida_thread_arg));
-    if (!ta) { fprintf(stderr, "taida: out of memory (taida_async_spawn)\n"); exit(1); }
-    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
-    if (!obj) { free(ta); fprintf(stderr, "taida: out of memory (taida_async_spawn)\n"); exit(1); }
+    taida_thread_arg *ta = (taida_thread_arg*)TAIDA_MALLOC(sizeof(taida_thread_arg), "async_spawn_arg");
+    taida_val *obj = (taida_val*)TAIDA_MALLOC(7 * sizeof(taida_val), "async_spawn");
     obj[0] = TAIDA_ASYNC_MAGIC | 1; // Magic + initial refcount
     obj[1] = 0;   // status: pending
     obj[2] = 0;   // no value yet
@@ -5292,10 +5284,11 @@ static json_val json_parse_array(const char **p) {
     json_val v;
     v.type = JSON_ARRAY;
     v.str_val = NULL; v.obj = NULL;
-    v.arr = (json_array*)malloc(sizeof(json_array));
+    // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
+    v.arr = (json_array*)TAIDA_MALLOC(sizeof(json_array), "json_array");
     v.arr->count = 0;
     v.arr->cap = 4;
-    v.arr->items = (json_val*)malloc(4 * sizeof(json_val));
+    v.arr->items = (json_val*)TAIDA_MALLOC(4 * sizeof(json_val), "json_array_items");
     (*p)++;  // skip '['
     json_skip_ws(p);
     if (**p == ']') { (*p)++; return v; }
@@ -5320,10 +5313,11 @@ static json_val json_parse_object(const char **p) {
     json_val v;
     v.type = JSON_OBJECT;
     v.str_val = NULL; v.arr = NULL;
-    v.obj = (json_obj*)malloc(sizeof(json_obj));
+    // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
+    v.obj = (json_obj*)TAIDA_MALLOC(sizeof(json_obj), "json_obj");
     v.obj->count = 0;
     v.obj->cap = 8;
-    v.obj->entries = (json_obj_entry*)malloc(8 * sizeof(json_obj_entry));
+    v.obj->entries = (json_obj_entry*)TAIDA_MALLOC(8 * sizeof(json_obj_entry), "json_obj_entries");
     (*p)++;  // skip '{'
     json_skip_ws(p);
     if (**p == '}') { (*p)++; return v; }
@@ -6308,9 +6302,12 @@ taida_val taida_sha256(taida_val value) {
     if (TAIDA_IS_BYTES(value)) {
         taida_val len = taida_bytes_len(value);
         if (len <= 0) return taida_sha256_hex_from_bytes(NULL, 0);
+        // M-08: Cap Bytes length to 256MB to prevent OOM from huge positive len.
+        if (len > (taida_val)(256 * 1024 * 1024)) {
+            return taida_sha256_hex_from_bytes(NULL, 0);
+        }
         taida_val *bytes = (taida_val*)value;
-        unsigned char *raw = (unsigned char*)malloc((size_t)len);
-        if (!raw) return taida_sha256_hex_from_bytes(NULL, 0);
+        unsigned char *raw = (unsigned char*)TAIDA_MALLOC((size_t)len, "sha256_bytes");
         for (taida_val i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
         taida_val out = taida_sha256_hex_from_bytes(raw, (size_t)len);
         free(raw);
@@ -6512,15 +6509,27 @@ taida_val taida_os_list_dir(taida_val path_ptr) {
     // Collect entries, then sort
     taida_val capacity = 64;
     taida_val count = 0;
-    char **names = (char**)malloc(capacity * sizeof(char*));
+    char **names = (char**)TAIDA_MALLOC(capacity * sizeof(char*), "listDir_init");
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         // Skip . and ..
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
         if (count >= capacity) {
+            // M-12: Guard against taida_val overflow on capacity *= 2.
+            // capacity is int64_t; if it exceeds INT64_MAX/2, doubling would
+            // overflow. In practice this is unreachable (>4 billion entries),
+            // but the guard prevents undefined behavior.
+            if (capacity > (taida_val)(INT64_MAX / 2)) {
+                fprintf(stderr, "taida: directory entry count overflow in taida_os_list_dir\n");
+                // Clean up already-collected names
+                for (taida_val i = 0; i < count; i++) taida_str_release((taida_val)names[i]);
+                free(names);
+                closedir(dir);
+                return taida_lax_empty(taida_list_new());
+            }
             capacity *= 2;
-            TAIDA_REALLOC(names, capacity * sizeof(char*), "listDir");
+            TAIDA_REALLOC(names, taida_safe_mul((size_t)capacity, sizeof(char*), "listDir_grow"), "listDir");
         }
         names[count] = taida_str_new_copy(entry->d_name);
         count++;
@@ -6720,8 +6729,10 @@ taida_val taida_os_remove(taida_val path_ptr) {
 // ── createDir(path) → Result (mkdir -p) ────────────────────
 static int taida_os_mkdir_p(const char *path) {
     size_t path_len = strlen(path);
+    // M-14: Note: mkdir_p returns -1 on failure rather than aborting, so we
+    // keep the manual malloc + NULL check pattern here (TAIDA_MALLOC would abort).
     char *tmp = (char*)malloc(path_len + 1);
-    if (!tmp) { fprintf(stderr, "taida: out of memory (mkdir_p)\n"); return -1; }
+    if (!tmp) return -1;
     memcpy(tmp, path, path_len + 1);
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
@@ -6793,7 +6804,8 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
         close(stderr_pipe[1]);
 
         // Build argv: [program, arg0, arg1, ..., NULL]
-        char **argv = (char**)malloc((argc + 2) * sizeof(char*));
+        // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
+        char **argv = (char**)TAIDA_MALLOC((argc + 2) * sizeof(char*), "exec_argv");
         argv[0] = (char*)program;
         for (taida_val i = 0; i < argc; i++) {
             argv[i + 1] = (char*)list[4 + i];
