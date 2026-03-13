@@ -27,6 +27,10 @@ function __taida_ensureNotNull(value, defaultValue) {
   return (value === null || value === undefined) ? defaultValue : value;
 }
 
+function __taida_escape_str(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t').replace(/\0/g, '\\0');
+}
+
 function __taida_solidify(value) {
   if (value && typeof value === 'object' && typeof value.solidify === 'function') {
     return value.solidify();
@@ -667,16 +671,17 @@ function Cage_mold(cageValue, cageFn) {
 // ── Div/Mod Mold types (safe division returning Lax) ──
 function Div_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = typeof a === 'number' && (String(a).includes('.') || typeof b === 'number' && String(b).includes('.'));
+  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
   if (b === 0) return Lax(null, def);
+  if (isFloat) return Lax(a / b);
   const result = Number.isInteger(a) && Number.isInteger(b) ? Math.trunc(a / b) : a / b;
   const lax = Lax(result);
   return lax;
 }
 function Mod_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = typeof a === 'number' && (String(a).includes('.') || typeof b === 'number' && String(b).includes('.'));
+  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
   if (b === 0) return Lax(null, def);
   return Lax(a % b);
@@ -1168,11 +1173,13 @@ function __taida_stdin(prompt) {
     if (prompt) process.stdout.write(prompt);
     try {
       const buf = Buffer.alloc(1024); let line = '';
-      const fd = __taida_fs.openSync('/dev/stdin', 'r');
+      // Use fd 0 (process.stdin.fd) for cross-platform compatibility.
+      // Use fd instead of /dev/stdin for Windows compatibility.
+      // Note: Do NOT close this fd — it is process.stdin.fd, not a newly opened handle.
+      const fd = process.stdin.fd ?? 0;
       let n; while ((n = __taida_fs.readSync(fd, buf, 0, 1)) > 0) {
         const ch = buf.toString('utf-8', 0, n); if (ch === '\n') break; line += ch;
       }
-      __taida_fs.closeSync(fd);
       return line.replace(/\r$/, '');
     } catch(e) { return ''; }
   }
@@ -1605,8 +1612,8 @@ function __taida_createHashMap(entries) {
     },
     toString() {
       const pairs = _entries.map(e => {
-        const k = typeof e.key === 'string' ? '"' + e.key + '"' : String(e.key);
-        const v = typeof e.value === 'string' ? '"' + e.value + '"' : String(e.value);
+        const k = typeof e.key === 'string' ? '"' + __taida_escape_str(e.key) + '"' : String(e.key);
+        const v = typeof e.value === 'string' ? '"' + __taida_escape_str(e.value) + '"' : String(e.value);
         return k + ': ' + v;
       });
       return 'HashMap({' + pairs.join(', ') + '})';
@@ -1687,7 +1694,7 @@ function __taida_createSet(items) {
       return _items.length === 0;
     },
     toString() {
-      const strs = _items.map(i => typeof i === 'string' ? '"' + i + '"' : String(i));
+      const strs = _items.map(i => typeof i === 'string' ? '"' + __taida_escape_str(i) + '"' : String(i));
       return 'Set({' + strs.join(', ') + '})';
     },
   };
@@ -2893,3 +2900,26 @@ function sha256(value) {
   return '';
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FL-28: Verify stdin does not use /dev/stdin (Windows incompatible)
+    #[test]
+    fn test_stdin_no_dev_stdin_hardcode() {
+        assert!(
+            !RUNTIME_JS.contains("'/dev/stdin'"),
+            "JS runtime should not hardcode '/dev/stdin' -- use process.stdin.fd for cross-platform compatibility"
+        );
+        assert!(
+            !RUNTIME_JS.contains("\"/dev/stdin\""),
+            "JS runtime should not hardcode \"/dev/stdin\""
+        );
+        // Verify the cross-platform approach is used
+        assert!(
+            RUNTIME_JS.contains("process.stdin.fd"),
+            "JS runtime should use process.stdin.fd for cross-platform stdin"
+        );
+    }
+}

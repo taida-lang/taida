@@ -42,7 +42,7 @@ jobs:
             release_ref="${EVENT_REF}"
           fi
 
-          if [[ ! "${release_tag}" =~ ^@[A-Za-z0-9]+(\.[A-Za-z0-9-]+)+$ ]]; then
+          if [[ ! "${release_tag}" =~ ^@[a-z]\.[0-9]+(\.[a-z0-9][a-z0-9-]*)?$ ]]; then
             echo "invalid release tag: ${release_tag}" >&2
             exit 1
           fi
@@ -83,7 +83,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: cargo build --release
+      - run: cargo build --locked --release
       - run: ./tests/run_backend_parity.sh
       - run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
       - name: Write release gate summary

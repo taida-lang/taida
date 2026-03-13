@@ -3758,8 +3758,16 @@ fn run_install(args: &[String]) {
 
     println!("Installing dependencies for '{}'...", manifest.name);
 
-    // Resolve all dependencies using the provider chain
-    let result = pkg::resolver::resolve_deps(&manifest);
+    // Read existing lockfile to pin generation-only versions for reproducibility
+    let lock_path = project_dir.join(".taida").join("taida.lock");
+    let existing_lockfile = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or_default();
+
+    // Resolve all dependencies using the provider chain,
+    // pinning generation-only versions to locked exact versions when available
+    let result = match &existing_lockfile {
+        Some(lf) => pkg::resolver::resolve_deps_locked(&manifest, lf),
+        None => pkg::resolver::resolve_deps(&manifest),
+    };
 
     // Report errors
     for err in &result.errors {
@@ -3988,21 +3996,25 @@ fn run_publish(args: &[String]) {
         return;
     }
 
+    // Save original manifest for rollback on failure
+    let original_manifest_source = manifest_source.clone();
+
     // Update packages.tdm
     if let Err(e) = fs::write(&manifest_path, &preparation.updated_manifest_source) {
         eprintln!("Failed to update '{}': {}", manifest_path.display(), e);
         std::process::exit(1);
     }
 
-    // Git commit + tag + push
+    // Git commit + tag + push (with rollback on failure)
     if let Err(e) = pkg::publish::git_commit_tag_push(
         &project_dir,
         &preparation.version,
         &preparation.package_name,
     ) {
+        // Restore packages.tdm to its original state
+        let _ = fs::write(&manifest_path, &original_manifest_source);
         eprintln!("Publish failed: {}", e);
-        eprintln!("packages.tdm was updated but git operations failed.");
-        eprintln!("You may need to manually commit, tag, and push.");
+        eprintln!("packages.tdm has been restored to its original state.");
         std::process::exit(1);
     }
 

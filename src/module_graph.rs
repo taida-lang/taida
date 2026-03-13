@@ -52,8 +52,8 @@ pub fn resolve_local_import_from(base_file: &Path, import_path: &str) -> Option<
             .unwrap_or(Path::new("."))
             .join(import_path)
     } else if let Some(stripped) = import_path.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")?;
-        PathBuf::from(home).join(stripped)
+        let home = crate::util::taida_home_dir().ok()?;
+        home.join(stripped)
     } else if import_path.starts_with('/') {
         PathBuf::from(import_path)
     } else {

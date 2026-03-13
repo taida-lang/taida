@@ -1771,9 +1771,75 @@ defaulted fields must be provided via `()`",
                 // Validate defaults left-to-right and register params in scope order.
                 self.validate_function_param_defaults(fd, &param_types);
 
-                // Check function body
-                for body_stmt in &fd.body {
+                // Check function body.
+                // FL-1 / Fix 6: When a return type annotation exists, avoid
+                // double-inferring the last expression (once via check_statement,
+                // once for the return-type check).  We check all statements
+                // except the last one first, then handle the last one with the
+                // return-type comparison so that infer_expr_type is called
+                // exactly once and errors are never duplicated.
+                let body_len = fd.body.len();
+                let has_return_check = ret_ty != Type::Unknown && body_len > 0;
+                let check_up_to = if has_return_check {
+                    body_len - 1
+                } else {
+                    body_len
+                };
+                for body_stmt in fd.body.iter().take(check_up_to) {
                     self.check_statement(body_stmt);
+                }
+
+                // FL-1: Enforce return type annotation against body's last expression
+                if has_return_check {
+                    let last_stmt = &fd.body[body_len - 1];
+                    if let Statement::Expr(last_expr) = last_stmt {
+                        let body_ty = self.infer_expr_type(last_expr);
+                        if !(body_ty == Type::Unknown
+                            || Self::contains_unknown(&body_ty)
+                            || self.registry.is_subtype_of(&body_ty, &ret_ty)
+                            // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
+                            || body_ty.is_numeric() && ret_ty.is_numeric()
+                            // Mold/Fold application and unmold (]=>) can produce types
+                            // that the checker cannot accurately track; skip Named types
+                            // and compound types that may result from these operations
+                            || matches!(
+                                body_ty,
+                                Type::Named(_) | Type::List(_) | Type::BuchiPack(_)
+                            ))
+                        {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1601] Function '{}' declares return type {}, but body returns {}. \
+                                     Hint: Ensure the last expression in the function body matches the declared return type.",
+                                    fd.name, ret_ty, body_ty
+                                ),
+                                span: fd.span.clone(),
+                            });
+                        }
+                    } else {
+                        // Last statement is not an expression — check it normally.
+                        self.check_statement(last_stmt);
+                        // Assignment, UnmoldForward, UnmoldBackward produce Unit implicitly.
+                        // Only report E1601 if the declared return type is not Unit.
+                        let is_unit_producing = matches!(
+                            last_stmt,
+                            Statement::Assignment(_)
+                                | Statement::UnmoldForward(_)
+                                | Statement::UnmoldBackward(_)
+                        );
+                        let is_unit_ret = ret_ty == Type::Unit
+                            || matches!(&ret_ty, Type::Named(n) if n == "Unit");
+                        if !(is_unit_producing && is_unit_ret) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1601] Function '{}' declares return type {}, but the last statement is not an expression. \
+                                     Hint: The function body's last statement must be an expression that produces a value.",
+                                    fd.name, ret_ty
+                                ),
+                                span: fd.span.clone(),
+                            });
+                        }
+                    }
                 }
 
                 self.pop_scope();
@@ -1832,9 +1898,51 @@ defaulted fields must be provided via `()`",
             Expr::Placeholder(_) => Type::Unknown,
             Expr::Hole(_) => Type::Unknown,
 
-            Expr::Ident(name, _) => {
+            Expr::Ident(name, span) => {
                 // Look up variable in scope
-                self.lookup_var(name).unwrap_or(Type::Unknown)
+                if let Some(ty) = self.lookup_var(name) {
+                    ty
+                } else if self.func_types.contains_key(name)
+                    || self.generic_func_defs.contains_key(name)
+                    || self.declared_concrete_type_names.contains(name)
+                    || self.registry.mold_defs.contains_key(name)
+                    || matches!(
+                        name.as_str(),
+                        "debug"
+                            | "toString"
+                            | "toStr"
+                            | "typeOf"
+                            | "typeof"
+                            | "jsonEncode"
+                            | "jsonPretty"
+                            | "nowMs"
+                            | "assert"
+                            | "range"
+                            | "enumerate"
+                            | "zip"
+                            | "hashMap"
+                            | "setOf"
+                            | "stdout"
+                            | "stderr"
+                            | "exit"
+                            | "stdin"
+                            | "argv"
+                            | "sleep"
+                    )
+                {
+                    // Known function/type/mold name used as value reference
+                    Type::Unknown
+                } else {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1502] Undefined variable '{}'. \
+                             Hint: Check the variable name for typos, or define it before use.",
+                            name
+                        ),
+                        span: span.clone(),
+                    });
+                    Type::Unknown
+                }
             }
 
             Expr::BuchiPack(fields, _) => {
@@ -1931,23 +2039,122 @@ defaulted fields must be provided via `()`",
                             Type::Unknown
                         }
                     }
-                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::GtEq => Type::Bool,
-                    BinOp::And | BinOp::Or => Type::Bool,
+                    BinOp::Eq | BinOp::NotEq => {
+                        // FL-4: Equality operators allow any types but warn on incompatible comparisons
+                        if left_type != Type::Unknown
+                            && right_type != Type::Unknown
+                            && !Self::contains_unknown(&left_type)
+                            && !Self::contains_unknown(&right_type)
+                            && left_type != right_type
+                            && !(left_type.is_numeric() && right_type.is_numeric())
+                            // Allow structurally compatible types (e.g. BuchiPack subtypes)
+                            && !self.registry.is_subtype_of(&left_type, &right_type)
+                            && !self.registry.is_subtype_of(&right_type, &left_type)
+                        {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1605] Cannot compare {} with {} using {:?}. \
+                                     Hint: Both operands should be of compatible types.",
+                                    left_type, right_type, op
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        Type::Bool
+                    }
+                    BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
+                        // FL-4: Ordering operators require numeric or string operands
+                        if left_type != Type::Unknown
+                            && right_type != Type::Unknown
+                            && !Self::contains_unknown(&left_type)
+                            && !Self::contains_unknown(&right_type)
+                        {
+                            let valid = (left_type.is_numeric() && right_type.is_numeric())
+                                || (matches!(left_type, Type::Str)
+                                    && matches!(right_type, Type::Str));
+                            if !valid {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1605] Cannot compare {} with {} using {:?}. \
+                                         Hint: Ordering comparison requires numeric or string operands.",
+                                        left_type, right_type, op
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                        Type::Bool
+                    }
+                    BinOp::And | BinOp::Or => {
+                        // FL-4: Logical operators require Bool operands
+                        if left_type != Type::Unknown
+                            && !Self::contains_unknown(&left_type)
+                            && !matches!(left_type, Type::Bool)
+                        {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1606] Logical operator {:?} requires Bool operands, got {} on left side. \
+                                     Hint: Use a boolean expression or comparison.",
+                                    op, left_type
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        if right_type != Type::Unknown
+                            && !Self::contains_unknown(&right_type)
+                            && !matches!(right_type, Type::Bool)
+                        {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1606] Logical operator {:?} requires Bool operands, got {} on right side. \
+                                     Hint: Use a boolean expression or comparison.",
+                                    op, right_type
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        Type::Bool
+                    }
                     BinOp::Concat => Type::Str,
                 }
             }
 
-            Expr::UnaryOp(op, inner, _) => {
+            Expr::UnaryOp(op, inner, span) => {
                 let inner_type = self.infer_expr_type(inner);
                 match op {
                     UnaryOp::Neg => {
                         if inner_type.is_numeric() || inner_type == Type::Unknown {
                             inner_type
                         } else {
+                            // FL-4: Report non-numeric operand for unary negation
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1607] Unary negation `-` requires a numeric operand, got {}. \
+                                     Hint: Use `-` only with Int or Float values.",
+                                    inner_type
+                                ),
+                                span: span.clone(),
+                            });
                             Type::Unknown
                         }
                     }
-                    UnaryOp::Not => Type::Bool,
+                    UnaryOp::Not => {
+                        // FL-4: Not operator requires Bool operand
+                        if inner_type != Type::Unknown
+                            && !Self::contains_unknown(&inner_type)
+                            && !matches!(inner_type, Type::Bool)
+                        {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1607] Logical not `!` requires a Bool operand, got {}. \
+                                     Hint: Use `!` only with boolean expressions.",
+                                    inner_type
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        Type::Bool
+                    }
                 }
             }
 
@@ -2239,6 +2446,20 @@ defaulted fields must be provided via `()`",
                         }
                         return *ret;
                     }
+                    // FL-23: Check if variable is a non-function type being called
+                    if let Some(var_ty) = self.lookup_var(name)
+                        && !matches!(var_ty, Type::Unknown)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1510] Cannot call '{}' of type {} as a function. \
+                                 Hint: Only functions and molds can be called.",
+                                name, var_ty
+                            ),
+                            span: span.clone(),
+                        });
+                        return Type::Unknown;
+                    }
                     // Check if it's a known builtin
                     // E1507: Builtin arity check
                     // (name, min_args, max_args)
@@ -2346,7 +2567,19 @@ defaulted fields must be provided via `()`",
                             }
                             *ret
                         }
-                        _ => Type::Unknown,
+                        Type::Unknown => Type::Unknown,
+                        _ => {
+                            // FL-23: non-function call
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1510] Cannot call non-function value of type {}. \
+                                     Hint: Only functions and molds can be called.",
+                                    func_type
+                                ),
+                                span: span.clone(),
+                            });
+                            Type::Unknown
+                        }
                     }
                 }
             }
@@ -2381,6 +2614,15 @@ defaulted fields must be provided via `()`",
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
                                 ty.clone()
                             } else {
+                                // FL-2: Report undefined field access on Named types
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1602] Field '{}' does not exist on type '{}'. \
+                                         Hint: Check the type definition for available fields.",
+                                        field, type_name
+                                    ),
+                                    span: span.clone(),
+                                });
                                 Type::Unknown
                             }
                         } else {
@@ -2393,18 +2635,7 @@ defaulted fields must be provided via `()`",
             }
 
             // IndexAccess removed in v0.5.0 — use .get(i) instead
-            Expr::CondBranch(arms, _) => {
-                // Infer type from the first arm's body (all arms should return same type)
-                if let Some(first_arm) = arms.first() {
-                    if let Some(last_expr) = first_arm.last_expr() {
-                        self.infer_expr_type(last_expr)
-                    } else {
-                        Type::Unknown
-                    }
-                } else {
-                    Type::Unknown
-                }
-            }
+            Expr::CondBranch(arms, span) => self.check_cond_branch(arms, span),
 
             Expr::Pipeline(exprs, _) => {
                 // Pipeline: walk all expressions, set in_pipeline for non-first elements
@@ -2752,14 +2983,118 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown)
                     })
                     .collect();
+                // Push scope with lambda params so body references don't trigger E1502
+                self.push_scope();
+                for (i, p) in params.iter().enumerate() {
+                    self.define_var(
+                        &p.name,
+                        param_types.get(i).cloned().unwrap_or(Type::Unknown),
+                    );
+                }
                 // Try to infer return type from the body expression
                 let ret_type = self.infer_expr_type(body);
+                self.pop_scope();
                 Type::Function(param_types, Box::new(ret_type))
             }
 
             Expr::TypeInst(name, _, _) => Type::Named(name.clone()),
             Expr::Throw(_, _) => Type::Unknown,
         }
+    }
+
+    /// Check a condition branch expression (extracted from `infer_expr_type`).
+    ///
+    /// Validates that:
+    /// - All arm conditions are Bool (E1604)
+    /// - All arms return compatible types (E1603)
+    fn check_cond_branch(&mut self, arms: &[CondArm], span: &Span) -> Type {
+        // FL-3: Check all arms' types, not just the first
+        if arms.is_empty() {
+            return Type::Unknown;
+        }
+        // Infer type from the first arm
+        let first_ty = if let Some(first_arm) = arms.first() {
+            // Check condition type
+            if let Some(cond) = &first_arm.condition {
+                let cond_ty = self.infer_expr_type(cond);
+                if cond_ty != Type::Bool
+                    && cond_ty != Type::Unknown
+                    && !Self::contains_unknown(&cond_ty)
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1604] Condition in branch must be Bool, got {}. \
+                             Hint: Use a boolean expression as the condition.",
+                            cond_ty
+                        ),
+                        span: first_arm.span.clone(),
+                    });
+                }
+            }
+            // Each arm gets its own scope for local bindings (e.g. ]=>)
+            self.push_scope();
+            for body_stmt in &first_arm.body {
+                self.check_statement(body_stmt);
+            }
+            let ty = if let Some(last_expr) = first_arm.last_expr() {
+                self.infer_expr_type(last_expr)
+            } else {
+                Type::Unknown
+            };
+            self.pop_scope();
+            ty
+        } else {
+            Type::Unknown
+        };
+
+        // Check subsequent arms for type consistency
+        for arm in arms.iter().skip(1) {
+            // Check condition type
+            if let Some(cond) = &arm.condition {
+                let cond_ty = self.infer_expr_type(cond);
+                if cond_ty != Type::Bool
+                    && cond_ty != Type::Unknown
+                    && !Self::contains_unknown(&cond_ty)
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1604] Condition in branch must be Bool, got {}. \
+                             Hint: Use a boolean expression as the condition.",
+                            cond_ty
+                        ),
+                        span: arm.span.clone(),
+                    });
+                }
+            }
+            // Each arm gets its own scope
+            self.push_scope();
+            for body_stmt in &arm.body {
+                self.check_statement(body_stmt);
+            }
+            if let Some(last_expr) = arm.last_expr() {
+                let arm_ty = self.infer_expr_type(last_expr);
+                if !(first_ty == Type::Unknown
+                    || arm_ty == Type::Unknown
+                    || Self::contains_unknown(&first_ty)
+                    || Self::contains_unknown(&arm_ty)
+                    || self.registry.is_subtype_of(&arm_ty, &first_ty)
+                    // Allow Int/Float mixing (both are Num)
+                    || first_ty.is_numeric() && arm_ty.is_numeric())
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1603] Condition branch type mismatch: first arm returns {}, but this arm returns {}. \
+                             Hint: All arms of a condition branch should return the same type.",
+                            first_ty, arm_ty
+                        ),
+                        span: span.clone(),
+                    });
+                }
+            }
+            self.pop_scope();
+        }
+
+        first_ty
     }
 }
 

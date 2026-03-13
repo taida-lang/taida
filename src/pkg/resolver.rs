@@ -33,7 +33,17 @@ pub struct ResolveResult {
 /// Tries each provider in order for each dependency:
 /// WorkspaceProvider -> CoreBundledProvider -> StoreProvider
 pub fn resolve_deps(manifest: &Manifest) -> ResolveResult {
-    resolve_deps_inner(manifest, false)
+    resolve_deps_inner(manifest, false, None)
+}
+
+/// Resolve all dependencies using the provider chain, but pin generation-only
+/// versions to their locked exact versions from an existing lockfile.
+///
+/// Used by `taida install` to ensure reproducible installs: if a lockfile
+/// records `alice/demo@a.2`, a manifest dependency of `alice/demo@a` will
+/// resolve to `a.2` instead of the latest version in generation `a`.
+pub fn resolve_deps_locked(manifest: &Manifest, lockfile: &Lockfile) -> ResolveResult {
+    resolve_deps_inner(manifest, false, Some(lockfile))
 }
 
 /// Resolve all dependencies, bypassing local cache for generation resolution.
@@ -41,7 +51,7 @@ pub fn resolve_deps(manifest: &Manifest) -> ResolveResult {
 /// Used by `taida update` to re-resolve generation-only versions (e.g. "a")
 /// to the latest exact version (e.g. "a.47") by querying GitHub API directly.
 pub fn resolve_deps_update(manifest: &Manifest) -> ResolveResult {
-    resolve_deps_inner(manifest, true)
+    resolve_deps_inner(manifest, true, None)
 }
 
 fn dep_decl_identity(dep: &Dependency, declared_from_root: &Path) -> String {
@@ -69,7 +79,21 @@ fn resolved_identity(pkg: &ResolvedPackage) -> String {
     }
 }
 
-fn resolve_deps_inner(manifest: &Manifest, force_remote: bool) -> ResolveResult {
+fn resolve_deps_inner(
+    manifest: &Manifest,
+    force_remote: bool,
+    lockfile: Option<&Lockfile>,
+) -> ResolveResult {
+    // Build a lookup table from lockfile: package name -> locked version
+    let locked_versions: std::collections::HashMap<String, String> = lockfile
+        .map(|lf| {
+            lf.packages
+                .iter()
+                .map(|p| (p.name.clone(), p.version.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let providers: Vec<Box<dyn PackageProvider>> = vec![
         Box::new(WorkspaceProvider),
         Box::new(CoreBundledProvider::new()),
@@ -105,6 +129,28 @@ fn resolve_deps_inner(manifest: &Manifest, force_remote: bool) -> ResolveResult 
     }
 
     while let Some((name, dep, requester, declared_from_root)) = queue.pop_front() {
+        // Pin generation-only registry deps to locked exact versions.
+        // A generation-only version has no '.' (e.g. "a" vs "a.2").
+        let dep = match &dep {
+            Dependency::Registry {
+                org,
+                name: dep_name,
+                version,
+            } if !version.contains('.') && locked_versions.contains_key(&name) => {
+                let locked_ver = &locked_versions[&name];
+                // Only pin if the locked version belongs to the same generation
+                if locked_ver.starts_with(version) {
+                    Dependency::Registry {
+                        org: org.clone(),
+                        name: dep_name.clone(),
+                        version: locked_ver.clone(),
+                    }
+                } else {
+                    dep
+                }
+            }
+            _ => dep,
+        };
         let requested_identity = dep_decl_identity(&dep, &declared_from_root);
 
         if let Some(existing_identity) = resolved_by_alias.get(&name) {
@@ -849,6 +895,60 @@ deps <= @(
         assert!(content.contains("os"));
         assert!(content.contains("bundled"));
         assert!(content.contains("a.1"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── FL-20 regression: resolve_deps_locked pins generation-only versions ──
+
+    #[test]
+    fn test_resolve_deps_locked_pins_generation_version() {
+        use super::super::lockfile::{LockedPackage, Lockfile};
+
+        let dir = PathBuf::from("/tmp/taida_test_resolve_locked");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Manifest declares os@a (generation-only)
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: {
+                let mut deps = BTreeMap::new();
+                deps.insert(
+                    "os".to_string(),
+                    Dependency::Registry {
+                        org: "taida-lang".to_string(),
+                        name: "os".to_string(),
+                        version: "a".to_string(),
+                    },
+                );
+                deps
+            },
+            root_dir: dir.clone(),
+        };
+
+        // Lockfile records os@a.1 (exact version)
+        let lockfile = Lockfile {
+            version: 1,
+            packages: vec![LockedPackage {
+                name: "os".to_string(),
+                version: "a.1".to_string(),
+                source: "bundled".to_string(),
+                integrity: "fnv1a:0000000000000002".to_string(),
+            }],
+        };
+
+        // resolve_deps_locked should pin os to a.1 (from lockfile)
+        let result = resolve_deps_locked(&manifest, &lockfile);
+        assert!(result.errors.is_empty(), "Errors: {:?}", result.errors);
+        assert_eq!(result.packages.len(), 1);
+        assert_eq!(
+            result.packages[0].version, "a.1",
+            "Locked version should be used instead of re-resolving"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

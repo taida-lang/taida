@@ -14,6 +14,15 @@
 #include <limits.h>
 #include <pthread.h>
 
+// FL-9: Safe realloc wrapper — aborts on NULL with a diagnostic message.
+// Usage: TAIDA_REALLOC(ptr, new_size, context_label)
+// ptr is reassigned in-place; on failure, prints OOM message and exits.
+#define TAIDA_REALLOC(ptr, size, label) do { \
+    void *_tmp = realloc((ptr), (size)); \
+    if (!_tmp) { fprintf(stderr, "taida: out of memory (%s)\n", (label)); exit(1); } \
+    (ptr) = _tmp; \
+} while(0)
+
 // ---------------------------------------------------------------------------
 // W-0d/W-0f: ABI 正規化 — 値型・ポインタ型・関数ポインタ型の typedef
 //
@@ -1481,6 +1490,26 @@ taida_val taida_poly_neq(taida_val a, taida_val b) {
     if (taida_is_string_value(a) && taida_is_string_value(b))
         return strcmp((char*)a, (char*)b) != 0 ? 1 : 0;
     return a != b ? 1 : 0;
+}
+// FL-16: Polymorphic add — dispatches to str_concat or int_add at runtime
+taida_val taida_poly_add(taida_val a, taida_val b) {
+    if (taida_is_string_value(a) || taida_is_string_value(b)) {
+        // Convert both to strings and concatenate
+        const char *sa = taida_is_string_value(a) ? (const char*)a : "";
+        const char *sb = taida_is_string_value(b) ? (const char*)b : "";
+        // If one side is not a string, convert it
+        char buf_a[32], buf_b[32];
+        if (!taida_is_string_value(a)) {
+            snprintf(buf_a, sizeof(buf_a), "%lld", (long long)a);
+            sa = buf_a;
+        }
+        if (!taida_is_string_value(b)) {
+            snprintf(buf_b, sizeof(buf_b), "%lld", (long long)b);
+            sb = buf_b;
+        }
+        return taida_str_concat(sa, sb);
+    }
+    return a + b;
 }
 taida_val taida_int_lt(taida_val a, taida_val b)  { return a < b ? 1 : 0; }
 taida_val taida_int_gt(taida_val a, taida_val b)  { return a > b ? 1 : 0; }
@@ -3543,7 +3572,7 @@ taida_val taida_hashmap_to_string(taida_val hm_ptr) {
             if (count > 0) needed += 2;
             while (strlen(buf) + needed + 3 > buf_size) {
                 buf_size *= 2;
-                buf = (char*)realloc(buf, buf_size);
+                TAIDA_REALLOC(buf, buf_size, "hashmap_to_string");
             }
 
             if (count > 0) strcat(buf, ", ");
@@ -3747,7 +3776,7 @@ taida_val taida_set_to_string(taida_val set_ptr) {
         snprintf(item_str, sizeof(item_str), "%" PRId64 "", list[4 + i]);
         if (strlen(buf) + strlen(item_str) + 10 > buf_size) {
             buf_size *= 2;
-            buf = (char*)realloc(buf, buf_size);
+            TAIDA_REALLOC(buf, buf_size, "set_to_string");
         }
         strcat(buf, item_str);
     }
@@ -4288,21 +4317,21 @@ static taida_val taida_list_to_display_string(taida_val list_ptr) {
     char *buf = (char*)malloc(cap);
     buf[0] = '\0';
     // Append "@["
-    { const char *s = "@["; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
+    { const char *s = "@["; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
     for (taida_val i = 0; i < list_len; i++) {
         if (i > 0) {
-            const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
+            const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
         }
         taida_val item = list[4 + i];
         taida_val item_str = taida_value_to_debug_string(item);
         const char *is = (const char*)item_str;
         if (is) {
-            size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
+            size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
         }
         taida_str_release(item_str);
     }
     // Append "]"
-    while (len + 2 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+    while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
     buf[len++] = ']'; buf[len] = '\0';
     taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
@@ -4321,7 +4350,7 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
     buf[0] = '\0';
     const char *prefix = "Bytes[@[";
     size_t pl = strlen(prefix);
-    while (len + pl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+    while (len + pl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
     memcpy(buf + len, prefix, pl);
     len += pl;
     buf[len] = '\0';
@@ -4330,7 +4359,7 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
         if (i > 0) {
             const char *sep = ", ";
             size_t sl = 2;
-            while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+            while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
             memcpy(buf + len, sep, sl);
             len += sl;
             buf[len] = '\0';
@@ -4339,7 +4368,7 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
         int wrote = snprintf(nbuf, sizeof(nbuf), "%" PRId64 "", bytes[2 + i]);
         if (wrote < 0) wrote = 0;
         size_t sl = (size_t)wrote;
-        while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+        while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
         memcpy(buf + len, nbuf, sl);
         len += sl;
         buf[len] = '\0';
@@ -4347,7 +4376,7 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
 
     const char *suffix = "]]";
     size_t sl = 2;
-    while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+    while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
     memcpy(buf + len, suffix, sl);
     len += sl;
     buf[len] = '\0';
@@ -4365,7 +4394,7 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     char *buf = (char*)malloc(cap);
     buf[0] = '\0';
     // Append "@("
-    { const char *s = "@("; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
+    { const char *s = "@("; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
     int count = 0;
     for (taida_val i = 0; i < fc; i++) {
         taida_val field_hash = pack[2 + i * 3];
@@ -4375,11 +4404,11 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
         // Skip internal __ fields for display
         if (fname[0] == '_' && fname[1] == '_') continue;
         if (count > 0) {
-            const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
+            const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
         }
         // Append "fieldname <= "
         size_t nlen = strlen(fname);
-        while (len + nlen + 5 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+        while (len + nlen + 5 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
         memcpy(buf + len, fname, nlen); len += nlen;
         memcpy(buf + len, " <= ", 4); len += 4;
         buf[len] = '\0';
@@ -4388,20 +4417,20 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
         if (ftype == 4) {
             // Bool: display as true/false
             const char *bv = field_val ? "true" : "false";
-            size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
+            size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
         } else {
             // Append value (debug string: strings are quoted)
             taida_val val_str = taida_value_to_debug_string(field_val);
             const char *vs = (const char*)val_str;
             if (vs) {
-                size_t sl = strlen(vs); while (len + sl + 1 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); } memcpy(buf + len, vs, sl); len += sl; buf[len] = '\0';
+                size_t sl = strlen(vs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, vs, sl); len += sl; buf[len] = '\0';
             }
             taida_str_release(val_str);
         }
         count++;
     }
     // Append ")"
-    while (len + 2 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+    while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); }
     buf[len++] = ')'; buf[len] = '\0';
     taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
@@ -5156,7 +5185,9 @@ static json_val json_parse_array(const char **p) {
         json_val item = json_parse_value(p);
         if (v.arr->count >= v.arr->cap) {
             v.arr->cap *= 2;
-            v.arr->items = (json_val*)realloc(v.arr->items, v.arr->cap * sizeof(json_val));
+            json_val *_tmp = (json_val*)realloc(v.arr->items, v.arr->cap * sizeof(json_val));
+            if (!_tmp) { fprintf(stderr, "taida: out of memory (json_array)\n"); exit(1); }
+            v.arr->items = _tmp;
         }
         v.arr->items[v.arr->count++] = item;
         json_skip_ws(p);
@@ -5187,7 +5218,9 @@ static json_val json_parse_object(const char **p) {
         json_val val = json_parse_value(p);
         if (v.obj->count >= v.obj->cap) {
             v.obj->cap *= 2;
-            v.obj->entries = (json_obj_entry*)realloc(v.obj->entries, v.obj->cap * sizeof(json_obj_entry));
+            json_obj_entry *_tmp = (json_obj_entry*)realloc(v.obj->entries, v.obj->cap * sizeof(json_obj_entry));
+            if (!_tmp) { fprintf(stderr, "taida: out of memory (json_object)\n"); exit(1); }
+            v.obj->entries = _tmp;
         }
         v.obj->entries[v.obj->count].key = key;
         v.obj->entries[v.obj->count].value = val;
@@ -5724,7 +5757,7 @@ static void json_append(char **buf, size_t *cap, size_t *len, const char *s) {
     size_t slen = strlen(s);
     while (*len + slen + 1 > *cap) {
         *cap *= 2;
-        *buf = (char*)realloc(*buf, *cap);
+        TAIDA_REALLOC(*buf, *cap, "json_stringify");
     }
     memcpy(*buf + *len, s, slen);
     *len += slen;
@@ -5734,7 +5767,7 @@ static void json_append(char **buf, size_t *cap, size_t *len, const char *s) {
 static void json_append_char(char **buf, size_t *cap, size_t *len, char c) {
     if (*len + 2 > *cap) {
         *cap *= 2;
-        *buf = (char*)realloc(*buf, *cap);
+        TAIDA_REALLOC(*buf, *cap, "json_stringify");
     }
     (*buf)[*len] = c;
     *len += 1;
@@ -6369,7 +6402,7 @@ taida_val taida_os_list_dir(taida_val path_ptr) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
         if (count >= capacity) {
             capacity *= 2;
-            names = (char**)realloc(names, capacity * sizeof(char*));
+            TAIDA_REALLOC(names, capacity * sizeof(char*), "listDir");
         }
         names[count] = taida_str_new_copy(entry->d_name);
         count++;
@@ -6565,8 +6598,10 @@ taida_val taida_os_remove(taida_val path_ptr) {
 
 // ── createDir(path) → Result (mkdir -p) ────────────────────
 static int taida_os_mkdir_p(const char *path) {
-    char *tmp = (char*)malloc(strlen(path) + 1);
-    strcpy(tmp, path);
+    size_t path_len = strlen(path);
+    char *tmp = (char*)malloc(path_len + 1);
+    if (!tmp) { fprintf(stderr, "taida: out of memory (mkdir_p)\n"); return -1; }
+    memcpy(tmp, path, path_len + 1);
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
@@ -6661,7 +6696,7 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
         out_len += n;
         if (out_len >= out_cap - 1) {
             out_cap *= 2;
-            out_buf = (char*)realloc(out_buf, out_cap);
+            TAIDA_REALLOC(out_buf, out_cap, "os_run_stdout");
         }
     }
     out_buf[out_len] = '\0';
@@ -6674,7 +6709,7 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
         err_len += n;
         if (err_len >= err_cap - 1) {
             err_cap *= 2;
-            err_buf = (char*)realloc(err_buf, err_cap);
+            TAIDA_REALLOC(err_buf, err_cap, "os_run_stderr");
         }
     }
     err_buf[err_len] = '\0';
@@ -6736,7 +6771,7 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
     ssize_t n;
     while ((n = read(stdout_pipe[0], out_buf + out_len, out_cap - out_len - 1)) > 0) {
         out_len += n;
-        if (out_len >= out_cap - 1) { out_cap *= 2; out_buf = (char*)realloc(out_buf, out_cap); }
+        if (out_len >= out_cap - 1) { out_cap *= 2; TAIDA_REALLOC(out_buf, out_cap, "execShell_stdout"); }
     }
     out_buf[out_len] = '\0';
     close(stdout_pipe[0]);
@@ -6745,7 +6780,7 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
     char *err_buf = (char*)malloc(err_cap);
     while ((n = read(stderr_pipe[0], err_buf + err_len, err_cap - err_len - 1)) > 0) {
         err_len += n;
-        if (err_len >= err_cap - 1) { err_cap *= 2; err_buf = (char*)realloc(err_buf, err_cap); }
+        if (err_len >= err_cap - 1) { err_cap *= 2; TAIDA_REALLOC(err_buf, err_cap, "execShell_stderr"); }
     }
     err_buf[err_len] = '\0';
     close(stderr_pipe[0]);
@@ -6882,7 +6917,7 @@ static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
         size_t need = strlen(name) + strlen(value_str) + 4;
         while (len + need + 1 > cap) {
             cap *= 2;
-            buf = (char*)realloc(buf, cap);
+            TAIDA_REALLOC(buf, cap, "http_response");
         }
 
         int n = snprintf(buf + len, cap - len, "%s: %s\r\n", name, value_str);
@@ -7276,7 +7311,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
         resp_len += (size_t)n;
         if (resp_len >= buf_cap - 1) {
             buf_cap *= 2;
-            resp_buf = (char*)realloc(resp_buf, buf_cap);
+            TAIDA_REALLOC(resp_buf, buf_cap, "tcp_recv");
         }
     }
     close(sockfd);

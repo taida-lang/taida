@@ -41,6 +41,8 @@ pub struct Lowering {
     stdlib_runtime_funcs: std::collections::HashMap<String, String>,
     /// stdlib 定数: インポート名 → f64 値
     stdlib_constants: std::collections::HashMap<String, f64>,
+    /// int 値を保持する変数名のセット（FL-16: poly_add 誤発火防止）
+    int_vars: std::collections::HashSet<String>,
     /// float を返す stdlib 関数の結果変数（型追跡用）
     /// float 値を保持する変数名のセット
     float_vars: std::collections::HashSet<String>,
@@ -230,6 +232,7 @@ impl Lowering {
             current_heap_vars: Vec::new(),
             stdlib_runtime_funcs,
             stdlib_constants: std::collections::HashMap::new(),
+            int_vars: std::collections::HashSet::new(),
             float_vars: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
             bool_vars: std::collections::HashSet::new(),
@@ -1249,6 +1252,57 @@ impl Lowering {
 
         // ヒープ変数トラッカーをリセット
         self.current_heap_vars.clear();
+
+        // FL-16: パラメータの型注釈から型トラッキング変数を登録
+        for param in &func_def.params {
+            if let Some(type_ann) = &param.type_annotation {
+                match type_ann {
+                    crate::parser::TypeExpr::Named(name) if name == "Int" || name == "Num" => {
+                        self.int_vars.insert(param.name.clone());
+                    }
+                    crate::parser::TypeExpr::Named(name) if name == "Str" => {
+                        self.string_vars.insert(param.name.clone());
+                    }
+                    crate::parser::TypeExpr::Named(name) if name == "Float" => {
+                        self.float_vars.insert(param.name.clone());
+                    }
+                    crate::parser::TypeExpr::Named(name) if name == "Bool" => {
+                        self.bool_vars.insert(param.name.clone());
+                    }
+                    crate::parser::TypeExpr::List(_) => {
+                        self.list_vars.insert(param.name.clone());
+                    }
+                    crate::parser::TypeExpr::BuchiPack(_) => {
+                        self.pack_vars.insert(param.name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 戻り値型注釈から型注釈なしパラメータの型を推論登録
+        // 例: `sumTo n acc = ... => :Int` の場合、n, acc を int_vars に登録
+        // これにより poly_add 等のヒューリスティック関数の誤発火を防ぐ
+        if let Some(ref rt) = func_def.return_type {
+            let inferred_numeric = matches!(
+                rt,
+                crate::parser::TypeExpr::Named(name) if name == "Int" || name == "Num"
+            );
+            if inferred_numeric {
+                for param in &func_def.params {
+                    if param.type_annotation.is_none()
+                        && !self.string_vars.contains(&param.name)
+                        && !self.float_vars.contains(&param.name)
+                        && !self.bool_vars.contains(&param.name)
+                        && !self.pack_vars.contains(&param.name)
+                        && !self.list_vars.contains(&param.name)
+                        && !self.closure_vars.contains(&param.name)
+                    {
+                        self.int_vars.insert(param.name.clone());
+                    }
+                }
+            }
+        }
 
         // ローカル関数定義の前処理: 関数本体内の FuncDef を先に IR 化して登録する。
         // 内部関数が親スコープの変数を参照する場合はクロージャとして生成する。
@@ -2806,6 +2860,10 @@ impl Lowering {
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     // Float arithmetic: use float add
                     "taida_float_add"
+                } else if self.expr_type_is_unknown(lhs) || self.expr_type_is_unknown(rhs) {
+                    // FL-16: untyped operand (e.g. function param without annotation)
+                    // → use polymorphic add that dispatches at runtime
+                    "taida_poly_add"
                 } else {
                     "taida_int_add"
                 }
@@ -4150,13 +4208,13 @@ impl Lowering {
         Ok(current_list)
     }
 
-    /// テンプレート文字列: `"Hello, {name}!"` → 部分文字列を連結
+    /// テンプレート文字列: `"Hello, ${name}!"` → 部分文字列を連結
     fn lower_template_lit(
         &mut self,
         func: &mut IrFunction,
         template: &str,
     ) -> Result<IrVar, LowerError> {
-        // Parse template: split on { and } to get literal parts and expression parts
+        // Parse template: split on ${ and } to get literal parts and expression parts
         let mut result_var = {
             let var = func.alloc_var();
             func.push(IrInst::ConstStr(var, String::new()));
@@ -4166,23 +4224,24 @@ impl Lowering {
         let chars: Vec<char> = template.chars().collect();
         let mut i = 0;
         while i < chars.len() {
-            if chars[i] == '{' {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                // Skip '$' and '{'
+                i += 2;
                 // Find matching }
-                let start = i + 1;
+                let start = i;
                 let mut depth = 1;
-                let mut end = start;
-                while end < chars.len() && depth > 0 {
-                    if chars[end] == '{' {
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' {
                         depth += 1;
                     }
-                    if chars[end] == '}' {
+                    if chars[i] == '}' {
                         depth -= 1;
                     }
                     if depth > 0 {
-                        end += 1;
+                        i += 1;
                     }
                 }
-                let expr_name: String = chars[start..end].iter().collect();
+                let expr_name: String = chars[start..i].iter().collect();
                 let var_name = expr_name.trim().to_string();
                 // Look up the variable and convert to string based on type
                 let name_var = func.alloc_var();
@@ -4237,11 +4296,17 @@ impl Lowering {
                     vec![result_var, str_var],
                 ));
                 result_var = concat_var;
-                i = end + 1;
+                // skip closing '}'
+                if i < chars.len() {
+                    i += 1;
+                }
             } else {
-                // Collect literal characters until next { or end
+                // Collect literal characters until next ${ or end
                 let start = i;
-                while i < chars.len() && chars[i] != '{' {
+                while i < chars.len() {
+                    if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                        break;
+                    }
                     i += 1;
                 }
                 let literal: String = chars[start..i].iter().collect();
@@ -4352,6 +4417,25 @@ impl Lowering {
                         })
                         .unwrap_or(false)
                 })
+            }
+            _ => false,
+        }
+    }
+
+    /// FL-16: 式の型がコンパイル時に不明かどうかを判定（untyped パラメータ等）
+    fn expr_type_is_unknown(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(name, _) => {
+                !self.int_vars.contains(name)
+                    && !self.string_vars.contains(name)
+                    && !self.float_vars.contains(name)
+                    && !self.bool_vars.contains(name)
+                    && !self.pack_vars.contains(name)
+                    && !self.list_vars.contains(name)
+                    && !self.closure_vars.contains(name)
+                    && !self.top_level_vars.contains(name)
+                    && !self.user_funcs.contains(name)
+                    && !self.stdlib_constants.contains_key(name)
             }
             _ => false,
         }

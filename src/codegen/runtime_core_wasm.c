@@ -266,11 +266,21 @@ static int _wasm_is_lax(int64_t val);
 static int _wasm_is_result(int64_t val);
 static int _wasm_is_gorillax(int64_t val);
 int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);
+int64_t taida_pack_new(int64_t field_count);
+int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
+int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);
 int64_t taida_throw(int64_t error_val);
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
 int64_t taida_can_throw_payload(int64_t val);
 static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
 static int64_t _wasm_result_is_error_check(int64_t result);
+
+/* ── Hash constants needed by taida_generic_unmold (full definitions in W-5) ── */
+#define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
+#define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
+#define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
+#define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
 
 /* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
@@ -342,7 +352,50 @@ int64_t taida_generic_unmold(int64_t val) {
             (int64_t)(intptr_t)"Gorillax error");
         return taida_throw(err);
     }
+    /* BE-WASM-1: TODO unmold — return unm channel, fallback to sol/__default/__value.
+       Matches native_runtime.c taida_generic_unmold TODO branch. */
+    if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
+        int64_t type_ptr = taida_pack_get(val, WASM_HASH___TYPE);
+        /* Guard: ensure type_ptr looks like a valid pointer (> 4096) */
+        if ((intptr_t)type_ptr <= 4096) return val;
+        const char *type_str = (const char *)(intptr_t)type_ptr;
+        if (type_str != 0 && type_str[0] == 'T' && type_str[1] == 'O' &&
+            type_str[2] == 'D' && type_str[3] == 'O' && type_str[4] == '\0') {
+            /* TODO pack: prefer unm > __default > sol > __value */
+            if (taida_pack_has_hash(val, WASM_HASH_TODO_UNM))
+                return taida_pack_get(val, WASM_HASH_TODO_UNM);
+            if (taida_pack_has_hash(val, WASM_HASH___DEFAULT))
+                return taida_pack_get(val, WASM_HASH___DEFAULT);
+            if (taida_pack_has_hash(val, WASM_HASH_TODO_SOL))
+                return taida_pack_get(val, WASM_HASH_TODO_SOL);
+            if (taida_pack_has_hash(val, WASM_HASH___VALUE))
+                return taida_pack_get(val, WASM_HASH___VALUE);
+            return taida_pack_new(0);
+        }
+        /* Molten detection: cannot unmold Molten directly */
+        if (type_str != 0 && type_str[0] == 'M' && type_str[1] == 'o' &&
+            type_str[2] == 'l' && type_str[3] == 't' && type_str[4] == 'e' &&
+            type_str[5] == 'n' && type_str[6] == '\0') {
+            int64_t error = taida_make_error(
+                (int64_t)(intptr_t)"TypeError",
+                (int64_t)(intptr_t)"Cannot unmold Molten directly. Molten can only be used inside Cage.");
+            return taida_throw(error);
+        }
+        /* Custom mold: pack with __type and __value fields */
+        if (taida_pack_has_hash(val, WASM_HASH___VALUE))
+            return taida_pack_get(val, WASM_HASH___VALUE);
+    }
     return val;
+}
+
+/* ── FL-16: 多態加算 (polymorphic add) ── */
+/* wasm-min: integer-only add. String concatenation in Taida is handled
+   by taida_str_concat which the compiler emits explicitly for string
+   operands. poly_add is only reached when the compiler cannot determine
+   the operand type at compile time, and in wasm-min all such values
+   are integers (wasm-min has no heap string detection mechanism). */
+int64_t taida_poly_add(int64_t a, int64_t b) {
+    return a + b;
 }
 
 /* ── 多態比較 (wasm-min: 整数比較のみ) ── */
@@ -779,13 +832,28 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
 /* WFX-2: corrected FNV-1a hashes (previous values were wrong, causing
    field access mismatch with compiler-generated hashes from simple_hash()) */
 #define WASM_HASH_HAS_VALUE   0x9e9c6dc733414d60LL  /* FNV-1a("hasValue") */
+#ifndef WASM_HASH___VALUE
 #define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
+#endif
+#ifndef WASM_HASH___TYPE
 #define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
+#endif
 #define WASM_HASH_IS_OK       0x6550c1c5b98b56bfLL  /* FNV-1a("isOk") */
 #define WASM_HASH___ERROR     0x15c3e6e41a99a6cbLL  /* FNV-1a("__error") */
+#ifndef WASM_HASH___DEFAULT
 #define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#endif
 #define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
 #define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
+/* BE-WASM-1: TODO field hashes (matching native_runtime.c) */
+#define WASM_HASH_TODO_ID     0x08b72e07b55c3ac0LL  /* FNV-1a("id") */
+#define WASM_HASH_TODO_TASK   0xd9603bef07a9524cLL  /* FNV-1a("task") */
+#ifndef WASM_HASH_TODO_SOL
+#define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
+#endif
+#ifndef WASM_HASH_TODO_UNM
+#define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
+#endif
 
 /* W-4f2: Dynamic string buffer for building collection toString output */
 typedef struct {
@@ -2240,8 +2308,32 @@ int64_t taida_stub_new(int64_t message) {
 }
 
 int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm) {
-    (void)id; (void)task; (void)sol; (void)unm;
-    return taida_molten_new();
+    /* BE-WASM-1: proper TODO pack matching native_runtime.c layout.
+       Fields: id(0), task(1), sol(2), unm(3), __value(4), __default(5), __type(6) */
+    int64_t pack = taida_pack_new(7);
+    taida_pack_set_hash(pack, 0, WASM_HASH_TODO_ID);
+    taida_pack_set(pack, 0, id);
+    taida_pack_set_hash(pack, 1, WASM_HASH_TODO_TASK);
+    taida_pack_set(pack, 1, task);
+    taida_pack_set_hash(pack, 2, WASM_HASH_TODO_SOL);
+    taida_pack_set(pack, 2, sol);
+    taida_pack_set_hash(pack, 3, WASM_HASH_TODO_UNM);
+    taida_pack_set(pack, 3, unm);
+    taida_pack_set_hash(pack, 4, WASM_HASH___VALUE);
+    taida_pack_set(pack, 4, sol);
+    taida_pack_set_hash(pack, 5, WASM_HASH___DEFAULT);
+    taida_pack_set(pack, 5, unm);
+    taida_pack_set_hash(pack, 6, WASM_HASH___TYPE);
+    taida_pack_set(pack, 6, (int64_t)(intptr_t)"TODO");
+    return pack;
+}
+
+/* BE-WASM-2: Gorilla literal — immediate crash (matching native exit(1)).
+   In WASM, __builtin_trap() produces an unreachable instruction that
+   terminates the module, which is the WASM equivalent of exit(). */
+void taida_gorilla(void) {
+    /* No output — matches native exit(1) behavior */
+    __builtin_trap();
 }
 
 /* ── W-5: Type conversion molds (returning Lax) ── */

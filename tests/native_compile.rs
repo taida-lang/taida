@@ -6,8 +6,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant};
 
 /// Get the path to the built taida binary.
 fn taida_bin() -> PathBuf {
@@ -36,46 +34,12 @@ fn run_interpreter(td_path: &Path) -> Option<String> {
     )
 }
 
-struct NativeBuildLock {
-    path: PathBuf,
-}
-
-impl Drop for NativeBuildLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
-    }
-}
-
-fn acquire_native_build_lock() -> NativeBuildLock {
-    let lock_path = std::env::temp_dir().join("taida_native_build_test.lock");
-    let started = Instant::now();
-    loop {
-        match fs::create_dir(&lock_path) {
-            Ok(()) => return NativeBuildLock { path: lock_path },
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                assert!(
-                    started.elapsed() < Duration::from_secs(120),
-                    "timed out waiting for native build test lock {}",
-                    lock_path.display()
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(err) => panic!(
-                "failed to acquire native build test lock {}: {}",
-                lock_path.display(),
-                err
-            ),
-        }
-    }
-}
-
 /// Compile a .td file to a native binary, execute it, and return its stdout.
 fn compile_and_run(td_path: &Path) -> Option<String> {
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
     let binary_path = unique_temp_path(&format!("taida_test_{}", stem), "bin");
 
-    // Compile
-    let _build_lock = acquire_native_build_lock();
+    // Compile (no global lock needed -- FL-7 ensures unique .o paths)
     let compile_output = Command::new(taida_bin())
         .arg("build")
         .arg("--target")
@@ -321,7 +285,6 @@ fn test_native_stream_example_is_explicitly_rejected() {
         .join("compile_stream.td");
     let binary_path = unique_temp_path("taida_native_stream_reject", "bin");
 
-    let _build_lock = acquire_native_build_lock();
     let output = Command::new(taida_bin())
         .arg("build")
         .arg("--target")

@@ -113,9 +113,9 @@ struct RuntimeAbi {
 ///   Lax, Result, Gorillax, Bytes, JSON, Molten 等）
 /// - FnPtr: 関数ポインタ（クロージャ生成・list_map/filter 等のコールバック）
 /// - F64: 浮動小数点数（bitcast 経由で boxed value と変換される場合あり）
-fn runtime_abi(name: &str) -> RuntimeAbi {
+fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
     use AbiKind::*;
-    match name {
+    Ok(match name {
         // ── Debug 出力 ──
         "taida_debug_int" => RuntimeAbi {
             params: &[Val],
@@ -151,7 +151,7 @@ fn runtime_abi(name: &str) -> RuntimeAbi {
         },
 
         // ── 整数演算 ──
-        "taida_int_add" | "taida_int_sub" | "taida_int_mul" => RuntimeAbi {
+        "taida_int_add" | "taida_int_sub" | "taida_int_mul" | "taida_poly_add" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Val],
         },
@@ -1509,8 +1509,13 @@ fn runtime_abi(name: &str) -> RuntimeAbi {
             returns: &[Ptr],
         },
 
-        _ => panic!("unknown runtime function: {}", name),
-    }
+        _ => {
+            return Err(format!(
+                "unknown runtime function: '{}'. Add it to the ABI table in emit.rs runtime_abi().",
+                name
+            ));
+        }
+    })
 }
 
 /// ABI 定義 + AbiHelper から CLIF 型を解決する
@@ -1538,9 +1543,9 @@ fn resolve_abi(abi: &RuntimeAbi, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<cl
 fn runtime_func_signature_for(
     name: &str,
     helper: &AbiHelper,
-) -> (Vec<clif::Type>, Vec<clif::Type>) {
-    let abi = runtime_abi(name);
-    resolve_abi(&abi, helper)
+) -> Result<(Vec<clif::Type>, Vec<clif::Type>), String> {
+    let abi = runtime_abi(name)?;
+    Ok(resolve_abi(&abi, helper))
 }
 
 pub struct Emitter {
@@ -1760,7 +1765,8 @@ impl Emitter {
             match inst {
                 IrInst::Call(_, func_name, _) => {
                     if !self.declared_funcs.contains_key(func_name) {
-                        let (params, returns) = runtime_func_signature_for(func_name, &self.abi);
+                        let (params, returns) = runtime_func_signature_for(func_name, &self.abi)
+                            .map_err(|e| EmitError { message: e })?;
                         self.declare_runtime_func(func_name, &params, &returns)?;
                     }
                 }
@@ -1854,7 +1860,8 @@ impl Emitter {
 
     fn ensure_runtime_func(&mut self, name: &str) -> Result<(), EmitError> {
         if !self.declared_funcs.contains_key(name) {
-            let (params, returns) = runtime_func_signature_for(name, &self.abi);
+            let (params, returns) = runtime_func_signature_for(name, &self.abi)
+                .map_err(|e| EmitError { message: e })?;
             self.declare_runtime_func(name, &params, &returns)?;
         }
         Ok(())
@@ -2207,7 +2214,10 @@ impl Emitter {
                 } else {
                     // W-0f: runtime_func_signature_for() で ectx.abi ベースの解決に統一
                     let func_ref = ectx.func_refs[func_name];
-                    let runtime_abi_def = runtime_abi(func_name);
+                    // FL-11: runtime_abi already validated in predeclare_runtime_funcs_recursive,
+                    // so this should not fail. Use expect with descriptive message as defensive fallback.
+                    let runtime_abi_def =
+                        runtime_abi(func_name).unwrap_or_else(|e| panic!("BUG: {}", e));
                     let (param_types, return_types) = resolve_abi(&runtime_abi_def, &ectx.abi);
 
                     let arg_vals: Vec<clif::Value> = args

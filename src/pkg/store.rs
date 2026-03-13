@@ -39,11 +39,9 @@ impl Default for GlobalStore {
 impl GlobalStore {
     /// Create a new GlobalStore using the default location (`~/.taida/store/`).
     pub fn new() -> Self {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".to_string());
+        let home = crate::util::taida_home_dir().unwrap_or_else(|_| std::env::temp_dir());
         GlobalStore {
-            root: PathBuf::from(home).join(".taida").join("store"),
+            root: home.join(".taida").join("store"),
         }
     }
 
@@ -479,5 +477,42 @@ mod tests {
     fn test_extract_json_name_empty() {
         let names = extract_json_name_values("[]");
         assert!(names.is_empty());
+    }
+
+    /// FL-29: GlobalStore fallback uses std::env::temp_dir() instead of "/tmp"
+    /// Note: This test modifies environment variables and may be flaky under parallel
+    /// execution. Run with `cargo test --test-threads=1` if it fails intermittently.
+    #[test]
+    fn test_global_store_fallback_uses_temp_dir() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+
+        let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+
+        let store = GlobalStore::new();
+        let expected_root = std::env::temp_dir().join(".taida").join("store");
+        assert_eq!(
+            store.root, expected_root,
+            "GlobalStore fallback should use std::env::temp_dir(), not hardcoded /tmp"
+        );
+
+        // Restore environment
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(up) = original_userprofile {
+                std::env::set_var("USERPROFILE", up);
+            } else {
+                std::env::remove_var("USERPROFILE");
+            }
+        }
     }
 }

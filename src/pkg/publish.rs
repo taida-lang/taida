@@ -49,6 +49,13 @@ pub fn validate_label(label: &str) -> Result<(), String> {
 }
 
 pub fn read_git_tags(project_dir: &Path) -> Result<Vec<String>, String> {
+    // Fetch remote tags to ensure local tag list is up to date.
+    // Failure here is non-fatal (e.g. no remote configured, offline).
+    let _ = Command::new("git")
+        .args(["fetch", "--tags", "--quiet"])
+        .current_dir(project_dir)
+        .output();
+
     let output = Command::new("git")
         .args(["tag", "--list"])
         .current_dir(project_dir)
@@ -290,11 +297,35 @@ pub fn prepare_publish(
 }
 
 /// Git commit + tag + push を実行する。
+///
+/// Performs operations in a safe order with rollback on failure:
+/// 1. Check if the tag already exists on remote (fail early)
+/// 2. Stage + commit + tag locally
+/// 3. Push commit + tag
+/// 4. On push failure, rollback local commit and tag
 pub fn git_commit_tag_push(
     project_dir: &Path,
     version: &str,
     package_name: &str,
 ) -> Result<(), String> {
+    let tag = version.to_string();
+    let tag_ref = format!("refs/tags/{tag}");
+
+    // Pre-check: verify the tag does not already exist on remote
+    if let Ok(output) = Command::new("git")
+        .args(["ls-remote", "--tags", "origin", &tag_ref])
+        .current_dir(project_dir)
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() && !stdout.trim().is_empty() {
+            return Err(format!(
+                "Tag '{}' already exists on remote. Cannot publish duplicate version.",
+                tag
+            ));
+        }
+    }
+
     // Stage packages.tdm
     run_git(project_dir, &["add", "packages.tdm"])?;
 
@@ -303,13 +334,31 @@ pub fn git_commit_tag_push(
     run_git(project_dir, &["commit", "-m", &message])?;
 
     // Tag
-    let tag = version.to_string();
-    run_git(project_dir, &["tag", &tag])?;
+    if let Err(e) = run_git(project_dir, &["tag", &tag]) {
+        // Rollback: undo the commit
+        let _ = run_git(project_dir, &["reset", "--soft", "HEAD~1"]);
+        return Err(e);
+    }
 
-    // Push commit + the specific tag only
-    run_git(project_dir, &["push", "origin", "HEAD"])?;
-    let tag_ref = format!("refs/tags/{tag}");
-    run_git(project_dir, &["push", "origin", &tag_ref])?;
+    // Push commit
+    if let Err(e) = run_git(project_dir, &["push", "origin", "HEAD"]) {
+        // Rollback: delete local tag, undo commit
+        let _ = run_git(project_dir, &["tag", "-d", &tag]);
+        let _ = run_git(project_dir, &["reset", "--soft", "HEAD~1"]);
+        return Err(e);
+    }
+
+    // Push tag
+    if let Err(e) = run_git(project_dir, &["push", "origin", &tag_ref]) {
+        // Rollback: revert the pushed commit, delete local tag
+        let _ = run_git(project_dir, &["tag", "-d", &tag]);
+        let _ = run_git(project_dir, &["revert", "HEAD", "--no-edit"]);
+        let _ = run_git(project_dir, &["push", "origin", "HEAD"]);
+        return Err(format!(
+            "Tag push failed (commit was pushed but tag was not): {}",
+            e
+        ));
+    }
 
     Ok(())
 }

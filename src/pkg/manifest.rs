@@ -114,13 +114,22 @@ impl Manifest {
                 Statement::Import(imp) if imp.version.is_some() => {
                     // >>> taida-lang/string-utils@1.0.0
                     if let Some((org, name)) = parse_org_name(&imp.path) {
+                        let ver = match &imp.version {
+                            Some(v) => v.clone(),
+                            None => {
+                                return Err(format!(
+                                    "packages.tdm: import '{}' has no version. This is a parser bug.",
+                                    imp.path
+                                ));
+                            }
+                        };
                         let canonical_id = format!("{}/{}", org, name);
                         deps.insert(
                             canonical_id,
                             Dependency::Registry {
                                 org,
                                 name,
-                                version: imp.version.clone().unwrap(),
+                                version: ver,
                             },
                         );
                     }
@@ -140,8 +149,8 @@ impl Manifest {
                             "packages.tdm: only one <<< (export) line is allowed.".to_string()
                         );
                     }
-                    if exp.version.is_some() {
-                        version = exp.version.clone().unwrap();
+                    if let Some(v) = &exp.version {
+                        version = v.clone();
                     }
                 }
                 // P-2: reject non-import/export statements
@@ -770,5 +779,20 @@ stdout("hello")
 "#;
         let result = Manifest::parse(source, Path::new("/tmp"));
         assert!(result.is_ok());
+    }
+
+    // ── FL-15 regression: version unwrap safety ──
+
+    #[test]
+    fn test_export_without_version_does_not_panic() {
+        // An export (<<<) without a version should use the default, not panic
+        let source = r#"
+>>> taida-lang/os@a.1
+<<< @(hello)
+"#;
+        let result = Manifest::parse(source, Path::new("/my-pkg"));
+        assert!(result.is_ok());
+        let manifest = result.unwrap();
+        assert_eq!(manifest.version, "0.1.0"); // default version
     }
 }

@@ -44,6 +44,14 @@ impl TypeChecker {
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Unknown])),
                 "any" | "all" | "none" => Some((1, 1, vec![Type::Unknown])), // predicate
                 "take" | "drop" => Some((1, 1, vec![Type::Int])),
+                "unique" | "reverse" | "sort" | "flatten" => Some((0, 0, vec![])),
+                "map" | "flatMap" | "filter" => Some((1, 1, vec![Type::Unknown])),
+                "reduce" | "fold" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
+                "join" => Some((1, 1, vec![Type::Str])),
+                "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
+                "push" | "append" => Some((1, 1, vec![Type::Unknown])),
+                "concat" => Some((1, 1, vec![Type::Unknown])),
+                "zip" => Some((1, 1, vec![Type::Unknown])),
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
@@ -88,6 +96,31 @@ impl TypeChecker {
                 None
             }
         };
+
+        // FL-22: Emit error for unknown methods on known concrete types
+        if method_sig.is_none() && method != "toString" {
+            let is_known_type = matches!(
+                obj_type,
+                Type::Str
+                    | Type::Int
+                    | Type::Float
+                    | Type::Num
+                    | Type::Bool
+                    | Type::Bytes
+                    | Type::List(_)
+            ) || matches!(obj_type, Type::Named(n) if n == "HashMap" || n == "Set")
+                || matches!(obj_type, Type::Generic(n, _) if n == "Lax" || n == "Result");
+            if is_known_type {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1509] Unknown method '{}' on type {}. \
+                         Hint: Check the method name for typos, or use a mold instead.",
+                        method, obj_type
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
 
         if let Some((min_args, max_args, param_types)) = method_sig {
             // Check arity
