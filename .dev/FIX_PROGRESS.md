@@ -158,24 +158,24 @@ unwrap パターン、silent default、テストコードの改善。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 48 | N-14 | `chars().nth(idx).unwrap()` (charAt) | [P] | `DONE` | `src/interpreter/methods.rs:1055` |
-| 49 | N-15 | `scopes.last_mut().unwrap()` (define) | [P] | `DONE` | `src/interpreter/env.rs:43` |
-| 50 | N-16 | `scopes.last_mut().unwrap()` (define_force) | [P] | `DONE` | `src/interpreter/env.rs:57` |
-| 51 | N-17 | async resolve の check-then-unwrap | [P] | `DONE` | `src/interpreter/unmold.rs:43` |
-| 52 | N-18 | async resolve の check-then-unwrap (別箇所) | [P] | `DONE` | `src/interpreter/unmold.rs:109` |
-| 53 | N-19 | テスト内の `panic!("Expected ...")` (11箇所) | [T] | `DONE` | `src/interpreter/json.rs` |
-| 54 | N-20 | 統合テストの `panic!("Expected Bool...")` | [T] | `DONE` | `src/interpreter/os_eval.rs:2505,2538` |
-| 55 | N-21 | `unreachable!()` にコメントなし | [M] | `DONE` | `src/interpreter/mold_eval.rs:793` |
-| 56 | N-22 | check-then-unwrap アンチパターン | [M] | `DONE` | `src/interpreter/unmold.rs:43,109` |
-| 57 | N-23 | JSON パース失敗時の silent default | [E] | `DONE` | `src/interpreter/json.rs:254,260,264,274` |
-| 58 | N-24 | `parent().unwrap_or(Path::new("."))` | [E] | `DONE` | `src/interpreter/module_eval.rs:21,89` |
-| 59 | N-25 | export シンボル不在時の silent fallback | [E] | `DONE` | `src/interpreter/module_eval.rs:380` |
-| 60 | N-26 | TODO コメント残存 (`]=>` channel) | [M] | `DONE` | `src/interpreter/unmold.rs:263` |
-| 61 | N-27 | TODO mold コメントが探索的実装を示唆 | [M] | `DONE` | `src/interpreter/mold_eval.rs:1711-1738` |
-| 62 | N-28 | "unexpected signal" にシグナル型が含まれない | [E] | `DONE` | `src/interpreter/os_eval.rs` |
-| 63 | N-29 | Tokio runtime の `expect()` | [P] | `DONE` | `src/interpreter/eval.rs:139` |
-| 64 | N-30 | Pipeline scope の RAII ガードなし | [L] | `DONE` | `src/interpreter/control_flow.rs:32-55` |
-| 65 | N-31 | `eval_mold()` の match arm が巨大 | [M] | `DONE` | `src/interpreter/mold_eval.rs` |
+| 48 | N-14 | `chars().nth(idx).unwrap()` (charAt) | [P] | `VERIFIED` | `src/interpreter/methods.rs:1055` |
+| 49 | N-15 | `scopes.last_mut().unwrap()` (define) | [P] | `VERIFIED` | `src/interpreter/env.rs:43` |
+| 50 | N-16 | `scopes.last_mut().unwrap()` (define_force) | [P] | `VERIFIED` | `src/interpreter/env.rs:57` |
+| 51 | N-17 | async resolve の check-then-unwrap | [P] | `VERIFIED` | `src/interpreter/unmold.rs:43` |
+| 52 | N-18 | async resolve の check-then-unwrap (別箇所) | [P] | `VERIFIED` | `src/interpreter/unmold.rs:109` |
+| 53 | N-19 | テスト内の `panic!("Expected ...")` (11箇所) | [T] | `VERIFIED` | `src/interpreter/json.rs` |
+| 54 | N-20 | 統合テストの `panic!("Expected Bool...")` | [T] | `VERIFIED` | `src/interpreter/os_eval.rs:2505,2538` |
+| 55 | N-21 | `unreachable!()` にコメントなし | [M] | `VERIFIED` | `src/interpreter/mold_eval.rs:793` |
+| 56 | N-22 | check-then-unwrap アンチパターン | [M] | `VERIFIED` | `src/interpreter/unmold.rs:43,109` |
+| 57 | N-23 | JSON パース失敗時の silent default | [E] | `VERIFIED` | `src/interpreter/json.rs:254,260,264,274` |
+| 58 | N-24 | `parent().unwrap_or(Path::new("."))` | [E] | `VERIFIED` | `src/interpreter/module_eval.rs:21,89` |
+| 59 | N-25 | export シンボル不在時の silent fallback | [E] | `VERIFIED` | `src/interpreter/module_eval.rs:380` |
+| 60 | N-26 | TODO コメント残存 (`]=>` channel) | [M] | `VERIFIED` | `src/interpreter/unmold.rs:263` |
+| 61 | N-27 | TODO mold コメントが探索的実装を示唆 | [M] | `VERIFIED` | `src/interpreter/mold_eval.rs:1711-1738` |
+| 62 | N-28 | "unexpected signal" にシグナル型が含まれない | [E] | `VERIFIED` | `src/interpreter/os_eval.rs` |
+| 63 | N-29 | Tokio runtime の `expect()` | [P] | `VERIFIED` | `src/interpreter/eval.rs:139` |
+| 64 | N-30 | Pipeline scope の RAII ガードなし | [L] | `VERIFIED` | `src/interpreter/control_flow.rs:32-55` |
+| 65 | N-31 | `eval_mold()` の match arm が巨大 | [M] | `VERIFIED` | `src/interpreter/mold_eval.rs` |
 
 ---
 
