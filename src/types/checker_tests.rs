@@ -2088,3 +2088,351 @@ fn test_list_single_element() {
         e0401
     );
 }
+
+// ── FL-1: Return type annotation enforcement ──────────────────────
+
+#[test]
+fn test_fl1_return_type_mismatch_detected() {
+    // Function declares :Int but body returns Str
+    let source = "bad x =\n  \"oops\"\n=> :Int";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]") && e.message.contains("return type")),
+        "Expected return type mismatch error [E1601], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl1_return_type_match_no_error() {
+    // Function declares :Str and body returns Str — no error
+    let source = "greet name =\n  `Hello ${name}`\n=> :Str";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for matching return type, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_fl1_return_type_numeric_compatible_no_error() {
+    // Function declares :Int but body returns Float — allowed (numeric narrowing)
+    let source = "bad =\n  3.14\n=> :Int";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for numeric types (Int/Float/Num are compatible), got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_fl1_return_type_bool_body_str_mismatch() {
+    // Function declares :Bool but body returns Str — genuine mismatch
+    let source = "bad =\n  \"hello\"\n=> :Bool";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]")),
+        "Expected E1601 for Bool/Str mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl1_no_return_annotation_no_error() {
+    // Function without return type annotation — no E1601
+    let source = "add x y =\n  x + y";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 without return type annotation, got: {:?}",
+        e1601
+    );
+}
+
+// ── FL-2: Named type field access diagnostic ──────────────────────
+
+#[test]
+fn test_fl2_named_type_undefined_field_error() {
+    // Access a field that doesn't exist on a Named type
+    let source = "Person = @(name: Str)\np <= Person(name <= \"a\")\nemail <= p.email";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1602]") && e.message.contains("email")),
+        "Expected undefined field error [E1602] for 'email', got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl2_named_type_valid_field_no_error() {
+    // Access a valid field — no error
+    let source = "Person = @(name: Str)\np <= Person(name <= \"a\")\nname <= p.name";
+    let (_, errors) = check(source);
+    let e1602: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1602]")).collect();
+    assert!(
+        e1602.is_empty(),
+        "Should not produce E1602 for valid field access, got: {:?}",
+        e1602
+    );
+}
+
+// ── FL-3: Condition branch type mismatch ──────────────────────────
+
+#[test]
+fn test_fl3_cond_branch_type_mismatch() {
+    // First arm returns Int, second returns Str
+    let source = "x <= 5\ny <=\n  | x > 3 |> 1\n  | _ |> \"oops\"";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1603]")),
+        "Expected condition branch type mismatch [E1603], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl3_cond_branch_same_type_no_error() {
+    // Both arms return Str — no error
+    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
+    let (_, errors) = check(source);
+    let e1603: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1603]")).collect();
+    assert!(
+        e1603.is_empty(),
+        "Should not produce E1603 for same-type arms, got: {:?}",
+        e1603
+    );
+}
+
+#[test]
+fn test_fl3_cond_branch_int_float_mix_allowed() {
+    // Int/Float mixing should be allowed (both are Num)
+    let source = "x <= 5\ny <=\n  | x > 3 |> 1\n  | _ |> 2.5";
+    let (_, errors) = check(source);
+    let e1603: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1603]")).collect();
+    assert!(
+        e1603.is_empty(),
+        "Should not produce E1603 for Int/Float mix, got: {:?}",
+        e1603
+    );
+}
+
+// ── FL-4: Operator type validation ────────────────────────────────
+
+#[test]
+fn test_fl4_logical_not_on_non_bool() {
+    // `!1` — not operator on Int
+    let source = "flag <= !1";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1607]") && e.message.contains("Bool")),
+        "Expected E1607 for `!1`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl4_logical_or_on_non_bool() {
+    // `1 || 2` — logical or on Int
+    let source = "text <= 1 || 2";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1606]")),
+        "Expected E1606 for `1 || 2`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl4_logical_and_on_non_bool() {
+    let source = "flag <= \"a\" && \"b\"";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1606]")),
+        "Expected E1606 for Str && Str, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl4_unary_neg_on_string() {
+    let source = "x <= -\"hello\"";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1607]") && e.message.contains("numeric")),
+        "Expected E1607 for `-\"hello\"`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl4_comparison_type_mismatch() {
+    // Comparing Int with Str
+    let source = "flag <= 1 == \"a\"";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1605]")),
+        "Expected E1605 for comparing Int with Str, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl4_ordering_non_numeric() {
+    // Comparing Bool values with < — not valid
+    let source = "x <= true\ny <= false\nflag <= x < y";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1605]")),
+        "Expected E1605 for Bool ordering, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl4_valid_bool_operators_no_error() {
+    // Valid: Bool && Bool, Bool || Bool, !Bool
+    let source = "a <= true\nb <= false\nc <= a && b\nd <= a || b\ne <= !a";
+    let (_, errors) = check(source);
+    let e16: Vec<_> = errors.iter().filter(|e| e.message.contains("[E160")).collect();
+    assert!(
+        e16.is_empty(),
+        "Should not produce errors for valid Bool operations, got: {:?}",
+        e16
+    );
+}
+
+#[test]
+fn test_fl4_valid_numeric_comparison_no_error() {
+    // Valid: Int == Int, Int < Float
+    let source = "a <= 1\nb <= 2\nc <= a == b\nd <= a < 3.5";
+    let (_, errors) = check(source);
+    let e1605: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1605]")).collect();
+    assert!(
+        e1605.is_empty(),
+        "Should not produce E1605 for valid numeric comparison, got: {:?}",
+        e1605
+    );
+}
+
+// ── Fix 1: E1604 non-Bool condition in CondBranch ──────────────────
+
+#[test]
+fn test_e1604_non_bool_condition_int() {
+    // `| 42 |>` — condition is Int, not Bool
+    let source = "y <=\n  | 42 |> \"yes\"\n  | _ |> \"no\"";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1604]") && e.message.contains("Int")),
+        "Expected E1604 for Int condition, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_e1604_non_bool_condition_str() {
+    // `| "hello" |>` — condition is Str, not Bool
+    let source = "y <=\n  | \"hello\" |> 1\n  | _ |> 2";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1604]") && e.message.contains("Str")),
+        "Expected E1604 for Str condition, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_e1604_bool_condition_no_error() {
+    // Valid Bool condition — no E1604
+    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
+    let (_, errors) = check(source);
+    let e1604: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1604]")).collect();
+    assert!(
+        e1604.is_empty(),
+        "Should not produce E1604 for valid Bool condition, got: {:?}",
+        e1604
+    );
+}
+
+#[test]
+fn test_e1604_non_bool_in_subsequent_arm() {
+    // Second arm has a non-Bool condition
+    let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | 42 |> \"medium\"\n  | _ |> \"small\"";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1604]")),
+        "Expected E1604 for non-Bool condition in subsequent arm, got: {:?}",
+        errors
+    );
+}
+
+// ── Fix 3: FL-1 last statement not an expression ───────────────────
+
+#[test]
+fn test_fl1_last_stmt_not_expr_with_return_type() {
+    // Function declares :Int but last statement is an assignment (not an expression)
+    let source = "bad =\n  x <= 42\n=> :Int";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]") && e.message.contains("not an expression")),
+        "Expected E1601 for non-expression last statement, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl1_last_stmt_not_expr_without_return_type_no_error() {
+    // Function without return type annotation — last stmt being assignment is fine
+    let source = "foo =\n  x <= 42";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 without return type annotation, got: {:?}",
+        e1601
+    );
+}
+
+// ── Fix 8: Complex last-expression cases (CondBranch, Pipeline) ────
+
+#[test]
+fn test_fl1_cond_branch_as_last_expr() {
+    // Function with CondBranch as last expression — matching return type
+    let source = "classify x =\n  | x > 0 |> \"pos\"\n  | _ |> \"neg\"\n=> :Str";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 when CondBranch returns matching type, got: {:?}",
+        e1601
+    );
+}
+
+#[test]
+fn test_fl1_cond_branch_as_last_expr_mismatch() {
+    // Function with CondBranch as last expression — type mismatch
+    let source = "classify x =\n  | x > 0 |> \"pos\"\n  | _ |> \"neg\"\n=> :Int";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1601]")),
+        "Expected E1601 for CondBranch returning Str when Int declared, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_fl1_pipeline_as_last_expr() {
+    // Function with pipeline as last expression
+    let source = "transform x =\n  x => _ + 1\n=> :Int";
+    let (_, errors) = check(source);
+    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    assert!(
+        e1601.is_empty(),
+        "Should not produce E1601 for pipeline returning compatible type, got: {:?}",
+        e1601
+    );
+}
