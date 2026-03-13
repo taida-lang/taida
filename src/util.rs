@@ -7,9 +7,7 @@ pub fn taida_home_dir() -> Result<PathBuf, String> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
-        .map_err(|_| {
-            "Home directory not found: neither HOME nor USERPROFILE is set".to_string()
-        })
+        .map_err(|_| "Home directory not found: neither HOME nor USERPROFILE is set".to_string())
 }
 
 /// Shared lock for tests that modify environment variables.

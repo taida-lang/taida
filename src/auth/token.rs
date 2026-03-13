@@ -16,7 +16,9 @@ pub use crate::util::taida_home_dir;
 /// HOME -> USERPROFILE の順でホームディレクトリを検索し、
 /// いずれも未設定の場合はエラーを返す。
 pub fn auth_json_path() -> Result<PathBuf, String> {
-    Ok(crate::util::taida_home_dir()?.join(".taida").join("auth.json"))
+    Ok(crate::util::taida_home_dir()?
+        .join(".taida")
+        .join("auth.json"))
 }
 
 /// 保存された認証トークンを読み込む。存在しなければ None を返す。
@@ -40,13 +42,7 @@ pub fn save_token(github_token: &str, username: &str) -> Result<(), String> {
             use std::os::unix::fs::PermissionsExt;
             let perms = fs::Permissions::from_mode(0o700);
             fs::set_permissions(parent, perms)
-                .map_err(|e| {
-                    format!(
-                        "Failed to set permissions on {}: {}",
-                        parent.display(),
-                        e
-                    )
-                })?;
+                .map_err(|e| format!("Failed to set permissions on {}: {}", parent.display(), e))?;
         }
     }
 
@@ -267,11 +263,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let meta = fs::metadata(&path).unwrap();
             let mode = meta.permissions().mode() & 0o777;
-            assert_eq!(
-                mode, 0o600,
-                "Expected permission 0o600, got 0o{:o}",
-                mode
-            );
+            assert_eq!(mode, 0o600, "Expected permission 0o600, got 0o{:o}", mode);
 
             // .taida/ ディレクトリが 0o700 であること
             let dir_meta = fs::metadata(tmp.join(".taida")).unwrap();
@@ -347,7 +339,7 @@ mod tests {
         // 年が妥当な範囲内であること
         let year: u32 = ts[0..4].parse().expect("Year should be numeric");
         assert!(
-            year >= 2024 && year <= 2100,
+            (2024..=2100).contains(&year),
             "Year should be reasonable: {}",
             year
         );

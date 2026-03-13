@@ -1780,7 +1780,11 @@ defaulted fields must be provided via `()`",
                 // exactly once and errors are never duplicated.
                 let body_len = fd.body.len();
                 let has_return_check = ret_ty != Type::Unknown && body_len > 0;
-                let check_up_to = if has_return_check { body_len - 1 } else { body_len };
+                let check_up_to = if has_return_check {
+                    body_len - 1
+                } else {
+                    body_len
+                };
                 for body_stmt in fd.body.iter().take(check_up_to) {
                     self.check_statement(body_stmt);
                 }
@@ -1790,11 +1794,11 @@ defaulted fields must be provided via `()`",
                     let last_stmt = &fd.body[body_len - 1];
                     if let Statement::Expr(last_expr) = last_stmt {
                         let body_ty = self.infer_expr_type(last_expr);
-                        if body_ty != Type::Unknown
-                            && !Self::contains_unknown(&body_ty)
-                            && !self.registry.is_subtype_of(&body_ty, &ret_ty)
+                        if !(body_ty == Type::Unknown
+                            || Self::contains_unknown(&body_ty)
+                            || self.registry.is_subtype_of(&body_ty, &ret_ty)
                             // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
-                            && !(body_ty.is_numeric() && ret_ty.is_numeric())
+                            || body_ty.is_numeric() && ret_ty.is_numeric())
                         {
                             self.errors.push(TypeError {
                                 message: format!(
@@ -2042,12 +2046,14 @@ defaulted fields must be provided via `()`",
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
                         // FL-4: Ordering operators require numeric or string operands
-                        if left_type != Type::Unknown && right_type != Type::Unknown
+                        if left_type != Type::Unknown
+                            && right_type != Type::Unknown
                             && !Self::contains_unknown(&left_type)
                             && !Self::contains_unknown(&right_type)
                         {
                             let valid = (left_type.is_numeric() && right_type.is_numeric())
-                                || (matches!(left_type, Type::Str) && matches!(right_type, Type::Str));
+                                || (matches!(left_type, Type::Str)
+                                    && matches!(right_type, Type::Str));
                             if !valid {
                                 self.errors.push(TypeError {
                                     message: format!(
@@ -2063,7 +2069,8 @@ defaulted fields must be provided via `()`",
                     }
                     BinOp::And | BinOp::Or => {
                         // FL-4: Logical operators require Bool operands
-                        if left_type != Type::Unknown && !Self::contains_unknown(&left_type)
+                        if left_type != Type::Unknown
+                            && !Self::contains_unknown(&left_type)
                             && !matches!(left_type, Type::Bool)
                         {
                             self.errors.push(TypeError {
@@ -2075,7 +2082,8 @@ defaulted fields must be provided via `()`",
                                 span: span.clone(),
                             });
                         }
-                        if right_type != Type::Unknown && !Self::contains_unknown(&right_type)
+                        if right_type != Type::Unknown
+                            && !Self::contains_unknown(&right_type)
                             && !matches!(right_type, Type::Bool)
                         {
                             self.errors.push(TypeError {
@@ -2421,18 +2429,18 @@ defaulted fields must be provided via `()`",
                         return *ret;
                     }
                     // FL-23: Check if variable is a non-function type being called
-                    if let Some(var_ty) = self.lookup_var(name) {
-                        if !matches!(var_ty, Type::Unknown) {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1510] Cannot call '{}' of type {} as a function. \
-                                     Hint: Only functions and molds can be called.",
-                                    name, var_ty
-                                ),
-                                span: span.clone(),
-                            });
-                            return Type::Unknown;
-                        }
+                    if let Some(var_ty) = self.lookup_var(name)
+                        && !matches!(var_ty, Type::Unknown)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1510] Cannot call '{}' of type {} as a function. \
+                                 Hint: Only functions and molds can be called.",
+                                name, var_ty
+                            ),
+                            span: span.clone(),
+                        });
+                        return Type::Unknown;
                     }
                     // Check if it's a known builtin
                     // E1507: Builtin arity check
@@ -2960,7 +2968,10 @@ defaulted fields must be provided via `()`",
                 // Push scope with lambda params so body references don't trigger E1502
                 self.push_scope();
                 for (i, p) in params.iter().enumerate() {
-                    self.define_var(&p.name, param_types.get(i).cloned().unwrap_or(Type::Unknown));
+                    self.define_var(
+                        &p.name,
+                        param_types.get(i).cloned().unwrap_or(Type::Unknown),
+                    );
                 }
                 // Try to infer return type from the body expression
                 let ret_type = self.infer_expr_type(body);
@@ -3044,13 +3055,13 @@ defaulted fields must be provided via `()`",
             }
             if let Some(last_expr) = arm.last_expr() {
                 let arm_ty = self.infer_expr_type(last_expr);
-                if first_ty != Type::Unknown
-                    && arm_ty != Type::Unknown
-                    && !Self::contains_unknown(&first_ty)
-                    && !Self::contains_unknown(&arm_ty)
-                    && !self.registry.is_subtype_of(&arm_ty, &first_ty)
+                if !(first_ty == Type::Unknown
+                    || arm_ty == Type::Unknown
+                    || Self::contains_unknown(&first_ty)
+                    || Self::contains_unknown(&arm_ty)
+                    || self.registry.is_subtype_of(&arm_ty, &first_ty)
                     // Allow Int/Float mixing (both are Num)
-                    && !(first_ty.is_numeric() && arm_ty.is_numeric())
+                    || first_ty.is_numeric() && arm_ty.is_numeric())
                 {
                     self.errors.push(TypeError {
                         message: format!(

@@ -3760,10 +3760,7 @@ fn run_install(args: &[String]) {
 
     // Read existing lockfile to pin generation-only versions for reproducibility
     let lock_path = project_dir.join(".taida").join("taida.lock");
-    let existing_lockfile = match pkg::lockfile::Lockfile::read(&lock_path) {
-        Ok(lf) => lf,
-        Err(_) => None,
-    };
+    let existing_lockfile = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or_default();
 
     // Resolve all dependencies using the provider chain,
     // pinning generation-only versions to locked exact versions when available
