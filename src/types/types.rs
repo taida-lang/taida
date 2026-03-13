@@ -324,6 +324,16 @@ impl TypeRegistry {
     }
 
     /// Resolve a type expression to a concrete Type.
+    ///
+    /// N-74: This method does not cache results. Each call re-traverses the
+    /// TypeExpr tree. This is acceptable at current codebase scale because:
+    /// 1. Type expressions are typically shallow (1-3 levels deep).
+    /// 2. The checker calls resolve_type() O(n) times per program where n is
+    ///    the number of type annotations — not per-expression.
+    /// 3. Adding a cache would require either interior mutability (&self -> &mut self
+    ///    propagation) or a RefCell, adding complexity for negligible benefit.
+    /// If profiling reveals this as a bottleneck, consider a HashMap<TypeExpr, Type>
+    /// cache with the TypeExpr implementing Hash + Eq.
     pub fn resolve_type(&self, ty: &crate::parser::TypeExpr) -> Type {
         use crate::parser::TypeExpr;
         match ty {
@@ -460,7 +470,10 @@ mod tests {
             vec![("department".to_string(), Type::Str)],
         );
 
-        let emp_fields = reg.get_type_fields("Employee").unwrap();
+        // N-61: Use expect() instead of unwrap() for clearer test failure messages
+        let emp_fields = reg
+            .get_type_fields("Employee")
+            .expect("Employee type should be registered after inheritance");
         assert_eq!(emp_fields.len(), 3);
 
         // Register error type

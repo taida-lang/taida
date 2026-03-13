@@ -92,7 +92,11 @@ impl TypeChecker {
                 _ => None,
             },
             _ => {
-                // For unknown receiver types, skip method arg checking
+                // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
+                // Type::Generic for non-Lax/Result/Async, user-defined Named types without
+                // known method signatures), we skip method argument checking. This is
+                // intentional: the checker cannot enumerate methods on types it does not
+                // fully know. FL-22 handles the known-type case above.
                 None
             }
         };

@@ -239,23 +239,23 @@ unwrap チェーン、silent エラー、パターン統一。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 93 | N-59 | テスト内 `panic!` → `assert!` に統一 | [T] | `TODO` | `src/types/checker_tests.rs:684` |
-| 94 | N-60 | レジストリ取得の `unwrap()` 検証なし | [T] | `TODO` | `src/types/checker_tests.rs:155,167,176` |
-| 95 | N-61 | `get_type_fields().unwrap()` | [T] | `TODO` | `src/types/types.rs:463` |
-| 96 | N-62 | `!lines.is_empty()` のみの弱いアサーション | [T] | `TODO` | `tests/todo_cli.rs:570` |
-| 97 | N-63 | `as_array().unwrap()` で JSON 構造を仮定 | [T] | `TODO` | `tests/todo_cli.rs:1353` |
-| 98 | N-64 | `check_program()` の `_ => {}` catch-all | [L] | `TODO` | `src/types/checker.rs:814` |
-| 99 | N-65 | `check_statement()` の `_ => {}` catch-all | [L] | `TODO` | `src/types/checker.rs:1798-1819` |
-| 100 | N-66 | 未知 receiver 型のメソッドチェックスキップ | [L] | `TODO` | `src/types/checker_methods.rs:86-90` |
-| 101 | N-67 | `unwrap_or(Type::Unknown)` で型精度低下 | [E] | `TODO` | `src/types/checker.rs` |
-| 102 | N-68 | エラーコードの付与が不統一 | [M] | `TODO` | `src/types/checker.rs` |
-| 103 | N-69 | 循環型依存のテストなし | [T] | `TODO` | `src/types/checker_tests.rs` |
-| 104 | N-70 | ジェネリック型制約のテストカバレッジ限定 | [T] | `TODO` | `src/types/checker_tests.rs` |
-| 105 | N-71 | `@[]` 型パラメータ推論の負テストなし | [T] | `TODO` | `src/types/checker_tests.rs` |
-| 106 | N-72 | 型エラー報告で行番号が欠落 | [T] | `TODO` | `tests/typecheck_examples.rs:42` |
-| 107 | N-73 | Optional/Result 再設計の migration marker なし | [T] | `TODO` | `src/types/` |
-| 108 | N-74 | `resolve_type()` がキャッシュしない | [L] | `TODO` | `src/types/types.rs:326-372` |
-| 109 | N-75 | スコープスタック非空の不変条件が未ドキュメント | [M] | `TODO` | `src/types/checker.rs:699,721,733` |
+| 93 | N-59 | テスト内 `panic!` → `assert!` に統一 | [T] | `DONE` | `src/types/checker_tests.rs:684` |
+| 94 | N-60 | レジストリ取得の `unwrap()` 検証なし | [T] | `DONE` | `src/types/checker_tests.rs:155,167,176` |
+| 95 | N-61 | `get_type_fields().unwrap()` | [T] | `DONE` | `src/types/types.rs:463` |
+| 96 | N-62 | `!lines.is_empty()` のみの弱いアサーション | [T] | `DONE` | `tests/todo_cli.rs:570` |
+| 97 | N-63 | `as_array().unwrap()` で JSON 構造を仮定 | [T] | `DONE` | `tests/todo_cli.rs:1353` |
+| 98 | N-64 | `check_program()` の `_ => {}` catch-all | [L] | `DONE` | `src/types/checker.rs:814` |
+| 99 | N-65 | `check_statement()` の `_ => {}` catch-all | [L] | `DONE` | `src/types/checker.rs:1798-1819` |
+| 100 | N-66 | 未知 receiver 型のメソッドチェックスキップ | [L] | `DONE` | `src/types/checker_methods.rs:86-90` |
+| 101 | N-67 | `unwrap_or(Type::Unknown)` で型精度低下 | [E] | `DONE` | `src/types/checker.rs` |
+| 102 | N-68 | エラーコードの付与が不統一 | [M] | `DONE` | `src/types/checker.rs` |
+| 103 | N-69 | 循環型依存のテストなし | [T] | `DONE` | `src/types/checker_tests.rs` |
+| 104 | N-70 | ジェネリック型制約のテストカバレッジ限定 | [T] | `DONE` | `src/types/checker_tests.rs` |
+| 105 | N-71 | `@[]` 型パラメータ推論の負テストなし | [T] | `DONE` | `src/types/checker_tests.rs` |
+| 106 | N-72 | 型エラー報告で行番号が欠落 | [T] | `DONE` | `tests/typecheck_examples.rs:42` |
+| 107 | N-73 | Optional/Result 再設計の migration marker なし | [T] | `DONE` | `src/types/` |
+| 108 | N-74 | `resolve_type()` がキャッシュしない | [L] | `DONE` | `src/types/types.rs:326-372` |
+| 109 | N-75 | スコープスタック非空の不変条件が未ドキュメント | [M] | `DONE` | `src/types/checker.rs:699,721,733` |
 
 ---
 
@@ -300,11 +300,11 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 11 | JS codegen | 8 | 8 | 0 |
 | 12 | Native codegen | 5 | 5 | 0 |
 | 13 | CLI/pkg/auth | 14 | 14 (VERIFIED) | 0 |
-| 14 | Type checker/Tests | 17 | 0 | 17 |
+| 14 | Type checker/Tests | 17 | 17 | 0 |
 | 15 | WASM/Runtime Hardening | 6 | 6 | 0 |
-| **小計** | | **81** | **64** | **17** |
+| **小計** | | **81** | **81** | **0** |
 
-| | | **総計 115** | **98** | **17** |
+| | | **総計 115** | **115** | **0** |
 
 ---
 
@@ -381,6 +381,7 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-14 | Phase 12 全完了 (N-40〜N-44)。Native codegen: strcpy→memcpy/snprintf 変換 (3箇所)、driver.rs unwrap_or(Path) の安全性ドキュメント、native_runtime.c の stale TODO コメント更新、TAIDA_MALLOC マクロ導入+未チェック malloc 一括変換 (30箇所以上)、emit.rs ABI テーブル保守ガイドコメント追加 |
 | 2026-03-14 | Phase 13 全完了 (N-45〜N-58)。CLI/pkg/auth: REPL flush を is_err+break に変更、device_flow エラー本文保存、unwrap_or_else フラット化、parent/canonicalize フォールバックドキュメント、resolver.rs パストラバーサル安全性コメント、import パス解決チェーンドキュメント、option_env コンパイル時解決ドキュメント、SystemTime/Tokio expect メッセージ改善、エラーハンドリング規約をファイル先頭に記述、init ディレクトリ作成エラーを warning 化、staging ファイル削除に NotFound ドキュメント、token.rs 非 Unix パーミッションドキュメント |
 | 2026-03-14 | Phase 13 VERIFIED (N-45〜N-58)。Phase Gate 通過: cargo test 1504 pass / 0 fail、run_backend_parity.sh 66 pass / 0 fail、e2e_smoke.sh 73 pass / 0 fail |
+| 2026-03-14 | Phase 14 全完了 (N-59〜N-75)。Type checker/Tests: test panic→assert 統一、unwrap→expect 変換 (checker_tests 3箇所+types.rs 1箇所+todo_cli 2箇所)、check_program/check_statement catch-all 意図ドキュメント、checker_methods 未知 receiver スキップ理由ドキュメント、unwrap_or(Type::Unknown) 設計規約をモジュール docstring に記述、エラーコード一覧ドキュメント、循環型依存/自己参照型テスト追加、ジェネリック制約エッジケーステスト追加、@[] 負テスト追加、typecheck_examples 行番号コメント、Optional/Result migration marker テスト追加、resolve_type キャッシュ不使用の理由ドキュメント、scope_stack 非空不変条件ドキュメント |
 
 ---
 
