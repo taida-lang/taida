@@ -37,6 +37,28 @@ static inline void *taida_safe_malloc(size_t size, const char *label) {
 }
 #define TAIDA_MALLOC(size, label) taida_safe_malloc((size), (label))
 
+// M-00: Safe arithmetic helpers for allocation size calculations.
+// These detect overflow BEFORE passing the result to malloc, preventing
+// heap corruption from silently-wrapped size_t values.
+
+// Multiply two size_t values; abort on overflow.
+static inline size_t taida_safe_mul(size_t a, size_t b, const char *label) {
+    if (a != 0 && b > SIZE_MAX / a) {
+        fprintf(stderr, "taida: integer overflow in size calculation (%s): %zu * %zu\n", label, a, b);
+        exit(1);
+    }
+    return a * b;
+}
+
+// Add two size_t values; abort on overflow.
+static inline size_t taida_safe_add(size_t a, size_t b, const char *label) {
+    if (a > SIZE_MAX - b) {
+        fprintf(stderr, "taida: integer overflow in size calculation (%s): %zu + %zu\n", label, a, b);
+        exit(1);
+    }
+    return a + b;
+}
+
 // ---------------------------------------------------------------------------
 // W-0d/W-0f: ABI 正規化 — 値型・ポインタ型・関数ポインタ型の typedef
 //
@@ -1732,6 +1754,12 @@ taida_val taida_release(taida_ptr ptr) {
 // Allocate a heap string with room for `len` characters (+ \0).
 // Returns pointer to the bytes area.  Caller must fill the bytes.
 static char* taida_str_alloc(size_t len) {
+    // M-09: Guard against size_t overflow in header+len+NUL calculation.
+    // sizeof(taida_val)*2 = 16 on LP64, so len > SIZE_MAX - 17 would wrap.
+    if (len > SIZE_MAX - (sizeof(taida_val) * 2 + 1)) {
+        fprintf(stderr, "taida: string length overflow in taida_str_alloc: %zu\n", len);
+        exit(1);
+    }
     taida_val *hdr = (taida_val*)malloc(sizeof(taida_val) * 2 + len + 1);
     if (!hdr) { fprintf(stderr, "taida: out of memory (taida_str_alloc)\n"); exit(1); }
     hdr[0] = TAIDA_STR_MAGIC | 1;  // magic + refcount = 1
@@ -1798,7 +1826,16 @@ static void taida_str_release(taida_val ptr) {
 // Stride = 3 per field: [hash, type_tag, value]
 
 taida_ptr taida_pack_new(taida_val field_count) {
-    taida_val *pack = (taida_val*)malloc((2 + field_count * 3) * sizeof(taida_val));
+    // M-01: Guard against negative field_count (taida_val is int64_t) and
+    // overflow in the size calculation (2 + field_count * 3) * sizeof(taida_val).
+    if (field_count < 0) {
+        fprintf(stderr, "taida: invalid field_count %" PRId64 " in taida_pack_new\n", (int64_t)field_count);
+        exit(1);
+    }
+    size_t fc = (size_t)field_count;
+    size_t slots = taida_safe_add(2, taida_safe_mul(fc, 3, "pack_new fields"), "pack_new header");
+    size_t alloc_size = taida_safe_mul(slots, sizeof(taida_val), "pack_new bytes");
+    taida_val *pack = (taida_val*)malloc(alloc_size);
     if (!pack) { fprintf(stderr, "taida: out of memory (taida_pack_new)\n"); exit(1); }
     pack[0] = TAIDA_PACK_MAGIC | 1;  // Magic + refcount
     pack[1] = field_count;
@@ -2211,7 +2248,9 @@ taida_val taida_str_concat(const char* a, const char* b) {
     if (!a) a = "";
     if (!b) b = "";
     size_t la = strlen(a), lb = strlen(b);
-    char *buf = taida_str_alloc(la + lb);
+    // M-10: Overflow guard on la + lb before passing to taida_str_alloc.
+    size_t total_len = taida_safe_add(la, lb, "str_concat length");
+    char *buf = taida_str_alloc(total_len);
     memcpy(buf, a, la);
     memcpy(buf + la, b, lb);
     return (taida_val)buf;
@@ -2712,16 +2751,20 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
     taida_val len = list[2];
     if (len == 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
     if (!sep) sep = "";
-    taida_val sep_len = (taida_val)strlen(sep);
+    size_t sep_len = strlen(sep);
 
     // Convert each element through the shared toString path.
     // This avoids pointer heuristics and keeps behavior consistent.
-    const char **strs = (const char**)malloc(len * sizeof(const char*));
-    taida_val total = 0;
+    // M-06: Overflow guard on len * sizeof + NULL check.
+    size_t strs_size = taida_safe_mul((size_t)len, sizeof(const char*), "list_join strs");
+    const char **strs = (const char**)malloc(strs_size);
+    if (!strs) { fprintf(stderr, "taida: out of memory (taida_list_join strs)\n"); exit(1); }
+    // M-16: Use size_t for total with overflow guards to prevent wrap-around.
+    size_t total = 0;
     for (taida_val i = 0; i < len; i++) {
         strs[i] = (const char*)taida_value_to_display_string(list[4 + i]);
-        total += (taida_val)strlen(strs[i]);
-        if (i > 0) total += sep_len;
+        total = taida_safe_add(total, strlen(strs[i]), "list_join total");
+        if (i > 0) total = taida_safe_add(total, sep_len, "list_join sep");
     }
 
     char *r = taida_str_alloc(total);
@@ -2750,8 +2793,11 @@ taida_val taida_list_sort(taida_val list_ptr) {
     taida_val new_list = taida_list_new();
     taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    // Copy items
-    taida_val *items = (taida_val*)malloc(len * sizeof(taida_val));
+    if (len == 0) return new_list;
+    // M-07: Overflow guard + NULL check on items allocation.
+    size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort items");
+    taida_val *items = (taida_val*)malloc(items_size);
+    if (!items) { fprintf(stderr, "taida: out of memory (taida_list_sort)\n"); exit(1); }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Simple insertion sort
     for (taida_val i = 1; i < len; i++) {
@@ -2884,7 +2930,11 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
     taida_val new_list = taida_list_new();
     taida_val *nl = (taida_val*)new_list;
     nl[3] = elem_tag;  // propagate elem_type_tag
-    taida_val *items = (taida_val*)malloc(len * sizeof(taida_val));
+    if (len == 0) return new_list;
+    // M-07: Overflow guard + NULL check on items allocation.
+    size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_desc items");
+    taida_val *items = (taida_val*)malloc(items_size);
+    if (!items) { fprintf(stderr, "taida: out of memory (taida_list_sort_desc)\n"); exit(1); }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Insertion sort descending
     for (taida_val i = 1; i < len; i++) {
@@ -3484,9 +3534,16 @@ static taida_val taida_hashmap_clone(taida_val hm_ptr) {
     taida_val *hm = (taida_val*)hm_ptr;
     taida_val cap = hm[1];
     taida_val val_tag = hm[3];  // value_type_tag
-    taida_val total = HM_HEADER + cap * 3;
-    taida_val *new_hm = (taida_val*)malloc(total * sizeof(taida_val));
-    memcpy(new_hm, hm, total * sizeof(taida_val));
+    // M-03: Guard against negative/overflow cap and NULL malloc result.
+    if (cap < 0) {
+        fprintf(stderr, "taida: invalid hashmap cap %" PRId64 " in taida_hashmap_clone\n", (int64_t)cap);
+        exit(1);
+    }
+    size_t total = taida_safe_add((size_t)HM_HEADER, taida_safe_mul((size_t)cap, 3, "hm_clone slots"), "hm_clone total");
+    size_t alloc_size = taida_safe_mul(total, sizeof(taida_val), "hm_clone bytes");
+    taida_val *new_hm = (taida_val*)malloc(alloc_size);
+    if (!new_hm) { fprintf(stderr, "taida: out of memory (taida_hashmap_clone)\n"); exit(1); }
+    memcpy(new_hm, hm, alloc_size);
     new_hm[0] = TAIDA_HMAP_MAGIC | 1;  // preserve magic + reset rc
     // Retain all keys and values in the clone (shared ownership)
     for (taida_val i = 0; i < cap; i++) {
