@@ -382,7 +382,38 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-14 | Phase 13 全完了 (N-45〜N-58)。CLI/pkg/auth: REPL flush を is_err+break に変更、device_flow エラー本文保存、unwrap_or_else フラット化、parent/canonicalize フォールバックドキュメント、resolver.rs パストラバーサル安全性コメント、import パス解決チェーンドキュメント、option_env コンパイル時解決ドキュメント、SystemTime/Tokio expect メッセージ改善、エラーハンドリング規約をファイル先頭に記述、init ディレクトリ作成エラーを warning 化、staging ファイル削除に NotFound ドキュメント、token.rs 非 Unix パーミッションドキュメント |
 | 2026-03-14 | Phase 13 VERIFIED (N-45〜N-58)。Phase Gate 通過: cargo test 1504 pass / 0 fail、run_backend_parity.sh 66 pass / 0 fail、e2e_smoke.sh 73 pass / 0 fail |
 | 2026-03-14 | Phase 14 VERIFIED (N-59〜N-75)。Phase Gate 通過: cargo test 1536 pass / 0 fail、run_backend_parity.sh 66 pass / 0 fail、e2e_smoke.sh 73 pass / 0 fail |
+| 2026-03-14 | Phase 16 全完了 (R-01〜R-11, 9件)。横断レビュー指摘: utf8_decode_mold に len<=0 ガード追加、taida_safe_malloc で size==0 を 1 に正規化、parser advance() に debug_assert 追加、checker_tests 3件に具体的 assertion 追加、lax_result テストから None 許容除去、hashmap/set_to_string の strcat をオフセットベース memcpy に変換、charAt の unwrap_or_default を expect に変更、自明な N-XX コメント削除 (7件)、固定文字列 snprintf を memcpy に統一 (4箇所) |
 | 2026-03-14 | Phase 14 全完了 (N-59〜N-75)。Type checker/Tests: test panic→assert 統一、unwrap→expect 変換 (checker_tests 3箇所+types.rs 1箇所+todo_cli 2箇所)、check_program/check_statement catch-all 意図ドキュメント、checker_methods 未知 receiver スキップ理由ドキュメント、unwrap_or(Type::Unknown) 設計規約をモジュール docstring に記述、エラーコード一覧ドキュメント、循環型依存/自己参照型テスト追加、ジェネリック制約エッジケーステスト追加、@[] 負テスト追加、typecheck_examples 行番号コメント、Optional/Result migration marker テスト追加、resolve_type キャッシュ不使用の理由ドキュメント、scope_stack 非空不変条件ドキュメント |
+
+---
+
+## Phase 16: Phase 9-15 横断レビュー指摘 (9件)
+
+Phase 9-15 のコードレビューで検出された修正項目。
+
+### Must Fix
+
+| ID | severity | 概要 | ファイル | 状態 |
+|----|----------|------|---------|------|
+| R-01 | critical | `taida_utf8_decode_mold` に `len < 0` ガード欠如 — 負値で巨大 malloc → OOM abort | `src/codegen/native_runtime.c` | `DONE` |
+| R-02 | major | `taida_safe_malloc` で `size == 0` のとき `malloc(0)` → NULL → exit(1) — `size = 1` に正規化 | `src/codegen/native_runtime.c` | `DONE` |
+
+### Should Fix
+
+| ID | severity | 概要 | ファイル | 状態 |
+|----|----------|------|---------|------|
+| R-05 | minor | `parser.rs` `advance()` に `debug_assert!` 追加（防御的クランプが不正状態を隠す） | `src/parser/parser.rs` | `DONE` |
+| R-09 | minor | 新規テスト3件の assertion が弱い（パニックしないことだけ検証）— 具体的 assertion 追加 | `src/types/checker_tests.rs` | `DONE` |
+| R-10 | minor | `test_lax_result_current_behavior_stable` で `None` 許容が広すぎ — 除去 | `src/types/checker_tests.rs` | `DONE` |
+
+### Nice to Have
+
+| ID | severity | 概要 | ファイル | 状態 |
+|----|----------|------|---------|------|
+| R-03 | minor | `hashmap_to_string` / `set_to_string` 内の `strcat` が残存 — 安全パターンに置換 | `src/codegen/native_runtime.c` | `DONE` |
+| R-04 | minor | `methods.rs` の `unwrap_or_default` を `expect("bounds checked above")` に変更 | `src/interpreter/methods.rs` | `DONE` |
+| R-06 | nit | 自明な N-XX コメント削除（情報量ゼロのもの） | 複数ファイル | `DONE` |
+| R-11 | nit | `snprintf` → `memcpy` に統一（固定文字列コピー） | `src/codegen/native_runtime.c` | `DONE` |
 
 ---
 

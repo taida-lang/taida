@@ -23,10 +23,14 @@
     (ptr) = _tmp; \
 } while(0)
 
-// N-43: Safe malloc wrapper — aborts on NULL with a diagnostic message.
+// Safe malloc wrapper — aborts on NULL with a diagnostic message.
 // Usage: void *p = TAIDA_MALLOC(size, context_label);
 // Returns the allocated pointer; on failure, prints OOM message and exits.
 static inline void *taida_safe_malloc(size_t size, const char *label) {
+    // R-02: malloc(0) is implementation-defined (may return NULL or a unique
+    // pointer). Normalize to 1 so that the NULL check below reliably detects
+    // real OOM rather than a valid zero-size allocation.
+    if (size == 0) size = 1;
     void *p = malloc(size);
     if (!p) { fprintf(stderr, "taida: out of memory (%s)\n", label); exit(1); }
     return p;
@@ -850,7 +854,7 @@ taida_val taida_gorillax_to_string(taida_val ptr) {
         taida_val value = taida_pack_get_idx(ptr, 1);
         snprintf(tmp, sizeof(tmp), "Gorillax(%" PRId64 ")", value);
     } else {
-        snprintf(tmp, sizeof(tmp), "Gorillax(><)");
+        memcpy(tmp, "Gorillax(><)", 13); /* 12 chars + '\0' */
     }
     return (taida_val)taida_str_new_copy(tmp);
 }
@@ -861,7 +865,7 @@ taida_val taida_relaxed_gorillax_to_string(taida_val ptr) {
         taida_val value = taida_pack_get_idx(ptr, 1);
         snprintf(tmp, sizeof(tmp), "RelaxedGorillax(%" PRId64 ")", value);
     } else {
-        snprintf(tmp, sizeof(tmp), "RelaxedGorillax(escaped)");
+        memcpy(tmp, "RelaxedGorillax(escaped)", 24); /* 23 chars + '\0' */
     }
     return (taida_val)taida_str_new_copy(tmp);
 }
@@ -1445,6 +1449,10 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     if (!TAIDA_IS_BYTES(value)) return taida_lax_empty((taida_val)"");
     taida_val *bytes = (taida_val*)value;
     taida_val len = bytes[1];
+    // R-01: Guard against negative length — a corrupted Bytes header could
+    // pass a negative len, which would be cast to a huge size_t and trigger
+    // a massive malloc followed by OOM abort.
+    if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
     unsigned char *raw = (unsigned char*)TAIDA_MALLOC((size_t)len, "bytes_decode");
     for (taida_val i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
 
@@ -3577,8 +3585,9 @@ taida_val taida_hashmap_to_string(taida_val hm_ptr) {
 
     size_t buf_size = 256;
     char *buf = (char*)TAIDA_MALLOC(buf_size, "hm_to_string");
-    // N-40: strcpy → memcpy with known-length literal for safety
+    // R-03: Use offset tracking instead of strcat (O(n) per call → O(1)).
     memcpy(buf, "HashMap({", 10); /* 9 chars + '\0' */
+    size_t off = 9;
     taida_val count = 0;
 
     for (taida_val i = 0; i < cap; i++) {
@@ -3594,24 +3603,27 @@ taida_val taida_hashmap_to_string(taida_val hm_ptr) {
             if (!key_str) key_str = "\"\"";
             if (!val_str) val_str = "0";
 
-            size_t needed = strlen(key_str) + strlen(val_str) + 4;
+            size_t klen = strlen(key_str);
+            size_t vlen = strlen(val_str);
+            size_t needed = klen + vlen + 4;
             if (count > 0) needed += 2;
-            while (strlen(buf) + needed + 3 > buf_size) {
+            while (off + needed + 3 > buf_size) {
                 buf_size *= 2;
                 TAIDA_REALLOC(buf, buf_size, "hashmap_to_string");
             }
 
-            if (count > 0) strcat(buf, ", ");
-            strcat(buf, key_str);
-            strcat(buf, ": ");
-            strcat(buf, val_str);
+            if (count > 0) { memcpy(buf + off, ", ", 2); off += 2; }
+            memcpy(buf + off, key_str, klen); off += klen;
+            memcpy(buf + off, ": ", 2); off += 2;
+            memcpy(buf + off, val_str, vlen); off += vlen;
+            buf[off] = '\0';
 
             taida_str_release(key_str_ptr);
             taida_str_release(val_str_ptr);
             count++;
         }
     }
-    strcat(buf, "})");
+    memcpy(buf + off, "})", 3); /* 2 chars + '\0' */
     taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
@@ -3795,19 +3807,22 @@ taida_val taida_set_to_string(taida_val set_ptr) {
     taida_val len = list[2];  // length at index 2
     size_t buf_size = 128;
     char *buf = (char*)TAIDA_MALLOC(buf_size, "set_to_string");
-    // N-40: strcpy → memcpy with known-length literal for safety
+    // R-03: Use offset tracking instead of strcat (O(n) per call → O(1)).
     memcpy(buf, "Set({", 6); /* 5 chars + '\0' */
+    size_t off = 5;
     for (taida_val i = 0; i < len; i++) {
-        if (i > 0) strcat(buf, ", ");
         char item_str[64];
-        snprintf(item_str, sizeof(item_str), "%" PRId64 "", list[4 + i]);
-        if (strlen(buf) + strlen(item_str) + 10 > buf_size) {
+        int item_len = snprintf(item_str, sizeof(item_str), "%" PRId64 "", list[4 + i]);
+        size_t needed = (size_t)item_len + (i > 0 ? 2 : 0) + 10;
+        if (off + needed > buf_size) {
             buf_size *= 2;
             TAIDA_REALLOC(buf, buf_size, "set_to_string");
         }
-        strcat(buf, item_str);
+        if (i > 0) { memcpy(buf + off, ", ", 2); off += 2; }
+        memcpy(buf + off, item_str, (size_t)item_len); off += (size_t)item_len;
+        buf[off] = '\0';
     }
-    strcat(buf, "})");
+    memcpy(buf + off, "})", 3); /* 2 chars + '\0' */
     taida_val result = (taida_val)taida_str_new_copy(buf);
     free(buf);
     return result;
@@ -4949,7 +4964,7 @@ taida_val taida_generic_unmold(taida_val ptr) {
         return taida_lax_unmold(ptr);
     }
 
-    // N-42: TODO mold unmold — check __type tag and extract via unm/default/sol/value channels.
+    // TODO mold unmold — check __type tag and extract via unm/default/sol/value channels.
     // The `unm` channel is returned when present (priority: unm > __default > sol > __value).
     if (taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
         taida_val type_ptr = taida_pack_get(ptr, (taida_val)HASH___TYPE);
@@ -5033,7 +5048,7 @@ static taida_val taida_async_to_string(taida_val async_ptr) {
         snprintf(tmp, sizeof(tmp), "Async[rejected: %s]", (const char*)err_str);
         taida_str_release(err_str);
     } else {
-        snprintf(tmp, sizeof(tmp), "Async[pending]");
+        memcpy(tmp, "Async[pending]", 15); /* 14 chars + '\0' */
     }
     return (taida_val)taida_str_new_copy(tmp);
 }
@@ -6479,8 +6494,8 @@ taida_val taida_os_stat(taida_val path_ptr) {
     if (tm_utc) {
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", tm_utc);
     } else {
-        // N-40: strcpy → snprintf for bounded write
-        snprintf(time_buf, sizeof(time_buf), "%s", "1970-01-01T00:00:00Z");
+        // R-11: memcpy for fixed-length literal (no format parsing overhead)
+        memcpy(time_buf, "1970-01-01T00:00:00Z", 21); /* 20 chars + '\0' */
     }
     char *time_str = taida_str_new_copy(time_buf);
 

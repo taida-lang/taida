@@ -138,6 +138,14 @@ impl Parser {
     fn advance(&mut self) -> &Token {
         // Safety: callers gate on `!is_at_end()` / `peek()` before advancing.
         // The `min` clamp prevents OOB if invariants are violated.
+        // R-05: debug_assert catches callers that advance past the end during
+        // development; the clamp still prevents UB in release builds.
+        debug_assert!(
+            self.pos < self.tokens.len(),
+            "advance() called at pos {} but token stream length is {} — caller should check is_at_end()",
+            self.pos,
+            self.tokens.len()
+        );
         let pos = self.pos.min(self.tokens.len().saturating_sub(1));
         let token = &self.tokens[pos];
         if self.pos < self.tokens.len().saturating_sub(1) {
