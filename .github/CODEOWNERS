@@ -15,6 +15,3 @@
 # Required check entrypoints
 /tests/run_backend_parity.sh @shijimic
 /tests/e2e_smoke.sh @shijimic
-
-# Branch / release operation docs
-/.dev/RELEASE_PREP.md @shijimic
