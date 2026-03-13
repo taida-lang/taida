@@ -608,6 +608,10 @@ function __taida_stub(message) {
   return __taida_molten();
 }
 
+// TODO mold runtime factory. The `__type: 'TODO'` marker matches the source-
+// level mold name and is used by `__taida_typeof`, `toString()`, and unmold
+// dispatch to identify TODO values. This naming convention is shared by all
+// mold types (Lax, Result, Gorillax, etc.).
 function __taida_todo_mold(typeDefault, fields) {
   const f = fields && typeof fields === 'object' ? fields : {};
   const has = (name) => Object.prototype.hasOwnProperty.call(f, name);
@@ -1610,6 +1614,9 @@ function __taida_createHashMap(entries) {
       }
       return __taida_createHashMap(merged);
     },
+    // Format: `HashMap({key1: val1, key2: val2})` — matches interpreter output.
+    // String keys/values are quoted with `"` and escaped via __taida_escape_str
+    // (handles `"`, `\n`, `\t`, `\\`). Non-string values use String() coercion.
     toString() {
       const pairs = _entries.map(e => {
         const k = typeof e.key === 'string' ? '"' + __taida_escape_str(e.key) + '"' : String(e.key);
@@ -1693,6 +1700,9 @@ function __taida_createSet(items) {
     isEmpty() {
       return _items.length === 0;
     },
+    // Format: `Set({val1, val2})` — matches interpreter output.
+    // String items are quoted with `"` and escaped via __taida_escape_str.
+    // Non-string items use String() coercion, consistent with HashMap.toString().
     toString() {
       const strs = _items.map(i => typeof i === 'string' ? '"' + __taida_escape_str(i) + '"' : String(i));
       return 'Set({' + strs.join(', ') + '})';

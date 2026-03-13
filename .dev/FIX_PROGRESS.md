@@ -185,14 +185,14 @@ unwrap パターン、silent default、テストコードの改善。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 66 | N-32 | 相互再帰検出の `position().unwrap()` | [P] | `TODO` | `src/js/codegen.rs:176` |
-| 67 | N-33 | テンプレートリテラル変換の限定 | [L] | `TODO` | `src/js/codegen.rs:2039-2047` |
-| 68 | N-34 | Mold フィールドレジストリの更新タイミング | [L] | `TODO` | `src/js/codegen.rs:882-883` |
-| 69 | N-35 | manifest 読み込み失敗時の silent fallback | [E] | `TODO` | `src/js/codegen.rs:1109-1115` |
-| 70 | N-36 | Pipeline の `__p` ハードコード変数名 | [L] | `TODO` | `src/js/codegen.rs:2054-2064` |
-| 71 | N-37 | TODO mold の `__type: 'TODO'` マーカー名 | [M] | `TODO` | `src/js/codegen.rs:1843`, `src/js/runtime.rs:618` |
-| 72 | N-38 | HashMap/Set toString() フォーマット不統一 | [L] | `TODO` | `src/js/runtime.rs:1606-1612,1689-1691` |
-| 73 | N-39 | 型引数不足時の `"undefined"` フォールバック | [E] | `TODO` | `src/js/codegen.rs:946-951` |
+| 66 | N-32 | 相互再帰検出の `position().unwrap()` | [P] | `DONE` | `src/js/codegen.rs:176` |
+| 67 | N-33 | テンプレートリテラル変換の限定 | [L] | `DONE` | `src/js/codegen.rs:2039-2047` |
+| 68 | N-34 | Mold フィールドレジストリの更新タイミング | [L] | `DONE` | `src/js/codegen.rs:882-883` |
+| 69 | N-35 | manifest 読み込み失敗時の silent fallback | [E] | `DONE` | `src/js/codegen.rs:1109-1115` |
+| 70 | N-36 | Pipeline の `__p` ハードコード変数名 | [L] | `DONE` | `src/js/codegen.rs:2054-2064` |
+| 71 | N-37 | TODO mold の `__type: 'TODO'` マーカー名 | [M] | `DONE` | `src/js/codegen.rs:1843`, `src/js/runtime.rs:618` |
+| 72 | N-38 | HashMap/Set toString() フォーマット不統一 | [L] | `DONE` | `src/js/runtime.rs:1606-1612,1689-1691` |
+| 73 | N-39 | 型引数不足時の `"undefined"` フォールバック | [E] | `DONE` | `src/js/codegen.rs:946-951` |
 
 ---
 
@@ -297,14 +297,14 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 |-------|------|------|------|------|
 | 9 | Parser/Lexer | 13 | 13 | 0 |
 | 10 | Interpreter | 18 | 18 | 0 |
-| 11 | JS codegen | 8 | 0 | 8 |
+| 11 | JS codegen | 8 | 8 | 0 |
 | 12 | Native codegen | 5 | 0 | 5 |
 | 13 | CLI/pkg/auth | 14 | 0 | 14 |
 | 14 | Type checker/Tests | 17 | 0 | 17 |
 | 15 | WASM/Runtime Hardening | 6 | 6 | 0 |
-| **小計** | | **81** | **37** | **44** |
+| **小計** | | **81** | **45** | **36** |
 
-| | | **総計 115** | **71** | **44** |
+| | | **総計 115** | **79** | **36** |
 
 ---
 
@@ -377,6 +377,7 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-14 | Phase 15 全完了 (NTH-1〜NTH-6)。WASM/Runtime Hardening: native poly_add に float heuristic 追加、delete_token TOCTOU 解消、emit.rs panic を Result 伝播に変更、wasm generic_unmold に非ポインタ値ガード追加+str_to_int 符号なしオーバーフロー修正、wasm poly_add に文字列検出追加 (parity: wasm-full 42→51, wasm-wasi 24→27)、allowlist 縮小 |
 | 2026-03-14 | Phase 9 全完了 (N-1〜N-13)。Parser/Lexer: body_expr panic メッセージ改善、peek_at/advance 境界チェック強化 (expect+saturating_add+min clamp)、scan_number SAFETY コメント、バージョンパーサー状態機械ドキュメント、Mold バックトラックコメント、ブロックパーサー/synchronize/行継続コメント補強、import パス未知トークンコメント、不正エスケープ error recovery コメント、テンプレート文字列不明エスケープにエラー報告追加 (通常文字列との一貫性)、peek_at ルックアヘッドドキュメント、lexer テスト2件追加 |
 | 2026-03-14 | Phase 10 全完了 (N-14〜N-31)。Interpreter: charAt unwrap_or_default 化、env.rs scope 非空不変条件ドキュメント+expect メッセージ、unmold.rs check-then-unwrap を match 統合に変更、json.rs テスト panic→let-else 変換 (11箇所)、os_eval.rs テスト panic→unreachable 変換+signal_name ヘルパー追加で unexpected signal にシグナル型を含める、mold_eval.rs unreachable にコメント追加+TODO mold ドキュメント整理+eval_mold match 巨大さのドキュメント、json.rs silent default の哲学準拠コメント、module_eval.rs parent/export フォールバックコメント、eval.rs expect メッセージ改善、control_flow.rs pipeline scope RAII 不使用の理由ドキュメント |
+| 2026-03-14 | Phase 11 全完了 (N-32〜N-39)。JS codegen: 相互再帰 position().unwrap() に SAFETY コメント+expect メッセージ、テンプレートリテラル変換の制限事項ドキュメント、Mold フィールドレジストリ更新タイミングコメント、manifest 読み込み失敗時に eprintln 警告追加 (silent fallback 解消)、Pipeline __p 変数の IIFE スコープ安全性ドキュメント、TODO mold __type マーカー命名規則コメント (codegen+runtime 両方)、HashMap/Set toString() フォーマットドキュメント、型引数不足時の undefined フォールバック理由ドキュメント |
 
 ---
 
