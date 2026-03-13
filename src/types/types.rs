@@ -332,6 +332,7 @@ impl TypeRegistry {
     ///    the number of type annotations — not per-expression.
     /// 3. Adding a cache would require either interior mutability (&self -> &mut self
     ///    propagation) or a RefCell, adding complexity for negligible benefit.
+    ///
     /// If profiling reveals this as a bottleneck, consider a HashMap<TypeExpr, Type>
     /// cache with the TypeExpr implementing Hash + Eq.
     pub fn resolve_type(&self, ty: &crate::parser::TypeExpr) -> Type {

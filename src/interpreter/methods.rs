@@ -1053,7 +1053,11 @@ impl Interpreter {
                 let char_len = s.chars().count();
                 if idx >= 0 && (idx as usize) < char_len {
                     // SAFETY: bounds checked above — idx is in [0, char_len)
-                    let ch = s.chars().nth(idx as usize).expect("bounds checked above").to_string();
+                    let ch = s
+                        .chars()
+                        .nth(idx as usize)
+                        .expect("bounds checked above")
+                        .to_string();
                     Ok(Signal::Value(Value::BuchiPack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), Value::Str(ch)),

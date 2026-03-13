@@ -45,7 +45,10 @@ impl Environment {
     /// `pop_scope()` guards against popping the last element.
     pub fn define(&mut self, name: &str, value: Value) -> Result<(), String> {
         // SAFETY: scopes is always non-empty (invariant enforced by new/pop_scope)
-        let scope = self.scopes.last_mut().expect("scope stack must be non-empty");
+        let scope = self
+            .scopes
+            .last_mut()
+            .expect("scope stack must be non-empty");
         if scope.contains_key(name) {
             return Err(format!(
                 "Variable '{}' is already defined in this scope",
@@ -63,7 +66,10 @@ impl Environment {
     /// See `define()` — scopes is always non-empty.
     pub fn define_force(&mut self, name: &str, value: Value) {
         // SAFETY: scopes is always non-empty (invariant enforced by new/pop_scope)
-        let scope = self.scopes.last_mut().expect("scope stack must be non-empty");
+        let scope = self
+            .scopes
+            .last_mut()
+            .expect("scope stack must be non-empty");
         scope.insert(name.to_string(), value);
     }
 

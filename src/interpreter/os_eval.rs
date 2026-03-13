@@ -2343,7 +2343,9 @@ impl Interpreter {
             other => Err(RuntimeError {
                 message: format!(
                     "{}: unexpected signal evaluating '{}': {}",
-                    func_name, field_name, signal_name(&other)
+                    func_name,
+                    field_name,
+                    signal_name(&other)
                 ),
             }),
         }
@@ -2368,7 +2370,9 @@ impl Interpreter {
             other => Err(RuntimeError {
                 message: format!(
                     "{}: unexpected signal evaluating '{}': {}",
-                    func_name, arg_name, signal_name(&other)
+                    func_name,
+                    arg_name,
+                    signal_name(&other)
                 ),
             }),
         }
@@ -2395,7 +2399,9 @@ impl Interpreter {
             other => Err(RuntimeError {
                 message: format!(
                     "{}: unexpected signal evaluating '{}': {}",
-                    func_name, arg_name, signal_name(&other)
+                    func_name,
+                    arg_name,
+                    signal_name(&other)
                 ),
             }),
         }
@@ -2426,7 +2432,8 @@ impl Interpreter {
             other => Err(RuntimeError {
                 message: format!(
                     "{}: unexpected signal evaluating 'timeoutMs': {}",
-                    func_name, signal_name(&other)
+                    func_name,
+                    signal_name(&other)
                 ),
             }),
         }
