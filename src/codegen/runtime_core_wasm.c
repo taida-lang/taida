@@ -342,6 +342,39 @@ int64_t taida_generic_unmold(int64_t val) {
             (int64_t)(intptr_t)"Gorillax error");
         return taida_throw(err);
     }
+    /* BE-WASM-1: TODO unmold — return unm channel, fallback to sol/__default/__value.
+       Matches native_runtime.c taida_generic_unmold TODO branch. */
+    if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
+        int64_t type_ptr = taida_pack_get(val, WASM_HASH___TYPE);
+        /* Guard: ensure type_ptr looks like a valid pointer (> 4096) */
+        if ((intptr_t)type_ptr <= 4096) return val;
+        const char *type_str = (const char *)(intptr_t)type_ptr;
+        if (type_str != 0 && type_str[0] == 'T' && type_str[1] == 'O' &&
+            type_str[2] == 'D' && type_str[3] == 'O' && type_str[4] == '\0') {
+            /* TODO pack: prefer unm > __default > sol > __value */
+            if (taida_pack_has_hash(val, WASM_HASH_TODO_UNM))
+                return taida_pack_get(val, WASM_HASH_TODO_UNM);
+            if (taida_pack_has_hash(val, WASM_HASH___DEFAULT))
+                return taida_pack_get(val, WASM_HASH___DEFAULT);
+            if (taida_pack_has_hash(val, WASM_HASH_TODO_SOL))
+                return taida_pack_get(val, WASM_HASH_TODO_SOL);
+            if (taida_pack_has_hash(val, WASM_HASH___VALUE))
+                return taida_pack_get(val, WASM_HASH___VALUE);
+            return taida_pack_new(0);
+        }
+        /* Molten detection: cannot unmold Molten directly */
+        if (type_str != 0 && type_str[0] == 'M' && type_str[1] == 'o' &&
+            type_str[2] == 'l' && type_str[3] == 't' && type_str[4] == 'e' &&
+            type_str[5] == 'n' && type_str[6] == '\0') {
+            int64_t error = taida_make_error(
+                (int64_t)(intptr_t)"TypeError",
+                (int64_t)(intptr_t)"Cannot unmold Molten directly. Molten can only be used inside Cage.");
+            return taida_throw(error);
+        }
+        /* Custom mold: pack with __type and __value fields */
+        if (taida_pack_has_hash(val, WASM_HASH___VALUE))
+            return taida_pack_get(val, WASM_HASH___VALUE);
+    }
     return val;
 }
 
@@ -786,6 +819,11 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
 #define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
 #define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
 #define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
+/* BE-WASM-1: TODO field hashes (matching native_runtime.c) */
+#define WASM_HASH_TODO_ID     0x08b72e07b55c3ac0LL  /* FNV-1a("id") */
+#define WASM_HASH_TODO_TASK   0xd9603bef07a9524cLL  /* FNV-1a("task") */
+#define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
+#define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
 
 /* W-4f2: Dynamic string buffer for building collection toString output */
 typedef struct {
@@ -2240,8 +2278,32 @@ int64_t taida_stub_new(int64_t message) {
 }
 
 int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm) {
-    (void)id; (void)task; (void)sol; (void)unm;
-    return taida_molten_new();
+    /* BE-WASM-1: proper TODO pack matching native_runtime.c layout.
+       Fields: id(0), task(1), sol(2), unm(3), __value(4), __default(5), __type(6) */
+    int64_t pack = taida_pack_new(7);
+    taida_pack_set_hash(pack, 0, WASM_HASH_TODO_ID);
+    taida_pack_set(pack, 0, id);
+    taida_pack_set_hash(pack, 1, WASM_HASH_TODO_TASK);
+    taida_pack_set(pack, 1, task);
+    taida_pack_set_hash(pack, 2, WASM_HASH_TODO_SOL);
+    taida_pack_set(pack, 2, sol);
+    taida_pack_set_hash(pack, 3, WASM_HASH_TODO_UNM);
+    taida_pack_set(pack, 3, unm);
+    taida_pack_set_hash(pack, 4, WASM_HASH___VALUE);
+    taida_pack_set(pack, 4, sol);
+    taida_pack_set_hash(pack, 5, WASM_HASH___DEFAULT);
+    taida_pack_set(pack, 5, unm);
+    taida_pack_set_hash(pack, 6, WASM_HASH___TYPE);
+    taida_pack_set(pack, 6, (int64_t)(intptr_t)"TODO");
+    return pack;
+}
+
+/* BE-WASM-2: Gorilla literal — immediate crash (matching native exit(1)).
+   In WASM, __builtin_trap() produces an unreachable instruction that
+   terminates the module, which is the WASM equivalent of exit(). */
+void taida_gorilla(void) {
+    /* No output — matches native exit(1) behavior */
+    __builtin_trap();
 }
 
 /* ── W-5: Type conversion molds (returning Lax) ── */

@@ -584,6 +584,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm);"
                 .to_string()
         }
+        // BE-WASM-2: Gorilla literal (exit with status 1)
+        "taida_gorilla" => "void taida_gorilla(void);".to_string(),
         // W-5: Type molds that return Lax
         "taida_str_mold_int" => "int64_t taida_str_mold_int(int64_t v);".to_string(),
         "taida_str_mold_float" => "int64_t taida_str_mold_float(int64_t v);".to_string(),
@@ -1127,7 +1129,7 @@ fn emit_inst(
             writeln!(c, "{}v_{} = nv_{};", indent, dst, sanitize_name(name)).unwrap();
         }
         IrInst::Call(dst, name, args) => {
-            // void-returning functions: RC no-ops + tag setters
+            // void-returning functions: RC no-ops + tag setters + gorilla (noreturn)
             if name == "taida_retain"
                 || name == "taida_release"
                 || name == "taida_str_retain"
@@ -1135,6 +1137,7 @@ fn emit_inst(
                 || name == "taida_hashmap_set_value_tag"
                 || name == "taida_set_set_elem_tag"
                 || name == "taida_error_ceiling_pop"
+                || name == "taida_gorilla"
             {
                 write!(c, "{}{}(", indent, name).unwrap();
                 for (i, arg) in args.iter().enumerate() {
