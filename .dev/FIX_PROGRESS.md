@@ -216,20 +216,20 @@ unwrap チェーン、silent エラー、パターン統一。
 
 | # | ID | 概要 | 分類 | 状態 | 担当ファイル |
 |---|-----|------|------|------|------------|
-| 79 | N-45 | REPL `flush().unwrap()` | [P] | `TODO` | `src/main.rs:4198` |
-| 80 | N-46 | device_flow のエラー詳細消失 | [E] | `TODO` | `src/auth/device_flow.rs:58,137` |
-| 81 | N-47 | ネストした `unwrap_or_else` | [E] | `TODO` | `src/main.rs:1316` |
-| 82 | N-48 | 依存収集のパス解決フォールバック | [E] | `TODO` | `src/main.rs:2922,2927` |
-| 83 | N-49 | `canonicalize()` のフォールバック | [E] | `TODO` | `src/main.rs:1343-1344` |
-| 84 | N-50 | パストラバーサルの理論的リスク | [E] | `TODO` | `src/pkg/resolver.rs:55` |
-| 85 | N-51 | import パス解決の多段 `unwrap_or` チェーン | [E] | `TODO` | `src/main.rs:1408-1422` |
-| 86 | N-52 | `option_env!` の `unwrap_or` | [E] | `TODO` | `src/main.rs:25` |
-| 87 | N-53 | `SystemTime` の `expect()` | [P] | `TODO` | `src/main.rs:1505-1506` |
-| 88 | N-54 | LSP 用 Tokio runtime `expect()` | [P] | `TODO` | `src/main.rs:4187` |
-| 89 | N-55 | エラーハンドリングパターンの不統一 | [M] | `TODO` | `src/main.rs` |
-| 90 | N-56 | `init` のディレクトリ作成エラー無視 | [E] | `TODO` | `src/main.rs:3745-3751` |
-| 91 | N-57 | ステージングファイル削除エラー無視 | [E] | `TODO` | `src/main.rs:1582-1585` |
-| 92 | N-58 | トークンファイルのパーミッション未設定 | [E] | `TODO` | `src/auth/token.rs` |
+| 79 | N-45 | REPL `flush().unwrap()` | [P] | `VERIFIED` | `src/main.rs:4198` |
+| 80 | N-46 | device_flow のエラー詳細消失 | [E] | `VERIFIED` | `src/auth/device_flow.rs:58,137` |
+| 81 | N-47 | ネストした `unwrap_or_else` | [E] | `VERIFIED` | `src/main.rs:1316` |
+| 82 | N-48 | 依存収集のパス解決フォールバック | [E] | `VERIFIED` | `src/main.rs:2922,2927` |
+| 83 | N-49 | `canonicalize()` のフォールバック | [E] | `VERIFIED` | `src/main.rs:1343-1344` |
+| 84 | N-50 | パストラバーサルの理論的リスク | [E] | `VERIFIED` | `src/pkg/resolver.rs:55` |
+| 85 | N-51 | import パス解決の多段 `unwrap_or` チェーン | [E] | `VERIFIED` | `src/main.rs:1408-1422` |
+| 86 | N-52 | `option_env!` の `unwrap_or` | [E] | `VERIFIED` | `src/main.rs:25` |
+| 87 | N-53 | `SystemTime` の `expect()` | [P] | `VERIFIED` | `src/main.rs:1505-1506` |
+| 88 | N-54 | LSP 用 Tokio runtime `expect()` | [P] | `VERIFIED` | `src/main.rs:4187` |
+| 89 | N-55 | エラーハンドリングパターンの不統一 | [M] | `VERIFIED` | `src/main.rs` |
+| 90 | N-56 | `init` のディレクトリ作成エラー無視 | [E] | `VERIFIED` | `src/main.rs:3745-3751` |
+| 91 | N-57 | ステージングファイル削除エラー無視 | [E] | `VERIFIED` | `src/main.rs:1582-1585` |
+| 92 | N-58 | トークンファイルのパーミッション未設定 | [E] | `VERIFIED` | `src/auth/token.rs` |
 
 ---
 
@@ -299,12 +299,12 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 10 | Interpreter | 18 | 18 | 0 |
 | 11 | JS codegen | 8 | 8 | 0 |
 | 12 | Native codegen | 5 | 5 | 0 |
-| 13 | CLI/pkg/auth | 14 | 0 | 14 |
+| 13 | CLI/pkg/auth | 14 | 14 (VERIFIED) | 0 |
 | 14 | Type checker/Tests | 17 | 0 | 17 |
 | 15 | WASM/Runtime Hardening | 6 | 6 | 0 |
-| **小計** | | **81** | **50** | **31** |
+| **小計** | | **81** | **64** | **17** |
 
-| | | **総計 115** | **84** | **31** |
+| | | **総計 115** | **98** | **17** |
 
 ---
 
@@ -379,6 +379,8 @@ poly_add 文字列対応、int_mold_str 負数修正、delete_token TOCTOU、emi
 | 2026-03-14 | Phase 10 全完了 (N-14〜N-31)。Interpreter: charAt unwrap_or_default 化、env.rs scope 非空不変条件ドキュメント+expect メッセージ、unmold.rs check-then-unwrap を match 統合に変更、json.rs テスト panic→let-else 変換 (11箇所)、os_eval.rs テスト panic→unreachable 変換+signal_name ヘルパー追加で unexpected signal にシグナル型を含める、mold_eval.rs unreachable にコメント追加+TODO mold ドキュメント整理+eval_mold match 巨大さのドキュメント、json.rs silent default の哲学準拠コメント、module_eval.rs parent/export フォールバックコメント、eval.rs expect メッセージ改善、control_flow.rs pipeline scope RAII 不使用の理由ドキュメント |
 | 2026-03-14 | Phase 11 全完了 (N-32〜N-39)。JS codegen: 相互再帰 position().unwrap() に SAFETY コメント+expect メッセージ、テンプレートリテラル変換の制限事項ドキュメント、Mold フィールドレジストリ更新タイミングコメント、manifest 読み込み失敗時に eprintln 警告追加 (silent fallback 解消)、Pipeline __p 変数の IIFE スコープ安全性ドキュメント、TODO mold __type マーカー命名規則コメント (codegen+runtime 両方)、HashMap/Set toString() フォーマットドキュメント、型引数不足時の undefined フォールバック理由ドキュメント |
 | 2026-03-14 | Phase 12 全完了 (N-40〜N-44)。Native codegen: strcpy→memcpy/snprintf 変換 (3箇所)、driver.rs unwrap_or(Path) の安全性ドキュメント、native_runtime.c の stale TODO コメント更新、TAIDA_MALLOC マクロ導入+未チェック malloc 一括変換 (30箇所以上)、emit.rs ABI テーブル保守ガイドコメント追加 |
+| 2026-03-14 | Phase 13 全完了 (N-45〜N-58)。CLI/pkg/auth: REPL flush を is_err+break に変更、device_flow エラー本文保存、unwrap_or_else フラット化、parent/canonicalize フォールバックドキュメント、resolver.rs パストラバーサル安全性コメント、import パス解決チェーンドキュメント、option_env コンパイル時解決ドキュメント、SystemTime/Tokio expect メッセージ改善、エラーハンドリング規約をファイル先頭に記述、init ディレクトリ作成エラーを warning 化、staging ファイル削除に NotFound ドキュメント、token.rs 非 Unix パーミッションドキュメント |
+| 2026-03-14 | Phase 13 VERIFIED (N-45〜N-58)。Phase Gate 通過: cargo test 1504 pass / 0 fail、run_backend_parity.sh 66 pass / 0 fail、e2e_smoke.sh 73 pass / 0 fail |
 
 ---
 
