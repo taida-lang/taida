@@ -1525,10 +1525,7 @@ mod tests {
         } else {
             // `ls` exists on all Unix systems
             let result = which_command("ls");
-            assert!(
-                result.is_some(),
-                "which_command should find 'ls' on Unix"
-            );
+            assert!(result.is_some(), "which_command should find 'ls' on Unix");
             assert!(
                 result.unwrap().contains("ls"),
                 "which_command result should contain 'ls'"
@@ -1548,8 +1545,8 @@ mod tests {
     /// FL-27: find_wasm_ld error message should be platform-appropriate
     #[test]
     fn test_find_wasm_ld_error_message() {
-        if which_command("wasm-ld").is_some() {
-            return; // skip — tool is installed, can't test error path
+        if find_wasm_ld().is_ok() {
+            return; // skip — tool is available (PATH or known paths)
         }
         let err = find_wasm_ld().unwrap_err();
         if cfg!(windows) {
@@ -1562,8 +1559,8 @@ mod tests {
     /// FL-27: find_clang_for_wasm error message should be platform-appropriate
     #[test]
     fn test_find_clang_error_message() {
-        if which_command("clang").is_some() {
-            return; // skip — tool is installed, can't test error path
+        if find_clang_for_wasm().is_ok() {
+            return; // skip — tool is available (PATH or versioned)
         }
         let err = find_clang_for_wasm().unwrap_err();
         if cfg!(windows) {

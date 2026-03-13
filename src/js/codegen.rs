@@ -2063,7 +2063,12 @@ impl JsCodegen {
             // Escape the text before ${
             result.push_str(&Self::escape_template_text(&rest[..start]));
             if let Some(end) = rest[start..].find('}') {
-                result.push_str(&rest[start..start + end + 1]); // ${...} as-is
+                // Apply expression-level transforms inside ${...}
+                let expr_content = &rest[start..start + end + 1];
+                let expr_converted = expr_content
+                    .replace("@[", "[")
+                    .replace(".length()", ".length_()");
+                result.push_str(&expr_converted);
                 rest = &rest[start + end + 1..];
             } else {
                 break;

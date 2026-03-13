@@ -1509,7 +1509,12 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
-        _ => return Err(format!("unknown runtime function: '{}'. Add it to the ABI table in emit.rs runtime_abi().", name)),
+        _ => {
+            return Err(format!(
+                "unknown runtime function: '{}'. Add it to the ABI table in emit.rs runtime_abi().",
+                name
+            ));
+        }
     })
 }
 
@@ -2211,8 +2216,8 @@ impl Emitter {
                     let func_ref = ectx.func_refs[func_name];
                     // FL-11: runtime_abi already validated in predeclare_runtime_funcs_recursive,
                     // so this should not fail. Use expect with descriptive message as defensive fallback.
-                    let runtime_abi_def = runtime_abi(func_name)
-                        .unwrap_or_else(|e| panic!("BUG: {}", e));
+                    let runtime_abi_def =
+                        runtime_abi(func_name).unwrap_or_else(|e| panic!("BUG: {}", e));
                     let (param_types, return_types) = resolve_abi(&runtime_abi_def, &ectx.abi);
 
                     let arg_vals: Vec<clif::Value> = args

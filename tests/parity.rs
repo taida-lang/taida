@@ -822,13 +822,13 @@ fn test_three_way_parity() {
 /// When fixed, remove from this list so the parity test catches regressions.
 fn native_numbered_known_failures() -> Vec<&'static str> {
     vec![
-        "03_buchi_pack",            // template literal field access emits 0
-        "04_functions",             // recursive function results emit 0
-        "06_lists",                 // .length() returns 0
-        "07_closures",              // closure captured variables emit 0
-        "15_noarg_functions",       // no-arg function calls return 0
-        "26_prelude_optional",      // segfault (exit 139)
-        "27_prelude_result",        // Error toString format mismatch
+        "03_buchi_pack",       // template literal field access emits 0
+        "04_functions",        // recursive function results emit 0
+        "06_lists",            // .length() returns 0
+        "07_closures",         // closure captured variables emit 0
+        "15_noarg_functions",  // no-arg function calls return 0
+        "26_prelude_optional", // segfault (exit 139)
+        "27_prelude_result",   // Error toString format mismatch
     ]
 }
 
@@ -882,10 +882,7 @@ fn test_numbered_examples_native_parity() {
                     expected_failed += 1;
                     continue;
                 }
-                unexpected_failures.push(format!(
-                    "{}: native compile/run failed",
-                    name,
-                ));
+                unexpected_failures.push(format!("{}: native compile/run failed", name,));
                 continue;
             }
         };

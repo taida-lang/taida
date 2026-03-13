@@ -2097,7 +2097,9 @@ fn test_fl1_return_type_mismatch_detected() {
     let source = "bad x =\n  \"oops\"\n=> :Int";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1601]") && e.message.contains("return type")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1601]") && e.message.contains("return type")),
         "Expected return type mismatch error [E1601], got: {:?}",
         errors
     );
@@ -2108,7 +2110,10 @@ fn test_fl1_return_type_match_no_error() {
     // Function declares :Str and body returns Str — no error
     let source = "greet name =\n  `Hello ${name}`\n=> :Str";
     let (_, errors) = check(source);
-    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
         e1601.is_empty(),
         "Should not produce E1601 for matching return type, got: {:?}",
@@ -2121,7 +2126,10 @@ fn test_fl1_return_type_numeric_compatible_no_error() {
     // Function declares :Int but body returns Float — allowed (numeric narrowing)
     let source = "bad =\n  3.14\n=> :Int";
     let (_, errors) = check(source);
-    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
         e1601.is_empty(),
         "Should not produce E1601 for numeric types (Int/Float/Num are compatible), got: {:?}",
@@ -2146,7 +2154,10 @@ fn test_fl1_no_return_annotation_no_error() {
     // Function without return type annotation — no E1601
     let source = "add x y =\n  x + y";
     let (_, errors) = check(source);
-    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
         e1601.is_empty(),
         "Should not produce E1601 without return type annotation, got: {:?}",
@@ -2162,7 +2173,9 @@ fn test_fl2_named_type_undefined_field_error() {
     let source = "Person = @(name: Str)\np <= Person(name <= \"a\")\nemail <= p.email";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1602]") && e.message.contains("email")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1602]") && e.message.contains("email")),
         "Expected undefined field error [E1602] for 'email', got: {:?}",
         errors
     );
@@ -2173,7 +2186,10 @@ fn test_fl2_named_type_valid_field_no_error() {
     // Access a valid field — no error
     let source = "Person = @(name: Str)\np <= Person(name <= \"a\")\nname <= p.name";
     let (_, errors) = check(source);
-    let e1602: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1602]")).collect();
+    let e1602: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1602]"))
+        .collect();
     assert!(
         e1602.is_empty(),
         "Should not produce E1602 for valid field access, got: {:?}",
@@ -2200,7 +2216,10 @@ fn test_fl3_cond_branch_same_type_no_error() {
     // Both arms return Str — no error
     let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
     let (_, errors) = check(source);
-    let e1603: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1603]")).collect();
+    let e1603: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1603]"))
+        .collect();
     assert!(
         e1603.is_empty(),
         "Should not produce E1603 for same-type arms, got: {:?}",
@@ -2213,7 +2232,10 @@ fn test_fl3_cond_branch_int_float_mix_allowed() {
     // Int/Float mixing should be allowed (both are Num)
     let source = "x <= 5\ny <=\n  | x > 3 |> 1\n  | _ |> 2.5";
     let (_, errors) = check(source);
-    let e1603: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1603]")).collect();
+    let e1603: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1603]"))
+        .collect();
     assert!(
         e1603.is_empty(),
         "Should not produce E1603 for Int/Float mix, got: {:?}",
@@ -2229,7 +2251,9 @@ fn test_fl4_logical_not_on_non_bool() {
     let source = "flag <= !1";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1607]") && e.message.contains("Bool")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1607]") && e.message.contains("Bool")),
         "Expected E1607 for `!1`, got: {:?}",
         errors
     );
@@ -2263,7 +2287,9 @@ fn test_fl4_unary_neg_on_string() {
     let source = "x <= -\"hello\"";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1607]") && e.message.contains("numeric")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1607]") && e.message.contains("numeric")),
         "Expected E1607 for `-\"hello\"`, got: {:?}",
         errors
     );
@@ -2298,7 +2324,10 @@ fn test_fl4_valid_bool_operators_no_error() {
     // Valid: Bool && Bool, Bool || Bool, !Bool
     let source = "a <= true\nb <= false\nc <= a && b\nd <= a || b\ne <= !a";
     let (_, errors) = check(source);
-    let e16: Vec<_> = errors.iter().filter(|e| e.message.contains("[E160")).collect();
+    let e16: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E160"))
+        .collect();
     assert!(
         e16.is_empty(),
         "Should not produce errors for valid Bool operations, got: {:?}",
@@ -2311,7 +2340,10 @@ fn test_fl4_valid_numeric_comparison_no_error() {
     // Valid: Int == Int, Int < Float
     let source = "a <= 1\nb <= 2\nc <= a == b\nd <= a < 3.5";
     let (_, errors) = check(source);
-    let e1605: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1605]")).collect();
+    let e1605: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1605]"))
+        .collect();
     assert!(
         e1605.is_empty(),
         "Should not produce E1605 for valid numeric comparison, got: {:?}",
@@ -2327,7 +2359,9 @@ fn test_e1604_non_bool_condition_int() {
     let source = "y <=\n  | 42 |> \"yes\"\n  | _ |> \"no\"";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1604]") && e.message.contains("Int")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1604]") && e.message.contains("Int")),
         "Expected E1604 for Int condition, got: {:?}",
         errors
     );
@@ -2339,7 +2373,9 @@ fn test_e1604_non_bool_condition_str() {
     let source = "y <=\n  | \"hello\" |> 1\n  | _ |> 2";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1604]") && e.message.contains("Str")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1604]") && e.message.contains("Str")),
         "Expected E1604 for Str condition, got: {:?}",
         errors
     );
@@ -2350,7 +2386,10 @@ fn test_e1604_bool_condition_no_error() {
     // Valid Bool condition — no E1604
     let source = "x <= 5\ny <=\n  | x > 3 |> \"big\"\n  | _ |> \"small\"";
     let (_, errors) = check(source);
-    let e1604: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1604]")).collect();
+    let e1604: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1604]"))
+        .collect();
     assert!(
         e1604.is_empty(),
         "Should not produce E1604 for valid Bool condition, got: {:?}",
@@ -2378,7 +2417,9 @@ fn test_fl1_last_stmt_not_expr_with_return_type() {
     let source = "bad =\n  x <= 42\n=> :Int";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1601]") && e.message.contains("not an expression")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1601]") && e.message.contains("not an expression")),
         "Expected E1601 for non-expression last statement, got: {:?}",
         errors
     );
@@ -2389,7 +2430,10 @@ fn test_fl1_last_stmt_not_expr_without_return_type_no_error() {
     // Function without return type annotation — last stmt being assignment is fine
     let source = "foo =\n  x <= 42";
     let (_, errors) = check(source);
-    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
         e1601.is_empty(),
         "Should not produce E1601 without return type annotation, got: {:?}",
@@ -2404,7 +2448,10 @@ fn test_fl1_cond_branch_as_last_expr() {
     // Function with CondBranch as last expression — matching return type
     let source = "classify x =\n  | x > 0 |> \"pos\"\n  | _ |> \"neg\"\n=> :Str";
     let (_, errors) = check(source);
-    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
         e1601.is_empty(),
         "Should not produce E1601 when CondBranch returns matching type, got: {:?}",
@@ -2429,7 +2476,10 @@ fn test_fl1_pipeline_as_last_expr() {
     // Function with pipeline as last expression
     let source = "transform x =\n  x => _ + 1\n=> :Int";
     let (_, errors) = check(source);
-    let e1601: Vec<_> = errors.iter().filter(|e| e.message.contains("[E1601]")).collect();
+    let e1601: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1601]"))
+        .collect();
     assert!(
         e1601.is_empty(),
         "Should not produce E1601 for pipeline returning compatible type, got: {:?}",

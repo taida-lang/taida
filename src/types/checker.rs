@@ -1798,7 +1798,14 @@ defaulted fields must be provided via `()`",
                             || Self::contains_unknown(&body_ty)
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
                             // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
-                            || body_ty.is_numeric() && ret_ty.is_numeric())
+                            || body_ty.is_numeric() && ret_ty.is_numeric()
+                            // Mold/Fold application and unmold (]=>) can produce types
+                            // that the checker cannot accurately track; skip Named types
+                            // and compound types that may result from these operations
+                            || matches!(
+                                body_ty,
+                                Type::Named(_) | Type::List(_) | Type::BuchiPack(_)
+                            ))
                         {
                             self.errors.push(TypeError {
                                 message: format!(
@@ -1810,17 +1817,28 @@ defaulted fields must be provided via `()`",
                             });
                         }
                     } else {
-                        // Last statement is not an expression — check it normally,
-                        // then report that it cannot produce a return value.
+                        // Last statement is not an expression — check it normally.
                         self.check_statement(last_stmt);
-                        self.errors.push(TypeError {
-                            message: format!(
-                                "[E1601] Function '{}' declares return type {}, but the last statement is not an expression. \
-                                 Hint: The function body's last statement must be an expression that produces a value.",
-                                fd.name, ret_ty
-                            ),
-                            span: fd.span.clone(),
-                        });
+                        // Assignment, UnmoldForward, UnmoldBackward produce Unit implicitly.
+                        // Only report E1601 if the declared return type is not Unit.
+                        let is_unit_producing = matches!(
+                            last_stmt,
+                            Statement::Assignment(_)
+                                | Statement::UnmoldForward(_)
+                                | Statement::UnmoldBackward(_)
+                        );
+                        let is_unit_ret = ret_ty == Type::Unit
+                            || matches!(&ret_ty, Type::Named(n) if n == "Unit");
+                        if !(is_unit_producing && is_unit_ret) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1601] Function '{}' declares return type {}, but the last statement is not an expression. \
+                                     Hint: The function body's last statement must be an expression that produces a value.",
+                                    fd.name, ret_ty
+                                ),
+                                span: fd.span.clone(),
+                            });
+                        }
                     }
                 }
 

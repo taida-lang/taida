@@ -132,9 +132,11 @@ fn resolve_deps_inner(
         // Pin generation-only registry deps to locked exact versions.
         // A generation-only version has no '.' (e.g. "a" vs "a.2").
         let dep = match &dep {
-            Dependency::Registry { org, name: dep_name, version }
-                if !version.contains('.') && locked_versions.contains_key(&name) =>
-            {
+            Dependency::Registry {
+                org,
+                name: dep_name,
+                version,
+            } if !version.contains('.') && locked_versions.contains_key(&name) => {
                 let locked_ver = &locked_versions[&name];
                 // Only pin if the locked version belongs to the same generation
                 if locked_ver.starts_with(version) {
