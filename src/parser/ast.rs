@@ -304,7 +304,10 @@ impl CondArm {
         );
         match &self.body[0] {
             Statement::Expr(e) => e,
-            _ => panic!("body_expr() called on non-expression arm"),
+            other => panic!(
+                "body_expr() called on non-expression arm: {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
 }

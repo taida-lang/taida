@@ -241,6 +241,9 @@ impl Parser {
                 self.advance();
 
                 // Check for type/mold instantiation: `Name[args](...)`
+                // Uses backtracking: if bracket-args parsing fails or the
+                // result is not followed by `(`, we restore `self.pos = save`
+                // and treat the identifier as a plain Ident.
                 if self.check(&TokenKind::LBracket) {
                     let save = self.pos;
                     self.advance(); // consume `[`
