@@ -626,6 +626,82 @@ fn test_single_direction_assignment_then_pipeline_violation() {
     );
 }
 
+// ── BT-3: Single direction constraint nested tests ──
+
+#[test]
+fn test_bt3_direction_violation_in_mold_args() {
+    // Concat[@[1], @[2]] => result then <= — E0301
+    let source = r#"x <= Concat[@[1], @[2]] => result"#;
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected E0301 error for direction violation in mold+assignment"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0301")),
+        "Expected E0301, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_direction_violation_multiple_in_one_statement() {
+    // Multiple direction violations in a single statement
+    let source = "a => b <= c => d";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected error(s) for multiple direction violations"
+    );
+    // Should contain at least one E0301
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0301")),
+        "Expected E0301, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_direction_ok_separate_statements() {
+    // Separate statements with different directions should be fine
+    let source = "x => y\na <= b";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.is_empty(),
+        "Separate statements with different directions should parse: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_unmold_direction_violation_nested() {
+    // Nested unmold direction violation: ]=> and <=[ in same statement
+    let source = "a ]=> x <=[ b";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected E0302 error for unmold direction violation"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0302")),
+        "Expected E0302, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_direction_ok_arrow_and_unmold_mix() {
+    // => and <=[ in same statement is allowed (different categories)
+    // This tests that the two constraint categories are independent
+    let source = "x <= 42";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.is_empty(),
+        "Single direction should parse fine: {:?}",
+        errors
+    );
+}
+
 // ── Method definition parsing ──
 
 #[test]

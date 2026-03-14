@@ -3280,4 +3280,123 @@ stdout(lax.hasValue)"#;
         let resp = make_http_failure();
         assert!(!lax_has_value(&resp));
     }
+
+    // ── BT-11: OS operation error path tests ──
+
+    #[test]
+    fn test_bt11_read_nonexistent_returns_lax_false() {
+        let code = r#"result <= Read["/tmp/taida_bt11_nonexistent_xyz.txt"]()
+stdout(result.hasValue)
+stdout(result.__default)"#;
+        let output = run_code(code);
+        assert_eq!(output[0], "false", "Read nonexistent should return Lax(hasValue=false)");
+        assert_eq!(output[1], "", "Default for string Lax should be empty string");
+    }
+
+    #[test]
+    fn test_bt11_stat_nonexistent_returns_lax_false() {
+        let code = r#"result <= Stat["/tmp/taida_bt11_nonexistent_xyz"]()
+stdout(result.hasValue)"#;
+        let output = run_code(code);
+        assert_eq!(output, vec!["false"], "Stat nonexistent should return Lax(hasValue=false)");
+    }
+
+    #[test]
+    fn test_bt11_exists_nonexistent() {
+        let code = r#"stdout(Exists["/tmp/taida_bt11_nonexistent_xyz"]())"#;
+        let output = run_code(code);
+        assert_eq!(output, vec!["false"], "Exists nonexistent should return false");
+    }
+
+    #[test]
+    fn test_bt11_read_empty_file() {
+        let dir = std::path::PathBuf::from("/tmp/taida_test_bt11_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+
+        let path = dir.join("empty.txt").to_string_lossy().to_string();
+        let code = format!(
+            r#"result <= Read["{}"]()
+stdout(result.hasValue)
+stdout(result.__value)"#,
+            path
+        );
+        let output = run_code(&code);
+        assert_eq!(output[0], "true", "Empty file should still have hasValue=true");
+        assert_eq!(output[1], "", "Empty file content should be empty string");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bt11_write_and_read_empty_file() {
+        let dir = std::path::PathBuf::from("/tmp/taida_test_bt11_write_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("empty.txt").to_string_lossy().to_string();
+        let code = format!(
+            r#"writeFile("{path}", "")
+result <= Read["{path}"]()
+stdout(result.hasValue)
+stdout(result.__value)"#,
+            path = path
+        );
+        let output = run_code(&code);
+        assert_eq!(output[0], "true", "Written empty file should be readable");
+        assert_eq!(output[1], "", "Written empty file content should be empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bt11_path_with_spaces() {
+        let dir = std::path::PathBuf::from("/tmp/taida test bt11 spaces");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test file.txt"), "hello spaces").unwrap();
+
+        let path = dir.join("test file.txt").to_string_lossy().to_string();
+        let code = format!(
+            r#"result <= Read["{}"]()
+stdout(result.hasValue)
+stdout(result.__value)"#,
+            path
+        );
+        let output = run_code(&code);
+        assert_eq!(output[0], "true", "File with spaces in path should be readable");
+        assert_eq!(output[1], "hello spaces");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bt11_path_with_unicode() {
+        let dir = std::path::PathBuf::from("/tmp/taida_test_bt11_unicode_\u{65E5}\u{672C}");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.txt"), "unicode path").unwrap();
+
+        let path = dir.join("test.txt").to_string_lossy().to_string();
+        let code = format!(
+            r#"result <= Read["{}"]()
+stdout(result.hasValue)
+stdout(result.__value)"#,
+            path
+        );
+        let output = run_code(&code);
+        assert_eq!(output[0], "true", "File with Unicode path should be readable");
+        assert_eq!(output[1], "unicode path");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_bt11_listdir_nonexistent_returns_lax_false() {
+        let code = r#"result <= ListDir["/tmp/taida_bt11_nonexistent_dir_xyz"]()
+stdout(result.hasValue)"#;
+        let output = run_code(code);
+        assert_eq!(output, vec!["false"], "ListDir nonexistent should return Lax(hasValue=false)");
+    }
 }

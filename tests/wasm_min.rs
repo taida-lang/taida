@@ -42,6 +42,28 @@ fn wasmtime_bin() -> Option<PathBuf> {
     None
 }
 
+/// AT-7: Require wasmtime or skip with clear visibility.
+///
+/// In CI (when `CI` env var is set), panics if wasmtime is not found,
+/// ensuring wasm tests are never silently skipped in CI.
+/// Locally, returns None so tests are skipped with an eprintln message.
+fn require_wasmtime() -> Option<PathBuf> {
+    match wasmtime_bin() {
+        Some(p) => Some(p),
+        None => {
+            if std::env::var("CI").is_ok() {
+                panic!(
+                    "AT-7: wasmtime not found in CI environment. \
+                     Install wasmtime or remove wasm-min tests from CI. \
+                     Without wasmtime, all wasm-min tests silently pass."
+                );
+            }
+            eprintln!("SKIP: wasmtime not found, skipping wasm-min test");
+            None
+        }
+    }
+}
+
 /// Run a .td file with the interpreter and return its stdout.
 fn run_interpreter(td_path: &Path) -> Option<String> {
     let output = Command::new(taida_bin()).arg(td_path).output().ok()?;
@@ -106,12 +128,8 @@ fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
 
 #[test]
 fn wasm_min_hello() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
@@ -123,12 +141,8 @@ fn wasm_min_hello() {
 
 #[test]
 fn wasm_min_pi_approx() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_pi_approx.td");
@@ -244,12 +258,8 @@ fn wasm_min_size_gate_wado_comparison() {
 /// W-4: Basic BuchiPack support — create, field access, stdout.
 #[test]
 fn wasm_min_pack_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -267,12 +277,8 @@ fn wasm_min_pack_basic() {
 /// W-4: Nested BuchiPack — inner pack accessed through outer pack fields.
 #[test]
 fn wasm_min_pack_nested() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -349,12 +355,8 @@ fn wasm_min_closure_accepted() {
 /// Verifies that globals do not collide (F-4 regression).
 #[test]
 fn wasm_min_multiple_globals() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -401,12 +403,8 @@ fn wasm_min_release_gate_positive() {
 /// W-3: Float literals and debug(Float) should work.
 #[test]
 fn wasm_min_float_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -424,12 +422,8 @@ fn wasm_min_float_basic() {
 /// W-3: Float arithmetic (add, sub, mul) should work.
 #[test]
 fn wasm_min_float_arith() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -450,12 +444,8 @@ fn wasm_min_float_arith() {
 /// W-3: String concatenation should work (requires bump allocator).
 #[test]
 fn wasm_min_str_ops() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/str_ops.td");
@@ -532,12 +522,8 @@ fn wasm_min_release_gate_negative() {
 /// AT-8: Compare against interpreter (reference implementation).
 #[test]
 fn wasm_min_float_small_values() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -555,12 +541,8 @@ fn wasm_min_float_small_values() {
 /// W-3f F-2: String.length() should work via taida_polymorphic_length.
 #[test]
 fn wasm_min_str_length() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -578,12 +560,8 @@ fn wasm_min_str_length() {
 /// W-3f F-2: Int.toString() should work via taida_polymorphic_to_string.
 #[test]
 fn wasm_min_int_to_string() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -601,12 +579,8 @@ fn wasm_min_int_to_string() {
 /// W-3f F-2: Int["str"]() ]=> should work via taida_int_mold_str + taida_generic_unmold.
 #[test]
 fn wasm_min_int_mold_str() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -629,12 +603,8 @@ fn wasm_min_int_mold_str() {
 /// W-4: Basic list support — create, push, length.
 #[test]
 fn wasm_min_list_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -656,12 +626,8 @@ fn wasm_min_list_basic() {
 /// W-4f F-2: HashMap basic operations — new, set, has, size, keys, values, remove, merge, entries.
 #[test]
 fn wasm_min_hashmap_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -680,12 +646,8 @@ fn wasm_min_hashmap_basic() {
 /// W-4f F-2: Set basic operations — setOf, size, add, has, remove, union, intersect, diff, toList.
 #[test]
 fn wasm_min_set_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -708,12 +670,8 @@ fn wasm_min_set_basic() {
 /// W-5: Basic closure — function returning a function with captured variable.
 #[test]
 fn wasm_min_closure_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -731,12 +689,8 @@ fn wasm_min_closure_basic() {
 /// W-5: Error ceiling — error handling with |== operator.
 #[test]
 fn wasm_min_error_ceiling() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -754,12 +708,8 @@ fn wasm_min_error_ceiling() {
 /// W-5: Lax[T] — Div/Mod molds return Lax, ]=> unmolds.
 #[test]
 fn wasm_min_lax_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -781,12 +731,8 @@ fn wasm_min_lax_basic() {
 /// W-5f F-2: Lax.toString() — "Lax(42)", "Lax(default: 0)", "Lax(3)".
 #[test]
 fn wasm_min_lax_tostring() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -805,12 +751,8 @@ fn wasm_min_lax_tostring() {
 /// W-5f F-1/F-3: Result basic — create, unmold, toString.
 #[test]
 fn wasm_min_result_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -829,12 +771,8 @@ fn wasm_min_result_basic() {
 /// W-5g F-1: Result with predicate — predicate-fail should be error, predicate-pass should succeed.
 #[test]
 fn wasm_min_result_predicate() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -853,12 +791,8 @@ fn wasm_min_result_predicate() {
 /// W-5g F-2: Str->Float/Bool mold failure should return empty Lax (not success Lax(0)).
 #[test]
 fn wasm_min_mold_fail() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -884,12 +818,8 @@ fn wasm_min_mold_fail() {
 /// the wasm output must match the interpreter output exactly.
 #[test]
 fn wasm_min_parity_all_examples() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min parity test");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
