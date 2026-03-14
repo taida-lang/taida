@@ -3024,6 +3024,81 @@ result
         }
     }
 
+    // ── BT-12: JSON schema edge case tests ──────────────────
+
+    #[test]
+    fn test_bt12_json_empty_object_schema() {
+        // JSON['{}', Schema]() — empty object should produce a BuchiPack with default values
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{}'
+result <= JSON[raw, User]()
+result.hasValue
+"#;
+        assert_eq!(eval_ok(source), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_bt12_json_empty_object_defaults() {
+        // Empty JSON object fields should fall back to type defaults
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{}'
+JSON[raw, User]() ]=> user
+user.name
+"#;
+        // name should be "" (default for Str)
+        assert_eq!(eval_ok(source), Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_bt12_json_empty_array_schema() {
+        // JSON['[]', @[Int]]() — empty array
+        let source = r#"
+raw <= '[]'
+JSON[raw, @[Int]]() ]=> nums
+nums.length()
+"#;
+        assert_eq!(eval_ok(source), Value::Int(0));
+    }
+
+    #[test]
+    fn test_bt12_json_malformed_input() {
+        // JSON[malformed, Schema]() — invalid JSON should return Lax with hasValue=false
+        let source = r#"
+User = @(name: Str)
+raw <= '{invalid json}'
+result <= JSON[raw, User]()
+result.hasValue
+"#;
+        assert_eq!(eval_ok(source), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_bt12_json_null_field_to_default() {
+        // JSON['{"name":null}', @(name: Str)]() — null field should become default
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{"name":null,"age":null}'
+JSON[raw, User]() ]=> user
+user.name
+"#;
+        // null should become "" (Str default)
+        assert_eq!(eval_ok(source), Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_bt12_json_null_field_int_default() {
+        // null int field should become 0 (Int default)
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{"name":"Alice","age":null}'
+JSON[raw, User]() ]=> user
+user.age
+"#;
+        assert_eq!(eval_ok(source), Value::Int(0));
+    }
+
     // ── IndexAccess removed (v0.5.0) — .get() returns Lax ──────────────────
 
     #[test]
