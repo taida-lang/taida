@@ -2602,6 +2602,65 @@ fn test_list_mixed_types_inference() {
 // usage patterns. For now, verify existing mold-based Optional/Result
 // behavior does not regress.
 
+// ── BT-2: null/undefined/none/nil rejection tests ────────────────
+// PHILOSOPHY.md I: "null/undefinedの完全排除 — 全ての型にデフォルト値を保証"
+// These identifiers should be rejected as undefined variables by the type checker.
+
+#[test]
+fn test_bt2_null_rejected() {
+    let source = "x <= null";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1502") && e.message.contains("null")),
+        "Assignment from 'null' should produce E1502 undefined variable error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt2_undefined_rejected() {
+    let source = "x <= undefined";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1502") && e.message.contains("undefined")),
+        "Assignment from 'undefined' should produce E1502 undefined variable error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt2_none_rejected() {
+    let source = "x <= none";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1502") && e.message.contains("none")),
+        "Assignment from 'none' should produce E1502 undefined variable error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt2_nil_rejected() {
+    let source = "x <= nil";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1502") && e.message.contains("nil")),
+        "Assignment from 'nil' should produce E1502 undefined variable error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt2_null_in_expression_rejected() {
+    let source = "x <= 42\ny <= x + null";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("null")),
+        "'null' used in expression should produce an error, got: {:?}",
+        errors
+    );
+}
+
 #[test]
 fn test_lax_result_current_behavior_stable() {
     // Verify that current Lax/Result type inference works as expected.

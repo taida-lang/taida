@@ -1856,4 +1856,43 @@ c.hasValue()"#;
             err
         );
     }
+
+    // ── BT-2: null/undefined/none/nil rejection at interpreter level ──
+    // PHILOSOPHY.md I: "null/undefinedの完全排除 — 全ての型にデフォルト値を保証"
+
+    #[test]
+    fn test_bt2_null_eval_fails() {
+        let result = eval("x <= null");
+        assert!(
+            result.is_err(),
+            "'null' should not be evaluable as a value"
+        );
+    }
+
+    #[test]
+    fn test_bt2_undefined_eval_fails() {
+        let result = eval("x <= undefined");
+        assert!(
+            result.is_err(),
+            "'undefined' should not be evaluable as a value"
+        );
+    }
+
+    #[test]
+    fn test_bt2_none_eval_fails() {
+        let result = eval("x <= none");
+        assert!(
+            result.is_err(),
+            "'none' should not be evaluable as a value"
+        );
+    }
+
+    #[test]
+    fn test_bt2_nil_eval_fails() {
+        let result = eval("x <= nil");
+        assert!(
+            result.is_err(),
+            "'nil' should not be evaluable as a value"
+        );
+    }
 }
