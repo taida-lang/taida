@@ -51,24 +51,26 @@ mod tests {
     fn test_eval_div_mold() {
         // Div[10, 3]() returns Lax with hasValue=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                let value = fields
-                    .iter()
-                    .find(|(k, _)| k == "__value")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Int(3));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            let value = fields
+                .iter()
+                .find(|(k, _)| k == "__value")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(true));
+            assert_eq!(value, Value::Int(3));
         }
     }
 
@@ -76,17 +78,19 @@ mod tests {
     fn test_eval_div_mold_zero() {
         // Div[10, 0]() returns Lax with hasValue=false
         let result = eval_ok("result <= Div[10, 0]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(false));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(false));
         }
     }
 
@@ -94,24 +98,26 @@ mod tests {
     fn test_eval_mod_mold() {
         // Mod[10, 3]() returns Lax with hasValue=true, value=1
         let result = eval_ok("result <= Mod[10, 3]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                let value = fields
-                    .iter()
-                    .find(|(k, _)| k == "__value")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Int(1));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            let value = fields
+                .iter()
+                .find(|(k, _)| k == "__value")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(true));
+            assert_eq!(value, Value::Int(1));
         }
     }
 
@@ -119,17 +125,19 @@ mod tests {
     fn test_eval_mod_mold_zero() {
         // Mod[10, 0]() returns Lax with hasValue=false
         let result = eval_ok("result <= Mod[10, 0]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(false));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(false));
         }
     }
 
@@ -139,24 +147,26 @@ mod tests {
     fn test_str_mold_from_int() {
         // Str[42]() → Lax(hasValue=true, __value="42")
         let result = eval_ok("result <= Str[42]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                let value = fields
-                    .iter()
-                    .find(|(k, _)| k == "__value")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Str("42".into()));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            let value = fields
+                .iter()
+                .find(|(k, _)| k == "__value")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(true));
+            assert_eq!(value, Value::Str("42".into()));
         }
     }
 
