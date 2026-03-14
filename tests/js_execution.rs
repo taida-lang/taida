@@ -15,10 +15,12 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Global counter to generate unique temp file names across parallel tests.
+/// Combined with PID to remain unique under cargo-nextest (each test = separate process).
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn unique_id() -> u64 {
-    COUNTER.fetch_add(1, Ordering::SeqCst)
+fn unique_id() -> String {
+    let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("{}_{}", std::process::id(), seq)
 }
 
 fn taida_bin() -> PathBuf {

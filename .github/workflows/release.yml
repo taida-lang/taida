@@ -82,7 +82,8 @@ jobs:
         run: ./scripts/release/secret-scan.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --profile ci
       - run: cargo build --locked --release
       - run: ./tests/run_backend_parity.sh
       - run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh

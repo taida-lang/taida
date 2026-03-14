@@ -1,3 +1,4 @@
+#![cfg(feature = "native")]
 /// Integration tests for wasm-edge backend.
 ///
 /// WE-2/WE-3: Validates that wasm-edge compiles correctly,
