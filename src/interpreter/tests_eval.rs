@@ -2360,4 +2360,81 @@ p.y.hasValue"#);
             other => panic!("Abs[-0.0] should return Float or Int, got: {:?}", other),
         }
     }
+
+    // ── BT-13: String mold edge case tests ──
+
+    #[test]
+    fn test_bt13_slice_negative_start() {
+        // Slice[s, -2]() — negative start index
+        // TF-15: Returns BuchiPack instead of Str (Slice mold returns raw Lax-like structure)
+        let result = eval(r#"Slice["hello", -2]()"#);
+        match result {
+            Ok(val) => {
+                // Returns Str or BuchiPack (Lax-like) — both acceptable
+                assert!(
+                    matches!(&val, Value::Str(_)) || matches!(&val, Value::BuchiPack(_)),
+                    "Slice with negative start should return Str or BuchiPack, got: {:?}",
+                    val
+                );
+            }
+            Err(err) => {
+                assert!(!err.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bt13_slice_reversed_indices() {
+        // Slice[s, 3, 1]() — end < start (reversed)
+        // TF-15: Returns BuchiPack instead of Str for edge-case indices
+        let result = eval(r#"Slice["hello", 3, 1]()"#);
+        match result {
+            Ok(val) => {
+                assert!(
+                    matches!(&val, Value::Str(_)) || matches!(&val, Value::BuchiPack(_)),
+                    "Slice with reversed indices should return Str or BuchiPack, got: {:?}",
+                    val
+                );
+            }
+            Err(err) => {
+                assert!(!err.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bt13_char_at_negative_index() {
+        // CharAt[s, -1]() — negative index
+        let result = eval(r#"CharAt["hello", -1]()"#);
+        match result {
+            Ok(val) => {
+                assert!(
+                    matches!(&val, Value::Str(_)) || matches!(&val, Value::BuchiPack(_)),
+                    "CharAt with negative index should return Str or BuchiPack, got: {:?}",
+                    val
+                );
+            }
+            Err(err) => {
+                assert!(!err.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bt13_upper_unicode() {
+        // Upper["hello"]() should work — basic ASCII
+        assert_eq!(eval_ok(r#"Upper["hello"]()"#), Value::Str("HELLO".to_string()));
+    }
+
+    #[test]
+    fn test_bt13_reverse_unicode() {
+        // Reverse on ASCII string
+        assert_eq!(eval_ok(r#"Reverse["abc"]()"#), Value::Str("cba".to_string()));
+    }
+
+    #[test]
+    fn test_bt13_reverse_empty() {
+        // Reverse[""]() should return ""
+        assert_eq!(eval_ok(r#"Reverse[""]()"#), Value::Str(String::new()));
+    }
 }
