@@ -485,6 +485,53 @@ r
         assert_eq!(eval_ok(source), Value::Int(20));
     }
 
+    // ── BT-15: Error ceiling nesting edge cases ──
+
+    #[test]
+    fn test_bt15_double_error_ceiling() {
+        // Inner error ceiling catches inner throw, outer ceiling is untouched
+        let source = r#"
+Error => MyError = @()
+inner x =
+  |== error: Error =
+    -1
+  => :Int
+  | x < 0 |> MyError(type <= "MyError", message <= "inner error").throw()
+  | _ |> x
+=> :Int
+outer x =
+  |== error: Error =
+    -999
+  => :Int
+  result <= inner(x)
+  result + 100
+=> :Int
+r <= outer(-5)
+r
+"#;
+        // Inner ceiling catches the throw, returns -1. Outer ceiling gets -1 + 100 = 99
+        assert_eq!(eval_ok(source), Value::Int(99));
+    }
+
+    #[test]
+    fn test_bt15_closure_error_ceiling() {
+        // Error ceiling inside a function called indirectly
+        let source = r#"
+Error => SafeError = @()
+safe x =
+  |== error: Error =
+    0
+  => :Int
+  | x < 0 |> SafeError(type <= "SafeError", message <= "negative").throw()
+  | _ |> x * 2
+=> :Int
+result <= safe(-3)
+result
+"#;
+        // Error ceiling should catch the throw inside safe(-3) and return 0
+        assert_eq!(eval_ok(source), Value::Int(0));
+    }
+
     #[test]
     fn test_eval_gorilla_ceiling_unhandled_throw() {
         // Unhandled throw causes program termination (Gorilla ceiling)
