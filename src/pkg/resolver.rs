@@ -450,7 +450,11 @@ mod tests {
 
         let result = resolve_deps(&manifest);
         assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0].contains("missing"));
+        assert!(
+            result.errors[0].contains("missing"),
+            "Error should mention 'missing' dep name, got: {}",
+            result.errors[0]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

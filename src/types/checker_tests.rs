@@ -337,8 +337,9 @@ fn test_func_call_return_type() {
 fn test_func_call_too_many_args_is_error() {
     let source = "add x: Int y: Int =\n  x + y\n=> :Int\n\nresult <= add(1, 2, 3)";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1301]")),
+        errors[0].message.contains("[E1301]"),
         "Expected E1301 too many args error, got: {:?}",
         errors
     );
@@ -371,8 +372,9 @@ fn test_param_default_type_mismatch_is_error() {
   a
 => :Int"#;
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1303]")),
+        errors[0].message.contains("[E1303]"),
         "Expected E1303 default type mismatch error, got: {:?}",
         errors
     );
@@ -416,10 +418,9 @@ fn test_mold_inst_div_type() {
 fn test_molten_rejects_type_args() {
     let source = "m <= Molten[1]()";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("Molten takes no type arguments")),
+        errors[0].message.contains("Molten takes no type arguments"),
         "Expected Molten arity error, got: {:?}",
         errors
     );
@@ -492,10 +493,9 @@ fn test_generic_function_map_value_infers_return_type() {
 fn test_generic_function_constraint_is_enforced() {
     let source = "idNum[T <= :Num] x: T =\n  x\n=> :T\n\nvalue <= idNum(\"nope\")";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("[E1509]") && e.message.contains("violates its constraint")),
+        errors[0].message.contains("[E1509]") && errors[0].message.contains("violates its constraint"),
         "Expected generic function constraint error, got: {:?}",
         errors
     );
@@ -505,6 +505,7 @@ fn test_generic_function_constraint_is_enforced() {
 fn test_generic_function_requires_inferable_type_param() {
     let source = "make[T] =\n  1\n=> :T\n\nvalue <= make()";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors, got: {:?}", errors);
     assert!(
         errors.iter().any(|e| {
             e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): T")
@@ -518,10 +519,9 @@ fn test_generic_function_requires_inferable_type_param() {
 fn test_rejected_generic_function_does_not_emit_spurious_non_generic_call_error() {
     let source = "pair[T, U] x: T =\n  x\n=> :U\n\nvalue <= pair(1)";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
-        }),
+        errors[0].message.contains("[E1510]") && errors[0].message.contains("uninferable type parameter(s): U"),
         "Expected generic definition error, got: {:?}",
         errors
     );
@@ -536,11 +536,10 @@ fn test_rejected_generic_function_does_not_emit_spurious_non_generic_call_error(
 fn test_generic_function_does_not_treat_unknown_binding_as_inferred() {
     let source = "accept[T] fn: T => :Bool =\n  true\n=> :Bool\n\nok <= accept(_ y = true)";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]")
-                && e.message.contains("could not infer type parameter(s): T")
-        }),
+        errors[0].message.contains("[E1510]")
+            && errors[0].message.contains("could not infer type parameter(s): T"),
         "Expected higher-order generic inference error, got: {:?}",
         errors
     );
@@ -550,12 +549,10 @@ fn test_generic_function_does_not_treat_unknown_binding_as_inferred() {
 fn test_generic_function_type_param_cannot_shadow_builtin_type_name() {
     let source = "id[Int] x: Int =\n  x\n=> :Int\n\nvalue <= id(1)";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]")
-                && e.message
-                    .contains("reserved concrete type name(s) as type parameter(s): Int")
-        }),
+        errors[0].message.contains("[E1510]")
+            && errors[0].message.contains("reserved concrete type name(s) as type parameter(s): Int"),
         "Expected generic type parameter name collision error, got: {:?}",
         errors
     );
@@ -565,12 +562,10 @@ fn test_generic_function_type_param_cannot_shadow_builtin_type_name() {
 fn test_generic_function_type_param_cannot_shadow_declared_type_name() {
     let source = "User = @(name: Str)\n\nid[User] x: User =\n  x\n=> :User";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]")
-                && e.message
-                    .contains("reserved concrete type name(s) as type parameter(s): User")
-        }),
+        errors[0].message.contains("[E1510]")
+            && errors[0].message.contains("reserved concrete type name(s) as type parameter(s): User"),
         "Expected declared type name collision error, got: {:?}",
         errors
     );
@@ -580,12 +575,10 @@ fn test_generic_function_type_param_cannot_shadow_declared_type_name() {
 fn test_generic_function_type_param_cannot_shadow_later_declared_type_name() {
     let source = "id[Point] x: Point =\n  x\n=> :Point\n\nPoint = @(x: Int)";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]")
-                && e.message
-                    .contains("reserved concrete type name(s) as type parameter(s): Point")
-        }),
+        errors[0].message.contains("[E1510]")
+            && errors[0].message.contains("reserved concrete type name(s) as type parameter(s): Point"),
         "Expected forward-declared type name collision error, got: {:?}",
         errors
     );
@@ -595,12 +588,10 @@ fn test_generic_function_type_param_cannot_shadow_later_declared_type_name() {
 fn test_generic_function_type_param_cannot_shadow_declared_mold_name() {
     let source = "Mold[T] => Box[T] = @()\n\nid[Box] x: Box =\n  x\n=> :Box";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]")
-                && e.message
-                    .contains("reserved concrete type name(s) as type parameter(s): Box")
-        }),
+        errors[0].message.contains("[E1510]")
+            && errors[0].message.contains("reserved concrete type name(s) as type parameter(s): Box"),
         "Expected declared mold name collision error, got: {:?}",
         errors
     );
@@ -610,12 +601,10 @@ fn test_generic_function_type_param_cannot_shadow_declared_mold_name() {
 fn test_generic_function_type_param_cannot_shadow_later_declared_mold_name() {
     let source = "id[Box] x: Box =\n  x\n=> :Box\n\nMold[T] => Box[T] = @()";
     let (_checker, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1510]")
-                && e.message
-                    .contains("reserved concrete type name(s) as type parameter(s): Box")
-        }),
+        errors[0].message.contains("[E1510]")
+            && errors[0].message.contains("reserved concrete type name(s) as type parameter(s): Box"),
         "Expected forward-declared mold name collision error, got: {:?}",
         errors
     );
@@ -856,12 +845,10 @@ fn test_mold_type_param_after_concrete_slots_without_binding_target_is_error() {
 fn test_mold_concrete_header_arg_without_binding_target_is_error() {
     let source = r#"Mold[T] => Broken[T, :Int] = @()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1401]")
-                && e.message
-                    .contains("header argument(s) without binding target(s): :Int")
-        }),
+        errors[0].message.contains("[E1401]")
+            && errors[0].message.contains("header argument(s) without binding target(s): :Int"),
         "Expected concrete mold header arg without binding target error, got: {:?}",
         errors
     );
@@ -874,12 +861,10 @@ fn test_custom_mold_inst_missing_required_positional_args_is_error() {
 )
 p <= Pair[1]()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1402]")
-                && e.message
-                    .contains("requires 2 positional `[]` argument(s), got 1")
-        }),
+        errors[0].message.contains("[E1402]")
+            && errors[0].message.contains("requires 2 positional `[]` argument(s), got 1"),
         "Expected missing positional arg error, got: {:?}",
         errors
     );
@@ -893,12 +878,10 @@ fn test_custom_mold_inst_too_many_positional_args_is_error() {
 )
 p <= Pair[1, 2, true]()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1403]")
-                && e.message
-                    .contains("takes 2 positional `[]` argument(s), got 3")
-        }),
+        errors[0].message.contains("[E1403]")
+            && errors[0].message.contains("takes 2 positional `[]` argument(s), got 3"),
         "Expected positional overflow error, got: {:?}",
         errors
     );
@@ -912,6 +895,7 @@ fn test_custom_mold_inst_required_field_in_named_options_is_error() {
 )
 p <= Pair[1](second <= 2)"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors (E1402 + E1405), got: {:?}", errors);
     assert!(
         errors.iter().any(|e| {
             e.message.contains("[E1405]")
@@ -930,6 +914,7 @@ fn test_custom_mold_inst_duplicate_and_undefined_options_are_errors() {
 )
 p <= Pair[1, 2](flag <= true, flag <= false, nope <= true)"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors (E1404 + E1406), got: {:?}", errors);
     assert!(
         errors.iter().any(|e| {
             e.message.contains("[E1404]") && e.message.contains("duplicate option 'flag'")
@@ -966,6 +951,7 @@ fn test_mold_explicit_name_header_must_preserve_inherited_prefix() {
     let source = r#"Mold[:Int] => IntBox[T, U] = @()
 box <= IntBox[1]()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors, got: {:?}", errors);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1407]")
             && e.message.contains("must preserve inherited header slot 1")),
@@ -979,12 +965,10 @@ fn test_custom_mold_concrete_header_type_is_enforced() {
     let source = r#"Mold[:Int] => IntBox = @()
 box <= IntBox["oops"]()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1408]")
-                && e.message
-                    .contains("positional `[]` argument 1 is fixed to Int")
-        }),
+        errors[0].message.contains("[E1408]")
+            && errors[0].message.contains("positional `[]` argument 1 is fixed to Int"),
         "Expected concrete mold header type error, got: {:?}",
         errors
     );
@@ -1010,6 +994,7 @@ fn test_mold_root_cannot_extend_parent_arity_directly() {
   predicate: P
 )"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors, got: {:?}", errors);
     assert!(
         errors.iter().any(|e| {
             e.message.contains("[E1407]")
@@ -1027,12 +1012,10 @@ fn test_mold_child_header_cannot_reuse_type_param_names() {
   predicate: T
 )"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1407]")
-                && e.message
-                    .contains("reuses header type parameter name(s): T")
-        }),
+        errors[0].message.contains("[E1407]")
+            && errors[0].message.contains("reuses header type parameter name(s): T"),
         "Expected duplicate child header type parameter names to be rejected, got: {:?}",
         errors
     );
@@ -2682,3 +2665,4 @@ fn test_lax_result_current_behavior_stable() {
         x_ty
     );
 }
+

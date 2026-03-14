@@ -420,14 +420,26 @@ mod tests {
     fn test_eval_slash_operator_removed() {
         // `/` operator should now produce a parse error
         let result = eval("x <= 10 / 3");
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected error for removed `/` operator");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Parse error") || err.contains("Unexpected"),
+            "Expected parse error for `/`, got: {}",
+            err
+        );
     }
 
     #[test]
     fn test_eval_percent_operator_removed() {
         // `%` operator should now produce a parse error
         let result = eval("x <= 10 % 3");
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected error for removed `%` operator");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Parse error") || err.contains("Unexpected"),
+            "Expected parse error for `%`, got: {}",
+            err
+        );
     }
 
     #[test]
