@@ -3230,7 +3230,7 @@ int64_t taida_result_to_string(int64_t result) {
     }
     int64_t throw_val = taida_pack_get_idx(result, 2);
     if (throw_val == 0) {
-        return taida_str_new_copy((int64_t)(intptr_t)"Result(throw <= error)");
+        return taida_str_new_copy((int64_t)(intptr_t)"Result(throw <= @())");
     }
     int64_t err_disp = taida_polymorphic_to_string(throw_val);
     const char *es = (const char *)(intptr_t)err_disp;

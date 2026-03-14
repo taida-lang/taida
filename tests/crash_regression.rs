@@ -31,6 +31,10 @@ fn unique_temp_path(prefix: &str, stem: &str, ext: &str) -> PathBuf {
     ))
 }
 
+/// Normalize output for comparison: strip trailing whitespace per line and at end.
+///
+/// LIMITATION (AT-1): This hides trailing-space differences between backends.
+/// See tests/parity.rs normalize() for full documentation.
 fn normalize(s: &str) -> String {
     s.lines()
         .map(|line| line.trim_end())
@@ -209,11 +213,14 @@ fn test_crash_regression_corpus_three_way() {
         };
 
         if native != interp {
+            // AT-9: Show full output diff, not just first 4 lines
             failures.push(format!(
-                "{}: interpreter/native mismatch\n  interp: {:?}\n  native: {:?}",
+                "{}: interpreter/native mismatch\n  interp ({} lines):\n{}\n  native ({} lines):\n{}",
                 name,
-                interp.lines().take(4).collect::<Vec<_>>(),
-                native.lines().take(4).collect::<Vec<_>>(),
+                interp.lines().count(),
+                interp.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n"),
+                native.lines().count(),
+                native.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n"),
             ));
             continue;
         }
@@ -228,11 +235,21 @@ fn test_crash_regression_corpus_three_way() {
             };
 
             if js != interp {
+                // AT-9: Show full output diff, not just first 4 lines
                 failures.push(format!(
-                    "{}: interpreter/js mismatch\n  interp: {:?}\n  js:     {:?}",
+                    "{}: interpreter/js mismatch\n  interp ({} lines):\n{}\n  js ({} lines):\n{}",
                     name,
-                    interp.lines().take(4).collect::<Vec<_>>(),
-                    js.lines().take(4).collect::<Vec<_>>(),
+                    interp.lines().count(),
+                    interp
+                        .lines()
+                        .map(|l| format!("    {}", l))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    js.lines().count(),
+                    js.lines()
+                        .map(|l| format!("    {}", l))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 ));
                 continue;
             }

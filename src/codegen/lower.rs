@@ -2550,6 +2550,28 @@ impl Lowering {
                 return self.lower_debug_call(func, args);
             }
 
+            if name == "typeof" || name == "typeOf" {
+                if args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!("typeof requires exactly 1 argument, got {}", args.len()),
+                    });
+                }
+                let arg = &args[0];
+                let arg_var = self.lower_expr(func, arg)?;
+                // Pass compile-time type tag as second argument to disambiguate
+                // Int/Float/Bool which are all i64 at runtime
+                let tag = self.expr_type_tag(arg);
+                let tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(tag_var, tag));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_typeof".to_string(),
+                    vec![arg_var, tag_var],
+                ));
+                return Ok(result);
+            }
+
             if name == "nowMs" {
                 if !args.is_empty() {
                     return Err(LowerError {
@@ -4214,7 +4236,10 @@ impl Lowering {
         func: &mut IrFunction,
         template: &str,
     ) -> Result<IrVar, LowerError> {
-        // Parse template: split on ${ and } to get literal parts and expression parts
+        // Parse template: split on ${ and } to get literal parts and expression parts.
+        // Interpolation expressions are parsed using the full Taida parser and lowered
+        // as real AST expressions, so field access, function calls, method calls etc.
+        // are all supported (matching the interpreter behaviour).
         let mut result_var = {
             let var = func.alloc_var();
             func.push(IrInst::ConstStr(var, String::new()));
@@ -4241,46 +4266,23 @@ impl Lowering {
                         i += 1;
                     }
                 }
-                let expr_name: String = chars[start..i].iter().collect();
-                let var_name = expr_name.trim().to_string();
-                // Look up the variable and convert to string based on type
-                let name_var = func.alloc_var();
-                func.push(IrInst::UseVar(name_var, var_name.clone()));
-                let str_var = if self.string_vars.contains(&var_name) {
-                    // Already a string — no conversion needed
-                    name_var
-                } else if self.bool_vars.contains(&var_name) {
-                    let v = func.alloc_var();
-                    func.push(IrInst::Call(
-                        v,
-                        "taida_str_from_bool".to_string(),
-                        vec![name_var],
-                    ));
-                    v
-                } else if self.float_vars.contains(&var_name) {
-                    let v = func.alloc_var();
-                    func.push(IrInst::Call(
-                        v,
-                        "taida_str_from_float".to_string(),
-                        vec![name_var],
-                    ));
-                    v
-                } else if self.pack_vars.contains(&var_name)
-                    || self.list_vars.contains(&var_name)
-                    || self.closure_vars.contains(&var_name)
+                let expr_str: String = chars[start..i].iter().collect();
+                let expr_str_trimmed = expr_str.trim();
+
+                // Parse the interpolation expression using the full Taida parser.
+                let (program, errors) = crate::parser::parse(expr_str_trimmed);
+                let str_var = if errors.is_empty()
+                    && !program.statements.is_empty()
+                    && let crate::parser::Statement::Expr(ref parsed_expr) = program.statements[0]
                 {
-                    let v = func.alloc_var();
-                    func.push(IrInst::Call(
-                        v,
-                        "taida_polymorphic_to_string".to_string(),
-                        vec![name_var],
-                    ));
-                    v
+                    // Lower the parsed expression and convert to string
+                    let expr_var = self.lower_expr(func, parsed_expr)?;
+                    self.convert_to_string(func, parsed_expr, expr_var)?
                 } else {
-                    // Default: polymorphic to_string (handles int, string pointers,
-                    // monadic types, etc.). This is safer than taida_str_from_int
-                    // because function parameters and condition branch results may
-                    // be string pointers that are not tracked in string_vars.
+                    // Fallback: treat as simple variable name (backward compat)
+                    let var_name = expr_str_trimmed.to_string();
+                    let name_var = func.alloc_var();
+                    func.push(IrInst::UseVar(name_var, var_name.clone()));
                     let v = func.alloc_var();
                     func.push(IrInst::Call(
                         v,
@@ -4389,7 +4391,8 @@ impl Lowering {
             Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
                 self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs)
             }
-            // WF-2b: MoldInst string molds (CharAt, Upper, Lower, etc.) return strings
+            // WF-2b: MoldInst string molds (Upper, Lower, etc.) return strings
+            // Note: CharAt returns Lax[Str], not raw Str (TF-15)
             Expr::MoldInst(name, _, _, _) => matches!(
                 name.as_str(),
                 "Str"
@@ -4398,7 +4401,6 @@ impl Lowering {
                     | "Trim"
                     | "Replace"
                     | "Slice"
-                    | "CharAt"
                     | "Repeat"
                     | "Reverse"
                     | "Pad"

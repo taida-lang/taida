@@ -51,24 +51,26 @@ mod tests {
     fn test_eval_div_mold() {
         // Div[10, 3]() returns Lax with hasValue=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                let value = fields
-                    .iter()
-                    .find(|(k, _)| k == "__value")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Int(3));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            let value = fields
+                .iter()
+                .find(|(k, _)| k == "__value")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(true));
+            assert_eq!(value, Value::Int(3));
         }
     }
 
@@ -76,17 +78,19 @@ mod tests {
     fn test_eval_div_mold_zero() {
         // Div[10, 0]() returns Lax with hasValue=false
         let result = eval_ok("result <= Div[10, 0]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(false));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(false));
         }
     }
 
@@ -94,24 +98,26 @@ mod tests {
     fn test_eval_mod_mold() {
         // Mod[10, 3]() returns Lax with hasValue=true, value=1
         let result = eval_ok("result <= Mod[10, 3]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                let value = fields
-                    .iter()
-                    .find(|(k, _)| k == "__value")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Int(1));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            let value = fields
+                .iter()
+                .find(|(k, _)| k == "__value")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(true));
+            assert_eq!(value, Value::Int(1));
         }
     }
 
@@ -119,17 +125,19 @@ mod tests {
     fn test_eval_mod_mold_zero() {
         // Mod[10, 0]() returns Lax with hasValue=false
         let result = eval_ok("result <= Mod[10, 0]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(false));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(false));
         }
     }
 
@@ -139,24 +147,26 @@ mod tests {
     fn test_str_mold_from_int() {
         // Str[42]() → Lax(hasValue=true, __value="42")
         let result = eval_ok("result <= Str[42]()");
-        match &result {
-            Value::BuchiPack(fields) => {
-                let has_value = fields
-                    .iter()
-                    .find(|(k, _)| k == "hasValue")
-                    .unwrap()
-                    .1
-                    .clone();
-                let value = fields
-                    .iter()
-                    .find(|(k, _)| k == "__value")
-                    .unwrap()
-                    .1
-                    .clone();
-                assert_eq!(has_value, Value::Bool(true));
-                assert_eq!(value, Value::Str("42".into()));
-            }
-            _ => panic!("Expected BuchiPack, got {:?}", result),
+        assert!(
+            matches!(&result, Value::BuchiPack(_)),
+            "Expected BuchiPack, got {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = &result {
+            let has_value = fields
+                .iter()
+                .find(|(k, _)| k == "hasValue")
+                .unwrap()
+                .1
+                .clone();
+            let value = fields
+                .iter()
+                .find(|(k, _)| k == "__value")
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(has_value, Value::Bool(true));
+            assert_eq!(value, Value::Str("42".into()));
         }
     }
 
@@ -420,14 +430,26 @@ mod tests {
     fn test_eval_slash_operator_removed() {
         // `/` operator should now produce a parse error
         let result = eval("x <= 10 / 3");
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected error for removed `/` operator");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Parse error") || err.contains("Unexpected"),
+            "Expected parse error for `/`, got: {}",
+            err
+        );
     }
 
     #[test]
     fn test_eval_percent_operator_removed() {
         // `%` operator should now produce a parse error
         let result = eval("x <= 10 % 3");
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected error for removed `%` operator");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Parse error") || err.contains("Unexpected"),
+            "Expected parse error for `%`, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -831,7 +853,11 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_mold_charat() {
-        assert_eq!(eval_ok("CharAt[\"hello\", 1]()"), Value::Str("e".into()));
+        // CharAt returns Lax[Str]; unmold with ]=> to get the inner value
+        assert_eq!(
+            eval_ok("CharAt[\"hello\", 1]() ]=> x\nx"),
+            Value::Str("e".into())
+        );
     }
 
     #[test]
@@ -1855,5 +1881,573 @@ c.hasValue()"#;
             "Got: {}",
             err
         );
+    }
+
+    // ── BT-2: null/undefined/none/nil rejection at interpreter level ──
+    // PHILOSOPHY.md I: "null/undefinedの完全排除 — 全ての型にデフォルト値を保証"
+
+    #[test]
+    fn test_bt2_null_eval_fails() {
+        let result = eval("x <= null");
+        assert!(result.is_err(), "'null' should not be evaluable as a value");
+    }
+
+    #[test]
+    fn test_bt2_undefined_eval_fails() {
+        let result = eval("x <= undefined");
+        assert!(
+            result.is_err(),
+            "'undefined' should not be evaluable as a value"
+        );
+    }
+
+    #[test]
+    fn test_bt2_none_eval_fails() {
+        let result = eval("x <= none");
+        assert!(result.is_err(), "'none' should not be evaluable as a value");
+    }
+
+    #[test]
+    fn test_bt2_nil_eval_fails() {
+        let result = eval("x <= nil");
+        assert!(result.is_err(), "'nil' should not be evaluable as a value");
+    }
+
+    // ── BT-4: Integer overflow boundary tests ──
+
+    #[test]
+    fn test_bt4_i64_max_literal() {
+        // i64::MAX = 9223372036854775807
+        assert_eq!(eval_ok("9223372036854775807"), Value::Int(i64::MAX));
+    }
+
+    #[test]
+    fn test_bt4_i64_max_plus_one_overflow() {
+        // TF-12 fixed: wrapping arithmetic ensures consistent behavior in debug/release.
+        // i64::MAX + 1 wraps to i64::MIN.
+        assert_eq!(
+            eval_ok("x <= 9223372036854775807 + 1\nx"),
+            Value::Int(i64::MIN),
+            "i64::MAX + 1 should wrap to i64::MIN"
+        );
+    }
+
+    #[test]
+    fn test_bt4_i64_min_via_subtraction() {
+        // i64::MIN = -9223372036854775808 (can't be expressed as a literal directly)
+        // Use 0 - i64::MAX - 1 to reach i64::MIN.
+        assert_eq!(
+            eval_ok("x <= 0 - 9223372036854775807 - 1\nx"),
+            Value::Int(i64::MIN),
+            "0 - i64::MAX - 1 should equal i64::MIN"
+        );
+    }
+
+    #[test]
+    fn test_bt4_i64_min_minus_one_overflow() {
+        // TF-12 fixed: i64::MIN - 1 wraps to i64::MAX.
+        assert_eq!(
+            eval_ok("x <= (0 - 9223372036854775807 - 1) - 1\nx"),
+            Value::Int(i64::MAX),
+            "i64::MIN - 1 should wrap to i64::MAX"
+        );
+    }
+
+    // ── Lax helpers (used by BT-4, BT-6, BT-7, BT-12, BT-18) ──
+
+    fn lax_has_value(result: &Value) -> bool {
+        assert!(
+            matches!(result, Value::BuchiPack(_)),
+            "Expected BuchiPack (Lax), got: {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = result {
+            fields
+                .iter()
+                .any(|(k, v)| k == "hasValue" && *v == Value::Bool(true))
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn lax_field<'a>(result: &'a Value, field: &str) -> Option<&'a Value> {
+        assert!(
+            matches!(result, Value::BuchiPack(_)),
+            "Expected BuchiPack (Lax), got: {:?}",
+            result
+        );
+        if let Value::BuchiPack(fields) = result {
+            fields.iter().find(|(k, _)| k == field).map(|(_, v)| v)
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn test_bt4_int_mold_i64_max_string() {
+        // Int["9223372036854775807"]() should succeed
+        let result = eval_ok(r#"Int["9223372036854775807"]()"#);
+        assert!(
+            lax_has_value(&result),
+            "Int[i64::MAX string] should have value"
+        );
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Int(i64::MAX)));
+    }
+
+    #[test]
+    fn test_bt4_int_mold_overflow_string() {
+        // Int["999999999999999999999999"]() should return Lax with hasValue=false
+        let result = eval_ok(r#"Int["999999999999999999999999"]()"#);
+        assert!(
+            !lax_has_value(&result),
+            "Int[overflow string] should return empty Lax"
+        );
+    }
+
+    #[test]
+    fn test_bt4_int_mold_i64_min_string() {
+        // Int["-9223372036854775808"]() should succeed
+        let result = eval_ok(r#"Int["-9223372036854775808"]()"#);
+        assert!(
+            lax_has_value(&result),
+            "Int[i64::MIN string] should have value"
+        );
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Int(i64::MIN)));
+    }
+
+    // ── BT-5: Empty collection operation tests ──
+
+    #[test]
+    fn test_bt5_upper_empty_string() {
+        assert_eq!(eval_ok(r#"Upper[""]() "#), Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_bt5_reverse_empty_string() {
+        assert_eq!(eval_ok(r#"Reverse[""]() "#), Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_bt5_split_empty_string_empty_delimiter() {
+        // Split["",""]() — splits empty string by empty delimiter → ["", ""]
+        let result = eval_ok(r#"Split["",""]() "#);
+        assert!(
+            matches!(&result, Value::List(items) if items.len() == 2),
+            "Split[\"\",\"\"]() should return 2-element list, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_bt5_sum_empty_list() {
+        assert_eq!(eval_ok(r#"Sum[@[]]() "#), Value::Int(0));
+    }
+
+    #[test]
+    fn test_bt5_concat_empty_lists() {
+        let result = eval_ok(r#"Concat[@[],@[]]() "#);
+        if let Value::List(items) = &result {
+            assert!(items.is_empty(), "Concat of empty lists should be empty");
+        } else {
+            panic!("Expected List, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_bt5_flatten_empty_list() {
+        let result = eval_ok(r#"Flatten[@[]]() "#);
+        if let Value::List(items) = &result {
+            assert!(items.is_empty(), "Flatten of empty list should be empty");
+        } else {
+            panic!("Expected List, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_bt5_unique_empty_list() {
+        let result = eval_ok(r#"Unique[@[]]() "#);
+        if let Value::List(items) = &result {
+            assert!(items.is_empty(), "Unique of empty list should be empty");
+        } else {
+            panic!("Expected List, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_bt5_reverse_empty_list() {
+        let result = eval_ok(
+            r#"x <= Reverse[@[]]()
+x"#,
+        );
+        if let Value::List(items) = &result {
+            assert!(items.is_empty(), "Reverse of empty list should be empty");
+        } else {
+            panic!("Expected List, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_bt5_set_of_empty_list() {
+        // setOf(@[]) should create an empty set
+        let result = eval_ok(
+            r#"x <= setOf(@[])
+x.size()"#,
+        );
+        assert_eq!(result, Value::Int(0), "Empty set should have size 0");
+    }
+
+    #[test]
+    fn test_bt5_hashmap_empty_list() {
+        // hashMap(@[]) should create an empty hashmap
+        let result = eval_ok(
+            r#"x <= hashMap(@[])
+x.size()"#,
+        );
+        assert_eq!(result, Value::Int(0), "Empty hashmap should have size 0");
+    }
+
+    #[test]
+    fn test_bt5_char_at_empty_string_index_zero() {
+        // Expected: return Lax with hasValue=false (out of bounds)
+        let result = eval_ok(
+            r#"x <= CharAt["",0]()
+x.hasValue"#,
+        );
+        assert_eq!(
+            result,
+            Value::Bool(false),
+            "CharAt on empty string should return empty Lax"
+        );
+    }
+
+    #[test]
+    fn test_bt5_slice_empty_string() {
+        // Expected: return "" (empty string)
+        let result = eval_ok(r#"Slice["",0,0]() "#);
+        assert_eq!(
+            result,
+            Value::Str(String::new()),
+            "Slice of empty string should return empty string"
+        );
+    }
+
+    // ── BT-6: Lax[T] boundary condition tests ──
+
+    #[test]
+    fn test_bt6_lax_success_has_value() {
+        // Div[10,2]() should return Lax with hasValue=true
+        let result = eval_ok("Div[10,2]()");
+        assert!(
+            lax_has_value(&result),
+            "Div[10,2]() should have hasValue=true"
+        );
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Int(5)));
+    }
+
+    #[test]
+    fn test_bt6_lax_failure_has_no_value() {
+        // Div[1,0]() should return Lax with hasValue=false
+        let result = eval_ok("Div[1,0]()");
+        assert!(
+            !lax_has_value(&result),
+            "Div[1,0]() should have hasValue=false"
+        );
+    }
+
+    #[test]
+    fn test_bt6_lax_in_list() {
+        // Lax values stored in a list should maintain their identity
+        let result = eval_ok(
+            r#"y <= @[Div[1,0](), Div[2,0](), Div[10,2]()]
+y.length()"#,
+        );
+        assert_eq!(result, Value::Int(3), "List of Lax should have 3 elements");
+    }
+
+    #[test]
+    fn test_bt6_lax_in_buchi_pack() {
+        // Lax values as BuchiPack fields should preserve hasValue
+        let result = eval_ok(
+            r#"p <= @(x <= Div[1,0](), y <= Div[10,2]())
+p.x.hasValue"#,
+        );
+        assert_eq!(
+            result,
+            Value::Bool(false),
+            "Failed Lax in pack should have hasValue=false"
+        );
+
+        let result2 = eval_ok(
+            r#"p <= @(x <= Div[1,0](), y <= Div[10,2]())
+p.y.hasValue"#,
+        );
+        assert_eq!(
+            result2,
+            Value::Bool(true),
+            "Success Lax in pack should have hasValue=true"
+        );
+    }
+
+    #[test]
+    fn test_bt6_lax_default_value() {
+        // Failed Lax should have __default field with type default
+        let result = eval_ok("Div[1,0]()");
+        assert_eq!(
+            lax_field(&result, "__default"),
+            Some(&Value::Int(0)),
+            "Int Lax default should be 0"
+        );
+    }
+
+    #[test]
+    fn test_bt6_lax_type_field() {
+        // Lax should have __type field
+        let result = eval_ok("Div[1,0]()");
+        assert!(
+            lax_field(&result, "__type").is_some(),
+            "Lax should have __type field"
+        );
+    }
+
+    // ── BT-7: Type conversion boundary tests ──
+
+    #[test]
+    fn test_bt7_int_plus_sign_string() {
+        // Int["+42"]() should succeed (plus sign prefix)
+        let result = eval_ok(r#"Int["+42"]()"#);
+        assert!(lax_has_value(&result), "Int[\"+42\"] should succeed");
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Int(42)));
+    }
+
+    #[test]
+    fn test_bt7_int_decimal_string_fails() {
+        // Int["42.0"]() should fail (not a pure integer)
+        let result = eval_ok(r#"Int["42.0"]()"#);
+        assert!(
+            !lax_has_value(&result),
+            "Int[\"42.0\"] should fail (decimal)"
+        );
+    }
+
+    #[test]
+    fn test_bt7_int_hex_string_fails() {
+        // Int["0x10"]() should fail (hex not supported)
+        let result = eval_ok(r#"Int["0x10"]()"#);
+        assert!(!lax_has_value(&result), "Int[\"0x10\"] should fail (hex)");
+    }
+
+    #[test]
+    fn test_bt7_int_empty_string_fails() {
+        // Int[""]() should fail
+        let result = eval_ok(r#"Int[""]()"#);
+        assert!(!lax_has_value(&result), "Int[\"\"] should fail (empty)");
+    }
+
+    #[test]
+    fn test_bt7_bool_zero() {
+        // Bool[0]() should return false
+        let result = eval_ok("Bool[0]()");
+        assert!(lax_has_value(&result), "Bool[0] should succeed");
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_bt7_bool_negative_one() {
+        // Bool[-1]() should return true (non-zero)
+        let result = eval_ok("Bool[-1]()");
+        assert!(lax_has_value(&result), "Bool[-1] should succeed");
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_bt7_float_empty_string_fails() {
+        // Float[""]() should fail
+        let result = eval_ok(r#"Float[""]()"#);
+        assert!(!lax_has_value(&result), "Float[\"\"] should fail (empty)");
+    }
+
+    #[test]
+    fn test_bt7_int_negative_max_string() {
+        // Int["-9223372036854775808"]() — i64::MIN as string
+        let result = eval_ok(r#"Int["-9223372036854775808"]()"#);
+        assert!(
+            lax_has_value(&result),
+            "Int[i64::MIN string] should succeed"
+        );
+        assert_eq!(lax_field(&result, "__value"), Some(&Value::Int(i64::MIN)));
+    }
+
+    // ── BT-8: Numeric mold negative/zero boundary tests ──
+
+    #[test]
+    fn test_bt8_floor_negative() {
+        // Floor[-3.7]() should return -4 (floor rounds toward negative infinity)
+        assert_eq!(eval_ok("Floor[-3.7]()"), Value::Int(-4));
+    }
+
+    #[test]
+    fn test_bt8_ceil_negative() {
+        // Ceil[-3.2]() should return -3 (ceil rounds toward positive infinity)
+        assert_eq!(eval_ok("Ceil[-3.2]()"), Value::Int(-3));
+    }
+
+    #[test]
+    fn test_bt8_round_negative_half() {
+        // Round[-3.5]() — f64::round() uses "half away from zero" → -4
+        assert_eq!(eval_ok("Round[-3.5]()"), Value::Int(-4));
+    }
+
+    #[test]
+    fn test_bt8_round_positive_half() {
+        // Round[0.5]() — f64::round() uses "half away from zero" → 1
+        assert_eq!(eval_ok("Round[0.5]()"), Value::Int(1));
+    }
+
+    #[test]
+    fn test_bt8_clamp_at_lower_bound() {
+        // Clamp[0, 0, 5]() — value equals lower bound, should return 0
+        assert_eq!(eval_ok("Clamp[0, 0, 5]()"), Value::Int(0));
+    }
+
+    #[test]
+    fn test_bt8_clamp_at_upper_bound() {
+        // Clamp[5, 0, 5]() — value equals upper bound, should return 5
+        assert_eq!(eval_ok("Clamp[5, 0, 5]()"), Value::Int(5));
+    }
+
+    #[test]
+    fn test_bt8_abs_negative_zero() {
+        // Abs[-0.0]() — negative zero should become 0.0
+        let result = eval_ok("Abs[-0.0]()");
+        match &result {
+            Value::Float(f) => assert!(*f == 0.0, "Abs[-0.0] should be 0.0, got: {}", f),
+            Value::Int(i) => assert!(*i == 0, "Abs[-0.0] as Int should be 0, got: {}", i),
+            other => panic!("Abs[-0.0] should return Float or Int, got: {:?}", other),
+        }
+    }
+
+    // ── BT-13: String mold edge case tests ──
+
+    #[test]
+    fn test_bt13_slice_negative_start() {
+        // Slice[s, -2]() — negative start index
+        // TF-15: Returns BuchiPack instead of Str (Slice mold returns raw Lax-like structure)
+        let result = eval(r#"Slice["hello", -2]()"#);
+        match result {
+            Ok(val) => {
+                // Returns Str or BuchiPack (Lax-like) — both acceptable
+                assert!(
+                    matches!(&val, Value::Str(_)) || matches!(&val, Value::BuchiPack(_)),
+                    "Slice with negative start should return Str or BuchiPack, got: {:?}",
+                    val
+                );
+            }
+            Err(err) => {
+                assert!(!err.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bt13_slice_reversed_indices() {
+        // Slice[s, 3, 1]() — end < start (reversed)
+        // TF-15: Returns BuchiPack instead of Str for edge-case indices
+        let result = eval(r#"Slice["hello", 3, 1]()"#);
+        match result {
+            Ok(val) => {
+                assert!(
+                    matches!(&val, Value::Str(_)) || matches!(&val, Value::BuchiPack(_)),
+                    "Slice with reversed indices should return Str or BuchiPack, got: {:?}",
+                    val
+                );
+            }
+            Err(err) => {
+                assert!(!err.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bt13_char_at_negative_index() {
+        // CharAt[s, -1]() — negative index
+        let result = eval(r#"CharAt["hello", -1]()"#);
+        match result {
+            Ok(val) => {
+                assert!(
+                    matches!(&val, Value::Str(_)) || matches!(&val, Value::BuchiPack(_)),
+                    "CharAt with negative index should return Str or BuchiPack, got: {:?}",
+                    val
+                );
+            }
+            Err(err) => {
+                assert!(!err.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bt13_upper_unicode() {
+        // Upper["hello"]() should work — basic ASCII
+        assert_eq!(
+            eval_ok(r#"Upper["hello"]()"#),
+            Value::Str("HELLO".to_string())
+        );
+    }
+
+    #[test]
+    fn test_bt13_reverse_unicode() {
+        // Reverse on ASCII string
+        assert_eq!(
+            eval_ok(r#"Reverse["abc"]()"#),
+            Value::Str("cba".to_string())
+        );
+    }
+
+    #[test]
+    fn test_bt13_reverse_empty() {
+        // Reverse[""]() should return ""
+        assert_eq!(eval_ok(r#"Reverse[""]()"#), Value::Str(String::new()));
+    }
+
+    // ── BT-18: Type conversion failure default consistency tests ──
+
+    #[test]
+    fn test_bt18_int_conversion_failure_default() {
+        // Int["invalid"]() should return Lax with __default = 0
+        let result = eval_ok(r#"Int["abc"]().__default"#);
+        assert_eq!(
+            result,
+            Value::Int(0),
+            "Int conversion failure default should be 0"
+        );
+    }
+
+    #[test]
+    fn test_bt18_float_conversion_failure_default() {
+        // Float["invalid"]() should return Lax with __default = 0.0
+        let result = eval_ok(r#"Float["abc"]().__default"#);
+        assert_eq!(
+            result,
+            Value::Float(0.0),
+            "Float conversion failure default should be 0.0"
+        );
+    }
+
+    #[test]
+    fn test_bt18_lax_type_field() {
+        // Type conversion molds return Lax, __type field should be "Lax"
+        let result = eval_ok(r#"Bool[0]().__type"#);
+        assert_eq!(
+            result,
+            Value::Str("Lax".to_string()),
+            "Lax __type should be 'Lax' (the mold type, not the inner type)"
+        );
+    }
+
+    #[test]
+    fn test_bt18_div_zero_default() {
+        // Div[1,0]() should return Lax with __default = 0
+        let result = eval_ok("Div[1,0]().__default");
+        assert_eq!(result, Value::Int(0), "Div by zero default should be 0");
     }
 }

@@ -1572,6 +1572,196 @@ alice <= Person(name <= "Alice", age <= 30)
         }
     }
 
+    // ── BT-1: 10-operator rule negative tests ──────────────────
+    // PHILOSOPHY.md: "演算子は10種のみ"
+    // These tests verify that invalid operators are properly rejected.
+
+    #[test]
+    fn test_bt1_caret_rejected() {
+        let (_, errors) = tokenize("x <= 1 ^ 2");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '^'")),
+            "Caret '^' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_single_ampersand_rejected() {
+        let (_, errors) = tokenize("x <= 1 & 2");
+        assert!(!errors.is_empty(), "Single '&' should produce an error");
+        assert!(
+            errors[0].message.contains("&"),
+            "Error should mention '&', got: {}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn test_bt1_tilde_rejected() {
+        let (_, errors) = tokenize("x <= ~1");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '~'")),
+            "Tilde '~' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_question_mark_rejected() {
+        let (_, errors) = tokenize("x <= y ? 1");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '?'")),
+            "Question mark '?' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_hash_rejected() {
+        let (_, errors) = tokenize("x <= #tag");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '#'")),
+            "Hash '#' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_slash_tokenized_as_slash() {
+        // `/` is tokenized at lexer level (for comments: //, /* */)
+        // but rejected at parser level as division operator.
+        // At lexer level, standalone `/` should produce a Slash token (no error).
+        let kinds = tok_kinds("x / y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Slash, Ident("y".into())],
+            "Standalone '/' should tokenize as Slash (rejected at parser level)"
+        );
+    }
+
+    #[test]
+    fn test_bt1_percent_tokenized_as_percent() {
+        // `%` is tokenized at lexer level but rejected at parser level as modulo.
+        let kinds = tok_kinds("x % y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Percent, Ident("y".into())],
+            "Standalone '%' should tokenize as Percent (rejected at parser level)"
+        );
+    }
+
+    // ── BT-1b: Operator partial match / boundary tests ───────────
+    // Verify that operator-like sequences don't produce wrong tokens.
+
+    #[test]
+    fn test_bt1_fat_arrow_eq_eq_boundary() {
+        // `=>==` should tokenize as `=>` `==`, not as some merged operator
+        let kinds = tok_kinds("x =>== y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), FatArrow, EqEq, Ident("y".into())],
+            "'=>==' should split into '=>' + '=='"
+        );
+    }
+
+    #[test]
+    fn test_bt1_lt_eq_eq_eq_gt_boundary() {
+        // `<===>`  should tokenize as `<=` `==` `>`
+        let kinds = tok_kinds("x <===> y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, EqEq, Gt, Ident("y".into())],
+            "'<===>' should split into '<=' + '==' + '>'"
+        );
+    }
+
+    #[test]
+    fn test_bt1_pipe_eq_gt_boundary() {
+        // `|=>` should tokenize as `|` `=>`, not as some combined operator
+        let kinds = tok_kinds("x |=> y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Pipe, FatArrow, Ident("y".into())],
+            "'|=>' should split into '|' + '=>'"
+        );
+    }
+
+    #[test]
+    fn test_bt1_double_gt_not_import() {
+        // `>>` (two greater-than) should NOT be tokenized as Import (`>>>`)
+        let kinds = tok_kinds("x >> y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Gt, Gt, Ident("y".into())],
+            "'>>' should be two Gt tokens, not Import"
+        );
+    }
+
+    #[test]
+    fn test_bt1_double_lt_not_export() {
+        // `<<` should NOT be tokenized as Export (`<<<`)
+        let kinds = tok_kinds("x << y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Lt, Lt, Ident("y".into())],
+            "'<<' should be two Lt tokens, not Export"
+        );
+    }
+
+    // ── BT-2: null/undefined rejection tests ───────────────────
+    // PHILOSOPHY.md I: "null/undefinedの完全排除 — 全ての型にデフォルト値を保証"
+    // These words must not be keywords or special tokens — they should be
+    // plain identifiers that will be rejected by the type checker as undefined.
+
+    #[test]
+    fn test_bt2_null_is_plain_identifier() {
+        let kinds = tok_kinds("x <= null");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("null".into())],
+            "'null' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
+    #[test]
+    fn test_bt2_undefined_is_plain_identifier() {
+        let kinds = tok_kinds("x <= undefined");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("undefined".into())],
+            "'undefined' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
+    #[test]
+    fn test_bt2_none_is_plain_identifier() {
+        let kinds = tok_kinds("x <= none");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("none".into())],
+            "'none' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
+    #[test]
+    fn test_bt2_nil_is_plain_identifier() {
+        let kinds = tok_kinds("x <= nil");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("nil".into())],
+            "'nil' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
     #[test]
     fn test_invalid_escape_in_template_reports_error() {
         let (tokens, errors) = tokenize(r#"`template \q text`"#);
@@ -1597,5 +1787,107 @@ alice <= Person(name <= "Alice", age <= 30)
                 "Template recovery keeps backslash + char"
             );
         }
+    }
+
+    // ── BT-16: Unicode boundary tests ──
+
+    #[test]
+    fn test_bidi_override_in_identifier() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) embedded in identifier should not silently pass
+        let source = "x\u{202E}y <= 1";
+        let (tokens, errors) = tokenize(source);
+        // BiDi control chars are not alphabetic/alphanumeric, so should split
+        // the identifier or cause an error token
+        let idents: Vec<&Token> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, Ident(_)))
+            .collect();
+        // The identifier should NOT be "x\u{202E}y" as a single token
+        let has_bidi_ident = idents.iter().any(|t| {
+            if let Ident(ref name) = t.kind {
+                name.contains('\u{202E}')
+            } else {
+                false
+            }
+        });
+        assert!(
+            !has_bidi_ident || !errors.is_empty(),
+            "BiDi control character U+202E should not silently appear in identifier. Tokens: {:?}, Errors: {:?}",
+            idents,
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bidi_lri_in_string_literal() {
+        // U+2066 (LEFT-TO-RIGHT ISOLATE) in string should be preserved
+        let source = "s <= \"hello\u{2066}world\"";
+        let (tokens, _errors) = tokenize(source);
+        let str_tokens: Vec<&Token> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, StringLiteral(_)))
+            .collect();
+        assert_eq!(str_tokens.len(), 1, "Should have one string literal");
+        if let StringLiteral(ref val) = str_tokens[0].kind {
+            assert!(
+                val.contains('\u{2066}'),
+                "BiDi character inside string literal should be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn test_combining_character_in_identifier() {
+        // e + U+0301 (COMBINING ACUTE ACCENT) = e followed by combining mark
+        // Combining marks are not alphabetic, so behavior depends on is_alphanumeric()
+        let source = "e\u{0301} <= 1";
+        let (tokens, _errors) = tokenize(source);
+        let idents: Vec<String> = tokens
+            .iter()
+            .filter_map(|t| {
+                if let Ident(ref name) = t.kind {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // The combining mark U+0301 should either be included in the identifier
+        // (if is_alphanumeric returns true for it) or cause a split.
+        // In Rust, char::is_alphanumeric returns false for U+0301 (Mn category),
+        // but char::is_alphabetic also returns false, so it should NOT start an ident.
+        // However, U+0301 follows 'e' which starts the ident, and is_alphanumeric is
+        // used for continuation chars. U+0301 is Mn (Nonspacing_Mark), is_alphanumeric() = false.
+        // So the identifier should be just "e", and U+0301 becomes an error/unknown token.
+        assert!(
+            idents.contains(&"e".to_string()),
+            "Identifier 'e' should be recognized, idents found: {:?}",
+            idents
+        );
+    }
+
+    #[test]
+    fn test_japanese_identifier() {
+        // Japanese characters are alphabetic and should work as identifiers
+        let source = "\u{540D}\u{524D} <= 42";
+        let kinds = tok_kinds(source);
+        assert_eq!(
+            kinds,
+            vec![Ident("\u{540D}\u{524D}".into()), LtEq, IntLiteral(42)],
+            "Japanese characters should be valid identifiers"
+        );
+    }
+
+    #[test]
+    fn test_emoji_in_identifier_rejected() {
+        // Emojis (e.g. U+1F600) are not alphabetic in Rust's char::is_alphabetic
+        // They should not form valid identifiers
+        let source = "\u{1F600} <= 1";
+        let (_tokens, errors) = tokenize(source);
+        // Emoji is not alphabetic, not a known operator, so should produce an error
+        assert!(
+            !errors.is_empty(),
+            "Emoji should not be accepted as identifier start"
+        );
     }
 }

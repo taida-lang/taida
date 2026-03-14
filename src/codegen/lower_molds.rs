@@ -252,11 +252,20 @@ impl Lowering {
                 }
                 let s = self.lower_expr(func, &type_args[0])?;
                 let idx = self.lower_expr(func, &type_args[1])?;
+                let raw = func.alloc_var();
+                func.push(IrInst::Call(
+                    raw,
+                    "taida_str_char_at".to_string(),
+                    vec![s, idx],
+                ));
+                // TF-15: CharAt returns Lax[Str] (matching interpreter)
+                let default_val = func.alloc_var();
+                func.push(IrInst::ConstStr(default_val, String::new()));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
-                    "taida_str_char_at".to_string(),
-                    vec![s, idx],
+                    "taida_lax_new".to_string(),
+                    vec![raw, default_val],
                 ));
                 Ok(result)
             }

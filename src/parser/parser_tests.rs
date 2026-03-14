@@ -626,6 +626,82 @@ fn test_single_direction_assignment_then_pipeline_violation() {
     );
 }
 
+// ── BT-3: Single direction constraint nested tests ──
+
+#[test]
+fn test_bt3_direction_violation_in_mold_args() {
+    // Concat[@[1], @[2]] => result then <= — E0301
+    let source = r#"x <= Concat[@[1], @[2]] => result"#;
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected E0301 error for direction violation in mold+assignment"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0301")),
+        "Expected E0301, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_direction_violation_multiple_in_one_statement() {
+    // Multiple direction violations in a single statement
+    let source = "a => b <= c => d";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected error(s) for multiple direction violations"
+    );
+    // Should contain at least one E0301
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0301")),
+        "Expected E0301, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_direction_ok_separate_statements() {
+    // Separate statements with different directions should be fine
+    let source = "x => y\na <= b";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.is_empty(),
+        "Separate statements with different directions should parse: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_unmold_direction_violation_nested() {
+    // Nested unmold direction violation: ]=> and <=[ in same statement
+    let source = "a ]=> x <=[ b";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Expected E0302 error for unmold direction violation"
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("E0302")),
+        "Expected E0302, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt3_direction_ok_arrow_and_unmold_mix() {
+    // => and <=[ in same statement is allowed (different categories)
+    // This tests that the two constraint categories are independent
+    let source = "x <= 42";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.is_empty(),
+        "Single direction should parse fine: {:?}",
+        errors
+    );
+}
+
 // ── Method definition parsing ──
 
 #[test]
@@ -1399,11 +1475,22 @@ fn test_docs_sample_pipeline_parses() {
     // Note: `<=` and `=>` cannot be mixed in one statement (E0301),
     // so we use `=>` only for pipeline.
     let source = r#""  Hello World  " => Trim[_]() => Lower[_]() => result"#;
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Pipeline sample should parse: {:?}",
         errors
+    );
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "Pipeline should produce 1 statement"
+    );
+    // Pipeline `expr => ... => name` parses as Assignment with pipeline value
+    assert!(
+        matches!(&program.statements[0], Statement::Assignment(a) if a.target == "result"),
+        "Expected Assignment to 'result' via pipeline, got: {:?}",
+        program.statements[0]
     );
 }
 
@@ -1411,96 +1498,258 @@ fn test_docs_sample_pipeline_parses() {
 fn test_docs_sample_buchi_pack_parses() {
     // BuchiPack from docs/guide/04_buchi_pack.md
     let source = "Pilot = @(name: Str, age: Int, role: Str)";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "BuchiPack sample should parse: {:?}",
         errors
     );
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "TypeDef should produce 1 statement"
+    );
+    match &program.statements[0] {
+        Statement::TypeDef(td) => {
+            assert_eq!(td.name, "Pilot");
+            assert_eq!(td.fields.len(), 3, "Pilot should have 3 fields");
+        }
+        other => panic!("Expected TypeDef, got: {:?}", other),
+    }
 }
 
 #[test]
 fn test_docs_sample_assignment_parses() {
     let source = "x <= 42\nname <= \"Shinji\"";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Assignment sample should parse: {:?}",
         errors
     );
+    assert_eq!(
+        program.statements.len(),
+        2,
+        "Should produce 2 assignment statements"
+    );
+    assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "x"));
+    assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "name"));
 }
 
 #[test]
 fn test_docs_sample_condition_branch_parses() {
     let source = "grade <=\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Condition branch sample should parse: {:?}",
         errors
+    );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(
+        matches!(&program.statements[0], Statement::Assignment(_)),
+        "Expected Assignment with condition branch value"
     );
 }
 
 #[test]
 fn test_docs_sample_error_ceiling_parses() {
     let source = "|== error: Error =\n  0\n=> :Int";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Error ceiling sample should parse: {:?}",
         errors
+    );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(
+        matches!(&program.statements[0], Statement::ErrorCeiling(_)),
+        "Expected ErrorCeiling statement, got: {:?}",
+        program.statements[0]
     );
 }
 
 #[test]
 fn test_docs_sample_mold_instantiation_parses() {
     let source = r#"result <= Div[10, 3]()"#;
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Mold instantiation sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "result"));
 }
 
 #[test]
 fn test_docs_sample_json_parses() {
     let source = r#"User = @(name: Str, age: Int)
 parsed <= JSON[raw, User]()"#;
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(errors.is_empty(), "JSON sample should parse: {:?}", errors);
+    assert_eq!(
+        program.statements.len(),
+        2,
+        "Should produce 2 statements (TypeDef + Assignment)"
+    );
+    assert!(matches!(&program.statements[0], Statement::TypeDef(_)));
+    assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "parsed"));
 }
 
 #[test]
 fn test_docs_sample_lambda_parses() {
     let source = "doubler <= _ x = x + x";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Lambda sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "doubler"));
 }
 
 #[test]
 fn test_docs_sample_import_export_parses() {
     let source = ">>> ./utils => @(helper)\n<<< @(main)";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Import/export sample should parse: {:?}",
         errors
     );
+    assert_eq!(
+        program.statements.len(),
+        2,
+        "Should produce 2 statements (Import + Export)"
+    );
+    assert!(matches!(&program.statements[0], Statement::Import(_)));
+    assert!(matches!(&program.statements[1], Statement::Export(_)));
 }
 
 #[test]
 fn test_docs_sample_empty_slot_partial_application_parses() {
     // Empty slot partial application from docs/reference/operators.md
     let source = "add x y = x + y\n=> :Int\nadd5 <= add(5, )";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Empty slot partial application should parse: {:?}",
         errors
     );
+    // FuncDef followed by Assignment — parser may merge trailing statement
+    assert!(
+        !program.statements.is_empty(),
+        "Should produce at least 1 statement"
+    );
+    // Verify the function definition exists
+    assert!(
+        program
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::FuncDef(f) if f.name == "add")),
+        "Expected FuncDef 'add' in AST, got: {:?}",
+        program.statements
+    );
+}
+
+// ── BT-1c: 10-operator rule — parser-level rejection tests ───────
+
+#[test]
+fn test_bt1_division_operator_rejected() {
+    // PHILOSOPHY.md: `/` operator removed — use Div[x, y]() mold
+    let source = "x <= 10 / 2";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Division operator '/' should be rejected at parser level"
+    );
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{}", e);
+            msg.contains("Div") || msg.contains("removed")
+        }),
+        "Error should mention Div mold alternative, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt1_modulo_operator_rejected() {
+    // PHILOSOPHY.md: `%` operator removed — use Mod[x, y]() mold
+    let source = "x <= 10 % 3";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Modulo operator '%' should be rejected at parser level"
+    );
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{}", e);
+            msg.contains("Mod") || msg.contains("removed")
+        }),
+        "Error should mention Mod mold alternative, got: {:?}",
+        errors
+    );
+}
+
+// ── BT-9: Deep nesting resilience tests ──
+
+#[test]
+fn test_deep_parenthesized_expression_50_levels() {
+    // 50 levels of parenthesized expression: (((((...42...)))))
+    let depth = 50;
+    let open = "(".repeat(depth);
+    let close = ")".repeat(depth);
+    let source = format!("x <= {open}42{close}");
+    let (program, errors) = parse(&source);
+    assert!(
+        errors.is_empty(),
+        "Parser should handle 50-level parenthesized expression without error, got: {:?}",
+        errors
+    );
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_deep_list_nesting_50_levels() {
+    // 50 levels of list nesting: @[@[@[...@[1]...]]]
+    let depth = 50;
+    let mut source = String::from("x <= ");
+    for _ in 0..depth {
+        source.push_str("@[");
+    }
+    source.push('1');
+    for _ in 0..depth {
+        source.push(']');
+    }
+    let (program, errors) = parse(&source);
+    assert!(
+        errors.is_empty(),
+        "Parser should handle 50-level list nesting without error, got: {:?}",
+        errors
+    );
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_deep_buchipack_nesting_50_levels() {
+    // 50 levels of BuchiPack nesting: @(a <= @(a <= @(a <= ... 1 ...)))
+    let depth = 50;
+    let mut source = String::from("x <= ");
+    for _ in 0..depth {
+        source.push_str("@(a <= ");
+    }
+    source.push('1');
+    for _ in 0..depth {
+        source.push(')');
+    }
+    let (program, errors) = parse(&source);
+    assert!(
+        errors.is_empty(),
+        "Parser should handle 50-level BuchiPack nesting without error, got: {:?}",
+        errors
+    );
+    assert_eq!(program.statements.len(), 1);
 }

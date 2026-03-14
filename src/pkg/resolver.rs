@@ -450,7 +450,11 @@ mod tests {
 
         let result = resolve_deps(&manifest);
         assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0].contains("missing"));
+        assert!(
+            result.errors[0].contains("missing"),
+            "Error should mention 'missing' dep name, got: {}",
+            result.errors[0]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -956,5 +960,247 @@ deps <= @(
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── BT-10: Package version boundary tests ──
+
+    /// RAII guard for test directories — ensures cleanup even on panic.
+    struct TestDir(PathBuf);
+    impl TestDir {
+        fn new(path: &str) -> Self {
+            let p = PathBuf::from(path);
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_bt10_version_zero() {
+        // Version "0.0.0" should be accepted
+        let dir = TestDir::new("/tmp/taida_test_bt10_version_zero");
+        let dep_dir = dir.path().join("dep_lib");
+        fs::create_dir_all(&dep_dir).unwrap();
+        fs::write(dep_dir.join("lib.td"), "// lib").unwrap();
+
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.0.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: {
+                let mut deps = BTreeMap::new();
+                deps.insert(
+                    "mylib".to_string(),
+                    Dependency::Path {
+                        path: "./dep_lib".to_string(),
+                    },
+                );
+                deps
+            },
+            root_dir: dir.path().clone(),
+        };
+
+        let result = resolve_deps(&manifest);
+        assert!(
+            result.errors.is_empty(),
+            "Version 0.0.0 should be accepted: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_bt10_self_dependency() {
+        // A package depending on itself should not cause infinite loop
+        let dir = TestDir::new("/tmp/taida_test_bt10_self_dep");
+        fs::write(dir.path().join("main.td"), "// self").unwrap();
+        fs::write(
+            dir.path().join("packages.tdm"),
+            r#"
+name <= "self_pkg"
+version <= "0.1.0"
+deps <= @(
+  self_pkg <= @(path <= ".")
+)
+"#,
+        )
+        .unwrap();
+
+        let manifest = Manifest {
+            name: "self_pkg".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: {
+                let mut deps = BTreeMap::new();
+                deps.insert(
+                    "self_pkg".to_string(),
+                    Dependency::Path {
+                        path: ".".to_string(),
+                    },
+                );
+                deps
+            },
+            root_dir: dir.path().clone(),
+        };
+
+        // Should either succeed (resolving to itself) or produce an error,
+        // but must not hang or panic.
+        let result = resolve_deps(&manifest);
+        assert!(
+            result.resolved.len() <= 1,
+            "Self-dependency should resolve at most once"
+        );
+    }
+
+    #[test]
+    fn test_bt10_diamond_dependency() {
+        // Diamond: root -> A -> shared, root -> B -> shared
+        // Should resolve "shared" exactly once
+        let dir = TestDir::new("/tmp/taida_test_bt10_diamond");
+        let dep_a = dir.path().join("dep_a");
+        let dep_b = dir.path().join("dep_b");
+        let shared = dir.path().join("shared");
+        fs::create_dir_all(&dep_a).unwrap();
+        fs::create_dir_all(&dep_b).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(dep_a.join("main.td"), "// dep_a").unwrap();
+        fs::write(dep_b.join("main.td"), "// dep_b").unwrap();
+        fs::write(shared.join("main.td"), "// shared").unwrap();
+
+        fs::write(
+            dep_a.join("packages.tdm"),
+            r#"
+name <= "dep_a"
+deps <= @(
+  shared <= @(path <= "../shared")
+)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dep_b.join("packages.tdm"),
+            r#"
+name <= "dep_b"
+deps <= @(
+  shared <= @(path <= "../shared")
+)
+"#,
+        )
+        .unwrap();
+
+        let manifest = Manifest {
+            name: "root".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: {
+                let mut deps = BTreeMap::new();
+                deps.insert(
+                    "dep_a".to_string(),
+                    Dependency::Path {
+                        path: "./dep_a".to_string(),
+                    },
+                );
+                deps.insert(
+                    "dep_b".to_string(),
+                    Dependency::Path {
+                        path: "./dep_b".to_string(),
+                    },
+                );
+                deps
+            },
+            root_dir: dir.path().clone(),
+        };
+
+        let result = resolve_deps(&manifest);
+        assert!(
+            result.errors.is_empty(),
+            "Diamond dependency should resolve without errors: {:?}",
+            result.errors
+        );
+        assert!(
+            result.resolved.contains_key("dep_a"),
+            "dep_a should be resolved"
+        );
+        assert!(
+            result.resolved.contains_key("dep_b"),
+            "dep_b should be resolved"
+        );
+        assert!(
+            result.resolved.contains_key("shared"),
+            "shared should be resolved"
+        );
+    }
+
+    #[test]
+    fn test_bt10_circular_dependency_a_b_a() {
+        // Circular: A -> B -> A
+        // Should not loop forever. Should either resolve or error.
+        let dir = TestDir::new("/tmp/taida_test_bt10_circular");
+        let dep_a = dir.path().join("dep_a");
+        let dep_b = dir.path().join("dep_b");
+        fs::create_dir_all(&dep_a).unwrap();
+        fs::create_dir_all(&dep_b).unwrap();
+        fs::write(dep_a.join("main.td"), "// dep_a").unwrap();
+        fs::write(dep_b.join("main.td"), "// dep_b").unwrap();
+
+        fs::write(
+            dep_a.join("packages.tdm"),
+            r#"
+name <= "dep_a"
+deps <= @(
+  dep_b <= @(path <= "../dep_b")
+)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dep_b.join("packages.tdm"),
+            r#"
+name <= "dep_b"
+deps <= @(
+  dep_a <= @(path <= "../dep_a")
+)
+"#,
+        )
+        .unwrap();
+
+        let manifest = Manifest {
+            name: "root".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: {
+                let mut deps = BTreeMap::new();
+                deps.insert(
+                    "dep_a".to_string(),
+                    Dependency::Path {
+                        path: "./dep_a".to_string(),
+                    },
+                );
+                deps
+            },
+            root_dir: dir.path().clone(),
+        };
+
+        // Must terminate (no infinite loop), regardless of whether it errors
+        let result = resolve_deps(&manifest);
+        assert!(
+            result.resolved.contains_key("dep_a"),
+            "dep_a should be resolved"
+        );
+        assert!(
+            result.resolved.contains_key("dep_b"),
+            "dep_b should be resolved"
+        );
     }
 }

@@ -42,37 +42,25 @@ fn wasmtime_bin() -> Option<PathBuf> {
     None
 }
 
-/// Run a .td file with the native backend and return its stdout.
-fn run_native(td_path: &Path) -> Option<String> {
-    let stem = td_path.file_stem()?.to_string_lossy().to_string();
-    let native_path = std::env::temp_dir().join(format!("taida_native_test_{}", stem));
-
-    let compile_output = Command::new(taida_bin())
-        .arg("build")
-        .arg("--target")
-        .arg("native")
-        .arg(td_path)
-        .arg("-o")
-        .arg(&native_path)
-        .output()
-        .ok()?;
-
-    if !compile_output.status.success() {
-        return None;
+/// AT-7: Require wasmtime or skip with clear visibility.
+///
+/// In CI (when `CI` env var is set), panics if wasmtime is not found,
+/// ensuring wasm tests are never silently skipped in CI.
+/// Locally, returns None so tests are skipped with an eprintln message.
+fn require_wasmtime() -> Option<PathBuf> {
+    match wasmtime_bin() {
+        Some(p) => Some(p),
+        None => {
+            if std::env::var("CI").is_ok() {
+                panic!(
+                    "AT-7: wasmtime not found in CI environment. \
+                     Install wasmtime in ci.yml or wasm-min runtime tests are never verified."
+                );
+            }
+            eprintln!("SKIP: wasmtime not found, skipping wasm-min runtime test");
+            None
+        }
     }
-
-    let output = Command::new(&native_path).output().ok()?;
-    let _ = std::fs::remove_file(&native_path);
-
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string(),
-    )
 }
 
 /// Run a .td file with the interpreter and return its stdout.
@@ -139,12 +127,8 @@ fn compile_and_run_wasm(td_path: &Path, wasmtime: &Path) -> Option<String> {
 
 #[test]
 fn wasm_min_hello() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
@@ -156,12 +140,8 @@ fn wasm_min_hello() {
 
 #[test]
 fn wasm_min_pi_approx() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_pi_approx.td");
@@ -277,12 +257,8 @@ fn wasm_min_size_gate_wado_comparison() {
 /// W-4: Basic BuchiPack support — create, field access, stdout.
 #[test]
 fn wasm_min_pack_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -300,12 +276,8 @@ fn wasm_min_pack_basic() {
 /// W-4: Nested BuchiPack — inner pack accessed through outer pack fields.
 #[test]
 fn wasm_min_pack_nested() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -382,12 +354,8 @@ fn wasm_min_closure_accepted() {
 /// Verifies that globals do not collide (F-4 regression).
 #[test]
 fn wasm_min_multiple_globals() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -434,12 +402,8 @@ fn wasm_min_release_gate_positive() {
 /// W-3: Float literals and debug(Float) should work.
 #[test]
 fn wasm_min_float_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -457,38 +421,30 @@ fn wasm_min_float_basic() {
 /// W-3: Float arithmetic (add, sub, mul) should work.
 #[test]
 fn wasm_min_float_arith() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/float_arith.td");
-    // Float formatting differs between interpreter and compiled backends
-    // (e.g., "5.0" vs "5", "5.840400000000001" vs "5.8404").
-    // Compare against native backend output instead.
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    // Float formatting may differ between interpreter and compiled backends;
+    // if this test fails, it indicates a formatting parity issue to be tracked.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "float_arith: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "float_arith: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
 /// W-3: String concatenation should work (requires bump allocator).
 #[test]
 fn wasm_min_str_ops() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/str_ops.td");
@@ -562,38 +518,30 @@ fn wasm_min_release_gate_negative() {
 // ---------------------------------------------------------------------------
 
 /// W-3f F-1: debug(Float) should handle small non-zero values (scientific notation).
-/// Compare against native backend (both use %g-equivalent formatting).
+/// AT-8: Compare against interpreter (reference implementation).
 #[test]
 fn wasm_min_float_small_values() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/float_small.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "float_small: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "float_small: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
 /// W-3f F-2: String.length() should work via taida_polymorphic_length.
 #[test]
 fn wasm_min_str_length() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -611,12 +559,8 @@ fn wasm_min_str_length() {
 /// W-3f F-2: Int.toString() should work via taida_polymorphic_to_string.
 #[test]
 fn wasm_min_int_to_string() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -634,23 +578,20 @@ fn wasm_min_int_to_string() {
 /// W-3f F-2: Int["str"]() ]=> should work via taida_int_mold_str + taida_generic_unmold.
 #[test]
 fn wasm_min_int_mold_str() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/int_mold_str.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "int_mold_str: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "int_mold_str: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
@@ -661,12 +602,8 @@ fn wasm_min_int_mold_str() {
 /// W-4: Basic list support — create, push, length.
 #[test]
 fn wasm_min_list_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -688,46 +625,40 @@ fn wasm_min_list_basic() {
 /// W-4f F-2: HashMap basic operations — new, set, has, size, keys, values, remove, merge, entries.
 #[test]
 fn wasm_min_hashmap_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/hashmap_basic.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "hashmap_basic: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "hashmap_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
 /// W-4f F-2: Set basic operations — setOf, size, add, has, remove, union, intersect, diff, toList.
 #[test]
 fn wasm_min_set_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/set_basic.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "set_basic: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "set_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
@@ -738,12 +669,8 @@ fn wasm_min_set_basic() {
 /// W-5: Basic closure — function returning a function with captured variable.
 #[test]
 fn wasm_min_closure_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -761,12 +688,8 @@ fn wasm_min_closure_basic() {
 /// W-5: Error ceiling — error handling with |== operator.
 #[test]
 fn wasm_min_error_ceiling() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -784,12 +707,8 @@ fn wasm_min_error_ceiling() {
 /// W-5: Lax[T] — Div/Mod molds return Lax, ]=> unmolds.
 #[test]
 fn wasm_min_lax_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
@@ -811,92 +730,80 @@ fn wasm_min_lax_basic() {
 /// W-5f F-2: Lax.toString() — "Lax(42)", "Lax(default: 0)", "Lax(3)".
 #[test]
 fn wasm_min_lax_tostring() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/lax_tostring.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "lax_tostring: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "lax_tostring: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
 /// W-5f F-1/F-3: Result basic — create, unmold, toString.
 #[test]
 fn wasm_min_result_basic() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/result_basic.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "result_basic: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "result_basic: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
 /// W-5g F-1: Result with predicate — predicate-fail should be error, predicate-pass should succeed.
 #[test]
 fn wasm_min_result_predicate() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/result_predicate.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "result_predicate: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "result_predicate: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
 /// W-5g F-2: Str->Float/Bool mold failure should return empty Lax (not success Lax(0)).
 #[test]
 fn wasm_min_mold_fail() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min tests");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let td_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm_min/mold_fail.td");
-    let native_output = run_native(&td_path).expect("native should succeed");
+    // AT-8: Compare against interpreter (reference implementation), not native.
+    let interp = run_interpreter(&td_path).expect("interpreter should succeed");
     let wasm = compile_and_run_wasm(&td_path, &wasmtime).expect("wasm-min should succeed");
 
     assert_eq!(
-        native_output, wasm,
-        "mold_fail: wasm-min output should match native (expected '{}', got '{}')",
-        native_output, wasm
+        interp, wasm,
+        "mold_fail: wasm-min output should match interpreter (expected '{}', got '{}')",
+        interp, wasm
     );
 }
 
@@ -905,16 +812,13 @@ fn wasm_min_mold_fail() {
 // ---------------------------------------------------------------------------
 
 /// W-6: Comprehensive parity test.
+/// AT-8: Compare against interpreter (reference implementation), not native.
 /// For every .td file in examples/ that successfully compiles with wasm-min,
-/// the wasm output must match the native backend output exactly.
+/// the wasm output must match the interpreter output exactly.
 #[test]
 fn wasm_min_parity_all_examples() {
-    let wasmtime = match wasmtime_bin() {
-        Some(p) => p,
-        None => {
-            eprintln!("wasmtime not found, skipping wasm-min parity test");
-            return;
-        }
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
     };
 
     let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
@@ -929,18 +833,18 @@ fn wasm_min_parity_all_examples() {
     let mut parity_ok = Vec::new();
     let mut parity_fail = Vec::new();
     let mut compile_rejected = Vec::new();
-    let mut native_fail = Vec::new();
+    let mut interp_fail = Vec::new();
 
     for td_path in &td_files {
         let stem = td_path.file_stem().unwrap().to_string_lossy().to_string();
 
-        // Try native build first
-        let native_output = run_native(td_path);
-        if native_output.is_none() {
-            native_fail.push(stem.clone());
+        // Try interpreter first (reference implementation)
+        let interp_output = run_interpreter(td_path);
+        if interp_output.is_none() {
+            interp_fail.push(stem.clone());
             continue;
         }
-        let native_out = native_output.unwrap();
+        let interp_out = interp_output.unwrap();
 
         // Try wasm-min compile + run
         let wasm_output = compile_and_run_wasm(td_path, &wasmtime);
@@ -950,27 +854,27 @@ fn wasm_min_parity_all_examples() {
         }
         let wasm_out = wasm_output.unwrap();
 
-        if native_out == wasm_out {
+        if interp_out == wasm_out {
             parity_ok.push(stem.clone());
         } else {
-            parity_fail.push((stem.clone(), native_out, wasm_out));
+            parity_fail.push((stem.clone(), interp_out, wasm_out));
         }
     }
 
     eprintln!(
-        "W-6 Parity: {} OK, {} rejected, {} native-fail",
+        "W-6 Parity: {} OK, {} rejected, {} interp-fail",
         parity_ok.len(),
         compile_rejected.len(),
-        native_fail.len()
+        interp_fail.len()
     );
 
     if !parity_fail.is_empty() {
         let mut msg = format!("W-6 PARITY FAILED for {} example(s):\n", parity_fail.len());
-        for (stem, native, wasm) in &parity_fail {
+        for (stem, interp, wasm) in &parity_fail {
             msg.push_str(&format!(
-                "\n  {}: native='{}' vs wasm='{}'\n",
+                "\n  {}: interp='{}' vs wasm='{}'\n",
                 stem,
-                native.chars().take(100).collect::<String>(),
+                interp.chars().take(100).collect::<String>(),
                 wasm.chars().take(100).collect::<String>()
             ));
         }

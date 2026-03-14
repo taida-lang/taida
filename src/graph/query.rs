@@ -775,4 +775,140 @@ safe input =
             _ => panic!("Expected Nodes result"),
         }
     }
+
+    // ── BT-17: Graph cycle detection tests ──
+
+    fn make_node(id: &str, label: &str) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            kind: NodeKind::Variable,
+            label: label.to_string(),
+            location: Location {
+                file: "test.td".to_string(),
+                line: 1,
+                column: 1,
+            },
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_edge(source: &str, target: &str) -> GraphEdge {
+        GraphEdge {
+            source: source.to_string(),
+            target: target.to_string(),
+            kind: EdgeKind::PipeForward,
+            label: "".to_string(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_graph(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> Graph {
+        Graph {
+            view: GraphView::Dataflow,
+            nodes,
+            edges,
+            source_files: vec!["test.td".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_find_cycles_self_reference() {
+        // A -> A (self-loop)
+        let graph = make_graph(vec![make_node("a", "A")], vec![make_edge("a", "a")]);
+        let result = find_cycles(&graph);
+        match result {
+            QueryResult::Cycles(cycles) => {
+                assert!(
+                    !cycles.is_empty(),
+                    "Self-referencing node should produce a cycle"
+                );
+                // The cycle should contain "A"
+                assert!(
+                    cycles.iter().any(|c| c.contains(&"A".to_string())),
+                    "Cycle should include node A, got: {:?}",
+                    cycles
+                );
+            }
+            _ => panic!("Expected Cycles result"),
+        }
+    }
+
+    #[test]
+    fn test_find_cycles_two_node_cycle() {
+        // A -> B -> A
+        let graph = make_graph(
+            vec![make_node("a", "A"), make_node("b", "B")],
+            vec![make_edge("a", "b"), make_edge("b", "a")],
+        );
+        let result = find_cycles(&graph);
+        match result {
+            QueryResult::Cycles(cycles) => {
+                assert!(
+                    !cycles.is_empty(),
+                    "Two-node cycle (A->B->A) should be detected"
+                );
+            }
+            _ => panic!("Expected Cycles result"),
+        }
+    }
+
+    #[test]
+    fn test_find_cycles_three_node_cycle() {
+        // A -> B -> C -> A
+        let graph = make_graph(
+            vec![
+                make_node("a", "A"),
+                make_node("b", "B"),
+                make_node("c", "C"),
+            ],
+            vec![
+                make_edge("a", "b"),
+                make_edge("b", "c"),
+                make_edge("c", "a"),
+            ],
+        );
+        let result = find_cycles(&graph);
+        match result {
+            QueryResult::Cycles(cycles) => {
+                assert!(
+                    !cycles.is_empty(),
+                    "Three-node cycle (A->B->C->A) should be detected"
+                );
+                // Cycle should include all three nodes
+                let all_labels: Vec<String> = cycles.iter().flatten().cloned().collect();
+                assert!(
+                    all_labels.contains(&"A".to_string())
+                        && all_labels.contains(&"B".to_string())
+                        && all_labels.contains(&"C".to_string()),
+                    "Cycle should include A, B, C, got: {:?}",
+                    cycles
+                );
+            }
+            _ => panic!("Expected Cycles result"),
+        }
+    }
+
+    #[test]
+    fn test_find_cycles_acyclic_graph() {
+        // A -> B -> C (no cycle)
+        let graph = make_graph(
+            vec![
+                make_node("a", "A"),
+                make_node("b", "B"),
+                make_node("c", "C"),
+            ],
+            vec![make_edge("a", "b"), make_edge("b", "c")],
+        );
+        let result = find_cycles(&graph);
+        match result {
+            QueryResult::Cycles(cycles) => {
+                assert!(
+                    cycles.is_empty(),
+                    "Acyclic graph should have no cycles, got: {:?}",
+                    cycles
+                );
+            }
+            _ => panic!("Expected Cycles result"),
+        }
+    }
 }

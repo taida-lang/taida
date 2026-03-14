@@ -179,7 +179,7 @@ impl Interpreter {
     ) -> Result<Signal, RuntimeError> {
         match op {
             BinOp::Add => match (left, right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Signal::Value(Value::Int(a + b))),
+                (Value::Int(a), Value::Int(b)) => Ok(Signal::Value(Value::Int(a.wrapping_add(*b)))),
                 (Value::Float(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(a + b))),
                 (Value::Int(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(*a as f64 + b))),
                 (Value::Float(a), Value::Int(b)) => Ok(Signal::Value(Value::Float(a + *b as f64))),
@@ -192,7 +192,7 @@ impl Interpreter {
                 }),
             },
             BinOp::Sub => match (left, right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Signal::Value(Value::Int(a - b))),
+                (Value::Int(a), Value::Int(b)) => Ok(Signal::Value(Value::Int(a.wrapping_sub(*b)))),
                 (Value::Float(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(a - b))),
                 (Value::Int(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(*a as f64 - b))),
                 (Value::Float(a), Value::Int(b)) => Ok(Signal::Value(Value::Float(a - *b as f64))),
@@ -201,7 +201,7 @@ impl Interpreter {
                 }),
             },
             BinOp::Mul => match (left, right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Signal::Value(Value::Int(a * b))),
+                (Value::Int(a), Value::Int(b)) => Ok(Signal::Value(Value::Int(a.wrapping_mul(*b)))),
                 (Value::Float(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(a * b))),
                 (Value::Int(a), Value::Float(b)) => Ok(Signal::Value(Value::Float(*a as f64 * b))),
                 (Value::Float(a), Value::Int(b)) => Ok(Signal::Value(Value::Float(a * *b as f64))),

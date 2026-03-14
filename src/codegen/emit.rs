@@ -1314,6 +1314,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Ptr],
         },
+        // typeof prelude
+        "taida_typeof" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
         // time prelude
         "taida_time_now_ms" => RuntimeAbi {
             params: &[],

@@ -272,6 +272,8 @@ static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
+static taida_val taida_throw_to_display_string(taida_val throw_val);
+taida_val taida_typeof(taida_val val, taida_val tag);
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle);
@@ -679,7 +681,21 @@ static void taida_retain_and_tag_field(taida_val pack, taida_val field_idx, taid
     }
 }
 
+// TF-15: Register Lax internal field names so display_string can render them
+static void taida_register_lax_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue");
+    taida_register_field_name((taida_val)HASH___VALUE, (taida_val)"__value");
+    taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
+    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+    // Register hasValue as Bool type for correct display (true/false instead of 0/1)
+    taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue", 4);
+}
+
 taida_val taida_lax_new(taida_val value, taida_val default_value) {
+    taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);  // hasValue = true
@@ -699,6 +715,7 @@ taida_val taida_lax_new(taida_val value, taida_val default_value) {
 }
 
 taida_val taida_lax_empty(taida_val default_value) {
+    taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);  // hasValue = false
@@ -4217,8 +4234,22 @@ taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
         return result;  // Success: return as-is
     }
     taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
-    taida_val new_error = taida_invoke_callback1(fn_ptr, throw_val);
-    return taida_result_create(0, new_error, 0);
+    // Extract the error message string to pass to the mapping function
+    // (matching interpreter: passes display string, not the Error BuchiPack)
+    taida_val err_display = taida_throw_to_display_string(throw_val);
+    taida_val mapped_str = taida_invoke_callback1(fn_ptr, err_display);
+    // Wrap the mapped result back into an Error BuchiPack
+    const char *new_msg = (const char*)mapped_str;
+    size_t sl = 0;
+    if (taida_read_cstr_len_safe(new_msg, 65536, &sl)) {
+        taida_val new_error = taida_make_error("ResultError", new_msg);
+        taida_str_release(mapped_str);
+        taida_str_release(err_display);
+        return taida_result_create(0, new_error, 0);
+    }
+    // Fallback: use mapped value as-is
+    taida_str_release(err_display);
+    return taida_result_create(0, mapped_str, 0);
 }
 
 // Result.getOrThrow() — if success return __value, otherwise throw
@@ -4235,7 +4266,35 @@ taida_val taida_result_get_or_throw(taida_val result) {
     return taida_throw(error);
 }
 
-// Result.toString() — "Result(value)" or "Result(throw <= message)"
+// Result.toString() — "Result(value)" or "Result(throw <= ...)"
+// Helper: render a throw value for display.
+// TF-16: BuchiPack errors — extract the "message" field value
+// (matching interpreter: shows just the message string, not the full pack structure).
+static taida_val taida_throw_to_display_string(taida_val throw_val) {
+    if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
+    // If it's a BuchiPack (Error TypeDef), extract the "message" field
+    if (taida_is_buchi_pack(throw_val)) {
+        if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
+            taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
+            if (msg != 0) {
+                size_t sl = 0;
+                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl)) {
+                    return (taida_val)taida_str_new_copy((const char*)msg);
+                }
+            }
+        }
+        // Fallback: render full pack structure for non-message packs
+        return taida_value_to_display_string(throw_val);
+    }
+    // String error message
+    const char *s = (const char*)throw_val;
+    size_t sl = 0;
+    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+        return (taida_val)taida_str_new_copy(s);
+    }
+    return taida_value_to_display_string(throw_val);
+}
+
 taida_val taida_result_to_string(taida_val result) {
     if (!taida_result_is_error_check(result)) {
         taida_val value = taida_pack_get_idx(result, 0);  // __value
@@ -4252,7 +4311,7 @@ taida_val taida_result_to_string(taida_val result) {
     if (throw_val == 0) {
         return (taida_val)taida_str_new_copy("Result(throw <= error)");
     }
-    taida_val err_disp = taida_value_to_display_string(throw_val);
+    taida_val err_disp = taida_throw_to_display_string(throw_val);
     const char *err_str = (const char*)err_disp;
     size_t elen = strlen(err_str);
     size_t need = elen + 24;
@@ -4545,6 +4604,55 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     return result;
 }
 
+// TF-15: Pack to display string with ALL fields (including __ internal fields).
+// Matches interpreter's to_display_string() for BuchiPack which shows all fields.
+static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    taida_val fc = pack[1];
+    size_t cap = 128;
+    size_t len = 0;
+    char *buf = (char*)TAIDA_MALLOC(cap, "pack_to_display_string_full");
+    buf[0] = '\0';
+    // Append "@("
+    { const char *s = "@("; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
+    int count = 0;
+    for (taida_val i = 0; i < fc; i++) {
+        taida_val field_hash = pack[2 + i * 3];
+        taida_val field_val = pack[2 + i * 3 + 2];
+        const char *fname = taida_lookup_field_name(field_hash);
+        if (!fname) continue;
+        // NOTE: Unlike taida_pack_to_display_string, we do NOT skip __ fields
+        if (count > 0) {
+            const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
+        }
+        // Append "fieldname <= "
+        size_t nlen = strlen(fname);
+        while (len + nlen + 5 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+        memcpy(buf + len, fname, nlen); len += nlen;
+        memcpy(buf + len, " <= ", 4); len += 4;
+        buf[len] = '\0';
+        // Check if field is Bool via registry
+        int ftype = taida_lookup_field_type(field_hash);
+        if (ftype == 4) {
+            const char *bv = field_val ? "true" : "false";
+            size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
+        } else {
+            taida_val val_str = taida_value_to_debug_string(field_val);
+            const char *vs = (const char*)val_str;
+            if (vs) {
+                size_t sl = strlen(vs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, vs, sl); len += sl; buf[len] = '\0';
+            }
+            taida_str_release(val_str);
+        }
+        count++;
+    }
+    while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+    buf[len++] = ')'; buf[len] = '\0';
+    taida_val result = (taida_val)taida_str_new_copy(buf);
+    free(buf);
+    return result;
+}
+
 // Convert any Taida value to its display string (like interpreter's to_display_string)
 static taida_val taida_value_to_display_string(taida_val val) {
     if (val == 0) {
@@ -4650,6 +4758,58 @@ taida_val taida_polymorphic_is_empty(taida_val obj) {
 // Polymorphic .toString() — works on Int, Float, Bool, Result, Lax, HashMap, Set, List, BuchiPack
 taida_val taida_polymorphic_to_string(taida_val obj) {
     return taida_value_to_display_string(obj);
+}
+
+// TF-15: stdout display — renders BuchiPacks with ALL fields (including __ internal fields)
+// matching the interpreter's to_display_string() behavior.
+// .toString() methods use taida_polymorphic_to_string which produces Lax(...)/Result(...) forms.
+taida_val taida_stdout_display_string(taida_val obj) {
+    if (obj == 0) return (taida_val)taida_str_new_copy("0");
+    if (taida_is_buchi_pack(obj)) {
+        return taida_pack_to_display_string_full(obj);
+    }
+    return taida_value_to_display_string(obj);
+}
+
+// typeof(value, tag) — returns type name as a string.
+// tag is a compile-time hint: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure.
+// For heap objects the tag is ignored and runtime detection is used.
+taida_val taida_typeof(taida_val val, taida_val tag) {
+    // For non-zero heap pointers, detect at runtime via magic headers
+    if (val != 0 && val >= 4096) {
+        if (taida_is_hashmap(val)) return (taida_val)taida_str_new_copy("HashMap");
+        if (taida_is_set(val)) return (taida_val)taida_str_new_copy("Set");
+        if (taida_is_async(val)) return (taida_val)taida_str_new_copy("Async");
+        if (taida_is_list(val)) return (taida_val)taida_str_new_copy("List");
+        if (taida_is_bytes(val)) return (taida_val)taida_str_new_copy("Bytes");
+        if (taida_is_buchi_pack(val)) {
+            int fc = taida_monadic_field_count(val);
+            if (fc == 3) return (taida_val)taida_str_new_copy("Result");
+            if (fc == 4) {
+                int gtype = taida_detect_gorillax_type(val);
+                if (gtype == 1) return (taida_val)taida_str_new_copy("Gorillax");
+                if (gtype == 2) return (taida_val)taida_str_new_copy("RelaxedGorillax");
+                return (taida_val)taida_str_new_copy("Lax");
+            }
+            return (taida_val)taida_str_new_copy("BuchiPack");
+        }
+        // Check if it's a string pointer
+        const char *s = (const char*)val;
+        size_t sl = 0;
+        if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+            return (taida_val)taida_str_new_copy("Str");
+        }
+    }
+    // For scalars, use the compile-time tag
+    switch (tag) {
+        case 1: return (taida_val)taida_str_new_copy("Float");
+        case 2: return (taida_val)taida_str_new_copy("Bool");
+        case 3: return (taida_val)taida_str_new_copy("Str");
+        case 4: return (taida_val)taida_str_new_copy("BuchiPack");
+        case 5: return (taida_val)taida_str_new_copy("List");
+        case 6: return (taida_val)taida_str_new_copy("Closure");
+        default: return (taida_val)taida_str_new_copy("Int");
+    }
 }
 
 // Polymorphic .map(fn) — works on List, Result, Lax, Async

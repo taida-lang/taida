@@ -485,6 +485,53 @@ r
         assert_eq!(eval_ok(source), Value::Int(20));
     }
 
+    // ── BT-15: Error ceiling nesting edge cases ──
+
+    #[test]
+    fn test_bt15_double_error_ceiling() {
+        // Inner error ceiling catches inner throw, outer ceiling is untouched
+        let source = r#"
+Error => MyError = @()
+inner x =
+  |== error: Error =
+    -1
+  => :Int
+  | x < 0 |> MyError(type <= "MyError", message <= "inner error").throw()
+  | _ |> x
+=> :Int
+outer x =
+  |== error: Error =
+    -999
+  => :Int
+  result <= inner(x)
+  result + 100
+=> :Int
+r <= outer(-5)
+r
+"#;
+        // Inner ceiling catches the throw, returns -1. Outer ceiling gets -1 + 100 = 99
+        assert_eq!(eval_ok(source), Value::Int(99));
+    }
+
+    #[test]
+    fn test_bt15_closure_error_ceiling() {
+        // Error ceiling inside a function called indirectly
+        let source = r#"
+Error => SafeError = @()
+safe x =
+  |== error: Error =
+    0
+  => :Int
+  | x < 0 |> SafeError(type <= "SafeError", message <= "negative").throw()
+  | _ |> x * 2
+=> :Int
+result <= safe(-3)
+result
+"#;
+        // Error ceiling should catch the throw inside safe(-3) and return 0
+        assert_eq!(eval_ok(source), Value::Int(0));
+    }
+
     #[test]
     fn test_eval_gorilla_ceiling_unhandled_throw() {
         // Unhandled throw causes program termination (Gorilla ceiling)
@@ -1694,6 +1741,30 @@ sub_from_100 <= sub(100, )
 sub_from_100(30)
 "#;
         assert_eq!(eval_ok(source), Value::Int(70));
+    }
+
+    // ── BT-14: Partial application edge cases ──
+
+    #[test]
+    fn test_bt14_partial_all_holes() {
+        // add(, ) — all arguments as holes, should return a function equivalent to add itself
+        let source = r#"
+add x y = x + y => :Int
+addAll <= add(, )
+addAll(3, 4)
+"#;
+        assert_eq!(eval_ok(source), Value::Int(7));
+    }
+
+    #[test]
+    fn test_bt14_partial_first_arg_hole() {
+        // add(, 5) — first argument is hole
+        let source = r#"
+add x y = x + y => :Int
+addTo5 <= add(, 5)
+addTo5(3)
+"#;
+        assert_eq!(eval_ok(source), Value::Int(8));
     }
 
     // ── Pipeline ──
@@ -3022,6 +3093,81 @@ result
         } else {
             panic!("Expected Str");
         }
+    }
+
+    // ── BT-12: JSON schema edge case tests ──────────────────
+
+    #[test]
+    fn test_bt12_json_empty_object_schema() {
+        // JSON['{}', Schema]() — empty object should produce a BuchiPack with default values
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{}'
+result <= JSON[raw, User]()
+result.hasValue
+"#;
+        assert_eq!(eval_ok(source), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_bt12_json_empty_object_defaults() {
+        // Empty JSON object fields should fall back to type defaults
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{}'
+JSON[raw, User]() ]=> user
+user.name
+"#;
+        // name should be "" (default for Str)
+        assert_eq!(eval_ok(source), Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_bt12_json_empty_array_schema() {
+        // JSON['[]', @[Int]]() — empty array
+        let source = r#"
+raw <= '[]'
+JSON[raw, @[Int]]() ]=> nums
+nums.length()
+"#;
+        assert_eq!(eval_ok(source), Value::Int(0));
+    }
+
+    #[test]
+    fn test_bt12_json_malformed_input() {
+        // JSON[malformed, Schema]() — invalid JSON should return Lax with hasValue=false
+        let source = r#"
+User = @(name: Str)
+raw <= '{invalid json}'
+result <= JSON[raw, User]()
+result.hasValue
+"#;
+        assert_eq!(eval_ok(source), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_bt12_json_null_field_to_default() {
+        // JSON['{"name":null}', @(name: Str)]() — null field should become default
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{"name":null,"age":null}'
+JSON[raw, User]() ]=> user
+user.name
+"#;
+        // null should become "" (Str default)
+        assert_eq!(eval_ok(source), Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_bt12_json_null_field_int_default() {
+        // null int field should become 0 (Int default)
+        let source = r#"
+User = @(name: Str, age: Int)
+raw <= '{"name":"Alice","age":null}'
+JSON[raw, User]() ]=> user
+user.age
+"#;
+        assert_eq!(eval_ok(source), Value::Int(0));
     }
 
     // ── IndexAccess removed (v0.5.0) — .get() returns Lax ──────────────────

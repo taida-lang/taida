@@ -168,6 +168,12 @@ fn run_native_with_error(td_path: &Path) -> Result<String, String> {
 }
 
 /// Normalize output for comparison.
+/// Normalize output for comparison: strip trailing whitespace per line and at end.
+///
+/// LIMITATION (AT-1): This hides trailing-space differences between backends.
+/// For structured output (jsonPretty, indented strings), meaningful whitespace
+/// differences may be masked. Consider using exact comparison for specific tests
+/// where whitespace semantics matter.
 fn normalize(s: &str) -> String {
     s.lines()
         .map(|line| line.trim_end())
@@ -643,7 +649,18 @@ fn test_interpreter_js_parity() {
                     skipped += 1;
                     continue;
                 }
-                failures.push(format!("{}: interpreter failed", name));
+                // AT-3: Record interpreter failure AND capture JS output for visibility.
+                let js_note = match run_js(&path) {
+                    Some(js_out) => format!(
+                        "  js output: {:?}",
+                        js_out.lines().take(3).collect::<Vec<_>>()
+                    ),
+                    None => "  js: also failed".to_string(),
+                };
+                failures.push(format!(
+                    "{}: interpreter failed (reference impl error)\n{}",
+                    name, js_note
+                ));
                 continue;
             }
         };
@@ -820,15 +837,21 @@ fn test_three_way_parity() {
 /// Numbered examples with known native backend output mismatches.
 /// These are tracked as native backend issues and should be fixed eventually.
 /// When fixed, remove from this list so the parity test catches regressions.
+///
+/// Tracked as TF-6 through TF-11 in `.dev/FIX_PROGRESS.md`.
+/// TF-6/7/8/9/10/11 fixed. Only 06_lists remains due to pre-existing
+/// Reverse mold bug (Reverse[list]() returns reversed string, not list).
+///
+/// Fixed root causes:
+///   - TF-6: Template literal now parses expressions via full parser (03, 15)
+///   - TF-7: Recursive calls in template literals now work (04)
+///   - TF-8: Method calls in template literals now work (06 partial)
+///   - TF-9: Closure calls in template literals now work (07)
+///   - TF-10: typeof() now implemented in native backend (26)
+///   - TF-11: Error toString extracts message field correctly (27)
 fn native_numbered_known_failures() -> Vec<&'static str> {
     vec![
-        "03_buchi_pack",       // template literal field access emits 0
-        "04_functions",        // recursive function results emit 0
-        "06_lists",            // .length() returns 0
-        "07_closures",         // closure captured variables emit 0
-        "15_noarg_functions",  // no-arg function calls return 0
-        "26_prelude_optional", // segfault (exit 139)
-        "27_prelude_result",   // Error toString format mismatch
+        "06_lists", // Pre-existing: Reverse mold returns reversed string, not list
     ]
 }
 
@@ -872,7 +895,19 @@ fn test_numbered_examples_native_parity() {
 
         let interp = match run_interpreter(&path) {
             Some(o) => o,
-            None => continue, // interpreter failure = skip (not a native issue)
+            None => {
+                // AT-3: Record interpreter failures instead of silently skipping.
+                // Interpreter is the reference implementation; failures must be visible.
+                if !is_known_failure {
+                    unexpected_failures.push(format!(
+                        "{}: interpreter failed (reference implementation error)",
+                        name,
+                    ));
+                } else {
+                    expected_failed += 1;
+                }
+                continue;
+            }
         };
 
         let native = match run_native(&path) {

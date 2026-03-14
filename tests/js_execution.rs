@@ -79,6 +79,10 @@ fn js(source: &str) -> Option<String> {
     Some(normalize(&String::from_utf8_lossy(&run.stdout)))
 }
 
+/// Normalize output for comparison: strip trailing whitespace per line and at end.
+///
+/// LIMITATION (AT-1): This hides trailing-space differences between backends.
+/// See tests/parity.rs normalize() for full documentation.
 fn normalize(s: &str) -> String {
     s.lines()
         .map(|l| l.trim_end())

@@ -322,23 +322,37 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(Value::Str(result))))
             }
-            "Slice" if type_args.len() == 1 => {
-                // Slice[str|bytes](start <= n, end <= m)
+            "Slice" if !type_args.is_empty() && type_args.len() <= 3 => {
+                // Slice[str|bytes](start <= n, end <= m)  — 1 type arg + optional fields
+                // Slice[str|bytes, start, end]()          — 3 type args shorthand
                 let val = match self.eval_expr(&type_args[0])? {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let start = self
-                    .eval_mold_option(fields, "start")?
-                    .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
-                    .unwrap_or(0);
+                // start: from type_args[1] if present, else from optional field
+                let start = if type_args.len() >= 2 {
+                    match self.eval_expr(&type_args[1])? {
+                        Signal::Value(Value::Int(n)) => n,
+                        _ => 0,
+                    }
+                } else {
+                    self.eval_mold_option(fields, "start")?
+                        .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
+                        .unwrap_or(0)
+                };
                 match val {
                     Value::Str(s) => {
                         let char_count = s.chars().count();
-                        let end = self
-                            .eval_mold_option(fields, "end")?
-                            .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
-                            .unwrap_or(char_count as i64);
+                        let end = if type_args.len() >= 3 {
+                            match self.eval_expr(&type_args[2])? {
+                                Signal::Value(Value::Int(n)) => n,
+                                _ => char_count as i64,
+                            }
+                        } else {
+                            self.eval_mold_option(fields, "end")?
+                                .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
+                                .unwrap_or(char_count as i64)
+                        };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(char_count, start, end);
                         let result: String = s
@@ -349,10 +363,16 @@ impl Interpreter {
                         Ok(Some(Signal::Value(Value::Str(result))))
                     }
                     Value::Bytes(bytes) => {
-                        let end = self
-                            .eval_mold_option(fields, "end")?
-                            .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
-                            .unwrap_or(bytes.len() as i64);
+                        let end = if type_args.len() >= 3 {
+                            match self.eval_expr(&type_args[2])? {
+                                Signal::Value(Value::Int(n)) => n,
+                                _ => bytes.len() as i64,
+                            }
+                        } else {
+                            self.eval_mold_option(fields, "end")?
+                                .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
+                                .unwrap_or(bytes.len() as i64)
+                        };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(bytes.len(), start, end);
                         let result = bytes[clamped_start..clamped_end].to_vec();
@@ -388,12 +408,24 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let ch = s
-                    .chars()
-                    .nth(idx)
-                    .map(|c| c.to_string())
-                    .unwrap_or_default();
-                Ok(Some(Signal::Value(Value::Str(ch))))
+                match s.chars().nth(idx) {
+                    Some(c) => {
+                        let value = Value::Str(c.to_string());
+                        Ok(Some(Signal::Value(make_lax_value(
+                            true,
+                            value,
+                            Value::Str(String::new()),
+                        ))))
+                    }
+                    None => {
+                        // Out of bounds: return Lax with hasValue=false
+                        Ok(Some(Signal::Value(make_lax_value(
+                            false,
+                            Value::Str(String::new()),
+                            Value::Str(String::new()),
+                        ))))
+                    }
+                }
             }
             "Repeat" => {
                 if type_args.len() < 2 {
