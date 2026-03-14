@@ -1670,3 +1670,63 @@ fn test_bt1_modulo_operator_rejected() {
         errors
     );
 }
+
+// ── BT-9: Deep nesting resilience tests ──
+
+#[test]
+fn test_deep_parenthesized_expression_50_levels() {
+    // 50 levels of parenthesized expression: (((((...42...)))))
+    let depth = 50;
+    let open = "(".repeat(depth);
+    let close = ")".repeat(depth);
+    let source = format!("x <= {open}42{close}");
+    let (program, errors) = parse(&source);
+    assert!(
+        errors.is_empty(),
+        "Parser should handle 50-level parenthesized expression without error, got: {:?}",
+        errors
+    );
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_deep_list_nesting_50_levels() {
+    // 50 levels of list nesting: @[@[@[...@[1]...]]]
+    let depth = 50;
+    let mut source = String::from("x <= ");
+    for _ in 0..depth {
+        source.push_str("@[");
+    }
+    source.push('1');
+    for _ in 0..depth {
+        source.push(']');
+    }
+    let (program, errors) = parse(&source);
+    assert!(
+        errors.is_empty(),
+        "Parser should handle 50-level list nesting without error, got: {:?}",
+        errors
+    );
+    assert_eq!(program.statements.len(), 1);
+}
+
+#[test]
+fn test_deep_buchipack_nesting_50_levels() {
+    // 50 levels of BuchiPack nesting: @(a <= @(a <= @(a <= ... 1 ...)))
+    let depth = 50;
+    let mut source = String::from("x <= ");
+    for _ in 0..depth {
+        source.push_str("@(a <= ");
+    }
+    source.push('1');
+    for _ in 0..depth {
+        source.push(')');
+    }
+    let (program, errors) = parse(&source);
+    assert!(
+        errors.is_empty(),
+        "Parser should handle 50-level BuchiPack nesting without error, got: {:?}",
+        errors
+    );
+    assert_eq!(program.statements.len(), 1);
+}
