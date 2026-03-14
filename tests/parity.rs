@@ -168,6 +168,12 @@ fn run_native_with_error(td_path: &Path) -> Result<String, String> {
 }
 
 /// Normalize output for comparison.
+/// Normalize output for comparison: strip trailing whitespace per line and at end.
+///
+/// LIMITATION (AT-1): This hides trailing-space differences between backends.
+/// For structured output (jsonPretty, indented strings), meaningful whitespace
+/// differences may be masked. Consider using exact comparison for specific tests
+/// where whitespace semantics matter.
 fn normalize(s: &str) -> String {
     s.lines()
         .map(|line| line.trim_end())
