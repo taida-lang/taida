@@ -857,7 +857,6 @@ fn wasm_full_parity_all_examples() {
         "09_modules",
         "13_async",
         "14_unmold_backward",
-        "26_prelude_optional", // wasm-full runtime crash (pre-existing)
         "compile_async",
         "compile_module",
         "compile_module_value",
@@ -902,8 +901,8 @@ fn wasm_full_parity_all_examples() {
     // NTH-6: updated from 42 to 51 after NTH-5 poly_add string support
     assert_eq!(
         parity_ok.len(),
-        51,
-        "WF-5: Expected exactly 51 parity-OK examples, got {}. \
+        52,
+        "WF-5: Expected exactly 52 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

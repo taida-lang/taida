@@ -617,6 +617,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         | "taida_float_lte" | "taida_float_gte" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
+        // typeof (all profiles — implemented in runtime_core_wasm.c)
+        "taida_typeof" => "int64_t taida_typeof(int64_t val, int64_t tag);".to_string(),
         // RC no-ops
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)

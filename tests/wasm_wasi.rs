@@ -675,7 +675,7 @@ fn wasm_wasi_parity_all_examples() {
         "16_unmold_both_directions",
         "17_gorillax_cage",
         "18_std_json",
-        "26_prelude_optional",
+        "26_prelude_optional", // typeof works but taida_polymorphic_has_value missing
         "27_prelude_result",
         "28_prelude_collections",
         "30_class_like_methods",
