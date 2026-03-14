@@ -272,6 +272,8 @@ static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
+static taida_val taida_throw_to_display_string(taida_val throw_val);
+taida_val taida_typeof(taida_val val, taida_val tag);
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle);
@@ -4217,8 +4219,22 @@ taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
         return result;  // Success: return as-is
     }
     taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
-    taida_val new_error = taida_invoke_callback1(fn_ptr, throw_val);
-    return taida_result_create(0, new_error, 0);
+    // Extract the error message string to pass to the mapping function
+    // (matching interpreter: passes display string, not the Error BuchiPack)
+    taida_val err_display = taida_throw_to_display_string(throw_val);
+    taida_val mapped_str = taida_invoke_callback1(fn_ptr, err_display);
+    // Wrap the mapped result back into an Error BuchiPack
+    const char *new_msg = (const char*)mapped_str;
+    size_t sl = 0;
+    if (taida_read_cstr_len_safe(new_msg, 65536, &sl)) {
+        taida_val new_error = taida_make_error("ResultError", new_msg);
+        taida_str_release(mapped_str);
+        taida_str_release(err_display);
+        return taida_result_create(0, new_error, 0);
+    }
+    // Fallback: use mapped value as-is
+    taida_str_release(err_display);
+    return taida_result_create(0, mapped_str, 0);
 }
 
 // Result.getOrThrow() — if success return __value, otherwise throw
@@ -4236,6 +4252,36 @@ taida_val taida_result_get_or_throw(taida_val result) {
 }
 
 // Result.toString() — "Result(value)" or "Result(throw <= message)"
+// Helper: extract display string from a throw value (Error BuchiPack).
+// If the throw value is a BuchiPack with a "message" field, extract the message.
+// Otherwise, fall back to taida_value_to_display_string.
+static taida_val taida_throw_to_display_string(taida_val throw_val) {
+    if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
+    // If it's a BuchiPack (Error TypeDef), extract the message field
+    if (taida_is_buchi_pack(throw_val)) {
+        if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
+            taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
+            if (msg != 0) {
+                // Check if msg is a readable string
+                const char *s = (const char*)msg;
+                size_t sl = 0;
+                if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+                    return (taida_val)taida_str_new_copy(s);
+                }
+            }
+        }
+        // Fallback: use display string for non-message BuchiPacks
+        return taida_value_to_display_string(throw_val);
+    }
+    // String error message
+    const char *s = (const char*)throw_val;
+    size_t sl = 0;
+    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+        return (taida_val)taida_str_new_copy(s);
+    }
+    return taida_value_to_display_string(throw_val);
+}
+
 taida_val taida_result_to_string(taida_val result) {
     if (!taida_result_is_error_check(result)) {
         taida_val value = taida_pack_get_idx(result, 0);  // __value
@@ -4252,7 +4298,7 @@ taida_val taida_result_to_string(taida_val result) {
     if (throw_val == 0) {
         return (taida_val)taida_str_new_copy("Result(throw <= error)");
     }
-    taida_val err_disp = taida_value_to_display_string(throw_val);
+    taida_val err_disp = taida_throw_to_display_string(throw_val);
     const char *err_str = (const char*)err_disp;
     size_t elen = strlen(err_str);
     size_t need = elen + 24;
@@ -4650,6 +4696,47 @@ taida_val taida_polymorphic_is_empty(taida_val obj) {
 // Polymorphic .toString() — works on Int, Float, Bool, Result, Lax, HashMap, Set, List, BuchiPack
 taida_val taida_polymorphic_to_string(taida_val obj) {
     return taida_value_to_display_string(obj);
+}
+
+// typeof(value, tag) — returns type name as a string.
+// tag is a compile-time hint: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure.
+// For heap objects the tag is ignored and runtime detection is used.
+taida_val taida_typeof(taida_val val, taida_val tag) {
+    // For non-zero heap pointers, detect at runtime via magic headers
+    if (val != 0 && val >= 4096) {
+        if (taida_is_hashmap(val)) return (taida_val)taida_str_new_copy("HashMap");
+        if (taida_is_set(val)) return (taida_val)taida_str_new_copy("Set");
+        if (taida_is_async(val)) return (taida_val)taida_str_new_copy("Async");
+        if (taida_is_list(val)) return (taida_val)taida_str_new_copy("List");
+        if (taida_is_bytes(val)) return (taida_val)taida_str_new_copy("Bytes");
+        if (taida_is_buchi_pack(val)) {
+            int fc = taida_monadic_field_count(val);
+            if (fc == 3) return (taida_val)taida_str_new_copy("Result");
+            if (fc == 4) {
+                int gtype = taida_detect_gorillax_type(val);
+                if (gtype == 1) return (taida_val)taida_str_new_copy("Gorillax");
+                if (gtype == 2) return (taida_val)taida_str_new_copy("RelaxedGorillax");
+                return (taida_val)taida_str_new_copy("Lax");
+            }
+            return (taida_val)taida_str_new_copy("BuchiPack");
+        }
+        // Check if it's a string pointer
+        const char *s = (const char*)val;
+        size_t sl = 0;
+        if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+            return (taida_val)taida_str_new_copy("Str");
+        }
+    }
+    // For scalars, use the compile-time tag
+    switch (tag) {
+        case 1: return (taida_val)taida_str_new_copy("Float");
+        case 2: return (taida_val)taida_str_new_copy("Bool");
+        case 3: return (taida_val)taida_str_new_copy("Str");
+        case 4: return (taida_val)taida_str_new_copy("BuchiPack");
+        case 5: return (taida_val)taida_str_new_copy("List");
+        case 6: return (taida_val)taida_str_new_copy("Closure");
+        default: return (taida_val)taida_str_new_copy("Int");
+    }
 }
 
 // Polymorphic .map(fn) — works on List, Result, Lax, Async

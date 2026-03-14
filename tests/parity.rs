@@ -839,24 +839,19 @@ fn test_three_way_parity() {
 /// When fixed, remove from this list so the parity test catches regressions.
 ///
 /// Tracked as TF-6 through TF-11 in `.dev/FIX_PROGRESS.md`.
-/// Last verified: 2026-03-14 — all 7 still fail.
+/// TF-6/7/8/9/10/11 fixed. Only 06_lists remains due to pre-existing
+/// Reverse mold bug (Reverse[list]() returns reversed string, not list).
 ///
-/// Root causes:
-///   - TF-6: Native template literal field access emits 0 (03, 15)
-///   - TF-7: Native recursive function results emit 0 (04)
-///   - TF-8: Native .length() returns 0 (06)
-///   - TF-9: Native closure captured variables emit 0 (07)
-///   - TF-10: Native prelude_optional segfaults (26)
-///   - TF-11: Native Error toString format mismatch (27)
+/// Fixed root causes:
+///   - TF-6: Template literal now parses expressions via full parser (03, 15)
+///   - TF-7: Recursive calls in template literals now work (04)
+///   - TF-8: Method calls in template literals now work (06 partial)
+///   - TF-9: Closure calls in template literals now work (07)
+///   - TF-10: typeof() now implemented in native backend (26)
+///   - TF-11: Error toString extracts message field correctly (27)
 fn native_numbered_known_failures() -> Vec<&'static str> {
     vec![
-        "03_buchi_pack",       // TF-6: template literal field access emits 0
-        "04_functions",        // TF-7: recursive function results emit 0
-        "06_lists",            // TF-8: .length() returns 0
-        "07_closures",         // TF-9: closure captured variables emit 0
-        "15_noarg_functions",  // TF-6: no-arg function calls return 0
-        "26_prelude_optional", // TF-10: segfault (no output, exit 0)
-        "27_prelude_result",   // TF-11: Error toString format mismatch
+        "06_lists",            // Pre-existing: Reverse mold returns reversed string, not list
     ]
 }
 
