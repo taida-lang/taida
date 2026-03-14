@@ -2689,6 +2689,29 @@ void taida_retain(int64_t val) { (void)val; }
 void taida_release(int64_t val) { (void)val; }
 void taida_str_retain(int64_t val) { (void)val; }
 
+/* ── typeof: compile-time tag + runtime heuristic ── */
+
+int64_t taida_typeof(int64_t val, int64_t tag) {
+    if (val != 0 && val >= 4096) {
+        if (_is_wasm_hashmap(val)) return (int64_t)(intptr_t)"HashMap";
+        if (_is_wasm_set(val)) return (int64_t)(intptr_t)"Set";
+        if (_wasm_is_result(val)) return (int64_t)(intptr_t)"Result";
+        if (_wasm_is_lax(val)) return (int64_t)(intptr_t)"Lax";
+        if (_looks_like_pack(val)) return (int64_t)(intptr_t)"BuchiPack";
+        if (_looks_like_list(val)) return (int64_t)(intptr_t)"List";
+        if (_looks_like_string(val)) return (int64_t)(intptr_t)"Str";
+    }
+    switch (tag) {
+        case 1: return (int64_t)(intptr_t)"Float";
+        case 2: return (int64_t)(intptr_t)"Bool";
+        case 3: return (int64_t)(intptr_t)"Str";
+        case 4: return (int64_t)(intptr_t)"BuchiPack";
+        case 5: return (int64_t)(intptr_t)"List";
+        case 6: return (int64_t)(intptr_t)"Closure";
+        default: return (int64_t)(intptr_t)"Int";
+    }
+}
+
 /* ── _taida_main: C emitter が生成する関数（extern） ── */
 
 extern int64_t _taida_main(void);
