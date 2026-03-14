@@ -665,14 +665,15 @@ fn wasm_wasi_parity_all_examples() {
     // If it grows, the test fails — that's a regression.
     // NTH-6: allowlist reduced after NTH-5 poly_add string support enabled
     // 3 examples (07_closures, compile_lambda, wasm_min_pi_approx) now pass parity.
+    // WC-3: updated after list molds moved to core. Many list examples now compile.
+    // Removed: 10_list_operations, 11_introspection, 16_unmold_both_directions,
+    //          compile_hof_molds, compile_list, compile_list_map, compile_list_molds,
+    //          compile_rc, compile_str_molds, compile_num_molds, todo_app
     let expected_rejected: Vec<&str> = vec![
         "06_lists",
         "09_modules",
-        "10_list_operations",
-        "11_introspection",
         "13_async",
         "14_unmold_backward",
-        "16_unmold_both_directions",
         "17_gorillax_cage",
         "18_std_json",
         "26_prelude_optional", // typeof works but taida_polymorphic_has_value missing
@@ -683,23 +684,15 @@ fn wasm_wasi_parity_all_examples() {
         "compile_async",
         "compile_gorillax",
         "compile_hashmap_set",
-        "compile_hof_molds",
         "compile_json",
         "compile_lax",
-        "compile_list",
-        "compile_list_map",
-        "compile_list_molds",
         "compile_methods",
         "compile_module",
         "compile_module_value",
-        "compile_num_molds",
         "compile_optional_result",
         "compile_pack_field_call",
         "compile_prelude",
-        "compile_rc",
-        "compile_str_molds",
         "compile_type_conv",
-        "todo_app",
     ];
 
     // Expected allowlist: examples where native backend itself fails.
@@ -735,10 +728,14 @@ fn wasm_wasi_parity_all_examples() {
     // Exact parity count — if this changes, update deliberately.
     // WE-2: wasm_edge_hello.td added (simple stdout, compilable by wasm-wasi too)
     // NTH-6: updated from 24 to 27 after NTH-5 poly_add string support
+    // WC-1: compile_str_molds now passes on wasm-wasi (string molds in core) → 28
+    // WC-2: compile_num_molds now passes on wasm-wasi (number molds in core) → 29
+    // WC-3: list molds in core → 38 (compile_list_molds, compile_list_map, compile_hof_molds,
+    //        todo_app, 10_list_operations, plus others now compile with list ops in core)
     assert_eq!(
         parity_ok.len(),
-        27,
-        "WW-3: Expected exactly 27 parity-OK examples, got {}. \
+        38,
+        "WW-3: Expected exactly 38 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -851,9 +848,12 @@ fn wasm_wasi_superset_of_wasm_min() {
     // Exact superset count — if this changes, update deliberately.
     // WE-2: wasm_edge_hello.td added (simple stdout, compilable by both wasm-min and wasm-wasi)
     // NTH-6: updated from 23 to 26 after NTH-5 poly_add string support
+    // WC-1: compile_str_molds now passes on wasm-wasi (string molds in core) → 27
+    // WC-2: compile_num_molds now passes on wasm-wasi (number molds in core) → 28
+    // WC-3: list molds in core → 37 (list operations now compile in both profiles)
     assert_eq!(
-        superset_ok, 26,
-        "WW-3: Expected exactly 26 superset-verified examples, got {}. \
+        superset_ok, 37,
+        "WW-3: Expected exactly 37 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

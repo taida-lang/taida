@@ -617,6 +617,105 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         | "taida_float_lte" | "taida_float_gte" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
+        // WC-1: String molds (all profiles — implemented in runtime_core_wasm.c)
+        "taida_str_to_upper" | "taida_str_to_lower" | "taida_str_trim"
+        | "taida_str_trim_start" | "taida_str_trim_end" | "taida_str_reverse"
+        | "taida_str_alloc" | "taida_str_new_copy" => {
+            format!("int64_t {}(int64_t s);", name)
+        }
+        "taida_str_split" => "int64_t taida_str_split(int64_t s, int64_t sep);".to_string(),
+        "taida_str_replace" | "taida_str_replace_first" => {
+            format!("int64_t {}(int64_t s, int64_t from, int64_t to);", name)
+        }
+        "taida_str_pad" => "int64_t taida_str_pad(int64_t s, int64_t target_len, int64_t pad_char, int64_t pad_end);".to_string(),
+        "taida_str_slice" => "int64_t taida_str_slice(int64_t s, int64_t start, int64_t end);".to_string(),
+        "taida_str_char_at" | "taida_str_get" => {
+            format!("int64_t {}(int64_t s, int64_t idx);", name)
+        }
+        "taida_str_repeat" => "int64_t taida_str_repeat(int64_t s, int64_t n);".to_string(),
+        "taida_str_index_of" | "taida_str_last_index_of" => {
+            format!("int64_t {}(int64_t s, int64_t sub);", name)
+        }
+        "taida_str_contains" | "taida_str_starts_with" | "taida_str_ends_with" => {
+            format!("int64_t {}(int64_t s, int64_t sub);", name)
+        }
+        "taida_cmp_strings" => "int64_t taida_cmp_strings(int64_t a, int64_t b);".to_string(),
+        "taida_str_release" => "void taida_str_release(int64_t s);".to_string(),
+        "taida_slice_mold" => "int64_t taida_slice_mold(int64_t target, int64_t start, int64_t end);".to_string(),
+        // WC-1: Char/Codepoint molds (all profiles — implemented in runtime_core_wasm.c)
+        "taida_char_mold_int" | "taida_char_mold_str" => {
+            format!("int64_t {}(int64_t v);", name)
+        }
+        "taida_char_to_digit" => "int64_t taida_char_to_digit(int64_t v);".to_string(),
+        "taida_codepoint_mold_str" => "int64_t taida_codepoint_mold_str(int64_t v);".to_string(),
+        "taida_digit_to_char" => "int64_t taida_digit_to_char(int64_t v);".to_string(),
+        // WC-2: Number molds (all profiles — implemented in runtime_core_wasm.c)
+        "taida_float_abs" | "taida_float_ceil" | "taida_float_floor"
+        | "taida_float_round" => {
+            format!("int64_t {}(int64_t a);", name)
+        }
+        "taida_float_to_fixed" => "int64_t taida_float_to_fixed(int64_t a, int64_t b);".to_string(),
+        "taida_float_clamp" => "int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi);".to_string(),
+        "taida_float_is_nan" | "taida_float_is_infinite" | "taida_float_is_finite_check"
+        | "taida_float_is_positive" | "taida_float_is_negative" | "taida_float_is_zero" => {
+            format!("int64_t {}(int64_t a);", name)
+        }
+        "taida_int_clamp" => "int64_t taida_int_clamp(int64_t v, int64_t lo, int64_t hi);".to_string(),
+        "taida_int_is_positive" | "taida_int_is_negative" | "taida_int_is_zero" => {
+            format!("int64_t {}(int64_t a);", name)
+        }
+        "taida_int_mold_auto" => "int64_t taida_int_mold_auto(int64_t v);".to_string(),
+        "taida_int_mold_str_base" => "int64_t taida_int_mold_str_base(int64_t v, int64_t base);".to_string(),
+        "taida_to_radix" => "int64_t taida_to_radix(int64_t v, int64_t radix);".to_string(),
+        // WC-3: Callback invoke (all profiles — implemented in runtime_core_wasm.c)
+        "taida_invoke_callback1" => "int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t a);".to_string(),
+        "taida_invoke_callback2" => "int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t a, int64_t b);".to_string(),
+        // WC-3: List HOF functions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_list_map" | "taida_list_filter" => {
+            format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
+        }
+        "taida_list_fold" | "taida_list_foldr" => {
+            format!("int64_t {}(int64_t list, int64_t init, int64_t fn_ptr);", name)
+        }
+        "taida_list_find" | "taida_list_find_index" => {
+            format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
+        }
+        "taida_list_take_while" | "taida_list_drop_while"
+        | "taida_list_any" | "taida_list_all" | "taida_list_none" => {
+            format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
+        }
+        // WC-3: List operation functions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_list_sort" | "taida_list_sort_desc" | "taida_list_unique"
+        | "taida_list_flatten" | "taida_list_reverse"
+        | "taida_list_to_display_string" => {
+            format!("int64_t {}(int64_t list);", name)
+        }
+        "taida_list_join" => "int64_t taida_list_join(int64_t list, int64_t sep);".to_string(),
+        "taida_list_concat" | "taida_list_zip" => {
+            format!("int64_t {}(int64_t list_a, int64_t list_b);", name)
+        }
+        "taida_list_append" | "taida_list_prepend" => {
+            format!("int64_t {}(int64_t list, int64_t item);", name)
+        }
+        "taida_list_take" | "taida_list_drop" => {
+            format!("int64_t {}(int64_t list, int64_t n);", name)
+        }
+        "taida_list_enumerate" => "int64_t taida_list_enumerate(int64_t list);".to_string(),
+        // WC-3: List query functions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_list_first" | "taida_list_last" | "taida_list_min" | "taida_list_max"
+        | "taida_list_sum" => {
+            format!("int64_t {}(int64_t list);", name)
+        }
+        "taida_list_contains" | "taida_list_index_of" | "taida_list_last_index_of" => {
+            format!("int64_t {}(int64_t list, int64_t item);", name)
+        }
+        "taida_list_count" => {
+            "int64_t taida_list_count(int64_t list, int64_t fn_ptr);".to_string()
+        }
+        // WC-3: List elem retain/release (all profiles — no-ops in runtime_core_wasm.c)
+        "taida_list_elem_retain" | "taida_list_elem_release" => {
+            format!("void {}(int64_t list);", name)
+        }
         // typeof (all profiles — implemented in runtime_core_wasm.c)
         "taida_typeof" => "int64_t taida_typeof(int64_t val, int64_t tag);".to_string(),
         // RC no-ops
@@ -719,99 +818,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
 /// All values use int64_t (boxed value) ABI, matching native_runtime.c.
 fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
     let proto = match name {
-        // --- String molds ---
-        "taida_str_to_upper" | "taida_str_to_lower" | "taida_str_trim"
-        | "taida_str_trim_start" | "taida_str_trim_end" | "taida_str_reverse"
-        | "taida_str_alloc" | "taida_str_new_copy" => {
-            format!("int64_t {}(int64_t s);", name)
-        }
-        "taida_str_split" => "int64_t taida_str_split(int64_t s, int64_t sep);".to_string(),
-        "taida_str_replace" | "taida_str_replace_first" => {
-            format!("int64_t {}(int64_t s, int64_t from, int64_t to);", name)
-        }
-        "taida_str_pad" => "int64_t taida_str_pad(int64_t s, int64_t target_len, int64_t pad_char, int64_t pad_end);".to_string(),
-        "taida_str_slice" => "int64_t taida_str_slice(int64_t s, int64_t start, int64_t end);".to_string(),
-        "taida_str_char_at" | "taida_str_get" => {
-            format!("int64_t {}(int64_t s, int64_t idx);", name)
-        }
-        "taida_str_repeat" => "int64_t taida_str_repeat(int64_t s, int64_t n);".to_string(),
-        "taida_str_index_of" | "taida_str_last_index_of" => {
-            format!("int64_t {}(int64_t s, int64_t sub);", name)
-        }
-        "taida_str_contains" | "taida_str_starts_with" | "taida_str_ends_with" => {
-            format!("int64_t {}(int64_t s, int64_t sub);", name)
-        }
-        "taida_cmp_strings" => "int64_t taida_cmp_strings(int64_t a, int64_t b);".to_string(),
-        "taida_str_release" => "void taida_str_release(int64_t s);".to_string(),
-
-        // --- Float molds ---
-        "taida_float_abs" | "taida_float_ceil" | "taida_float_floor"
-        | "taida_float_round" => {
-            format!("int64_t {}(int64_t a);", name)
-        }
-        "taida_float_to_fixed" => "int64_t taida_float_to_fixed(int64_t a, int64_t b);".to_string(),
-        "taida_float_clamp" => "int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi);".to_string(),
-        "taida_float_is_nan" | "taida_float_is_infinite" | "taida_float_is_finite_check"
-        | "taida_float_is_positive" | "taida_float_is_negative" | "taida_float_is_zero" => {
-            format!("int64_t {}(int64_t a);", name)
-        }
-
-        // --- Int molds ---
-        "taida_int_clamp" => "int64_t taida_int_clamp(int64_t v, int64_t lo, int64_t hi);".to_string(),
-        "taida_int_is_positive" | "taida_int_is_negative" | "taida_int_is_zero" => {
-            format!("int64_t {}(int64_t a);", name)
-        }
-        "taida_int_mold_auto" => "int64_t taida_int_mold_auto(int64_t v);".to_string(),
-        "taida_int_mold_str_base" => "int64_t taida_int_mold_str_base(int64_t v, int64_t base);".to_string(),
-        "taida_to_radix" => "int64_t taida_to_radix(int64_t v, int64_t radix);".to_string(),
-        "taida_slice_mold" => "int64_t taida_slice_mold(int64_t target, int64_t start, int64_t end);".to_string(),
-
-        // --- Char / codepoint ---
-        "taida_char_mold_int" | "taida_char_mold_str" => {
-            format!("int64_t {}(int64_t v);", name)
-        }
-        "taida_char_to_digit" => "int64_t taida_char_to_digit(int64_t v);".to_string(),
-        "taida_codepoint_mold_str" => "int64_t taida_codepoint_mold_str(int64_t v);".to_string(),
-        "taida_digit_to_char" => "int64_t taida_digit_to_char(int64_t v);".to_string(),
-
-        // --- Extended list ops ---
-        "taida_list_map" | "taida_list_filter" => {
-            format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
-        }
-        "taida_list_fold" | "taida_list_foldr" => {
-            format!("int64_t {}(int64_t list, int64_t init, int64_t fn_ptr);", name)
-        }
-        "taida_list_find" | "taida_list_find_index" => {
-            format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
-        }
-        "taida_list_index_of" | "taida_list_last_index_of" | "taida_list_contains"
-        | "taida_list_count" => {
-            format!("int64_t {}(int64_t list, int64_t item);", name)
-        }
-        "taida_list_first" | "taida_list_last" | "taida_list_min" | "taida_list_max"
-        | "taida_list_sum" | "taida_list_reverse" | "taida_list_sort"
-        | "taida_list_sort_desc" | "taida_list_unique" | "taida_list_flatten"
-        | "taida_list_to_display_string" => {
-            format!("int64_t {}(int64_t list);", name)
-        }
-        "taida_list_join" => "int64_t taida_list_join(int64_t list, int64_t sep);".to_string(),
-        "taida_list_concat" | "taida_list_zip" => {
-            format!("int64_t {}(int64_t list_a, int64_t list_b);", name)
-        }
-        "taida_list_append" | "taida_list_prepend" => {
-            format!("int64_t {}(int64_t list, int64_t item);", name)
-        }
-        "taida_list_take" | "taida_list_drop" => {
-            format!("int64_t {}(int64_t list, int64_t n);", name)
-        }
-        "taida_list_take_while" | "taida_list_drop_while"
-        | "taida_list_any" | "taida_list_all" | "taida_list_none" => {
-            format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
-        }
-        "taida_list_enumerate" => "int64_t taida_list_enumerate(int64_t list);".to_string(),
-        "taida_list_elem_retain" | "taida_list_elem_release" => {
-            format!("void {}(int64_t list);", name)
-        }
+        // --- String molds: moved to runtime_func_prototype() (WC-1e) ---
+        // --- Number molds: moved to runtime_func_prototype() (WC-2c) ---
+        // --- Char / codepoint: moved to runtime_func_prototype() (WC-1e) ---
+        // --- List ops / HOF / query / callback: moved to runtime_func_prototype() (WC-3e) ---
 
         // --- HashMap extended ---
         "taida_hashmap_length" | "taida_hashmap_clone" | "taida_hashmap_to_string" => {
@@ -928,9 +938,7 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         "taida_lookup_field_name" => "int64_t taida_lookup_field_name(int64_t hash);".to_string(),
         "taida_lookup_field_type" => "int64_t taida_lookup_field_type(int64_t hash, int64_t name_ptr);".to_string(),
 
-        // --- Callback invoke ---
-        "taida_invoke_callback1" => "int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t a);".to_string(),
-        "taida_invoke_callback2" => "int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t a, int64_t b);".to_string(),
+        // --- Callback invoke: moved to runtime_func_prototype() (WC-3e) ---
 
         // --- Bitwise / Shift ---
         "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => {
