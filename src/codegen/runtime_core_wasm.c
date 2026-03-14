@@ -1293,6 +1293,11 @@ int64_t taida_polymorphic_to_string(int64_t obj) {
     return _wasm_value_to_display_string(obj);
 }
 
+/* TF-15: stdout display alias — same as polymorphic_to_string for WASM */
+int64_t taida_stdout_display_string(int64_t obj) {
+    return _wasm_value_to_display_string(obj);
+}
+
 /* ── W-6: taida_debug_polymorphic implementation ── */
 
 int64_t taida_debug_polymorphic(int64_t val) {

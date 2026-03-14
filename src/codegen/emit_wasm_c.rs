@@ -397,6 +397,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_polymorphic_to_string" => {
             "int64_t taida_polymorphic_to_string(int64_t obj);".to_string()
         }
+        "taida_stdout_display_string" => {
+            "int64_t taida_stdout_display_string(int64_t obj);".to_string()
+        }
         // W-3f: Int mold from string
         "taida_int_mold_str" => "int64_t taida_int_mold_str(int64_t v);".to_string(),
         // ブール演算
