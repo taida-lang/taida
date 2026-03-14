@@ -1481,7 +1481,11 @@ fn test_docs_sample_pipeline_parses() {
         "Pipeline sample should parse: {:?}",
         errors
     );
-    assert_eq!(program.statements.len(), 1, "Pipeline should produce 1 statement");
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "Pipeline should produce 1 statement"
+    );
     // Pipeline `expr => ... => name` parses as Assignment with pipeline value
     assert!(
         matches!(&program.statements[0], Statement::Assignment(a) if a.target == "result"),
@@ -1500,7 +1504,11 @@ fn test_docs_sample_buchi_pack_parses() {
         "BuchiPack sample should parse: {:?}",
         errors
     );
-    assert_eq!(program.statements.len(), 1, "TypeDef should produce 1 statement");
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "TypeDef should produce 1 statement"
+    );
     match &program.statements[0] {
         Statement::TypeDef(td) => {
             assert_eq!(td.name, "Pilot");
@@ -1519,7 +1527,11 @@ fn test_docs_sample_assignment_parses() {
         "Assignment sample should parse: {:?}",
         errors
     );
-    assert_eq!(program.statements.len(), 2, "Should produce 2 assignment statements");
+    assert_eq!(
+        program.statements.len(),
+        2,
+        "Should produce 2 assignment statements"
+    );
     assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "x"));
     assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "name"));
 }
@@ -1576,7 +1588,11 @@ fn test_docs_sample_json_parses() {
 parsed <= JSON[raw, User]()"#;
     let (program, errors) = parse(source);
     assert!(errors.is_empty(), "JSON sample should parse: {:?}", errors);
-    assert_eq!(program.statements.len(), 2, "Should produce 2 statements (TypeDef + Assignment)");
+    assert_eq!(
+        program.statements.len(),
+        2,
+        "Should produce 2 statements (TypeDef + Assignment)"
+    );
     assert!(matches!(&program.statements[0], Statement::TypeDef(_)));
     assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "parsed"));
 }
@@ -1603,7 +1619,11 @@ fn test_docs_sample_import_export_parses() {
         "Import/export sample should parse: {:?}",
         errors
     );
-    assert_eq!(program.statements.len(), 2, "Should produce 2 statements (Import + Export)");
+    assert_eq!(
+        program.statements.len(),
+        2,
+        "Should produce 2 statements (Import + Export)"
+    );
     assert!(matches!(&program.statements[0], Statement::Import(_)));
     assert!(matches!(&program.statements[1], Statement::Export(_)));
 }
@@ -1620,12 +1640,15 @@ fn test_docs_sample_empty_slot_partial_application_parses() {
     );
     // FuncDef followed by Assignment — parser may merge trailing statement
     assert!(
-        program.statements.len() >= 1,
+        !program.statements.is_empty(),
         "Should produce at least 1 statement"
     );
     // Verify the function definition exists
     assert!(
-        program.statements.iter().any(|s| matches!(s, Statement::FuncDef(f) if f.name == "add")),
+        program
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::FuncDef(f) if f.name == "add")),
         "Expected FuncDef 'add' in AST, got: {:?}",
         program.statements
     );

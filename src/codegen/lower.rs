@@ -2553,10 +2553,7 @@ impl Lowering {
             if name == "typeof" || name == "typeOf" {
                 if args.len() != 1 {
                     return Err(LowerError {
-                        message: format!(
-                            "typeof requires exactly 1 argument, got {}",
-                            args.len()
-                        ),
+                        message: format!("typeof requires exactly 1 argument, got {}", args.len()),
                     });
                 }
                 let arg = &args[0];
@@ -2628,10 +2625,13 @@ impl Lowering {
             // stdlib ランタイム関数呼び出し（std/math, std/io etc.）
             if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned() {
                 // stdout/stderr: auto-convert non-string args to string
+                // TF-15: Use taida_stdout_display_string for non-primitive types
+                // so that BuchiPacks (including Lax) render with all fields
+                // (matching interpreter's to_display_string behavior).
                 if (name == "stdout" || name == "stderr") && args.len() == 1 {
                     let arg = &args[0];
                     let arg_var = self.lower_expr(func, arg)?;
-                    let str_var = self.convert_to_string(func, arg, arg_var)?;
+                    let str_var = self.convert_to_string_for_stdout(func, arg, arg_var)?;
                     let result = func.alloc_var();
                     func.push(IrInst::Call(result, rt_name, vec![str_var]));
                     return Ok(result);
@@ -4276,8 +4276,7 @@ impl Lowering {
                 let (program, errors) = crate::parser::parse(expr_str_trimmed);
                 let str_var = if errors.is_empty()
                     && !program.statements.is_empty()
-                    && let crate::parser::Statement::Expr(ref parsed_expr) =
-                        program.statements[0]
+                    && let crate::parser::Statement::Expr(ref parsed_expr) = program.statements[0]
                 {
                     // Lower the parsed expression and convert to string
                     let expr_var = self.lower_expr(func, parsed_expr)?;
@@ -4395,7 +4394,8 @@ impl Lowering {
             Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
                 self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs)
             }
-            // WF-2b: MoldInst string molds (CharAt, Upper, Lower, etc.) return strings
+            // WF-2b: MoldInst string molds (Upper, Lower, etc.) return strings
+            // Note: CharAt returns Lax[Str], not raw Str (TF-15)
             Expr::MoldInst(name, _, _, _) => matches!(
                 name.as_str(),
                 "Str"
@@ -4404,7 +4404,6 @@ impl Lowering {
                     | "Trim"
                     | "Replace"
                     | "Slice"
-                    | "CharAt"
                     | "Repeat"
                     | "Reverse"
                     | "Pad"
@@ -4762,8 +4761,8 @@ impl Lowering {
     /// Helper: track unmold result type based on mold name
     fn track_unmold_type_by_mold_name(&mut self, target: &str, mold_name: &str) {
         match mold_name {
-            "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "CharAt" | "Repeat"
-            | "Reverse" | "Pad" | "Join" | "ToFixed" => {
+            "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "Repeat" | "Reverse"
+            | "Pad" | "Join" | "ToFixed" => {
                 self.string_vars.insert(target.to_string());
             }
             "Bool" => {
@@ -4809,6 +4808,45 @@ impl Lowering {
             func.push(IrInst::Call(
                 result,
                 "taida_polymorphic_to_string".to_string(),
+                vec![var],
+            ));
+            Ok(result)
+        }
+    }
+
+    /// TF-15: stdout/stderr display conversion — uses taida_stdout_display_string
+    /// for non-primitive types so that BuchiPacks render with all fields (including __ fields),
+    /// matching the interpreter's to_display_string() behavior.
+    fn convert_to_string_for_stdout(
+        &self,
+        func: &mut IrFunction,
+        expr: &Expr,
+        var: IrVar,
+    ) -> Result<IrVar, LowerError> {
+        if self.expr_is_string_full(expr) {
+            Ok(var)
+        } else if self.expr_is_bool(expr) {
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_str_from_bool".to_string(),
+                vec![var],
+            ));
+            Ok(result)
+        } else if self.expr_returns_float(expr) {
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_float_to_str".to_string(),
+                vec![var],
+            ));
+            Ok(result)
+        } else {
+            // Use stdout-specific display that renders BuchiPacks with all fields
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_stdout_display_string".to_string(),
                 vec![var],
             ));
             Ok(result)

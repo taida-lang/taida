@@ -322,7 +322,7 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(Value::Str(result))))
             }
-            "Slice" if type_args.len() >= 1 && type_args.len() <= 3 => {
+            "Slice" if !type_args.is_empty() && type_args.len() <= 3 => {
                 // Slice[str|bytes](start <= n, end <= m)  — 1 type arg + optional fields
                 // Slice[str|bytes, start, end]()          — 3 type args shorthand
                 let val = match self.eval_expr(&type_args[0])? {

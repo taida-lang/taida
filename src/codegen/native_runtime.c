@@ -681,7 +681,21 @@ static void taida_retain_and_tag_field(taida_val pack, taida_val field_idx, taid
     }
 }
 
+// TF-15: Register Lax internal field names so display_string can render them
+static void taida_register_lax_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue");
+    taida_register_field_name((taida_val)HASH___VALUE, (taida_val)"__value");
+    taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
+    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+    // Register hasValue as Bool type for correct display (true/false instead of 0/1)
+    taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue", 4);
+}
+
 taida_val taida_lax_new(taida_val value, taida_val default_value) {
+    taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);  // hasValue = true
@@ -701,6 +715,7 @@ taida_val taida_lax_new(taida_val value, taida_val default_value) {
 }
 
 taida_val taida_lax_empty(taida_val default_value) {
+    taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);  // hasValue = false
@@ -4251,26 +4266,15 @@ taida_val taida_result_get_or_throw(taida_val result) {
     return taida_throw(error);
 }
 
-// Result.toString() — "Result(value)" or "Result(throw <= message)"
-// Helper: extract display string from a throw value (Error BuchiPack).
-// If the throw value is a BuchiPack with a "message" field, extract the message.
-// Otherwise, fall back to taida_value_to_display_string.
+// Result.toString() — "Result(value)" or "Result(throw <= ...)"
+// Helper: render a throw value for display.
+// TF-16: BuchiPack errors are rendered with field names preserved
+// (e.g. @(type <= "IoError", message <= "...", ...)) so that structural
+// information is visible in toString output.
 static taida_val taida_throw_to_display_string(taida_val throw_val) {
     if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
-    // If it's a BuchiPack (Error TypeDef), extract the message field
+    // If it's a BuchiPack (Error TypeDef), render with field names
     if (taida_is_buchi_pack(throw_val)) {
-        if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
-            taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
-            if (msg != 0) {
-                // Check if msg is a readable string
-                const char *s = (const char*)msg;
-                size_t sl = 0;
-                if (taida_read_cstr_len_safe(s, 65536, &sl)) {
-                    return (taida_val)taida_str_new_copy(s);
-                }
-            }
-        }
-        // Fallback: use display string for non-message BuchiPacks
         return taida_value_to_display_string(throw_val);
     }
     // String error message
@@ -4591,6 +4595,55 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     return result;
 }
 
+// TF-15: Pack to display string with ALL fields (including __ internal fields).
+// Matches interpreter's to_display_string() for BuchiPack which shows all fields.
+static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    taida_val fc = pack[1];
+    size_t cap = 128;
+    size_t len = 0;
+    char *buf = (char*)TAIDA_MALLOC(cap, "pack_to_display_string_full");
+    buf[0] = '\0';
+    // Append "@("
+    { const char *s = "@("; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0'; }
+    int count = 0;
+    for (taida_val i = 0; i < fc; i++) {
+        taida_val field_hash = pack[2 + i * 3];
+        taida_val field_val = pack[2 + i * 3 + 2];
+        const char *fname = taida_lookup_field_name(field_hash);
+        if (!fname) continue;
+        // NOTE: Unlike taida_pack_to_display_string, we do NOT skip __ fields
+        if (count > 0) {
+            const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
+        }
+        // Append "fieldname <= "
+        size_t nlen = strlen(fname);
+        while (len + nlen + 5 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+        memcpy(buf + len, fname, nlen); len += nlen;
+        memcpy(buf + len, " <= ", 4); len += 4;
+        buf[len] = '\0';
+        // Check if field is Bool via registry
+        int ftype = taida_lookup_field_type(field_hash);
+        if (ftype == 4) {
+            const char *bv = field_val ? "true" : "false";
+            size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
+        } else {
+            taida_val val_str = taida_value_to_debug_string(field_val);
+            const char *vs = (const char*)val_str;
+            if (vs) {
+                size_t sl = strlen(vs); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, vs, sl); len += sl; buf[len] = '\0';
+            }
+            taida_str_release(val_str);
+        }
+        count++;
+    }
+    while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+    buf[len++] = ')'; buf[len] = '\0';
+    taida_val result = (taida_val)taida_str_new_copy(buf);
+    free(buf);
+    return result;
+}
+
 // Convert any Taida value to its display string (like interpreter's to_display_string)
 static taida_val taida_value_to_display_string(taida_val val) {
     if (val == 0) {
@@ -4695,6 +4748,17 @@ taida_val taida_polymorphic_is_empty(taida_val obj) {
 
 // Polymorphic .toString() — works on Int, Float, Bool, Result, Lax, HashMap, Set, List, BuchiPack
 taida_val taida_polymorphic_to_string(taida_val obj) {
+    return taida_value_to_display_string(obj);
+}
+
+// TF-15: stdout display — renders BuchiPacks with ALL fields (including __ internal fields)
+// matching the interpreter's to_display_string() behavior.
+// .toString() methods use taida_polymorphic_to_string which produces Lax(...)/Result(...) forms.
+taida_val taida_stdout_display_string(taida_val obj) {
+    if (obj == 0) return (taida_val)taida_str_new_copy("0");
+    if (taida_is_buchi_pack(obj)) {
+        return taida_pack_to_display_string_full(obj);
+    }
     return taida_value_to_display_string(obj);
 }
 

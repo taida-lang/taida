@@ -910,6 +910,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Ptr],
         },
+        "taida_stdout_display_string" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         "taida_monadic_flat_map" => RuntimeAbi {
             params: &[Val, FnPtr],
             returns: &[Val],
