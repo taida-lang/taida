@@ -1,17 +1,16 @@
-/// runtime_full_wasm.c -- wasm-full extended runtime
+/// runtime_full_wasm.c -- wasm-full extended runtime (non-prelude functions)
 ///
-/// wasm-min (runtime_core_wasm.c) + wasm-wasi (runtime_wasi_io.c) on top of which
-/// extended runtime functions are added. Covers:
+/// This file contains functions that are NOT part of the Taida prelude and
+/// therefore only available in the wasm-full profile. All prelude functions
+/// live in runtime_core_wasm.c (linked by all profiles).
 ///
-/// - String molds (to_upper, to_lower, trim, split, replace, etc.)
-/// - Number molds (float abs/ceil/floor/round/clamp, int clamp, etc.)
-/// - Extended list ops (filter, fold, find, sort, unique, etc.)
-/// - HashMap/Set extensions (length, clone, keys, values, entries, etc.)
-/// - JSON runtime (parse, stringify, schema_cast, etc.)
-/// - Gorillax/Lax/Result extensions (map, flat_map, to_string, etc.)
-/// - bytes / bitwise / char / codepoint
-/// - Pack/Error/Field/Callback extensions
-/// - Global get/set
+/// Contents:
+///   - Full-specific overrides (#define redirect targets)
+///   - Shadow field registry (for Bytes cursor hash lookups)
+///   - Bitwise operations (7 functions)
+///   - Global get/set (2 functions)
+///   - Bytes runtime (21 functions)
+///   - UTF-8 encode/decode molds (5 functions)
 ///
 /// This file references functions from runtime_core_wasm.c via extern.
 /// runtime_core_wasm.c is NOT #included; wasm-ld resolves symbols.
@@ -21,98 +20,40 @@
 // ---------------------------------------------------------------------------
 // Forward declarations from runtime_core_wasm.c
 // (linked via wasm-ld, not #include)
+// Only functions actually called from this file are declared here.
 // ---------------------------------------------------------------------------
 extern void *wasm_alloc(unsigned int size);
-
-// Lax/Error/Pack/List/HashMap/Set helpers from core
 extern int64_t taida_lax_new(int64_t value, int64_t default_value);
 extern int64_t taida_lax_empty(int64_t default_value);
-extern int64_t taida_lax_unmold(int64_t lax_ptr);
-extern int64_t taida_lax_has_value(int64_t lax_ptr);
 extern int64_t taida_list_new(void);
 extern int64_t taida_list_push(int64_t list_ptr, int64_t item);
-extern int64_t taida_list_length(int64_t list_ptr);
-extern int64_t taida_list_get(int64_t list_ptr, int64_t index);
 extern int64_t taida_pack_new(int64_t field_count);
 extern int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);
 extern int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);
 extern int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash);
-extern int64_t taida_hashmap_new(void);
-extern int64_t taida_hashmap_set(int64_t hm, int64_t kh, int64_t kp, int64_t v);
-extern int64_t taida_hashmap_get(int64_t hm, int64_t kh, int64_t kp);
 extern int64_t taida_hashmap_get_lax(int64_t hm, int64_t kh, int64_t kp);
-extern int64_t taida_hashmap_has(int64_t hm, int64_t kh, int64_t kp);
-extern int64_t taida_str_hash(int64_t str_ptr);
-extern int64_t taida_str_concat(int64_t a, int64_t b);
-extern int64_t taida_str_length(int64_t s);
-extern int64_t taida_str_eq(int64_t a, int64_t b);
-extern int64_t taida_int_to_str(int64_t a);
-extern int64_t taida_float_to_str(int64_t a);
-extern int64_t taida_str_from_bool(int64_t v);
-extern int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
-extern int64_t taida_throw(int64_t error_val);
-extern int64_t taida_gorillax_new(int64_t value);
-extern int64_t taida_gorillax_err(int64_t error);
-extern int64_t taida_gorillax_is_ok(int64_t gx);
-extern int64_t taida_gorillax_get_value(int64_t gx);
-extern int64_t taida_gorillax_get_error(int64_t gx);
-extern int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);
-extern int64_t taida_result_is_ok(int64_t result);
-extern int64_t taida_result_is_error(int64_t result);
-extern int64_t taida_closure_get_fn(int64_t closure_ptr);
-extern int64_t taida_closure_get_env(int64_t closure_ptr);
-extern int64_t taida_is_closure_value(int64_t val);
-extern int64_t taida_set_from_list(int64_t list_ptr);
-extern int64_t taida_set_add(int64_t set_ptr, int64_t item);
-extern int64_t taida_set_has(int64_t set_ptr, int64_t item);
 extern int64_t taida_value_hash(int64_t val);
 extern int64_t taida_register_field_name(int64_t hash, int64_t name_ptr);
 extern int64_t taida_polymorphic_to_string(int64_t obj);
-
-// Forward declarations for functions now in runtime_core_wasm.c (WC-1)
 extern int64_t taida_str_alloc(int64_t len_raw);
 extern int64_t taida_str_new_copy(int64_t src_raw);
-extern int64_t taida_str_to_upper(int64_t s_raw);
-extern int64_t taida_str_to_lower(int64_t s_raw);
-extern int64_t taida_str_trim(int64_t s_raw);
-extern int64_t taida_str_trim_start(int64_t s_raw);
-extern int64_t taida_str_trim_end(int64_t s_raw);
-extern int64_t taida_str_split(int64_t s_raw, int64_t sep_raw);
-extern int64_t taida_str_replace(int64_t s_raw, int64_t from_raw, int64_t to_raw);
-extern int64_t taida_str_replace_first(int64_t s_raw, int64_t from_raw, int64_t to_raw);
-extern int64_t taida_str_slice(int64_t s_raw, int64_t start_raw, int64_t end_raw);
-extern int64_t taida_str_char_at(int64_t s_raw, int64_t idx_raw);
-extern int64_t taida_str_repeat(int64_t s_raw, int64_t n_raw);
-extern int64_t taida_str_reverse(int64_t s_raw);
-extern int64_t taida_str_pad(int64_t s_raw, int64_t target_len_raw, int64_t pad_char_raw, int64_t pad_end_raw);
-extern int64_t taida_str_contains(int64_t s_raw, int64_t sub_raw);
-extern int64_t taida_str_starts_with(int64_t s_raw, int64_t prefix_raw);
-extern int64_t taida_str_ends_with(int64_t s_raw, int64_t suffix_raw);
-extern int64_t taida_str_index_of(int64_t s_raw, int64_t sub_raw);
-extern int64_t taida_str_last_index_of(int64_t s_raw, int64_t sub_raw);
 extern int64_t taida_str_get(int64_t s_raw, int64_t idx_raw);
-extern int64_t taida_cmp_strings(int64_t a_raw, int64_t b_raw);
-extern int64_t taida_slice_mold(int64_t value, int64_t start_raw, int64_t end_raw);
-extern int64_t taida_char_mold_int(int64_t value);
-extern int64_t taida_char_mold_str(int64_t value);
-extern int64_t taida_char_to_digit(int64_t v);
 extern int64_t taida_codepoint_mold_str(int64_t value);
-extern int64_t taida_digit_to_char(int64_t digit);
+extern int64_t taida_result_is_error(int64_t result);
+extern int64_t taida_monadic_to_string(int64_t obj);
 
-// Float bit-punning helpers (same as runtime_core_wasm.c)
+// ---------------------------------------------------------------------------
+// Float bit-punning helper
+// ---------------------------------------------------------------------------
 static inline double _to_double(int64_t v) {
     union { int64_t i; double d; } u;
     u.i = v;
     return u.d;
 }
-static inline int64_t _d2l(double d) {
-    union { int64_t i; double d2; } u;
-    u.d2 = d;
-    return u.i;
-}
 
 // ---------------------------------------------------------------------------
 // Local string helpers (no libc available in wasm32)
+// Only helpers still needed by remaining full-only functions are kept.
 // ---------------------------------------------------------------------------
 
 static int _wf_strlen(const char *s) {
@@ -128,164 +69,8 @@ static void _wf_memcpy(void *dst, const void *src, int len) {
     for (int i = 0; i < len; i++) d[i] = s[i];
 }
 
-static int _wf_strncmp(const char *a, const char *b, int n) {
-    for (int i = 0; i < n; i++) {
-        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
-        if (a[i] == '\0') return 0;
-    }
-    return 0;
-}
-
-static int _wf_strcmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return (unsigned char)*a - (unsigned char)*b;
-}
-
-/// Find first occurrence of needle in haystack, or NULL.
-static const char *_wf_strstr(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return (const char *)0;
-    int nlen = _wf_strlen(needle);
-    if (nlen == 0) return haystack;
-    int hlen = _wf_strlen(haystack);
-    if (nlen > hlen) return (const char *)0;
-    for (int i = 0; i <= hlen - nlen; i++) {
-        if (_wf_strncmp(haystack + i, needle, nlen) == 0)
-            return haystack + i;
-    }
-    return (const char *)0;
-}
-
-static int _wf_is_whitespace(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
 // ---------------------------------------------------------------------------
-// WC-1: String mold/query/char functions moved to runtime_core_wasm.c
-// (see extern declarations above)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// WC-2: Number mold functions moved to runtime_core_wasm.c
-// (see extern declarations below)
-// ---------------------------------------------------------------------------
-
-// Forward declarations for number mold functions now in runtime_core_wasm.c (WC-2)
-extern int64_t taida_float_floor(int64_t a);
-extern int64_t taida_float_ceil(int64_t a);
-extern int64_t taida_float_round(int64_t a);
-extern int64_t taida_float_abs(int64_t a);
-extern int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi);
-extern int64_t taida_float_to_fixed(int64_t a, int64_t digits_raw);
-extern int64_t taida_float_is_nan(int64_t a);
-extern int64_t taida_float_is_infinite(int64_t a);
-extern int64_t taida_float_is_finite_check(int64_t a);
-extern int64_t taida_float_is_positive(int64_t a);
-extern int64_t taida_float_is_negative(int64_t a);
-extern int64_t taida_float_is_zero(int64_t a);
-extern int64_t taida_int_clamp(int64_t a, int64_t lo, int64_t hi);
-extern int64_t taida_int_is_positive(int64_t a);
-extern int64_t taida_int_is_negative(int64_t a);
-extern int64_t taida_int_is_zero(int64_t a);
-extern int64_t taida_int_mold_auto(int64_t v);
-extern int64_t taida_int_mold_str_base(int64_t v, int64_t base);
-extern int64_t taida_to_radix(int64_t value, int64_t base);
-
-/// Int[str]() -- parse string to int, returning Lax[Int]
-/// This overrides core's version which returns raw value (no Lax wrapper).
-/// Linked via #define redirect: taida_int_mold_str -> _full.
-int64_t taida_int_mold_str_full(int64_t v) {
-    const char *s = (const char *)(intptr_t)v;
-    if (!s || s[0] == '\0') return taida_lax_empty(0);
-    int neg = 0;
-    int i = 0;
-    if (s[0] == '-') { neg = 1; i = 1; }
-    else if (s[0] == '+') { i = 1; }
-    int64_t acc = 0;
-    int found_digit = 0;
-    while (s[i] >= '0' && s[i] <= '9') {
-        acc = acc * 10 + (s[i] - '0');
-        found_digit = 1;
-        i++;
-    }
-    if (found_digit && s[i] == '\0') {
-        return taida_lax_new(neg ? -acc : acc, 0);
-    }
-    return taida_lax_empty(0); // parse failed
-}
-
-// ---------------------------------------------------------------------------
-// WF-2d: Extended list operations
-// ---------------------------------------------------------------------------
-// WASM list layout: [capacity, length, elem_type_tag, type_marker, item0, item1, ...]
-// Header offset for items = 4 (WASM_LIST_ELEMS).
-// In WASM, retain/release are no-ops (bump allocator).
-
-// Additional extern declarations for core helpers used by list ops
-extern int64_t taida_list_set_elem_tag(int64_t list_ptr, int64_t tag);
-extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
-
-// WASM list constants
-#define WF_LIST_ELEMS 4
-
-// FNV-1a hashes for Zip/Enumerate BuchiPack fields
-#define WF_HASH_FIRST  0x89d7ed7f996f1d41ULL
-#define WF_HASH_SECOND 0xa49985ef4cee20bdULL
-#define WF_HASH_INDEX  0x83cf8e8f9081468bULL
-#define WF_HASH_VALUE  0x7ce4fd9430e80ceaULL
-
-// ---------------------------------------------------------------------------
-// WC-3: List mold/HOF/query/callback functions moved to runtime_core_wasm.c
-// (see extern declarations below)
-// ---------------------------------------------------------------------------
-extern int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0);
-extern int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t arg0, int64_t arg1);
-
-// WC-3: List HOF functions moved to runtime_core_wasm.c
-extern int64_t taida_list_map(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_filter(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_fold(int64_t list, int64_t init, int64_t fn_ptr);
-extern int64_t taida_list_foldr(int64_t list, int64_t init, int64_t fn_ptr);
-extern int64_t taida_list_find(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_find_index(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_take_while(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_drop_while(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_any(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_all(int64_t list, int64_t fn_ptr);
-extern int64_t taida_list_none(int64_t list, int64_t fn_ptr);
-
-// WC-3: List operation functions moved to runtime_core_wasm.c
-extern int64_t taida_list_sort(int64_t list);
-extern int64_t taida_list_sort_desc(int64_t list);
-extern int64_t taida_list_unique(int64_t list);
-extern int64_t taida_list_flatten(int64_t list);
-extern int64_t taida_list_reverse(int64_t list);
-extern int64_t taida_list_join(int64_t list, int64_t sep);
-extern int64_t taida_list_concat(int64_t list_a, int64_t list_b);
-extern int64_t taida_list_append(int64_t list, int64_t item);
-extern int64_t taida_list_prepend(int64_t list, int64_t item);
-extern int64_t taida_list_take(int64_t list, int64_t n);
-extern int64_t taida_list_drop(int64_t list, int64_t n);
-extern int64_t taida_list_enumerate(int64_t list);
-extern int64_t taida_list_zip(int64_t list_a, int64_t list_b);
-extern int64_t taida_list_to_display_string(int64_t list);
-
-// WC-3: List query functions moved to runtime_core_wasm.c
-extern int64_t taida_list_first(int64_t list);
-extern int64_t taida_list_last(int64_t list);
-extern int64_t taida_list_min(int64_t list);
-extern int64_t taida_list_max(int64_t list);
-extern int64_t taida_list_sum(int64_t list);
-extern int64_t taida_list_contains(int64_t list, int64_t item);
-extern int64_t taida_list_index_of(int64_t list, int64_t item);
-extern int64_t taida_list_last_index_of(int64_t list, int64_t item);
-extern int64_t taida_list_count(int64_t list, int64_t fn_ptr);
-
-// WC-3: List elem retain/release moved to runtime_core_wasm.c
-extern void taida_list_elem_retain(int64_t list);
-extern void taida_list_elem_release(int64_t list);
-
-// ---------------------------------------------------------------------------
-// Helpers used by remaining full-only functions (kept locally after WC-3 move)
+// Type/pointer detection helpers (used by full-specific overrides and Bytes)
 // ---------------------------------------------------------------------------
 
 /// Helper: check if a pointer looks like a WASM list (same heuristic as core)
@@ -318,12 +103,7 @@ static int _wf_looks_like_string(int64_t val) {
     return 1;
 }
 
-// ---------------------------------------------------------------------------
-// WC-6: HashMap/Set extensions moved to runtime_core_wasm.c
-// ---------------------------------------------------------------------------
-
-// Local helpers still needed by remaining full-only functions
-#define WF_HM_HEADER 4
+#define WF_LIST_ELEMS 4
 #define WF_HM_MARKER_VAL 0x484D4150LL
 #define WF_SET_MARKER_VAL 0x53455421LL
 #define WF_HASH_HAS_VALUE   0x9e9c6dc733414d60LL
@@ -351,13 +131,6 @@ static int _wf_is_set(int64_t ptr) {
     return data[3] == WF_SET_MARKER_VAL;
 }
 
-static int _wf_is_lax(int64_t val) {
-    if (!_wf_is_valid_ptr(val, 104)) return 0;
-    int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] == 4 && p[1] == WF_HASH_HAS_VALUE) return 1;
-    return 0;
-}
-
 static int _wf_is_result(int64_t val) {
     if (!_wf_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
@@ -368,40 +141,89 @@ static int _wf_is_result(int64_t val) {
     return 0;
 }
 
-// Forward declare from core
-extern int64_t taida_result_is_ok(int64_t result);
-extern int64_t taida_result_is_error(int64_t result);
-extern int64_t taida_can_throw_payload(int64_t val);
+// ---------------------------------------------------------------------------
+// Numeric helpers (no libc: manual strtol / i64_to_str)
+// Only helpers still needed by remaining full-only functions are kept.
+// ---------------------------------------------------------------------------
 
-// WC-6a: HashMap extensions moved to runtime_core_wasm.c
-extern int64_t taida_hashmap_length(int64_t hm);
-extern int64_t taida_hashmap_clone(int64_t hm);
-extern int64_t taida_hashmap_to_string(int64_t hm);
-extern int64_t taida_hashmap_remove_immut(int64_t hm, int64_t kh, int64_t kp);
-extern int64_t taida_hashmap_new_with_cap(int64_t cap);
-extern int64_t taida_hashmap_adjust_hash(int64_t h);
-extern int64_t taida_hashmap_set_internal(int64_t hm, int64_t kh, int64_t kp, int64_t v, int64_t mode);
-extern int64_t taida_hashmap_resize(int64_t hm_ptr, int64_t new_cap);
-extern int64_t taida_hashmap_key_eq(int64_t a, int64_t b);
-extern int64_t taida_hashmap_key_retain(int64_t a, int64_t b);
-extern int64_t taida_hashmap_key_release(int64_t a, int64_t b);
-extern int64_t taida_hashmap_val_retain(int64_t a, int64_t b);
-extern int64_t taida_hashmap_val_release(int64_t a, int64_t b);
-extern int64_t taida_hashmap_key_valid(int64_t v);
+/// Manual string-to-long (base 10). Returns parsed value and advances *end.
+static int64_t _wf_strtol(const char *s, const char **end) {
+    if (!s) { if (end) *end = s; return 0; }
+    int64_t result = 0;
+    int neg = 0;
+    const char *p = s;
+    if (*p == '-') { neg = 1; p++; }
+    else if (*p == '+') { p++; }
+    if (*p < '0' || *p > '9') { if (end) *end = s; return 0; }
+    while (*p >= '0' && *p <= '9') {
+        result = result * 10 + (*p - '0');
+        p++;
+    }
+    if (end) *end = p;
+    return neg ? -result : result;
+}
 
-// WC-6b: Set extensions moved to runtime_core_wasm.c
-extern int64_t taida_set_contains(int64_t set, int64_t item);
-extern int64_t taida_set_is_empty(int64_t set);
-extern int64_t taida_set_size(int64_t set);
-extern int64_t taida_set_to_string(int64_t set);
+/// Manual int64_t to string. Returns bump-allocated string.
+static char *_wf_i64_to_str(int64_t val) {
+    char tmp[24];
+    int len = 0;
+    int neg = 0;
+    uint64_t uval;
+    if (val < 0) { neg = 1; uval = (uint64_t)(-(val + 1)) + 1; }
+    else { uval = (uint64_t)val; }
+    if (uval == 0) { tmp[len++] = '0'; }
+    else {
+        while (uval > 0) { tmp[len++] = '0' + (int)(uval % 10); uval /= 10; }
+    }
+    int total = neg + len;
+    char *buf = (char *)wasm_alloc((unsigned int)(total + 1));
+    int pos = 0;
+    if (neg) buf[pos++] = '-';
+    for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
+    buf[pos] = '\0';
+    return buf;
+}
 
 // ---------------------------------------------------------------------------
-// WC-6e: Polymorphic functions moved to runtime_core_wasm.c
+// FNV-1a hash (kept in full for Bytes cursor etc.)
 // ---------------------------------------------------------------------------
-extern int64_t taida_polymorphic_get_or_default(int64_t obj, int64_t def);
-extern int64_t taida_polymorphic_has_value(int64_t obj);
+static uint64_t _wf_fnv1a(const char *s, int len) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (int i = 0; i < len; i++) {
+        hash ^= (unsigned char)s[i];
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
+}
 
-/// Polymorphic .get(key_or_index) — wasm-full override.
+// ===========================================================================
+// Full-specific overrides (#define redirect targets)
+// ===========================================================================
+
+/// Int[str]() -- parse string to int, returning Lax[Int]
+/// This overrides core's version which returns raw value (no Lax wrapper).
+/// Linked via #define redirect: taida_int_mold_str -> _full.
+int64_t taida_int_mold_str_full(int64_t v) {
+    const char *s = (const char *)(intptr_t)v;
+    if (!s || s[0] == '\0') return taida_lax_empty(0);
+    int neg = 0;
+    int i = 0;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    else if (s[0] == '+') { i = 1; }
+    int64_t acc = 0;
+    int found_digit = 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        acc = acc * 10 + (s[i] - '0');
+        found_digit = 1;
+        i++;
+    }
+    if (found_digit && s[i] == '\0') {
+        return taida_lax_new(neg ? -acc : acc, 0);
+    }
+    return taida_lax_empty(0); // parse failed
+}
+
+/// Polymorphic .get(key_or_index) -- wasm-full override.
 /// The core version returns raw values for List.get(); this version wraps in Lax
 /// to match native semantics (OOB returns empty Lax, in-bounds returns Lax[value]).
 /// Linked via #define redirect in generated C: taida_collection_get -> _full.
@@ -424,7 +246,7 @@ int64_t taida_collection_get_full(int64_t ptr, int64_t item) {
     return taida_lax_empty(0);
 }
 
-/// Polymorphic .isEmpty() — wasm-full override.
+/// Polymorphic .isEmpty() -- wasm-full override.
 /// The core version (runtime_core_wasm.c) only handles List/Set/HashMap/String.
 /// This version adds Lax, Gorillax, and Result support.
 /// Linked via #define redirect in generated C: taida_polymorphic_is_empty -> _full.
@@ -459,17 +281,6 @@ int64_t taida_polymorphic_is_empty_full(int64_t ptr) {
     }
     return 0;
 }
-
-// WC-6e: Polymorphic contains/indexOf/lastIndexOf/map moved to runtime_core_wasm.c
-extern int64_t taida_polymorphic_contains(int64_t obj, int64_t needle);
-extern int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle);
-extern int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle);
-extern int64_t taida_polymorphic_map(int64_t obj, int64_t fn_ptr);
-
-/// Monadic ops — moved to runtime_core_wasm.c (WC-5d)
-extern int64_t taida_monadic_field_count(int64_t val);
-extern int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr);
-extern int64_t taida_monadic_get_or_throw(int64_t obj);
 
 /// Detect Gorillax type: 0 = unknown, 1 = Gorillax, 2 = RelaxedGorillax
 /// Unlike core's version, this does not use > 4096 threshold for the __type string.
@@ -511,7 +322,7 @@ static int64_t _wf_gorillax_to_str(int64_t gx) {
     return (int64_t)(intptr_t)"Gorillax(><)";
 }
 
-/// Polymorphic .toString() — wasm-full override.
+/// Polymorphic .toString() -- wasm-full override.
 /// Fixes Gorillax/RelaxedGorillax type detection that fails in core due to
 /// the > 4096 address threshold for data section strings.
 /// Linked via #define redirect: taida_polymorphic_to_string -> _full.
@@ -529,19 +340,9 @@ int64_t taida_polymorphic_to_string_full(int64_t obj) {
     return taida_polymorphic_to_string(obj);
 }
 
-/// Monadic .toString() — moved to runtime_core_wasm.c (WC-5d)
-/// Note: wasm-full overrides taida_polymorphic_to_string via #define redirect,
-/// so core's taida_monadic_to_string (which calls taida_polymorphic_to_string)
-/// will automatically use taida_polymorphic_to_string_full in the full profile.
-extern int64_t taida_monadic_to_string(int64_t obj);
-
 // ===========================================================================
-// WF-3a: JSON runtime (no libc)
+// Shadow field registry (for wasm-full overrides)
 // ===========================================================================
-
-// ---------------------------------------------------------------------------
-// Shadow field registry for wasm-full (mirrors core's _wasm_field_registry)
-// ---------------------------------------------------------------------------
 
 #define WF_FIELD_REGISTRY_MAX 256
 
@@ -589,228 +390,10 @@ do_core:;
     return taida_register_field_type(hash, name_ptr, type_tag);
 }
 
-/// Lookup field name/type: moved to runtime_core_wasm.c (WC-4)
-extern int64_t taida_lookup_field_name(int64_t hash);
-extern int64_t taida_lookup_field_type(int64_t hash, int64_t name_ptr);
-
-// ---------------------------------------------------------------------------
-// Numeric helpers (no libc: manual strtod/strtol/snprintf replacements)
-// ---------------------------------------------------------------------------
-
-/// Manual string-to-long (base 10). Returns parsed value and advances *end.
-static int64_t _wf_strtol(const char *s, const char **end) {
-    if (!s) { if (end) *end = s; return 0; }
-    int64_t result = 0;
-    int neg = 0;
-    const char *p = s;
-    if (*p == '-') { neg = 1; p++; }
-    else if (*p == '+') { p++; }
-    if (*p < '0' || *p > '9') { if (end) *end = s; return 0; }
-    while (*p >= '0' && *p <= '9') {
-        result = result * 10 + (*p - '0');
-        p++;
-    }
-    if (end) *end = p;
-    return neg ? -result : result;
-}
-
-/// Manual string-to-double. Handles integers, decimals, and scientific notation.
-static double _wf_strtod(const char *s, const char **end) {
-    if (!s) { if (end) *end = s; return 0.0; }
-    const char *p = s;
-    double result = 0.0;
-    int neg = 0;
-    if (*p == '-') { neg = 1; p++; }
-    else if (*p == '+') { p++; }
-    if (*p < '0' || *p > '9') {
-        if (*p != '.') { if (end) *end = s; return 0.0; }
-    }
-    // Integer part
-    while (*p >= '0' && *p <= '9') {
-        result = result * 10.0 + (*p - '0');
-        p++;
-    }
-    // Fractional part
-    if (*p == '.') {
-        p++;
-        double frac = 0.1;
-        while (*p >= '0' && *p <= '9') {
-            result += (*p - '0') * frac;
-            frac *= 0.1;
-            p++;
-        }
-    }
-    // Exponent part
-    if (*p == 'e' || *p == 'E') {
-        p++;
-        int exp_neg = 0;
-        if (*p == '-') { exp_neg = 1; p++; }
-        else if (*p == '+') { p++; }
-        int exp = 0;
-        while (*p >= '0' && *p <= '9') {
-            exp = exp * 10 + (*p - '0');
-            p++;
-        }
-        double factor = 1.0;
-        for (int i = 0; i < exp; i++) factor *= 10.0;
-        if (exp_neg) result /= factor;
-        else result *= factor;
-    }
-    if (end) *end = p;
-    return neg ? -result : result;
-}
-
-/// Manual int64_t to string. Returns bump-allocated string.
-static char *_wf_i64_to_str(int64_t val) {
-    char tmp[24];
-    int len = 0;
-    int neg = 0;
-    uint64_t uval;
-    if (val < 0) { neg = 1; uval = (uint64_t)(-(val + 1)) + 1; }
-    else { uval = (uint64_t)val; }
-    if (uval == 0) { tmp[len++] = '0'; }
-    else {
-        while (uval > 0) { tmp[len++] = '0' + (int)(uval % 10); uval /= 10; }
-    }
-    int total = neg + len;
-    char *buf = (char *)wasm_alloc((unsigned int)(total + 1));
-    int pos = 0;
-    if (neg) buf[pos++] = '-';
-    for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
-    buf[pos] = '\0';
-    return buf;
-}
-
-/// Manual double to string (like %g). Returns bump-allocated string.
-static char *_wf_double_to_str(double val) {
-    // Handle special values
-    if (val != val) { /* NaN */
-        char *r = (char *)wasm_alloc(4); r[0]='N'; r[1]='a'; r[2]='N'; r[3]='\0'; return r;
-    }
-    if (val > 1e18 || val < -1e18) {
-        // Very large — print as integer-ish
-        int neg = val < 0;
-        if (neg) val = -val;
-        // Use scientific notation approximation
-        int exp = 0;
-        double v = val;
-        while (v >= 10.0) { v /= 10.0; exp++; }
-        // Simple: just format like "Xe+YY"
-        char *buf = (char *)wasm_alloc(32);
-        int pos = 0;
-        if (neg) buf[pos++] = '-';
-        int d = (int)v;
-        buf[pos++] = '0' + d;
-        double frac = v - d;
-        if (frac > 0.0001) {
-            buf[pos++] = '.';
-            for (int i = 0; i < 5 && frac > 0.00001; i++) {
-                frac *= 10.0;
-                int fd = (int)frac;
-                buf[pos++] = '0' + fd;
-                frac -= fd;
-            }
-            // Trim trailing zeros
-            while (pos > 2 && buf[pos - 1] == '0') pos--;
-            if (buf[pos - 1] == '.') pos--;
-        }
-        buf[pos++] = 'e';
-        buf[pos++] = '+';
-        if (exp >= 100) { buf[pos++] = '0' + exp / 100; exp %= 100; }
-        buf[pos++] = '0' + exp / 10;
-        buf[pos++] = '0' + exp % 10;
-        buf[pos] = '\0';
-        return buf;
-    }
-    // Normal range
-    int neg = 0;
-    if (val < 0) { neg = 1; val = -val; }
-    int64_t int_part = (int64_t)val;
-    double frac_part = val - (double)int_part;
-    // If it's effectively an integer, print without decimal
-    if (frac_part < 0.0000001 && frac_part > -0.0000001) {
-        char *istr = _wf_i64_to_str(neg ? -int_part : int_part);
-        return istr;
-    }
-    // Print with decimals (%g-like: strip trailing zeros)
-    char *istr = _wf_i64_to_str(int_part);
-    int ilen = _wf_strlen(istr);
-    char *buf = (char *)wasm_alloc((unsigned int)(ilen + 18));
-    int pos = 0;
-    if (neg) buf[pos++] = '-';
-    for (int i = 0; i < ilen; i++) buf[pos++] = istr[i];
-    buf[pos++] = '.';
-    // Up to 10 decimal digits
-    for (int i = 0; i < 10; i++) {
-        frac_part *= 10.0;
-        int d = (int)frac_part;
-        if (d > 9) d = 9;
-        buf[pos++] = '0' + d;
-        frac_part -= d;
-        if (frac_part < 0.00000001) break;
-    }
-    // Strip trailing zeros
-    while (pos > 0 && buf[pos - 1] == '0') pos--;
-    if (pos > 0 && buf[pos - 1] == '.') pos--;
-    buf[pos] = '\0';
-    return buf;
-}
-
-// ---------------------------------------------------------------------------
-// FNV-1a hash (kept in full for Bytes cursor etc.)
-// ---------------------------------------------------------------------------
-
-/// FNV-1a hash (matches Rust side)
-static uint64_t _wf_fnv1a(const char *s, int len) {
-    uint64_t hash = 0xcbf29ce484222325ULL;
-    for (int i = 0; i < len; i++) {
-        hash ^= (unsigned char)s[i];
-        hash *= 0x100000001b3ULL;
-    }
-    return hash;
-}
-
-// ---------------------------------------------------------------------------
-// JSON functions: moved to runtime_core_wasm.c (WC-4)
-// ---------------------------------------------------------------------------
-extern int64_t taida_json_schema_cast(int64_t raw, int64_t schema);
-extern int64_t taida_json_parse(int64_t str_ptr);
-extern int64_t taida_json_empty(void);
-extern int64_t taida_json_from_int(int64_t value);
-extern int64_t taida_json_from_str(int64_t str_ptr);
-extern int64_t taida_json_unmold(int64_t json_ptr);
-extern int64_t taida_json_stringify(int64_t json_ptr);
-extern int64_t taida_json_to_str(int64_t json_ptr);
-extern int64_t taida_json_to_int(int64_t json_ptr);
-extern int64_t taida_json_size(int64_t json_ptr);
-extern int64_t taida_json_has(int64_t json_ptr, int64_t key_ptr);
-extern int64_t taida_debug_json(int64_t json_ptr);
-extern int64_t taida_debug_list(int64_t list_ptr);
-extern int64_t taida_json_encode(int64_t val);
-extern int64_t taida_json_pretty(int64_t val);
-
 // ===========================================================================
-// WF-3b: Lax / Result / Gorillax extensions — moved to runtime_core_wasm.c (WC-5)
-// ===========================================================================
-extern int64_t taida_lax_map(int64_t lax_ptr, int64_t fn_ptr);
-extern int64_t taida_lax_flat_map(int64_t lax_ptr, int64_t fn_ptr);
-extern int64_t taida_lax_to_string(int64_t lax_ptr);
-extern int64_t taida_result_is_error_check(int64_t result);
-extern int64_t taida_result_get_or_default(int64_t result, int64_t def);
-extern int64_t taida_result_map(int64_t result, int64_t fn_ptr);
-extern int64_t taida_result_flat_map(int64_t result, int64_t fn_ptr);
-extern int64_t taida_result_get_or_throw(int64_t result);
-extern int64_t taida_result_to_string(int64_t result);
-extern int64_t taida_gorillax_unmold(int64_t ptr);
-extern int64_t taida_gorillax_to_string(int64_t ptr);
-extern int64_t taida_relaxed_gorillax_unmold(int64_t ptr);
-extern int64_t taida_relaxed_gorillax_to_string(int64_t ptr);
-
-// ===========================================================================
-// WF-3c: Bitwise / Shift / Char / Codepoint
+// Bitwise operations (7 functions)
 // ===========================================================================
 
-// --- Bitwise ---
 int64_t taida_bit_and(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) & ((uint64_t)b)); }
 int64_t taida_bit_or(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) | ((uint64_t)b)); }
 int64_t taida_bit_xor(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) ^ ((uint64_t)b)); }
@@ -834,103 +417,10 @@ int64_t taida_shift_ru(int64_t x, int64_t n) {
     return taida_lax_new((int64_t)shifted, 0);
 }
 
-// --- Char / Codepoint ---
-
-static int _wf_utf8_encode_scalar(uint32_t cp, unsigned char out[4], int *out_len) {
-    if (cp <= 0x7F) {
-        out[0] = (unsigned char)cp;
-        *out_len = 1;
-        return 1;
-    }
-    if (cp <= 0x7FF) {
-        out[0] = (unsigned char)(0xC0 | (cp >> 6));
-        out[1] = (unsigned char)(0x80 | (cp & 0x3F));
-        *out_len = 2;
-        return 1;
-    }
-    if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
-    if (cp <= 0xFFFF) {
-        out[0] = (unsigned char)(0xE0 | (cp >> 12));
-        out[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
-        out[2] = (unsigned char)(0x80 | (cp & 0x3F));
-        *out_len = 3;
-        return 1;
-    }
-    if (cp <= 0x10FFFF) {
-        out[0] = (unsigned char)(0xF0 | (cp >> 18));
-        out[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
-        out[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
-        out[3] = (unsigned char)(0x80 | (cp & 0x3F));
-        *out_len = 4;
-        return 1;
-    }
-    return 0;
-}
-
-static int _wf_utf8_decode_one(const unsigned char *buf, int len, int *consumed, uint32_t *out_cp) {
-    if (len == 0) return 0;
-    unsigned char b0 = buf[0];
-    if (b0 < 0x80) { *consumed = 1; *out_cp = (uint32_t)b0; return 1; }
-    if (b0 >= 0xC2 && b0 <= 0xDF) {
-        if (len < 2) return 0;
-        unsigned char b1 = buf[1];
-        if ((b1 & 0xC0) != 0x80) return 0;
-        *consumed = 2;
-        *out_cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(b1 & 0x3F);
-        return 1;
-    }
-    if (b0 >= 0xE0 && b0 <= 0xEF) {
-        if (len < 3) return 0;
-        unsigned char b1 = buf[1], b2 = buf[2];
-        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return 0;
-        if (b0 == 0xE0 && b1 < 0xA0) return 0;
-        if (b0 == 0xED && b1 >= 0xA0) return 0;
-        uint32_t cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(b1 & 0x3F) << 6) | (uint32_t)(b2 & 0x3F);
-        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
-        *consumed = 3; *out_cp = cp;
-        return 1;
-    }
-    if (b0 >= 0xF0 && b0 <= 0xF4) {
-        if (len < 4) return 0;
-        unsigned char b1 = buf[1], b2 = buf[2], b3 = buf[3];
-        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return 0;
-        if (b0 == 0xF0 && b1 < 0x90) return 0;
-        if (b0 == 0xF4 && b1 > 0x8F) return 0;
-        uint32_t cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(b1 & 0x3F) << 12) | ((uint32_t)(b2 & 0x3F) << 6) | (uint32_t)(b3 & 0x3F);
-        if (cp > 0x10FFFF) return 0;
-        *consumed = 4; *out_cp = cp;
-        return 1;
-    }
-    return 0;
-}
-
-static int _wf_utf8_single_scalar(const unsigned char *buf, int len, uint32_t *cp_out) {
-    int consumed = 0;
-    uint32_t cp = 0;
-    if (!_wf_utf8_decode_one(buf, len, &consumed, &cp)) return 0;
-    if (consumed != len) return 0;
-    *cp_out = cp;
-    return 1;
-}
-
-// WC-1d: Char/Codepoint functions moved to runtime_core_wasm.c
-// (see extern declarations at top of file)
-
 // ===========================================================================
-// WF-3d: Pack / Error / Field / Global / Bytes basic
+// Global get/set (2 functions)
 // ===========================================================================
 
-// WC-6c: Pack extensions moved to runtime_core_wasm.c
-extern int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
-extern int64_t taida_pack_call_field0(int64_t pack, int64_t hash);
-extern int64_t taida_pack_call_field1(int64_t pack, int64_t hash, int64_t a);
-extern int64_t taida_pack_call_field2(int64_t pack, int64_t hash, int64_t a, int64_t b);
-extern int64_t taida_pack_call_field3(int64_t pack, int64_t hash, int64_t a, int64_t b, int64_t c);
-extern int64_t taida_pack_to_display_string(int64_t pack);
-extern int64_t taida_make_io_error(int64_t msg);
-extern int64_t taida_retain_and_tag_field(int64_t val, int64_t tag);
-
-// --- Global get/set ---
 #define WF_GLOBAL_TABLE_SIZE 64
 static int64_t _wf_global_keys[WF_GLOBAL_TABLE_SIZE];
 static int64_t _wf_global_vals[WF_GLOBAL_TABLE_SIZE];
@@ -960,10 +450,19 @@ int64_t taida_global_get(int64_t key) {
     return 0;
 }
 
-// --- Bytes runtime ---
+// ===========================================================================
+// Bytes runtime (21 functions)
+// ===========================================================================
+
 // Bytes layout (WASM): [BYTES_MAGIC, len, byte0, byte1, ...]
 // No RC header in WASM -- bump allocator.
 #define WF_BYTES_MAGIC 0x5441494442595400LL  // "TAIDBYT\0"
+
+static int _wf_is_bytes(int64_t val) {
+    if (!_wf_is_valid_ptr(val, 16)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    return (p[0] & 0xFFFFFFFFFFFFFF00LL) == WF_BYTES_MAGIC;
+}
 
 int64_t taida_bytes_default_value(void) {
     int64_t *bytes = (int64_t *)wasm_alloc(3 * 8);
@@ -971,12 +470,6 @@ int64_t taida_bytes_default_value(void) {
     bytes[1] = 0;  // len
     bytes[2] = 0;
     return (int64_t)(intptr_t)bytes;
-}
-
-static int _wf_is_bytes(int64_t val) {
-    if (!_wf_is_valid_ptr(val, 16)) return 0;
-    int64_t *p = (int64_t *)(intptr_t)val;
-    return (p[0] & 0xFFFFFFFFFFFFFF00LL) == WF_BYTES_MAGIC;
 }
 
 int64_t taida_bytes_len(int64_t bytes_ptr) {
@@ -1041,7 +534,7 @@ int64_t taida_bytes_to_list(int64_t bytes_ptr) {
     return list;
 }
 
-/* Minimal string buffer for Bytes display (JSON buf was moved to core in WC-4) */
+/* Minimal string buffer for Bytes display */
 typedef struct { char *buf; int len; int cap; } _wf_strbuf;
 static void _wf_sb_init(_wf_strbuf *sb) {
     sb->cap = 256; sb->buf = (char *)wasm_alloc(sb->cap); sb->len = 0;
@@ -1318,7 +811,47 @@ int64_t taida_uint8_mold_float(int64_t v) {
     return taida_lax_new((int64_t)d, 0);
 }
 
-// --- UTF-8 molds ---
+// ===========================================================================
+// UTF-8 encode/decode molds (5 functions)
+// ===========================================================================
+
+static int _wf_utf8_decode_one(const unsigned char *buf, int len, int *consumed, uint32_t *out_cp) {
+    if (len == 0) return 0;
+    unsigned char b0 = buf[0];
+    if (b0 < 0x80) { *consumed = 1; *out_cp = (uint32_t)b0; return 1; }
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if (len < 2) return 0;
+        unsigned char b1 = buf[1];
+        if ((b1 & 0xC0) != 0x80) return 0;
+        *consumed = 2;
+        *out_cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(b1 & 0x3F);
+        return 1;
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF) {
+        if (len < 3) return 0;
+        unsigned char b1 = buf[1], b2 = buf[2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return 0;
+        if (b0 == 0xE0 && b1 < 0xA0) return 0;
+        if (b0 == 0xED && b1 >= 0xA0) return 0;
+        uint32_t cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(b1 & 0x3F) << 6) | (uint32_t)(b2 & 0x3F);
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+        *consumed = 3; *out_cp = cp;
+        return 1;
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4) {
+        if (len < 4) return 0;
+        unsigned char b1 = buf[1], b2 = buf[2], b3 = buf[3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return 0;
+        if (b0 == 0xF0 && b1 < 0x90) return 0;
+        if (b0 == 0xF4 && b1 > 0x8F) return 0;
+        uint32_t cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(b1 & 0x3F) << 12) | ((uint32_t)(b2 & 0x3F) << 6) | (uint32_t)(b3 & 0x3F);
+        if (cp > 0x10FFFF) return 0;
+        *consumed = 4; *out_cp = cp;
+        return 1;
+    }
+    return 0;
+}
+
 int64_t taida_utf8_encode_mold(int64_t value) {
     const char *s = (const char *)(intptr_t)value;
     if (!s || !_wf_looks_like_string(value)) {
@@ -1363,22 +896,3 @@ int64_t taida_utf8_decode_one(int64_t v) {
 int64_t taida_utf8_single_scalar(int64_t v) {
     return taida_codepoint_mold_str(v);
 }
-
-// WC-6d: Type detection / display functions moved to runtime_core_wasm.c
-extern int64_t taida_is_string_value(int64_t val);
-extern int64_t taida_is_list(int64_t val);
-extern int64_t taida_is_hashmap(int64_t val);
-extern int64_t taida_is_set(int64_t val);
-extern int64_t taida_is_buchi_pack(int64_t val);
-extern int64_t taida_is_molten(int64_t val);
-extern int64_t taida_is_bytes(int64_t val);
-extern int64_t taida_is_async(int64_t val);
-extern int64_t taida_detect_value_tag(int64_t val);
-extern int64_t taida_detect_gorillax_type(int64_t val);
-extern int64_t taida_bool_to_int(int64_t v);
-extern int64_t taida_bool_to_str(int64_t v);
-extern int64_t taida_value_to_display_string(int64_t val);
-extern int64_t taida_value_to_debug_string(int64_t val);
-extern int64_t taida_has_magic_header(int64_t val);
-extern int64_t taida_ptr_is_readable(int64_t val);
-extern int64_t taida_read_cstr_len_safe(int64_t ptr, int64_t max);
