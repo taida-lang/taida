@@ -974,7 +974,7 @@ function Slice(val, opts) {
   }
   return '';
 }
-function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? str[idx] : ''; }
+function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
 function Repeat(str, n) { return typeof str === 'string' ? str.repeat(Math.max(0, n)) : ''; }
 function Reverse(val) {
   if (typeof val === 'string') return val.split('').reverse().join('');
@@ -1137,9 +1137,9 @@ function __taida_stdout(...args) {
       if (arg.isSuccess()) console.log('Result[' + String(arg.__value) + ']');
       else console.log('Result(throw)');
     } else if (arg && arg.__type === 'Lax') {
+      // Match interpreter BuchiPack display format
       const _lhv = typeof arg.hasValue === 'function' ? arg.hasValue() : arg.hasValue;
-      if (_lhv) console.log('Lax(' + String(arg.__value) + ')');
-      else console.log('Lax(default: ' + String(arg.__default) + ')');
+      console.log('@(hasValue <= ' + String(!!_lhv) + ', __value <= ' + __taida_format(arg.__value) + ', __default <= ' + __taida_format(arg.__default) + ', __type <= "Lax")');
     } else if (arg && typeof arg === 'object' && !Array.isArray(arg)) {
       // BuchiPack-like object
       const entries = Object.entries(arg).filter(([k]) => !k.startsWith('__'));

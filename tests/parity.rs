@@ -851,7 +851,7 @@ fn test_three_way_parity() {
 ///   - TF-11: Error toString extracts message field correctly (27)
 fn native_numbered_known_failures() -> Vec<&'static str> {
     vec![
-        "06_lists",            // Pre-existing: Reverse mold returns reversed string, not list
+        "06_lists", // Pre-existing: Reverse mold returns reversed string, not list
     ]
 }
 

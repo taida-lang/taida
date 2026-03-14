@@ -4268,13 +4268,22 @@ taida_val taida_result_get_or_throw(taida_val result) {
 
 // Result.toString() — "Result(value)" or "Result(throw <= ...)"
 // Helper: render a throw value for display.
-// TF-16: BuchiPack errors are rendered with field names preserved
-// (e.g. @(type <= "IoError", message <= "...", ...)) so that structural
-// information is visible in toString output.
+// TF-16: BuchiPack errors — extract the "message" field value
+// (matching interpreter: shows just the message string, not the full pack structure).
 static taida_val taida_throw_to_display_string(taida_val throw_val) {
     if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
-    // If it's a BuchiPack (Error TypeDef), render with field names
+    // If it's a BuchiPack (Error TypeDef), extract the "message" field
     if (taida_is_buchi_pack(throw_val)) {
+        if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
+            taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
+            if (msg != 0) {
+                size_t sl = 0;
+                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl)) {
+                    return (taida_val)taida_str_new_copy((const char*)msg);
+                }
+            }
+        }
+        // Fallback: render full pack structure for non-message packs
         return taida_value_to_display_string(throw_val);
     }
     // String error message

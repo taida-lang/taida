@@ -147,6 +147,9 @@ fn assert_native_and_interpreter_reject_source(source: &str, label: &str) {
 
 #[test]
 fn test_native_write_failure_shape_preserves_error_field_names() {
+    // TF-16: Native extracts message field from Error BuchiPack (matching interpreter)
+    // Note: exact error message format differs (strerror vs Rust io::Error::Display)
+    // so we verify structure, not exact string match.
     let bad_path = unique_temp_dir("taida_native_write_failure_shape")
         .join("missing")
         .join("file.txt");
@@ -168,11 +171,11 @@ stdout(result.toString())
         native_lines
     );
     assert_eq!(native_lines[0], "true");
+    // TF-16: message field value is extracted (not full BuchiPack structure)
     assert!(
-        native_lines[1].contains("type <=")
-            && native_lines[1].contains("message <=")
-            && native_lines[1].contains("kind <="),
-        "native Result toString should preserve error field names, got: {}",
+        native_lines[1].starts_with("Result(throw <= ")
+            && native_lines[1].contains("No such file or directory"),
+        "native Result toString should show extracted message, got: {}",
         native_lines[1]
     );
 }
