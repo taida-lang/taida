@@ -1572,6 +1572,191 @@ alice <= Person(name <= "Alice", age <= 30)
         }
     }
 
+    // ── BT-1: 10-operator rule negative tests ──────────────────
+    // PHILOSOPHY.md: "演算子は10種のみ"
+    // These tests verify that invalid operators are properly rejected.
+
+    #[test]
+    fn test_bt1_caret_rejected() {
+        let (_, errors) = tokenize("x <= 1 ^ 2");
+        assert!(
+            errors.iter().any(|e| e.message.contains("Unexpected character '^'")),
+            "Caret '^' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_single_ampersand_rejected() {
+        let (_, errors) = tokenize("x <= 1 & 2");
+        assert!(
+            !errors.is_empty(),
+            "Single '&' should produce an error"
+        );
+        assert!(
+            errors[0].message.contains("&"),
+            "Error should mention '&', got: {}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn test_bt1_tilde_rejected() {
+        let (_, errors) = tokenize("x <= ~1");
+        assert!(
+            errors.iter().any(|e| e.message.contains("Unexpected character '~'")),
+            "Tilde '~' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_question_mark_rejected() {
+        let (_, errors) = tokenize("x <= y ? 1");
+        assert!(
+            errors.iter().any(|e| e.message.contains("Unexpected character '?'")),
+            "Question mark '?' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_hash_rejected() {
+        let (_, errors) = tokenize("x <= #tag");
+        assert!(
+            errors.iter().any(|e| e.message.contains("Unexpected character '#'")),
+            "Hash '#' should be rejected as unexpected character, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bt1_slash_tokenized_as_slash() {
+        // `/` is tokenized at lexer level (for comments: //, /* */)
+        // but rejected at parser level as division operator.
+        // At lexer level, standalone `/` should produce a Slash token (no error).
+        let kinds = tok_kinds("x / y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Slash, Ident("y".into())],
+            "Standalone '/' should tokenize as Slash (rejected at parser level)"
+        );
+    }
+
+    #[test]
+    fn test_bt1_percent_tokenized_as_percent() {
+        // `%` is tokenized at lexer level but rejected at parser level as modulo.
+        let kinds = tok_kinds("x % y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Percent, Ident("y".into())],
+            "Standalone '%' should tokenize as Percent (rejected at parser level)"
+        );
+    }
+
+    // ── BT-1b: Operator partial match / boundary tests ───────────
+    // Verify that operator-like sequences don't produce wrong tokens.
+
+    #[test]
+    fn test_bt1_fat_arrow_eq_eq_boundary() {
+        // `=>==` should tokenize as `=>` `==`, not as some merged operator
+        let kinds = tok_kinds("x =>== y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), FatArrow, EqEq, Ident("y".into())],
+            "'=>==' should split into '=>' + '=='"
+        );
+    }
+
+    #[test]
+    fn test_bt1_lt_eq_eq_eq_gt_boundary() {
+        // `<===>`  should tokenize as `<=` `==` `>`
+        let kinds = tok_kinds("x <===> y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, EqEq, Gt, Ident("y".into())],
+            "'<===>' should split into '<=' + '==' + '>'"
+        );
+    }
+
+    #[test]
+    fn test_bt1_pipe_eq_gt_boundary() {
+        // `|=>` should tokenize as `|` `=>`, not as some combined operator
+        let kinds = tok_kinds("x |=> y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Pipe, FatArrow, Ident("y".into())],
+            "'|=>' should split into '|' + '=>'"
+        );
+    }
+
+    #[test]
+    fn test_bt1_double_gt_not_import() {
+        // `>>` (two greater-than) should NOT be tokenized as Import (`>>>`)
+        let kinds = tok_kinds("x >> y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Gt, Gt, Ident("y".into())],
+            "'>>' should be two Gt tokens, not Import"
+        );
+    }
+
+    #[test]
+    fn test_bt1_double_lt_not_export() {
+        // `<<` should NOT be tokenized as Export (`<<<`)
+        let kinds = tok_kinds("x << y");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), Lt, Lt, Ident("y".into())],
+            "'<<' should be two Lt tokens, not Export"
+        );
+    }
+
+    // ── BT-2: null/undefined rejection tests ───────────────────
+    // PHILOSOPHY.md I: "null/undefinedの完全排除 — 全ての型にデフォルト値を保証"
+    // These words must not be keywords or special tokens — they should be
+    // plain identifiers that will be rejected by the type checker as undefined.
+
+    #[test]
+    fn test_bt2_null_is_plain_identifier() {
+        let kinds = tok_kinds("x <= null");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("null".into())],
+            "'null' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
+    #[test]
+    fn test_bt2_undefined_is_plain_identifier() {
+        let kinds = tok_kinds("x <= undefined");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("undefined".into())],
+            "'undefined' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
+    #[test]
+    fn test_bt2_none_is_plain_identifier() {
+        let kinds = tok_kinds("x <= none");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("none".into())],
+            "'none' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
+    #[test]
+    fn test_bt2_nil_is_plain_identifier() {
+        let kinds = tok_kinds("x <= nil");
+        assert_eq!(
+            kinds,
+            vec![Ident("x".into()), LtEq, Ident("nil".into())],
+            "'nil' should be a plain identifier, not a keyword/special token"
+        );
+    }
+
     #[test]
     fn test_invalid_escape_in_template_reports_error() {
         let (tokens, errors) = tokenize(r#"`template \q text`"#);

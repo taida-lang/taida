@@ -1504,3 +1504,43 @@ fn test_docs_sample_empty_slot_partial_application_parses() {
         errors
     );
 }
+
+// ── BT-1c: 10-operator rule — parser-level rejection tests ───────
+
+#[test]
+fn test_bt1_division_operator_rejected() {
+    // PHILOSOPHY.md: `/` operator removed — use Div[x, y]() mold
+    let source = "x <= 10 / 2";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Division operator '/' should be rejected at parser level"
+    );
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{}", e);
+            msg.contains("Div") || msg.contains("removed")
+        }),
+        "Error should mention Div mold alternative, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_bt1_modulo_operator_rejected() {
+    // PHILOSOPHY.md: `%` operator removed — use Mod[x, y]() mold
+    let source = "x <= 10 % 3";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.is_empty(),
+        "Modulo operator '%' should be rejected at parser level"
+    );
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{}", e);
+            msg.contains("Mod") || msg.contains("removed")
+        }),
+        "Error should mention Mod mold alternative, got: {:?}",
+        errors
+    );
+}
