@@ -1696,6 +1696,30 @@ sub_from_100(30)
         assert_eq!(eval_ok(source), Value::Int(70));
     }
 
+    // ── BT-14: Partial application edge cases ──
+
+    #[test]
+    fn test_bt14_partial_all_holes() {
+        // add(, ) — all arguments as holes, should return a function equivalent to add itself
+        let source = r#"
+add x y = x + y => :Int
+addAll <= add(, )
+addAll(3, 4)
+"#;
+        assert_eq!(eval_ok(source), Value::Int(7));
+    }
+
+    #[test]
+    fn test_bt14_partial_first_arg_hole() {
+        // add(, 5) — first argument is hole
+        let source = r#"
+add x y = x + y => :Int
+addTo5 <= add(, 5)
+addTo5(3)
+"#;
+        assert_eq!(eval_ok(source), Value::Int(8));
+    }
+
     // ── Pipeline ──
 
     #[test]
