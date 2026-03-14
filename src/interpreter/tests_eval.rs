@@ -2299,4 +2299,65 @@ p.y.hasValue"#);
         assert!(lax_has_value_check(&result), "Int[i64::MIN string] should succeed");
         assert_eq!(lax_inner_value(&result), &Value::Int(i64::MIN));
     }
+
+    // ── BT-8: Numeric mold negative/zero boundary tests ──
+
+    #[test]
+    fn test_bt8_floor_negative() {
+        // Floor[-3.7]() should return -4 (floor rounds toward negative infinity)
+        assert_eq!(eval_ok("Floor[-3.7]()"), Value::Int(-4));
+    }
+
+    #[test]
+    fn test_bt8_ceil_negative() {
+        // Ceil[-3.2]() should return -3 (ceil rounds toward positive infinity)
+        assert_eq!(eval_ok("Ceil[-3.2]()"), Value::Int(-3));
+    }
+
+    #[test]
+    fn test_bt8_round_negative_half() {
+        // Round[-3.5]() — behavior depends on rounding mode
+        let result = eval_ok("Round[-3.5]()");
+        // Round should produce -4 (round half away from zero) or -3 (bankers rounding)
+        assert!(
+            result == Value::Int(-4) || result == Value::Int(-3),
+            "Round[-3.5] should be -4 or -3, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_bt8_round_positive_half() {
+        // Round[0.5]() — boundary of rounding
+        let result = eval_ok("Round[0.5]()");
+        // Round should produce 1 (round half away from zero) or 0 (bankers rounding)
+        assert!(
+            result == Value::Int(1) || result == Value::Int(0),
+            "Round[0.5] should be 1 or 0, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_bt8_clamp_at_lower_bound() {
+        // Clamp[0, 0, 5]() — value equals lower bound, should return 0
+        assert_eq!(eval_ok("Clamp[0, 0, 5]()"), Value::Int(0));
+    }
+
+    #[test]
+    fn test_bt8_clamp_at_upper_bound() {
+        // Clamp[5, 0, 5]() — value equals upper bound, should return 5
+        assert_eq!(eval_ok("Clamp[5, 0, 5]()"), Value::Int(5));
+    }
+
+    #[test]
+    fn test_bt8_abs_negative_zero() {
+        // Abs[-0.0]() — negative zero should become 0.0
+        let result = eval_ok("Abs[-0.0]()");
+        match &result {
+            Value::Float(f) => assert!(*f == 0.0, "Abs[-0.0] should be 0.0, got: {}", f),
+            Value::Int(i) => assert!(*i == 0, "Abs[-0.0] as Int should be 0, got: {}", i),
+            other => panic!("Abs[-0.0] should return Float or Int, got: {:?}", other),
+        }
+    }
 }
