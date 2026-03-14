@@ -418,6 +418,62 @@ mod tests {
         assert_eq!(Value::default_list(), Value::List(Vec::new()));
     }
 
+    // ── BT-18: Default value guarantee exhaustive tests ──
+
+    #[test]
+    fn test_bt18_default_buchi_pack() {
+        // BuchiPack default is empty @()
+        let d = Value::default_buchi();
+        assert_eq!(d, Value::BuchiPack(Vec::new()));
+        // Note: empty BuchiPack truthiness depends on implementation
+        // (may be truthy since it's a valid struct, just with no fields)
+    }
+
+    #[test]
+    fn test_bt18_default_json() {
+        // JSON default is empty object {}
+        let d = Value::default_json();
+        match &d {
+            Value::Json(v) => assert!(v.is_object(), "JSON default should be object"),
+            other => panic!("Expected Json, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bt18_default_molten() {
+        // Molten default is Molten itself
+        assert_eq!(Value::default_molten(), Value::Molten);
+    }
+
+    #[test]
+    fn test_bt18_default_stream() {
+        // Stream default is completed empty stream
+        match &Value::default_stream() {
+            Value::Stream(sv) => {
+                assert!(sv.items.is_empty(), "Default stream should have no items");
+                assert_eq!(sv.status, StreamStatus::Completed, "Default stream should be completed");
+            }
+            other => panic!("Expected Stream, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bt18_default_for_list_inference() {
+        // default_for_list should infer from first element type
+        let int_items = vec![Value::Int(1), Value::Int(2)];
+        assert_eq!(Value::default_for_list(&int_items), Value::Int(0));
+
+        let str_items = vec![Value::Str("a".to_string())];
+        assert_eq!(Value::default_for_list(&str_items), Value::Str(String::new()));
+
+        let float_items = vec![Value::Float(1.5)];
+        assert_eq!(Value::default_for_list(&float_items), Value::Float(0.0));
+
+        // Empty list should return Int(0) as default
+        let empty: Vec<Value> = vec![];
+        assert_eq!(Value::default_for_list(&empty), Value::Int(0));
+    }
+
     #[test]
     fn test_truthiness() {
         assert!(Value::Bool(true).is_truthy());

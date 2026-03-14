@@ -2437,4 +2437,35 @@ p.y.hasValue"#);
         // Reverse[""]() should return ""
         assert_eq!(eval_ok(r#"Reverse[""]()"#), Value::Str(String::new()));
     }
+
+    // ── BT-18: Type conversion failure default consistency tests ──
+
+    #[test]
+    fn test_bt18_int_conversion_failure_default() {
+        // Int["invalid"]() should return Lax with __default = 0
+        let result = eval_ok(r#"Int["abc"]().__default"#);
+        assert_eq!(result, Value::Int(0), "Int conversion failure default should be 0");
+    }
+
+    #[test]
+    fn test_bt18_float_conversion_failure_default() {
+        // Float["invalid"]() should return Lax with __default = 0.0
+        let result = eval_ok(r#"Float["abc"]().__default"#);
+        assert_eq!(result, Value::Float(0.0), "Float conversion failure default should be 0.0");
+    }
+
+    #[test]
+    fn test_bt18_lax_type_field() {
+        // Type conversion molds return Lax, __type field should be "Lax"
+        let result = eval_ok(r#"Bool[0]().__type"#);
+        assert_eq!(result, Value::Str("Lax".to_string()),
+            "Lax __type should be 'Lax' (the mold type, not the inner type)");
+    }
+
+    #[test]
+    fn test_bt18_div_zero_default() {
+        // Div[1,0]() should return Lax with __default = 0
+        let result = eval_ok("Div[1,0]().__default");
+        assert_eq!(result, Value::Int(0), "Div by zero default should be 0");
+    }
 }
