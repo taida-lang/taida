@@ -51,6 +51,12 @@ fn require_wasmtime() -> Option<PathBuf> {
     match wasmtime_bin() {
         Some(p) => Some(p),
         None => {
+            if std::env::var("CI").is_ok() {
+                panic!(
+                    "AT-7: wasmtime not found in CI environment. \
+                     Install wasmtime in ci.yml or wasm-min runtime tests are never verified."
+                );
+            }
             eprintln!("SKIP: wasmtime not found, skipping wasm-min runtime test");
             None
         }
