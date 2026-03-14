@@ -1783,4 +1783,105 @@ alice <= Person(name <= "Alice", age <= 30)
             );
         }
     }
+
+    // ── BT-16: Unicode boundary tests ──
+
+    #[test]
+    fn test_bidi_override_in_identifier() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) embedded in identifier should not silently pass
+        let source = "x\u{202E}y <= 1";
+        let (tokens, errors) = tokenize(source);
+        // BiDi control chars are not alphabetic/alphanumeric, so should split
+        // the identifier or cause an error token
+        let idents: Vec<&Token> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, Ident(_)))
+            .collect();
+        // The identifier should NOT be "x\u{202E}y" as a single token
+        let has_bidi_ident = idents.iter().any(|t| {
+            if let Ident(ref name) = t.kind {
+                name.contains('\u{202E}')
+            } else {
+                false
+            }
+        });
+        assert!(
+            !has_bidi_ident || !errors.is_empty(),
+            "BiDi control character U+202E should not silently appear in identifier. Tokens: {:?}, Errors: {:?}",
+            idents, errors
+        );
+    }
+
+    #[test]
+    fn test_bidi_lri_in_string_literal() {
+        // U+2066 (LEFT-TO-RIGHT ISOLATE) in string should be preserved
+        let source = "s <= \"hello\u{2066}world\"";
+        let (tokens, _errors) = tokenize(source);
+        let str_tokens: Vec<&Token> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, StringLiteral(_)))
+            .collect();
+        assert_eq!(str_tokens.len(), 1, "Should have one string literal");
+        if let StringLiteral(ref val) = str_tokens[0].kind {
+            assert!(
+                val.contains('\u{2066}'),
+                "BiDi character inside string literal should be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn test_combining_character_in_identifier() {
+        // e + U+0301 (COMBINING ACUTE ACCENT) = e followed by combining mark
+        // Combining marks are not alphabetic, so behavior depends on is_alphanumeric()
+        let source = "e\u{0301} <= 1";
+        let (tokens, _errors) = tokenize(source);
+        let idents: Vec<String> = tokens
+            .iter()
+            .filter_map(|t| {
+                if let Ident(ref name) = t.kind {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // The combining mark U+0301 should either be included in the identifier
+        // (if is_alphanumeric returns true for it) or cause a split.
+        // In Rust, char::is_alphanumeric returns false for U+0301 (Mn category),
+        // but char::is_alphabetic also returns false, so it should NOT start an ident.
+        // However, U+0301 follows 'e' which starts the ident, and is_alphanumeric is
+        // used for continuation chars. U+0301 is Mn (Nonspacing_Mark), is_alphanumeric() = false.
+        // So the identifier should be just "e", and U+0301 becomes an error/unknown token.
+        assert!(
+            idents.contains(&"e".to_string()),
+            "Identifier 'e' should be recognized, idents found: {:?}",
+            idents
+        );
+    }
+
+    #[test]
+    fn test_japanese_identifier() {
+        // Japanese characters are alphabetic and should work as identifiers
+        let source = "\u{540D}\u{524D} <= 42";
+        let kinds = tok_kinds(source);
+        assert_eq!(
+            kinds,
+            vec![Ident("\u{540D}\u{524D}".into()), LtEq, IntLiteral(42)],
+            "Japanese characters should be valid identifiers"
+        );
+    }
+
+    #[test]
+    fn test_emoji_in_identifier_rejected() {
+        // Emojis (e.g. U+1F600) are not alphabetic in Rust's char::is_alphabetic
+        // They should not form valid identifiers
+        let source = "\u{1F600} <= 1";
+        let (_tokens, errors) = tokenize(source);
+        // Emoji is not alphabetic, not a known operator, so should produce an error
+        assert!(
+            !errors.is_empty(),
+            "Emoji should not be accepted as identifier start"
+        );
+    }
 }
