@@ -22,9 +22,9 @@ stdout(replaced)
 replaced_all <= Replace[text, "foo", "baz"](all <= true)
 stdout(replaced_all)
 
-// CharAt
+// CharAt (returns Lax — unmold to get value)
 greeting <= "Hello"
-ch <= CharAt[greeting, 1]()
+CharAt[greeting, 1]() ]=> ch
 stdout(ch)
 
 // Repeat

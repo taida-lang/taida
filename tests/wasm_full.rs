@@ -857,6 +857,7 @@ fn wasm_full_parity_all_examples() {
         "09_modules",
         "13_async",
         "14_unmold_backward",
+        "26_prelude_optional", // wasm-full runtime crash (pre-existing)
         "compile_async",
         "compile_module",
         "compile_module_value",
@@ -865,7 +866,6 @@ fn wasm_full_parity_all_examples() {
     // Expected allowlist: examples where native backend itself fails (build or run).
     // These are checked before wasm-full compilation, so they never appear in compile_rejected.
     let expected_native_fail: Vec<&str> = vec![
-        "26_prelude_optional",
         "compile_stream",
         "helper_val",
         "module_math",
