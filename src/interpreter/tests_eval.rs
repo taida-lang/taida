@@ -853,7 +853,8 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_mold_charat() {
-        assert_eq!(eval_ok("CharAt[\"hello\", 1]()"), Value::Str("e".into()));
+        // CharAt returns Lax[Str]; unmold with ]=> to get the inner value
+        assert_eq!(eval_ok("CharAt[\"hello\", 1]() ]=> x\nx"), Value::Str("e".into()));
     }
 
     #[test]
@@ -1928,51 +1929,34 @@ c.hasValue()"#;
 
     #[test]
     fn test_bt4_i64_max_plus_one_overflow() {
-        // TF-12: i64::MAX + 1 panics in debug mode (non-wrapping arithmetic).
-        // This test verifies the operation does not return a successful value
-        // without overflow handling. In release mode it wraps silently.
-        // Correct behavior: either wrap explicitly or return error.
-        let result = std::panic::catch_unwind(|| eval("x <= 9223372036854775807 + 1"));
-        // In debug mode: panics (overflow). In release mode: wraps.
-        // Either way, the test documents the boundary behavior.
-        if let Ok(eval_result) = result {
-            // Release mode: wrapping occurred
-            assert_eq!(
-                eval_result.unwrap(),
-                Value::Int(i64::MIN),
-                "i64::MAX + 1 should wrap to i64::MIN in release mode"
-            );
-        }
-        // Debug mode: panic caught -- this is TF-12
+        // TF-12 fixed: wrapping arithmetic ensures consistent behavior in debug/release.
+        // i64::MAX + 1 wraps to i64::MIN.
+        assert_eq!(
+            eval_ok("x <= 9223372036854775807 + 1\nx"),
+            Value::Int(i64::MIN),
+            "i64::MAX + 1 should wrap to i64::MIN"
+        );
     }
 
     #[test]
     fn test_bt4_i64_min_via_subtraction() {
         // i64::MIN = -9223372036854775808 (can't be expressed as a literal directly)
-        // Use 0 - i64::MAX to get close, then subtract 1 more
-        let result = std::panic::catch_unwind(|| eval("x <= 0 - 9223372036854775807 - 1"));
-        if let Ok(eval_result) = result {
-            assert_eq!(
-                eval_result.unwrap(),
-                Value::Int(i64::MIN),
-                "0 - i64::MAX - 1 should equal i64::MIN"
-            );
-        }
-        // Debug mode: may panic on overflow -- TF-12
+        // Use 0 - i64::MAX - 1 to reach i64::MIN.
+        assert_eq!(
+            eval_ok("x <= 0 - 9223372036854775807 - 1\nx"),
+            Value::Int(i64::MIN),
+            "0 - i64::MAX - 1 should equal i64::MIN"
+        );
     }
 
     #[test]
     fn test_bt4_i64_min_minus_one_overflow() {
-        // TF-12: i64::MIN - 1 panics in debug mode.
-        let result = std::panic::catch_unwind(|| eval("x <= (0 - 9223372036854775807 - 1) - 1"));
-        if let Ok(eval_result) = result {
-            assert_eq!(
-                eval_result.unwrap(),
-                Value::Int(i64::MAX),
-                "i64::MIN - 1 should wrap to i64::MAX in release mode"
-            );
-        }
-        // Debug mode: panic caught -- TF-12
+        // TF-12 fixed: i64::MIN - 1 wraps to i64::MAX.
+        assert_eq!(
+            eval_ok("x <= (0 - 9223372036854775807 - 1) - 1\nx"),
+            Value::Int(i64::MAX),
+            "i64::MIN - 1 should wrap to i64::MAX"
+        );
     }
 
     // ── Lax helpers (used by BT-4, BT-6, BT-7, BT-12, BT-18) ──
@@ -2101,7 +2085,6 @@ x.size()"#);
     }
 
     #[test]
-    #[ignore = "TF-14: CharAt[\"\",0]() crashes with 'Cannot access field hasValue'"]
     fn test_bt5_charAt_empty_string_index_zero() {
         // Expected: return Lax with hasValue=false (out of bounds)
         let result = eval_ok(r#"x <= CharAt["",0]()
@@ -2110,7 +2093,6 @@ x.hasValue"#);
     }
 
     #[test]
-    #[ignore = "TF-13: Slice[\"\",0,0]() returns BuchiPack instead of String"]
     fn test_bt5_slice_empty_string() {
         // Expected: return "" (empty string)
         let result = eval_ok(r#"Slice["",0,0]() "#);
