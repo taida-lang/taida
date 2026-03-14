@@ -1475,11 +1475,18 @@ fn test_docs_sample_pipeline_parses() {
     // Note: `<=` and `=>` cannot be mixed in one statement (E0301),
     // so we use `=>` only for pipeline.
     let source = r#""  Hello World  " => Trim[_]() => Lower[_]() => result"#;
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Pipeline sample should parse: {:?}",
         errors
+    );
+    assert_eq!(program.statements.len(), 1, "Pipeline should produce 1 statement");
+    // Pipeline `expr => ... => name` parses as Assignment with pipeline value
+    assert!(
+        matches!(&program.statements[0], Statement::Assignment(a) if a.target == "result"),
+        "Expected Assignment to 'result' via pipeline, got: {:?}",
+        program.statements[0]
     );
 }
 
@@ -1487,97 +1494,140 @@ fn test_docs_sample_pipeline_parses() {
 fn test_docs_sample_buchi_pack_parses() {
     // BuchiPack from docs/guide/04_buchi_pack.md
     let source = "Pilot = @(name: Str, age: Int, role: Str)";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "BuchiPack sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 1, "TypeDef should produce 1 statement");
+    match &program.statements[0] {
+        Statement::TypeDef(td) => {
+            assert_eq!(td.name, "Pilot");
+            assert_eq!(td.fields.len(), 3, "Pilot should have 3 fields");
+        }
+        other => panic!("Expected TypeDef, got: {:?}", other),
+    }
 }
 
 #[test]
 fn test_docs_sample_assignment_parses() {
     let source = "x <= 42\nname <= \"Shinji\"";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Assignment sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 2, "Should produce 2 assignment statements");
+    assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "x"));
+    assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "name"));
 }
 
 #[test]
 fn test_docs_sample_condition_branch_parses() {
     let source = "grade <=\n  | score >= 90 |> \"A\"\n  | score >= 80 |> \"B\"\n  | _ |> \"F\"";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Condition branch sample should parse: {:?}",
         errors
+    );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(
+        matches!(&program.statements[0], Statement::Assignment(_)),
+        "Expected Assignment with condition branch value"
     );
 }
 
 #[test]
 fn test_docs_sample_error_ceiling_parses() {
     let source = "|== error: Error =\n  0\n=> :Int";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Error ceiling sample should parse: {:?}",
         errors
+    );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(
+        matches!(&program.statements[0], Statement::ErrorCeiling(_)),
+        "Expected ErrorCeiling statement, got: {:?}",
+        program.statements[0]
     );
 }
 
 #[test]
 fn test_docs_sample_mold_instantiation_parses() {
     let source = r#"result <= Div[10, 3]()"#;
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Mold instantiation sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "result"));
 }
 
 #[test]
 fn test_docs_sample_json_parses() {
     let source = r#"User = @(name: Str, age: Int)
 parsed <= JSON[raw, User]()"#;
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(errors.is_empty(), "JSON sample should parse: {:?}", errors);
+    assert_eq!(program.statements.len(), 2, "Should produce 2 statements (TypeDef + Assignment)");
+    assert!(matches!(&program.statements[0], Statement::TypeDef(_)));
+    assert!(matches!(&program.statements[1], Statement::Assignment(a) if a.target == "parsed"));
 }
 
 #[test]
 fn test_docs_sample_lambda_parses() {
     let source = "doubler <= _ x = x + x";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Lambda sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 1, "Should produce 1 statement");
+    assert!(matches!(&program.statements[0], Statement::Assignment(a) if a.target == "doubler"));
 }
 
 #[test]
 fn test_docs_sample_import_export_parses() {
     let source = ">>> ./utils => @(helper)\n<<< @(main)";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Import/export sample should parse: {:?}",
         errors
     );
+    assert_eq!(program.statements.len(), 2, "Should produce 2 statements (Import + Export)");
+    assert!(matches!(&program.statements[0], Statement::Import(_)));
+    assert!(matches!(&program.statements[1], Statement::Export(_)));
 }
 
 #[test]
 fn test_docs_sample_empty_slot_partial_application_parses() {
     // Empty slot partial application from docs/reference/operators.md
     let source = "add x y = x + y\n=> :Int\nadd5 <= add(5, )";
-    let (_, errors) = parse(source);
+    let (program, errors) = parse(source);
     assert!(
         errors.is_empty(),
         "Empty slot partial application should parse: {:?}",
         errors
+    );
+    // FuncDef followed by Assignment — parser may merge trailing statement
+    assert!(
+        program.statements.len() >= 1,
+        "Should produce at least 1 statement"
+    );
+    // Verify the function definition exists
+    assert!(
+        program.statements.iter().any(|s| matches!(s, Statement::FuncDef(f) if f.name == "add")),
+        "Expected FuncDef 'add' in AST, got: {:?}",
+        program.statements
     );
 }
 

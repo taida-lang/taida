@@ -831,11 +831,10 @@ fn test_mold_type_param_after_concrete_slots_without_binding_target_is_error() {
   tail: Int
 )"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("[E1401]")
-                && e.message.contains("unbound type parameter(s): U")),
+        errors[0].message.contains("[E1401]")
+            && errors[0].message.contains("unbound type parameter(s): U"),
         "Expected later concrete mold header args to consume field slots before type params, got: {:?}",
         errors
     );
@@ -1028,11 +1027,10 @@ fn test_mold_child_header_must_preserve_inherited_prefix() {
 )
 Guard[T, P <= :T => :Bool] => GuardAlias[T, Pred] = @()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| {
-            e.message.contains("[E1407]")
-                && e.message.contains("must preserve inherited header slot 2")
-        }),
+        errors[0].message.contains("[E1407]")
+            && errors[0].message.contains("must preserve inherited header slot 2"),
         "Expected inherited prefix rename/rewrite to be rejected, got: {:?}",
         errors
     );
@@ -1142,6 +1140,7 @@ Parent[T] => Expanded[T, U] = @(
 )
 Expanded[T, U] => Child[T] = @()"#;
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors, got: {:?}", errors);
     assert!(
         errors.iter().any(|e| {
             e.message.contains("[E1407]")
@@ -1159,8 +1158,9 @@ Expanded[T, U] => Child[T] = @()"#;
 fn test_same_scope_variable_redefinition_is_error() {
     let source = "x <= 1\nx <= 2";
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1501]")),
+        errors[0].message.contains("[E1501]"),
         "Expected E1501 same-scope redefinition error, got: {:?}",
         errors
     );
@@ -1170,8 +1170,9 @@ fn test_same_scope_variable_redefinition_is_error() {
 fn test_same_scope_function_overload_is_error() {
     let source = "f x: Int =\n  x + 1\n=> :Int\nf x: Str =\n  x\n=> :Str";
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1501]")),
+        errors[0].message.contains("[E1501]"),
         "Expected E1501 function overload error, got: {:?}",
         errors
     );
@@ -1181,6 +1182,7 @@ fn test_same_scope_function_overload_is_error() {
 fn test_invalid_generic_function_still_triggers_same_scope_duplicate_error() {
     let source = "id[T] x: T =\n  x\n=> :T\n\nid[T, U] x: T =\n  x\n=> :U";
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors (E1501 + E1510), got: {:?}", errors);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1501]")),
         "Expected E1501 duplicate-name error with invalid generic overload, got: {:?}",
@@ -1199,6 +1201,7 @@ fn test_invalid_generic_function_still_triggers_same_scope_duplicate_error() {
 fn test_invalid_generic_duplicate_clears_stale_callable_metadata() {
     let source = "id[T] x: T =\n  x\n=> :T\n\nid[T, U] x: T =\n  x\n=> :U\n\ny: Str <= id(1)";
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors (E1501 + E1510), got: {:?}", errors);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1501]")),
         "Expected duplicate-name error, got: {:?}",
@@ -1222,6 +1225,7 @@ fn test_invalid_generic_duplicate_clears_stale_callable_metadata() {
 fn test_invalid_then_valid_duplicate_still_clears_callable_metadata() {
     let source = "id[T, U] x: T =\n  x\n=> :U\n\nid[T] x: T =\n  x\n=> :T\n\ny: Str <= id(1)";
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 2, "Expected exactly 2 errors (E1510 + E1501), got: {:?}", errors);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1501]")),
         "Expected duplicate-name error, got: {:?}",
@@ -1245,8 +1249,9 @@ fn test_invalid_then_valid_duplicate_still_clears_callable_metadata() {
 fn test_function_overwrites_variable_is_error() {
     let source = "x <= 1\nx =\n  42\n=> :Int";
     let (_, errors) = check(source);
+    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1501]")),
+        errors[0].message.contains("[E1501]"),
         "Expected E1501 variable-to-function overwrite error, got: {:?}",
         errors
     );
@@ -2665,4 +2670,5 @@ fn test_lax_result_current_behavior_stable() {
         x_ty
     );
 }
+
 
