@@ -718,6 +718,27 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // typeof (all profiles — implemented in runtime_core_wasm.c)
         "taida_typeof" => "int64_t taida_typeof(int64_t val, int64_t tag);".to_string(),
+        // WC-4: JSON functions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_json_parse" | "taida_json_stringify" | "taida_json_encode"
+        | "taida_json_pretty" | "taida_json_unmold" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_json_schema_cast" => "int64_t taida_json_schema_cast(int64_t raw, int64_t schema);".to_string(),
+        "taida_json_empty" => "int64_t taida_json_empty(void);".to_string(),
+        "taida_json_has" => "int64_t taida_json_has(int64_t json, int64_t key);".to_string(),
+        "taida_json_size" => "int64_t taida_json_size(int64_t json);".to_string(),
+        "taida_json_from_int" | "taida_json_from_str" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_json_to_int" | "taida_json_to_str" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_debug_json" | "taida_debug_list" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        // WC-4: Field lookup (all profiles — implemented in runtime_core_wasm.c)
+        "taida_lookup_field_name" => "int64_t taida_lookup_field_name(int64_t hash);".to_string(),
+        "taida_lookup_field_type" => "int64_t taida_lookup_field_type(int64_t hash, int64_t name_ptr);".to_string(),
         // RC no-ops
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
@@ -882,24 +903,7 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         }
         "taida_monadic_flat_map" => "int64_t taida_monadic_flat_map(int64_t val, int64_t fn_ptr);".to_string(),
 
-        // --- JSON ---
-        "taida_json_parse" | "taida_json_stringify" | "taida_json_encode"
-        | "taida_json_pretty" | "taida_json_unmold" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_json_schema_cast" => "int64_t taida_json_schema_cast(int64_t raw, int64_t schema);".to_string(),
-        "taida_json_empty" => "int64_t taida_json_empty(void);".to_string(),
-        "taida_json_has" => "int64_t taida_json_has(int64_t json, int64_t key);".to_string(),
-        "taida_json_size" => "int64_t taida_json_size(int64_t json);".to_string(),
-        "taida_json_from_int" | "taida_json_from_str" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_json_to_int" | "taida_json_to_str" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_debug_json" | "taida_debug_list" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
+        // --- JSON: moved to runtime_func_prototype() (WC-4b) ---
 
         // --- Gorillax / Relaxed Gorillax extended ---
         "taida_gorillax_to_string" | "taida_gorillax_unmold" => {
@@ -934,10 +938,7 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         "taida_make_io_error" => "int64_t taida_make_io_error(int64_t msg);".to_string(),
         "taida_retain_and_tag_field" => "int64_t taida_retain_and_tag_field(int64_t val, int64_t tag);".to_string(),
 
-        // --- Field lookup ---
-        "taida_lookup_field_name" => "int64_t taida_lookup_field_name(int64_t hash);".to_string(),
-        "taida_lookup_field_type" => "int64_t taida_lookup_field_type(int64_t hash, int64_t name_ptr);".to_string(),
-
+        // --- Field lookup: moved to runtime_func_prototype() (WC-4b) ---
         // --- Callback invoke: moved to runtime_func_prototype() (WC-3e) ---
 
         // --- Bitwise / Shift ---

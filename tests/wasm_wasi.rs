@@ -675,23 +675,23 @@ fn wasm_wasi_parity_all_examples() {
         "13_async",
         "14_unmold_backward",
         "17_gorillax_cage",
-        "18_std_json",
+        // "18_std_json",          // WC-4: JSON in core
         "26_prelude_optional", // typeof works but taida_polymorphic_has_value missing
         "27_prelude_result",
         "28_prelude_collections",
         "30_class_like_methods",
-        "api_client",
+        // "api_client",           // WC-4: JSON in core
         "compile_async",
         "compile_gorillax",
         "compile_hashmap_set",
-        "compile_json",
+        // "compile_json",         // WC-4: JSON in core
         "compile_lax",
         "compile_methods",
         "compile_module",
         "compile_module_value",
         "compile_optional_result",
         "compile_pack_field_call",
-        "compile_prelude",
+        // "compile_prelude",      // WC-4: JSON in core (jsonEncode/jsonPretty)
         "compile_type_conv",
     ];
 
@@ -732,10 +732,11 @@ fn wasm_wasi_parity_all_examples() {
     // WC-2: compile_num_molds now passes on wasm-wasi (number molds in core) → 29
     // WC-3: list molds in core → 38 (compile_list_molds, compile_list_map, compile_hof_molds,
     //        todo_app, 10_list_operations, plus others now compile with list ops in core)
+    // WC-4: JSON in core → 42 (18_std_json, api_client, compile_json, compile_prelude)
     assert_eq!(
         parity_ok.len(),
-        38,
-        "WW-3: Expected exactly 38 parity-OK examples, got {}. \
+        42,
+        "WW-3: Expected exactly 42 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -851,9 +852,10 @@ fn wasm_wasi_superset_of_wasm_min() {
     // WC-1: compile_str_molds now passes on wasm-wasi (string molds in core) → 27
     // WC-2: compile_num_molds now passes on wasm-wasi (number molds in core) → 28
     // WC-3: list molds in core → 37 (list operations now compile in both profiles)
+    // WC-4: JSON in core → 41 (18_std_json, api_client, compile_json, compile_prelude)
     assert_eq!(
-        superset_ok, 37,
-        "WW-3: Expected exactly 37 superset-verified examples, got {}. \
+        superset_ok, 41,
+        "WW-3: Expected exactly 41 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );
