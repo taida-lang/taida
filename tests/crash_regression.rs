@@ -240,9 +240,16 @@ fn test_crash_regression_corpus_three_way() {
                     "{}: interpreter/js mismatch\n  interp ({} lines):\n{}\n  js ({} lines):\n{}",
                     name,
                     interp.lines().count(),
-                    interp.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n"),
+                    interp
+                        .lines()
+                        .map(|l| format!("    {}", l))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     js.lines().count(),
-                    js.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n"),
+                    js.lines()
+                        .map(|l| format!("    {}", l))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 ));
                 continue;
             }

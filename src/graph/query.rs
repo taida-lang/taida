@@ -814,10 +814,7 @@ safe input =
     #[test]
     fn test_find_cycles_self_reference() {
         // A -> A (self-loop)
-        let graph = make_graph(
-            vec![make_node("a", "A")],
-            vec![make_edge("a", "a")],
-        );
+        let graph = make_graph(vec![make_node("a", "A")], vec![make_edge("a", "a")]);
         let result = find_cycles(&graph);
         match result {
             QueryResult::Cycles(cycles) => {

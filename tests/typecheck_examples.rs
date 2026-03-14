@@ -64,7 +64,12 @@ fn check_source(source: &str) -> Vec<String> {
 fn test_negative_same_scope_redefinition() {
     // docs: same-scope redefinition is forbidden
     let errors = check_source("x <= 1\nx <= 2");
-    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "Expected exactly 1 error, got: {:?}",
+        errors
+    );
     assert!(
         errors[0].contains("[E1501]"),
         "Expected E1501, got: {:?}",
@@ -81,7 +86,12 @@ fn test_negative_same_scope_redefinition() {
 fn test_negative_function_overload() {
     // docs: function overloading is disallowed
     let errors = check_source("f x: Int =\n  x\n=> :Int\nf x: Str =\n  x\n=> :Str");
-    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "Expected exactly 1 error, got: {:?}",
+        errors
+    );
     assert!(
         errors[0].contains("[E1501]"),
         "Expected E1501, got: {:?}",
@@ -98,7 +108,12 @@ fn test_negative_function_overload() {
 fn test_negative_old_placeholder_partial() {
     // docs: old `_` partial application is rejected
     let errors = check_source("add x y = x + y\n=> :Int\nresult <= add(5, _)");
-    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "Expected exactly 1 error, got: {:?}",
+        errors
+    );
     assert!(
         errors[0].contains("[E1502]"),
         "Expected E1502, got: {:?}",
@@ -115,7 +130,12 @@ fn test_negative_old_placeholder_partial() {
 fn test_negative_typedef_partial_application() {
     // docs: TypeDef partial application is not supported
     let errors = check_source("Point = @(x: Int, y: Int)\np <= Point(1, )");
-    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "Expected exactly 1 error, got: {:?}",
+        errors
+    );
     assert!(
         errors[0].contains("[E1503]"),
         "Expected E1503, got: {:?}",
@@ -132,7 +152,12 @@ fn test_negative_typedef_partial_application() {
 fn test_negative_mold_placeholder_outside_pipeline() {
     // docs: Mold[_]() outside pipeline is rejected
     let errors = check_source("x <= Str[_]()");
-    assert_eq!(errors.len(), 1, "Expected exactly 1 error, got: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "Expected exactly 1 error, got: {:?}",
+        errors
+    );
     assert!(
         errors[0].contains("[E1504]"),
         "Expected E1504, got: {:?}",

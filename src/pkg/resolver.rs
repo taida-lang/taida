@@ -973,10 +973,14 @@ deps <= @(
             fs::create_dir_all(&p).unwrap();
             Self(p)
         }
-        fn path(&self) -> &PathBuf { &self.0 }
+        fn path(&self) -> &PathBuf {
+            &self.0
+        }
     }
     impl Drop for TestDir {
-        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -1123,9 +1127,18 @@ deps <= @(
             "Diamond dependency should resolve without errors: {:?}",
             result.errors
         );
-        assert!(result.resolved.contains_key("dep_a"), "dep_a should be resolved");
-        assert!(result.resolved.contains_key("dep_b"), "dep_b should be resolved");
-        assert!(result.resolved.contains_key("shared"), "shared should be resolved");
+        assert!(
+            result.resolved.contains_key("dep_a"),
+            "dep_a should be resolved"
+        );
+        assert!(
+            result.resolved.contains_key("dep_b"),
+            "dep_b should be resolved"
+        );
+        assert!(
+            result.resolved.contains_key("shared"),
+            "shared should be resolved"
+        );
     }
 
     #[test]
@@ -1181,7 +1194,13 @@ deps <= @(
 
         // Must terminate (no infinite loop), regardless of whether it errors
         let result = resolve_deps(&manifest);
-        assert!(result.resolved.contains_key("dep_a"), "dep_a should be resolved");
-        assert!(result.resolved.contains_key("dep_b"), "dep_b should be resolved");
+        assert!(
+            result.resolved.contains_key("dep_a"),
+            "dep_a should be resolved"
+        );
+        assert!(
+            result.resolved.contains_key("dep_b"),
+            "dep_b should be resolved"
+        );
     }
 }

@@ -451,7 +451,11 @@ mod tests {
         match &Value::default_stream() {
             Value::Stream(sv) => {
                 assert!(sv.items.is_empty(), "Default stream should have no items");
-                assert_eq!(sv.status, StreamStatus::Completed, "Default stream should be completed");
+                assert_eq!(
+                    sv.status,
+                    StreamStatus::Completed,
+                    "Default stream should be completed"
+                );
             }
             other => panic!("Expected Stream, got: {:?}", other),
         }
@@ -464,7 +468,10 @@ mod tests {
         assert_eq!(Value::default_for_list(&int_items), Value::Int(0));
 
         let str_items = vec![Value::Str("a".to_string())];
-        assert_eq!(Value::default_for_list(&str_items), Value::Str(String::new()));
+        assert_eq!(
+            Value::default_for_list(&str_items),
+            Value::Str(String::new())
+        );
 
         let float_items = vec![Value::Float(1.5)];
         assert_eq!(Value::default_for_list(&float_items), Value::Float(0.0));

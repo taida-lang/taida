@@ -1580,7 +1580,9 @@ alice <= Person(name <= "Alice", age <= 30)
     fn test_bt1_caret_rejected() {
         let (_, errors) = tokenize("x <= 1 ^ 2");
         assert!(
-            errors.iter().any(|e| e.message.contains("Unexpected character '^'")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '^'")),
             "Caret '^' should be rejected as unexpected character, got: {:?}",
             errors
         );
@@ -1589,10 +1591,7 @@ alice <= Person(name <= "Alice", age <= 30)
     #[test]
     fn test_bt1_single_ampersand_rejected() {
         let (_, errors) = tokenize("x <= 1 & 2");
-        assert!(
-            !errors.is_empty(),
-            "Single '&' should produce an error"
-        );
+        assert!(!errors.is_empty(), "Single '&' should produce an error");
         assert!(
             errors[0].message.contains("&"),
             "Error should mention '&', got: {}",
@@ -1604,7 +1603,9 @@ alice <= Person(name <= "Alice", age <= 30)
     fn test_bt1_tilde_rejected() {
         let (_, errors) = tokenize("x <= ~1");
         assert!(
-            errors.iter().any(|e| e.message.contains("Unexpected character '~'")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '~'")),
             "Tilde '~' should be rejected as unexpected character, got: {:?}",
             errors
         );
@@ -1614,7 +1615,9 @@ alice <= Person(name <= "Alice", age <= 30)
     fn test_bt1_question_mark_rejected() {
         let (_, errors) = tokenize("x <= y ? 1");
         assert!(
-            errors.iter().any(|e| e.message.contains("Unexpected character '?'")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '?'")),
             "Question mark '?' should be rejected as unexpected character, got: {:?}",
             errors
         );
@@ -1624,7 +1627,9 @@ alice <= Person(name <= "Alice", age <= 30)
     fn test_bt1_hash_rejected() {
         let (_, errors) = tokenize("x <= #tag");
         assert!(
-            errors.iter().any(|e| e.message.contains("Unexpected character '#'")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("Unexpected character '#'")),
             "Hash '#' should be rejected as unexpected character, got: {:?}",
             errors
         );
@@ -1808,7 +1813,8 @@ alice <= Person(name <= "Alice", age <= 30)
         assert!(
             !has_bidi_ident || !errors.is_empty(),
             "BiDi control character U+202E should not silently appear in identifier. Tokens: {:?}, Errors: {:?}",
-            idents, errors
+            idents,
+            errors
         );
     }
 

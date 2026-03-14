@@ -3289,8 +3289,14 @@ stdout(lax.hasValue)"#;
 stdout(result.hasValue)
 stdout(result.__default)"#;
         let output = run_code(code);
-        assert_eq!(output[0], "false", "Read nonexistent should return Lax(hasValue=false)");
-        assert_eq!(output[1], "", "Default for string Lax should be empty string");
+        assert_eq!(
+            output[0], "false",
+            "Read nonexistent should return Lax(hasValue=false)"
+        );
+        assert_eq!(
+            output[1], "",
+            "Default for string Lax should be empty string"
+        );
     }
 
     #[test]
@@ -3298,14 +3304,22 @@ stdout(result.__default)"#;
         let code = r#"result <= Stat["/tmp/taida_bt11_nonexistent_xyz"]()
 stdout(result.hasValue)"#;
         let output = run_code(code);
-        assert_eq!(output, vec!["false"], "Stat nonexistent should return Lax(hasValue=false)");
+        assert_eq!(
+            output,
+            vec!["false"],
+            "Stat nonexistent should return Lax(hasValue=false)"
+        );
     }
 
     #[test]
     fn test_bt11_exists_nonexistent() {
         let code = r#"stdout(Exists["/tmp/taida_bt11_nonexistent_xyz"]())"#;
         let output = run_code(code);
-        assert_eq!(output, vec!["false"], "Exists nonexistent should return false");
+        assert_eq!(
+            output,
+            vec!["false"],
+            "Exists nonexistent should return false"
+        );
     }
 
     /// RAII guard for test directories — ensures cleanup even on panic.
@@ -3317,10 +3331,14 @@ stdout(result.hasValue)"#;
             std::fs::create_dir_all(&p).unwrap();
             Self(p)
         }
-        fn path(&self) -> &std::path::PathBuf { &self.0 }
+        fn path(&self) -> &std::path::PathBuf {
+            &self.0
+        }
     }
     impl Drop for TestDir {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -3336,7 +3354,10 @@ stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output[0], "true", "Empty file should still have hasValue=true");
+        assert_eq!(
+            output[0], "true",
+            "Empty file should still have hasValue=true"
+        );
         assert_eq!(output[1], "", "Empty file content should be empty string");
     }
 
@@ -3362,7 +3383,11 @@ stdout(result.__value)"#,
         let dir = TestDir::new("/tmp/taida test bt11 spaces");
         std::fs::write(dir.path().join("test file.txt"), "hello spaces").unwrap();
 
-        let path = dir.path().join("test file.txt").to_string_lossy().to_string();
+        let path = dir
+            .path()
+            .join("test file.txt")
+            .to_string_lossy()
+            .to_string();
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
@@ -3370,7 +3395,10 @@ stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output[0], "true", "File with spaces in path should be readable");
+        assert_eq!(
+            output[0], "true",
+            "File with spaces in path should be readable"
+        );
         assert_eq!(output[1], "hello spaces");
     }
 
@@ -3387,7 +3415,10 @@ stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output[0], "true", "File with Unicode path should be readable");
+        assert_eq!(
+            output[0], "true",
+            "File with Unicode path should be readable"
+        );
         assert_eq!(output[1], "unicode path");
     }
 
@@ -3396,6 +3427,10 @@ stdout(result.__value)"#,
         let code = r#"result <= ListDir["/tmp/taida_bt11_nonexistent_dir_xyz"]()
 stdout(result.hasValue)"#;
         let output = run_code(code);
-        assert_eq!(output, vec!["false"], "ListDir nonexistent should return Lax(hasValue=false)");
+        assert_eq!(
+            output,
+            vec!["false"],
+            "ListDir nonexistent should return Lax(hasValue=false)"
+        );
     }
 }
