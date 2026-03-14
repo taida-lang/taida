@@ -38,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
       - uses: actions/cache@v5
         with:
           path: |
@@ -50,7 +51,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
             ${{ runner.os }}-cargo-
-      - run: cargo test --all-targets
+      - run: cargo nextest run --all-targets --profile ci
 
   parity:
     name: Backend Parity

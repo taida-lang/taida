@@ -1,0 +1,27 @@
+# cargo-nextest configuration for Taida Lang
+# https://nexte.st/docs/configuration/
+
+[store]
+# Directory for nextest artifacts (relative to target/)
+dir = "nextest"
+
+[profile.default]
+# Retry flaky tests once
+retries = 0
+# Fail-fast: stop on first failure
+fail-fast = true
+# Status level controls which test statuses are displayed
+status-level = "pass"
+# Final status level controls summary
+final-status-level = "fail"
+# Warn on tests slower than 60s
+slow-timeout = { period = "60s" }
+
+[profile.ci]
+# CI profile: no retries, fail-fast enabled
+retries = 0
+fail-fast = true
+status-level = "pass"
+final-status-level = "all"
+# Warn on tests slower than 60s, terminate after 10 minutes
+slow-timeout = { period = "60s", terminate-after = 10 }

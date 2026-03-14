@@ -26,8 +26,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(feature = "community")]
 use taida::auth;
+#[cfg(feature = "native")]
 use taida::codegen;
+#[cfg(feature = "community")]
 use taida::community;
 use taida::doc;
 use taida::graph::extract::GraphExtractor;
@@ -158,6 +161,7 @@ Notes:
     );
 }
 
+#[cfg(feature = "native")]
 fn print_compile_help() {
     println!(
         "\
@@ -285,6 +289,7 @@ Example:
     );
 }
 
+#[cfg(feature = "community")]
 fn print_publish_help() {
     println!(
         "\
@@ -316,6 +321,7 @@ Examples:
     );
 }
 
+#[cfg(feature = "lsp")]
 fn print_lsp_help() {
     println!(
         "\
@@ -373,9 +379,23 @@ fn main() {
         match filtered_args[1].as_str() {
             "--help" | "-h" | "help" => print_cli_help(),
             "--version" | "-V" | "version" => print_cli_version(),
+            #[cfg(feature = "lsp")]
             "lsp" => run_lsp(&filtered_args[2..]),
+            #[cfg(not(feature = "lsp"))]
+            "lsp" => {
+                eprintln!("The 'lsp' command requires the 'lsp' feature.");
+                eprintln!("Rebuild with: cargo build --features lsp");
+                std::process::exit(1);
+            }
             "check" => run_check_cmd(&filtered_args[2..]),
+            #[cfg(feature = "native")]
             "compile" => run_compile(&filtered_args[2..], no_check),
+            #[cfg(not(feature = "native"))]
+            "compile" => {
+                eprintln!("The 'compile' command requires the 'native' feature.");
+                eprintln!("Rebuild with: cargo build --features native");
+                std::process::exit(1);
+            }
             "transpile" => run_transpile(&filtered_args[2..], no_check),
             "build" => run_build(&filtered_args[2..], no_check),
             "graph" => run_graph(&filtered_args[2..]),
@@ -385,11 +405,32 @@ fn main() {
             "deps" => run_deps(&filtered_args[2..]),
             "install" => run_install(&filtered_args[2..]),
             "update" => run_update(&filtered_args[2..]),
+            #[cfg(feature = "community")]
             "publish" => run_publish(&filtered_args[2..]),
+            #[cfg(not(feature = "community"))]
+            "publish" => {
+                eprintln!("The 'publish' command requires the 'community' feature.");
+                eprintln!("Rebuild with: cargo build --features community");
+                std::process::exit(1);
+            }
             "doc" => run_doc(&filtered_args[2..]),
             "todo" => run_todo(&filtered_args[2..]),
+            #[cfg(feature = "community")]
             "auth" => auth::run_auth(&filtered_args[2..]),
+            #[cfg(not(feature = "community"))]
+            "auth" => {
+                eprintln!("The 'auth' command requires the 'community' feature.");
+                eprintln!("Rebuild with: cargo build --features community");
+                std::process::exit(1);
+            }
+            #[cfg(feature = "community")]
             "community" | "c" => community::run_community(&filtered_args[2..]),
+            #[cfg(not(feature = "community"))]
+            "community" | "c" => {
+                eprintln!("The 'community' command requires the 'community' feature.");
+                eprintln!("Rebuild with: cargo build --features community");
+                std::process::exit(1);
+            }
             _ => {
                 // File execution mode
                 let filename = &filtered_args[1];
@@ -846,6 +887,7 @@ fn emit_deprecation_warning(command: &str, replacement: &str) {
     );
 }
 
+#[cfg(feature = "native")]
 fn run_compile(args: &[String], no_check: bool) {
     if args.len() == 1 && is_help_flag(args[0].as_str()) {
         print_compile_help();
@@ -997,6 +1039,7 @@ fn run_build(args: &[String], no_check: bool) {
                 &mut compile_stats,
             );
         }
+        #[cfg(feature = "native")]
         BuildTarget::Native => {
             run_build_native(
                 input_path,
@@ -1008,6 +1051,13 @@ fn run_build(args: &[String], no_check: bool) {
                 &mut compile_stats,
             );
         }
+        #[cfg(not(feature = "native"))]
+        BuildTarget::Native => {
+            eprintln!("The 'native' build target requires the 'native' feature.");
+            eprintln!("Rebuild with: cargo build --features native");
+            std::process::exit(1);
+        }
+        #[cfg(feature = "native")]
         BuildTarget::WasmMin => {
             run_build_wasm_min(
                 input_path,
@@ -1018,6 +1068,13 @@ fn run_build(args: &[String], no_check: bool) {
                 &mut compile_stats,
             );
         }
+        #[cfg(not(feature = "native"))]
+        BuildTarget::WasmMin => {
+            eprintln!("The 'wasm-min' build target requires the 'native' feature.");
+            eprintln!("Rebuild with: cargo build --features native");
+            std::process::exit(1);
+        }
+        #[cfg(feature = "native")]
         BuildTarget::WasmWasi => {
             run_build_wasm_wasi(
                 input_path,
@@ -1028,6 +1085,13 @@ fn run_build(args: &[String], no_check: bool) {
                 &mut compile_stats,
             );
         }
+        #[cfg(not(feature = "native"))]
+        BuildTarget::WasmWasi => {
+            eprintln!("The 'wasm-wasi' build target requires the 'native' feature.");
+            eprintln!("Rebuild with: cargo build --features native");
+            std::process::exit(1);
+        }
+        #[cfg(feature = "native")]
         BuildTarget::WasmEdge => {
             run_build_wasm_edge(
                 input_path,
@@ -1038,6 +1102,13 @@ fn run_build(args: &[String], no_check: bool) {
                 &mut compile_stats,
             );
         }
+        #[cfg(not(feature = "native"))]
+        BuildTarget::WasmEdge => {
+            eprintln!("The 'wasm-edge' build target requires the 'native' feature.");
+            eprintln!("Rebuild with: cargo build --features native");
+            std::process::exit(1);
+        }
+        #[cfg(feature = "native")]
         BuildTarget::WasmFull => {
             run_build_wasm_full(
                 input_path,
@@ -1047,6 +1118,12 @@ fn run_build(args: &[String], no_check: bool) {
                 diag_format,
                 &mut compile_stats,
             );
+        }
+        #[cfg(not(feature = "native"))]
+        BuildTarget::WasmFull => {
+            eprintln!("The 'wasm-full' build target requires the 'native' feature.");
+            eprintln!("Rebuild with: cargo build --features native");
+            std::process::exit(1);
         }
     }
 
@@ -1830,6 +1907,7 @@ fn run_build_js_dir(
     }
 }
 
+#[cfg(feature = "native")]
 fn run_build_native(
     input_path: &Path,
     output_path: Option<&str>,
@@ -1975,6 +2053,7 @@ fn run_build_native(
     }
 }
 
+#[cfg(feature = "native")]
 fn run_build_wasm_min(
     input_path: &Path,
     output_path: Option<&str>,
@@ -2136,6 +2215,7 @@ fn run_build_wasm_min(
     }
 }
 
+#[cfg(feature = "native")]
 fn run_build_wasm_wasi(
     input_path: &Path,
     output_path: Option<&str>,
@@ -2297,6 +2377,7 @@ fn run_build_wasm_wasi(
     }
 }
 
+#[cfg(feature = "native")]
 fn run_build_wasm_edge(
     input_path: &Path,
     output_path: Option<&str>,
@@ -2459,6 +2540,7 @@ fn run_build_wasm_edge(
     }
 }
 
+#[cfg(feature = "native")]
 fn run_build_wasm_full(
     input_path: &Path,
     output_path: Option<&str>,
@@ -2620,6 +2702,7 @@ fn run_build_wasm_full(
     }
 }
 
+#[cfg(feature = "native")]
 fn resolve_native_entry_path(
     input_path: &Path,
     entry_path: Option<&str>,
@@ -3962,6 +4045,7 @@ fn run_update(args: &[String]) {
 
 // ── Publish subcommand ─────────────────────────────────
 
+#[cfg(feature = "community")]
 fn run_publish(args: &[String]) {
     let mut label: Option<String> = None;
     let mut dry_run = false;
@@ -4243,6 +4327,7 @@ fn find_packages_tdm() -> Option<PathBuf> {
 
 // ── LSP server ─────────────────────────────────────────
 
+#[cfg(feature = "lsp")]
 fn run_lsp(args: &[String]) {
     match args {
         [] => {}
