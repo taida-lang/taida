@@ -739,6 +739,33 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         // WC-4: Field lookup (all profiles — implemented in runtime_core_wasm.c)
         "taida_lookup_field_name" => "int64_t taida_lookup_field_name(int64_t hash);".to_string(),
         "taida_lookup_field_type" => "int64_t taida_lookup_field_type(int64_t hash, int64_t name_ptr);".to_string(),
+        // WC-5: Lax extended ops (all profiles — implemented in runtime_core_wasm.c)
+        "taida_lax_map" | "taida_lax_flat_map" => {
+            format!("int64_t {}(int64_t lax, int64_t fn_ptr);", name)
+        }
+        "taida_lax_to_string" => "int64_t taida_lax_to_string(int64_t lax);".to_string(),
+        // WC-5: Result extended ops (all profiles — implemented in runtime_core_wasm.c)
+        "taida_result_map" | "taida_result_flat_map" => {
+            format!("int64_t {}(int64_t result, int64_t fn_ptr);", name)
+        }
+        "taida_result_get_or_default" => "int64_t taida_result_get_or_default(int64_t result, int64_t fallback);".to_string(),
+        "taida_result_get_or_throw" | "taida_result_to_string"
+        | "taida_result_is_error_check" => {
+            format!("int64_t {}(int64_t result);", name)
+        }
+        // WC-5: Gorillax extended ops (all profiles — implemented in runtime_core_wasm.c)
+        "taida_gorillax_to_string" | "taida_gorillax_unmold" => {
+            format!("int64_t {}(int64_t gx);", name)
+        }
+        "taida_relaxed_gorillax_to_string" | "taida_relaxed_gorillax_unmold" => {
+            format!("int64_t {}(int64_t gx);", name)
+        }
+        // WC-5: Monadic ops (all profiles — implemented in runtime_core_wasm.c)
+        "taida_monadic_field_count" | "taida_monadic_get_or_throw"
+        | "taida_monadic_to_string" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_monadic_flat_map" => "int64_t taida_monadic_flat_map(int64_t val, int64_t fn_ptr);".to_string(),
         // RC no-ops
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
@@ -896,38 +923,11 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         "taida_polymorphic_has_value" => "int64_t taida_polymorphic_has_value(int64_t ptr);".to_string(),
         "taida_polymorphic_map" => "int64_t taida_polymorphic_map(int64_t ptr, int64_t fn_ptr);".to_string(),
 
-        // --- Monadic ---
-        "taida_monadic_field_count" | "taida_monadic_get_or_throw"
-        | "taida_monadic_to_string" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_monadic_flat_map" => "int64_t taida_monadic_flat_map(int64_t val, int64_t fn_ptr);".to_string(),
-
+        // --- Monadic: moved to runtime_func_prototype() (WC-5e) ---
         // --- JSON: moved to runtime_func_prototype() (WC-4b) ---
-
-        // --- Gorillax / Relaxed Gorillax extended ---
-        "taida_gorillax_to_string" | "taida_gorillax_unmold" => {
-            format!("int64_t {}(int64_t gx);", name)
-        }
-        "taida_relaxed_gorillax_to_string" | "taida_relaxed_gorillax_unmold" => {
-            format!("int64_t {}(int64_t gx);", name)
-        }
-
-        // --- Lax extended ---
-        "taida_lax_map" | "taida_lax_flat_map" => {
-            format!("int64_t {}(int64_t lax, int64_t fn_ptr);", name)
-        }
-        "taida_lax_to_string" => "int64_t taida_lax_to_string(int64_t lax);".to_string(),
-
-        // --- Result extended ---
-        "taida_result_map" | "taida_result_flat_map" => {
-            format!("int64_t {}(int64_t result, int64_t fn_ptr);", name)
-        }
-        "taida_result_get_or_default" => "int64_t taida_result_get_or_default(int64_t result, int64_t fallback);".to_string(),
-        "taida_result_get_or_throw" | "taida_result_to_string"
-        | "taida_result_is_error_check" => {
-            format!("int64_t {}(int64_t result);", name)
-        }
+        // --- Gorillax / Relaxed Gorillax: moved to runtime_func_prototype() (WC-5e) ---
+        // --- Lax extended: moved to runtime_func_prototype() (WC-5e) ---
+        // --- Result extended: moved to runtime_func_prototype() (WC-5e) ---
 
         // --- Pack / Error extended ---
         "taida_pack_call_field0" => "int64_t taida_pack_call_field0(int64_t pack, int64_t hash);".to_string(),

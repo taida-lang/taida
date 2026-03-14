@@ -2416,6 +2416,182 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
     return result;
 }
 
+/* =========================================================================
+ * WC-5a: Lax extended ops (prelude — all profiles)
+ * ========================================================================= */
+
+/* Forward declare taida_invoke_callback1 (defined below in Cage section) */
+int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0);
+
+/// Lax.map(fn)
+int64_t taida_lax_map(int64_t lax_ptr, int64_t fn_ptr) {
+    if (!taida_pack_get_idx(lax_ptr, 0)) {
+        int64_t def = taida_pack_get_idx(lax_ptr, 2);
+        return taida_lax_empty(def);
+    }
+    int64_t value = taida_pack_get_idx(lax_ptr, 1);
+    int64_t def = taida_pack_get_idx(lax_ptr, 2);
+    int64_t result = taida_invoke_callback1(fn_ptr, value);
+    return taida_lax_new(result, def);
+}
+
+/// Lax.flatMap(fn)
+int64_t taida_lax_flat_map(int64_t lax_ptr, int64_t fn_ptr) {
+    if (!taida_pack_get_idx(lax_ptr, 0)) {
+        int64_t def = taida_pack_get_idx(lax_ptr, 2);
+        return taida_lax_empty(def);
+    }
+    int64_t value = taida_pack_get_idx(lax_ptr, 1);
+    return taida_invoke_callback1(fn_ptr, value);
+}
+
+/// Lax.toString() — public wrapper for _wasm_lax_to_string
+int64_t taida_lax_to_string(int64_t lax_ptr) {
+    return _wasm_lax_to_string(lax_ptr);
+}
+
+/* =========================================================================
+ * WC-5b: Result extended ops (prelude — all profiles)
+ * ========================================================================= */
+
+/// Result.isError() check — public wrapper
+int64_t taida_result_is_error_check(int64_t result) {
+    return _wasm_result_is_error_check(result);
+}
+
+/// Result.getOrDefault(fallback)
+int64_t taida_result_get_or_default(int64_t result, int64_t def) {
+    if (!_wasm_result_is_error_check(result)) return taida_pack_get_idx(result, 0);
+    return def;
+}
+
+/// Result.map(fn)
+int64_t taida_result_map(int64_t result, int64_t fn_ptr) {
+    if (_wasm_result_is_error_check(result)) return result;
+    int64_t value = taida_pack_get_idx(result, 0);
+    int64_t new_val = taida_invoke_callback1(fn_ptr, value);
+    return taida_result_create(new_val, 0, 0);
+}
+
+/// Result.flatMap(fn)
+int64_t taida_result_flat_map(int64_t result, int64_t fn_ptr) {
+    if (_wasm_result_is_error_check(result)) return result;
+    int64_t value = taida_pack_get_idx(result, 0);
+    return taida_invoke_callback1(fn_ptr, value);
+}
+
+/// Result.getOrThrow()
+int64_t taida_result_get_or_throw(int64_t result) {
+    if (!_wasm_result_is_error_check(result)) {
+        return taida_pack_get_idx(result, 0);
+    }
+    int64_t throw_val = taida_pack_get_idx(result, 2);
+    if (taida_can_throw_payload(throw_val)) {
+        return taida_throw(throw_val);
+    }
+    int64_t error = taida_make_error(
+        (int64_t)(intptr_t)"ResultError",
+        (int64_t)(intptr_t)"Result predicate failed");
+    return taida_throw(error);
+}
+
+/// Result.toString() — public wrapper for _wasm_result_to_string
+int64_t taida_result_to_string(int64_t result) {
+    return _wasm_result_to_string(result);
+}
+
+/* =========================================================================
+ * WC-5c: Gorillax extended ops (prelude — all profiles)
+ * ========================================================================= */
+
+/// Gorillax.unmold()
+int64_t taida_gorillax_unmold(int64_t ptr) {
+    if (taida_pack_get_idx(ptr, 0)) {
+        return taida_pack_get_idx(ptr, 1);
+    }
+    /* GORILLA — terminate via WASI fd_write + proc_exit */
+    extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
+    const char *msg = "><\n";
+    struct { const char *buf; int len; } iov = { msg, 3 };
+    int nwritten;
+    fd_write(2, &iov, 1, &nwritten);
+    extern void proc_exit(int code)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+    proc_exit(1);
+    return 0;
+}
+
+/// Gorillax.toString() — public wrapper for _wasm_gorillax_to_string
+int64_t taida_gorillax_to_string(int64_t ptr) {
+    return _wasm_gorillax_to_string(ptr);
+}
+
+/// RelaxedGorillax.unmold()
+int64_t taida_relaxed_gorillax_unmold(int64_t ptr) {
+    if (taida_pack_get_idx(ptr, 0)) {
+        return taida_pack_get_idx(ptr, 1);
+    }
+    int64_t error = taida_make_error(
+        (int64_t)(intptr_t)"RelaxedGorillaEscaped",
+        (int64_t)(intptr_t)"Relaxed gorilla escaped");
+    return taida_throw(error);
+}
+
+/// RelaxedGorillax.toString() — public wrapper for _wasm_gorillax_to_string
+int64_t taida_relaxed_gorillax_to_string(int64_t ptr) {
+    return _wasm_gorillax_to_string(ptr);
+}
+
+/* =========================================================================
+ * WC-5d: Monadic ops (prelude — all profiles)
+ * ========================================================================= */
+
+/// Monadic field_count (for dispatch)
+int64_t taida_monadic_field_count(int64_t val) {
+    if (val == 0 || val < 4096) return 0;
+    if (_wasm_is_result(val)) return 3;
+    if (_wasm_is_lax(val)) return 4;
+    return 0;
+}
+
+/// Monadic .flatMap(fn)
+int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr) {
+    if (obj == 0 || obj < 4096) return obj;
+    if (_wasm_is_result(obj)) {
+        if (!taida_result_is_ok(obj)) return obj;
+        int64_t value = taida_pack_get_idx(obj, 0);
+        return taida_invoke_callback1(fn_ptr, value);
+    }
+    if (_wasm_is_lax(obj)) {
+        if (!taida_pack_get_idx(obj, 0)) return obj;
+        int64_t value = taida_pack_get_idx(obj, 1);
+        return taida_invoke_callback1(fn_ptr, value);
+    }
+    return obj;
+}
+
+/// Monadic .getOrThrow()
+int64_t taida_monadic_get_or_throw(int64_t obj) {
+    if (obj == 0 || obj < 4096) return obj;
+    if (_wasm_is_result(obj)) {
+        if (taida_result_is_ok(obj)) return taida_pack_get_idx(obj, 0);
+        int64_t throw_val = taida_pack_get_idx(obj, 2);
+        if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+        int64_t error = taida_make_error(
+            (int64_t)(intptr_t)"ResultError",
+            (int64_t)(intptr_t)"Result predicate failed");
+        return taida_throw(error);
+    }
+    if (_wasm_is_lax(obj)) return taida_lax_unmold(obj);
+    return obj;
+}
+
+/// Monadic .toString()
+int64_t taida_monadic_to_string(int64_t obj) {
+    return taida_polymorphic_to_string(obj);
+}
+
 /* ── W-5: Cage ── */
 
 /* Callback invoker helpers for wasm-min

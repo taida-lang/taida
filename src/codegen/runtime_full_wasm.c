@@ -746,45 +746,10 @@ int64_t taida_polymorphic_map(int64_t obj, int64_t fn_ptr) {
     return taida_list_map(obj, fn_ptr);
 }
 
-/// Monadic field_count (for dispatch)
-int64_t taida_monadic_field_count(int64_t val) {
-    if (val == 0 || val < 4096) return 0;
-    if (_wf_is_result(val)) return 3;
-    if (_wf_is_lax(val)) return 4;
-    return 0;
-}
-
-/// Monadic .flatMap(fn)
-int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr) {
-    if (obj == 0 || obj < 4096) return obj;
-    if (_wf_is_result(obj)) {
-        if (!taida_result_is_ok(obj)) return obj;
-        int64_t value = taida_pack_get_idx(obj, 0);
-        return taida_invoke_callback1(fn_ptr, value);
-    }
-    if (_wf_is_lax(obj)) {
-        if (!taida_pack_get_idx(obj, 0)) return obj;
-        int64_t value = taida_pack_get_idx(obj, 1);
-        return taida_invoke_callback1(fn_ptr, value);
-    }
-    return obj;
-}
-
-/// Monadic .getOrThrow()
-int64_t taida_monadic_get_or_throw(int64_t obj) {
-    if (obj == 0 || obj < 4096) return obj;
-    if (_wf_is_result(obj)) {
-        if (taida_result_is_ok(obj)) return taida_pack_get_idx(obj, 0);
-        int64_t throw_val = taida_pack_get_idx(obj, 2);
-        if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-        int64_t error = taida_make_error(
-            (int64_t)(intptr_t)"ResultError",
-            (int64_t)(intptr_t)"Result predicate failed");
-        return taida_throw(error);
-    }
-    if (_wf_is_lax(obj)) return taida_lax_unmold(obj);
-    return obj;
-}
+/// Monadic ops — moved to runtime_core_wasm.c (WC-5d)
+extern int64_t taida_monadic_field_count(int64_t val);
+extern int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr);
+extern int64_t taida_monadic_get_or_throw(int64_t obj);
 
 /// Detect Gorillax type: 0 = unknown, 1 = Gorillax, 2 = RelaxedGorillax
 /// Unlike core's version, this does not use > 4096 threshold for the __type string.
@@ -844,10 +809,11 @@ int64_t taida_polymorphic_to_string_full(int64_t obj) {
     return taida_polymorphic_to_string(obj);
 }
 
-/// Monadic .toString()
-int64_t taida_monadic_to_string(int64_t obj) {
-    return taida_polymorphic_to_string_full(obj);
-}
+/// Monadic .toString() — moved to runtime_core_wasm.c (WC-5d)
+/// Note: wasm-full overrides taida_polymorphic_to_string via #define redirect,
+/// so core's taida_monadic_to_string (which calls taida_polymorphic_to_string)
+/// will automatically use taida_polymorphic_to_string_full in the full profile.
+extern int64_t taida_monadic_to_string(int64_t obj);
 
 // ===========================================================================
 // WF-3a: JSON runtime (no libc)
@@ -1104,210 +1070,21 @@ extern int64_t taida_json_encode(int64_t val);
 extern int64_t taida_json_pretty(int64_t val);
 
 // ===========================================================================
-// WF-3b: Lax / Result / Gorillax extensions
+// WF-3b: Lax / Result / Gorillax extensions — moved to runtime_core_wasm.c (WC-5)
 // ===========================================================================
-
-/// Result.isError() check (matches native taida_result_is_error_check)
-static int64_t _wf_result_is_error_check(int64_t result) {
-    int64_t throw_val = taida_pack_get_idx(result, 2);  // throw
-    int64_t pred = taida_pack_get_idx(result, 1);        // __predicate
-    int64_t value = taida_pack_get_idx(result, 0);       // __value
-    if (throw_val != 0) {
-        if (pred != 0) {
-            int64_t pred_result = taida_invoke_callback1(pred, value);
-            if (!pred_result) return 1;
-            return 0;
-        }
-        return 1;
-    }
-    if (pred != 0) {
-        int64_t pred_result = taida_invoke_callback1(pred, value);
-        return pred_result ? 0 : 1;
-    }
-    return 0;
-}
-
-/// Result.isError() — public wrapper
-int64_t taida_result_is_error_check(int64_t result) {
-    return _wf_result_is_error_check(result);
-}
-
-/// Result.getOrDefault(fallback)
-int64_t taida_result_get_or_default(int64_t result, int64_t def) {
-    if (!_wf_result_is_error_check(result)) return taida_pack_get_idx(result, 0);
-    return def;
-}
-
-/// Result.map(fn)
-int64_t taida_result_map(int64_t result, int64_t fn_ptr) {
-    if (_wf_result_is_error_check(result)) return result;
-    int64_t value = taida_pack_get_idx(result, 0);
-    int64_t new_val = taida_invoke_callback1(fn_ptr, value);
-    return taida_result_create(new_val, 0, 0);
-}
-
-/// Result.flatMap(fn)
-int64_t taida_result_flat_map(int64_t result, int64_t fn_ptr) {
-    if (_wf_result_is_error_check(result)) return result;
-    int64_t value = taida_pack_get_idx(result, 0);
-    return taida_invoke_callback1(fn_ptr, value);
-}
-
-/// Result.getOrThrow()
-int64_t taida_result_get_or_throw(int64_t result) {
-    if (!_wf_result_is_error_check(result)) {
-        return taida_pack_get_idx(result, 0);
-    }
-    int64_t throw_val = taida_pack_get_idx(result, 2);
-    if (taida_can_throw_payload(throw_val)) {
-        return taida_throw(throw_val);
-    }
-    int64_t error = taida_make_error(
-        (int64_t)(intptr_t)"ResultError",
-        (int64_t)(intptr_t)"Result predicate failed");
-    return taida_throw(error);
-}
-
-/// Result.toString()
-int64_t taida_result_to_string(int64_t result) {
-    if (!_wf_result_is_error_check(result)) {
-        int64_t value = taida_pack_get_idx(result, 0);
-        int64_t value_str = taida_polymorphic_to_string(value);
-        const char *vs = (const char *)(intptr_t)value_str;
-        int vlen = _wf_strlen(vs);
-        int need = vlen + 10;
-        char *buf = (char *)wasm_alloc((unsigned int)(need + 1));
-        _wf_memcpy(buf, "Result(", 7);
-        _wf_memcpy(buf + 7, vs, vlen);
-        buf[7 + vlen] = ')';
-        buf[7 + vlen + 1] = '\0';
-        return (int64_t)(intptr_t)buf;
-    }
-    int64_t throw_val = taida_pack_get_idx(result, 2);
-    if (throw_val == 0) {
-        return taida_str_new_copy((int64_t)(intptr_t)"Result(throw <= @())");
-    }
-    int64_t err_disp = taida_polymorphic_to_string(throw_val);
-    const char *es = (const char *)(intptr_t)err_disp;
-    int elen = _wf_strlen(es);
-    int need = elen + 24;
-    char *buf = (char *)wasm_alloc((unsigned int)(need + 1));
-    _wf_memcpy(buf, "Result(throw <= ", 16);
-    _wf_memcpy(buf + 16, es, elen);
-    buf[16 + elen] = ')';
-    buf[16 + elen + 1] = '\0';
-    return (int64_t)(intptr_t)buf;
-}
-
-/// Lax.map(fn)
-int64_t taida_lax_map(int64_t lax_ptr, int64_t fn_ptr) {
-    if (!taida_pack_get_idx(lax_ptr, 0)) {
-        int64_t def = taida_pack_get_idx(lax_ptr, 2);
-        return taida_lax_empty(def);
-    }
-    int64_t value = taida_pack_get_idx(lax_ptr, 1);
-    int64_t def = taida_pack_get_idx(lax_ptr, 2);
-    int64_t result = taida_invoke_callback1(fn_ptr, value);
-    return taida_lax_new(result, def);
-}
-
-/// Lax.flatMap(fn)
-int64_t taida_lax_flat_map(int64_t lax_ptr, int64_t fn_ptr) {
-    if (!taida_pack_get_idx(lax_ptr, 0)) {
-        int64_t def = taida_pack_get_idx(lax_ptr, 2);
-        return taida_lax_empty(def);
-    }
-    int64_t value = taida_pack_get_idx(lax_ptr, 1);
-    return taida_invoke_callback1(fn_ptr, value);
-}
-
-/// Lax.toString()
-int64_t taida_lax_to_string(int64_t lax_ptr) {
-    int64_t val = taida_pack_get_idx(lax_ptr, 1);
-    int64_t def = taida_pack_get_idx(lax_ptr, 2);
-    int64_t rendered = taida_pack_get_idx(lax_ptr, 0)
-        ? taida_polymorphic_to_string(val)
-        : taida_polymorphic_to_string(def);
-    const char *rs = (const char *)(intptr_t)rendered;
-    int rlen = _wf_strlen(rs);
-    int need = rlen + 24;
-    char *buf = (char *)wasm_alloc((unsigned int)(need + 1));
-    if (taida_pack_get_idx(lax_ptr, 0)) {
-        _wf_memcpy(buf, "Lax(", 4);
-        _wf_memcpy(buf + 4, rs, rlen);
-        buf[4 + rlen] = ')';
-        buf[4 + rlen + 1] = '\0';
-    } else {
-        _wf_memcpy(buf, "Lax(default: ", 13);
-        _wf_memcpy(buf + 13, rs, rlen);
-        buf[13 + rlen] = ')';
-        buf[13 + rlen + 1] = '\0';
-    }
-    return (int64_t)(intptr_t)buf;
-}
-
-/// Gorillax.unmold()
-int64_t taida_gorillax_unmold(int64_t ptr) {
-    if (taida_pack_get_idx(ptr, 0)) {
-        return taida_pack_get_idx(ptr, 1);
-    }
-    // GORILLA — terminate
-    extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
-        __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
-    const char *msg = "><\n";
-    struct { const char *buf; int len; } iov = { msg, 3 };
-    int nwritten;
-    fd_write(2, &iov, 1, &nwritten);  // stderr
-    extern void proc_exit(int code)
-        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
-    proc_exit(1);
-    return 0;
-}
-
-/// Gorillax.toString()
-int64_t taida_gorillax_to_string(int64_t ptr) {
-    if (taida_pack_get_idx(ptr, 0)) {
-        int64_t value = taida_pack_get_idx(ptr, 1);
-        char *vs = _wf_i64_to_str(value);
-        int vlen = _wf_strlen(vs);
-        int need = vlen + 12;
-        char *buf = (char *)wasm_alloc((unsigned int)(need + 1));
-        _wf_memcpy(buf, "Gorillax(", 9);
-        _wf_memcpy(buf + 9, vs, vlen);
-        buf[9 + vlen] = ')';
-        buf[9 + vlen + 1] = '\0';
-        return (int64_t)(intptr_t)buf;
-    }
-    return taida_str_new_copy((int64_t)(intptr_t)"Gorillax(><)");
-}
-
-/// RelaxedGorillax.unmold()
-int64_t taida_relaxed_gorillax_unmold(int64_t ptr) {
-    if (taida_pack_get_idx(ptr, 0)) {
-        return taida_pack_get_idx(ptr, 1);
-    }
-    int64_t error = taida_make_error(
-        (int64_t)(intptr_t)"RelaxedGorillaEscaped",
-        (int64_t)(intptr_t)"Relaxed gorilla escaped");
-    return taida_throw(error);
-}
-
-/// RelaxedGorillax.toString()
-int64_t taida_relaxed_gorillax_to_string(int64_t ptr) {
-    if (taida_pack_get_idx(ptr, 0)) {
-        int64_t value = taida_pack_get_idx(ptr, 1);
-        char *vs = _wf_i64_to_str(value);
-        int vlen = _wf_strlen(vs);
-        int need = vlen + 20;
-        char *buf = (char *)wasm_alloc((unsigned int)(need + 1));
-        _wf_memcpy(buf, "RelaxedGorillax(", 16);
-        _wf_memcpy(buf + 16, vs, vlen);
-        buf[16 + vlen] = ')';
-        buf[16 + vlen + 1] = '\0';
-        return (int64_t)(intptr_t)buf;
-    }
-    return taida_str_new_copy((int64_t)(intptr_t)"RelaxedGorillax(escaped)");
-}
+extern int64_t taida_lax_map(int64_t lax_ptr, int64_t fn_ptr);
+extern int64_t taida_lax_flat_map(int64_t lax_ptr, int64_t fn_ptr);
+extern int64_t taida_lax_to_string(int64_t lax_ptr);
+extern int64_t taida_result_is_error_check(int64_t result);
+extern int64_t taida_result_get_or_default(int64_t result, int64_t def);
+extern int64_t taida_result_map(int64_t result, int64_t fn_ptr);
+extern int64_t taida_result_flat_map(int64_t result, int64_t fn_ptr);
+extern int64_t taida_result_get_or_throw(int64_t result);
+extern int64_t taida_result_to_string(int64_t result);
+extern int64_t taida_gorillax_unmold(int64_t ptr);
+extern int64_t taida_gorillax_to_string(int64_t ptr);
+extern int64_t taida_relaxed_gorillax_unmold(int64_t ptr);
+extern int64_t taida_relaxed_gorillax_to_string(int64_t ptr);
 
 // ===========================================================================
 // WF-3c: Bitwise / Shift / Char / Codepoint
