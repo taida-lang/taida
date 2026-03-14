@@ -258,6 +258,13 @@ int64_t taida_bool_and(int64_t a, int64_t b) { return (a && b) ? 1 : 0; }
 int64_t taida_bool_or(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
 int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 
+/* ── Type tags (matching native_runtime.c TAIDA_TAG_* constants) ── */
+#define WASM_TAG_INT     0
+#define WASM_TAG_FLOAT   1
+#define WASM_TAG_BOOL    2
+#define WASM_TAG_STR     3
+#define WASM_TAG_PACK    4
+
 /* ── Forward declarations for Lax/Result/Gorillax (defined in W-5 section below) ── */
 int64_t taida_lax_new(int64_t value, int64_t default_value);
 int64_t taida_lax_empty(int64_t default_value);
@@ -266,6 +273,8 @@ static int _wasm_is_lax(int64_t val);
 static int _wasm_is_result(int64_t val);
 static int _wasm_is_gorillax(int64_t val);
 int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);
+int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
+int64_t taida_pack_get_tag(int64_t pack_ptr, int64_t index);
 int64_t taida_pack_new(int64_t field_count);
 int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
 int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);
@@ -582,25 +591,48 @@ int64_t taida_float_sub(int64_t a, int64_t b) { return _d2l(_to_double(a) - _to_
 int64_t taida_float_mul(int64_t a, int64_t b) { return _d2l(_to_double(a) * _to_double(b)); }
 int64_t taida_float_neg(int64_t a) { return _d2l(-_to_double(a)); }
 
-/* ── W-3f: %g-equivalent float formatter ── */
-/* Implements printf("%g") behavior: 6 significant digits, scientific notation
-   when exponent < -4 or >= 6, trailing zeros trimmed. */
+/* ── TF-1/TF-2: Rust f64::Display compatible float formatter ── */
+/* Matches Rust's Display for f64: no scientific notation, integers get ".0",
+   non-integers use minimum significant digits for exact round-trip.
+   Replaces the previous %g-equivalent fmt_g. */
 
-static int fmt_g(double d, char *buf, int bufsize) {
-    int len = 0;
+/* Helper: parse a decimal string back to double (freestanding strtod).
+   Uses integer accumulation + final division to avoid cumulative
+   floating-point errors from repeated factor *= 0.1 multiplication. */
+static double _parse_double(const char *s) {
+    int i = 0;
+    int negative = 0;
+    if (s[i] == '-') { negative = 1; i++; }
+    /* Accumulate all digits as an integer mantissa, count decimal places */
+    uint64_t mantissa = 0;
+    int decimal_places = 0;
+    int in_frac = 0;
+    /* Integer part */
+    while (s[i] >= '0' && s[i] <= '9') {
+        mantissa = mantissa * 10 + (uint64_t)(s[i] - '0');
+        i++;
+    }
+    /* Fractional part */
+    if (s[i] == '.') {
+        i++;
+        in_frac = 1;
+        while (s[i] >= '0' && s[i] <= '9') {
+            mantissa = mantissa * 10 + (uint64_t)(s[i] - '0');
+            decimal_places++;
+            i++;
+        }
+    }
+    /* Convert: result = mantissa / 10^decimal_places */
+    double result = (double)mantissa;
+    double divisor = 1.0;
+    for (int j = 0; j < decimal_places; j++) divisor *= 10.0;
+    result /= divisor;
+    if (negative) result = -result;
+    return result;
+}
 
-    /* Handle negative */
-    if (d < 0) { buf[len++] = '-'; d = -d; }
-
-    /* NaN check: NaN != NaN */
-    if (d != d) { buf[len++]='N'; buf[len++]='a'; buf[len++]='N'; return len; }
-    /* Infinity */
-    if (d > 1e308) { buf[len++]='i'; buf[len++]='n'; buf[len++]='f'; return len; }
-
-    /* Zero */
-    if (d == 0.0) { buf[len++] = '0'; return len; }
-
-    /* Compute base-10 exponent */
+/* Helper: compute base-10 exponent and normalized mantissa for d > 0 */
+static int _compute_exp10(double d) {
     int exp10 = 0;
     double norm = d;
     if (norm >= 10.0) {
@@ -608,117 +640,146 @@ static int fmt_g(double d, char *buf, int bufsize) {
     } else if (norm < 1.0) {
         while (norm < 1.0) { norm *= 10.0; exp10--; }
     }
-    /* norm is in [1.0, 10.0) */
+    return exp10;
+}
 
-    /* %g precision=6: use scientific if exp < -4 or exp >= 6 */
-    int use_sci = (exp10 < -4 || exp10 >= 6);
+/* Helper: power of 10 (freestanding, integer exponent) */
+static double _pow10(int e) {
+    double r = 1.0;
+    double base = 10.0;
+    int neg = 0;
+    if (e < 0) { neg = 1; e = -e; }
+    while (e > 0) {
+        if (e & 1) r *= base;
+        base *= base;
+        e >>= 1;
+    }
+    return neg ? 1.0 / r : r;
+}
 
-    if (use_sci) {
-        /* Scientific notation: d.dddddde+/-dd */
-        /* Round norm to 6 significant digits */
-        double rounded = norm;
-        {
-            double factor = 1e5; /* 10^(6-1) */
-            rounded = (double)((uint64_t)(rounded * factor + 0.5)) / factor;
-            if (rounded >= 10.0) { rounded /= 10.0; exp10++; }
-        }
+/* Format d (positive) with `sig` significant digits in fixed notation.
+   Uses digit-by-digit extraction to avoid large-integer precision loss.
+   Returns length written to buf (not NUL-terminated). */
+static int _fmt_fixed_sig(double d, int sig, char *buf, int bufsize) {
+    int len = 0;
+    int exp10 = _compute_exp10(d);
 
-        /* Extract digits: first digit . remaining */
-        int first = (int)rounded;
-        if (first > 9) first = 9;
-        buf[len++] = '0' + (char)first;
+    /* Number of integer digits = exp10 + 1 */
+    int int_digits = exp10 + 1;
+    /* Number of decimal places = sig - int_digits */
+    int decimal_places = sig - int_digits;
+    if (decimal_places < 0) decimal_places = 0;
 
-        double frac = rounded - (double)first;
-        /* Up to 5 more significant digits */
+    /* Extract integer part */
+    uint64_t ipart = (uint64_t)d;
+    double frac = d - (double)ipart;
+
+    /* Write integer part */
+    char itmp[24];
+    int ipos = 23;
+    itmp[ipos] = '\0';
+    if (ipart == 0) { itmp[--ipos] = '0'; }
+    else { while (ipart > 0) { itmp[--ipos] = '0' + (char)(ipart % 10); ipart /= 10; } }
+    for (int i = ipos; i < 23; i++) {
+        if (len < bufsize) buf[len++] = itmp[i];
+    }
+
+    /* Fractional part: extract digit by digit */
+    if (decimal_places > 0) {
+        if (len < bufsize) buf[len++] = '.';
         int frac_start = len;
-        if (frac > 0.0000005) {
-            buf[len++] = '.';
-            frac_start = len;
-            for (int i = 0; i < 5; i++) {
-                frac *= 10.0;
-                int digit = (int)frac;
-                if (digit > 9) digit = 9;
-                frac -= (double)digit;
-                buf[len++] = '0' + (char)digit;
+        for (int i = 0; i < decimal_places; i++) {
+            frac *= 10.0;
+            int digit = (int)frac;
+            if (digit > 9) digit = 9;
+            frac -= (double)digit;
+            if (len < bufsize) buf[len++] = '0' + (char)digit;
+        }
+        /* Round: if remaining frac >= 0.5, round up last digit */
+        if (frac >= 0.5 && len > frac_start) {
+            int carry = 1;
+            for (int i = len - 1; i >= frac_start && carry; i--) {
+                int d2 = (buf[i] - '0') + carry;
+                if (d2 >= 10) { buf[i] = '0'; carry = 1; }
+                else { buf[i] = '0' + (char)d2; carry = 0; }
             }
-            /* Round */
-            if (frac >= 0.5 && len > frac_start) {
-                int carry = 1;
-                for (int i = len - 1; i >= frac_start && carry; i--) {
-                    int d2 = (buf[i] - '0') + carry;
-                    if (d2 >= 10) { buf[i] = '0'; carry = 1; }
-                    else { buf[i] = '0' + (char)d2; carry = 0; }
+            /* Carry into integer part */
+            if (carry) {
+                /* Need to carry into integer portion */
+                for (int i = frac_start - 2; i >= 0 && carry; i--) {
+                    if (buf[i] >= '0' && buf[i] <= '9') {
+                        int d2 = (buf[i] - '0') + carry;
+                        if (d2 >= 10) { buf[i] = '0'; carry = 1; }
+                        else { buf[i] = '0' + (char)d2; carry = 0; }
+                    }
                 }
             }
-            /* Trim trailing zeros */
-            while (len > frac_start && buf[len-1] == '0') len--;
-            if (len == frac_start) len--; /* remove dot */
         }
+        /* Trim trailing zeros, but keep at least one digit after dot */
+        while (len > frac_start + 1 && buf[len-1] == '0') len--;
+        /* If only dot remains, remove it too */
+        if (len == frac_start) len--;
+    }
+    return len;
+}
 
-        /* Exponent */
-        buf[len++] = 'e';
-        if (exp10 < 0) { buf[len++] = '-'; exp10 = -exp10; }
-        else { buf[len++] = '+'; }
-        if (exp10 >= 100) {
-            buf[len++] = '0' + (char)(exp10 / 100);
-            buf[len++] = '0' + (char)((exp10 / 10) % 10);
-            buf[len++] = '0' + (char)(exp10 % 10);
-        } else {
-            buf[len++] = '0' + (char)(exp10 / 10);
-            buf[len++] = '0' + (char)(exp10 % 10);
-        }
-    } else {
-        /* Fixed notation */
-        /* We have 6 significant digits total.
-           Number of integer digits = exp10 + 1.
-           Number of fractional significant digits = 6 - (exp10 + 1) = 5 - exp10 */
+static int fmt_g(double d, char *buf, int bufsize) {
+    int len = 0;
+    union { double d; uint64_t u; } ux;
+    ux.d = d;
+    int negative = (ux.u >> 63) != 0;
 
-        /* Round d to 6 significant digits */
-        {
-            double factor = 1.0;
-            for (int i = 0; i < 5 - exp10; i++) factor *= 10.0;
-            d = (double)((uint64_t)(d * factor + 0.5)) / factor;
-        }
+    /* Handle negative — extract sign, then work with positive value */
+    if (negative) { buf[len++] = '-'; d = -d; }
 
-        uint64_t ipart = (uint64_t)d;
-        double frac = d - (double)ipart;
+    /* NaN check: NaN != NaN */
+    if (d != d) { buf[len++]='N'; buf[len++]='a'; buf[len++]='N'; return len; }
+    /* Infinity */
+    if (d > 1e308) { buf[len++]='i'; buf[len++]='n'; buf[len++]='f'; return len; }
 
-        /* Integer part */
-        char itmp[21];
-        int ipos = 20;
-        itmp[ipos] = '\0';
-        if (ipart == 0) { itmp[--ipos] = '0'; }
-        else { while (ipart > 0) { itmp[--ipos] = '0' + (char)(ipart % 10); ipart /= 10; } }
-        for (int i = ipos; i < 20; i++) buf[len++] = itmp[i];
+    /* Zero: always "0.0" (or "-0.0") — matching Rust */
+    if (d == 0.0) {
+        buf[len++] = '0'; buf[len++] = '.'; buf[len++] = '0';
+        return len;
+    }
 
-        /* Fractional part */
-        int frac_digits = 5 - exp10;
-        if (frac_digits < 0) frac_digits = 0;
-        if (frac_digits > 0 && frac > 0.0000005) {
-            buf[len++] = '.';
-            int frac_start = len;
-            for (int i = 0; i < frac_digits; i++) {
-                frac *= 10.0;
-                int digit = (int)frac;
-                if (digit > 9) digit = 9;
-                frac -= (double)digit;
-                buf[len++] = '0' + (char)digit;
-            }
-            /* Round */
-            if (frac >= 0.5 && len > frac_start) {
-                int carry = 1;
-                for (int i = len - 1; i >= frac_start && carry; i--) {
-                    int d2 = (buf[i] - '0') + carry;
-                    if (d2 >= 10) { buf[i] = '0'; carry = 1; }
-                    else { buf[i] = '0' + (char)d2; carry = 0; }
-                }
-            }
-            /* Trim trailing zeros */
-            while (len > frac_start && buf[len-1] == '0') len--;
-            if (len == frac_start) len--; /* remove dot */
+    /* Integer check: if d == floor(d) and d < 1e18, format as "X.0" */
+    {
+        int64_t as_int = (int64_t)d;
+        double back = (double)as_int;
+        if (back == d && d < 1e18) {
+            /* Format integer part */
+            uint64_t uval = (uint64_t)d;
+            char itmp[24];
+            int ipos = 23;
+            itmp[ipos] = '\0';
+            if (uval == 0) { itmp[--ipos] = '0'; }
+            else { while (uval > 0) { itmp[--ipos] = '0' + (char)(uval % 10); uval /= 10; } }
+            for (int i = ipos; i < 23; i++) buf[len++] = itmp[i];
+            buf[len++] = '.'; buf[len++] = '0';
+            return len;
         }
     }
 
+    /* Non-integer: find minimum significant digits that round-trip exactly.
+       Try sig = 1..17. For each, format in fixed notation, parse back,
+       and check if the result equals the original. */
+    for (int sig = 1; sig <= 17; sig++) {
+        char trial[80];
+        int tlen = _fmt_fixed_sig(d, sig, trial, 79);
+        trial[tlen] = '\0';
+        /* Parse back */
+        double roundtrip = _parse_double(negative ? trial : trial);
+        if (roundtrip == d) {
+            /* Copy trial to output (after the sign if negative) */
+            for (int i = 0; i < tlen; i++) buf[len++] = trial[i];
+            return len;
+        }
+    }
+
+    /* Fallback: 17 significant digits */
+    int flen = _fmt_fixed_sig(d, 17, buf + len, bufsize - len);
+    len += flen;
     return len;
 }
 
@@ -1089,14 +1150,30 @@ static int _wasm_gorillax_type(int64_t val) {
     return 1; /* default to Gorillax */
 }
 
+/* TF-4: Convert a Lax inner value to display string using its type tag.
+   Without tag, float bit-patterns would fall through to int display. */
+static int64_t _wasm_lax_value_display(int64_t val, int64_t tag) {
+    if (tag == WASM_TAG_FLOAT) {
+        return taida_float_to_str(val);
+    }
+    if (tag == WASM_TAG_BOOL) {
+        return val ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+    }
+    /* For INT, STR, PACK etc. — use generic display */
+    return _wasm_value_to_display_string(val);
+}
+
 /* W-5f: Lax.toString() — "Lax(value)" or "Lax(default: value)" */
 static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
     int64_t has_value = taida_pack_get_idx(lax_ptr, 0); /* hasValue */
     int64_t value = taida_pack_get_idx(lax_ptr, 1);     /* __value */
     int64_t def = taida_pack_get_idx(lax_ptr, 2);       /* __default */
+    /* TF-4: Use type tag from __value field (index 1) for type-aware display */
+    int64_t val_tag = taida_pack_get_tag(lax_ptr, 1);
+    int64_t def_tag = taida_pack_get_tag(lax_ptr, 2);
     int64_t rendered = has_value
-        ? _wasm_value_to_display_string(value)
-        : _wasm_value_to_display_string(def);
+        ? _wasm_lax_value_display(value, val_tag)
+        : _wasm_lax_value_display(def, def_tag);
     const char *rs = (const char *)(intptr_t)rendered;
     _wasm_strbuf sb;
     _sb_init(&sb);
@@ -1125,10 +1202,10 @@ static int64_t _wasm_result_to_string(int64_t result) {
         _sb_append(&sb, ")");
         return _sb_finish(&sb);
     }
-    /* Error case */
+    /* Error case — throw_val == 0 means Unit (@()), matching interpreter */
     int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
     if (throw_val == 0) {
-        return (int64_t)(intptr_t)"Result(throw <= error)";
+        return (int64_t)(intptr_t)"Result(throw <= @())";
     }
     int64_t err_str = _wasm_value_to_display_string(throw_val);
     _wasm_strbuf sb;
@@ -1319,6 +1396,11 @@ int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag) {
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     pack[1 + index * 3 + 1] = tag;
     return pack_ptr;
+}
+
+int64_t taida_pack_get_tag(int64_t pack_ptr, int64_t index) {
+    int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
+    return pack[1 + index * 3 + 1];
 }
 
 int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index) {
@@ -2411,17 +2493,38 @@ int64_t taida_int_mold_bool(int64_t v) {
 }
 
 int64_t taida_float_mold_int(int64_t v) {
-    return taida_lax_new(taida_int_to_float(v), _d2l(0.0));
+    int64_t lax = taida_lax_new(taida_int_to_float(v), _d2l(0.0));
+    taida_pack_set_tag(lax, 1, WASM_TAG_FLOAT); /* __value tag */
+    taida_pack_set_tag(lax, 2, WASM_TAG_FLOAT); /* __default tag */
+    return lax;
 }
 
 int64_t taida_float_mold_float(int64_t v) {
-    return taida_lax_new(v, _d2l(0.0));
+    int64_t lax = taida_lax_new(v, _d2l(0.0));
+    taida_pack_set_tag(lax, 1, WASM_TAG_FLOAT);
+    taida_pack_set_tag(lax, 2, WASM_TAG_FLOAT);
+    return lax;
+}
+
+/* Helper: create a Lax with FLOAT tags on value/default fields */
+static int64_t _float_lax_empty(void) {
+    int64_t lax = taida_lax_empty(_d2l(0.0));
+    taida_pack_set_tag(lax, 1, WASM_TAG_FLOAT);
+    taida_pack_set_tag(lax, 2, WASM_TAG_FLOAT);
+    return lax;
+}
+
+static int64_t _float_lax_new(int64_t val) {
+    int64_t lax = taida_lax_new(val, _d2l(0.0));
+    taida_pack_set_tag(lax, 1, WASM_TAG_FLOAT);
+    taida_pack_set_tag(lax, 2, WASM_TAG_FLOAT);
+    return lax;
 }
 
 int64_t taida_float_mold_str(int64_t v) {
     /* Parse string to float — manual parser (no strtod in wasm freestanding) */
     const char *s = (const char *)(intptr_t)v;
-    if (!s || *s == '\0') return taida_lax_empty(_d2l(0.0));
+    if (!s || *s == '\0') return _float_lax_empty();
 
     int i = 0;
     int negative = 0;
@@ -2430,7 +2533,7 @@ int64_t taida_float_mold_str(int64_t v) {
 
     /* Must start with digit or '.' */
     if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '.'))
-        return taida_lax_empty(_d2l(0.0));
+        return _float_lax_empty();
 
     double result = 0.0;
     int has_int_digits = 0;
@@ -2454,7 +2557,7 @@ int64_t taida_float_mold_str(int64_t v) {
     }
     /* "." alone (no digits before or after dot) is invalid */
     if (!has_int_digits && !has_frac_digits)
-        return taida_lax_empty(_d2l(0.0));
+        return _float_lax_empty();
     /* Exponent part (e/E) */
     if (s[i] == 'e' || s[i] == 'E') {
         i++;
@@ -2469,63 +2572,90 @@ int64_t taida_float_mold_str(int64_t v) {
             i++;
         }
         /* "1e", "1e+", "1e-" (no exponent digits) is invalid */
-        if (!has_exp_digits) return taida_lax_empty(_d2l(0.0));
+        if (!has_exp_digits) return _float_lax_empty();
         double multiplier = 1.0;
         for (int e = 0; e < exp; e++) multiplier *= 10.0;
         if (exp_neg) result /= multiplier;
         else result *= multiplier;
     }
     /* Must have consumed entire string */
-    if (s[i] != '\0') return taida_lax_empty(_d2l(0.0));
+    if (s[i] != '\0') return _float_lax_empty();
 
     if (negative) result = -result;
-    return taida_lax_new(_d2l(result), _d2l(0.0));
+    return _float_lax_new(_d2l(result));
 }
 
 int64_t taida_float_mold_bool(int64_t v) {
-    return taida_lax_new(_d2l(v ? 1.0 : 0.0), _d2l(0.0));
+    return _float_lax_new(_d2l(v ? 1.0 : 0.0));
 }
 
 int64_t taida_bool_mold_int(int64_t v) {
-    return taida_lax_new(v != 0 ? 1 : 0, 0);
+    int64_t lax = taida_lax_new(v != 0 ? 1 : 0, 0);
+    taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+    taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+    return lax;
 }
 
 int64_t taida_bool_mold_float(int64_t v) {
     double d = _to_double(v);
-    return taida_lax_new(d != 0.0 ? 1 : 0, 0);
+    int64_t lax = taida_lax_new(d != 0.0 ? 1 : 0, 0);
+    taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+    taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+    return lax;
 }
 
 int64_t taida_bool_mold_str(int64_t v) {
     const char *s = (const char *)(intptr_t)v;
-    if (!s) return taida_lax_empty(0);
-    if (s[0] == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'e' && s[4] == 0)
-        return taida_lax_new(1, 0);
-    if (s[0] == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e' && s[5] == 0)
-        return taida_lax_new(0, 0);
-    return taida_lax_empty(0); /* not "true" or "false" — empty Lax */
+    int64_t lax;
+    if (!s) {
+        lax = taida_lax_empty(0);
+        taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+        taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+        return lax;
+    }
+    if (s[0] == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'e' && s[4] == 0) {
+        lax = taida_lax_new(1, 0);
+        taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+        taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+        return lax;
+    }
+    if (s[0] == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e' && s[5] == 0) {
+        lax = taida_lax_new(0, 0);
+        taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+        taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+        return lax;
+    }
+    /* not "true" or "false" — empty Lax */
+    lax = taida_lax_empty(0);
+    taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+    taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+    return lax;
 }
 
 int64_t taida_bool_mold_bool(int64_t v) {
-    return taida_lax_new(v, 0);
+    int64_t lax = taida_lax_new(v, 0);
+    taida_pack_set_tag(lax, 1, WASM_TAG_BOOL);
+    taida_pack_set_tag(lax, 2, WASM_TAG_BOOL);
+    return lax;
 }
 
 /* ── W-5: Float div/mod molds (returning Lax) ── */
 
 int64_t taida_float_div_mold(int64_t a, int64_t b) {
     double da = _to_double(a), db = _to_double(b);
-    if (db == 0.0) return taida_lax_new(_d2l(0.0), _d2l(0.0));
-    return taida_lax_new(_d2l(da / db), _d2l(0.0));
+    if (db == 0.0) return _float_lax_new(_d2l(0.0));
+    return _float_lax_new(_d2l(da / db));
 }
 
 int64_t taida_float_mod_mold(int64_t a, int64_t b) {
     double da = _to_double(a), db = _to_double(b);
-    if (db == 0.0) return taida_lax_new(_d2l(0.0), _d2l(0.0));
+    if (db == 0.0) return _float_lax_new(_d2l(0.0));
     /* fmod without libc — use repeated subtraction (good enough for wasm-min) */
     double q = da / db;
     /* truncate toward zero */
     int64_t qi = (int64_t)q;
     double result = da - (double)qi * db;
-    return taida_lax_new(_d2l(result), _d2l(0.0));
+    return _float_lax_new(_d2l(result));
 }
 
 /* ── W-5: Float comparison ── */
