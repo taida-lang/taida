@@ -75,7 +75,6 @@ fn compile_and_run(td_path: &Path) -> Option<String> {
     )
 }
 
-/// Normalize output for comparison (trailing whitespace, trailing newlines).
 /// Normalize output for comparison: strip trailing whitespace per line.
 ///
 /// LIMITATION (AT-1): This hides trailing-space differences between backends.

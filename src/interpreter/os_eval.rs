@@ -3308,14 +3308,27 @@ stdout(result.hasValue)"#;
         assert_eq!(output, vec!["false"], "Exists nonexistent should return false");
     }
 
+    /// RAII guard for test directories — ensures cleanup even on panic.
+    struct TestDir(std::path::PathBuf);
+    impl TestDir {
+        fn new(path: &str) -> Self {
+            let p = std::path::PathBuf::from(path);
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &std::path::PathBuf { &self.0 }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
     #[test]
     fn test_bt11_read_empty_file() {
-        let dir = std::path::PathBuf::from("/tmp/taida_test_bt11_empty");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        let dir = TestDir::new("/tmp/taida_test_bt11_empty");
+        std::fs::write(dir.path().join("empty.txt"), "").unwrap();
 
-        let path = dir.join("empty.txt").to_string_lossy().to_string();
+        let path = dir.path().join("empty.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
@@ -3325,17 +3338,13 @@ stdout(result.__value)"#,
         let output = run_code(&code);
         assert_eq!(output[0], "true", "Empty file should still have hasValue=true");
         assert_eq!(output[1], "", "Empty file content should be empty string");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_bt11_write_and_read_empty_file() {
-        let dir = std::path::PathBuf::from("/tmp/taida_test_bt11_write_empty");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("/tmp/taida_test_bt11_write_empty");
 
-        let path = dir.join("empty.txt").to_string_lossy().to_string();
+        let path = dir.path().join("empty.txt").to_string_lossy().to_string();
         let code = format!(
             r#"writeFile("{path}", "")
 result <= Read["{path}"]()
@@ -3346,18 +3355,14 @@ stdout(result.__value)"#,
         let output = run_code(&code);
         assert_eq!(output[0], "true", "Written empty file should be readable");
         assert_eq!(output[1], "", "Written empty file content should be empty");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_bt11_path_with_spaces() {
-        let dir = std::path::PathBuf::from("/tmp/taida test bt11 spaces");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("test file.txt"), "hello spaces").unwrap();
+        let dir = TestDir::new("/tmp/taida test bt11 spaces");
+        std::fs::write(dir.path().join("test file.txt"), "hello spaces").unwrap();
 
-        let path = dir.join("test file.txt").to_string_lossy().to_string();
+        let path = dir.path().join("test file.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
@@ -3367,18 +3372,14 @@ stdout(result.__value)"#,
         let output = run_code(&code);
         assert_eq!(output[0], "true", "File with spaces in path should be readable");
         assert_eq!(output[1], "hello spaces");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_bt11_path_with_unicode() {
-        let dir = std::path::PathBuf::from("/tmp/taida_test_bt11_unicode_\u{65E5}\u{672C}");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("test.txt"), "unicode path").unwrap();
+        let dir = TestDir::new("/tmp/taida_test_bt11_unicode_\u{65E5}\u{672C}");
+        std::fs::write(dir.path().join("test.txt"), "unicode path").unwrap();
 
-        let path = dir.join("test.txt").to_string_lossy().to_string();
+        let path = dir.path().join("test.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.hasValue)
@@ -3388,8 +3389,6 @@ stdout(result.__value)"#,
         let output = run_code(&code);
         assert_eq!(output[0], "true", "File with Unicode path should be readable");
         assert_eq!(output[1], "unicode path");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
