@@ -766,6 +766,62 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t val);", name)
         }
         "taida_monadic_flat_map" => "int64_t taida_monadic_flat_map(int64_t val, int64_t fn_ptr);".to_string(),
+        // WC-6a: HashMap extensions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_hashmap_length" | "taida_hashmap_clone" | "taida_hashmap_to_string" => {
+            format!("int64_t {}(int64_t hm);", name)
+        }
+        "taida_hashmap_remove_immut" => {
+            "int64_t taida_hashmap_remove_immut(int64_t hm, int64_t kh, int64_t kp);".to_string()
+        }
+        "taida_hashmap_new_with_cap" => "int64_t taida_hashmap_new_with_cap(int64_t cap);".to_string(),
+        "taida_hashmap_adjust_hash" => "int64_t taida_hashmap_adjust_hash(int64_t h);".to_string(),
+        "taida_hashmap_set_internal" => {
+            "int64_t taida_hashmap_set_internal(int64_t hm, int64_t kh, int64_t kp, int64_t v, int64_t mode);".to_string()
+        }
+        "taida_hashmap_resize" => "int64_t taida_hashmap_resize(int64_t hm, int64_t new_cap);".to_string(),
+        "taida_hashmap_key_eq" | "taida_hashmap_key_retain" | "taida_hashmap_key_release"
+        | "taida_hashmap_val_retain" | "taida_hashmap_val_release" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
+        "taida_hashmap_key_valid" => "int64_t taida_hashmap_key_valid(int64_t v);".to_string(),
+        // WC-6b: Set extensions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_set_contains" => "int64_t taida_set_contains(int64_t set, int64_t item);".to_string(),
+        "taida_set_is_empty" | "taida_set_size" | "taida_set_to_string" => {
+            format!("int64_t {}(int64_t set);", name)
+        }
+        // WC-6c: Pack extensions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_pack_call_field0" => "int64_t taida_pack_call_field0(int64_t pack, int64_t hash);".to_string(),
+        "taida_pack_call_field1" => "int64_t taida_pack_call_field1(int64_t pack, int64_t hash, int64_t a);".to_string(),
+        "taida_pack_call_field2" => "int64_t taida_pack_call_field2(int64_t pack, int64_t hash, int64_t a, int64_t b);".to_string(),
+        "taida_pack_call_field3" => "int64_t taida_pack_call_field3(int64_t pack, int64_t hash, int64_t a, int64_t b, int64_t c);".to_string(),
+        "taida_pack_to_display_string" => "int64_t taida_pack_to_display_string(int64_t pack);".to_string(),
+        "taida_make_io_error" => "int64_t taida_make_io_error(int64_t msg);".to_string(),
+        "taida_retain_and_tag_field" => "int64_t taida_retain_and_tag_field(int64_t val, int64_t tag);".to_string(),
+        // WC-6d: Type detection / display (all profiles — implemented in runtime_core_wasm.c)
+        "taida_is_string_value" | "taida_is_list" | "taida_is_hashmap" | "taida_is_set"
+        | "taida_is_buchi_pack" | "taida_is_molten" | "taida_is_bytes" | "taida_is_async" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_detect_value_tag" | "taida_detect_gorillax_type" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_bool_to_int" | "taida_bool_to_str" => {
+            format!("int64_t {}(int64_t v);", name)
+        }
+        "taida_value_to_display_string" | "taida_value_to_debug_string" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_has_magic_header" | "taida_ptr_is_readable" => {
+            format!("int64_t {}(int64_t val);", name)
+        }
+        "taida_read_cstr_len_safe" => "int64_t taida_read_cstr_len_safe(int64_t ptr, int64_t max);".to_string(),
+        // WC-6e: Polymorphic extensions (all profiles — implemented in runtime_core_wasm.c)
+        "taida_polymorphic_contains" | "taida_polymorphic_get_or_default"
+        | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of" => {
+            format!("int64_t {}(int64_t ptr, int64_t item);", name)
+        }
+        "taida_polymorphic_has_value" => "int64_t taida_polymorphic_has_value(int64_t ptr);".to_string(),
+        "taida_polymorphic_map" => "int64_t taida_polymorphic_map(int64_t ptr, int64_t fn_ptr);".to_string(),
         // RC no-ops
         "taida_retain" | "taida_release" | "taida_str_retain" => {
             format!("void {}(int64_t val);", name)
@@ -871,73 +927,16 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
         // --- Char / codepoint: moved to runtime_func_prototype() (WC-1e) ---
         // --- List ops / HOF / query / callback: moved to runtime_func_prototype() (WC-3e) ---
 
-        // --- HashMap extended ---
-        "taida_hashmap_length" | "taida_hashmap_clone" | "taida_hashmap_to_string" => {
-            format!("int64_t {}(int64_t hm);", name)
-        }
-        "taida_hashmap_remove_immut" => {
-            "int64_t taida_hashmap_remove_immut(int64_t hm, int64_t kh, int64_t kp);".to_string()
-        }
-        "taida_hashmap_new_with_cap" => "int64_t taida_hashmap_new_with_cap(int64_t cap);".to_string(),
-        "taida_hashmap_adjust_hash" => "int64_t taida_hashmap_adjust_hash(int64_t h);".to_string(),
-        "taida_hashmap_set_internal" => {
-            "int64_t taida_hashmap_set_internal(int64_t hm, int64_t kh, int64_t kp, int64_t v, int64_t mode);".to_string()
-        }
-        "taida_hashmap_resize" => "int64_t taida_hashmap_resize(int64_t hm, int64_t new_cap);".to_string(),
-        "taida_hashmap_key_eq" | "taida_hashmap_key_retain" | "taida_hashmap_key_release"
-        | "taida_hashmap_val_retain" | "taida_hashmap_val_release" => {
-            format!("int64_t {}(int64_t a, int64_t b);", name)
-        }
-        "taida_hashmap_key_valid" => "int64_t taida_hashmap_key_valid(int64_t v);".to_string(),
-
-        // --- Set extended ---
-        "taida_set_contains" => "int64_t taida_set_contains(int64_t set, int64_t item);".to_string(),
-        "taida_set_is_empty" | "taida_set_size" | "taida_set_to_string" => {
-            format!("int64_t {}(int64_t set);", name)
-        }
-
-        // --- Type detection / conversion ---
-        "taida_is_string_value" | "taida_is_list" | "taida_is_hashmap" | "taida_is_set"
-        | "taida_is_buchi_pack" | "taida_is_molten" | "taida_is_bytes" | "taida_is_async" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_detect_value_tag" | "taida_detect_gorillax_type" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_bool_to_int" | "taida_bool_to_str" => {
-            format!("int64_t {}(int64_t v);", name)
-        }
-        "taida_value_to_display_string" | "taida_value_to_debug_string" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_has_magic_header" | "taida_ptr_is_readable" => {
-            format!("int64_t {}(int64_t val);", name)
-        }
-        "taida_read_cstr_len_safe" => "int64_t taida_read_cstr_len_safe(int64_t ptr, int64_t max);".to_string(),
-
-        // --- Polymorphic extended ---
-        "taida_polymorphic_contains" | "taida_polymorphic_get_or_default"
-        | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of" => {
-            format!("int64_t {}(int64_t ptr, int64_t item);", name)
-        }
-        "taida_polymorphic_has_value" => "int64_t taida_polymorphic_has_value(int64_t ptr);".to_string(),
-        "taida_polymorphic_map" => "int64_t taida_polymorphic_map(int64_t ptr, int64_t fn_ptr);".to_string(),
-
+        // --- HashMap extended: moved to runtime_func_prototype() (WC-6g) ---
+        // --- Set extended: moved to runtime_func_prototype() (WC-6g) ---
+        // --- Type detection / conversion: moved to runtime_func_prototype() (WC-6g) ---
+        // --- Polymorphic extended: moved to runtime_func_prototype() (WC-6g) ---
+        // --- Pack / Error extended: moved to runtime_func_prototype() (WC-6g) ---
         // --- Monadic: moved to runtime_func_prototype() (WC-5e) ---
         // --- JSON: moved to runtime_func_prototype() (WC-4b) ---
         // --- Gorillax / Relaxed Gorillax: moved to runtime_func_prototype() (WC-5e) ---
         // --- Lax extended: moved to runtime_func_prototype() (WC-5e) ---
         // --- Result extended: moved to runtime_func_prototype() (WC-5e) ---
-
-        // --- Pack / Error extended ---
-        "taida_pack_call_field0" => "int64_t taida_pack_call_field0(int64_t pack, int64_t hash);".to_string(),
-        "taida_pack_call_field1" => "int64_t taida_pack_call_field1(int64_t pack, int64_t hash, int64_t a);".to_string(),
-        "taida_pack_call_field2" => "int64_t taida_pack_call_field2(int64_t pack, int64_t hash, int64_t a, int64_t b);".to_string(),
-        "taida_pack_call_field3" => "int64_t taida_pack_call_field3(int64_t pack, int64_t hash, int64_t a, int64_t b, int64_t c);".to_string(),
-        "taida_pack_to_display_string" => "int64_t taida_pack_to_display_string(int64_t pack);".to_string(),
-        "taida_make_io_error" => "int64_t taida_make_io_error(int64_t msg);".to_string(),
-        "taida_retain_and_tag_field" => "int64_t taida_retain_and_tag_field(int64_t val, int64_t tag);".to_string(),
-
         // --- Field lookup: moved to runtime_func_prototype() (WC-4b) ---
         // --- Callback invoke: moved to runtime_func_prototype() (WC-3e) ---
 

@@ -1161,7 +1161,7 @@ static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes) {
     unsigned int pages = __builtin_wasm_memory_size(0);
     unsigned int mem_size = pages * 65536;
     unsigned int addr = (unsigned int)val;
-    if (addr < 4096) return 0; /* skip low addresses (null, small ints) */
+    if (addr < 256) return 0; /* skip null/very-low addresses */
     if (addr + min_bytes > mem_size) return 0;
     return 1;
 }
@@ -2054,6 +2054,389 @@ int64_t taida_polymorphic_is_empty(int64_t ptr) {
         return s[0] == '\0' ? 1 : 0;
     }
     return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WC-6: Collection & Pack Extended + Type Detection + Polymorphic Extended
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Forward declarations for functions defined later in this file */
+int64_t taida_is_closure_value(int64_t val);
+int64_t taida_closure_get_fn(int64_t closure_ptr);
+int64_t taida_closure_get_env(int64_t closure_ptr);
+int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0);
+int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t arg0, int64_t arg1);
+int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);
+int64_t taida_result_is_ok(int64_t result);
+int64_t taida_str_new_copy(int64_t src_raw);
+int64_t taida_list_contains(int64_t list_ptr, int64_t item);
+int64_t taida_list_index_of(int64_t list_ptr, int64_t item);
+int64_t taida_list_last_index_of(int64_t list_ptr, int64_t item);
+int64_t taida_list_map(int64_t list_ptr, int64_t fn_ptr);
+int64_t taida_str_contains(int64_t s_raw, int64_t sub_raw);
+int64_t taida_str_index_of(int64_t s_raw, int64_t sub_raw);
+int64_t taida_str_last_index_of(int64_t s_raw, int64_t sub_raw);
+
+/* ── WC-6a: HashMap extensions ───────────────────────────── */
+
+/* HashMap.length() / HashMap.size() -- return number of entries */
+int64_t taida_hashmap_length(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    int64_t count = 0;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WASM_HM_HEADER + i * 3];
+        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (kh != 0 || kp != 0) {
+            /* Not empty and not tombstone (tombstone: hash=1, key=0) */
+            if (!(kh == 1 && kp == 0)) count++;
+        }
+    }
+    return count;
+}
+
+/* HashMap.clone() -- deep clone a hashmap (public wrapper for _wasm_hashmap_clone) */
+int64_t taida_hashmap_clone(int64_t hm_ptr) {
+    return _wasm_hashmap_clone(hm_ptr);
+}
+
+/* HashMap.toString() -- "HashMap({key: value, ...})" */
+int64_t taida_hashmap_to_string(int64_t hm_ptr) {
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+
+    /* Count entries */
+    int entry_count = 0;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WASM_HM_HEADER + i * 3];
+        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
+        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
+            entry_count++;
+        }
+    }
+
+    if (entry_count == 0) {
+        char *r = (char *)wasm_alloc(13);
+        _wf_memcpy(r, "HashMap({})", 12);
+        r[11] = '\0';
+        return (int64_t)r;
+    }
+
+    /* Build "HashMap({k: v, k: v, ...})" */
+    int buf_size = 256;
+    char *buf = (char *)wasm_alloc((unsigned int)buf_size);
+    _wf_memcpy(buf, "HashMap({", 9);
+    int pos = 9;
+    int first = 1;
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WASM_HM_HEADER + i * 3];
+        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
+        int64_t val = hm[WASM_HM_HEADER + i * 3 + 2];
+        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
+            if (!first) { buf[pos++] = ','; buf[pos++] = ' '; }
+            first = 0;
+            const char *ks = (const char *)(intptr_t)taida_polymorphic_to_string(kp);
+            int kl = _wf_strlen(ks);
+            const char *vs = (const char *)(intptr_t)taida_polymorphic_to_string(val);
+            int vl = _wf_strlen(vs);
+            while (pos + kl + vl + 10 > buf_size) {
+                buf_size *= 2;
+                char *new_buf = (char *)wasm_alloc((unsigned int)buf_size);
+                _wf_memcpy(new_buf, buf, pos);
+                buf = new_buf;
+            }
+            _wf_memcpy(buf + pos, ks, kl); pos += kl;
+            buf[pos++] = ':'; buf[pos++] = ' ';
+            _wf_memcpy(buf + pos, vs, vl); pos += vl;
+        }
+    }
+    buf[pos++] = '}'; buf[pos++] = ')';
+    buf[pos] = '\0';
+    return (int64_t)buf;
+}
+
+/* HashMap.remove(key) -> new HashMap without that key (immutable) */
+int64_t taida_hashmap_remove_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
+    int64_t clone = taida_hashmap_clone(hm_ptr);
+    int64_t *hm = (int64_t *)(intptr_t)clone;
+    int64_t cap = hm[0];
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t kh = hm[WASM_HM_HEADER + i * 3];
+        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
+        if (kh == key_hash && kp != 0) {
+            if (taida_str_eq(kp, key_ptr)) {
+                hm[WASM_HM_HEADER + i * 3] = 1;     /* tombstone hash */
+                hm[WASM_HM_HEADER + i * 3 + 1] = 0;
+                hm[WASM_HM_HEADER + i * 3 + 2] = 0;
+                break;
+            }
+        }
+    }
+    return clone;
+}
+
+/* HashMap with initial capacity (public wrapper) */
+int64_t taida_hashmap_new_with_cap(int64_t cap) {
+    if (cap < 8) cap = 8;
+    return _wasm_hashmap_new_with_cap(cap);
+}
+
+/* HashMap adjust hash: ensure hash is never 0 or 1 (reserved) */
+int64_t taida_hashmap_adjust_hash(int64_t h) {
+    if (h == 0 || h == 1) return h + 2;
+    return h;
+}
+
+/* HashMap set_internal: delegate to taida_hashmap_set */
+int64_t taida_hashmap_set_internal(int64_t hm, int64_t kh, int64_t kp, int64_t v, int64_t mode) {
+    (void)mode;
+    return taida_hashmap_set(hm, kh, kp, v);
+}
+
+/* HashMap resize: re-insert all entries into larger map */
+int64_t taida_hashmap_resize(int64_t hm_ptr, int64_t new_cap) {
+    int64_t *old = (int64_t *)(intptr_t)hm_ptr;
+    int64_t old_cap = old[0];
+    int64_t new_hm = taida_hashmap_new_with_cap(new_cap);
+    for (int64_t i = 0; i < old_cap; i++) {
+        int64_t kh = old[WASM_HM_HEADER + i * 3];
+        int64_t kp = old[WASM_HM_HEADER + i * 3 + 1];
+        int64_t val = old[WASM_HM_HEADER + i * 3 + 2];
+        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
+            new_hm = taida_hashmap_set(new_hm, kh, kp, val);
+        }
+    }
+    return new_hm;
+}
+
+/* HashMap key/value lifecycle helpers (no-ops in WASM bump allocator) */
+int64_t taida_hashmap_key_eq(int64_t a, int64_t b) { return taida_str_eq(a, b); }
+int64_t taida_hashmap_key_retain(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_key_release(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_val_retain(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_val_release(int64_t a, int64_t b) { (void)a; (void)b; return 0; }
+int64_t taida_hashmap_key_valid(int64_t v) { return v != 0 ? 1 : 0; }
+
+/* ── WC-6b: Set extensions ───────────────────────────────── */
+
+int64_t taida_set_contains(int64_t set_ptr, int64_t item) {
+    return taida_set_has(set_ptr, item);
+}
+
+int64_t taida_set_is_empty(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    return list[1] == 0 ? 1 : 0;
+}
+
+int64_t taida_set_size(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    return list[1];
+}
+
+int64_t taida_set_to_string(int64_t set_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    if (len == 0) {
+        char *r = (char *)wasm_alloc(8);
+        _wf_memcpy(r, "Set({})", 8);
+        return (int64_t)r;
+    }
+    int buf_size = 128;
+    char *buf = (char *)wasm_alloc((unsigned int)buf_size);
+    _wf_memcpy(buf, "Set({", 5);
+    int pos = 5;
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
+        const char *vs = (const char *)(intptr_t)taida_polymorphic_to_string(list[WASM_LIST_ELEMS + i]);
+        int vl = _wf_strlen(vs);
+        while (pos + vl + 10 > buf_size) {
+            buf_size *= 2;
+            char *new_buf = (char *)wasm_alloc((unsigned int)buf_size);
+            _wf_memcpy(new_buf, buf, pos);
+            buf = new_buf;
+        }
+        _wf_memcpy(buf + pos, vs, vl); pos += vl;
+    }
+    buf[pos++] = '}'; buf[pos++] = ')';
+    buf[pos] = '\0';
+    return (int64_t)buf;
+}
+
+/* ── WC-6c: Pack extensions ──────────────────────────────── */
+
+/* Pack call field: invoke a BuchiPack field as a function */
+int64_t taida_pack_call_field0(int64_t pack_ptr, int64_t field_hash) {
+    int64_t fn_ptr = taida_pack_get(pack_ptr, field_hash);
+    if (taida_is_closure_value(fn_ptr)) {
+        int64_t env = taida_closure_get_env(fn_ptr);
+        typedef int64_t (*cb)(int64_t);
+        return ((cb)(intptr_t)taida_closure_get_fn(fn_ptr))(env);
+    }
+    typedef int64_t (*cb0)(void);
+    return ((cb0)(intptr_t)fn_ptr)();
+}
+
+int64_t taida_pack_call_field1(int64_t pack_ptr, int64_t field_hash, int64_t a) {
+    int64_t fn_ptr = taida_pack_get(pack_ptr, field_hash);
+    return taida_invoke_callback1(fn_ptr, a);
+}
+
+int64_t taida_pack_call_field2(int64_t pack_ptr, int64_t field_hash, int64_t a, int64_t b) {
+    int64_t fn_ptr = taida_pack_get(pack_ptr, field_hash);
+    return taida_invoke_callback2(fn_ptr, a, b);
+}
+
+int64_t taida_pack_call_field3(int64_t pack_ptr, int64_t field_hash, int64_t a, int64_t b, int64_t c) {
+    int64_t fn_ptr = taida_pack_get(pack_ptr, field_hash);
+    if (taida_is_closure_value(fn_ptr)) {
+        int64_t env = taida_closure_get_env(fn_ptr);
+        typedef int64_t (*cb)(int64_t, int64_t, int64_t, int64_t);
+        return ((cb)(intptr_t)taida_closure_get_fn(fn_ptr))(env, a, b, c);
+    }
+    typedef int64_t (*cb3)(int64_t, int64_t, int64_t);
+    return ((cb3)(intptr_t)fn_ptr)(a, b, c);
+}
+
+/* Pack.toString() */
+int64_t taida_pack_to_display_string(int64_t pack_ptr) {
+    return taida_polymorphic_to_string(pack_ptr);
+}
+
+/* make_io_error(msg) -> Error BuchiPack */
+int64_t taida_make_io_error(int64_t msg) {
+    return taida_make_error(
+        (int64_t)(intptr_t)"IOError",
+        msg);
+}
+
+/* retain_and_tag_field -- no-op in WASM (no RC) */
+int64_t taida_retain_and_tag_field(int64_t val, int64_t tag) {
+    (void)val; (void)tag;
+    return 0;
+}
+
+/* ── WC-6d: Type detection & display functions ───────────── */
+
+int64_t taida_is_string_value(int64_t val) { return _looks_like_string(val); }
+int64_t taida_is_list(int64_t val) { return _looks_like_list(val); }
+int64_t taida_is_hashmap(int64_t val) { return _is_wasm_hashmap(val); }
+int64_t taida_is_set(int64_t val) { return _is_wasm_set(val); }
+int64_t taida_is_buchi_pack(int64_t val) {
+    if (!_wasm_is_valid_ptr(val, 8)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    int64_t fc = p[0];
+    if (fc > 0 && fc < 200) {
+        int64_t h = p[1];
+        if (h > 0x10000 || h < 0) return 1;
+    }
+    return 0;
+}
+int64_t taida_is_molten(int64_t val) { (void)val; return 0; /* Molten is JS-only */ }
+int64_t taida_is_bytes(int64_t val) { (void)val; return 0; /* Bytes not in core */ }
+int64_t taida_is_async(int64_t val) { (void)val; return 0; /* no async in WASM */ }
+int64_t taida_detect_value_tag(int64_t val) { (void)val; return 0; }
+int64_t taida_detect_gorillax_type(int64_t val) { (void)val; return 0; }
+int64_t taida_bool_to_int(int64_t v) { return v ? 1 : 0; }
+int64_t taida_bool_to_str(int64_t v) {
+    return taida_str_new_copy((int64_t)(intptr_t)(v ? "true" : "false"));
+}
+int64_t taida_value_to_display_string(int64_t val) { return taida_polymorphic_to_string(val); }
+int64_t taida_value_to_debug_string(int64_t val) { return taida_polymorphic_to_string(val); }
+int64_t taida_has_magic_header(int64_t val) { (void)val; return 0; }
+int64_t taida_ptr_is_readable(int64_t val) { return _wasm_is_valid_ptr(val, 1); }
+int64_t taida_read_cstr_len_safe(int64_t ptr, int64_t max) {
+    if (!_wasm_is_valid_ptr(ptr, 1)) return 0;
+    const char *s = (const char *)(intptr_t)ptr;
+    int len = 0;
+    while (len < (int)max && s[len]) len++;
+    if (len >= (int)max) return 0;
+    return (int64_t)len;
+}
+
+/* ── WC-6e: Polymorphic extensions ───────────────────────── */
+
+/* Lax.getOrDefault(fallback) -- helper for polymorphic_get_or_default */
+static int64_t _wc_lax_get_or_default(int64_t lax_ptr, int64_t fallback) {
+    if (taida_pack_get_idx(lax_ptr, 0)) {
+        return taida_pack_get_idx(lax_ptr, 1); /* __value */
+    }
+    return fallback;
+}
+
+/* Result.getOrDefault(fallback) -- helper for polymorphic_get_or_default */
+static int64_t _wc_result_get_or_default(int64_t result, int64_t def) {
+    if (taida_result_is_ok(result)) {
+        return taida_pack_get_idx(result, 0); /* __value */
+    }
+    return def;
+}
+
+/* Polymorphic .getOrDefault(fallback) -- works on Result, Lax, raw values */
+int64_t taida_polymorphic_get_or_default(int64_t obj, int64_t def) {
+    if (obj == 0) return def;
+    if (obj < 0) return obj; /* negative ints are valid values */
+    if (_wasm_is_valid_ptr(obj, 104)) {
+        if (_wasm_is_result(obj)) return _wc_result_get_or_default(obj, def);
+        if (_wasm_is_lax(obj)) return _wc_lax_get_or_default(obj, def);
+    }
+    return obj;
+}
+
+/* Polymorphic .hasValue() -- works for Lax, Gorillax, Result (fc=4 monadic types) */
+int64_t taida_polymorphic_has_value(int64_t obj) {
+    if (obj == 0) return 0;
+    if (!_wasm_is_valid_ptr(obj, 104)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)obj;
+    if (p[0] == 4) return taida_pack_get_idx(obj, 0); /* fc=4: Lax/Gorillax/Result */
+    return 0;
+}
+
+/* Polymorphic .contains() */
+int64_t taida_polymorphic_contains(int64_t obj, int64_t needle) {
+    if (obj == 0) return 0;
+    if (_is_wasm_hashmap(obj)) return taida_hashmap_has(obj, taida_value_hash(needle), needle);
+    if (_is_wasm_set(obj)) return taida_set_has(obj, needle);
+    if (_looks_like_list(obj)) return taida_list_contains(obj, needle);
+    if (_looks_like_string(obj)) return taida_str_contains(obj, needle);
+    return 0;
+}
+
+/* Polymorphic .indexOf() */
+int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle) {
+    if (obj == 0) return -1;
+    if (_looks_like_list(obj)) return taida_list_index_of(obj, needle);
+    if (_looks_like_string(obj)) return taida_str_index_of(obj, needle);
+    return -1;
+}
+
+/* Polymorphic .lastIndexOf() */
+int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
+    if (obj == 0) return -1;
+    if (_looks_like_list(obj)) return taida_list_last_index_of(obj, needle);
+    if (_looks_like_string(obj)) return taida_str_last_index_of(obj, needle);
+    return -1;
+}
+
+/* Polymorphic .map(fn) */
+int64_t taida_polymorphic_map(int64_t obj, int64_t fn_ptr) {
+    if (obj == 0) return obj;
+    if (_wasm_is_result(obj)) {
+        if (taida_result_is_ok(obj)) {
+            int64_t value = taida_pack_get_idx(obj, 0);
+            int64_t new_val = taida_invoke_callback1(fn_ptr, value);
+            return taida_result_create(new_val, 0, 0);
+        }
+        return obj;
+    }
+    if (_wasm_is_lax(obj)) {
+        if (!taida_pack_get_idx(obj, 0)) return obj; /* empty lax */
+        int64_t value = taida_pack_get_idx(obj, 1);
+        int64_t def = taida_pack_get_idx(obj, 2);
+        int64_t result = taida_invoke_callback1(fn_ptr, value);
+        return taida_lax_new(result, def);
+    }
+    /* Default: list.map */
+    return taida_list_map(obj, fn_ptr);
 }
 
 /* ── W-5: Closure runtime ────────────────────────────────── */
