@@ -880,21 +880,16 @@ fn wasm_min_parity_all_examples() {
 
     // WC-3/WC-6: Known parity diffs -- examples that compile but have known
     // behavioral differences. These are excluded from parity failure.
-    let expected_parity_diff: Vec<&str> = vec![
-        "todo_app",              // Sort[](by <= fn) not lowered to WASM -- uses plain sort
-        // WC-6: The following compile in wasm-min but have parity diffs because
-        // wasm-min type molds return raw values (not Lax-wrapped). Operations
-        // like .hasValue(), .isEmpty(), .getOrDefault() on raw values behave
-        // differently than on Lax-wrapped values.
-        "compile_type_conv",     // Int["42"]().hasValue() -> raw 42, not Lax
-        "compile_optional_result", // hasValue/isEmpty on raw vs Lax
-        "compile_gorillax",      // Gorillax toString with raw values
-        "compile_methods",       // Method dispatch on raw vs monadic types
-        "06_lists",              // List.first/last return raw vs Lax
-        "17_gorillax_cage",      // Gorillax/Cage monadic ops
-        "26_prelude_optional",   // Optional (Lax) hasValue/isEmpty/getOrDefault
-        "27_prelude_result",     // Result isSuccess/isError/getOrDefault
-    ];
+    // All 9 previously known diffs have been fixed:
+    //   - Bug A: taida_int_mold_str now returns Lax (not raw int)
+    //   - Bug B: taida_list_get now returns Lax (not raw value)
+    //   - Bug C: taida_hashmap_get_lax now returns Lax (not raw value)
+    //   - Bug D: taida_polymorphic_is_empty now handles Lax
+    //   - Bug E: Error toString via _wasm_throw_to_display_string + result_map_error
+    //   - Bug F: RelaxedGorillax type detection (removed WASM_MIN_HEAP_ADDR check)
+    //   - Bug G: Sort[](by <= fn) now lowered to taida_list_sort_by
+    //   - Reverse: Removed from string-returning molds in lower.rs
+    let expected_parity_diff: Vec<&str> = vec![];
 
     // Filter out expected diffs
     let unexpected_parity_fail: Vec<_> = parity_fail
@@ -930,12 +925,11 @@ fn wasm_min_parity_all_examples() {
     }
 
     // WC-7a: Exact parity count — update deliberately when parity improves.
-    // 46 = prelude-complete core (WC-1 through WC-6).
-    // 9 expected-parity-diff examples compile but have known behavioral differences.
+    // 55 = prelude-complete core (WC-1 through WC-6) + 9 previously known diffs now fixed.
     assert_eq!(
         parity_ok.len(),
-        46,
-        "WC-7: Expected exactly 46 parity-OK examples, got {}. \
+        55,
+        "WC-7: Expected exactly 55 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

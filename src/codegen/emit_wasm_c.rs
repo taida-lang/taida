@@ -690,6 +690,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         | "taida_list_to_display_string" => {
             format!("int64_t {}(int64_t list);", name)
         }
+        "taida_list_sort_by" => {
+            "int64_t taida_list_sort_by(int64_t list, int64_t fn_ptr);".to_string()
+        }
         "taida_list_join" => "int64_t taida_list_join(int64_t list, int64_t sep);".to_string(),
         "taida_list_concat" | "taida_list_zip" => {
             format!("int64_t {}(int64_t list_a, int64_t list_b);", name)

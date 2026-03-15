@@ -389,12 +389,13 @@ fn wasm_wasi_write_failure_shape() {
         "writeFile to non-existent dir should report isError() = true"
     );
 
-    // Line 2: toString() should preserve the inner error pack field names.
+    // Line 2: toString() should show "Result(throw <= <error message>)"
+    // After Bug E fix, throw display extracts the message field (matching interpreter),
+    // not the full BuchiPack structure.
     assert!(
-        wasm_lines[1].contains("type <=")
-            && wasm_lines[1].contains("message <=")
-            && wasm_lines[1].contains("kind <="),
-        "Result toString should preserve error field names, got: {}",
+        wasm_lines[1].starts_with("Result(throw <= ")
+            && wasm_lines[1].ends_with(")"),
+        "Result toString should show throw with error message, got: {}",
         wasm_lines[1]
     );
 }
@@ -645,18 +646,8 @@ fn wasm_wasi_parity_all_examples() {
         native_fail.len()
     );
 
-    // WC-6: Known parity diffs -- examples that compile but have known
-    // behavioral differences (wasm-wasi type molds return raw values, not Lax-wrapped).
-    let expected_parity_diff: Vec<&str> = vec![
-        "06_lists",              // List.first/last return raw vs Lax
-        "17_gorillax_cage",      // Gorillax/Cage monadic ops
-        "26_prelude_optional",   // Optional (Lax) hasValue/isEmpty/getOrDefault
-        "27_prelude_result",     // Result isSuccess/isError/getOrDefault
-        "compile_gorillax",      // Gorillax toString with raw values
-        "compile_methods",       // Method dispatch on raw vs monadic types
-        "compile_optional_result", // hasValue/isEmpty on raw vs Lax
-        "compile_type_conv",     // Int["42"]().hasValue() -> raw 42, not Lax
-    ];
+    // All previously known parity diffs have been fixed (Bug A-G + Reverse mold).
+    let expected_parity_diff: Vec<&str> = vec![];
 
     let unexpected_parity_fail: Vec<_> = parity_fail
         .iter()
@@ -733,12 +724,11 @@ fn wasm_wasi_parity_all_examples() {
     // Exact parity count — if this changes, update deliberately.
     // WC-4: JSON in core → 42
     // WC-6: Collection & Pack & Type detection in core → 47
-    //        New: 28_prelude_collections, 30_class_like_methods, compile_hashmap_set,
-    //             compile_lax, compile_pack_field_call
+    // Bug A-G + Reverse fix: 47 → 55 (8 previously known diffs now pass)
     assert_eq!(
         parity_ok.len(),
-        47,
-        "WW-3: Expected exactly 47 parity-OK examples, got {}. \
+        55,
+        "WW-3: Expected exactly 55 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

@@ -4393,6 +4393,7 @@ impl Lowering {
             }
             // WF-2b: MoldInst string molds (Upper, Lower, etc.) return strings
             // Note: CharAt returns Lax[Str], not raw Str (TF-15)
+            // Note: Reverse is polymorphic (Str or List), so NOT included here
             Expr::MoldInst(name, _, _, _) => matches!(
                 name.as_str(),
                 "Str"
@@ -4402,7 +4403,6 @@ impl Lowering {
                     | "Replace"
                     | "Slice"
                     | "Repeat"
-                    | "Reverse"
                     | "Pad"
                     | "Join"
                     | "ToFixed"
@@ -4758,8 +4758,9 @@ impl Lowering {
     /// Helper: track unmold result type based on mold name
     fn track_unmold_type_by_mold_name(&mut self, target: &str, mold_name: &str) {
         match mold_name {
+            // Note: Reverse is polymorphic (Str or List), so NOT included here
             "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "CharAt" | "Repeat"
-            | "Reverse" | "Pad" | "Join" | "ToFixed" => {
+            | "Pad" | "Join" | "ToFixed" => {
                 self.string_vars.insert(target.to_string());
             }
             "Bool" => {

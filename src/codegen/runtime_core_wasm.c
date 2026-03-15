@@ -1011,6 +1011,9 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
 #ifndef WASM_HASH_TODO_UNM
 #define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
 #endif
+/* Error field hashes (moved early for _wasm_is_error / _wasm_error_to_string) */
+#define WASM_HASH_TYPE      0xa79439ef7bfa9c2dLL  /* FNV-1a("type") */
+#define WASM_HASH_MESSAGE   0x546401b5d2a8d2a4LL  /* FNV-1a("message") */
 
 /* W-4f2: Dynamic string buffer for building collection toString output */
 typedef struct {
@@ -1195,7 +1198,9 @@ static int _wasm_gorillax_type(int64_t val) {
     int64_t *p = (int64_t *)(intptr_t)val;
     /* __type field is at index 3: p[1 + 3*3 + 2] = p[12] */
     int64_t type_str = p[1 + 3 * 3 + 2]; /* field 3 value */
-    if (type_str > WASM_MIN_HEAP_ADDR && _looks_like_string(type_str)) {
+    /* Static strings may be in data section at low addresses, so skip
+       WASM_MIN_HEAP_ADDR check; _looks_like_string validates the pointer. */
+    if (type_str > 0 && _looks_like_string(type_str)) {
         const char *s = (const char *)(intptr_t)type_str;
         if (s[0] == 'G') return 1; /* "Gorillax" */
         if (s[0] == 'R') return 2; /* "RelaxedGorillax" */
@@ -1242,6 +1247,28 @@ static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
     return _sb_finish(&sb);
 }
 
+/* Throw value to display string: extract "message" field from error BuchiPack,
+   matching native's taida_throw_to_display_string. */
+static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
+    if (throw_val == 0) return (int64_t)(intptr_t)"error";
+    /* If it's a BuchiPack, look for "message" field */
+    if (_looks_like_pack(throw_val)) {
+        int64_t *p = (int64_t *)(intptr_t)throw_val;
+        int64_t fc = p[0];
+        for (int64_t i = 0; i < fc; i++) {
+            if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
+                int64_t msg = p[1 + i * 3 + 2];
+                if (msg && _looks_like_string(msg)) return msg;
+                break;
+            }
+        }
+        /* Fallback: render full pack structure */
+        return _wasm_value_to_display_string(throw_val);
+    }
+    /* String or other value */
+    return _wasm_value_to_display_string(throw_val);
+}
+
 /* W-5g: Result.toString() — predicate-aware, matching native */
 static int64_t _wasm_result_to_string(int64_t result) {
     if (!_wasm_result_is_error_check(result)) {
@@ -1260,7 +1287,7 @@ static int64_t _wasm_result_to_string(int64_t result) {
     if (throw_val == 0) {
         return (int64_t)(intptr_t)"Result(throw <= @())";
     }
-    int64_t err_str = _wasm_value_to_display_string(throw_val);
+    int64_t err_str = _wasm_throw_to_display_string(throw_val);
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "Result(throw <= ");
@@ -1293,6 +1320,37 @@ static int64_t _wasm_gorillax_to_string(int64_t gx) {
     return _sb_finish(&sb);
 }
 
+/* Detect Error pack: fc in 1..10 and first field hash == WASM_HASH_TYPE */
+static int _wasm_is_error(int64_t val) {
+    if (!_wasm_is_valid_ptr(val, 32)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if (p[0] >= 1 && p[0] <= 10 && p[1] == WASM_HASH_TYPE) return 1;
+    return 0;
+}
+
+/* Error.toString() — "Error: message" format (matching native/interpreter) */
+static int64_t _wasm_error_to_string(int64_t val) {
+    int64_t *p = (int64_t *)(intptr_t)val;
+    int64_t fc = p[0];
+    /* Find message field by hash */
+    int64_t msg = 0;
+    for (int64_t i = 0; i < fc; i++) {
+        if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
+            msg = p[1 + i * 3 + 2];
+            break;
+        }
+    }
+    if (msg && _looks_like_string(msg)) {
+        const char *ms = (const char *)(intptr_t)msg;
+        _wasm_strbuf sb;
+        _sb_init(&sb);
+        _sb_append(&sb, "Error: ");
+        _sb_append(&sb, ms);
+        return _sb_finish(&sb);
+    }
+    return (int64_t)(intptr_t)"Error";
+}
+
 /* W-4f2: Convert value to display string (like native's taida_value_to_display_string) */
 static int64_t _wasm_value_to_display_string(int64_t val) {
     if (val == 0) return (int64_t)(intptr_t)"0";
@@ -1306,6 +1364,8 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
     if (_wasm_is_result(val)) return _wasm_result_to_string(val);
     if (_wasm_is_gorillax(val)) return _wasm_gorillax_to_string(val);
     if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
+    /* Check Error before generic pack (Error is a pack with "type" field) */
+    if (_wasm_is_error(val)) return _wasm_error_to_string(val);
     /* Check Pack (field_count + hash pattern) */
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* Check if it's a string */
@@ -1325,6 +1385,8 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
     if (_wasm_is_result(val)) return _wasm_result_to_string(val);
     if (_wasm_is_gorillax(val)) return _wasm_gorillax_to_string(val);
     if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
+    /* Check Error before generic pack */
+    if (_wasm_is_error(val)) return _wasm_error_to_string(val);
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* Check if it's a string — quote it for debug */
     if (_looks_like_string(val)) {
@@ -1359,11 +1421,27 @@ int64_t taida_debug_polymorphic(int64_t val) {
     return 0;
 }
 
-/* ── W-3f: taida_int_mold_str (wasm-min: parse string to int, simplified) ── */
-/* In native, this returns a Lax[Int]. In wasm-min, returns raw value (no Lax wrapper). */
+/* ── W-3f: taida_int_mold_str (wasm-min: parse string to int, returns Lax) ── */
+/* Parses a string to Int and returns Lax[Int]. Invalid strings return empty Lax. */
 
 int64_t taida_int_mold_str(int64_t v) {
-    return taida_str_to_int(v);
+    const char *s = (const char *)(intptr_t)v;
+    if (!s || s[0] == '\0') return taida_lax_empty(0);
+    int neg = 0;
+    int i = 0;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    else if (s[0] == '+') { i = 1; }
+    if (s[i] == '\0') return taida_lax_empty(0); /* just sign, no digits */
+    int found_digit = 0;
+    uint64_t acc = 0;
+    while (s[i] >= '0' && s[i] <= '9') {
+        acc = acc * 10 + (uint64_t)(s[i] - '0');
+        found_digit = 1;
+        i++;
+    }
+    if (!found_digit || s[i] != '\0') return taida_lax_empty(0);
+    int64_t result = neg ? -(int64_t)acc : (int64_t)acc;
+    return taida_lax_new(result, 0);
 }
 
 /* ── W-4f2: Field name/type registry for Pack toString ── */
@@ -1537,13 +1615,12 @@ int64_t taida_list_length(int64_t list_ptr) {
     return list[1];
 }
 
-/* taida_list_get: in native returns Lax, in wasm-min returns raw value
-   (no Lax wrapper). OOB returns 0. */
+/* taida_list_get: returns Lax[T]. OOB returns empty Lax. */
 int64_t taida_list_get(int64_t list_ptr, int64_t index) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (index < 0 || index >= len) return 0;
-    return list[WASM_LIST_ELEMS + index];
+    if (index < 0 || index >= len) return taida_lax_empty(0);
+    return taida_lax_new(list[WASM_LIST_ELEMS + index], 0);
 }
 
 int64_t taida_list_is_empty(int64_t list_ptr) {
@@ -1731,9 +1808,13 @@ int64_t taida_hashmap_set_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_pt
     return taida_hashmap_set(clone, key_hash, key_ptr, value);
 }
 
-/* taida_hashmap_get_lax: in native returns Lax, in wasm-min returns raw value */
+/* taida_hashmap_get_lax: returns Lax[V]. Key not found returns empty Lax. */
 int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
-    return taida_hashmap_get(hm_ptr, key_hash, key_ptr);
+    if (taida_hashmap_has(hm_ptr, key_hash, key_ptr)) {
+        int64_t value = taida_hashmap_get(hm_ptr, key_hash, key_ptr);
+        return taida_lax_new(value, 0);
+    }
+    return taida_lax_empty(0);
 }
 
 /* ── W-4f: HashMap type detection helper ── */
@@ -2043,10 +2124,16 @@ int64_t taida_collection_size(int64_t ptr) {
     return data[1];
 }
 
-/* ── W-4f: taida_polymorphic_is_empty (wasm-min: List/Set/HashMap) ── */
-/* For List/Set: length at index 1. For HashMap: length at index 1. */
+/* Forward declaration — taida_lax_is_empty is defined later */
+int64_t taida_lax_is_empty(int64_t lax_ptr);
+
+/* ── W-4f: taida_polymorphic_is_empty (wasm-min: Lax/List/Set/HashMap/String) ── */
 int64_t taida_polymorphic_is_empty(int64_t ptr) {
     if (ptr == 0) return 1;
+    /* Lax: isEmpty means hasValue == false */
+    if (_wasm_is_lax(ptr)) {
+        return taida_lax_is_empty(ptr);
+    }
     /* All collection types store length at index 1 in wasm-min */
     if (_looks_like_list(ptr) || _is_wasm_hashmap(ptr)) {
         int64_t *data = (int64_t *)(intptr_t)ptr;
@@ -2557,8 +2644,7 @@ int64_t taida_error_get_value(int64_t depth) {
 /* ── W-5: Error object creation ── */
 /* FNV-1a hashes for error BuchiPack fields (same as native_runtime.c) */
 /* WFX-2: corrected FNV-1a hashes for error fields */
-#define WASM_HASH_TYPE      0xa79439ef7bfa9c2dLL  /* FNV-1a("type") */
-#define WASM_HASH_MESSAGE   0x546401b5d2a8d2a4LL  /* FNV-1a("message") */
+/* WASM_HASH_TYPE and WASM_HASH_MESSAGE are defined early (near line 1014) */
 #define WASM_HASH_FIELD     0x2c5d047ff4e6ffc7LL  /* FNV-1a("field") */
 #define WASM_HASH_CODE      0x0bb51791194b4414LL  /* FNV-1a("code") */
 
@@ -2799,9 +2885,18 @@ int64_t taida_result_is_error(int64_t result) {
 }
 
 int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
-    /* Simplified: not used in wasm-min common paths */
-    (void)fn_ptr;
-    return result;
+    if (!_wasm_result_is_error_check(result)) {
+        return result; /* Success: return as-is */
+    }
+    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
+    /* Extract the error message string to pass to the mapping function
+       (matching native: passes display string, not the Error BuchiPack) */
+    int64_t err_display = _wasm_throw_to_display_string(throw_val);
+    int64_t mapped_str = taida_invoke_callback1(fn_ptr, err_display);
+    /* Wrap the mapped result back into an Error BuchiPack */
+    int64_t new_error = taida_make_error(
+        (int64_t)(intptr_t)"ResultError", mapped_str);
+    return taida_result_create(0, new_error, 0);
 }
 
 /* =========================================================================
@@ -4348,6 +4443,42 @@ int64_t taida_list_sort_desc(int64_t list_ptr) {
         int64_t j = i - 1;
         while (j >= 0 && items[j] < key) { items[j+1] = items[j]; j--; }
         items[j+1] = key;
+    }
+    for (int64_t i = 0; i < len; i++) {
+        new_list = taida_list_push(new_list, items[i]);
+    }
+    return new_list;
+}
+
+/* Sort by key extraction function: fn_ptr maps each element to a sort key,
+   then sort ascending by key. Matches interpreter's Sort[list](by <= fn). */
+int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t elem_tag = list[2];
+    int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = elem_tag;
+    if (len == 0) return new_list;
+    /* Allocate parallel arrays: items and keys */
+    int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
+    int64_t *keys = (int64_t *)wasm_alloc((unsigned int)(len * 8));
+    for (int64_t i = 0; i < len; i++) {
+        items[i] = list[WASM_LIST_ELEMS + i];
+        keys[i] = taida_invoke_callback1(fn_ptr, items[i]);
+    }
+    /* Insertion sort ascending by key */
+    for (int64_t i = 1; i < len; i++) {
+        int64_t kkey = keys[i];
+        int64_t kitem = items[i];
+        int64_t j = i - 1;
+        while (j >= 0 && keys[j] > kkey) {
+            keys[j+1] = keys[j];
+            items[j+1] = items[j];
+            j--;
+        }
+        keys[j+1] = kkey;
+        items[j+1] = kitem;
     }
     for (int64_t i = 0; i < len; i++) {
         new_list = taida_list_push(new_list, items[i]);
