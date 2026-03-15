@@ -970,9 +970,9 @@ impl Lowering {
                 if let Some(by_var) = by_fn {
                     // Sort by key extraction function: taida_list_sort_by(list, fn)
                     // The function extracts a sort key from each element, then sorts ascending by key.
-                    // If reverse is set, we sort descending instead (sort_by returns ascending).
+                    // If reverse or desc is set, we sort descending instead (sort_by returns ascending).
                     func.push(IrInst::Call(result, "taida_list_sort_by".to_string(), vec![list, by_var]));
-                    if reverse {
+                    if reverse || desc {
                         // Reverse the result for descending order
                         let reversed = func.alloc_var();
                         func.push(IrInst::Call(reversed, "taida_list_reverse".to_string(), vec![result]));

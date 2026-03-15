@@ -398,6 +398,12 @@ fn wasm_wasi_write_failure_shape() {
         "Result toString should show throw with error message, got: {}",
         wasm_lines[1]
     );
+    // Verify error message content mentions the writeFile operation
+    assert!(
+        wasm_lines[1].contains("writeFile"),
+        "Error message should mention 'writeFile', got: {}",
+        wasm_lines[1]
+    );
 }
 
 /// Test: wasm-min non-regression — ensure wasm-min still works after wasm-wasi additions.

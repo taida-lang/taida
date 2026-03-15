@@ -1320,11 +1320,13 @@ static int64_t _wasm_gorillax_to_string(int64_t gx) {
     return _sb_finish(&sb);
 }
 
-/* Detect Error pack: fc in 1..10 and first field hash == WASM_HASH_TYPE */
+/* Detect Error pack: fc in 2..10, first field hash == WASM_HASH_TYPE,
+   second field hash == WASM_HASH_MESSAGE. Two-field check prevents false
+   positives from user-defined packs like @(type <= "Foo", ...). */
 static int _wasm_is_error(int64_t val) {
     if (!_wasm_is_valid_ptr(val, 32)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] >= 1 && p[0] <= 10 && p[1] == WASM_HASH_TYPE) return 1;
+    if (p[0] >= 2 && p[0] <= 10 && p[1] == WASM_HASH_TYPE && p[4] == WASM_HASH_MESSAGE) return 1;
     return 0;
 }
 
@@ -1433,8 +1435,11 @@ int64_t taida_int_mold_str(int64_t v) {
     else if (s[0] == '+') { i = 1; }
     if (s[i] == '\0') return taida_lax_empty(0); /* just sign, no digits */
     int found_digit = 0;
+    int digit_count = 0;
     uint64_t acc = 0;
     while (s[i] >= '0' && s[i] <= '9') {
+        digit_count++;
+        if (digit_count > 19) return taida_lax_empty(0); /* overflow guard: int64_t max is 19 digits */
         acc = acc * 10 + (uint64_t)(s[i] - '0');
         found_digit = 1;
         i++;
@@ -1808,11 +1813,20 @@ int64_t taida_hashmap_set_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_pt
     return taida_hashmap_set(clone, key_hash, key_ptr, value);
 }
 
-/* taida_hashmap_get_lax: returns Lax[V]. Key not found returns empty Lax. */
+/* taida_hashmap_get_lax: returns Lax[V]. Key not found returns empty Lax.
+   Single-pass lookup (inlined probe) avoids double hash-table traversal. */
 int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
-    if (taida_hashmap_has(hm_ptr, key_hash, key_ptr)) {
-        int64_t value = taida_hashmap_get(hm_ptr, key_hash, key_ptr);
-        return taida_lax_new(value, 0);
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    uint64_t uh = (uint64_t)key_hash;
+    int64_t idx = (int64_t)(uh % (uint64_t)cap);
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t slot = (idx + i) % cap;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (sh == 0 && sk == 0) return taida_lax_empty(0); /* empty slot — not found */
+        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr))
+            return taida_lax_new(hm[WASM_HM_HEADER + slot * 3 + 2], 0);
     }
     return taida_lax_empty(0);
 }
@@ -2644,7 +2658,7 @@ int64_t taida_error_get_value(int64_t depth) {
 /* ── W-5: Error object creation ── */
 /* FNV-1a hashes for error BuchiPack fields (same as native_runtime.c) */
 /* WFX-2: corrected FNV-1a hashes for error fields */
-/* WASM_HASH_TYPE and WASM_HASH_MESSAGE are defined early (near line 1014) */
+/* WASM_HASH_TYPE and WASM_HASH_MESSAGE are defined in the "Error field hashes" section */
 #define WASM_HASH_FIELD     0x2c5d047ff4e6ffc7LL  /* FNV-1a("field") */
 #define WASM_HASH_CODE      0x0bb51791194b4414LL  /* FNV-1a("code") */
 
@@ -2678,7 +2692,7 @@ int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
 /* Lax is a BuchiPack @(hasValue: Bool, __value: T, __default: T, __type: Str)
    Layout: 4-field pack using same hash constants as native. */
 
-/* WASM_HASH_HAS_VALUE, __VALUE, __DEFAULT, __TYPE defined early (near line 710) */
+/* WASM_HASH_HAS_VALUE, __VALUE, __DEFAULT, __TYPE defined in W-5f monadic type hash section */
 
 int64_t taida_lax_new(int64_t value, int64_t default_value) {
     int64_t pack = taida_pack_new(4);
@@ -2748,7 +2762,7 @@ static int _wasm_is_lax(int64_t val) {
 /* Gorillax: @(isOk: Bool, __value: T, __error: Error, __type: "Gorillax")
    Using pack fields at fixed indices. */
 
-/* WASM_HASH_IS_OK, __ERROR defined early (near line 710) */
+/* WASM_HASH_IS_OK, __ERROR defined in W-5f monadic type hash section */
 
 int64_t taida_gorillax_new(int64_t value) {
     int64_t pack = taida_pack_new(4);
@@ -2837,7 +2851,7 @@ int64_t taida_relaxed_gorillax_err(int64_t error) {
 /* Result: @(__value: T, __predicate: P, throw: Error, __type: "Result")
    field 0: __value, field 1: __predicate, field 2: throw, field 3: __type */
 
-/* WASM_HASH___PREDICATE, WASM_HASH_THROW defined early (near line 710) */
+/* WASM_HASH___PREDICATE, WASM_HASH_THROW defined in W-5f monadic type hash section */
 
 int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate) {
     int64_t pack = taida_pack_new(4);
