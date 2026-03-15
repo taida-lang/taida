@@ -598,6 +598,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        "taida_list_sort_by" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
         "taida_list_find" => RuntimeAbi {
             params: &[Ptr, FnPtr],
             returns: &[Ptr],

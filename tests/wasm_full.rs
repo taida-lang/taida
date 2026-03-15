@@ -810,10 +810,9 @@ fn wasm_full_parity_all_examples() {
         let wasm_out = wasm_output.unwrap();
 
         // Known non-parity examples (pre-existing bugs in native/wasm, not wasm-full regressions)
+        // 06_lists and 27_prelude_result fixed (Reverse mold + mapError toString)
         let known_mismatch: Vec<&str> = vec![
-            "06_lists",          // string Reverse mold garbled on both backends differently
-            "11_introspection",  // pointer addresses differ between memory layouts
-            "27_prelude_result", // mapError toString differs (different error representation)
+            "11_introspection", // pointer addresses differ between memory layouts
         ];
 
         if native_out == wasm_out {
@@ -895,14 +894,12 @@ fn wasm_full_parity_all_examples() {
 
     // Exact parity count -- if this changes, update deliberately.
     // Known non-parity (excluded from this count):
-    //   06_lists: string Reverse mold produces different garbled output on native vs wasm
     //   11_introspection: pointer addresses differ between native and wasm memory layouts
-    //   27_prelude_result: mapError toString differs (different error representation)
-    // NTH-6: updated from 42 to 51 after NTH-5 poly_add string support
+    // 06_lists and 27_prelude_result fixed (Reverse mold + mapError toString)
     assert_eq!(
         parity_ok.len(),
-        52,
-        "WF-5: Expected exactly 52 parity-OK examples, got {}. \
+        54,
+        "WF-5: Expected exactly 54 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

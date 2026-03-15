@@ -3,9 +3,9 @@
 /// Compiles .td files to .wasm via `taida build --target wasm-min`,
 /// runs them with wasmtime, and verifies output matches the interpreter.
 ///
-/// W-2: Size gate CI tests — hard gates on .wasm file sizes.
-/// Wado baselines: hello_world = 1,572 bytes, pi_approx = 9,269 bytes.
-/// Gate: hello <= 2KB (minimum), <= 1,572 bytes (stretch); pi <= 9,269 bytes (hard).
+/// WC-7d: Size gate CI tests — hard gates on .wasm file sizes.
+/// Prelude-complete baselines (WC-1~WC-6): hello = 321 bytes, pi_approx = 6,736 bytes.
+/// Gate: hello <= 512 bytes, pi <= 8,192 bytes.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -152,7 +152,18 @@ fn wasm_min_pi_approx() {
 }
 
 // ---------------------------------------------------------------------------
-// W-2c: Size Gate CI — hard gates on .wasm file sizes
+// WC-7d: Size Gate CI — hard gates on .wasm file sizes
+//
+// Baselines (prelude-complete core, WC-1 through WC-6):
+//   hello = 321 bytes, pi_approx = 6,736 bytes
+//
+// wasm-ld --gc-sections prunes unused functions, so hello (which uses only
+// stdout + int-to-string) stays tiny even though core now contains all
+// prelude functions. pi_approx pulls in more of core (float formatting,
+// string concat, etc.) but is still well under 10KB.
+//
+// Gate values include ~60% headroom (hello) / ~22% headroom (pi) above
+// current baselines to allow minor growth without breaking CI.
 // ---------------------------------------------------------------------------
 
 /// Helper: compile a .td to .wasm and return the file size in bytes.
@@ -189,40 +200,39 @@ fn wasm_min_size_gate() {
         &std::env::temp_dir().join("taida_wasm_size_pi.wasm"),
     );
 
-    // Wado baselines: hello_world = 1,572 bytes, pi_approx = 9,269 bytes
-    eprintln!("wasm-min hello size: {} bytes (Wado: 1,572)", hello_size);
-    eprintln!("wasm-min pi size: {} bytes (Wado: 9,269)", pi_size);
-
-    // Hard gate: pi_approx must be <= 9,269 bytes (Wado baseline)
-    assert!(
-        pi_size > 0 && pi_size <= 9269,
-        "HARD GATE FAIL: pi.wasm should be <= 9,269 bytes (Wado baseline), got {} bytes. \
-         W-3 and beyond are blocked until this passes.",
+    // WC-7d baselines (prelude-complete core): hello = 321 bytes, pi = 6,736 bytes
+    eprintln!(
+        "wasm-min hello size: {} bytes (WC-7d baseline: 321)",
+        hello_size
+    );
+    eprintln!(
+        "wasm-min pi size: {} bytes (WC-7d baseline: 6,736)",
         pi_size
     );
 
-    // Minimum gate: hello must be <= 2KB
+    // Hard gate: hello must be <= 512 bytes (~60% headroom above 321 baseline)
     assert!(
-        hello_size > 0 && hello_size <= 2048,
-        "MINIMUM GATE FAIL: hello.wasm should be <= 2KB, got {} bytes",
+        hello_size > 0 && hello_size <= 512,
+        "HARD GATE FAIL: hello.wasm should be <= 512 bytes (WC-7d gate), got {} bytes",
         hello_size
     );
 
-    // Stretch goal: hello <= 1,572 bytes (Wado baseline)
-    if hello_size <= 1572 {
-        eprintln!(
-            "STRETCH GOAL MET: hello.wasm ({} bytes) <= Wado baseline (1,572 bytes)",
-            hello_size
-        );
-    } else {
-        eprintln!(
-            "Stretch goal not met: hello.wasm ({} bytes) > Wado baseline (1,572 bytes)",
-            hello_size
-        );
-    }
+    // Hard gate: pi_approx must be <= 8,192 bytes (~22% headroom above 6,736 baseline)
+    assert!(
+        pi_size > 0 && pi_size <= 8192,
+        "HARD GATE FAIL: pi.wasm should be <= 8,192 bytes (WC-7d gate), got {} bytes. \
+         Prelude-complete core baseline is 6,736 bytes.",
+        pi_size
+    );
+
+    // Report exact values for tracking
+    eprintln!(
+        "Size gate passed: hello={} (gate: 512), pi={} (gate: 8,192)",
+        hello_size, pi_size
+    );
 }
 
-/// W-2c: Size gate with exact Wado comparison — reports the ratio.
+/// WC-7d: Size gate with exact baseline comparison — reports the ratio.
 #[test]
 fn wasm_min_size_gate_wado_comparison() {
     let hello_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_min_hello.td");
@@ -868,9 +878,31 @@ fn wasm_min_parity_all_examples() {
         interp_fail.len()
     );
 
-    if !parity_fail.is_empty() {
-        let mut msg = format!("W-6 PARITY FAILED for {} example(s):\n", parity_fail.len());
-        for (stem, interp, wasm) in &parity_fail {
+    // WC-3/WC-6: Known parity diffs -- examples that compile but have known
+    // behavioral differences. These are excluded from parity failure.
+    // All 9 previously known diffs have been fixed:
+    //   - Bug A: taida_int_mold_str now returns Lax (not raw int)
+    //   - Bug B: taida_list_get now returns Lax (not raw value)
+    //   - Bug C: taida_hashmap_get_lax now returns Lax (not raw value)
+    //   - Bug D: taida_polymorphic_is_empty now handles Lax
+    //   - Bug E: Error toString via _wasm_throw_to_display_string + result_map_error
+    //   - Bug F: RelaxedGorillax type detection (removed WASM_MIN_HEAP_ADDR check)
+    //   - Bug G: Sort[](by <= fn) now lowered to taida_list_sort_by
+    //   - Reverse: Removed from string-returning molds in lower.rs
+    let expected_parity_diff: Vec<&str> = vec![];
+
+    // Filter out expected diffs
+    let unexpected_parity_fail: Vec<_> = parity_fail
+        .iter()
+        .filter(|(stem, _, _)| !expected_parity_diff.contains(&stem.as_str()))
+        .collect();
+
+    if !unexpected_parity_fail.is_empty() {
+        let mut msg = format!(
+            "W-6 PARITY FAILED for {} example(s):\n",
+            unexpected_parity_fail.len()
+        );
+        for (stem, interp, wasm) in &unexpected_parity_fail {
             msg.push_str(&format!(
                 "\n  {}: interp='{}' vs wasm='{}'\n",
                 stem,
@@ -881,10 +913,25 @@ fn wasm_min_parity_all_examples() {
         panic!("{}", msg);
     }
 
-    // At least 20 examples should have parity (sanity check)
-    assert!(
-        parity_ok.len() >= 20,
-        "W-6: Expected at least 20 examples with parity, got {}",
-        parity_ok.len()
+    if !parity_fail.is_empty() {
+        eprintln!(
+            "W-6 Parity: {} expected-diff examples skipped: {:?}",
+            parity_fail.len(),
+            parity_fail
+                .iter()
+                .map(|(s, _, _)| s.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // WC-7a: Exact parity count — update deliberately when parity improves.
+    // 55 = prelude-complete core (WC-1 through WC-6) + 9 previously known diffs now fixed.
+    assert_eq!(
+        parity_ok.len(),
+        55,
+        "WC-7: Expected exactly 55 parity-OK examples, got {}. \
+         If parity improved, update the expected count. List: {:?}",
+        parity_ok.len(),
+        parity_ok
     );
 }

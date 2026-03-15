@@ -2974,6 +2974,45 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
     return new_list;
 }
 
+/* Sort by key extraction function: fn_ptr maps each element to a sort key,
+   then sort ascending by key. Matches interpreter's Sort[list](by <= fn). */
+taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl = (taida_val*)new_list;
+    nl[3] = elem_tag;
+    if (len == 0) return new_list;
+    size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_by items");
+    taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_by items");
+    taida_val *keys = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_by keys");
+    for (taida_val i = 0; i < len; i++) {
+        items[i] = list[4 + i];
+        keys[i] = taida_invoke_callback1(fn_ptr, items[i]);
+    }
+    /* Insertion sort ascending by key */
+    for (taida_val i = 1; i < len; i++) {
+        taida_val kkey = keys[i];
+        taida_val kitem = items[i];
+        taida_val j = i - 1;
+        while (j >= 0 && keys[j] > kkey) {
+            keys[j+1] = keys[j];
+            items[j+1] = items[j];
+            j--;
+        }
+        keys[j+1] = kkey;
+        items[j+1] = kitem;
+    }
+    for (taida_val i = 0; i < len; i++) {
+        taida_list_elem_retain(items[i], elem_tag);
+        new_list = taida_list_push(new_list, items[i]);
+    }
+    free(items);
+    free(keys);
+    return new_list;
+}
+
 taida_val taida_list_find(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];

@@ -962,16 +962,30 @@ impl Lowering {
                     });
                 }
                 let list = self.lower_expr(func, &type_args[0])?;
-                // オプション: reverse (default false), desc (default false)
+                // オプション: by (key extraction function), reverse, desc
+                let by_fn = self.lower_mold_field_expr(func, fields, "by")?;
                 let reverse = self.lower_mold_field_bool(func, fields, "reverse", false)?;
                 let desc = self.lower_mold_field_bool(func, fields, "desc", false)?;
-                let runtime_fn = if reverse || desc {
-                    "taida_list_sort_desc"
-                } else {
-                    "taida_list_sort"
-                };
                 let result = func.alloc_var();
-                func.push(IrInst::Call(result, runtime_fn.to_string(), vec![list]));
+                if let Some(by_var) = by_fn {
+                    // Sort by key extraction function: taida_list_sort_by(list, fn)
+                    // The function extracts a sort key from each element, then sorts ascending by key.
+                    // If reverse or desc is set, we sort descending instead (sort_by returns ascending).
+                    func.push(IrInst::Call(result, "taida_list_sort_by".to_string(), vec![list, by_var]));
+                    if reverse || desc {
+                        // Reverse the result for descending order
+                        let reversed = func.alloc_var();
+                        func.push(IrInst::Call(reversed, "taida_list_reverse".to_string(), vec![result]));
+                        return Ok(reversed);
+                    }
+                } else {
+                    let runtime_fn = if reverse || desc {
+                        "taida_list_sort_desc"
+                    } else {
+                        "taida_list_sort"
+                    };
+                    func.push(IrInst::Call(result, runtime_fn.to_string(), vec![list]));
+                }
                 Ok(result)
             }
             "Unique" => {

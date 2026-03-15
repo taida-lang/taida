@@ -389,12 +389,18 @@ fn wasm_wasi_write_failure_shape() {
         "writeFile to non-existent dir should report isError() = true"
     );
 
-    // Line 2: toString() should preserve the inner error pack field names.
+    // Line 2: toString() should show "Result(throw <= <error message>)"
+    // After Bug E fix, throw display extracts the message field (matching interpreter),
+    // not the full BuchiPack structure.
     assert!(
-        wasm_lines[1].contains("type <=")
-            && wasm_lines[1].contains("message <=")
-            && wasm_lines[1].contains("kind <="),
-        "Result toString should preserve error field names, got: {}",
+        wasm_lines[1].starts_with("Result(throw <= ") && wasm_lines[1].ends_with(")"),
+        "Result toString should show throw with error message, got: {}",
+        wasm_lines[1]
+    );
+    // Verify error message content mentions the writeFile operation
+    assert!(
+        wasm_lines[1].contains("writeFile"),
+        "Error message should mention 'writeFile', got: {}",
         wasm_lines[1]
     );
 }
@@ -645,9 +651,20 @@ fn wasm_wasi_parity_all_examples() {
         native_fail.len()
     );
 
-    if !parity_fail.is_empty() {
-        let mut msg = format!("WW-3 PARITY FAILED for {} example(s):\n", parity_fail.len());
-        for (stem, native, wasm) in &parity_fail {
+    // All previously known parity diffs have been fixed (Bug A-G + Reverse mold).
+    let expected_parity_diff: Vec<&str> = vec![];
+
+    let unexpected_parity_fail: Vec<_> = parity_fail
+        .iter()
+        .filter(|(stem, _, _)| !expected_parity_diff.contains(&stem.as_str()))
+        .collect();
+
+    if !unexpected_parity_fail.is_empty() {
+        let mut msg = format!(
+            "WW-3 PARITY FAILED for {} example(s):\n",
+            unexpected_parity_fail.len()
+        );
+        for (stem, native, wasm) in &unexpected_parity_fail {
             msg.push_str(&format!(
                 "\n  {}: native='{}' vs wasm-wasi='{}'\n",
                 stem,
@@ -665,41 +682,21 @@ fn wasm_wasi_parity_all_examples() {
     // If it grows, the test fails — that's a regression.
     // NTH-6: allowlist reduced after NTH-5 poly_add string support enabled
     // 3 examples (07_closures, compile_lambda, wasm_min_pi_approx) now pass parity.
+    // WC-3: updated after list molds moved to core. Many list examples now compile.
+    // Removed: 10_list_operations, 11_introspection, 16_unmold_both_directions,
+    //          compile_hof_molds, compile_list, compile_list_map, compile_list_molds,
+    //          compile_rc, compile_str_molds, compile_num_molds, todo_app
+    // WC-6: Many examples removed from rejected list — now compile with core
+    // extensions. Some produce parity diffs (expected_parity_diff above),
+    // others pass parity (28_prelude_collections, 30_class_like_methods,
+    // compile_hashmap_set, compile_lax, compile_pack_field_call).
     let expected_rejected: Vec<&str> = vec![
-        "06_lists",
         "09_modules",
-        "10_list_operations",
-        "11_introspection",
         "13_async",
         "14_unmold_backward",
-        "16_unmold_both_directions",
-        "17_gorillax_cage",
-        "18_std_json",
-        "26_prelude_optional", // typeof works but taida_polymorphic_has_value missing
-        "27_prelude_result",
-        "28_prelude_collections",
-        "30_class_like_methods",
-        "api_client",
         "compile_async",
-        "compile_gorillax",
-        "compile_hashmap_set",
-        "compile_hof_molds",
-        "compile_json",
-        "compile_lax",
-        "compile_list",
-        "compile_list_map",
-        "compile_list_molds",
-        "compile_methods",
         "compile_module",
         "compile_module_value",
-        "compile_num_molds",
-        "compile_optional_result",
-        "compile_pack_field_call",
-        "compile_prelude",
-        "compile_rc",
-        "compile_str_molds",
-        "compile_type_conv",
-        "todo_app",
     ];
 
     // Expected allowlist: examples where native backend itself fails.
@@ -733,12 +730,13 @@ fn wasm_wasi_parity_all_examples() {
     );
 
     // Exact parity count — if this changes, update deliberately.
-    // WE-2: wasm_edge_hello.td added (simple stdout, compilable by wasm-wasi too)
-    // NTH-6: updated from 24 to 27 after NTH-5 poly_add string support
+    // WC-4: JSON in core → 42
+    // WC-6: Collection & Pack & Type detection in core → 47
+    // Bug A-G + Reverse fix: 47 → 55 (8 previously known diffs now pass)
     assert_eq!(
         parity_ok.len(),
-        27,
-        "WW-3: Expected exactly 27 parity-OK examples, got {}. \
+        55,
+        "WW-3: Expected exactly 55 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -849,11 +847,11 @@ fn wasm_wasi_superset_of_wasm_min() {
     }
 
     // Exact superset count — if this changes, update deliberately.
-    // WE-2: wasm_edge_hello.td added (simple stdout, compilable by both wasm-min and wasm-wasi)
-    // NTH-6: updated from 23 to 26 after NTH-5 poly_add string support
+    // WC-4: JSON in core → 41
+    // WC-6: Collection & Pack & Type detection in core → 54
     assert_eq!(
-        superset_ok, 26,
-        "WW-3: Expected exactly 26 superset-verified examples, got {}. \
+        superset_ok, 54,
+        "WW-3: Expected exactly 54 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

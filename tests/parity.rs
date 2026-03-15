@@ -839,8 +839,8 @@ fn test_three_way_parity() {
 /// When fixed, remove from this list so the parity test catches regressions.
 ///
 /// Tracked as TF-6 through TF-11 in `.dev/FIX_PROGRESS.md`.
-/// TF-6/7/8/9/10/11 fixed. Only 06_lists remains due to pre-existing
-/// Reverse mold bug (Reverse[list]() returns reversed string, not list).
+/// TF-6/7/8/9/10/11 + 06_lists all fixed.
+/// 06_lists: Reverse mold was misidentified as string-returning in lower.rs.
 ///
 /// Fixed root causes:
 ///   - TF-6: Template literal now parses expressions via full parser (03, 15)
@@ -849,10 +849,9 @@ fn test_three_way_parity() {
 ///   - TF-9: Closure calls in template literals now work (07)
 ///   - TF-10: typeof() now implemented in native backend (26)
 ///   - TF-11: Error toString extracts message field correctly (27)
+///   - Reverse: Removed from string-returning molds (polymorphic: Str or List)
 fn native_numbered_known_failures() -> Vec<&'static str> {
-    vec![
-        "06_lists", // Pre-existing: Reverse mold returns reversed string, not list
-    ]
+    vec![]
 }
 
 #[test]
