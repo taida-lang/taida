@@ -812,7 +812,7 @@ fn wasm_full_parity_all_examples() {
         // Known non-parity examples (pre-existing bugs in native/wasm, not wasm-full regressions)
         // 06_lists and 27_prelude_result fixed (Reverse mold + mapError toString)
         let known_mismatch: Vec<&str> = vec![
-            "11_introspection",  // pointer addresses differ between memory layouts
+            "11_introspection", // pointer addresses differ between memory layouts
         ];
 
         if native_out == wasm_out {

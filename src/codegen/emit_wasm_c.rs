@@ -954,34 +954,57 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
 
         // --- Bytes ---
         "taida_bytes_mold" => "int64_t taida_bytes_mold(int64_t v, int64_t fill);".to_string(),
-        "taida_bytes_clone" | "taida_bytes_len"
-        | "taida_bytes_to_list" | "taida_bytes_to_display_string"
+        "taida_bytes_clone"
+        | "taida_bytes_len"
+        | "taida_bytes_to_list"
+        | "taida_bytes_to_display_string"
         | "taida_bytes_default_value" => {
             format!("int64_t {}(int64_t v);", name)
         }
-        "taida_bytes_from_raw" => "int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);".to_string(),
-        "taida_bytes_new_filled" => "int64_t taida_bytes_new_filled(int64_t len, int64_t fill);".to_string(),
-        "taida_bytes_get_lax" => "int64_t taida_bytes_get_lax(int64_t bytes, int64_t idx);".to_string(),
-        "taida_bytes_set" => "int64_t taida_bytes_set(int64_t bytes, int64_t idx, int64_t val);".to_string(),
+        "taida_bytes_from_raw" => {
+            "int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);".to_string()
+        }
+        "taida_bytes_new_filled" => {
+            "int64_t taida_bytes_new_filled(int64_t len, int64_t fill);".to_string()
+        }
+        "taida_bytes_get_lax" => {
+            "int64_t taida_bytes_get_lax(int64_t bytes, int64_t idx);".to_string()
+        }
+        "taida_bytes_set" => {
+            "int64_t taida_bytes_set(int64_t bytes, int64_t idx, int64_t val);".to_string()
+        }
         // Bytes cursor
-        "taida_bytes_cursor_new" => "int64_t taida_bytes_cursor_new(int64_t bytes, int64_t offset);".to_string(),
+        "taida_bytes_cursor_new" => {
+            "int64_t taida_bytes_cursor_new(int64_t bytes, int64_t offset);".to_string()
+        }
         "taida_bytes_cursor_u8" | "taida_bytes_cursor_remaining" => {
             format!("int64_t {}(int64_t cursor);", name)
         }
         "taida_bytes_cursor_take" | "taida_bytes_cursor_step" => {
             format!("int64_t {}(int64_t cursor, int64_t n);", name)
         }
-        "taida_bytes_cursor_unpack" => "int64_t taida_bytes_cursor_unpack(int64_t cursor, int64_t schema);".to_string(),
+        "taida_bytes_cursor_unpack" => {
+            "int64_t taida_bytes_cursor_unpack(int64_t cursor, int64_t schema);".to_string()
+        }
         // Bytes encode/decode molds
-        "taida_u16be_mold" | "taida_u16le_mold" | "taida_u32be_mold" | "taida_u32le_mold"
-        | "taida_u16be_decode_mold" | "taida_u16le_decode_mold"
-        | "taida_u32be_decode_mold" | "taida_u32le_decode_mold"
-        | "taida_uint8_mold" | "taida_uint8_mold_float" => {
+        "taida_u16be_mold"
+        | "taida_u16le_mold"
+        | "taida_u32be_mold"
+        | "taida_u32le_mold"
+        | "taida_u16be_decode_mold"
+        | "taida_u16le_decode_mold"
+        | "taida_u32be_decode_mold"
+        | "taida_u32le_decode_mold"
+        | "taida_uint8_mold"
+        | "taida_uint8_mold_float" => {
             format!("int64_t {}(int64_t v);", name)
         }
         // UTF-8 molds
-        "taida_utf8_encode_mold" | "taida_utf8_decode_mold" | "taida_utf8_encode_scalar"
-        | "taida_utf8_decode_one" | "taida_utf8_single_scalar" => {
+        "taida_utf8_encode_mold"
+        | "taida_utf8_decode_mold"
+        | "taida_utf8_encode_scalar"
+        | "taida_utf8_decode_one"
+        | "taida_utf8_single_scalar" => {
             format!("int64_t {}(int64_t v);", name)
         }
 

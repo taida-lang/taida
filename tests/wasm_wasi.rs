@@ -393,8 +393,7 @@ fn wasm_wasi_write_failure_shape() {
     // After Bug E fix, throw display extracts the message field (matching interpreter),
     // not the full BuchiPack structure.
     assert!(
-        wasm_lines[1].starts_with("Result(throw <= ")
-            && wasm_lines[1].ends_with(")"),
+        wasm_lines[1].starts_with("Result(throw <= ") && wasm_lines[1].ends_with(")"),
         "Result toString should show throw with error message, got: {}",
         wasm_lines[1]
     );
@@ -661,7 +660,10 @@ fn wasm_wasi_parity_all_examples() {
         .collect();
 
     if !unexpected_parity_fail.is_empty() {
-        let mut msg = format!("WW-3 PARITY FAILED for {} example(s):\n", unexpected_parity_fail.len());
+        let mut msg = format!(
+            "WW-3 PARITY FAILED for {} example(s):\n",
+            unexpected_parity_fail.len()
+        );
         for (stem, native, wasm) in &unexpected_parity_fail {
             msg.push_str(&format!(
                 "\n  {}: native='{}' vs wasm-wasi='{}'\n",
