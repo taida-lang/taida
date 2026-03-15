@@ -54,6 +54,10 @@
 
 #include <stdint.h>
 
+// WCR-2: Minimum heap address — values below this are small integers, not pointers.
+// Used by _wasm_is_valid_ptr and type detection heuristics.
+#define WASM_MIN_HEAP_ADDR 4096
+
 /* ── WASI fd_write import ── */
 
 typedef int32_t wasi_fd;
@@ -138,7 +142,7 @@ void *wasm_alloc(unsigned int size) {
 
 /* ── strlen (no libc) ── */
 
-static int32_t wasm_strlen(const char *s) {
+int32_t wasm_strlen(const char *s) {
     int32_t n = 0;
     while (s[n]) n++;
     return n;
@@ -422,8 +426,8 @@ int64_t taida_generic_unmold(int64_t val) {
        Matches native_runtime.c taida_generic_unmold TODO branch. */
     if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
         int64_t type_ptr = taida_pack_get(val, WASM_HASH___TYPE);
-        /* Guard: ensure type_ptr looks like a valid pointer (> 4096) */
-        if ((intptr_t)type_ptr <= 4096) return val;
+        /* Guard: ensure type_ptr looks like a valid pointer (> WASM_MIN_HEAP_ADDR) */
+        if ((intptr_t)type_ptr <= WASM_MIN_HEAP_ADDR) return val;
         const char *type_str = (const char *)(intptr_t)type_ptr;
         if (type_str != 0 && type_str[0] == 'T' && type_str[1] == 'O' &&
             type_str[2] == 'D' && type_str[3] == 'O' && type_str[4] == '\0') {
@@ -1161,7 +1165,7 @@ static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes) {
     unsigned int pages = __builtin_wasm_memory_size(0);
     unsigned int mem_size = pages * 65536;
     unsigned int addr = (unsigned int)val;
-    if (addr < 256) return 0; /* skip null/very-low addresses */
+    if (addr < WASM_MIN_HEAP_ADDR) return 0; /* skip null/very-low addresses */
     if (addr + min_bytes > mem_size) return 0;
     return 1;
 }
@@ -1191,7 +1195,7 @@ static int _wasm_gorillax_type(int64_t val) {
     int64_t *p = (int64_t *)(intptr_t)val;
     /* __type field is at index 3: p[1 + 3*3 + 2] = p[12] */
     int64_t type_str = p[1 + 3 * 3 + 2]; /* field 3 value */
-    if (type_str > 4096 && _looks_like_string(type_str)) {
+    if (type_str > WASM_MIN_HEAP_ADDR && _looks_like_string(type_str)) {
         const char *s = (const char *)(intptr_t)type_str;
         if (s[0] == 'G') return 1; /* "Gorillax" */
         if (s[0] == 'R') return 2; /* "RelaxedGorillax" */
@@ -2116,8 +2120,9 @@ int64_t taida_hashmap_to_string(int64_t hm_ptr) {
     }
 
     if (entry_count == 0) {
-        char *r = (char *)wasm_alloc(13);
-        _wf_memcpy(r, "HashMap({})", 12);
+        // WCR-6: "HashMap({})" = 11 chars + NUL = 12 bytes
+        char *r = (char *)wasm_alloc(12);
+        _wf_memcpy(r, "HashMap({})", 11);
         r[11] = '\0';
         return (int64_t)r;
     }
@@ -2932,7 +2937,7 @@ int64_t taida_relaxed_gorillax_to_string(int64_t ptr) {
 
 /// Monadic field_count (for dispatch)
 int64_t taida_monadic_field_count(int64_t val) {
-    if (val == 0 || val < 4096) return 0;
+    if (val == 0 || val < WASM_MIN_HEAP_ADDR) return 0;
     if (_wasm_is_result(val)) return 3;
     if (_wasm_is_lax(val)) return 4;
     return 0;
@@ -2940,7 +2945,7 @@ int64_t taida_monadic_field_count(int64_t val) {
 
 /// Monadic .flatMap(fn)
 int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr) {
-    if (obj == 0 || obj < 4096) return obj;
+    if (obj == 0 || obj < WASM_MIN_HEAP_ADDR) return obj;
     if (_wasm_is_result(obj)) {
         if (!taida_result_is_ok(obj)) return obj;
         int64_t value = taida_pack_get_idx(obj, 0);
@@ -2956,7 +2961,7 @@ int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr) {
 
 /// Monadic .getOrThrow()
 int64_t taida_monadic_get_or_throw(int64_t obj) {
-    if (obj == 0 || obj < 4096) return obj;
+    if (obj == 0 || obj < WASM_MIN_HEAP_ADDR) return obj;
     if (_wasm_is_result(obj)) {
         if (taida_result_is_ok(obj)) return taida_pack_get_idx(obj, 0);
         int64_t throw_val = taida_pack_get_idx(obj, 2);
@@ -3284,7 +3289,7 @@ int64_t taida_str_from_float(int64_t v) { return taida_float_to_str(v); }
 
 int64_t taida_can_throw_payload(int64_t val) {
     /* Check if val is a pack with a "type" field (looks like an error) */
-    if (val < 4096) return 0;
+    if (val < WASM_MIN_HEAP_ADDR) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
     /* Simple heuristic: first field hash is type hash */
     if (p[0] >= 1 && p[0] <= 10 && p[1] == WASM_HASH_TYPE) return 1;
@@ -3823,7 +3828,7 @@ void taida_str_retain(int64_t val) { (void)val; }
 /* ── typeof: compile-time tag + runtime heuristic ── */
 
 int64_t taida_typeof(int64_t val, int64_t tag) {
-    if (val != 0 && val >= 4096) {
+    if (val != 0 && val >= WASM_MIN_HEAP_ADDR) {
         if (_is_wasm_hashmap(val)) return (int64_t)(intptr_t)"HashMap";
         if (_is_wasm_set(val)) return (int64_t)(intptr_t)"Set";
         if (_wasm_is_result(val)) return (int64_t)(intptr_t)"Result";
@@ -4043,7 +4048,7 @@ static int _wc_char_to_digit(int c) {
 /// Int[v]() auto-detect: tries to distinguish int, string, other
 int64_t taida_int_mold_auto(int64_t v) {
     if (v == 0) return taida_lax_new(0, 0);
-    if (v < 0 || v < 4096) return taida_lax_new(v, 0);
+    if (v < 0 || v < WASM_MIN_HEAP_ADDR) return taida_lax_new(v, 0);
 
     const char *s = (const char *)(intptr_t)v;
     char c = s[0];
@@ -4979,6 +4984,9 @@ static char *_wc_json_parse_string_raw(const char **p) {
                 case 'r': buf[out++] = '\r'; break;
                 case 'b': buf[out++] = '\b'; break;
                 case 'f': buf[out++] = '\f'; break;
+                // TODO(WCR-3): \uXXXX Unicode escape not implemented.
+                // Currently outputs raw character after 'u'. Should decode 4-hex-digit
+                // codepoint to UTF-8. Surrogate pairs (\uD800-\uDFFF) also needed.
                 default: buf[out++] = **p; break;
             }
             (*p)++;

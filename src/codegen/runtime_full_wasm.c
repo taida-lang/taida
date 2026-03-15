@@ -17,6 +17,10 @@
 
 #include <stdint.h>
 
+// WCR-2: Minimum heap address — values below this are small integers, not pointers.
+// Used by _wasm_is_valid_ptr and type detection heuristics.
+#define WASM_MIN_HEAP_ADDR 4096
+
 // ---------------------------------------------------------------------------
 // Forward declarations from runtime_core_wasm.c
 // (linked via wasm-ld, not #include)
@@ -56,18 +60,11 @@ static inline double _to_double(int64_t v) {
 // Only helpers still needed by remaining full-only functions are kept.
 // ---------------------------------------------------------------------------
 
-static int _wf_strlen(const char *s) {
-    if (!s) return 0;
-    int len = 0;
-    while (s[len]) len++;
-    return len;
-}
-
-static void _wf_memcpy(void *dst, const void *src, int len) {
-    char *d = (char *)dst;
-    const char *s = (const char *)src;
-    for (int i = 0; i < len; i++) d[i] = s[i];
-}
+// WCR-4: Use core's wasm_strlen instead of duplicating
+extern int32_t wasm_strlen(const char *s);
+extern void *memcpy(void *dest, const void *src, unsigned long n);
+#define _wf_strlen(s) ((int)wasm_strlen((s) ? (s) : ""))
+#define _wf_memcpy(d,s,n) memcpy((d),(s),(n))
 
 // ---------------------------------------------------------------------------
 // Type/pointer detection helpers (used by full-specific overrides and Bytes)
