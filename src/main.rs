@@ -4187,10 +4187,10 @@ fn run_cache_clean() {
             let path = entry.path();
             let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
             // Remove cached .o files and temp files, preserve 'include/' dir
-            if fname.ends_with(".o") || fname.ends_with(".tmp.c") || fname.ends_with(".tmp.o") {
-                if fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
+            if (fname.ends_with(".o") || fname.ends_with(".tmp.c") || fname.ends_with(".tmp.o"))
+                && fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
             }
         }
     }

@@ -167,9 +167,6 @@ fn run_native_with_error(td_path: &Path) -> Result<String, String> {
     Ok(normalize(&String::from_utf8_lossy(&run_output.stdout)))
 }
 
-/// Normalize output for comparison.
-/// Normalize output for comparison: strip trailing whitespace per line and at end.
-///
 // normalize() is provided by common::normalize (RCB-26).
 // LIMITATION (AT-1): This hides trailing-space differences between backends.
 // For structured output (jsonPretty, indented strings), meaningful whitespace

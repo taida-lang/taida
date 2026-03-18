@@ -198,11 +198,11 @@ pub fn cache_wasm(profile: &str, stem: &str, wasm_path: &Path) {
     let cache_path = wasm_test_cache_dir(profile).join(format!("{}.wasm", stem));
     // Atomic: write to .tmp then rename to avoid partial reads by concurrent tests.
     let tmp_path = cache_path.with_extension("wasm.tmp");
-    if std::fs::copy(wasm_path, &tmp_path).is_ok() {
-        if std::fs::rename(&tmp_path, &cache_path).is_err() {
-            // N-3: Clean up the .tmp file on rename failure.
-            let _ = std::fs::remove_file(&tmp_path);
-        }
+    if std::fs::copy(wasm_path, &tmp_path).is_ok()
+        && std::fs::rename(&tmp_path, &cache_path).is_err()
+    {
+        // N-3: Clean up the .tmp file on rename failure.
+        let _ = std::fs::remove_file(&tmp_path);
     }
 }
 
@@ -235,10 +235,10 @@ pub fn cached_wasm(profile: &str, stem: &str, td_path: &Path) -> Option<PathBuf>
             return None; // stale: source changed
         }
         // RCB-55: Invalidate if taida binary is newer than cache.
-        if let Some(bin_mtime) = taida_bin_mtime() {
-            if bin_mtime > cache_mtime {
-                return None; // stale: compiler rebuilt
-            }
+        if let Some(bin_mtime) = taida_bin_mtime()
+            && bin_mtime > cache_mtime
+        {
+            return None; // stale: compiler rebuilt
         }
         Some(cache_path)
     } else {

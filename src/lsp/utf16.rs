@@ -1,12 +1,12 @@
-/// UTF-16 conversion utilities for LSP protocol compliance.
-///
-/// The LSP specification defines `Position.character` as a 0-based offset
-/// measured in UTF-16 code units. Taida's lexer uses char-based (Unicode
-/// scalar value) indexing internally. Characters outside the Basic
-/// Multilingual Plane (e.g., emoji) occupy 2 UTF-16 code units but only
-/// 1 Rust `char`, so a direct cast would misplace the cursor.
-///
-/// This module provides bidirectional conversion between the two systems.
+//! UTF-16 conversion utilities for LSP protocol compliance.
+//!
+//! The LSP specification defines `Position.character` as a 0-based offset
+//! measured in UTF-16 code units. Taida's lexer uses char-based (Unicode
+//! scalar value) indexing internally. Characters outside the Basic
+//! Multilingual Plane (e.g., emoji) occupy 2 UTF-16 code units but only
+//! 1 Rust `char`, so a direct cast would misplace the cursor.
+//!
+//! This module provides bidirectional conversion between the two systems.
 
 /// Convert a 0-based UTF-16 code unit offset to a 0-based char index
 /// within `line_text`.
