@@ -1,0 +1,5 @@
+T1: Square color=red sides=4 w=5 h=5 sq=true area=25
+T2: red shape
+T3: 4 sides
+T4: Rectangle area=0 w=10 h=5
+T5: Polygon sides=3 area=0

@@ -1,0 +1,747 @@
+# 標準メソッドリファレンス
+
+## 概要
+
+プリミティブ型およびリスト型で使用できる標準メソッドのリファレンスです。
+
+メソッドは**状態チェック**（内部状態を問い合わせる）と**表示用**（toString）に限定されています。
+操作系の処理はモールドとして提供されます。詳細は `reference/mold_types.md` を参照してください。
+
+## 設計原則
+
+- **状態チェックメソッド**: 対象の内部状態を Bool/Int で返す。変換は行わない
+- **モナディック操作メソッド**: Result/Lax/Async 固有の map/flatMap/mapError
+- **toString メソッド**: デバッグ・表示用の文字列変換
+- **操作はモールドで**: 値の変換・加工はモールドを使用する
+
+> **PHILOSOPHY.md — III.** カタめたいなら、鋳型を作りましょう
+
+---
+
+## Str — 文字列メソッド
+
+### 状態チェック
+
+#### length
+
+文字列の長さを返します。
+
+```taida
+"hello".length()  // 5
+"".length()       // 0
+"日本語".length()   // 3 (文字数)
+```
+
+**シグネチャ**: `=> :Int`
+
+#### contains
+
+部分文字列が含まれているかを返します。
+
+```taida
+"hello world".contains("world")  // true
+"hello".contains("xyz")  // false
+```
+
+**シグネチャ**: `substr: Str => :Bool`
+
+#### startsWith
+
+指定した文字列で始まるかを返します。
+
+```taida
+"hello world".startsWith("hello")  // true
+"hello".startsWith("world")  // false
+```
+
+**シグネチャ**: `prefix: Str => :Bool`
+
+#### endsWith
+
+指定した文字列で終わるかを返します。
+
+```taida
+"hello world".endsWith("world")  // true
+"hello".endsWith("xyz")  // false
+```
+
+**シグネチャ**: `suffix: Str => :Bool`
+
+#### indexOf
+
+部分文字列の位置を返します。見つからない場合は -1。
+
+```taida
+"hello world".indexOf("world")  // 6
+"hello".indexOf("xyz")  // -1
+```
+
+**シグネチャ**: `substr: Str => :Int`
+
+#### lastIndexOf
+
+部分文字列の最後の出現位置を返します。見つからない場合は -1。
+
+```taida
+"hello hello".lastIndexOf("hello")  // 6
+"hello".lastIndexOf("xyz")  // -1
+```
+
+**シグネチャ**: `substr: Str => :Int`
+
+### 安全アクセス
+
+#### get
+
+指定インデックスの文字を Lax で返します。範囲外の場合は `hasValue = false`。
+
+```taida
+"hello".get(0) ]=> ch    // "h"
+"hello".get(10) ]=> ch   // "" (デフォルト値)
+"hello".get(10).hasValue  // false
+```
+
+**シグネチャ**: `index: Int => :Lax[Str]`
+
+### 文字列変換
+
+#### toString
+
+文字列をそのまま返します（他の型との一貫性のため）。
+
+```taida
+"hello".toString()  // "hello"
+```
+
+**シグネチャ**: `=> :Str`
+
+### 操作はモールドで
+
+以下の操作はモールドとして提供されます:
+
+| 操作 | モールド | 例 |
+|------|---------|-----|
+| 大文字変換 | `Upper[str]()` | `Upper["hello"]()` → `"HELLO"` |
+| 小文字変換 | `Lower[str]()` | `Lower["HELLO"]()` → `"hello"` |
+| 空白除去 | `Trim[str]()` | `Trim["  hi  "]()` → `"hi"` |
+| 分割 | `Split[str, delim]()` | `Split["a,b", ","]()` → `@["a", "b"]` |
+| 置換 | `Replace[str, old, new]()` | `Replace["ab", "a", "x"]()` → `"xb"` |
+| 範囲抽出 | `Slice[str]()` | `Slice["hello"](end <= 3)` → `"hel"` |
+| 文字取得 | `CharAt[str, idx]()` | `CharAt["hello", 0]() ]=> ch` → `"h"` (Lax[Str]) |
+| 繰り返し | `Repeat[str, n]()` | `Repeat["ha", 3]()` → `"hahaha"` |
+| 逆順 | `Reverse[str]()` | `Reverse["hello"]()` → `"olleh"` |
+| パディング | `Pad[str, len]()` | `Pad["42", 5](side <= "start", char <= "0")` → `"00042"` |
+| 型変換 | `Int[str]()` / `Float[str]()` | `Int["42"]() ]=> num` → `42` |
+
+---
+
+## Bytes — バイト列メソッド
+
+`Bytes` は 0..255 の連続領域です。バイナリ境界で使います。
+
+### 状態チェック
+
+#### length
+
+バイト数を返します。
+
+```taida
+Bytes["ping"]() ]=> b
+b.length()  // 4
+```
+
+**シグネチャ**: `=> :Int`
+
+### 安全アクセス
+
+#### get
+
+指定インデックスのバイト値を `Lax[Int]` で返します。範囲外は `hasValue = false`。
+
+```taida
+Bytes[@[65, 66]]() ]=> b
+b.get(0) ]=> v    // 65
+b.get(99).hasValue  // false
+```
+
+**シグネチャ**: `index: Int => :Lax[Int]`
+
+### 文字列変換
+
+#### toString
+
+表示用の `Bytes[@[...]]` 形式へ変換します。
+
+```taida
+Bytes[@[65, 66]]() ]=> b
+b.toString()  // "Bytes[@[65, 66]]"
+```
+
+**シグネチャ**: `=> :Str`
+
+### 操作はモールドで
+
+```taida
+ByteSet[b, 1, 67]() ]=> b2
+Slice[b](start <= 0, end <= 1)      // Bytes
+Concat[b, b2]()                      // Bytes
+BytesToList[b2]()                    // @[Int]
+Utf8Decode[b2]()                     // Lax[Str]
+```
+
+---
+
+## Molten -- 溶鉄（メソッドなし）
+
+`Molten` 型はメソッドを一切持ちません。Molten は外部由来の不透明値であり、直接操作はできません。型パラメータはありません -- Molten は Molten でしかありません。
+
+```taida
+>>> npm:lodash => @(lodash)  // lodash: Molten
+
+// これらは全てエラーになります
+lodash.sum()          // エラー: Molten has no methods
+lodash.toString()     // エラー: Molten has no methods
+lodash.length()       // エラー: Molten has no methods
+```
+
+Molten 値を操作するには Cage を使います。JS バックエンドでは JSNew, JSSet, JSBind, JSSpread モールドも利用可能です。
+
+JSON は Molten の特殊ケースです。JSON もメソッドを持ちません（詳細は下記の JSON セクションを参照）。
+
+---
+
+## JSON -- 溶鉄（メソッドなし）
+
+`JSON` 型はメソッドを一切持ちません。JSON は Molten の特殊ケースであり、外部由来の不透明値です。
+
+```taida
+// これらは全てエラーになります
+data.at("name")       // エラー: JSON has no methods
+data.toStr()           // エラー: JSON has no methods
+data.keys()            // エラー: JSON has no methods
+data ]=> x             // エラー: JSON direct unmold is not allowed
+```
+
+JSON を使うには `JSON[raw, Schema]()` でスキーマを指定してください。詳細は [JSON 溶鉄](../guide/03_json.md) を参照してください。
+
+---
+
+## Num — 数値メソッド (Int / Float)
+
+### 状態チェック
+
+#### isNaN
+
+NaN (非数) かどうかを返します。
+
+```taida
+42.isNaN()     // false
+0.0.isNaN()    // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+> **注意**: Taida に `/` 演算子はなく、`Div[x, y]()` モールドが Lax を返すため、通常の計算で NaN が生成されることはありません。外部データ（JSON など）から受け取った値の検査に使用します。
+
+#### isInfinite
+
+無限大かどうかを返します。
+
+```taida
+42.isInfinite()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+#### isFinite
+
+有限数かどうかを返します。
+
+```taida
+42.isFinite()   // true
+3.14.isFinite() // true
+```
+
+**シグネチャ**: `=> :Bool`
+
+#### isPositive
+
+正の数かどうかを返します。
+
+```taida
+5.isPositive()  // true
+(-5).isPositive()  // false
+0.isPositive()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+#### isNegative
+
+負の数かどうかを返します。
+
+```taida
+(-5).isNegative()  // true
+5.isNegative()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+#### isZero
+
+ゼロかどうかを返します。
+
+```taida
+0.isZero()  // true
+0.0.isZero()  // true
+1.isZero()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+### 文字列変換
+
+#### toString
+
+数値を文字列に変換します。
+
+```taida
+42.toString()  // "42"
+3.14.toString()  // "3.14"
+```
+
+**シグネチャ**: `=> :Str`
+
+### 操作はモールドで
+
+以下の操作はモールドとして提供されます:
+
+| 操作 | モールド | 例 |
+|------|---------|-----|
+| 小数点固定 | `ToFixed[num, digits]()` | `ToFixed[3.14159, 2]()` → `"3.14"` |
+| 絶対値 | `Abs[num]()` | `Abs[-5]()` → `5` |
+| 切り捨て | `Floor[num]()` | `Floor[3.7]()` → `3` |
+| 切り上げ | `Ceil[num]()` | `Ceil[3.2]()` → `4` |
+| 四捨五入 | `Round[num]()` | `Round[3.5]()` → `4` |
+| 0方向切り捨て | `Truncate[num]()` | `Truncate[3.7]()` → `3` |
+| 範囲制限 | `Clamp[num, min, max]()` | `Clamp[15, 0, 10]()` → `10` |
+
+---
+
+## List — リストメソッド
+
+### 状態チェック
+
+#### length
+
+リストの要素数を返します。
+
+```taida
+@[1, 2, 3].length()  // 3
+@[].length()  // 0
+```
+
+**シグネチャ**: `=> :Int`
+
+#### isEmpty
+
+リストが空かどうかを返します。
+
+```taida
+@[].isEmpty()  // true
+@[1].isEmpty()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+#### contains
+
+要素が含まれているかを返します。
+
+```taida
+@[1, 2, 3].contains(2)  // true
+@[1, 2, 3].contains(5)  // false
+```
+
+**シグネチャ**: `item: T => :Bool`
+
+#### indexOf
+
+要素の位置を返します。見つからない場合は -1。
+
+```taida
+@[10, 20, 30].indexOf(20)  // 1
+@[10, 20, 30].indexOf(50)  // -1
+```
+
+**シグネチャ**: `item: T => :Int`
+
+#### lastIndexOf
+
+要素の最後の出現位置を返します。見つからない場合は -1。
+
+```taida
+@[1, 2, 1, 2].lastIndexOf(1)  // 2
+```
+
+**シグネチャ**: `item: T => :Int`
+
+### 安全アクセス（Lax 返し）
+
+#### first
+
+最初の要素を Lax で返します。空リストの場合は `hasValue = false`。
+
+```taida
+@[1, 2, 3].first() ]=> val  // 1
+@[].first().hasValue         // false
+```
+
+**シグネチャ**: `=> :Lax[T]`
+
+#### last
+
+最後の要素を Lax で返します。空リストの場合は `hasValue = false`。
+
+```taida
+@[1, 2, 3].last() ]=> val  // 3
+@[].last().hasValue         // false
+```
+
+**シグネチャ**: `=> :Lax[T]`
+
+#### get
+
+指定インデックスの要素を Lax で返します。範囲外の場合は `hasValue = false`。
+
+```taida
+@[10, 20, 30].get(1) ]=> val    // 20
+@[10, 20, 30].get(10).hasValue  // false
+```
+
+**シグネチャ**: `index: Int => :Lax[T]`
+
+#### max
+
+最大値を Lax で返します。空リストの場合は `hasValue = false`。
+
+```taida
+@[1, 3, 2].max() ]=> val  // 3
+@[].max().hasValue         // false
+```
+
+**シグネチャ**: `=> :Lax[T]`
+
+#### min
+
+最小値を Lax で返します。空リストの場合は `hasValue = false`。
+
+```taida
+@[1, 3, 2].min() ]=> val  // 1
+@[].min().hasValue         // false
+```
+
+**シグネチャ**: `=> :Lax[T]`
+
+### 述語（状態チェック）
+
+#### any
+
+いずれかの要素が条件を満たすかを返します。
+
+```taida
+@[1, 2, 3].any(_ x = x > 2)  // true
+@[1, 2, 3].any(_ x = x > 10)  // false
+```
+
+**シグネチャ**: `pred: :T => :Bool => :Bool`
+
+#### all
+
+すべての要素が条件を満たすかを返します。
+
+```taida
+@[2, 4, 6].all(_ x = Mod[x, 2]().unmold() == 0)  // true
+@[1, 2, 3].all(_ x = x > 2)  // false
+```
+
+**シグネチャ**: `pred: :T => :Bool => :Bool`
+
+#### none
+
+すべての要素が条件を満たさないかを返します。
+
+```taida
+@[1, 2, 3].none(_ x = x > 10)  // true
+@[1, 2, 3].none(_ x = x > 2)  // false
+```
+
+**シグネチャ**: `pred: :T => :Bool => :Bool`
+
+### 操作はモールドで
+
+以下の操作はモールドとして提供されます:
+
+| 操作 | モールド | 例 |
+|------|---------|-----|
+| 逆順 | `Reverse[list]()` | `Reverse[@[1,2,3]]()` → `@[3,2,1]` |
+| 結合 | `Concat[list, other]()` | `Concat[@[1,2], @[3,4]]()` → `@[1,2,3,4]` |
+| 末尾追加 | `Append[list, val]()` | `Append[@[1,2], 3]()` → `@[1,2,3]` |
+| 先頭追加 | `Prepend[list, val]()` | `Prepend[@[2,3], 1]()` → `@[1,2,3]` |
+| 文字列結合 | `Join[list, sep]()` | `Join[@["a","b"], ","]()` → `"a,b"` |
+| 合計 | `Sum[list]()` | `Sum[@[1,2,3]]()` → `6` |
+| ソート | `Sort[list]()` | `Sort[@[3,1,2]]()` → `@[1,2,3]` |
+| 重複除去 | `Unique[list]()` | `Unique[@[1,2,2,3]]()` → `@[1,2,3]` |
+| フラット化 | `Flatten[list]()` | `Flatten[@[@[1],@[2]]]()` → `@[1,2]` |
+| 条件検索 | `Find[list, fn]()` | `Find[@[1,2,3], _ x = x > 1]()` → `Lax(2)` |
+| 位置検索 | `FindIndex[list, fn]()` | `FindIndex[@[1,2,3], _ x = x > 1]()` → `1` |
+| 条件カウント | `Count[list, fn]()` | `Count[@[1,2,3], _ x = x > 1]()` → `2` |
+| 先頭n個 | `Take[list, n]()` | `Take[@[1,2,3], 2]()` → `@[1,2]` |
+| スキップ | `Drop[list, n]()` | `Drop[@[1,2,3], 1]()` → `@[2,3]` |
+| ペア化 | `Zip[list, other]()` | `Zip[@[1,2], @["a","b"]]()` |
+| インデックス付与 | `Enumerate[list]()` | `Enumerate[@["a","b"]]()` |
+| フィルタ | `Filter[list, fn]()` | `Filter[@[1,2,3], _ x = x > 1]()` → `@[2,3]` |
+| 変換 | `Map[list, fn]()` | `Map[@[1,2,3], _ x = x * 2]()` → `@[2,4,6]` |
+| 左畳み込み | `Fold[list, init, fn]()` | `Fold[@[1,2,3], 0, _ a x = a + x]()` → `6` |
+| 右畳み込み | `Foldr[list, init, fn]()` | `Foldr[@[1,2,3], 0, _ a x = a + x]()` → `6` |
+
+---
+
+## Bool — ブールメソッド
+
+### 文字列変換
+
+#### toString
+
+真偽値を文字列に変換します。
+
+```taida
+true.toString()  // "true"
+false.toString()  // "false"
+```
+
+**シグネチャ**: `=> :Str`
+
+### 型変換はモールドで
+
+`Int[bool]()` を使用してください。
+
+```taida
+Int[true]() ]=> num   // 1
+Int[false]() ]=> num  // 0
+```
+
+---
+
+## Lax — Lax メソッド
+
+`Lax[T]` 型に対して使用できるメソッドです。Lax は `Div[x, y]()`、`Mod[x, y]()`、`get()`、`first()`、`last()`、`max()`、`min()` などの戻り値として得られます。
+
+### フィールド
+
+#### hasValue
+
+値を持つかどうかを示すブールフィールドです。
+
+```taida
+Div[10, 3]().hasValue   // true
+Div[10, 0]().hasValue   // false
+```
+
+**型**: `Bool`
+
+### 検査
+
+#### isEmpty
+
+値を持たないかどうかを返します。`!hasValue` と同じです。
+
+```taida
+Div[10, 0]().isEmpty()  // true
+Div[10, 3]().isEmpty()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+### 値の取得
+
+#### getOrDefault
+
+値があればその値を、なければ指定したデフォルト値を返します。
+
+```taida
+Div[10, 3]().getOrDefault(99)  // 3
+Div[10, 0]().getOrDefault(99)  // 99
+```
+
+**シグネチャ**: `default: T => :T`
+
+#### unmold
+
+値を取り出します。`hasValue = false` の場合は型 T のデフォルト値を返します。
+
+```taida
+Div[10, 3]().unmold()  // 3
+Div[10, 0]().unmold()  // 0 (Int のデフォルト値)
+```
+
+**シグネチャ**: `=> :T`
+
+### モナディック操作
+
+#### map
+
+値がある場合に関数を適用し、新しい Lax を返します。
+
+```taida
+Div[10, 2]().map(_ x = x * 3) ]=> result  // 15
+Div[10, 0]().map(_ x = x * 3) ]=> result  // 0 (空のまま)
+```
+
+**シグネチャ**: `fn: :T => :U => :Lax[U]`
+
+#### flatMap
+
+値がある場合に関数を適用し、関数が返す Lax をそのまま返します。
+
+```taida
+Div[10, 2]().flatMap(_ x = Div[x, 3]()) ]=> result  // 1
+```
+
+**シグネチャ**: `fn: :T => :Lax[U] => :Lax[U]`
+
+### 文字列変換
+
+#### toString
+
+Lax の文字列表現を返します。
+
+```taida
+Div[10, 3]().toString()  // "Lax(3)"
+Div[10, 0]().toString()  // "Lax(default: 0)"
+```
+
+**シグネチャ**: `=> :Str`
+
+---
+
+## Gorillax — 覚悟のモールドメソッド
+
+`Gorillax[T]` 型に対して使用できるメソッドです。Gorillax は `Cage[value, fn]()` や `Gorillax[value]()` で生成されます。
+
+### フィールド
+
+#### hasValue
+
+値を持つかどうかを示すブールフィールドです。
+
+```taida
+Gorillax[42]().hasValue  // true
+```
+
+**型**: `Bool`
+
+### 検査
+
+#### isEmpty
+
+値を持たないかどうかを返します。
+
+```taida
+Gorillax[42]().isEmpty()  // false
+```
+
+**シグネチャ**: `=> :Bool`
+
+### 変換
+
+#### relax
+
+Gorillax を RelaxedGorillax に変換します。unmold 失敗時のゴリラ（即終了）が `RelaxedGorillaEscaped` エラーの throw に変わり、`|==` でキャッチ可能になります。
+
+```taida
+Gorillax[42]().relax()  // RelaxedGorillax(42)
+```
+
+**シグネチャ**: `=> :RelaxedGorillax[T]`
+
+### 文字列変換
+
+#### toString
+
+Gorillax の文字列表現を返します。
+
+```taida
+Gorillax[42]().toString()  // "Gorillax(42)"
+```
+
+**シグネチャ**: `=> :Str`
+
+---
+
+## RelaxedGorillax — リラックスしたゴリラメソッド
+
+`RelaxedGorillax[T]` 型に対して使用できるメソッドです。`Gorillax.relax()` で生成されます。
+
+### フィールド
+
+#### hasValue
+
+値を持つかどうかを示すブールフィールドです。
+
+**型**: `Bool`
+
+### 検査
+
+#### isEmpty
+
+値を持たないかどうかを返します。
+
+**シグネチャ**: `=> :Bool`
+
+### 文字列変換
+
+#### toString
+
+RelaxedGorillax の文字列表現を返します。
+
+```taida
+gorillax.relax().toString()  // "RelaxedGorillax(42)"
+```
+
+**シグネチャ**: `=> :Str`
+
+---
+
+## Result — モナディック型メソッド
+
+`Result[T, P]` は `Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)` として定義されます。述語 P が真を返す場合は成功、偽を返す場合は失敗（throw 発動）を表します。
+
+### Result
+
+| メソッド | シグネチャ | 説明 |
+|---------|-----------|------|
+| `throw` | `Error` | エラー値（フィールド） |
+| `isSuccess()` | `=> :Bool` | 成功か（述語 P が真） |
+| `isError()` | `=> :Bool` | エラーか（述語 P が偽） |
+| `getOrDefault(default)` | `T => :T` | 安全な値取得 |
+| `getOrThrow()` | `=> :T` | 値取得（失敗時エラーを throw） |
+| `map(fn)` | `:T => :U => :Result[U, _]` | モナディック変換 |
+| `flatMap(fn)` | `:T => :Result[U, _] => :Result[U, _]` | モナディック連鎖 |
+| `mapError(fn)` | `:Error => :Error => :Result[T, P]` | throw フィールドのエラーを変換 |
+| `toString()` | `=> :Str` | 文字列表現 |
+| `unmold()` | `=> :T` | アンモールディング |
+
+---
+
+## Async — 非同期メソッド
+
+| メソッド | シグネチャ | 説明 |
+|---------|-----------|------|
+| `isPending()` | `=> :Bool` | 実行中か |
+| `isFulfilled()` | `=> :Bool` | 完了したか |
+| `isRejected()` | `=> :Bool` | 失敗したか |
+| `getOrDefault(default)` | `T => :T` | 安全な値取得 |
+| `map(fn)` | `:T => :U => :Async[U]` | モナディック変換 |
+| `toString()` | `=> :Str` | 文字列表現 |
+| `unmold()` | `=> :T` | アンモールディング |

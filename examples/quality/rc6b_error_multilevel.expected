@@ -1,0 +1,6 @@
+T1: FieldValidationError ac=500 fn=age et=Int
+T2: caught(FieldValidationError): bad field field=email
+T3: caught(ValidationError): validation failed
+T4: type=NetworkError msg=connection refused
+T4: app_code=503 url=https://api.example.com
+T4: status=503

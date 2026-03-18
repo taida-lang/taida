@@ -1,0 +1,17 @@
+List: @[10, 3, 7, 1, 9, 5, 2, 8, 4, 6]
+Length: 10
+First: 10
+Last: 6
+Sum: 55
+Sorted: @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+Reversed: @[6, 4, 8, 2, 5, 9, 1, 7, 3, 10]
+Contains 7: true
+Contains 42: false
+Unique: @[1, 2, 3]
+Original: '  Hello, Taida Lang!  '
+Trimmed: 'Hello, Taida Lang!'
+Upper: 'HELLO, TAIDA LANG!'
+Lower: 'hello, taida lang!'
+Length: 18
+Contains 'Taida': true
+Replace: 'Hello, World Lang!'

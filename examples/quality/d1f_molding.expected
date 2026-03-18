@@ -1,0 +1,50 @@
+HELLO
+hello
+hello
+@["a", "b", "c"]
+hell0 world
+hell0 w0rld
+el
+@(hasValue <= true, __value <= "h", __default <= "", __type <= "Lax")
+hahaha
+olleh
+00042
+3.14
+5
+3
+4
+4
+-3
+10
+@[1, 2, 3]
+@[3, 2, 1]
+@[1, 2, 3]
+@[4, 5]
+@[2, 4, 6, 8, 10]
+15
+3
+0
+false
+1
+0
+false
+123
+0
+3.14
+42
+true
+false
+true
+false
+3
+6
+Lax(3)
+false
+true
+99
+0
+Lax(default: 0)
+3
+3
+3
+HELLO, WORLD!

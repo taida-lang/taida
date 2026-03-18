@@ -1,0 +1,8 @@
+T1: AppError code=42
+T2: DetailedError msg=something failed detail=db connection sev=3
+T3: tag=
+T4: caught: boom
+T5: caught(ChildError): child failed
+T6: caught: email
+T7: SubError base_info=base sub_detail=detail
+T8: caught(Level2Error): one+two

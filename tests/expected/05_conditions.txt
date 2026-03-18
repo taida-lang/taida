@@ -1,0 +1,12 @@
+Score: 85, Grade: B
+1
+2
+Fizz
+4
+Buzz
+Fizz
+Fizz
+Buzz
+FizzBuzz
+Buzz
+FizzBuzz

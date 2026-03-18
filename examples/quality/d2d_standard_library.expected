@@ -1,0 +1,7 @@
+Hello from prelude
+{"age":14,"name":"Asuka"}
+{
+  "age": 14,
+  "name": "Asuka"
+}
+HashMap/Set: skipped (not implemented)

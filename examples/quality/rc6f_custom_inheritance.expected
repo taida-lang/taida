@@ -1,0 +1,6 @@
+T1: Car name=Sedan speed=120 doors=4
+T2: name=BMX speed=0 pedals=false
+T3: SportsCar name=Ferrari speed=300 doors=2 turbo=true
+T4: Toyota at speed 100
+T5: name=Semi speed=0 payload=0
+T6: Dog=Shiba Cat=true

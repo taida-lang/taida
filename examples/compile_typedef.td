@@ -1,0 +1,6 @@
+Pilot = @(name: Str, age: Int)
+asuka <= Pilot(name <= "Asuka", age <= 14)
+debug(asuka.age)
+rei <= Pilot(name <= "Rei", age <= 14)
+debug(rei.age)
+debug(asuka.age + rei.age)

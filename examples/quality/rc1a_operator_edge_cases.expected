@@ -1,0 +1,68 @@
+42
+42
+@[30, 40, 50]
+@[30, 40, 50]
+HELLO WORLD
+3
+5
+14
+@[6, 9]
+@[6, 9]
+F
+positive
+full
+medium
+10
+-1
+25
+999
+-42
+999999998000000001
+0.30000000000000004
+Hello World
+true
+true
+true
+true
+true
+true
+false
+true
+true
+true
+true
+true
+true
+true
+false
+false
+true
+false
+true
+false
+true
+true
+true
+3
+0
+true
+false
+1
+0
+3.3333333333333335
+42
+0
+false
+3.14
+42
+true
+false
+2
+4
+-1
+5
+3
+-1
+2
+1
+=== ALL OPERATOR TESTS PASSED ===
