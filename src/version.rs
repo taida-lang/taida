@@ -16,8 +16,7 @@ mod tests {
         assert!(!version.is_empty());
         // When TAIDA_RELEASE_TAG is set at compile time, use that;
         // otherwise fall back to CARGO_PKG_VERSION.
-        let expected = option_env!("TAIDA_RELEASE_TAG")
-            .unwrap_or(env!("CARGO_PKG_VERSION"));
+        let expected = option_env!("TAIDA_RELEASE_TAG").unwrap_or(env!("CARGO_PKG_VERSION"));
         assert_eq!(version, expected);
     }
 }
