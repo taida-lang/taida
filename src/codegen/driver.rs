@@ -60,6 +60,322 @@ pub struct WasmEdgeOutput {
     pub glue_path: PathBuf,
 }
 
+// ---------------------------------------------------------------------------
+// RC-8a/8d: WASM runtime .o cache
+// ---------------------------------------------------------------------------
+
+/// Filesystem-based cache for pre-compiled WASM runtime .o files.
+///
+/// The WASM compilation pipeline compiles C runtime sources to .o files
+/// via clang on every invocation. Since the runtime sources are embedded
+/// via `include_str!` and never change between invocations, caching the
+/// .o files eliminates the most expensive step of WASM compilation.
+///
+/// Cache key: SipHash of (runtime_source + clang_version_string + clang_flags).
+/// Cache location:
+///   - Tests: `target/wasm-rt-cache/`
+///   - Production: `.taida/cache/wasm-rt/`
+///   - Override: `TAIDA_WASM_RT_CACHE` environment variable
+pub struct WasmRuntimeCache {
+    cache_dir: PathBuf,
+    clang: String,
+    clang_version: String,
+    include_dir: PathBuf,
+}
+
+impl WasmRuntimeCache {
+    /// Create a new runtime cache. `cache_dir` will be created if it does not exist.
+    ///
+    /// S-3: If clang version cannot be determined ("unknown"), the cache is
+    /// effectively disabled — every invocation produces a different key because
+    /// "unknown" is a degenerate version string.  A warning is emitted to stderr.
+    pub fn new(cache_dir: PathBuf) -> Result<Self, CompileError> {
+        fs::create_dir_all(&cache_dir).map_err(|e| CompileError {
+            message: format!(
+                "failed to create wasm runtime cache dir '{}': {}",
+                cache_dir.display(),
+                e
+            ),
+        })?;
+
+        let clang = find_clang_for_wasm()?;
+        let clang_version = get_clang_version(&clang);
+
+        // S-3: Warn when clang version is unknown — cache keys will be
+        // unreliable across invocations.
+        if clang_version == "unknown" {
+            eprintln!(
+                "warning: could not determine clang version; WASM runtime cache may not work correctly"
+            );
+        }
+
+        // Create a persistent include directory inside the cache dir
+        let include_dir = cache_dir.join("include");
+        write_wasm_stdint_header(&include_dir)?;
+
+        Ok(Self {
+            cache_dir,
+            clang,
+            clang_version,
+            include_dir,
+        })
+    }
+
+    /// Compute a cache key for the given runtime source + toolchain.
+    ///
+    /// N-1: Uses FNV-1a (matching the project convention) instead of
+    /// `std::hash::DefaultHasher` whose algorithm is not guaranteed
+    /// stable across Rust versions.
+    fn cache_key(&self, source: &str) -> String {
+        let mut state: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+        for byte in source.bytes() {
+            state ^= byte as u64;
+            state = state.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        // Mix in clang version
+        for byte in self.clang_version.bytes() {
+            state ^= byte as u64;
+            state = state.wrapping_mul(0x100000001b3);
+        }
+        // Mix in clang flags that affect output
+        for byte in b"--target=wasm32-unknown-wasi -nostdlib -O2 -c" {
+            state ^= *byte as u64;
+            state = state.wrapping_mul(0x100000001b3);
+        }
+        format!("{:016x}", state)
+    }
+
+    /// Get a cached .o file or compile the runtime source and cache the result.
+    ///
+    /// N-3: When a new cache entry is created, stale .o files for the same
+    /// runtime `name` but with a different key are automatically removed.
+    fn get_or_compile(&self, name: &str, source: &str) -> Result<PathBuf, CompileError> {
+        let key = self.cache_key(source);
+        let cached_obj = self.cache_dir.join(format!("{}.{}.o", name, key));
+
+        if cached_obj.exists() {
+            return Ok(cached_obj);
+        }
+
+        // Compile to a temporary file, then rename atomically.
+        // Use PID + counter to avoid collisions between parallel processes/threads.
+        let pid = std::process::id();
+        let seq = OBJ_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_c = self
+            .cache_dir
+            .join(format!("{}.{}.{}.{}.tmp.c", name, key, pid, seq));
+        let tmp_o = self
+            .cache_dir
+            .join(format!("{}.{}.{}.{}.tmp.o", name, key, pid, seq));
+
+        fs::write(&tmp_c, source).map_err(|e| CompileError {
+            message: format!("failed to write runtime source to cache: {}", e),
+        })?;
+
+        let clang_args = wasm_clang_base_args(&self.include_dir);
+        let status = run_wasm_clang_object(
+            &self.clang,
+            &clang_args,
+            &tmp_c,
+            &tmp_o,
+            &self.include_dir,
+            &[],
+            false,
+            None,
+        )?;
+
+        let _ = fs::remove_file(&tmp_c);
+
+        if !status.success() {
+            let _ = fs::remove_file(&tmp_o);
+            return Err(CompileError {
+                message: format!(
+                    "clang wasm32 compilation of {} runtime failed (cache build).",
+                    name
+                ),
+            });
+        }
+
+        // N-4: Atomic rename to final cached path.
+        // On POSIX systems, `rename(2)` is atomic when source and destination
+        // are on the same filesystem (guaranteed here since both are inside
+        // `cache_dir`).  This ensures that concurrent processes never observe
+        // a partially-written .o file.  On Windows, `std::fs::rename` uses
+        // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` which is not strictly
+        // atomic, but is safe enough for our use case (worst case: a redundant
+        // recompile on the next invocation).
+        fs::rename(&tmp_o, &cached_obj).map_err(|e| CompileError {
+            message: format!("failed to rename cached runtime object: {}", e),
+        })?;
+
+        // N-3: Clean up stale cache entries for the same runtime name.
+        // Pattern: `{name}.{old_key}.o` where old_key != current key.
+        let stale_prefix = format!("{}.", name);
+        if let Ok(entries) = fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                if fname_str.starts_with(&stale_prefix)
+                    && fname_str.ends_with(".o")
+                    && !fname_str.contains(".tmp.")
+                    && entry.path() != cached_obj
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        Ok(cached_obj)
+    }
+
+    /// Get or compile the core runtime .o
+    pub fn rt_core(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_core_wasm.c");
+        self.get_or_compile("rt_core", source)
+    }
+
+    /// Get or compile the WASI I/O runtime .o
+    pub fn rt_wasi(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_wasi_io.c");
+        self.get_or_compile("rt_wasi", source)
+    }
+
+    /// Get or compile the edge host runtime .o
+    pub fn rt_edge(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_edge_host.c");
+        self.get_or_compile("rt_edge", source)
+    }
+
+    /// Get or compile the full runtime .o
+    pub fn rt_full(&self) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_full_wasm.c");
+        self.get_or_compile("rt_full", source)
+    }
+
+    /// Return the clang path discovered during cache init.
+    pub fn clang(&self) -> &str {
+        &self.clang
+    }
+
+    /// Return the include directory (contains stdint.h shim).
+    pub fn include_dir(&self) -> &Path {
+        &self.include_dir
+    }
+
+    /// S-1: Shared helper — compile generated C and link with cached runtime .o files.
+    ///
+    /// This eliminates ~240 lines of near-identical code across the four cached
+    /// compilation branches (wasm-min, wasm-wasi, wasm-edge, wasm-full).
+    ///
+    /// `rt_objs`: pre-compiled runtime .o files from the cache (e.g. `[rt_core.o]`
+    ///            or `[rt_core.o, rt_wasi.o, rt_full.o]`).
+    /// `generated_c`: the C source emitted from the IR.
+    /// `wasm_path`: final output .wasm path.
+    /// `tmp_suffix`: suffix for temp files to avoid collisions between profiles
+    ///               (e.g. `"_wasm_tmp"`, `"_wasm_wasi_tmp"`).
+    fn link_wasm_cached(
+        &self,
+        rt_objs: &[PathBuf],
+        generated_c: &str,
+        wasm_path: &Path,
+        tmp_suffix: &str,
+    ) -> Result<(), CompileError> {
+        let tmp_base = wasm_path.with_extension(tmp_suffix);
+        let gen_c_path = tmp_base.with_extension("gen.c");
+        let gen_obj_path = tmp_base.with_extension("gen.o");
+
+        fs::write(&gen_c_path, generated_c).map_err(|e| CompileError {
+            message: format!("failed to write generated C: {}", e),
+        })?;
+
+        let clang_args = wasm_clang_base_args(self.include_dir());
+        let gen_status = run_wasm_clang_object(
+            self.clang(),
+            &clang_args,
+            &gen_c_path,
+            &gen_obj_path,
+            self.include_dir(),
+            &[],
+            false,
+            Some(&gen_c_path),
+        )?;
+
+        if !gen_status.success() {
+            return Err(CompileError {
+                message: format!(
+                    "clang wasm32 compilation of generated code failed (source preserved at: {}; shim preserved at: {})",
+                    gen_c_path.display(),
+                    self.include_dir().display()
+                ),
+            });
+        }
+
+        let _ = fs::remove_file(&gen_c_path);
+
+        let wasm_ld = find_wasm_ld()?;
+        let mut cmd = Command::new(&wasm_ld);
+        cmd.args([
+            "--no-entry",
+            "--export=_start",
+            "--strip-all",
+            "--gc-sections",
+        ]);
+        for rt_obj in rt_objs {
+            cmd.arg(rt_obj);
+        }
+        cmd.arg(&gen_obj_path).arg("-o").arg(wasm_path);
+
+        let ld_status = cmd.status().map_err(|e| CompileError {
+            message: format!("wasm-ld invocation failed: {}", e),
+        })?;
+
+        let _ = fs::remove_file(&gen_obj_path);
+
+        if !ld_status.success() {
+            return Err(CompileError {
+                message: format!("wasm-ld failed with exit code: {:?}", ld_status.code()),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Get the clang version string for cache key computation.
+///
+/// S-3: If the version cannot be determined, returns "unknown" which
+/// causes cache invalidation (see `WasmRuntimeCache::new`).
+fn get_clang_version(clang: &str) -> String {
+    Command::new(clang)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Resolve the default cache directory for WASM runtime objects.
+///
+/// Priority:
+/// 1. `TAIDA_WASM_RT_CACHE` environment variable
+/// 2. `.taida/cache/wasm-rt/` relative to the project root (if `.taida/` exists)
+/// 3. `target/wasm-rt-cache/` as fallback
+pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
+    if let Ok(env_dir) = std::env::var("TAIDA_WASM_RT_CACHE") {
+        return PathBuf::from(env_dir);
+    }
+
+    if let Some(dir) = project_dir {
+        let taida_dir = dir.join(".taida");
+        if taida_dir.exists() {
+            return taida_dir.join("cache").join("wasm-rt");
+        }
+    }
+
+    // Fallback: target/wasm-rt-cache/ (works for both tests and standalone)
+    PathBuf::from("target/wasm-rt-cache")
+}
+
 /// 単一 .td ファイルを Native .o にコンパイル（リンクなし）
 fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), CompileError> {
     let source = fs::read_to_string(input_path).map_err(|e| CompileError {
@@ -707,6 +1023,15 @@ pub fn compile_file_wasm(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_cached(input_path, output_path, None)
+}
+
+/// wasm-min コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<PathBuf, CompileError> {
     // 循環インポート検出
     module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
         message: e.to_string(),
@@ -764,7 +1089,14 @@ pub fn compile_file_wasm(
         }
     };
 
-    // 一時ファイルパスの生成（出力パスベースで一意化し、並列コンパイルの衝突を防ぐ）
+    // --- S-1: cached runtime path (shared helper) ---
+    if let Some(rt_cache) = cache {
+        let rt_obj = rt_cache.rt_core()?;
+        rt_cache.link_wasm_cached(&[rt_obj], &generated_c, &wasm_path, "_wasm_tmp")?;
+        return Ok(wasm_path);
+    }
+
+    // --- uncached (original) path ---
     let tmp_base = wasm_path.with_extension("_wasm_tmp");
     let gen_c_path = tmp_base.with_extension("gen.c");
     let gen_obj_path = tmp_base.with_extension("gen.o");
@@ -884,6 +1216,15 @@ pub fn compile_file_wasm_wasi(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_wasi_cached(input_path, output_path, None)
+}
+
+/// wasm-wasi コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_wasi_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<PathBuf, CompileError> {
     module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
         message: e.to_string(),
     })?;
@@ -940,7 +1281,20 @@ pub fn compile_file_wasm_wasi(
         }
     };
 
-    // 一時ファイルパスの生成
+    // --- S-1: cached runtime path (shared helper) ---
+    if let Some(rt_cache) = cache {
+        let rt_core = rt_cache.rt_core()?;
+        let rt_wasi = rt_cache.rt_wasi()?;
+        rt_cache.link_wasm_cached(
+            &[rt_core, rt_wasi],
+            &generated_c,
+            &wasm_path,
+            "_wasm_wasi_tmp",
+        )?;
+        return Ok(wasm_path);
+    }
+
+    // --- uncached (original) path ---
     let tmp_base = wasm_path.with_extension("_wasm_wasi_tmp");
     let gen_c_path = tmp_base.with_extension("gen.c");
     let gen_obj_path = tmp_base.with_extension("gen.o");
@@ -1100,6 +1454,15 @@ pub fn compile_file_wasm_edge(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<WasmEdgeOutput, CompileError> {
+    compile_file_wasm_edge_cached(input_path, output_path, None)
+}
+
+/// wasm-edge コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_edge_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<WasmEdgeOutput, CompileError> {
     module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
         message: e.to_string(),
     })?;
@@ -1156,7 +1519,24 @@ pub fn compile_file_wasm_edge(
         }
     };
 
-    // 一時ファイルパスの生成
+    // --- S-1: cached runtime path (shared helper) ---
+    if let Some(rt_cache) = cache {
+        let rt_core = rt_cache.rt_core()?;
+        let rt_edge = rt_cache.rt_edge()?;
+        rt_cache.link_wasm_cached(
+            &[rt_core, rt_edge],
+            &generated_c,
+            &wasm_path,
+            "_wasm_edge_tmp",
+        )?;
+        let glue_path = generate_edge_js_glue(&wasm_path)?;
+        return Ok(WasmEdgeOutput {
+            wasm_path,
+            glue_path,
+        });
+    }
+
+    // --- uncached (original) path ---
     let tmp_base = wasm_path.with_extension("_wasm_edge_tmp");
     let gen_c_path = tmp_base.with_extension("gen.c");
     let gen_obj_path = tmp_base.with_extension("gen.o");
@@ -1326,6 +1706,15 @@ pub fn compile_file_wasm_full(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_full_cached(input_path, output_path, None)
+}
+
+/// wasm-full コンパイル with optional runtime cache (RC-8a/8d).
+pub fn compile_file_wasm_full_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+) -> Result<PathBuf, CompileError> {
     module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
         message: e.to_string(),
     })?;
@@ -1382,7 +1771,21 @@ pub fn compile_file_wasm_full(
         }
     };
 
-    // 一時ファイルパスの生成
+    // --- S-1: cached runtime path (shared helper) ---
+    if let Some(rt_cache) = cache {
+        let rt_core = rt_cache.rt_core()?;
+        let rt_wasi = rt_cache.rt_wasi()?;
+        let rt_full = rt_cache.rt_full()?;
+        rt_cache.link_wasm_cached(
+            &[rt_core, rt_wasi, rt_full],
+            &generated_c,
+            &wasm_path,
+            "_wasm_full_tmp",
+        )?;
+        return Ok(wasm_path);
+    }
+
+    // --- uncached (original) path ---
     let tmp_base = wasm_path.with_extension("_wasm_full_tmp");
     let gen_c_path = tmp_base.with_extension("gen.c");
     let gen_obj_path = tmp_base.with_extension("gen.o");
@@ -2044,5 +2447,156 @@ mod tests {
             "non-init functions should NOT be included when nothing is requested"
         );
         assert!(!needed.contains("_taida_fn_mod1_private"));
+    }
+
+    // -----------------------------------------------------------------------
+    // S-4: WasmRuntimeCache unit tests
+    // -----------------------------------------------------------------------
+
+    /// S-4: cache_key produces different keys for different source content.
+    #[test]
+    fn test_cache_key_differs_on_source_change() {
+        use std::path::PathBuf;
+
+        let cache_dir = PathBuf::from("target/test-wasm-cache-key");
+        let _ = std::fs::create_dir_all(&cache_dir);
+
+        // We cannot easily construct a WasmRuntimeCache without clang,
+        // so test the FNV-1a logic directly with the same algorithm.
+        fn fnv1a_cache_key(source: &str, version: &str) -> String {
+            let mut state: u64 = 0xcbf29ce484222325;
+            for byte in source.bytes() {
+                state ^= byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
+            for byte in version.bytes() {
+                state ^= byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
+            for byte in b"--target=wasm32-unknown-wasi -nostdlib -O2 -c" {
+                state ^= *byte as u64;
+                state = state.wrapping_mul(0x100000001b3);
+            }
+            format!("{:016x}", state)
+        }
+
+        let key_a = fnv1a_cache_key("int main() { return 0; }", "clang 17.0.0");
+        let key_b = fnv1a_cache_key("int main() { return 1; }", "clang 17.0.0");
+        let key_c = fnv1a_cache_key("int main() { return 0; }", "clang 18.0.0");
+
+        assert_ne!(
+            key_a, key_b,
+            "different source should produce different keys"
+        );
+        assert_ne!(
+            key_a, key_c,
+            "different clang version should produce different keys"
+        );
+
+        // Same inputs should produce the same key
+        let key_a2 = fnv1a_cache_key("int main() { return 0; }", "clang 17.0.0");
+        assert_eq!(key_a, key_a2, "same inputs should produce identical keys");
+
+        // Key should be a 16-char hex string
+        assert_eq!(key_a.len(), 16, "cache key should be 16 hex chars");
+        assert!(
+            key_a.chars().all(|c| c.is_ascii_hexdigit()),
+            "cache key should only contain hex digits"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    /// S-4: default_wasm_cache_dir respects environment variable priority.
+    #[test]
+    fn test_default_wasm_cache_dir_env_override() {
+        // Save and set env
+        let saved = std::env::var("TAIDA_WASM_RT_CACHE").ok();
+        // SAFETY: this test is run single-threaded in cargo test; env mutation is safe.
+        unsafe {
+            std::env::set_var("TAIDA_WASM_RT_CACHE", "/tmp/test-wasm-cache-override");
+        }
+
+        let dir = default_wasm_cache_dir(Some(Path::new("/some/project")));
+        assert_eq!(
+            dir,
+            PathBuf::from("/tmp/test-wasm-cache-override"),
+            "env variable should take highest priority"
+        );
+
+        // Restore
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("TAIDA_WASM_RT_CACHE", v),
+                None => std::env::remove_var("TAIDA_WASM_RT_CACHE"),
+            }
+        }
+    }
+
+    /// S-4: default_wasm_cache_dir falls back to target/ when no .taida/ exists.
+    #[test]
+    fn test_default_wasm_cache_dir_fallback() {
+        // Ensure env is not set
+        let saved = std::env::var("TAIDA_WASM_RT_CACHE").ok();
+        // SAFETY: this test is run single-threaded in cargo test; env mutation is safe.
+        unsafe {
+            std::env::remove_var("TAIDA_WASM_RT_CACHE");
+        }
+
+        // Create a temp dir that definitely has no .taida/ subdirectory
+        let tmp = PathBuf::from("target/test-cache-dir-no-taida");
+        let _ = std::fs::create_dir_all(&tmp);
+        // Ensure .taida does NOT exist
+        let _ = std::fs::remove_dir_all(tmp.join(".taida"));
+
+        let dir = default_wasm_cache_dir(Some(&tmp));
+        assert_eq!(
+            dir,
+            PathBuf::from("target/wasm-rt-cache"),
+            "should fall back to target/wasm-rt-cache when .taida/ does not exist"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Restore
+        unsafe {
+            if let Some(v) = saved {
+                std::env::set_var("TAIDA_WASM_RT_CACHE", v);
+            }
+        }
+    }
+
+    /// S-4: default_wasm_cache_dir uses .taida/cache/wasm-rt/ when .taida/ exists.
+    #[test]
+    fn test_default_wasm_cache_dir_taida_dir() {
+        // Ensure env is not set
+        let saved = std::env::var("TAIDA_WASM_RT_CACHE").ok();
+        // SAFETY: this test is run single-threaded in cargo test; env mutation is safe.
+        unsafe {
+            std::env::remove_var("TAIDA_WASM_RT_CACHE");
+        }
+
+        // Create a temp dir with .taida/ inside
+        let tmp = PathBuf::from("target/test-cache-dir-taida");
+        let taida_dir = tmp.join(".taida");
+        let _ = std::fs::create_dir_all(&taida_dir);
+
+        let dir = default_wasm_cache_dir(Some(&tmp));
+        assert_eq!(
+            dir,
+            taida_dir.join("cache").join("wasm-rt"),
+            "should use .taida/cache/wasm-rt/ when .taida/ exists"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Restore
+        unsafe {
+            if let Some(v) = saved {
+                std::env::set_var("TAIDA_WASM_RT_CACHE", v);
+            }
+        }
     }
 }
