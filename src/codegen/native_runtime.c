@@ -4151,18 +4151,29 @@ taida_val taida_error_get_value(taida_val depth) {
 }
 
 // RCB-101: Inheritance parent registry for error type filtering in |==
-#define TAIDA_MAX_TYPE_PARENTS 256
-static taida_val __taida_type_parent_child[TAIDA_MAX_TYPE_PARENTS];
-static taida_val __taida_type_parent_parent[TAIDA_MAX_TYPE_PARENTS];
+// Dynamic array — grows as needed to handle projects with many type hierarchies.
+static taida_val *__taida_type_parent_child = NULL;
+static taida_val *__taida_type_parent_parent = NULL;
 static int __taida_type_parent_count = 0;
+static int __taida_type_parent_cap = 0;
 
 // Register an inheritance parent: child IS-A parent
 void taida_register_type_parent(taida_val child_str, taida_val parent_str) {
-    if (__taida_type_parent_count < TAIDA_MAX_TYPE_PARENTS) {
-        __taida_type_parent_child[__taida_type_parent_count] = child_str;
-        __taida_type_parent_parent[__taida_type_parent_count] = parent_str;
-        __taida_type_parent_count++;
+    if (__taida_type_parent_count >= __taida_type_parent_cap) {
+        int new_cap = __taida_type_parent_cap == 0 ? 64 : __taida_type_parent_cap * 2;
+        taida_val *new_child = (taida_val*)realloc(__taida_type_parent_child, sizeof(taida_val) * new_cap);
+        taida_val *new_parent = (taida_val*)realloc(__taida_type_parent_parent, sizeof(taida_val) * new_cap);
+        if (!new_child || !new_parent) {
+            fprintf(stderr, "Warning: type parent registry allocation failed\n");
+            return;
+        }
+        __taida_type_parent_child = new_child;
+        __taida_type_parent_parent = new_parent;
+        __taida_type_parent_cap = new_cap;
     }
+    __taida_type_parent_child[__taida_type_parent_count] = child_str;
+    __taida_type_parent_parent[__taida_type_parent_count] = parent_str;
+    __taida_type_parent_count++;
 }
 
 // Find the parent type string for a given child type string.
@@ -7498,7 +7509,8 @@ static taida_val taida_os_http_do_curl(const char *method, const char *url, taid
     }
     cmd[0] = '\0';
 
-    if (!taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, "curl -sS -i --max-time 30 -X ")
+    // RCB-306: Limit response size for HTTPS (curl) path — 100MB matches raw HTTP limit
+    if (!taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, "curl -sS -i --max-time 30 --max-filesize 104857600 -X ")
         || !taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, q_method)
         || !taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, " ")
         || !taida_os_cmd_append(&cmd, &cmd_cap, &cmd_len, q_url)) {
@@ -7679,6 +7691,12 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     if (host_len >= sizeof(host_buf)) host_len = sizeof(host_buf) - 1;
     memcpy(host_buf, host_start, host_len);
     host_buf[host_len] = '\0';
+
+    // RCB-304: Reject URLs with CR/LF in host or path to prevent CRLF injection
+    if (strchr(host_buf, '\r') || strchr(host_buf, '\n') ||
+        strchr(path, '\r') || strchr(path, '\n')) {
+        return taida_async_resolved(taida_os_http_failure_lax());
+    }
 
     struct addrinfo hints = {0}, *res = NULL;
     hints.ai_family = AF_UNSPEC;

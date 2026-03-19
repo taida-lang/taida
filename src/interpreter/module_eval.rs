@@ -516,6 +516,15 @@ impl Interpreter {
     /// When a module has `<<<`, only the listed symbols are exported.
     /// When no `<<<` exists, all module-level symbols are exported (backward compat).
     pub(crate) fn eval_export(&mut self, export: &ExportStmt) -> Result<Signal, RuntimeError> {
+        // RCB-212: Re-export path `<<< ./path` is not supported at runtime.
+        // The checker catches this, but --no-check bypasses it.
+        if export.path.is_some() {
+            return Err(RuntimeError {
+                message: "Re-export with path (`<<< ./path`) is not yet supported. \
+                         Use explicit import and re-export instead."
+                    .to_string(),
+            });
+        }
         // RCB-102: `<<< @()` (empty export) is an error — a module that exports
         // nothing is useless to importers.  Without this check, the empty symbols
         // list falls through to the "no <<< found → export everything" path.

@@ -2677,17 +2677,30 @@ int64_t taida_error_get_value(int64_t depth) {
 }
 
 /* RCB-101: Inheritance parent registry for error type filtering in |== */
-#define WASM_MAX_TYPE_PARENTS 256
-static int64_t __wasm_type_parent_child[WASM_MAX_TYPE_PARENTS];
-static int64_t __wasm_type_parent_parent[WASM_MAX_TYPE_PARENTS];
+/* Dynamic array using wasm_alloc (bump allocator, copy-on-grow). */
+static int64_t *__wasm_type_parent_child = 0;
+static int64_t *__wasm_type_parent_parent = 0;
 static int __wasm_type_parent_count = 0;
+static int __wasm_type_parent_cap = 0;
 
 void taida_register_type_parent(int64_t child_str, int64_t parent_str) {
-    if (__wasm_type_parent_count < WASM_MAX_TYPE_PARENTS) {
-        __wasm_type_parent_child[__wasm_type_parent_count] = child_str;
-        __wasm_type_parent_parent[__wasm_type_parent_count] = parent_str;
-        __wasm_type_parent_count++;
+    if (__wasm_type_parent_count >= __wasm_type_parent_cap) {
+        int new_cap = __wasm_type_parent_cap == 0 ? 64 : __wasm_type_parent_cap * 2;
+        int64_t *new_child = (int64_t*)wasm_alloc(sizeof(int64_t) * new_cap);
+        int64_t *new_parent = (int64_t*)wasm_alloc(sizeof(int64_t) * new_cap);
+        if (!new_child || !new_parent) return;
+        /* Copy old entries (bump allocator cannot realloc, so we copy) */
+        for (int i = 0; i < __wasm_type_parent_count; i++) {
+            new_child[i] = __wasm_type_parent_child[i];
+            new_parent[i] = __wasm_type_parent_parent[i];
+        }
+        __wasm_type_parent_child = new_child;
+        __wasm_type_parent_parent = new_parent;
+        __wasm_type_parent_cap = new_cap;
     }
+    __wasm_type_parent_child[__wasm_type_parent_count] = child_str;
+    __wasm_type_parent_parent[__wasm_type_parent_count] = parent_str;
+    __wasm_type_parent_count++;
 }
 
 static int64_t wasm_find_parent_type(int64_t child_str) {

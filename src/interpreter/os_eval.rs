@@ -395,6 +395,11 @@ fn parse_url(url: &str) -> Option<(String, u16, String, bool)> {
         None => (host_port.to_string(), default_port),
     };
 
+    // RCB-304: Reject URLs with CR/LF in host or path to prevent CRLF injection
+    if host.contains('\r') || host.contains('\n') || path.contains('\r') || path.contains('\n') {
+        return None;
+    }
+
     Some((host, port, path.to_string(), use_tls))
 }
 

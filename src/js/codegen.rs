@@ -1162,6 +1162,34 @@ impl JsCodegen {
             ));
         } else {
             // ローカルモジュール — ESM import (.mjs)
+            // RCB-303: Reject relative imports that escape the project root (path traversal).
+            if import.path.contains("..") {
+                if let Some(ref project_root) = self.project_root {
+                    if let Some(ref source_file) = self.source_file {
+                        let source_dir = source_file
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."));
+                        let resolved = source_dir.join(&import.path);
+                        let reject = if let Ok(canonical) = resolved.canonicalize() {
+                            if let Ok(root_canonical) = project_root.canonicalize() {
+                                !canonical.starts_with(&root_canonical)
+                            } else {
+                                true // cannot verify — reject
+                            }
+                        } else {
+                            true // cannot canonicalize — reject if ".." present
+                        };
+                        if reject {
+                            return Err(JsError {
+                                message: format!(
+                                    "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
+                                    import.path
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
             let js_path = if import.path.ends_with(".td") || import.path.ends_with(".tdjs") {
                 import.path.replace(".td", ".mjs").replace(".tdjs", ".mjs")
             } else {
@@ -1295,6 +1323,14 @@ impl JsCodegen {
     }
 
     fn gen_export(&mut self, export: &ExportStmt) -> Result<(), JsError> {
+        // RCB-212: Re-export path `<<< ./path` is not supported.
+        if export.path.is_some() {
+            return Err(JsError {
+                message: "Re-export with path (`<<< ./path`) is not yet supported. \
+                         Use explicit import and re-export instead."
+                    .to_string(),
+            });
+        }
         // ESM named export
         self.write_indent();
         self.write("export { ");

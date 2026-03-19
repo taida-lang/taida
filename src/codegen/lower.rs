@@ -1127,6 +1127,14 @@ impl Lowering {
                     }
                 }
                 Statement::Export(export_stmt) => {
+                    // RCB-212: Re-export path `<<< ./path` is not supported.
+                    if export_stmt.path.is_some() {
+                        return Err(LowerError {
+                            message: "Re-export with path (`<<< ./path`) is not yet supported. \
+                                     Use explicit import and re-export instead."
+                                .to_string(),
+                        });
+                    }
                     for sym in &export_stmt.symbols {
                         self.exported_symbols.insert(sym.clone());
                         module.exports.push(self.export_func_symbol(sym));
