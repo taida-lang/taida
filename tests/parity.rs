@@ -3679,7 +3679,7 @@ fn test_phase_c1e_module_backend_parity() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./helper => @(tools)
+        r#">>> ./helper.td => @(tools)
 
 stdout(tools.run(3))
 stdout(tools.run(1))
@@ -4017,14 +4017,14 @@ fn test_qf21_circular_import_rejected_all_backends() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 stdout(hello("test"))
 "#,
     )
     .expect("write main");
     fs::write(
         dir.join("mod_a.td"),
-        r#">>> ./mod_b => @(world)
+        r#">>> ./mod_b.td => @(world)
 hello x = "Hello:" + world(x) => :Str
 <<< @(hello)
 "#,
@@ -4032,7 +4032,7 @@ hello x = "Hello:" + world(x) => :Str
     .expect("write mod_a");
     fs::write(
         dir.join("mod_b.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 world x = "World:" + x => :Str
 <<< @(world)
 "#,
@@ -4085,8 +4085,8 @@ fn test_qf24_js_build_writes_transitive_modules() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./mod_b => @(fromB)
->>> ./mod_c => @(fromC)
+        r#">>> ./mod_b.td => @(fromB)
+>>> ./mod_c.td => @(fromC)
 stdout(fromB("x"))
 stdout(fromC("y"))
 "#,
@@ -4094,7 +4094,7 @@ stdout(fromC("y"))
     .expect("write main");
     fs::write(
         dir.join("mod_b.td"),
-        r#">>> ./mod_d => @(shared)
+        r#">>> ./mod_d.td => @(shared)
 fromB x = "B:" + shared(x) => :Str
 <<< @(fromB)
 "#,
@@ -4102,7 +4102,7 @@ fromB x = "B:" + shared(x) => :Str
     .expect("write mod_b");
     fs::write(
         dir.join("mod_c.td"),
-        r#">>> ./mod_d => @(shared)
+        r#">>> ./mod_d.td => @(shared)
 fromC x = "C:" + shared(x) => :Str
 <<< @(fromC)
 "#,
@@ -4155,6 +4155,152 @@ fromC x = "C:" + shared(x) => :Str
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Directory build with sibling import outside the input directory.
+/// project/src/main.td imports ../shared.td (outside src/).
+/// `taida build --target js project/src -o out` must transpile shared.td too.
+#[test]
+fn test_qf26_js_dir_build_includes_sibling_modules() {
+    if !node_available() {
+        return;
+    }
+
+    let dir = unique_temp_path("taida_qf26", "sibling", "dir");
+    let src_dir = dir.join("src");
+    fs::create_dir_all(&src_dir).expect("create src dir");
+
+    fs::write(
+        src_dir.join("main.td"),
+        r#">>> ../shared.td => @(fromShared)
+>>> ./helper.td => @(fromHelper)
+stdout(fromShared("A"))
+stdout(fromHelper("B"))
+"#,
+    )
+    .expect("write main");
+    fs::write(
+        src_dir.join("helper.td"),
+        r#"fromHelper x = "helper:" + x => :Str
+<<< @(fromHelper)
+"#,
+    )
+    .expect("write helper");
+    fs::write(
+        dir.join("shared.td"),
+        r#"fromShared x = "shared:" + x => :Str
+<<< @(fromShared)
+"#,
+    )
+    .expect("write shared");
+
+    let out_dir = dir.join("out");
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&src_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .expect("build js");
+    assert!(
+        build.status.success(),
+        "js dir build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    assert!(out_dir.join("main.mjs").exists(), "main.mjs missing");
+    assert!(out_dir.join("helper.mjs").exists(), "helper.mjs missing");
+    assert!(
+        out_dir.join("shared.mjs").exists(),
+        "shared.mjs missing — sibling module not transpiled"
+    );
+
+    let interp = run_interpreter(&src_dir.join("main.td")).expect("interpreter should succeed");
+    let js = Command::new("node")
+        .arg(out_dir.join("main.mjs"))
+        .output()
+        .expect("run node");
+    assert!(
+        js.status.success(),
+        "node run failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    let js_out = normalize(&String::from_utf8_lossy(&js.stdout));
+    assert_eq!(interp, js_out, "interpreter vs JS output mismatch");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Directory build with relative CLI paths (simulates `cd project && taida build --target js src -o out`).
+/// Ensures entry_root/out_root canonicalization works with nested + sibling modules.
+#[test]
+fn test_qf27_js_dir_build_relative_paths_with_sibling() {
+    if !node_available() {
+        return;
+    }
+
+    let dir = unique_temp_path("taida_qf27", "relpath", "dir");
+    let src_dir = dir.join("src");
+    let nested_dir = src_dir.join("nested");
+    fs::create_dir_all(&nested_dir).expect("create nested dir");
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    fs::write(
+        nested_dir.join("main.td"),
+        r#">>> ../../lib/util.td => @(greet)
+stdout(greet("world"))
+"#,
+    )
+    .expect("write main");
+    fs::write(
+        lib_dir.join("util.td"),
+        r#"greet x = "hello:" + x => :Str
+<<< @(greet)
+"#,
+    )
+    .expect("write util");
+
+    let out_dir = dir.join("out");
+    // Build using the project dir as cwd and relative paths (like `cd dir && taida build --target js src -o out`)
+    let build = Command::new(taida_bin())
+        .current_dir(&dir)
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg("src")
+        .arg("-o")
+        .arg("out")
+        .output()
+        .expect("build js");
+    assert!(
+        build.status.success(),
+        "js dir build with relative paths failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    assert!(
+        out_dir.join("nested").join("main.mjs").exists(),
+        "nested/main.mjs missing"
+    );
+
+    let interp =
+        run_interpreter(&nested_dir.join("main.td")).expect("interpreter should succeed");
+    let js = Command::new("node")
+        .arg(out_dir.join("nested").join("main.mjs"))
+        .output()
+        .expect("run node");
+    assert!(
+        js.status.success(),
+        "node run failed: {}",
+        String::from_utf8_lossy(&js.stderr)
+    );
+    let js_out = normalize(&String::from_utf8_lossy(&js.stdout));
+    assert_eq!(interp, js_out, "interpreter vs JS output mismatch");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_qf22_verify_detects_circular_imports() {
     let nanos = SystemTime::now()
@@ -4166,14 +4312,14 @@ fn test_qf22_verify_detects_circular_imports() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 stdout(hello("test"))
 "#,
     )
     .expect("write main");
     fs::write(
         dir.join("mod_a.td"),
-        r#">>> ./mod_b => @(world)
+        r#">>> ./mod_b.td => @(world)
 hello x = "Hello:" + world(x) => :Str
 <<< @(hello)
 "#,
@@ -4181,7 +4327,7 @@ hello x = "Hello:" + world(x) => :Str
     .expect("write mod_a");
     fs::write(
         dir.join("mod_b.td"),
-        r#">>> ./mod_a => @(hello)
+        r#">>> ./mod_a.td => @(hello)
 world x = "World:" + x => :Str
 <<< @(world)
 "#,
@@ -4223,7 +4369,7 @@ fn test_qf25_self_import_error_message_matches_across_backends() {
 
     fs::write(
         dir.join("main.td"),
-        r#">>> ./main => @(greet)
+        r#">>> ./main.td => @(greet)
 stdout(greet())
 "#,
     )

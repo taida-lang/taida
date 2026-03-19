@@ -46,7 +46,7 @@ pub fn collect_local_modules(entry_path: &Path) -> Result<Vec<PathBuf>, ModuleGr
 }
 
 pub fn resolve_local_import_from(base_file: &Path, import_path: &str) -> Option<PathBuf> {
-    let mut path = if import_path.starts_with("./") || import_path.starts_with("../") {
+    let path = if import_path.starts_with("./") || import_path.starts_with("../") {
         base_file
             .parent()
             .unwrap_or(Path::new("."))
@@ -60,9 +60,6 @@ pub fn resolve_local_import_from(base_file: &Path, import_path: &str) -> Option<
         return None;
     };
 
-    if path.extension().is_none_or(|ext| ext != "td") {
-        path.set_extension("td");
-    }
     Some(path)
 }
 

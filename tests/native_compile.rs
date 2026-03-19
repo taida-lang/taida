@@ -1139,7 +1139,7 @@ add x =
     .expect("write helper");
     fs::write(
         dir.join("main.td"),
-        r#">>> ./helper => @(add)
+        r#">>> ./helper.td => @(add)
 
 stdout(add(4).toString())
 stdout(add(10).toString())

@@ -324,7 +324,7 @@ impl Lowering {
     ) -> Option<std::path::PathBuf> {
         let source_dir = self.source_dir.as_ref()?;
 
-        let mut path = if module_path.starts_with("./") || module_path.starts_with("../") {
+        let path = if module_path.starts_with("./") || module_path.starts_with("../") {
             // Relative path
             source_dir.join(module_path)
         } else if std::path::Path::new(module_path).is_absolute() {
@@ -398,9 +398,6 @@ impl Lowering {
             }
         };
 
-        if path.extension().is_none_or(|e| e != "td") {
-            path.set_extension("td");
-        }
         let resolved = path.canonicalize().unwrap_or(path);
 
         // RCB-303: Reject relative imports that escape the project root (path traversal).

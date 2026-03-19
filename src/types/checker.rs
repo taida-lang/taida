@@ -1939,7 +1939,7 @@ defaulted fields must be provided via `()`",
                 if export.path.is_some() {
                     self.errors.push(TypeError {
                         message: "Re-export path `<<< ./path` is not yet supported. \
-                             Use explicit import and re-export: `>>> ./path => @(sym)` then `<<< @(sym)`."
+                             Use explicit import and re-export: `>>> ./path.td => @(sym)` then `<<< @(sym)`."
                             .to_string(),
                         span: export.span.clone(),
                     });

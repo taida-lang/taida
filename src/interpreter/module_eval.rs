@@ -65,27 +65,10 @@ impl Interpreter {
             }
         };
 
-        // Canonicalize if possible; try appending .td if not found
-        let canonical = match path.canonicalize() {
-            Ok(c) => c,
-            Err(_) => {
-                // Try with .td extension if the path doesn't already have it
-                if path.extension().is_none() {
-                    let with_ext = path.with_extension("td");
-                    if let Ok(c) = with_ext.canonicalize() {
-                        c
-                    } else {
-                        return Err(RuntimeError {
-                            message: format!("Module not found: '{}'", path.display()),
-                        });
-                    }
-                } else {
-                    return Err(RuntimeError {
-                        message: format!("Module not found: '{}'", path.display()),
-                    });
-                }
-            }
-        };
+        // Canonicalize the resolved path
+        let canonical = path.canonicalize().map_err(|_| RuntimeError {
+            message: format!("Module not found: '{}'", path.display()),
+        })?;
 
         // RCB-303: Reject imports that escape the project root (path traversal).
         // Only check relative imports (`./` or `../`); absolute and package imports
@@ -205,15 +188,9 @@ impl Interpreter {
                         }
                     }
                 };
-                match path.canonicalize() {
-                    Ok(c) => c,
-                    Err(_) => {
-                        let with_ext = path.with_extension("td");
-                        with_ext.canonicalize().map_err(|_| RuntimeError {
-                            message: format!("Module not found: '{}'", path.display()),
-                        })?
-                    }
-                }
+                path.canonicalize().map_err(|_| RuntimeError {
+                    message: format!("Module not found: '{}'", path.display()),
+                })?
             } else {
                 return Err(RuntimeError {
                     message: format!(

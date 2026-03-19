@@ -1,7 +1,7 @@
 // Test cross-module error type catching
 // ChildErr (defined in error_lib.td) should be caught by |== e: BaseErr
 // because ChildErr IS-A BaseErr via inheritance chain.
->>> ./error_lib => @(BaseErr, ChildErr, throwChild, throwBase)
+>>> ./error_lib.td => @(BaseErr, ChildErr, throwChild, throwBase)
 
 // Test 1: ChildErr caught by BaseErr handler (inheritance)
 test1 x =

@@ -184,11 +184,11 @@ pub fn compile_file(
     result
 }
 
-/// モジュールパスの解決: "./math" → "./math.td"
+/// モジュールパスの解決: "./math.td" → 絶対パス
 /// RCB-103: Support ~/ (project root relative) and package imports.
 /// RCB-213: Support versioned package imports via resolve_package_import_versioned.
 fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>) -> PathBuf {
-    let mut path = if module_path.starts_with("./") || module_path.starts_with("../") {
+    let path = if module_path.starts_with("./") || module_path.starts_with("../") {
         base_dir.join(module_path)
     } else if Path::new(module_path).is_absolute() {
         PathBuf::from(module_path)
@@ -250,10 +250,6 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
             PathBuf::from(format!("<unresolved package: {}>", module_path))
         }
     };
-    if path.extension().is_none_or(|e| e != "td") {
-        path.set_extension("td");
-    }
-
     // RCB-303: Reject relative imports that escape the project root (path traversal).
     if module_path.starts_with("./") || module_path.starts_with("../") {
         let project_root = find_project_root(base_dir);

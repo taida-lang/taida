@@ -1208,10 +1208,7 @@ impl JsCodegen {
                 (&self.project_root, &self.source_file)
             {
                 let source_dir = source_file.parent().unwrap_or(Path::new("."));
-                let mut td_path = source_dir.join(import_path);
-                if td_path.extension().is_none() {
-                    td_path.set_extension("td");
-                }
+                let td_path = source_dir.join(import_path);
                 let reject = if let Ok(canonical) = td_path.canonicalize() {
                     if let Ok(root_canonical) = project_root.canonicalize() {
                         !canonical.starts_with(&root_canonical)
@@ -1238,10 +1235,7 @@ impl JsCodegen {
             (&self.entry_root, &self.out_root, &self.source_file, &self.output_file)
         {
             let source_dir = source_file.parent().unwrap_or(Path::new("."));
-            let mut dep_source = source_dir.join(import_path);
-            if dep_source.extension().is_none() {
-                dep_source.set_extension("td");
-            }
+            let dep_source = source_dir.join(import_path);
             // Canonicalize to resolve symlinks and ..
             let dep_source = dep_source.canonicalize().unwrap_or(dep_source);
 
@@ -1279,12 +1273,12 @@ impl JsCodegen {
             }
         }
 
-        // Fallback: simple string replacement (no build context)
-        let js_path = if import_path.ends_with(".td") || import_path.ends_with(".tdjs") {
-            import_path.replace(".td", ".mjs").replace(".tdjs", ".mjs")
-        } else {
-            format!("{}.mjs", import_path)
-        };
+        // Fallback: simple string replacement (no build context).
+        // Parser enforces .td extension on relative imports, so we only need
+        // the .td/.tdjs → .mjs conversion.
+        let js_path = import_path
+            .replace(".tdjs", ".mjs")
+            .replace(".td", ".mjs");
         Ok(js_path)
     }
 
@@ -3050,13 +3044,17 @@ pub fn transpile_with_context(
 pub fn transpile_with_build_context(
     program: &Program,
     source_file: &std::path::Path,
-    project_root: &std::path::Path,
+    project_root: Option<&std::path::Path>,
     output_file: &std::path::Path,
     entry_root: &std::path::Path,
     out_root: &std::path::Path,
 ) -> Result<String, JsError> {
     let mut codegen = JsCodegen::new();
-    codegen.set_file_context(source_file, project_root, output_file);
+    codegen.source_file = Some(source_file.to_path_buf());
+    codegen.output_file = Some(output_file.to_path_buf());
+    if let Some(root) = project_root {
+        codegen.project_root = Some(root.to_path_buf());
+    }
     codegen.set_build_context(entry_root, out_root);
     codegen.generate(program)
 }

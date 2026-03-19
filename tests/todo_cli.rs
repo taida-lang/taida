@@ -161,7 +161,7 @@ fn test_build_native_release_blocks_todo_in_imported_module() {
     write_file(
         &main_td,
         r#"
->>> ./dep => @(v)
+>>> ./dep.td => @(v)
 v ]=> out
 stdout(out.toString())
 "#,
@@ -1070,7 +1070,7 @@ fn test_build_js_failure_does_not_leave_stale_local_module_outputs() {
     write_file(&project.join("packages.tdm"), ">>> alice/missing@a.1\n");
     write_file(
         &project.join("main.td"),
-        ">>> ./ok => @(value)\n>>> ./helper => @(run)\nstdout(value)\n",
+        ">>> ./ok.td => @(value)\n>>> ./helper.td => @(run)\nstdout(value)\n",
     );
     write_file(&project.join("ok.td"), "value <= \"ok\"\n<<< @(value)\n");
     write_file(
