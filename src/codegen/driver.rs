@@ -14,7 +14,7 @@ use super::rc_opt;
 use crate::module_graph;
 use crate::parser::parse;
 
-type ModuleImports = Vec<(String, Vec<String>)>;
+type ModuleImports = Vec<(String, Vec<String>, Option<String>)>;
 
 /// Process-wide counter to produce unique .o file names.
 static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -132,16 +132,18 @@ pub fn compile_file(
             .unwrap_or(input_path.to_path_buf()),
     );
 
-    // Each pending import carries (module_path, symbols, importing_file_dir).
+    // Each pending import carries (module_path, symbols, importing_file_dir, version).
     // Relative paths are resolved from the importing file's directory, not the main file's.
-    let mut pending_imports: Vec<(String, Vec<String>, PathBuf)> = imports
+    // RCB-213: version is now carried through for versioned package resolution.
+    let mut pending_imports: Vec<(String, Vec<String>, PathBuf, Option<String>)> = imports
         .into_iter()
-        .map(|(p, s)| (p, s, base_dir.to_path_buf()))
+        .map(|(p, s, v)| (p, s, base_dir.to_path_buf(), v))
         .collect();
 
     let result = (|| -> Result<PathBuf, CompileError> {
-        while let Some((module_path, _symbols, importer_dir)) = pending_imports.pop() {
-            let dep_path = resolve_module_path(&importer_dir, &module_path);
+        while let Some((module_path, _symbols, importer_dir, version)) = pending_imports.pop() {
+            let dep_path =
+                resolve_module_path(&importer_dir, &module_path, version.as_deref());
             let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
             if compiled.contains(&canonical) {
                 continue;
@@ -154,7 +156,7 @@ pub fn compile_file(
             pending_imports.extend(
                 sub_imports
                     .into_iter()
-                    .map(|(p, s)| (p, s, dep_dir.clone())),
+                    .map(|(p, s, v)| (p, s, dep_dir.clone(), v)),
             );
         }
 
@@ -183,12 +185,116 @@ pub fn compile_file(
 }
 
 /// モジュールパスの解決: "./math" → "./math.td"
-fn resolve_module_path(base_dir: &Path, module_path: &str) -> PathBuf {
-    let mut path = base_dir.join(module_path);
+/// RCB-103: Support ~/ (project root relative) and package imports.
+/// RCB-213: Support versioned package imports via resolve_package_import_versioned.
+fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>) -> PathBuf {
+    let mut path = if module_path.starts_with("./") || module_path.starts_with("../") {
+        base_dir.join(module_path)
+    } else if Path::new(module_path).is_absolute() {
+        PathBuf::from(module_path)
+    } else if let Some(stripped) = module_path.strip_prefix("~/") {
+        let root = find_project_root(base_dir);
+        root.join(stripped)
+    } else {
+        // Package import
+        let root = find_project_root(base_dir);
+
+        // RCB-213: Versioned resolution with longest-prefix matching.
+        // Supports submodule imports (e.g., alice/pkg/submod@b.12 resolves to
+        // .taida/deps/alice/pkg@b.12/submod.td).
+        if let Some(ver) = version {
+            if let Some(resolution) =
+                crate::pkg::resolver::resolve_package_module_versioned(&root, module_path, ver)
+            {
+                match resolution.submodule {
+                    Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                    None => {
+                        let entry =
+                            match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                                Ok(Some(manifest)) => manifest.entry,
+                                _ => "main.td".to_string(),
+                            };
+                        if entry.starts_with("./") || entry.starts_with("../") {
+                            resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                        } else {
+                            resolution.pkg_dir.join(&entry)
+                        }
+                    }
+                }
+            } else {
+                // RCB-213: Versioned package not found — do not fall back silently.
+                PathBuf::from(format!("<unresolved package: {}@{}>", module_path, ver))
+            }
+        } else if let Some(resolution) =
+            crate::pkg::resolver::resolve_package_module(&root, module_path)
+        {
+            match resolution.submodule {
+                Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                None => {
+                    let entry =
+                        match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                            Ok(Some(manifest)) => manifest.entry,
+                            _ => "main.td".to_string(),
+                        };
+                    if entry.starts_with("./") || entry.starts_with("../") {
+                        resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                    } else {
+                        resolution.pkg_dir.join(&entry)
+                    }
+                }
+            }
+        } else {
+            // RCB-103 fix: package resolution failed — use a clearly
+            // non-existent path so the caller gets a meaningful "not found"
+            // error instead of silently misresolving to a local file.
+            PathBuf::from(format!("<unresolved package: {}>", module_path))
+        }
+    };
     if path.extension().is_none_or(|e| e != "td") {
         path.set_extension("td");
     }
+
+    // RCB-303: Reject relative imports that escape the project root (path traversal).
+    if module_path.starts_with("./") || module_path.starts_with("../") {
+        let project_root = find_project_root(base_dir);
+        let reject = if let Ok(resolved) = path.canonicalize() {
+            if let Ok(root_canonical) = project_root.canonicalize() {
+                !resolved.starts_with(&root_canonical)
+            } else {
+                // Cannot canonicalize project root — reject if path contains ".."
+                module_path.contains("..")
+            }
+        } else {
+            // Cannot canonicalize target — reject if path contains ".."
+            module_path.contains("..")
+        };
+        if reject {
+            return PathBuf::from(format!(
+                "<path traversal rejected: {}>",
+                module_path
+            ));
+        }
+    }
+
     path
+}
+
+/// RCB-103: Find project root by walking up from the given directory.
+fn find_project_root(start_dir: &Path) -> PathBuf {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        if dir.join("packages.tdm").exists()
+            || dir.join("taida.toml").exists()
+            || dir.join(".taida").exists()
+            || dir.join(".git").exists()
+        {
+            return dir;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    start_dir.to_path_buf()
 }
 
 /// 複数 .o ファイルをリンクしてバイナリを生成
@@ -490,16 +596,25 @@ fn inline_wasm_module_imports(
         HashSet::new(),
     );
 
-    // pending: (module_path, importer_dir, requested_syms)
+    // pending: (module_path, importer_dir, requested_syms, version)
     // requested_syms: importer が要求するリンクシンボル名のリスト
-    let mut pending: Vec<(String, PathBuf, Vec<String>)> = main_module
+    // RCB-213: version is carried through for versioned package resolution.
+    let mut pending: Vec<(String, PathBuf, Vec<String>, Option<String>)> = main_module
         .imports
         .iter()
-        .map(|(path, syms)| (path.clone(), base_dir.to_path_buf(), syms.clone()))
+        .map(|(path, syms, ver)| {
+            (
+                path.clone(),
+                base_dir.to_path_buf(),
+                syms.clone(),
+                ver.clone(),
+            )
+        })
         .collect();
 
-    while let Some((module_path, importer_dir, requested_syms)) = pending.pop() {
-        let dep_path = resolve_module_path(&importer_dir, &module_path);
+    while let Some((module_path, importer_dir, requested_syms, version)) = pending.pop() {
+        let dep_path =
+            resolve_module_path(&importer_dir, &module_path, version.as_deref());
         let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
 
         // 既にコンパイル済みのモジュールか確認
@@ -600,8 +715,13 @@ fn inline_wasm_module_imports(
 
         // 依存モジュールがさらに import していれば、それも再帰的に処理
         let dep_dir = dep_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        for (sub_path, sub_syms) in &dep_ir.imports {
-            pending.push((sub_path.clone(), dep_dir.clone(), sub_syms.clone()));
+        for (sub_path, sub_syms, sub_ver) in &dep_ir.imports {
+            pending.push((
+                sub_path.clone(),
+                dep_dir.clone(),
+                sub_syms.clone(),
+                sub_ver.clone(),
+            ));
         }
     }
 

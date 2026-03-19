@@ -4976,3 +4976,170 @@ stdout(dog.__type + "=" + dog.breed + " " + cat.__type + "=" + ci)
 "#;
     assert_backend_parity_for_source(source, "rc6k_multi_children");
 }
+
+// =========================================================================
+// Cross-module quality tests: examples/quality/*/main.td
+//
+// RCB-214: Sweep multi-module test directories in examples/quality/.
+// Each directory contains a main.td (entry point) and optional helper
+// modules. If an `expected` file is present, all backends are compared
+// against its content. Otherwise, the interpreter output is used as
+// the reference (same parity approach as other tests).
+// =========================================================================
+#[test]
+fn test_quality_cross_module_parity() {
+    let has_node = node_available();
+    let has_cc = cc_available();
+
+    if !has_cc {
+        eprintln!("SKIP: cc not available, skipping cross-module quality parity tests");
+        return;
+    }
+
+    let quality_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("quality");
+
+    if !quality_dir.exists() {
+        eprintln!("SKIP: examples/quality/ directory does not exist");
+        return;
+    }
+
+    // Collect subdirectories that contain main.td or main.tdm
+    // RCB-213: main.tdm is used for versioned import tests (versioned imports
+    // are only allowed in .tdm files).
+    let mut test_dirs: Vec<PathBuf> = fs::read_dir(&quality_dir)
+        .expect("examples/quality/ should be readable")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| e.path().join("main.td").exists() || e.path().join("main.tdm").exists())
+        .map(|e| e.path())
+        .collect();
+    test_dirs.sort();
+
+    if test_dirs.is_empty() {
+        eprintln!("SKIP: no cross-module test directories found in examples/quality/");
+        return;
+    }
+
+    // Tests that are expected to fail in the interpreter (error tests, etc.)
+    let error_tests: Vec<&str> = vec![
+        "b10a_circular_direct",
+        "b10b_circular_indirect",
+        "b10d_self_import",
+        "b10e_circular_typedef",
+        "b10f_circular_closure",
+        "b10h_cross_backend_circular",
+    ];
+
+    let mut passed = 0;
+    let mut skipped = 0;
+    let mut failures = Vec::new();
+
+    for dir in &test_dirs {
+        let dir_name = dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
+        let main_td = if dir.join("main.td").exists() {
+            dir.join("main.td")
+        } else {
+            dir.join("main.tdm")
+        };
+
+        // Skip known error tests (circular imports, etc.)
+        if error_tests.iter().any(|t| dir_name == *t) {
+            skipped += 1;
+            continue;
+        }
+
+        // Run interpreter (reference implementation)
+        let interp = match run_interpreter(&main_td) {
+            Some(o) => o,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // If an `expected` file exists, verify interpreter matches it
+        let expected_path = dir.join("expected");
+        if expected_path.exists() {
+            let expected = normalize(
+                &fs::read_to_string(&expected_path)
+                    .expect("expected file should be readable"),
+            );
+            if interp != expected {
+                failures.push(format!(
+                    "{}: interpreter output does not match expected\n  interp:    {:?}\n  expected:  {:?}",
+                    dir_name,
+                    interp.lines().take(5).collect::<Vec<_>>(),
+                    expected.lines().take(5).collect::<Vec<_>>(),
+                ));
+                continue;
+            }
+        }
+
+        // JS parity check
+        if has_node {
+            match run_js_project(&main_td, &dir_name) {
+                Some(js) => {
+                    if interp != js {
+                        failures.push(format!(
+                            "{}: Interpreter vs JS mismatch\n  interp: {:?}\n  js:     {:?}",
+                            dir_name,
+                            interp.lines().take(5).collect::<Vec<_>>(),
+                            js.lines().take(5).collect::<Vec<_>>(),
+                        ));
+                        continue;
+                    }
+                }
+                None => {
+                    failures.push(format!("{}: JS build/execution failed", dir_name));
+                    continue;
+                }
+            }
+        }
+
+        // Native parity check
+        match run_native_with_error(&main_td) {
+            Ok(native) => {
+                if interp != native {
+                    failures.push(format!(
+                        "{}: Interpreter vs Native mismatch\n  interp: {:?}\n  native: {:?}",
+                        dir_name,
+                        interp.lines().take(5).collect::<Vec<_>>(),
+                        native.lines().take(5).collect::<Vec<_>>(),
+                    ));
+                    continue;
+                }
+            }
+            Err(err) => {
+                failures.push(format!(
+                    "{}: Native compile/run failed\n  {}",
+                    dir_name, err
+                ));
+                continue;
+            }
+        }
+
+        passed += 1;
+    }
+
+    eprintln!(
+        "Cross-module quality parity: {}/{} passed, {} skipped",
+        passed,
+        passed + failures.len(),
+        skipped,
+    );
+
+    if !failures.is_empty() {
+        panic!(
+            "{} cross-module quality parity test(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n"),
+        );
+    }
+}

@@ -281,12 +281,46 @@ impl JsCodegen {
                 self.gen_statement_sequence(remaining, result)?;
                 self.indent -= 1;
 
+                // RCB-101: Extract handler type name for error type filtering
+                let handler_type = match &ec.error_type {
+                    TypeExpr::Named(name) => name.as_str(),
+                    _ => "Error",
+                };
+
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!("}} catch ({}) {{\n", ec.error_param));
+                self.write(&format!(
+                    "}} catch (__taida_caught_err) {{\n"
+                ));
                 result.push_str(&self.output);
 
                 self.indent += 1;
+
+                // RCB-101: Type filter — re-throw if type does not match
+                self.output.clear();
+                self.write_indent();
+                self.write(&format!(
+                    "const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';\n"
+                ));
+                result.push_str(&self.output);
+
+                self.output.clear();
+                self.write_indent();
+                self.write(&format!(
+                    "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;\n",
+                    handler_type
+                ));
+                result.push_str(&self.output);
+
+                // Bind the error to the user's parameter name
+                self.output.clear();
+                self.write_indent();
+                self.write(&format!(
+                    "const {} = __taida_caught_err;\n",
+                    ec.error_param
+                ));
+                result.push_str(&self.output);
+
                 for stmt in &ec.handler_body {
                     self.output.clear();
                     self.gen_statement(stmt)?;
@@ -603,12 +637,38 @@ impl JsCodegen {
                 self.gen_func_body_to_buf(remaining, result)?;
                 self.indent -= 1;
 
+                // RCB-101: Extract handler type name for error type filtering
+                let handler_type = match &ec.error_type {
+                    TypeExpr::Named(name) => name.as_str(),
+                    _ => "Error",
+                };
+
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!("}} catch ({}) {{\n", ec.error_param));
+                self.write("} catch (__taida_caught_err) {\n");
                 result.push_str(&self.output);
 
                 self.indent += 1;
+
+                // RCB-101: Type filter — re-throw if type does not match
+                self.output.clear();
+                self.writeln("const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';");
+                result.push_str(&self.output);
+
+                self.output.clear();
+                self.writeln(&format!(
+                    "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;",
+                    handler_type
+                ));
+                result.push_str(&self.output);
+
+                self.output.clear();
+                self.writeln(&format!(
+                    "const {} = __taida_caught_err;",
+                    ec.error_param
+                ));
+                result.push_str(&self.output);
+
                 for (j, handler_stmt) in ec.handler_body.iter().enumerate() {
                     self.output.clear();
                     if j == ec.handler_body.len() - 1 {
@@ -867,6 +927,12 @@ impl JsCodegen {
         self.indent -= 1;
         self.writeln("}");
 
+        // RCB-101: Register inheritance parent for error type filtering in |==
+        self.writeln(&format!(
+            "__taida_type_parents['{}'] = '{}';",
+            inh_def.child, inh_def.parent
+        ));
+
         // Register child type fields (parent fields + child fields) for further inheritance
         let mut all_fields: Vec<String> = parent_field_names;
         all_fields.extend(field_names.iter().map(|s| s.to_string()));
@@ -1015,13 +1081,29 @@ impl JsCodegen {
     }
 
     fn gen_error_ceiling(&mut self, ec: &ErrorCeiling) -> Result<(), JsError> {
+        // RCB-101: Extract handler type name for error type filtering
+        let handler_type = match &ec.error_type {
+            TypeExpr::Named(name) => name.as_str(),
+            _ => "Error",
+        };
+
         // Standalone ErrorCeiling — generate try/catch with empty try
         self.writeln("try {");
         self.indent += 1;
         self.indent -= 1;
         self.write_indent();
-        self.write(&format!("}} catch ({}) {{\n", ec.error_param));
+        self.write("} catch (__taida_caught_err) {\n");
         self.indent += 1;
+        // RCB-101: Type filter
+        self.writeln("const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';");
+        self.writeln(&format!(
+            "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;",
+            handler_type
+        ));
+        self.writeln(&format!(
+            "const {} = __taida_caught_err;",
+            ec.error_param
+        ));
         for stmt in &ec.handler_body {
             self.gen_statement(stmt)?;
         }
@@ -1121,28 +1203,22 @@ impl JsCodegen {
         })?;
 
         // Find the package directory using longest-prefix matching.
-        // RC-1q: For versioned imports, try version-qualified directory first,
-        // then fall back to unversioned (same logic as interpreter's eval_import).
+        // RCB-213: For versioned imports, use resolve_package_module_versioned
+        // which does longest-prefix matching with version-qualified directories.
+        // This supports submodule imports (e.g., alice/pkg/submod@b.12 resolves to
+        // .taida/deps/alice/pkg@b.12/submod.td).
         let resolution = if let Some(ver) = version {
-            // Try version-qualified path first: .taida/deps/org/name@version/
-            let deps_dir = project_root.join(".taida").join("deps");
-            let versioned_id = format!("{}@{}", import_path, ver);
-            let versioned_path = deps_dir.join(&versioned_id);
-            if versioned_path.exists() && versioned_path.is_dir() {
-                crate::pkg::resolver::PackageModuleResolution {
-                    pkg_dir: versioned_path,
-                    submodule: None,
-                }
-            } else {
-                // Fall back to unversioned resolution
-                crate::pkg::resolver::resolve_package_module(project_root, import_path)
-                    .ok_or_else(|| JsError {
-                        message: format!(
-                            "Could not resolve package import '{}@{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
-                            import_path, ver
-                        ),
-                    })?
-            }
+            crate::pkg::resolver::resolve_package_module_versioned(
+                project_root,
+                import_path,
+                ver,
+            )
+            .ok_or_else(|| JsError {
+                message: format!(
+                    "Could not resolve package import '{}@{}'. Run `taida deps` and ensure the package is installed in .taida/deps/ before building JS.",
+                    import_path, ver
+                ),
+            })?
         } else {
             crate::pkg::resolver::resolve_package_module(project_root, import_path)
                 .ok_or_else(|| JsError {

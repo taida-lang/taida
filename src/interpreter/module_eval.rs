@@ -66,21 +66,46 @@ impl Interpreter {
         };
 
         // Canonicalize if possible; try appending .td if not found
-        match path.canonicalize() {
-            Ok(canonical) => Ok(canonical),
+        let canonical = match path.canonicalize() {
+            Ok(c) => c,
             Err(_) => {
                 // Try with .td extension if the path doesn't already have it
                 if path.extension().is_none() {
                     let with_ext = path.with_extension("td");
-                    if let Ok(canonical) = with_ext.canonicalize() {
-                        return Ok(canonical);
+                    if let Ok(c) = with_ext.canonicalize() {
+                        c
+                    } else {
+                        return Err(RuntimeError {
+                            message: format!("Module not found: '{}'", path.display()),
+                        });
                     }
+                } else {
+                    return Err(RuntimeError {
+                        message: format!("Module not found: '{}'", path.display()),
+                    });
                 }
-                Err(RuntimeError {
-                    message: format!("Module not found: '{}'", path.display()),
-                })
+            }
+        };
+
+        // RCB-303: Reject imports that escape the project root (path traversal).
+        // Only check relative imports (`./` or `../`); absolute and package imports
+        // are either trusted paths or resolved through the package system.
+        if import_path.starts_with("./") || import_path.starts_with("../") {
+            let project_root = self.find_project_root();
+            if let Ok(root_canonical) = project_root.canonicalize() {
+                if !canonical.starts_with(&root_canonical) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Import path '{}' resolves outside the project root. \
+                             Path traversal beyond the project boundary is not allowed.",
+                            import_path
+                        ),
+                    });
+                }
             }
         }
+
+        Ok(canonical)
     }
 
     /// Find project root by walking up from the current file.
@@ -148,30 +173,37 @@ impl Interpreter {
             }
         }
 
-        // For versioned imports (>>> alice/string-utils@b.12), the path is "alice/string-utils"
-        // where "alice" is the org and "string-utils" is the package name.
-        // Canonical package ID is "org/name" — resolve via .taida/deps/org/name/.
+        // For versioned imports (>>> alice/string-utils@b.12 or alice/pkg/submod@b.12),
+        // the path is "alice/string-utils" or "alice/pkg/submod" and version is "b.12".
         //
         // RC-1q: Version coexistence support — when a versioned import is encountered,
         // first try the version-qualified directory (.taida/deps/org/name@version/),
         // then fall back to the unversioned directory (.taida/deps/org/name/).
+        //
+        // RCB-213: Use resolve_package_module_versioned with longest-prefix matching
+        // to support submodule imports (e.g., alice/pkg/submod@b.12 resolves to
+        // .taida/deps/alice/pkg@b.12/submod.td).
         let module_path = if let Some(version) = &import.version {
-            // Versioned import: resolve via canonical org/name package ID
             let root = self.find_project_root();
-            let pkg_id = &import.path; // "alice/string-utils"
-            if let Some(pkg_dir) =
-                crate::pkg::resolver::resolve_package_import_versioned(&root, pkg_id, version)
+            let pkg_id = &import.path;
+            if let Some(resolution) =
+                crate::pkg::resolver::resolve_package_module_versioned(&root, pkg_id, version)
             {
-                // Read packages.tdm to determine the entry point
-                let entry = match crate::pkg::manifest::Manifest::from_dir(&pkg_dir) {
-                    Ok(Some(manifest)) => manifest.entry,
-                    _ => "main.td".to_string(),
-                };
-                // Resolve the entry path relative to the package directory
-                let path = if entry.starts_with("./") || entry.starts_with("../") {
-                    pkg_dir.join(entry[2..].trim_start_matches('/'))
-                } else {
-                    pkg_dir.join(&entry)
+                let path = match resolution.submodule {
+                    Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                    None => {
+                        // Package root import: read packages.tdm to determine entry point
+                        let entry =
+                            match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                                Ok(Some(manifest)) => manifest.entry,
+                                _ => "main.td".to_string(),
+                            };
+                        if entry.starts_with("./") || entry.starts_with("../") {
+                            resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
+                        } else {
+                            resolution.pkg_dir.join(&entry)
+                        }
+                    }
                 };
                 match path.canonicalize() {
                     Ok(c) => c,
@@ -484,6 +516,16 @@ impl Interpreter {
     /// When a module has `<<<`, only the listed symbols are exported.
     /// When no `<<<` exists, all module-level symbols are exported (backward compat).
     pub(crate) fn eval_export(&mut self, export: &ExportStmt) -> Result<Signal, RuntimeError> {
+        // RCB-102: `<<< @()` (empty export) is an error — a module that exports
+        // nothing is useless to importers.  Without this check, the empty symbols
+        // list falls through to the "no <<< found → export everything" path.
+        if export.symbols.is_empty() && export.path.is_none() {
+            return Err(RuntimeError {
+                message: "Empty export `<<< @()` exports nothing. \
+                         Remove the export statement or list symbols to export: `<<< @(name1, name2)`."
+                    .to_string(),
+            });
+        }
         // P-6: Versioned exports (<<<@version) are only allowed in packages.tdm
         if export.version.is_some() {
             let is_tdm = self

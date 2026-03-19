@@ -1920,6 +1920,31 @@ defaulted fields must be provided via `()`",
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
             }
+            Statement::Export(export) => {
+                // RCB-102: `<<< @()` (empty export) is almost certainly a mistake.
+                // A module that exports nothing is useless to importers, and the
+                // current backend handling diverges (Interp: leak, JS: runtime error,
+                // Native: linker error).  Reject at check time.
+                if export.symbols.is_empty() && export.path.is_none() {
+                    self.errors.push(TypeError {
+                        message: "Empty export `<<< @()` exports nothing. \
+                             If this module is not meant to be imported, remove the export statement. \
+                             If you want to export symbols, list them: `<<< @(name1, name2)`."
+                            .to_string(),
+                        span: export.span.clone(),
+                    });
+                }
+                // RCB-212: Re-export path `<<< ./path` is parsed but not implemented
+                // in any backend. Emit an error to avoid silent no-op.
+                if export.path.is_some() {
+                    self.errors.push(TypeError {
+                        message: "Re-export path `<<< ./path` is not yet supported. \
+                             Use explicit import and re-export: `>>> ./path => @(sym)` then `<<< @(sym)`."
+                            .to_string(),
+                        span: export.span.clone(),
+                    });
+                }
+            }
             // N-65: Intentional catch-all — TypeDef, MoldDef, and InheritanceDef
             // are registered in the first pass of check_program(). Additional
             // statement kinds (e.g., future AST variants) will need explicit arms

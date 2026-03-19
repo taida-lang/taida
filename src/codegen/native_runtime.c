@@ -474,7 +474,7 @@ static void taida_register_builtin_error_field_names(void) {
 static taida_val taida_make_error(const char *error_type, const char *error_msg) {
     taida_register_builtin_error_field_names();
 
-    taida_val pack = taida_pack_new(2);
+    taida_val pack = taida_pack_new(3);
     // Set hash for "type" field (index 0)
     taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
     char *type_str = taida_str_new_copy(error_type);
@@ -485,6 +485,14 @@ static taida_val taida_make_error(const char *error_type, const char *error_msg)
     char *msg_str = taida_str_new_copy(error_msg);
     taida_pack_set(pack, 1, (taida_val)msg_str);
     taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    // RCB-101 fix: Set __type field (index 2) so error type matching works.
+    // Without this, taida_error_type_matches falls through to catch-all
+    // because it looks for __type, not type.
+    // Use literal FNV-1a("__type") hash since HASH___TYPE is defined later.
+    taida_pack_set_hash(pack, 2, (taida_val)0x84d2d84b631f799bULL);
+    char *type_str2 = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 2, (taida_val)type_str2);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
     return pack;
 }
 
@@ -4142,6 +4150,79 @@ taida_val taida_error_get_value(taida_val depth) {
     return __taida_error_val[(int)depth];
 }
 
+// RCB-101: Inheritance parent registry for error type filtering in |==
+#define TAIDA_MAX_TYPE_PARENTS 256
+static taida_val __taida_type_parent_child[TAIDA_MAX_TYPE_PARENTS];
+static taida_val __taida_type_parent_parent[TAIDA_MAX_TYPE_PARENTS];
+static int __taida_type_parent_count = 0;
+
+// Register an inheritance parent: child IS-A parent
+void taida_register_type_parent(taida_val child_str, taida_val parent_str) {
+    if (__taida_type_parent_count < TAIDA_MAX_TYPE_PARENTS) {
+        __taida_type_parent_child[__taida_type_parent_count] = child_str;
+        __taida_type_parent_parent[__taida_type_parent_count] = parent_str;
+        __taida_type_parent_count++;
+    }
+}
+
+// Find the parent type string for a given child type string.
+// Returns 0 if not found.
+static taida_val taida_find_parent_type(taida_val child_str) {
+    for (int i = 0; i < __taida_type_parent_count; i++) {
+        if (taida_str_eq(__taida_type_parent_child[i], child_str)) {
+            return __taida_type_parent_parent[i];
+        }
+    }
+    return 0;
+}
+
+// Check if thrown_type IS-A handler_type by walking the inheritance chain.
+// handler_type_str and thrown_type_str are C string pointers.
+// Returns 1 if match, 0 if not.
+taida_val taida_error_type_matches(taida_val error_val, taida_val handler_type_str) {
+    // "Error" catches everything
+    const char *handler_s = (const char*)handler_type_str;
+    if (handler_s && strcmp(handler_s, "Error") == 0) return 1;
+
+    // Get the thrown type from __type field of the BuchiPack.
+    // Fall back to "type" field if __type is absent (legacy errors).
+    taida_val thrown_type_str = 0;
+    if (taida_is_buchi_pack(error_val)) {
+        if (taida_pack_has_hash(error_val, (taida_val)HASH___TYPE)) {
+            thrown_type_str = taida_pack_get(error_val, (taida_val)HASH___TYPE);
+        } else if (taida_pack_has_hash(error_val, (taida_val)HASH_TYPE)) {
+            thrown_type_str = taida_pack_get(error_val, (taida_val)HASH_TYPE);
+        }
+    }
+    // RCB-101 fix: unknown type must NOT be catch-all.  Only the "Error"
+    // handler (checked above) catches everything.  A typed handler like
+    // |== e: MyError should not match an error with no type information.
+    if (thrown_type_str == 0) return 0;
+
+    // Walk inheritance chain
+    taida_val current = thrown_type_str;
+    for (int i = 0; i < 64; i++) {
+        if (taida_str_eq(current, handler_type_str)) return 1;
+        taida_val parent = taida_find_parent_type(current);
+        if (parent == 0) break;
+        current = parent;
+    }
+    return 0;
+}
+
+// RCB-101: Check error type and re-throw if it does not match.
+// Called at the start of error ceiling handler arm.
+// If the type matches, returns the error_val unchanged.
+// If it does not match, calls taida_throw(error_val) which longjmps (never returns).
+taida_val taida_error_type_check_or_rethrow(taida_val error_val, taida_val handler_type_str) {
+    if (taida_error_type_matches(error_val, handler_type_str)) {
+        return error_val;
+    }
+    // Re-throw: this longjmps to the next outer error ceiling
+    taida_throw(error_val);
+    return 0; // unreachable
+}
+
 taida_val taida_cage_apply(taida_val cage_value, taida_val fn_ptr) {
     if (fn_ptr == 0) {
         taida_val error = taida_make_error("CageError", "Cage second argument must be a function");
@@ -7266,13 +7347,21 @@ static char *taida_os_http_headers_to_lines(taida_val headers_ptr) {
         const char *value_str = (const char*)value_str_ptr;
         if (!value_str) value_str = "";
 
-        size_t need = strlen(name) + strlen(value_str) + 4;
+        /* RCB-304: Strip CR/LF from header name and value to prevent CRLF injection */
+        char *safe_name = strdup(name);
+        char *safe_value = strdup(value_str);
+        for (char *p = safe_name; *p; p++) { if (*p == '\r' || *p == '\n') *p = ' '; }
+        for (char *p = safe_value; *p; p++) { if (*p == '\r' || *p == '\n') *p = ' '; }
+
+        size_t need = strlen(safe_name) + strlen(safe_value) + 4;
         while (len + need + 1 > cap) {
             cap *= 2;
             TAIDA_REALLOC(buf, cap, "http_response");
         }
 
-        int n = snprintf(buf + len, cap - len, "%s: %s\r\n", name, value_str);
+        int n = snprintf(buf + len, cap - len, "%s: %s\r\n", safe_name, safe_value);
+        free(safe_name);
+        free(safe_value);
         taida_str_release(value_str_ptr);
         if (n < 0) {
             free(buf);
@@ -7655,14 +7744,22 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     }
     free(request);
 
+    /* RCB-306: Limit HTTP response to 100 MB to prevent OOM */
+    const size_t MAX_HTTP_RESPONSE = 100 * 1024 * 1024;
     size_t buf_cap = 65536;
     char *resp_buf = (char*)TAIDA_MALLOC(buf_cap, "http_recv");
     size_t resp_len = 0;
     ssize_t n;
     while ((n = recv(sockfd, resp_buf + resp_len, buf_cap - resp_len - 1, 0)) > 0) {
         resp_len += (size_t)n;
+        if (resp_len > MAX_HTTP_RESPONSE) {
+            close(sockfd);
+            free(resp_buf);
+            return taida_async_resolved(taida_os_http_failure_lax());
+        }
         if (resp_len >= buf_cap - 1) {
             buf_cap *= 2;
+            if (buf_cap > MAX_HTTP_RESPONSE + 1) buf_cap = MAX_HTTP_RESPONSE + 1;
             TAIDA_REALLOC(resp_buf, buf_cap, "tcp_recv");
         }
     }
@@ -7859,7 +7956,8 @@ taida_val taida_os_tcp_listen(taida_val port, taida_val timeout_ms) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    /* RCB-305: Default to loopback (127.0.0.1) instead of all interfaces */
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     addr.sin_port = htons((unsigned short)port);
 
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {

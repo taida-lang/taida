@@ -21,10 +21,16 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Recursive descent parser for Taida Lang.
+/// Maximum nesting depth for recursive expression parsing.
+/// Prevents stack overflow from deeply nested inputs (RCB-301 / SEC-002).
+const MAX_PARSE_DEPTH: usize = 256;
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     errors: Vec<ParseError>,
+    /// Current recursion depth for expression parsing (RCB-301).
+    depth: usize,
 }
 
 impl Parser {
@@ -79,6 +85,7 @@ impl Parser {
             tokens: filtered,
             pos: 0,
             errors: Vec::new(),
+            depth: 0,
         }
     }
 
