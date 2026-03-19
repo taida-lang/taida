@@ -1169,15 +1169,38 @@ impl JsCodegen {
                         let source_dir = source_file
                             .parent()
                             .unwrap_or(std::path::Path::new("."));
-                        let resolved = source_dir.join(&import.path);
-                        let reject = if let Ok(canonical) = resolved.canonicalize() {
+                        // Resolve with .td extension (matches actual file on disk)
+                        let mut td_path = source_dir.join(&import.path);
+                        if td_path.extension().is_none() {
+                            td_path.set_extension("td");
+                        }
+                        let reject = if let Ok(canonical) = td_path.canonicalize() {
                             if let Ok(root_canonical) = project_root.canonicalize() {
                                 !canonical.starts_with(&root_canonical)
                             } else {
-                                true // cannot verify — reject
+                                // Cannot canonicalize project root — check normalized path
+                                let normalized = source_dir.join(&import.path);
+                                !normalized
+                                    .components()
+                                    .fold(0i32, |depth, c| match c {
+                                        std::path::Component::ParentDir => depth - 1,
+                                        std::path::Component::Normal(_) => depth + 1,
+                                        _ => depth,
+                                    })
+                                    .is_positive()
                             }
                         } else {
-                            true // cannot canonicalize — reject if ".." present
+                            // File not found — check if path goes above source_dir's
+                            // depth within the project (conservative: reject net-upward)
+                            let normalized = source_dir.join(&import.path);
+                            !normalized
+                                .components()
+                                .fold(0i32, |depth, c| match c {
+                                    std::path::Component::ParentDir => depth - 1,
+                                    std::path::Component::Normal(_) => depth + 1,
+                                    _ => depth,
+                                })
+                                .is_positive()
                         };
                         if reject {
                             return Err(JsError {

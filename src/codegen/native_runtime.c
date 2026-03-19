@@ -4161,12 +4161,22 @@ static int __taida_type_parent_cap = 0;
 void taida_register_type_parent(taida_val child_str, taida_val parent_str) {
     if (__taida_type_parent_count >= __taida_type_parent_cap) {
         int new_cap = __taida_type_parent_cap == 0 ? 64 : __taida_type_parent_cap * 2;
-        taida_val *new_child = (taida_val*)realloc(__taida_type_parent_child, sizeof(taida_val) * new_cap);
-        taida_val *new_parent = (taida_val*)realloc(__taida_type_parent_parent, sizeof(taida_val) * new_cap);
+        // Allocate both new arrays first, then copy + swap atomically.
+        // This avoids stale pointers if one allocation fails.
+        taida_val *new_child = (taida_val*)malloc(sizeof(taida_val) * new_cap);
+        taida_val *new_parent = (taida_val*)malloc(sizeof(taida_val) * new_cap);
         if (!new_child || !new_parent) {
+            free(new_child);
+            free(new_parent);
             fprintf(stderr, "Warning: type parent registry allocation failed\n");
             return;
         }
+        if (__taida_type_parent_count > 0) {
+            memcpy(new_child, __taida_type_parent_child, sizeof(taida_val) * __taida_type_parent_count);
+            memcpy(new_parent, __taida_type_parent_parent, sizeof(taida_val) * __taida_type_parent_count);
+        }
+        free(__taida_type_parent_child);
+        free(__taida_type_parent_parent);
         __taida_type_parent_child = new_child;
         __taida_type_parent_parent = new_parent;
         __taida_type_parent_cap = new_cap;
