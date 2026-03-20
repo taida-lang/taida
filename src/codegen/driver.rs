@@ -837,7 +837,14 @@ fn write_wasm_stdint_header(include_dir: &Path) -> Result<(), CompileError> {
         ),
     })?;
 
-    if let Err(e) = fs::write(include_dir.join("stdint.h"), WASM_STDINT_HEADER) {
+    let header_path = include_dir.join("stdint.h");
+
+    // Skip write if existing file content is already correct (avoid race in parallel tests)
+    if fs::read(&header_path).is_ok_and(|existing| existing == WASM_STDINT_HEADER.as_bytes()) {
+        return Ok(());
+    }
+
+    if let Err(e) = fs::write(&header_path, WASM_STDINT_HEADER) {
         let _ = fs::remove_dir_all(include_dir);
         return Err(CompileError {
             message: format!(
