@@ -840,10 +840,8 @@ fn write_wasm_stdint_header(include_dir: &Path) -> Result<(), CompileError> {
     let header_path = include_dir.join("stdint.h");
 
     // Skip write if existing file content is already correct (avoid race in parallel tests)
-    if let Ok(existing) = fs::read(&header_path) {
-        if existing == WASM_STDINT_HEADER.as_bytes() {
-            return Ok(());
-        }
+    if fs::read(&header_path).is_ok_and(|existing| existing == WASM_STDINT_HEADER.as_bytes()) {
+        return Ok(());
     }
 
     if let Err(e) = fs::write(&header_path, WASM_STDINT_HEADER) {
