@@ -77,16 +77,16 @@ impl Interpreter {
         // are either trusted paths or resolved through the package system.
         if import_path.starts_with("./") || import_path.starts_with("../") {
             let project_root = self.find_project_root();
-            if let Ok(root_canonical) = project_root.canonicalize() {
-                if !canonical.starts_with(&root_canonical) {
-                    return Err(RuntimeError {
-                        message: format!(
-                            "Import path '{}' resolves outside the project root. \
-                             Path traversal beyond the project boundary is not allowed.",
-                            import_path
-                        ),
-                    });
-                }
+            if let Ok(root_canonical) = project_root.canonicalize()
+                && !canonical.starts_with(&root_canonical)
+            {
+                return Err(RuntimeError {
+                    message: format!(
+                        "Import path '{}' resolves outside the project root. \
+                         Path traversal beyond the project boundary is not allowed.",
+                        import_path
+                    ),
+                });
             }
         }
 

@@ -1797,8 +1797,9 @@ fn run_build_js_dir(
     let mut staged_outputs = Vec::new();
     let mut count = 0usize;
     // Cycle detection + collect external sibling modules from import graph
-    let input_canonical =
-        input_path.canonicalize().unwrap_or_else(|_| input_path.to_path_buf());
+    let input_canonical = input_path
+        .canonicalize()
+        .unwrap_or_else(|_| input_path.to_path_buf());
     let mut external_modules = Vec::new();
     {
         let mut seen: std::collections::HashSet<PathBuf> = td_files
@@ -1841,9 +1842,7 @@ fn run_build_js_dir(
     // Canonicalize entry_root and out_root so the JS codegen's strip_prefix
     // chain works regardless of whether the CLI was invoked with relative paths.
     let entry_root_canonical = input_canonical.clone();
-    let out_root_canonical = out_dir
-        .canonicalize()
-        .unwrap_or_else(|_| out_dir.clone());
+    let out_root_canonical = out_dir.canonicalize().unwrap_or_else(|_| out_dir.clone());
 
     for td_file in &td_files {
         let rel = td_file.strip_prefix(input_path).unwrap_or(td_file);

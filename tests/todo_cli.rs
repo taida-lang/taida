@@ -1810,9 +1810,7 @@ fn test_check_package_import_unexported_symbol_e1701() {
         .as_array()
         .expect("diagnostics should be array");
 
-    let has_e1701 = diags
-        .iter()
-        .any(|d| d["code"].as_str() == Some("E1701"));
+    let has_e1701 = diags.iter().any(|d| d["code"].as_str() == Some("E1701"));
     assert!(
         has_e1701,
         "should report E1701 for unexported symbol in package import, got: {}",
@@ -1872,9 +1870,7 @@ fn test_check_package_import_nondefault_entry_unexported_e1701() {
         .as_array()
         .expect("diagnostics should be array");
 
-    let has_e1701 = diags
-        .iter()
-        .any(|d| d["code"].as_str() == Some("E1701"));
+    let has_e1701 = diags.iter().any(|d| d["code"].as_str() == Some("E1701"));
     assert!(
         has_e1701,
         "should report E1701 for unexported symbol when package uses non-default entry, got: {}",
@@ -1926,9 +1922,7 @@ fn test_check_package_submodule_import_unexported_e1701() {
         .as_array()
         .expect("diagnostics should be array");
 
-    let has_e1701 = diags
-        .iter()
-        .any(|d| d["code"].as_str() == Some("E1701"));
+    let has_e1701 = diags.iter().any(|d| d["code"].as_str() == Some("E1701"));
     assert!(
         has_e1701,
         "should report E1701 for unexported symbol in package submodule import, got: {}",

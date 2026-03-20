@@ -749,9 +749,7 @@ impl TypeChecker {
         use crate::parser::Statement as S;
 
         // Skip core-bundled and npm packages
-        if imp.path.starts_with("npm:")
-            || imp.path.starts_with("taida-lang/")
-        {
+        if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
             return;
         }
 
@@ -790,7 +788,7 @@ impl TypeChecker {
 
             match resolution {
                 Some(res) => {
-                    let entry = match &res.submodule {
+                    match &res.submodule {
                         Some(sub) => {
                             let sub_path = res.pkg_dir.join(format!("{}.td", sub));
                             if sub_path.exists() {
@@ -807,8 +805,8 @@ impl TypeChecker {
                                     Ok(Some(manifest)) => manifest.entry,
                                     _ => "main.td".to_string(),
                                 };
-                            let entry_path = if entry_name.starts_with("./") {
-                                res.pkg_dir.join(&entry_name[2..])
+                            let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
+                                res.pkg_dir.join(stripped)
                             } else {
                                 res.pkg_dir.join(&entry_name)
                             };
@@ -818,8 +816,7 @@ impl TypeChecker {
                                 return; // Entry not found — let downstream handle
                             }
                         }
-                    };
-                    entry
+                    }
                 }
                 None => return, // Package not installed — let downstream handle
             }
@@ -857,7 +854,11 @@ impl TypeChecker {
                 } else {
                     let mut sorted: Vec<&String> = exports.iter().collect();
                     sorted.sort();
-                    sorted.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    sorted
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 self.errors.push(TypeError {
                     message: format!(
@@ -2092,58 +2093,61 @@ defaulted fields must be provided via `()`",
                     let declared_ret = self.registry.resolve_type(ret_type_expr);
                     let is_unit_ret = matches!(declared_ret, Type::Unit)
                         || matches!(&declared_ret, Type::Named(n) if n == "Unit");
-                    if !matches!(declared_ret, Type::Unknown) && !is_unit_ret {
-                        if let Some(last_stmt) = ec.handler_body.last() {
-                            if let Statement::Expr(last_expr) = last_stmt {
-                                // Skip if the last expression is Gorilla (><) — never returns
-                                let is_never_returns = matches!(last_expr, Expr::Gorilla(_));
-                                if !is_never_returns {
-                                    let body_ty = self.infer_expr_type(last_expr);
-                                    // Also treat empty BuchiPack as Unit
-                                    let is_unit_body =
-                                        matches!(body_ty, Type::Unit)
-                                        || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
-                                    // RCB-241: Same exemption as FuncDef return type check
-                                    if !matches!(body_ty, Type::Unknown)
-                                        && !is_unit_body
-                                        && body_ty != declared_ret
-                                        && !self.registry.is_subtype_of(&body_ty, &declared_ret)
-                                        && !matches!(body_ty, Type::Named(_) | Type::List(_) | Type::BuchiPack(_))
-                                    {
-                                        self.errors.push(TypeError {
-                                            message: format!(
-                                                "[E1601] Error handler declares return type {}, \
+                    if !matches!(declared_ret, Type::Unknown)
+                        && !is_unit_ret
+                        && let Some(last_stmt) = ec.handler_body.last()
+                    {
+                        if let Statement::Expr(last_expr) = last_stmt {
+                            // Skip if the last expression is Gorilla (><) — never returns
+                            let is_never_returns = matches!(last_expr, Expr::Gorilla(_));
+                            if !is_never_returns {
+                                let body_ty = self.infer_expr_type(last_expr);
+                                // Also treat empty BuchiPack as Unit
+                                let is_unit_body = matches!(body_ty, Type::Unit)
+                                    || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
+                                // RCB-241: Same exemption as FuncDef return type check
+                                if !matches!(body_ty, Type::Unknown)
+                                    && !is_unit_body
+                                    && body_ty != declared_ret
+                                    && !self.registry.is_subtype_of(&body_ty, &declared_ret)
+                                    && !matches!(
+                                        body_ty,
+                                        Type::Named(_) | Type::List(_) | Type::BuchiPack(_)
+                                    )
+                                {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1601] Error handler declares return type {}, \
                                                  but the handler body evaluates to {}. \
                                                  Hint: The last expression in the |== handler \
                                                  must produce a value compatible with the declared \
                                                  return type.",
-                                                declared_ret, body_ty
-                                            ),
-                                            span: ec.span.clone(),
-                                        });
-                                    }
-                                }
-                            } else {
-                                // Last statement is not an expression (e.g. assignment).
-                                // Assignments produce Unit implicitly.
-                                let is_unit_producing = matches!(
-                                    last_stmt,
-                                    Statement::Assignment(_)
-                                        | Statement::UnmoldForward(_)
-                                        | Statement::UnmoldBackward(_)
-                                );
-                                if !(is_unit_producing && is_unit_ret) {
-                                    self.errors.push(TypeError {
-                                        message: format!(
-                                            "[E1601] Error handler declares return type {}, \
-                                             but the last statement is not an expression. \
-                                             Hint: The |== handler body's last statement must \
-                                             be an expression that produces a value.",
-                                            declared_ret
+                                            declared_ret, body_ty
                                         ),
                                         span: ec.span.clone(),
                                     });
                                 }
+                            }
+                        } else {
+                            // Last statement is not an expression (e.g. assignment).
+                            // Assignments produce Unit implicitly.
+                            let is_unit_producing = matches!(
+                                last_stmt,
+                                Statement::Assignment(_)
+                                    | Statement::UnmoldForward(_)
+                                    | Statement::UnmoldBackward(_)
+                            );
+                            if !(is_unit_producing && is_unit_ret) {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1601] Error handler declares return type {}, \
+                                             but the last statement is not an expression. \
+                                             Hint: The |== handler body's last statement must \
+                                             be an expression that produces a value.",
+                                        declared_ret
+                                    ),
+                                    span: ec.span.clone(),
+                                });
                             }
                         }
                     }

@@ -415,7 +415,8 @@ mod tests {
         let handle = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024) // 8 MB stack
             .spawn(|| {
-                let source = "x <= ".to_string() + &"(@(y <= ".repeat(300) + "1" + &"))".repeat(300);
+                let source =
+                    "x <= ".to_string() + &"(@(y <= ".repeat(300) + "1" + &"))".repeat(300);
                 let result = analyze(&source);
                 // Should produce a parse error about nesting depth, not crash
                 assert!(
@@ -429,7 +430,11 @@ mod tests {
                 assert!(
                     has_depth_error,
                     "Should report nesting depth error. Got: {:?}",
-                    result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+                    result
+                        .diagnostics
+                        .iter()
+                        .map(|d| &d.message)
+                        .collect::<Vec<_>>()
                 );
             })
             .expect("Failed to spawn test thread");
@@ -498,7 +503,11 @@ mod tests {
         assert!(
             has_empty_export_error,
             "Empty export <<< @() should produce diagnostic. Got: {:?}",
-            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+            result
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
         );
     }
 

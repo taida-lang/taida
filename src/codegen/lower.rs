@@ -345,11 +345,7 @@ impl Lowering {
             // .taida/deps/alice/pkg@b.12/submod.td).
             if let Some(ver) = version {
                 if let Some(resolution) =
-                    crate::pkg::resolver::resolve_package_module_versioned(
-                        &root,
-                        module_path,
-                        ver,
-                    )
+                    crate::pkg::resolver::resolve_package_module_versioned(&root, module_path, ver)
                 {
                     match resolution.submodule {
                         Some(submodule_path) => {
@@ -357,9 +353,8 @@ impl Lowering {
                         }
                         None => {
                             let entry =
-                                match crate::pkg::manifest::Manifest::from_dir(
-                                    &resolution.pkg_dir,
-                                ) {
+                                match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir)
+                                {
                                     Ok(Some(manifest)) => manifest.entry,
                                     _ => "main.td".to_string(),
                                 };
@@ -405,14 +400,14 @@ impl Lowering {
         let resolved = path.canonicalize().unwrap_or(path);
 
         // RCB-303: Reject relative imports that escape the project root (path traversal).
-        if module_path.starts_with("./") || module_path.starts_with("../") {
-            if let Some(sd) = source_dir.canonicalize().ok() {
-                let project_root = Self::find_project_root(&sd);
-                if let Ok(root_canonical) = project_root.canonicalize() {
-                    if !resolved.starts_with(&root_canonical) {
-                        return None;
-                    }
-                }
+        if (module_path.starts_with("./") || module_path.starts_with("../"))
+            && let Ok(sd) = source_dir.canonicalize()
+        {
+            let project_root = Self::find_project_root(&sd);
+            if let Ok(root_canonical) = project_root.canonicalize()
+                && !resolved.starts_with(&root_canonical)
+            {
+                return None;
             }
         }
 
@@ -510,28 +505,28 @@ impl Lowering {
         // RCB-201: Check if the module has explicit exports (<<<).
         // If it does, verify the symbol is in the export list before classifying.
         let export_list = Self::collect_module_export_list(&program.statements);
-        if let Some(ref exports) = export_list {
-            if !exports.contains(symbol_name) {
-                return Err(LowerError {
-                    message: format!(
-                        "Symbol '{}' not found in module '{}'. \
-                         The module exports: {}",
-                        symbol_name,
-                        module_path,
-                        if exports.is_empty() {
-                            "(nothing)".to_string()
-                        } else {
-                            let mut sorted: Vec<&String> = exports.iter().collect();
-                            sorted.sort();
-                            sorted
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
-                    ),
-                });
-            }
+        if let Some(ref exports) = export_list
+            && !exports.contains(symbol_name)
+        {
+            return Err(LowerError {
+                message: format!(
+                    "Symbol '{}' not found in module '{}'. \
+                     The module exports: {}",
+                    symbol_name,
+                    module_path,
+                    if exports.is_empty() {
+                        "(nothing)".to_string()
+                    } else {
+                        let mut sorted: Vec<&String> = exports.iter().collect();
+                        sorted.sort();
+                        sorted
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ),
+            });
         }
 
         // シンボルの種類を判定

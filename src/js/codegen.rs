@@ -92,11 +92,7 @@ impl JsCodegen {
     /// Set the entry root (entry .td file's parent) and output root for
     /// computing correct ESM import specifiers when modules are placed
     /// in a flattened output layout.
-    pub fn set_build_context(
-        &mut self,
-        entry_root: &std::path::Path,
-        out_root: &std::path::Path,
-    ) {
+    pub fn set_build_context(&mut self, entry_root: &std::path::Path, out_root: &std::path::Path) {
         self.entry_root = Some(entry_root.to_path_buf());
         self.out_root = Some(out_root.to_path_buf());
     }
@@ -307,9 +303,7 @@ impl JsCodegen {
 
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!(
-                    "}} catch (__taida_caught_err) {{\n"
-                ));
+                self.write("} catch (__taida_caught_err) {\n");
                 result.push_str(&self.output);
 
                 self.indent += 1;
@@ -317,9 +311,7 @@ impl JsCodegen {
                 // RCB-101: Type filter — re-throw if type does not match
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!(
-                    "const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';\n"
-                ));
+                self.write("const __taida_thrown_type = __taida_caught_err.type || (__taida_caught_err.__type) || 'Error';\n");
                 result.push_str(&self.output);
 
                 self.output.clear();
@@ -333,10 +325,7 @@ impl JsCodegen {
                 // Bind the error to the user's parameter name
                 self.output.clear();
                 self.write_indent();
-                self.write(&format!(
-                    "const {} = __taida_caught_err;\n",
-                    ec.error_param
-                ));
+                self.write(&format!("const {} = __taida_caught_err;\n", ec.error_param));
                 result.push_str(&self.output);
 
                 for stmt in &ec.handler_body {
@@ -681,10 +670,7 @@ impl JsCodegen {
                 result.push_str(&self.output);
 
                 self.output.clear();
-                self.writeln(&format!(
-                    "const {} = __taida_caught_err;",
-                    ec.error_param
-                ));
+                self.writeln(&format!("const {} = __taida_caught_err;", ec.error_param));
                 result.push_str(&self.output);
 
                 for (j, handler_stmt) in ec.handler_body.iter().enumerate() {
@@ -1118,10 +1104,7 @@ impl JsCodegen {
             "if (!__taida_is_error_subtype(__taida_thrown_type, '{}')) throw __taida_caught_err;",
             handler_type
         ));
-        self.writeln(&format!(
-            "const {} = __taida_caught_err;",
-            ec.error_param
-        ));
+        self.writeln(&format!("const {} = __taida_caught_err;", ec.error_param));
         for stmt in &ec.handler_body {
             self.gen_statement(stmt)?;
         }
@@ -1146,10 +1129,7 @@ impl JsCodegen {
     /// RCB-201: Validate that all imported symbols are exported by the target module.
     /// Reads and parses the target .td file, checks for explicit `<<<` declarations,
     /// and returns an error if any imported symbol is not in the export list.
-    fn validate_import_symbols(
-        &self,
-        import: &ImportStmt,
-    ) -> Result<(), JsError> {
+    fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
         // Skip core-bundled and npm packages — they don't have .td export declarations
         if import.path.starts_with("npm:")
             || import.path == "taida-lang/js"
@@ -1162,7 +1142,10 @@ impl JsCodegen {
         }
 
         // Resolve the .td source path
-        let td_path = if import.path.starts_with("./") || import.path.starts_with("../") || import.path.starts_with('/') {
+        let td_path = if import.path.starts_with("./")
+            || import.path.starts_with("../")
+            || import.path.starts_with('/')
+        {
             self.resolve_import_td_path(&import.path)
         } else if import.path.contains('/') {
             // Package import — resolve via .taida/deps/
@@ -1332,37 +1315,38 @@ impl JsCodegen {
         use std::path::{Path, PathBuf};
 
         // RCB-303: Check path traversal for `..` imports
-        if import_path.contains("..") {
-            if let (Some(project_root), Some(source_file)) =
-                (&self.project_root, &self.source_file)
-            {
-                let source_dir = source_file.parent().unwrap_or(Path::new("."));
-                let td_path = source_dir.join(import_path);
-                let reject = if let Ok(canonical) = td_path.canonicalize() {
-                    if let Ok(root_canonical) = project_root.canonicalize() {
-                        !canonical.starts_with(&root_canonical)
-                    } else {
-                        false // cannot verify root — let it through, will fail at read
-                    }
+        if import_path.contains("..")
+            && let (Some(project_root), Some(source_file)) = (&self.project_root, &self.source_file)
+        {
+            let source_dir = source_file.parent().unwrap_or(Path::new("."));
+            let td_path = source_dir.join(import_path);
+            let reject = if let Ok(canonical) = td_path.canonicalize() {
+                if let Ok(root_canonical) = project_root.canonicalize() {
+                    !canonical.starts_with(&root_canonical)
                 } else {
-                    false // file not found — let it through, will fail at read
-                };
-                if reject {
-                    return Err(JsError {
-                        message: format!(
-                            "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
-                            import_path
-                        ),
-                    });
+                    false // cannot verify root — let it through, will fail at read
                 }
+            } else {
+                false // file not found — let it through, will fail at read
+            };
+            if reject {
+                return Err(JsError {
+                    message: format!(
+                        "Import path '{}' resolves outside the project root. Path traversal is not allowed.",
+                        import_path
+                    ),
+                });
             }
         }
 
         // When build context is available and the import crosses directory boundaries,
         // compute the correct ESM path based on output layout.
-        if let (Some(entry_root), Some(out_root), Some(source_file), Some(output_file)) =
-            (&self.entry_root, &self.out_root, &self.source_file, &self.output_file)
-        {
+        if let (Some(entry_root), Some(out_root), Some(source_file), Some(output_file)) = (
+            &self.entry_root,
+            &self.out_root,
+            &self.source_file,
+            &self.output_file,
+        ) {
             let source_dir = source_file.parent().unwrap_or(Path::new("."));
             let dep_source = source_dir.join(import_path);
             // Canonicalize to resolve symlinks and ..
@@ -1405,9 +1389,7 @@ impl JsCodegen {
         // Fallback: simple string replacement (no build context).
         // Parser enforces .td extension on relative imports, so we only need
         // the .td/.tdjs → .mjs conversion.
-        let js_path = import_path
-            .replace(".tdjs", ".mjs")
-            .replace(".td", ".mjs");
+        let js_path = import_path.replace(".tdjs", ".mjs").replace(".td", ".mjs");
         Ok(js_path)
     }
 

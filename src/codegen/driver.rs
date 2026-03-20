@@ -142,8 +142,7 @@ pub fn compile_file(
 
     let result = (|| -> Result<PathBuf, CompileError> {
         while let Some((module_path, _symbols, importer_dir, version)) = pending_imports.pop() {
-            let dep_path =
-                resolve_module_path(&importer_dir, &module_path, version.as_deref());
+            let dep_path = resolve_module_path(&importer_dir, &module_path, version.as_deref());
             let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
             if compiled.contains(&canonical) {
                 continue;
@@ -231,15 +230,13 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
             crate::pkg::resolver::resolve_package_module(&root, module_path)
         {
             match resolution.submodule {
-                Some(submodule_path) => {
-                    resolution.pkg_dir.join(format!("{}.td", submodule_path))
-                }
+                Some(submodule_path) => resolution.pkg_dir.join(format!("{}.td", submodule_path)),
                 None => {
-                    let entry =
-                        match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
-                            Ok(Some(manifest)) => manifest.entry,
-                            _ => "main.td".to_string(),
-                        };
+                    let entry = match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir)
+                    {
+                        Ok(Some(manifest)) => manifest.entry,
+                        _ => "main.td".to_string(),
+                    };
                     if entry.starts_with("./") || entry.starts_with("../") {
                         resolution.pkg_dir.join(entry[2..].trim_start_matches('/'))
                     } else {
@@ -269,10 +266,7 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
             module_path.contains("..")
         };
         if reject {
-            return PathBuf::from(format!(
-                "<path traversal rejected: {}>",
-                module_path
-            ));
+            return PathBuf::from(format!("<path traversal rejected: {}>", module_path));
         }
     }
 
@@ -613,8 +607,7 @@ fn inline_wasm_module_imports(
         .collect();
 
     while let Some((module_path, importer_dir, requested_syms, version)) = pending.pop() {
-        let dep_path =
-            resolve_module_path(&importer_dir, &module_path, version.as_deref());
+        let dep_path = resolve_module_path(&importer_dir, &module_path, version.as_deref());
         let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
 
         // 既にコンパイル済みのモジュールか確認

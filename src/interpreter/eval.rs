@@ -307,18 +307,13 @@ impl Interpreter {
                             self.env.push_scope();
                             self.env.define_force(&ec.error_param, err);
 
-                            let handler_result =
-                                self.eval_statements(&ec.handler_body)?;
+                            let handler_result = self.eval_statements(&ec.handler_body)?;
                             self.env.pop_scope();
 
                             match handler_result {
                                 Signal::Value(v) => return Ok(Signal::Value(v)),
-                                Signal::TailCall(args) => {
-                                    return Ok(Signal::TailCall(args))
-                                }
-                                Signal::Throw(err) => {
-                                    return Ok(Signal::Throw(err))
-                                }
+                                Signal::TailCall(args) => return Ok(Signal::TailCall(args)),
+                                Signal::Throw(err) => return Ok(Signal::Throw(err)),
                                 Signal::Gorilla => return Ok(Signal::Gorilla),
                             }
                         } else {
@@ -769,7 +764,10 @@ impl Interpreter {
                 match callee_val {
                     Value::Function(func) => self.call_function(&func, args),
                     _ => Err(RuntimeError {
-                        message: format!("Cannot call non-function value: {}", callee_val.to_error_display(200)),
+                        message: format!(
+                            "Cannot call non-function value: {}",
+                            callee_val.to_error_display(200)
+                        ),
                     }),
                 }
             }
@@ -807,7 +805,11 @@ impl Interpreter {
                         }
                     }
                     _ => Err(RuntimeError {
-                        message: format!("Cannot access field '{}' on {}", field, obj_val.to_error_display(200)),
+                        message: format!(
+                            "Cannot access field '{}' on {}",
+                            field,
+                            obj_val.to_error_display(200)
+                        ),
                     }),
                 }
             }

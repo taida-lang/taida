@@ -1955,11 +1955,7 @@ fn test_quality_cross_module_native() {
     let mut failures = Vec::new();
 
     for dir in &test_dirs {
-        let dir_name = dir
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
         // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
         let main_td = if dir.join("main.td").exists() {
             dir.join("main.td")

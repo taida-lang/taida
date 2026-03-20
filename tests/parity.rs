@@ -4284,8 +4284,7 @@ stdout(greet("world"))
         "nested/main.mjs missing"
     );
 
-    let interp =
-        run_interpreter(&nested_dir.join("main.td")).expect("interpreter should succeed");
+    let interp = run_interpreter(&nested_dir.join("main.td")).expect("interpreter should succeed");
     let js = Command::new("node")
         .arg(out_dir.join("nested").join("main.mjs"))
         .output()
@@ -5183,11 +5182,7 @@ fn test_quality_cross_module_parity() {
     let mut failures = Vec::new();
 
     for dir in &test_dirs {
-        let dir_name = dir
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let dir_name = dir.file_name().unwrap().to_string_lossy().to_string();
         // RCB-213: prefer main.td, fall back to main.tdm for versioned import tests
         let main_td = if dir.join("main.td").exists() {
             dir.join("main.td")
@@ -5214,8 +5209,7 @@ fn test_quality_cross_module_parity() {
         let expected_path = dir.join("expected");
         if expected_path.exists() {
             let expected = normalize(
-                &fs::read_to_string(&expected_path)
-                    .expect("expected file should be readable"),
+                &fs::read_to_string(&expected_path).expect("expected file should be readable"),
             );
             if interp != expected {
                 failures.push(format!(

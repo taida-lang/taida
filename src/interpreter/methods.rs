@@ -119,12 +119,20 @@ impl Interpreter {
                     Ok(Signal::Throw(obj.clone()))
                 } else {
                     Err(RuntimeError {
-                        message: format!("Unknown method '{}' on {}", method, obj.to_error_display(200)),
+                        message: format!(
+                            "Unknown method '{}' on {}",
+                            method,
+                            obj.to_error_display(200)
+                        ),
                     })
                 }
             }
             _ => Err(RuntimeError {
-                message: format!("Cannot call method '{}' on {}", method, obj.to_error_display(200)),
+                message: format!(
+                    "Cannot call method '{}' on {}",
+                    method,
+                    obj.to_error_display(200)
+                ),
             }),
         }
     }

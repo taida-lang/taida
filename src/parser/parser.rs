@@ -837,9 +837,8 @@ impl Parser {
 
         // Local imports (relative or absolute path) must end with .td extension.
         // Package imports (e.g. author/pkg) are excluded.
-        let is_local_import = path.starts_with("./")
-            || path.starts_with("../")
-            || path.starts_with('/');
+        let is_local_import =
+            path.starts_with("./") || path.starts_with("../") || path.starts_with('/');
         if is_local_import && !path.ends_with(".td") {
             return Err(ParseError {
                 message: format!(
