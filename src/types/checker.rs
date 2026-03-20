@@ -2151,15 +2151,15 @@ defaulted fields must be provided via `()`",
                                 // Also treat empty BuchiPack as Unit
                                 let is_unit_body = matches!(body_ty, Type::Unit)
                                     || matches!(&body_ty, Type::BuchiPack(f) if f.is_empty());
-                                // RCB-241: Same exemption as FuncDef return type check
-                                if !matches!(body_ty, Type::Unknown)
-                                    && !is_unit_body
-                                    && body_ty != declared_ret
-                                    && !self.registry.is_subtype_of(&body_ty, &declared_ret)
-                                    && !matches!(
-                                        body_ty,
-                                        Type::Named(_) | Type::List(_) | Type::BuchiPack(_)
-                                    )
+                                // RCB-241: Aligned with FuncDef return type check (FL-1 / RCB-50)
+                                if !(matches!(body_ty, Type::Unknown)
+                                    || is_unit_body
+                                    || Self::contains_unknown(&body_ty)
+                                    || self.registry.is_subtype_of(&body_ty, &declared_ret)
+                                    || body_ty.is_numeric() && declared_ret.is_numeric()
+                                    || self.contains_unresolved_type_var(&body_ty)
+                                    || self.contains_unresolved_type_var(&declared_ret)
+                                    || self.is_mold_defined_named(&body_ty))
                                 {
                                     self.errors.push(TypeError {
                                         message: format!(
