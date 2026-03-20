@@ -389,6 +389,10 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
     // Type checking
     if !no_check {
         let mut checker = TypeChecker::new();
+        let file_path = std::path::Path::new(filename);
+        if file_path.exists() {
+            checker.set_source_file(file_path);
+        }
         checker.check_program(&program);
         if !checker.errors.is_empty() {
             for err in &checker.errors {
@@ -528,6 +532,7 @@ fn run_check_cmd(args: &[String]) {
         }
 
         let mut checker = TypeChecker::new();
+        checker.set_source_file(std::path::Path::new(&file_str));
         checker.check_program(&program);
         for err in &checker.errors {
             let (code, suggestion) = split_diag_code_and_hint(&err.message);
@@ -2037,7 +2042,10 @@ fn run_build_native(
     match codegen::driver::compile_file(&entry_file, output) {
         Ok(bin_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (native): {}", bin_path.display());
+                // RCB-217: Display the canonical (absolute) path for consistency
+                // with JS backend which always shows absolute paths.
+                let display_path = bin_path.canonicalize().unwrap_or(bin_path);
+                println!("Built (native): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2199,7 +2207,9 @@ fn run_build_wasm_min(
     match codegen::driver::compile_file_wasm(input_path, output) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-min): {}", wasm_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let display_path = wasm_path.canonicalize().unwrap_or(wasm_path);
+                println!("Built (wasm-min): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2361,7 +2371,9 @@ fn run_build_wasm_wasi(
     match codegen::driver::compile_file_wasm_wasi(input_path, output) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-wasi): {}", wasm_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let display_path = wasm_path.canonicalize().unwrap_or(wasm_path);
+                println!("Built (wasm-wasi): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2523,8 +2535,11 @@ fn run_build_wasm_edge(
     match codegen::driver::compile_file_wasm_edge(input_path, output) {
         Ok(result) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-edge): {}", result.wasm_path.display());
-                println!("  JS glue: {}", result.glue_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let wasm_display = result.wasm_path.canonicalize().unwrap_or(result.wasm_path);
+                let glue_display = result.glue_path.canonicalize().unwrap_or(result.glue_path);
+                println!("Built (wasm-edge): {}", wasm_display.display());
+                println!("  JS glue: {}", glue_display.display());
             }
         }
         Err(e) => {
@@ -2686,7 +2701,9 @@ fn run_build_wasm_full(
     match codegen::driver::compile_file_wasm_full(input_path, output) {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
-                println!("Built (wasm-full): {}", wasm_path.display());
+                // RCB-217: Display canonical path for consistency with JS backend
+                let display_path = wasm_path.canonicalize().unwrap_or(wasm_path);
+                println!("Built (wasm-full): {}", display_path.display());
             }
         }
         Err(e) => {
@@ -2748,6 +2765,10 @@ fn run_type_checks_and_warnings(
     compile_stats: &mut CompileDiagStats,
 ) {
     let mut checker = TypeChecker::new();
+    let file_path = std::path::Path::new(file);
+    if file_path.exists() {
+        checker.set_source_file(file_path);
+    }
     checker.check_program(program);
     if !checker.errors.is_empty() {
         for err in &checker.errors {

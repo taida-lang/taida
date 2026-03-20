@@ -207,7 +207,9 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
                 crate::pkg::resolver::resolve_package_module_versioned(&root, module_path, ver)
             {
                 match resolution.submodule {
-                    Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                    Some(submodule_path) => {
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                    }
                     None => {
                         let entry =
                             match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
@@ -229,7 +231,9 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
             crate::pkg::resolver::resolve_package_module(&root, module_path)
         {
             match resolution.submodule {
-                Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                Some(submodule_path) => {
+                    resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                }
                 None => {
                     let entry =
                         match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {

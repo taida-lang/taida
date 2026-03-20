@@ -40,7 +40,9 @@ impl Interpreter {
                 crate::pkg::resolver::resolve_package_module(&root, import_path)
             {
                 match resolution.submodule {
-                    Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                    Some(submodule_path) => {
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                    }
                     None => {
                         // Package root import: read packages.tdm to determine entry point
                         let entry =
@@ -173,7 +175,9 @@ impl Interpreter {
                 crate::pkg::resolver::resolve_package_module_versioned(&root, pkg_id, version)
             {
                 let path = match resolution.submodule {
-                    Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                    Some(submodule_path) => {
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                    }
                     None => {
                         // Package root import: read packages.tdm to determine entry point
                         let entry =

@@ -352,7 +352,9 @@ impl Lowering {
                     )
                 {
                     match resolution.submodule {
-                        Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                        Some(submodule_path) => {
+                            resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                        }
                         None => {
                             let entry =
                                 match crate::pkg::manifest::Manifest::from_dir(
@@ -376,7 +378,9 @@ impl Lowering {
                 crate::pkg::resolver::resolve_package_module(&root, module_path)
             {
                 match resolution.submodule {
-                    Some(submodule_path) => resolution.pkg_dir.join(submodule_path),
+                    Some(submodule_path) => {
+                        resolution.pkg_dir.join(format!("{}.td", submodule_path))
+                    }
                     None => {
                         let entry =
                             match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
@@ -459,47 +463,99 @@ impl Lowering {
 
     /// QF-16/17: インポートされたシンボルの種類を判定する。
     /// モジュールのソースを解析し、シンボルが関数定義/値代入/TypeDef のいずれかを返す。
+    /// Collect the explicit export list from a parsed module's AST.
+    /// Returns `None` if the module has no `<<<` statements (backward compat: export everything).
+    /// Returns `Some(set)` if the module has `<<<` statements listing specific symbols.
+    fn collect_module_export_list(
+        statements: &[Statement],
+    ) -> Option<std::collections::HashSet<String>> {
+        let mut export_symbols: Vec<String> = Vec::new();
+        let mut has_export = false;
+        for stmt in statements {
+            if let Statement::Export(export_stmt) = stmt {
+                has_export = true;
+                for sym in &export_stmt.symbols {
+                    if !export_symbols.contains(sym) {
+                        export_symbols.push(sym.clone());
+                    }
+                }
+            }
+        }
+        if has_export {
+            Some(export_symbols.into_iter().collect())
+        } else {
+            None
+        }
+    }
+
     fn classify_imported_symbol(
         &self,
         module_path: &str,
         symbol_name: &str,
         version: Option<&str>,
-    ) -> ImportedSymbolKind {
+    ) -> Result<ImportedSymbolKind, LowerError> {
         // モジュールパスを解決
         let path = match self.resolve_import_path(module_path, version) {
             Some(path) => path,
-            None => return ImportedSymbolKind::Function,
+            None => return Ok(ImportedSymbolKind::Function),
         };
 
         // ソースを読み込んでパース
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
-            Err(_) => return ImportedSymbolKind::Function,
+            Err(_) => return Ok(ImportedSymbolKind::Function),
         };
         let (program, _) = crate::parser::parse(&source);
+
+        // RCB-201: Check if the module has explicit exports (<<<).
+        // If it does, verify the symbol is in the export list before classifying.
+        let export_list = Self::collect_module_export_list(&program.statements);
+        if let Some(ref exports) = export_list {
+            if !exports.contains(symbol_name) {
+                return Err(LowerError {
+                    message: format!(
+                        "Symbol '{}' not found in module '{}'. \
+                         The module exports: {}",
+                        symbol_name,
+                        module_path,
+                        if exports.is_empty() {
+                            "(nothing)".to_string()
+                        } else {
+                            let mut sorted: Vec<&String> = exports.iter().collect();
+                            sorted.sort();
+                            sorted
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    ),
+                });
+            }
+        }
 
         // シンボルの種類を判定
         for stmt in &program.statements {
             match stmt {
                 Statement::FuncDef(func_def) if func_def.name == symbol_name => {
-                    return ImportedSymbolKind::Function;
+                    return Ok(ImportedSymbolKind::Function);
                 }
                 Statement::TypeDef(type_def) if type_def.name == symbol_name => {
                     // 種類判定のみ。メタデータ登録は register_imported_typedef で行う。
-                    return ImportedSymbolKind::TypeDef;
+                    return Ok(ImportedSymbolKind::TypeDef);
                 }
                 Statement::InheritanceDef(inh_def) if inh_def.child == symbol_name => {
-                    return ImportedSymbolKind::TypeDef;
+                    return Ok(ImportedSymbolKind::TypeDef);
                 }
                 Statement::Assignment(assign) if assign.target == symbol_name => {
-                    return ImportedSymbolKind::Value;
+                    return Ok(ImportedSymbolKind::Value);
                 }
                 _ => {}
             }
         }
 
         // 見つからなかった場合はデフォルトで関数扱い
-        ImportedSymbolKind::Function
+        Ok(ImportedSymbolKind::Function)
     }
 
     // collect_module_top_level_values は廃止。
@@ -1185,8 +1241,9 @@ impl Lowering {
                         } else {
                             // stdlib でないか、マッピングのない関数はユーザー関数として登録
                             // QF-16/17: シンボルの種類に応じて処理を分岐
+                            // RCB-201: classify now validates against module's export list
                             let sym_kind =
-                                self.classify_imported_symbol(path, orig_name, version);
+                                self.classify_imported_symbol(path, orig_name, version)?;
                             let module_key = self.import_module_key(path, version);
                             let init_symbol = Self::init_symbol_for_key(&module_key);
                             needs_module_object = true;

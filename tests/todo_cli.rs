@@ -1169,9 +1169,14 @@ fn test_build_js_failure_does_not_leave_stale_dependency_outputs() {
         "build should fail when a dependency import cannot be resolved"
     );
     let stderr = String::from_utf8_lossy(&build_out.stderr);
+    // RCB-201: The JS backend now validates imported symbols against the target
+    // module's export list at compile time.  The `main.td` imports `greet` from
+    // `alice/pkg`, but `pkg` only exports `welcome`, so the error is caught
+    // before reaching the unresolved `alice/missing` dependency.
     assert!(
-        stderr.contains("Could not resolve package import 'alice/missing'"),
-        "expected unresolved dependency import error, got: {}",
+        stderr.contains("not found in module")
+            || stderr.contains("Could not resolve package import"),
+        "expected import validation or unresolved dependency error, got: {}",
         stderr
     );
 
@@ -1760,5 +1765,217 @@ fn test_rc5_inspect_format_missing_value_errors() {
         stderr.contains("Missing value for --format"),
         "should mention missing value, got: {}",
         stderr
+    );
+}
+
+// ── RCB-201: taida check detects unexported symbols in package imports ──
+
+#[test]
+fn test_check_package_import_unexported_symbol_e1701() {
+    let dir = unique_temp_dir("taida_check_pkg_e1701");
+    let project = dir.join("project");
+    let dep_dir = project
+        .join(".taida")
+        .join("deps")
+        .join("alice")
+        .join("pkg");
+    fs::create_dir_all(&dep_dir).expect("create dep dir");
+
+    // Package module exports only "exported"
+    write_file(
+        &dep_dir.join("main.td"),
+        "exported <= \"hello\"\nhidden <= \"secret\"\n\n<<< @(exported)\n",
+    );
+
+    // Main file tries to import "hidden" which is not exported
+    write_file(
+        &project.join("main.td"),
+        ">>> alice/pkg => @(hidden)\nstdout(hidden)\n",
+    );
+    write_file(&project.join("packages.tdm"), ">>> alice/pkg@a.1\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(project.join("main.td"))
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+
+    let has_e1701 = diags
+        .iter()
+        .any(|d| d["code"].as_str() == Some("E1701"));
+    assert!(
+        has_e1701,
+        "should report E1701 for unexported symbol in package import, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_check_package_import_nondefault_entry_unexported_e1701() {
+    let dir = unique_temp_dir("taida_check_pkg_entry_e1701");
+    let project = dir.join("project");
+    let dep_dir = project
+        .join(".taida")
+        .join("deps")
+        .join("alice")
+        .join("pkg");
+    fs::create_dir_all(&dep_dir).expect("create dep dir");
+
+    // Package has packages.tdm with non-default entry pointing to lib.td
+    write_file(
+        &dep_dir.join("packages.tdm"),
+        ">>> ./lib.td => @(exported)\n<<<@a.1 @(exported)\n",
+    );
+
+    // lib.td exports only "exported"
+    write_file(
+        &dep_dir.join("lib.td"),
+        "exported <= \"hello\"\n\n<<< @(exported)\n",
+    );
+
+    // main.td in the package exists but is NOT the entry
+    write_file(
+        &dep_dir.join("main.td"),
+        "hidden <= \"secret\"\n\n<<< @(hidden)\n",
+    );
+
+    // Project main tries to import "hidden" — lib.td (the real entry) does NOT export it
+    write_file(
+        &project.join("main.td"),
+        ">>> alice/pkg => @(hidden)\nstdout(hidden)\n",
+    );
+    write_file(&project.join("packages.tdm"), ">>> alice/pkg@a.1\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(project.join("main.td"))
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+
+    let has_e1701 = diags
+        .iter()
+        .any(|d| d["code"].as_str() == Some("E1701"));
+    assert!(
+        has_e1701,
+        "should report E1701 for unexported symbol when package uses non-default entry, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_check_package_submodule_import_unexported_e1701() {
+    let dir = unique_temp_dir("taida_check_pkg_submod_e1701");
+    let project = dir.join("project");
+    let dep_dir = project
+        .join(".taida")
+        .join("deps")
+        .join("alice")
+        .join("pkg");
+    let sub_dir = dep_dir.join("sub");
+    fs::create_dir_all(&sub_dir).expect("create sub dir");
+
+    // Submodule at sub/util.td exports only "exported"
+    write_file(
+        &sub_dir.join("util.td"),
+        "exported <= \"hello\"\nhidden <= \"secret\"\n\n<<< @(exported)\n",
+    );
+
+    // Package needs a main.td for the root
+    write_file(&dep_dir.join("main.td"), "root <= \"root\"\n<<< @(root)\n");
+
+    // Main file tries to import "hidden" from submodule — not exported
+    write_file(
+        &project.join("main.td"),
+        ">>> alice/pkg/sub/util => @(hidden)\nstdout(hidden)\n",
+    );
+    write_file(&project.join("packages.tdm"), ">>> alice/pkg@a.1\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(project.join("main.td"))
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    let diags = value["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+
+    let has_e1701 = diags
+        .iter()
+        .any(|d| d["code"].as_str() == Some("E1701"));
+    assert!(
+        has_e1701,
+        "should report E1701 for unexported symbol in package submodule import, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_check_package_import_exported_symbol_passes() {
+    let dir = unique_temp_dir("taida_check_pkg_export_ok");
+    let project = dir.join("project");
+    let dep_dir = project
+        .join(".taida")
+        .join("deps")
+        .join("alice")
+        .join("pkg");
+    fs::create_dir_all(&dep_dir).expect("create dep dir");
+
+    // Package module exports "exported"
+    write_file(
+        &dep_dir.join("main.td"),
+        "exported <= \"hello\"\nhidden <= \"secret\"\n\n<<< @(exported)\n",
+    );
+
+    // Main file imports "exported" which IS exported — should pass
+    write_file(
+        &project.join("main.td"),
+        ">>> alice/pkg => @(exported)\nstdout(exported)\n",
+    );
+    write_file(&project.join("packages.tdm"), ">>> alice/pkg@a.1\n");
+
+    let output = Command::new(taida_bin())
+        .arg("check")
+        .arg("--json")
+        .arg(project.join("main.td"))
+        .output()
+        .expect("failed to run taida check --json");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output should be valid json");
+    assert_eq!(
+        value["summary"]["errors"].as_u64(),
+        Some(0),
+        "should have no errors when importing exported symbol, got: {}",
+        stdout
     );
 }

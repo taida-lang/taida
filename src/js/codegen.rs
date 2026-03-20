@@ -1130,7 +1130,136 @@ impl JsCodegen {
         Ok(())
     }
 
+    /// RCB-201: Resolve the .td source path for a local import, for export validation.
+    /// Returns None if the path cannot be determined (e.g., no source_file context).
+    fn resolve_import_td_path(&self, import_path: &str) -> Option<std::path::PathBuf> {
+        let source_file = self.source_file.as_ref()?;
+        let source_dir = source_file.parent()?;
+        let td_path = source_dir.join(import_path);
+        if td_path.exists() {
+            Some(td_path)
+        } else {
+            None
+        }
+    }
+
+    /// RCB-201: Validate that all imported symbols are exported by the target module.
+    /// Reads and parses the target .td file, checks for explicit `<<<` declarations,
+    /// and returns an error if any imported symbol is not in the export list.
+    fn validate_import_symbols(
+        &self,
+        import: &ImportStmt,
+    ) -> Result<(), JsError> {
+        // Skip core-bundled and npm packages — they don't have .td export declarations
+        if import.path.starts_with("npm:")
+            || import.path == "taida-lang/js"
+            || import.path == "taida-lang/os"
+            || import.path == "taida-lang/crypto"
+            || import.path == "taida-lang/net"
+            || import.path == "taida-lang/pool"
+        {
+            return Ok(());
+        }
+
+        // Resolve the .td source path
+        let td_path = if import.path.starts_with("./") || import.path.starts_with("../") || import.path.starts_with('/') {
+            self.resolve_import_td_path(&import.path)
+        } else if import.path.contains('/') {
+            // Package import — resolve via .taida/deps/
+            let project_root = match self.project_root.as_ref() {
+                Some(r) => r,
+                None => return Ok(()), // No project root — skip validation
+            };
+            let resolution = if let Some(ref ver) = import.version {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    project_root,
+                    &import.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(project_root, &import.path)
+            };
+            resolution.and_then(|r| {
+                let path = match &r.submodule {
+                    Some(sub) => r.pkg_dir.join(format!("{}.td", sub)),
+                    None => {
+                        let entry = match crate::pkg::manifest::Manifest::from_dir(&r.pkg_dir) {
+                            Ok(Some(manifest)) => manifest.entry,
+                            _ => "main.td".to_string(),
+                        };
+                        r.pkg_dir.join(entry)
+                    }
+                };
+                if path.exists() { Some(path) } else { None }
+            })
+        } else {
+            None
+        };
+
+        let td_path = match td_path {
+            Some(p) => p,
+            None => return Ok(()), // Cannot resolve — let downstream handle the error
+        };
+
+        let source = match std::fs::read_to_string(&td_path) {
+            Ok(s) => s,
+            Err(_) => return Ok(()), // Cannot read — let downstream handle the error
+        };
+        let (program, _) = crate::parser::parse(&source);
+
+        // Collect explicit export list from <<< statements
+        let mut export_symbols: Vec<String> = Vec::new();
+        let mut has_export = false;
+        for stmt in &program.statements {
+            if let crate::parser::Statement::Export(export_stmt) = stmt {
+                has_export = true;
+                for sym in &export_stmt.symbols {
+                    if !export_symbols.contains(sym) {
+                        export_symbols.push(sym.clone());
+                    }
+                }
+            }
+        }
+
+        // If no <<< found, all symbols are exported (backward compat)
+        if !has_export {
+            return Ok(());
+        }
+
+        let exports: std::collections::HashSet<String> = export_symbols.into_iter().collect();
+
+        // Validate each imported symbol
+        for sym in &import.symbols {
+            if !exports.contains(&sym.name) {
+                return Err(JsError {
+                    message: format!(
+                        "Symbol '{}' not found in module '{}'. \
+                         The module exports: {}",
+                        sym.name,
+                        import.path,
+                        if exports.is_empty() {
+                            "(nothing)".to_string()
+                        } else {
+                            let mut sorted: Vec<&String> = exports.iter().collect();
+                            sorted.sort();
+                            sorted
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn gen_import(&mut self, import: &ImportStmt) -> Result<(), JsError> {
+        // RCB-201: Validate imported symbols against target module's export list
+        self.validate_import_symbols(import)?;
+
         // taida-lang/js: JSNew is a compile-time construct, no runtime import needed
         if import.path == "taida-lang/js" {
             return Ok(());
@@ -1337,7 +1466,7 @@ impl JsCodegen {
 
         // Determine the target .td file
         let td_path = match &resolution.submodule {
-            Some(submodule) => resolution.pkg_dir.join(submodule),
+            Some(submodule) => resolution.pkg_dir.join(format!("{}.td", submodule)),
             None => {
                 // Read packages.tdm for entry point.
                 // If the manifest is missing or unreadable, fall back to "main.td"
