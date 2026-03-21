@@ -646,36 +646,56 @@ impl Interpreter {
             // Set read timeout on the connection
             let _ = stream.set_read_timeout(Some(read_timeout));
 
-            // Read request data (up to 64KB for v1)
-            let mut buf = vec![0u8; 65536];
-            let bytes_read = match std::io::Read::read(&mut stream, &mut buf) {
-                Ok(0) => {
-                    // Connection closed without data, skip
-                    continue;
+            // ── Read until head is complete + full body arrives ──
+            // v1 max buffer: 1 MiB (protects against memory exhaustion)
+            const MAX_REQUEST_BUF: usize = 1_048_576;
+            let mut buf = vec![0u8; 8192];
+            let mut total_read: usize = 0;
+
+            // Phase 1: read until the HTTP head is complete
+            enum HeadResult {
+                Complete(Vec<(String, Value)>, usize, i64), // (parsed_fields, head_consumed, content_length)
+                Malformed,
+                Incomplete, // EOF / timeout before head finished
+            }
+
+            let head_result = loop {
+                if total_read >= MAX_REQUEST_BUF {
+                    break HeadResult::Incomplete;
                 }
-                Ok(n) => n,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    // Read timeout, skip this connection
-                    continue;
+                if total_read == buf.len() {
+                    buf.resize(std::cmp::min(buf.len() * 2, MAX_REQUEST_BUF), 0);
                 }
-                Err(_) => {
-                    // Read error, skip this connection
-                    continue;
+                match std::io::Read::read(&mut stream, &mut buf[total_read..]) {
+                    Ok(0) => break HeadResult::Incomplete,
+                    Ok(n) => total_read += n,
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break HeadResult::Incomplete;
+                    }
+                    Err(_) => break HeadResult::Incomplete,
+                }
+
+                let parse_result = parse_request_head(&buf[..total_read]);
+                match extract_result_value(&parse_result) {
+                    None => break HeadResult::Malformed,
+                    Some(inner) => {
+                        if get_field_bool(inner, "complete").unwrap_or(false) {
+                            let consumed =
+                                get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                            let cl =
+                                get_field_int(inner, "contentLength").unwrap_or(0);
+                            break HeadResult::Complete(inner.clone(), consumed, cl);
+                        }
+                    }
                 }
             };
-            buf.truncate(bytes_read);
 
-            // Parse the request head
-            let raw_bytes = buf.clone();
-            let parse_result = parse_request_head(&raw_bytes);
-
-            // Check if parse succeeded
-            let parsed_inner = match extract_result_value(&parse_result) {
-                Some(inner) => inner,
-                None => {
-                    // Parse failed → send 400 Bad Request
+            let (parsed_fields, head_consumed, content_length) = match head_result {
+                HeadResult::Complete(fields, consumed, cl) => (fields, consumed, cl),
+                HeadResult::Malformed | HeadResult::Incomplete => {
                     let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = std::io::Write::write_all(&mut stream, bad_request);
                     request_count += 1;
@@ -683,42 +703,47 @@ impl Interpreter {
                 }
             };
 
-            // Check completeness
-            let is_complete = match get_field_bool(&parsed_inner, "complete") {
-                Some(c) => c,
-                None => false,
-            };
-            if !is_complete {
-                // Incomplete request → send 400
-                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = std::io::Write::write_all(&mut stream, bad_request);
-                request_count += 1;
-                continue;
+            // Phase 2: read until the full body arrives (Content-Length bytes after head)
+            let body_needed = head_consumed + content_length as usize;
+            while total_read < body_needed && total_read < MAX_REQUEST_BUF {
+                if total_read == buf.len() {
+                    buf.resize(std::cmp::min(buf.len() * 2, MAX_REQUEST_BUF), 0);
+                }
+                match std::io::Read::read(&mut stream, &mut buf[total_read..]) {
+                    Ok(0) => break,
+                    Ok(n) => total_read += n,
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
             }
+            buf.truncate(total_read);
 
             // ── Build request pack for handler ──
-            // request shape: @(raw, method, path, query, version, headers, body, bodyOffset, contentLength, remoteHost, remotePort)
-            let body_offset = get_field_int(&parsed_inner, "bodyOffset").unwrap_or(0);
-            let content_length = get_field_int(&parsed_inner, "contentLength").unwrap_or(0);
-            let body_start = body_offset as usize;
-            let body_len = std::cmp::min(content_length as usize, raw_bytes.len().saturating_sub(body_start));
+            let raw_bytes = buf;
+            let body_offset = head_consumed as i64;
+            let body_start = head_consumed;
+            let body_len = std::cmp::min(
+                content_length as usize,
+                raw_bytes.len().saturating_sub(body_start),
+            );
 
             let mut request_fields: Vec<(String, Value)> = Vec::new();
             request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
 
-            // Copy spans from parsed result
             for key in &["method", "path", "query", "version", "headers"] {
-                if let Some(v) = get_field_value(&parsed_inner, key) {
+                if let Some(v) = get_field_value(&parsed_fields, key) {
                     request_fields.push((key.to_string(), v.clone()));
                 }
             }
 
-            // body span
             request_fields.push(("body".into(), make_span(body_start, body_len)));
             request_fields.push(("bodyOffset".into(), Value::Int(body_offset)));
             request_fields.push(("contentLength".into(), Value::Int(content_length)));
-
-            // remoteHost and remotePort from peer address
             request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
             request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
 
@@ -1829,5 +1854,135 @@ mod tests {
         let result = interp.try_net_func("httpServe", &args);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("port must be 0-65535"));
+    }
+
+    /// TCP fragmentation: head split across two writes must still succeed
+    #[test]
+    fn test_http_serve_split_head() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18500);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("split-ok"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Send head in two fragments with a small delay between them
+        std::io::Write::write_all(&mut client, b"GET / HT").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::io::Write::write_all(&mut client, b"TP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("200 OK"),
+            "Split head should succeed, got: {}",
+            response_str
+        );
+        assert!(response_str.contains("split-ok"));
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// TCP fragmentation: body arriving after head in a separate write
+    #[test]
+    fn test_http_serve_split_body() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18600);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        // We need a handler that echoes contentLength so we can verify the body was complete
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("body-ok"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Send complete head with Content-Length, but body arrives separately
+        std::io::Write::write_all(
+            &mut client,
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\n",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::io::Write::write_all(&mut client, b"hello world").unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("200 OK"),
+            "Split body should succeed, got: {}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
     }
 }
