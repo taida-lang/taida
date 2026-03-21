@@ -209,8 +209,8 @@ fn encode_response(response: &Value) -> Value {
         Err(msg) => return make_result_failure_msg("EncodeError", msg),
     };
 
-    // RFC 9110: 1xx, 204, 304 MUST NOT contain a message body
-    let no_body = (100..200).contains(&status) || status == 204 || status == 304;
+    // RFC 9110: 1xx, 204, 205, 304 MUST NOT contain a message body
+    let no_body = (100..200).contains(&status) || status == 204 || status == 205 || status == 304;
     if no_body && !body_bytes.is_empty() {
         return make_result_failure_msg(
             "EncodeError",
@@ -362,6 +362,7 @@ fn status_reason(code: i64) -> &'static str {
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        205 => "Reset Content",
         206 => "Partial Content",
         301 => "Moved Permanently",
         302 => "Found",
@@ -1020,6 +1021,37 @@ mod tests {
         let result = encode_response(&response);
         assert!(is_result_failure(&result));
         assert!(get_failure_message(&result).contains("must not have a body"));
+    }
+
+    #[test]
+    fn test_encode_205_with_body_rejected() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(205)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str("data".into())),
+        ]);
+        let result = encode_response(&response);
+        assert!(is_result_failure(&result));
+        assert!(get_failure_message(&result).contains("must not have a body"));
+    }
+
+    #[test]
+    fn test_encode_205_empty_body_ok() {
+        let response = Value::BuchiPack(vec![
+            ("status".into(), Value::Int(205)),
+            ("headers".into(), Value::List(vec![])),
+            ("body".into(), Value::Str(String::new())),
+        ]);
+        let result = encode_response(&response);
+        assert!(!is_result_failure(&result));
+        let inner = extract_result_inner(&result);
+        let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
+            Some((_, Value::Bytes(b))) => b.clone(),
+            _ => panic!("no bytes"),
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 205 Reset Content\r\n"));
+        assert!(!text.contains("Content-Length"));
     }
 
     #[test]
