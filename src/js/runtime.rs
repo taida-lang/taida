@@ -3058,7 +3058,7 @@ function __taida_net_httpParseRequestHead(input) {
   // Version (strict: must match HTTP/x.y exactly when head is complete)
   const versionStr = requestLine.substring(sp2 + 1);
   let major = 1, minor = 1;
-  const vMatch = versionStr.match(/^HTTP\/(\d+)\.(\d+)$/);
+  const vMatch = versionStr.match(/^HTTP\/(\d)\.(\d)$/);
   if (vMatch) {
     major = parseInt(vMatch[1], 10);
     minor = parseInt(vMatch[2], 10);

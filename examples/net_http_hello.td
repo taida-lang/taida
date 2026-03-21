@@ -1,8 +1,17 @@
 // net_http_hello.td -- Minimal HTTP server using taida-lang/net
 //
-// Usage:
+// Usage (Interpreter):
 //   taida examples/net_http_hello.td
-//   (In another terminal: curl http://127.0.0.1:8080/)
+//
+// Usage (JS):
+//   taida build --target js examples/net_http_hello.td -o /tmp/net_hello.mjs
+//   node /tmp/net_hello.mjs
+//
+// Usage (Native):
+//   taida build --target native examples/net_http_hello.td -o /tmp/net_hello
+//   /tmp/net_hello
+//
+// Then: curl http://127.0.0.1:8080/
 //
 // The server processes 1 request and exits (maxRequests = 1).
 
