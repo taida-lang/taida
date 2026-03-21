@@ -8700,6 +8700,851 @@ taida_val taida_pool_health(taida_val pool_or_pack) {
     return taida_pool_health_pack(st->open, (taida_val)st->idle_len, (taida_val)st->in_use_len, 0);
 }
 
+// ── taida-lang/net: HTTP v1 runtime ─────────────────────────────
+// httpParseRequestHead, httpEncodeResponse, httpServe
+// These are dedicated net runtime functions, not os wrappers.
+
+// Forward declarations
+taida_val taida_net_http_parse_request_head(taida_val input);
+taida_val taida_net_http_encode_response(taida_val response);
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms);
+
+// Net result helpers (use HttpError instead of IoError)
+static taida_val taida_net_result_ok(taida_val inner) {
+    return taida_result_create(inner, 0, 0);
+}
+
+static taida_val taida_net_result_fail(const char *kind, const char *message) {
+    // inner = @(ok: false, code: -1, message: msg, kind: kind)
+    taida_val inner = taida_pack_new(4);
+    taida_pack_set_hash(inner, 0, taida_str_hash((taida_val)"ok"));
+    taida_pack_set(inner, 0, 0);  // false
+    taida_pack_set_tag(inner, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(inner, 1, taida_str_hash((taida_val)"code"));
+    taida_pack_set(inner, 1, -1);
+    taida_pack_set_hash(inner, 2, taida_str_hash((taida_val)"message"));
+    taida_pack_set(inner, 2, (taida_val)taida_str_new_copy(message));
+    taida_pack_set_tag(inner, 2, TAIDA_TAG_STR);
+    taida_pack_set_hash(inner, 3, taida_str_hash((taida_val)"kind"));
+    taida_pack_set(inner, 3, (taida_val)taida_str_new_copy(kind));
+    taida_pack_set_tag(inner, 3, TAIDA_TAG_STR);
+
+    taida_val error = taida_make_error("HttpError", message);
+    return taida_result_create(inner, error, 0);
+}
+
+// Helper: create span @(start: Int, len: Int)
+static taida_val taida_net_make_span(taida_val start, taida_val len) {
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)"start"));
+    taida_pack_set(pack, 0, start);
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)"len"));
+    taida_pack_set(pack, 1, len);
+    return pack;
+}
+
+// Status reason phrases (mirrors Interpreter status_reason)
+static const char *taida_net_status_reason(int code) {
+    switch (code) {
+        case 100: return "Continue";
+        case 101: return "Switching Protocols";
+        case 200: return "OK";
+        case 201: return "Created";
+        case 202: return "Accepted";
+        case 204: return "No Content";
+        case 205: return "Reset Content";
+        case 206: return "Partial Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 304: return "Not Modified";
+        case 307: return "Temporary Redirect";
+        case 308: return "Permanent Redirect";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 408: return "Request Timeout";
+        case 409: return "Conflict";
+        case 410: return "Gone";
+        case 413: return "Content Too Large";
+        case 415: return "Unsupported Media Type";
+        case 418: return "I'm a Teapot";
+        case 422: return "Unprocessable Content";
+        case 429: return "Too Many Requests";
+        case 500: return "Internal Server Error";
+        case 502: return "Bad Gateway";
+        case 503: return "Service Unavailable";
+        case 504: return "Gateway Timeout";
+        default:  return "";
+    }
+}
+
+// ── httpParseRequestHead(bytes) ─────────────────────────────────
+// Hand-written HTTP/1.1 request head parser (no external deps).
+// Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength), _]
+taida_val taida_net_http_parse_request_head(taida_val input) {
+    // Extract raw bytes from Bytes or Str
+    unsigned char *data = NULL;
+    size_t data_len = 0;
+    int free_data = 0;
+
+    if (TAIDA_IS_BYTES(input)) {
+        taida_val *bytes = (taida_val*)input;
+        taida_val blen = bytes[1];
+        if (blen < 0) blen = 0;
+        data_len = (size_t)blen;
+        data = (unsigned char*)TAIDA_MALLOC(data_len + 1, "net_parse_input");
+        for (size_t i = 0; i < data_len; i++) data[i] = (unsigned char)bytes[2 + i];
+        data[data_len] = 0;
+        free_data = 1;
+    } else {
+        // Assume string
+        size_t slen = 0;
+        if (!taida_read_cstr_len_safe((const char*)input, 1048576, &slen)) {
+            return taida_net_result_fail("ParseError", "httpParseRequestHead: argument must be Bytes or Str");
+        }
+        data = (unsigned char*)input;
+        data_len = slen;
+    }
+
+    // Find \r\n\r\n (end of head)
+    int head_end = -1;
+    for (size_t i = 0; i + 3 < data_len; i++) {
+        if (data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n') {
+            head_end = (int)i;
+            break;
+        }
+    }
+
+    int complete = (head_end >= 0);
+    size_t consumed = complete ? (size_t)(head_end + 4) : 0;
+
+    // We need at least a request line to parse
+    // Find the first \r\n for request line
+    int first_crlf = -1;
+    size_t scan_limit = complete ? (size_t)head_end : data_len;
+    for (size_t i = 0; i + 1 < scan_limit; i++) {
+        if (data[i] == '\r' && data[i+1] == '\n') {
+            first_crlf = (int)i;
+            break;
+        }
+    }
+
+    if (first_crlf < 0) {
+        // No CRLF found at all — incomplete if no head_end, try to check for obvious malformed
+        if (!complete) {
+            // Could be incomplete — return incomplete result
+            taida_val parsed = taida_pack_new(9);
+            taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
+            taida_pack_set(parsed, 0, 0);  // false
+            taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
+            taida_pack_set_hash(parsed, 1, taida_str_hash((taida_val)"consumed"));
+            taida_pack_set(parsed, 1, 0);
+            taida_pack_set_hash(parsed, 2, taida_str_hash((taida_val)"method"));
+            taida_pack_set(parsed, 2, taida_net_make_span(0, 0));
+            taida_pack_set_tag(parsed, 2, TAIDA_TAG_PACK);
+            taida_pack_set_hash(parsed, 3, taida_str_hash((taida_val)"path"));
+            taida_pack_set(parsed, 3, taida_net_make_span(0, 0));
+            taida_pack_set_tag(parsed, 3, TAIDA_TAG_PACK);
+            taida_pack_set_hash(parsed, 4, taida_str_hash((taida_val)"query"));
+            taida_pack_set(parsed, 4, taida_net_make_span(0, 0));
+            taida_pack_set_tag(parsed, 4, TAIDA_TAG_PACK);
+            taida_val ver = taida_pack_new(2);
+            taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
+            taida_pack_set(ver, 0, 1);
+            taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
+            taida_pack_set(ver, 1, 1);
+            taida_pack_set_hash(parsed, 5, taida_str_hash((taida_val)"version"));
+            taida_pack_set(parsed, 5, ver);
+            taida_pack_set_tag(parsed, 5, TAIDA_TAG_PACK);
+            taida_pack_set_hash(parsed, 6, taida_str_hash((taida_val)"headers"));
+            taida_pack_set(parsed, 6, taida_list_new());
+            taida_pack_set_tag(parsed, 6, TAIDA_TAG_LIST);
+            taida_pack_set_hash(parsed, 7, taida_str_hash((taida_val)"bodyOffset"));
+            taida_pack_set(parsed, 7, 0);
+            taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
+            taida_pack_set(parsed, 8, 0);
+            if (free_data) free(data);
+            return taida_net_result_ok(parsed);
+        }
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: no request line");
+    }
+
+    // Parse request line: METHOD SP PATH HTTP/x.y
+    // Find first SP
+    int method_end = -1;
+    for (int i = 0; i < first_crlf; i++) {
+        if (data[i] == ' ') { method_end = i; break; }
+    }
+    if (method_end <= 0) {
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid request line");
+    }
+
+    // Find last SP (before HTTP/x.y)
+    int version_start = -1;
+    for (int i = first_crlf - 1; i > method_end; i--) {
+        if (data[i - 1] == ' ') { version_start = i; break; }
+    }
+    if (version_start < 0 || version_start <= method_end + 1) {
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid request line");
+    }
+
+    // Parse version: HTTP/x.y
+    int http_major = 1, http_minor = 1;
+    if (first_crlf - version_start >= 8 &&
+        data[version_start] == 'H' && data[version_start+1] == 'T' &&
+        data[version_start+2] == 'T' && data[version_start+3] == 'P' &&
+        data[version_start+4] == '/') {
+        http_major = data[version_start+5] - '0';
+        if (version_start + 7 < first_crlf && data[version_start+6] == '.') {
+            http_minor = data[version_start+7] - '0';
+        }
+    } else {
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid HTTP version");
+    }
+
+    // Method span
+    int method_start_idx = 0;
+    int method_len = method_end;
+
+    // Path + query: between first SP and last SP
+    int uri_start = method_end + 1;
+    int uri_end = version_start - 1;
+    int uri_len = uri_end - uri_start;
+
+    // Split path and query on '?'
+    int path_start_idx = uri_start;
+    int path_len = uri_len;
+    int query_start_idx = 0;
+    int query_len = 0;
+    for (int i = uri_start; i < uri_end; i++) {
+        if (data[i] == '?') {
+            path_len = i - uri_start;
+            query_start_idx = i + 1;
+            query_len = uri_end - (i + 1);
+            break;
+        }
+    }
+
+    // Parse headers
+    taida_val headers_list = taida_list_new();
+    int64_t content_length = 0;
+    int cl_count = 0;
+    size_t pos = (size_t)(first_crlf + 2);  // after first \r\n
+
+    while (pos < scan_limit) {
+        // Find next \r\n
+        size_t line_end = scan_limit;
+        for (size_t j = pos; j + 1 < scan_limit; j++) {
+            if (data[j] == '\r' && data[j+1] == '\n') {
+                line_end = j;
+                break;
+            }
+        }
+        if (line_end == pos) break;  // empty line = end of headers
+
+        // Find colon separator
+        size_t colon = line_end;
+        for (size_t j = pos; j < line_end; j++) {
+            if (data[j] == ':') { colon = j; break; }
+        }
+        if (colon >= line_end) {
+            if (free_data) free(data);
+            return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid header line");
+        }
+
+        // Header name: pos..colon, value: after colon + optional leading SP
+        size_t name_start = pos;
+        size_t name_len = colon - pos;
+        size_t val_start = colon + 1;
+        // Skip leading spaces
+        while (val_start < line_end && data[val_start] == ' ') val_start++;
+        size_t val_len = line_end - val_start;
+
+        taida_val header_pack = taida_pack_new(2);
+        taida_pack_set_hash(header_pack, 0, taida_str_hash((taida_val)"name"));
+        taida_pack_set(header_pack, 0, taida_net_make_span((taida_val)name_start, (taida_val)name_len));
+        taida_pack_set_tag(header_pack, 0, TAIDA_TAG_PACK);
+        taida_pack_set_hash(header_pack, 1, taida_str_hash((taida_val)"value"));
+        taida_pack_set(header_pack, 1, taida_net_make_span((taida_val)val_start, (taida_val)val_len));
+        taida_pack_set_tag(header_pack, 1, TAIDA_TAG_PACK);
+        headers_list = taida_list_push(headers_list, header_pack);
+
+        // Check Content-Length (case-insensitive)
+        if (name_len == 14) {
+            // Check "content-length" case-insensitively
+            const char *cl_expected = "content-length";
+            int is_cl = 1;
+            for (size_t k = 0; k < 14; k++) {
+                char c = (char)data[name_start + k];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c != cl_expected[k]) { is_cl = 0; break; }
+            }
+            if (is_cl) {
+                cl_count++;
+                if (cl_count > 1) {
+                    if (free_data) free(data);
+                    return taida_net_result_fail("ParseError", "Malformed HTTP request: duplicate Content-Length header");
+                }
+                // Validate: trimmed value must be all digits
+                // val_start..val_start+val_len (already trimmed leading spaces)
+                // Also trim trailing spaces
+                size_t cl_end = val_start + val_len;
+                while (cl_end > val_start && data[cl_end-1] == ' ') cl_end--;
+                size_t cl_len = cl_end - val_start;
+                if (cl_len == 0) {
+                    if (free_data) free(data);
+                    return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
+                }
+                int all_digits = 1;
+                for (size_t k = 0; k < cl_len; k++) {
+                    if (data[val_start + k] < '0' || data[val_start + k] > '9') {
+                        all_digits = 0;
+                        break;
+                    }
+                }
+                if (!all_digits) {
+                    if (free_data) free(data);
+                    return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
+                }
+                // Parse digits
+                int64_t cl_val = 0;
+                for (size_t k = 0; k < cl_len; k++) {
+                    int64_t digit = data[val_start + k] - '0';
+                    // Overflow check
+                    if (cl_val > (9007199254740991LL - digit) / 10) {
+                        if (free_data) free(data);
+                        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
+                    }
+                    cl_val = cl_val * 10 + digit;
+                }
+                // Cap at Number.MAX_SAFE_INTEGER
+                if (cl_val > 9007199254740991LL) {
+                    if (free_data) free(data);
+                    return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
+                }
+                content_length = cl_val;
+            }
+        }
+
+        pos = line_end + 2;  // skip \r\n
+    }
+
+    // Build result pack
+    taida_val parsed = taida_pack_new(9);
+    taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
+    taida_pack_set(parsed, 0, complete ? 1 : 0);
+    taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(parsed, 1, taida_str_hash((taida_val)"consumed"));
+    taida_pack_set(parsed, 1, (taida_val)consumed);
+    taida_pack_set_hash(parsed, 2, taida_str_hash((taida_val)"method"));
+    taida_pack_set(parsed, 2, taida_net_make_span((taida_val)method_start_idx, (taida_val)method_len));
+    taida_pack_set_tag(parsed, 2, TAIDA_TAG_PACK);
+    taida_pack_set_hash(parsed, 3, taida_str_hash((taida_val)"path"));
+    taida_pack_set(parsed, 3, taida_net_make_span((taida_val)path_start_idx, (taida_val)path_len));
+    taida_pack_set_tag(parsed, 3, TAIDA_TAG_PACK);
+    taida_pack_set_hash(parsed, 4, taida_str_hash((taida_val)"query"));
+    taida_pack_set(parsed, 4, taida_net_make_span((taida_val)query_start_idx, (taida_val)query_len));
+    taida_pack_set_tag(parsed, 4, TAIDA_TAG_PACK);
+
+    taida_val ver = taida_pack_new(2);
+    taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
+    taida_pack_set(ver, 0, (taida_val)http_major);
+    taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
+    taida_pack_set(ver, 1, (taida_val)http_minor);
+    taida_pack_set_hash(parsed, 5, taida_str_hash((taida_val)"version"));
+    taida_pack_set(parsed, 5, ver);
+    taida_pack_set_tag(parsed, 5, TAIDA_TAG_PACK);
+
+    taida_pack_set_hash(parsed, 6, taida_str_hash((taida_val)"headers"));
+    taida_pack_set(parsed, 6, headers_list);
+    taida_pack_set_tag(parsed, 6, TAIDA_TAG_LIST);
+
+    taida_pack_set_hash(parsed, 7, taida_str_hash((taida_val)"bodyOffset"));
+    taida_pack_set(parsed, 7, (taida_val)consumed);
+
+    taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
+    taida_pack_set(parsed, 8, (taida_val)content_length);
+
+    if (free_data) free(data);
+    return taida_net_result_ok(parsed);
+}
+
+// ── httpEncodeResponse(response) ────────────────────────────────
+// Encode response @(status, headers, body) into HTTP/1.1 wire bytes.
+// Returns Result[@(bytes: Bytes), _]
+taida_val taida_net_http_encode_response(taida_val response) {
+    if (!taida_is_buchi_pack(response)) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: argument must be a BuchiPack @(...)");
+    }
+
+    // Extract status
+    taida_val status = taida_pack_get(response, taida_str_hash((taida_val)"status"));
+    if (status < 100 || status > 999) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: status must be 100-999");
+    }
+
+    // Extract headers list
+    taida_val headers_ptr = taida_pack_get(response, taida_str_hash((taida_val)"headers"));
+
+    // Extract body (Bytes or Str)
+    taida_val body_ptr = taida_pack_get(response, taida_str_hash((taida_val)"body"));
+    unsigned char *body_data = NULL;
+    size_t body_len = 0;
+    int free_body = 0;
+
+    if (TAIDA_IS_BYTES(body_ptr)) {
+        taida_val *bytes = (taida_val*)body_ptr;
+        taida_val blen = bytes[1];
+        if (blen < 0) blen = 0;
+        body_len = (size_t)blen;
+        body_data = (unsigned char*)TAIDA_MALLOC(body_len + 1, "net_encode_body");
+        for (size_t i = 0; i < body_len; i++) body_data[i] = (unsigned char)bytes[2 + i];
+        body_data[body_len] = 0;
+        free_body = 1;
+    } else {
+        size_t slen = 0;
+        if (taida_read_cstr_len_safe((const char*)body_ptr, 10485760, &slen)) {
+            body_data = (unsigned char*)body_ptr;
+            body_len = slen;
+        } else {
+            body_data = (unsigned char*)"";
+            body_len = 0;
+        }
+    }
+
+    // RFC 9110: 1xx, 204, 205, 304 MUST NOT contain a message body
+    int no_body = (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304;
+    if (no_body && body_len > 0) {
+        if (free_body) free(body_data);
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: status %d must not have a body", (int)status);
+        return taida_net_result_fail("EncodeError", err_msg);
+    }
+
+    // Build HTTP response buffer
+    size_t buf_cap = 512 + body_len;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(buf_cap, "net_encode_buf");
+    size_t buf_len = 0;
+
+    // Status line
+    const char *reason = taida_net_status_reason((int)status);
+    buf_len += (size_t)snprintf((char*)buf + buf_len, buf_cap - buf_len,
+                                 "HTTP/1.1 %d %s\r\n", (int)status, reason);
+
+    // User headers
+    int has_content_length = 0;
+    taida_val name_hash = taida_str_hash((taida_val)"name");
+    taida_val value_hash = taida_str_hash((taida_val)"value");
+
+    if (taida_is_list(headers_ptr)) {
+        taida_val *hlist = (taida_val*)headers_ptr;
+        taida_val hcount = hlist[2];
+        for (taida_val i = 0; i < hcount; i++) {
+            taida_val hdr = hlist[4 + i];
+            if (!taida_is_buchi_pack(hdr)) continue;
+            taida_val hname = taida_pack_get(hdr, name_hash);
+            taida_val hvalue = taida_pack_get(hdr, value_hash);
+            const char *hname_s = (const char*)hname;
+            const char *hvalue_s = (const char*)hvalue;
+            size_t hn_len = 0, hv_len = 0;
+            if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) continue;
+            if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) continue;
+
+            // Check for CRLF injection
+            int has_crlf = 0;
+            for (size_t k = 0; k < hn_len; k++) {
+                if (hname_s[k] == '\r' || hname_s[k] == '\n') { has_crlf = 1; break; }
+            }
+            for (size_t k = 0; k < hv_len && !has_crlf; k++) {
+                if (hvalue_s[k] == '\r' || hvalue_s[k] == '\n') { has_crlf = 1; break; }
+            }
+            if (has_crlf) {
+                if (free_body) free(body_data);
+                free(buf);
+                return taida_net_result_fail("EncodeError", "httpEncodeResponse: header contains CR/LF");
+            }
+
+            // Skip Content-Length for no-body statuses
+            if (no_body && hn_len == 14) {
+                const char *cl_expected = "content-length";
+                int is_cl = 1;
+                for (size_t k = 0; k < 14; k++) {
+                    char c = hname_s[k];
+                    if (c >= 'A' && c <= 'Z') c += 32;
+                    if (c != cl_expected[k]) { is_cl = 0; break; }
+                }
+                if (is_cl) continue;
+            }
+
+            // Check if user provided Content-Length
+            if (hn_len == 14) {
+                const char *cl_expected = "content-length";
+                int is_cl = 1;
+                for (size_t k = 0; k < 14; k++) {
+                    char c = hname_s[k];
+                    if (c >= 'A' && c <= 'Z') c += 32;
+                    if (c != cl_expected[k]) { is_cl = 0; break; }
+                }
+                if (is_cl) has_content_length = 1;
+            }
+
+            // Grow buffer if needed
+            size_t needed = buf_len + hn_len + hv_len + 4;
+            if (needed > buf_cap) {
+                buf_cap = needed * 2;
+                buf = (unsigned char*)realloc(buf, buf_cap);
+            }
+            memcpy(buf + buf_len, hname_s, hn_len); buf_len += hn_len;
+            buf[buf_len++] = ':'; buf[buf_len++] = ' ';
+            memcpy(buf + buf_len, hvalue_s, hv_len); buf_len += hv_len;
+            buf[buf_len++] = '\r'; buf[buf_len++] = '\n';
+        }
+    }
+
+    // Auto-append Content-Length for statuses that allow a body
+    if (!no_body && !has_content_length) {
+        char cl_hdr[64];
+        int cl_len = snprintf(cl_hdr, sizeof(cl_hdr), "Content-Length: %zu\r\n", body_len);
+        size_t needed = buf_len + (size_t)cl_len;
+        if (needed > buf_cap) {
+            buf_cap = needed * 2;
+            buf = (unsigned char*)realloc(buf, buf_cap);
+        }
+        memcpy(buf + buf_len, cl_hdr, (size_t)cl_len);
+        buf_len += (size_t)cl_len;
+    }
+
+    // End of headers
+    size_t needed = buf_len + 2 + body_len;
+    if (needed > buf_cap) {
+        buf_cap = needed;
+        buf = (unsigned char*)realloc(buf, buf_cap);
+    }
+    buf[buf_len++] = '\r'; buf[buf_len++] = '\n';
+
+    // Body
+    if (!no_body && body_len > 0) {
+        memcpy(buf + buf_len, body_data, body_len);
+        buf_len += body_len;
+    }
+
+    if (free_body) free(body_data);
+
+    // Convert to Bytes value
+    taida_val result_bytes = taida_bytes_from_raw(buf, (taida_val)buf_len);
+    free(buf);
+
+    taida_val result = taida_pack_new(1);
+    taida_pack_set_hash(result, 0, taida_str_hash((taida_val)"bytes"));
+    taida_pack_set(result, 0, result_bytes);
+    taida_pack_set_tag(result, 0, TAIDA_TAG_PACK);  // Bytes IS-A tagged ptr
+
+    return taida_net_result_ok(result);
+}
+
+// ── httpServe(port, handler, maxRequests, timeoutMs) ────────────
+// HTTP/1.1 server: bind, accept loop, parse, call handler, encode, respond.
+// Returns Async[Result[@(ok: Bool, requests: Int), _]]
+taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms) {
+    // Bind to 127.0.0.1:port (v1 contract: always loopback)
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "httpServe: failed to bind to 127.0.0.1:%d: %s", (int)port, strerror(errno));
+        return taida_async_resolved(taida_net_result_fail("BindError", errbuf));
+    }
+
+    int opt = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    addr.sin_port = htons((unsigned short)port);
+
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "httpServe: failed to bind to 127.0.0.1:%d: %s", (int)port, strerror(errno));
+        close(sockfd);
+        return taida_async_resolved(taida_net_result_fail("BindError", errbuf));
+    }
+
+    if (listen(sockfd, 128) < 0) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "httpServe: listen failed: %s", strerror(errno));
+        close(sockfd);
+        return taida_async_resolved(taida_net_result_fail("BindError", errbuf));
+    }
+
+    // Set read timeout
+    if (timeout_ms > 0) {
+        struct timeval tv;
+        tv.tv_sec = (long)(timeout_ms / 1000);
+        tv.tv_usec = (long)((timeout_ms % 1000) * 1000);
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
+    int64_t request_count = 0;
+    #define NET_MAX_REQUEST_BUF 1048576  // 1 MiB
+
+    // Accept loop
+    for (;;) {
+        // Bounded shutdown
+        if (max_requests > 0 && request_count >= max_requests) break;
+
+        struct sockaddr_in peer_addr;
+        socklen_t peer_len = sizeof(peer_addr);
+        int client_fd = accept(sockfd, (struct sockaddr*)&peer_addr, &peer_len);
+        if (client_fd < 0) {
+            char errbuf[256];
+            snprintf(errbuf, sizeof(errbuf), "httpServe: accept failed: %s", strerror(errno));
+            close(sockfd);
+            return taida_async_resolved(taida_net_result_fail("AcceptError", errbuf));
+        }
+
+        // Set read timeout on client
+        if (timeout_ms > 0) {
+            struct timeval tv;
+            tv.tv_sec = (long)(timeout_ms / 1000);
+            tv.tv_usec = (long)((timeout_ms % 1000) * 1000);
+            setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+
+        // Read request data
+        size_t buf_cap = 8192;
+        unsigned char *buf = (unsigned char*)TAIDA_MALLOC(buf_cap, "net_serve_buf");
+        size_t total_read = 0;
+
+        // Phase 1: Read until HTTP head is complete
+        int head_complete = 0;
+        size_t head_consumed = 0;
+        int64_t content_length = 0;
+        int head_malformed = 0;
+
+        while (total_read < NET_MAX_REQUEST_BUF) {
+            if (total_read == buf_cap) {
+                size_t new_cap = buf_cap * 2;
+                if (new_cap > NET_MAX_REQUEST_BUF) new_cap = NET_MAX_REQUEST_BUF;
+                buf = (unsigned char*)realloc(buf, new_cap);
+                buf_cap = new_cap;
+            }
+            ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
+            if (n <= 0) break;
+            total_read += (size_t)n;
+
+            // Check if head is complete
+            for (size_t i = 0; i + 3 < total_read; i++) {
+                if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+                    head_complete = 1;
+                    head_consumed = i + 4;
+                    break;
+                }
+            }
+
+            if (head_complete) {
+                // Parse Content-Length from the head
+                // We need to find Content-Length header in the raw bytes
+                taida_val parse_bytes = taida_bytes_from_raw(buf, (taida_val)total_read);
+                taida_val parse_result = taida_net_http_parse_request_head(parse_bytes);
+                // Check if parse succeeded
+                taida_val *res_fields = (taida_val*)parse_result;
+                taida_val throw_val = taida_pack_get(parse_result, taida_str_hash((taida_val)"throw"));
+                if (throw_val != 0) {
+                    head_malformed = 1;
+                    taida_release(parse_bytes);
+                    break;
+                }
+                taida_val inner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
+                if (inner != 0 && taida_is_buchi_pack(inner)) {
+                    content_length = taida_pack_get(inner, taida_str_hash((taida_val)"contentLength"));
+                    head_consumed = (size_t)taida_pack_get(inner, taida_str_hash((taida_val)"consumed"));
+                }
+                taida_release(parse_bytes);
+                break;
+            }
+        }
+
+        if (!head_complete || head_malformed) {
+            // Send 400 Bad Request
+            const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            send(client_fd, bad, strlen(bad), 0);
+            close(client_fd);
+            free(buf);
+            request_count++;
+            continue;
+        }
+
+        // Phase 2: Read until full body arrives
+        size_t body_needed = head_consumed + (size_t)content_length;
+        while (total_read < body_needed && total_read < NET_MAX_REQUEST_BUF) {
+            if (total_read == buf_cap) {
+                size_t new_cap = buf_cap * 2;
+                if (new_cap > NET_MAX_REQUEST_BUF) new_cap = NET_MAX_REQUEST_BUF;
+                buf = (unsigned char*)realloc(buf, new_cap);
+                buf_cap = new_cap;
+            }
+            ssize_t n = recv(client_fd, buf + total_read, buf_cap - total_read, 0);
+            if (n <= 0) break;
+            total_read += (size_t)n;
+        }
+
+        // Reject if body is incomplete
+        if (content_length > 0 && total_read < body_needed) {
+            const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            send(client_fd, bad, strlen(bad), 0);
+            close(client_fd);
+            free(buf);
+            request_count++;
+            continue;
+        }
+
+        // Build request pack for handler
+        // First, parse the full request to get spans
+        taida_val raw_bytes = taida_bytes_from_raw(buf, (taida_val)total_read);
+        taida_val parse_result = taida_net_http_parse_request_head(raw_bytes);
+        taida_val inner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
+
+        // Build request @(raw, method, path, query, version, headers, body, bodyOffset, contentLength, remoteHost, remotePort)
+        taida_val request = taida_pack_new(11);
+        taida_pack_set_hash(request, 0, taida_str_hash((taida_val)"raw"));
+        taida_pack_set(request, 0, raw_bytes);
+        taida_pack_set_tag(request, 0, TAIDA_TAG_PACK);  // Bytes
+        taida_retain(raw_bytes);
+
+        // Copy spans from parsed result
+        if (inner != 0 && taida_is_buchi_pack(inner)) {
+            taida_val method_v = taida_pack_get(inner, taida_str_hash((taida_val)"method"));
+            taida_pack_set_hash(request, 1, taida_str_hash((taida_val)"method"));
+            taida_pack_set(request, 1, method_v);
+            taida_pack_set_tag(request, 1, TAIDA_TAG_PACK);
+            if (method_v > 4096) taida_retain(method_v);
+
+            taida_val path_v = taida_pack_get(inner, taida_str_hash((taida_val)"path"));
+            taida_pack_set_hash(request, 2, taida_str_hash((taida_val)"path"));
+            taida_pack_set(request, 2, path_v);
+            taida_pack_set_tag(request, 2, TAIDA_TAG_PACK);
+            if (path_v > 4096) taida_retain(path_v);
+
+            taida_val query_v = taida_pack_get(inner, taida_str_hash((taida_val)"query"));
+            taida_pack_set_hash(request, 3, taida_str_hash((taida_val)"query"));
+            taida_pack_set(request, 3, query_v);
+            taida_pack_set_tag(request, 3, TAIDA_TAG_PACK);
+            if (query_v > 4096) taida_retain(query_v);
+
+            taida_val version_v = taida_pack_get(inner, taida_str_hash((taida_val)"version"));
+            taida_pack_set_hash(request, 4, taida_str_hash((taida_val)"version"));
+            taida_pack_set(request, 4, version_v);
+            taida_pack_set_tag(request, 4, TAIDA_TAG_PACK);
+            if (version_v > 4096) taida_retain(version_v);
+
+            taida_val headers_v = taida_pack_get(inner, taida_str_hash((taida_val)"headers"));
+            taida_pack_set_hash(request, 5, taida_str_hash((taida_val)"headers"));
+            taida_pack_set(request, 5, headers_v);
+            taida_pack_set_tag(request, 5, TAIDA_TAG_LIST);
+            if (headers_v > 4096) taida_retain(headers_v);
+        } else {
+            // Fallback empty spans
+            taida_pack_set_hash(request, 1, taida_str_hash((taida_val)"method"));
+            taida_pack_set(request, 1, taida_net_make_span(0, 0));
+            taida_pack_set_tag(request, 1, TAIDA_TAG_PACK);
+            taida_pack_set_hash(request, 2, taida_str_hash((taida_val)"path"));
+            taida_pack_set(request, 2, taida_net_make_span(0, 0));
+            taida_pack_set_tag(request, 2, TAIDA_TAG_PACK);
+            taida_pack_set_hash(request, 3, taida_str_hash((taida_val)"query"));
+            taida_pack_set(request, 3, taida_net_make_span(0, 0));
+            taida_pack_set_tag(request, 3, TAIDA_TAG_PACK);
+            taida_val ver = taida_pack_new(2);
+            taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
+            taida_pack_set(ver, 0, 1);
+            taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
+            taida_pack_set(ver, 1, 1);
+            taida_pack_set_hash(request, 4, taida_str_hash((taida_val)"version"));
+            taida_pack_set(request, 4, ver);
+            taida_pack_set_tag(request, 4, TAIDA_TAG_PACK);
+            taida_pack_set_hash(request, 5, taida_str_hash((taida_val)"headers"));
+            taida_pack_set(request, 5, taida_list_new());
+            taida_pack_set_tag(request, 5, TAIDA_TAG_LIST);
+        }
+
+        // body span
+        size_t body_start = head_consumed;
+        size_t body_len = (size_t)content_length;
+        taida_pack_set_hash(request, 6, taida_str_hash((taida_val)"body"));
+        taida_pack_set(request, 6, taida_net_make_span((taida_val)body_start, (taida_val)body_len));
+        taida_pack_set_tag(request, 6, TAIDA_TAG_PACK);
+
+        taida_pack_set_hash(request, 7, taida_str_hash((taida_val)"bodyOffset"));
+        taida_pack_set(request, 7, (taida_val)head_consumed);
+
+        taida_pack_set_hash(request, 8, taida_str_hash((taida_val)"contentLength"));
+        taida_pack_set(request, 8, (taida_val)content_length);
+
+        // remoteHost / remotePort
+        char host_buf[INET_ADDRSTRLEN] = {0};
+        const char *peer_host = inet_ntop(AF_INET, &peer_addr.sin_addr, host_buf, sizeof(host_buf));
+        if (!peer_host) peer_host = "";
+        taida_pack_set_hash(request, 9, taida_str_hash((taida_val)"remoteHost"));
+        taida_pack_set(request, 9, (taida_val)taida_str_new_copy(peer_host));
+        taida_pack_set_tag(request, 9, TAIDA_TAG_STR);
+
+        taida_pack_set_hash(request, 10, taida_str_hash((taida_val)"remotePort"));
+        taida_pack_set(request, 10, (taida_val)ntohs(peer_addr.sin_port));
+
+        free(buf);
+
+        // Call handler with request
+        taida_val response = taida_invoke_callback1(handler, request);
+
+        // Encode response
+        taida_val encoded = taida_net_http_encode_response(response);
+        taida_val enc_throw = taida_pack_get(encoded, taida_str_hash((taida_val)"throw"));
+        if (enc_throw == 0) {
+            // Success: extract bytes and send
+            taida_val enc_inner = taida_pack_get(encoded, taida_str_hash((taida_val)"__value"));
+            if (enc_inner != 0 && taida_is_buchi_pack(enc_inner)) {
+                taida_val wire_bytes = taida_pack_get(enc_inner, taida_str_hash((taida_val)"bytes"));
+                if (TAIDA_IS_BYTES(wire_bytes)) {
+                    taida_val *wb = (taida_val*)wire_bytes;
+                    taida_val wb_len = wb[1];
+                    unsigned char *wb_buf = (unsigned char*)TAIDA_MALLOC((size_t)wb_len, "net_serve_send");
+                    for (taida_val i = 0; i < wb_len; i++) wb_buf[i] = (unsigned char)wb[2 + i];
+                    send(client_fd, wb_buf, (size_t)wb_len, 0);
+                    free(wb_buf);
+                }
+            }
+        } else {
+            // Encode failed: send 500
+            const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            send(client_fd, fallback, strlen(fallback), 0);
+        }
+
+        // v1: 1 connection = 1 request, close after response
+        close(client_fd);
+        request_count++;
+    }
+
+    close(sockfd);
+
+    #undef NET_MAX_REQUEST_BUF
+
+    // Server completed successfully
+    taida_val ok_inner = taida_pack_new(2);
+    taida_pack_set_hash(ok_inner, 0, taida_str_hash((taida_val)"ok"));
+    taida_pack_set(ok_inner, 0, 1);  // true
+    taida_pack_set_tag(ok_inner, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(ok_inner, 1, taida_str_hash((taida_val)"requests"));
+    taida_pack_set(ok_inner, 1, (taida_val)request_count);
+
+    return taida_async_resolved(taida_net_result_ok(ok_inner));
+}
+
 int main(int argc, char **argv) {
     taida_cli_argc = argc;
     taida_cli_argv = argv;
