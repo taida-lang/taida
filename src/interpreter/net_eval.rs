@@ -15,8 +15,9 @@
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 
 use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::{ErrorValue, Value};
+use super::value::{AsyncStatus, AsyncValue, ErrorValue, PendingState, Value};
 use crate::parser::Expr;
+use std::sync::{Arc, Mutex};
 
 /// All symbols exported by the net package.
 /// Legacy (16) + HTTP v1 (3) = 19 symbols.
@@ -81,6 +82,56 @@ fn make_span(start: usize, len: usize) -> Value {
         ("start".into(), Value::Int(start as i64)),
         ("len".into(), Value::Int(len as i64)),
     ])
+}
+
+// ── Async / value helpers ──────────────────────────────────
+
+/// Wrap a value in a fulfilled Async envelope.
+fn make_fulfilled_async(value: Value) -> Value {
+    Value::Async(AsyncValue {
+        status: AsyncStatus::Fulfilled,
+        value: Box::new(value),
+        error: Box::new(Value::Unit),
+        task: None,
+    })
+}
+
+/// Extract the __value from a Result BuchiPack, returning None on failure.
+fn extract_result_value(result: &Value) -> Option<&Vec<(String, Value)>> {
+    let fields = match result {
+        Value::BuchiPack(f) => f,
+        _ => return None,
+    };
+    // Check that throw is Unit (success)
+    match fields.iter().find(|(k, _)| k == "throw") {
+        Some((_, Value::Unit)) => {}
+        _ => return None,
+    }
+    match fields.iter().find(|(k, _)| k == "__value") {
+        Some((_, Value::BuchiPack(inner))) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Get a Bool field from a BuchiPack field list.
+fn get_field_bool(fields: &[(String, Value)], key: &str) -> Option<bool> {
+    match fields.iter().find(|(k, _)| k == key) {
+        Some((_, Value::Bool(b))) => Some(*b),
+        _ => None,
+    }
+}
+
+/// Get an Int field from a BuchiPack field list.
+fn get_field_int(fields: &[(String, Value)], key: &str) -> Option<i64> {
+    match fields.iter().find(|(k, _)| k == key) {
+        Some((_, Value::Int(n))) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Get a reference to any field value from a BuchiPack field list.
+fn get_field_value<'a>(fields: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
+    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 // ── httpParseRequestHead ────────────────────────────────────
@@ -449,13 +500,277 @@ impl Interpreter {
                 Ok(Some(Signal::Value(encode_response(&response))))
             }
 
-            // ── httpServe — stub (implementation in NET-2) ──
-            "httpServe" => Err(RuntimeError {
-                message: "httpServe is not yet implemented (taida-lang/net NET-2 pending)".into(),
-            }),
+            // ── httpServe(port, handler, maxRequests, timeoutMs) ──
+            // → Async[Result[@(ok: Bool, requests: Int), _]]
+            "httpServe" => self.eval_http_serve(args),
 
             _ => Ok(None),
         }
+    }
+
+    // ── httpServe implementation ───────────────────────────────
+    //
+    // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000)
+    //   → Async[Result[@(ok: Bool, requests: Int), _]]
+    //
+    // - Binds to 127.0.0.1:port (fixed, never 0.0.0.0)
+    // - 1 connection = 1 request, response then close
+    // - Sequential processing (no concurrent handler dispatch)
+    // - maxRequests > 0 → bounded shutdown after N requests
+    // - maxRequests = 0 → run indefinitely
+    // - No httpClose, no keep-alive, no chunked, no streaming
+
+    fn eval_http_serve(
+        &mut self,
+        args: &[Expr],
+    ) -> Result<Option<Signal>, RuntimeError> {
+        // ── Arg 0: port (required, Int) ──
+        let port: u16 = match args.first() {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(Value::Int(n)) => {
+                    if n < 0 || n > 65535 {
+                        return Err(RuntimeError {
+                            message: format!("httpServe: port must be 0-65535, got {}", n),
+                        });
+                    }
+                    n as u16
+                }
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("httpServe: port must be Int, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            },
+            None => {
+                return Err(RuntimeError {
+                    message: "httpServe: missing argument 'port'".into(),
+                });
+            }
+        };
+
+        // ── Arg 1: handler (required, Function) ──
+        let handler = match args.get(1) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(Value::Function(f)) => f,
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("httpServe: handler must be a Function, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            },
+            None => {
+                return Err(RuntimeError {
+                    message: "httpServe: missing argument 'handler'".into(),
+                });
+            }
+        };
+
+        // ── Arg 2: maxRequests (optional, default 0 = unlimited) ──
+        let max_requests: i64 = match args.get(2) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(Value::Int(n)) => n,
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("httpServe: maxRequests must be Int, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            },
+            None => 0,
+        };
+
+        // ── Arg 3: timeoutMs (optional, default 5000) ──
+        let timeout_ms: u64 = match args.get(3) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(Value::Int(n)) => {
+                    if n < 0 {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "httpServe: timeoutMs must be non-negative, got {}",
+                                n
+                            ),
+                        });
+                    }
+                    n as u64
+                }
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("httpServe: timeoutMs must be Int, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            },
+            None => 5000,
+        };
+
+        // ── Bind to 127.0.0.1:port ──
+        // v1 contract: always bind to loopback, never 0.0.0.0
+        let addr = format!("127.0.0.1:{}", port);
+        let listener = match std::net::TcpListener::bind(&addr) {
+            Ok(l) => l,
+            Err(e) => {
+                // Bind failure → immediate failure result
+                let result = make_result_failure_msg(
+                    "BindError",
+                    format!("httpServe: failed to bind to {}: {}", addr, e),
+                );
+                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            }
+        };
+
+        // Set read timeout on accepted connections
+        let read_timeout = std::time::Duration::from_millis(timeout_ms);
+
+        // ── Accept loop ──
+        let mut request_count: i64 = 0;
+        loop {
+            // Check bounded shutdown
+            if max_requests > 0 && request_count >= max_requests {
+                break;
+            }
+
+            // Accept one connection
+            let (mut stream, peer_addr) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // Accept failure → return error result
+                    let result = make_result_failure_msg(
+                        "AcceptError",
+                        format!("httpServe: accept failed: {}", e),
+                    );
+                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                }
+            };
+
+            // Set read timeout on the connection
+            let _ = stream.set_read_timeout(Some(read_timeout));
+
+            // Read request data (up to 64KB for v1)
+            let mut buf = vec![0u8; 65536];
+            let bytes_read = match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => {
+                    // Connection closed without data, skip
+                    continue;
+                }
+                Ok(n) => n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Read timeout, skip this connection
+                    continue;
+                }
+                Err(_) => {
+                    // Read error, skip this connection
+                    continue;
+                }
+            };
+            buf.truncate(bytes_read);
+
+            // Parse the request head
+            let raw_bytes = buf.clone();
+            let parse_result = parse_request_head(&raw_bytes);
+
+            // Check if parse succeeded
+            let parsed_inner = match extract_result_value(&parse_result) {
+                Some(inner) => inner,
+                None => {
+                    // Parse failed → send 400 Bad Request
+                    let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut stream, bad_request);
+                    request_count += 1;
+                    continue;
+                }
+            };
+
+            // Check completeness
+            let is_complete = match get_field_bool(&parsed_inner, "complete") {
+                Some(c) => c,
+                None => false,
+            };
+            if !is_complete {
+                // Incomplete request → send 400
+                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut stream, bad_request);
+                request_count += 1;
+                continue;
+            }
+
+            // ── Build request pack for handler ──
+            // request shape: @(raw, method, path, query, version, headers, body, bodyOffset, contentLength, remoteHost, remotePort)
+            let body_offset = get_field_int(&parsed_inner, "bodyOffset").unwrap_or(0);
+            let content_length = get_field_int(&parsed_inner, "contentLength").unwrap_or(0);
+            let body_start = body_offset as usize;
+            let body_len = std::cmp::min(content_length as usize, raw_bytes.len().saturating_sub(body_start));
+
+            let mut request_fields: Vec<(String, Value)> = Vec::new();
+            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+
+            // Copy spans from parsed result
+            for key in &["method", "path", "query", "version", "headers"] {
+                if let Some(v) = get_field_value(&parsed_inner, key) {
+                    request_fields.push((key.to_string(), v.clone()));
+                }
+            }
+
+            // body span
+            request_fields.push(("body".into(), make_span(body_start, body_len)));
+            request_fields.push(("bodyOffset".into(), Value::Int(body_offset)));
+            request_fields.push(("contentLength".into(), Value::Int(content_length)));
+
+            // remoteHost and remotePort from peer address
+            request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
+            request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
+
+            let request_pack = Value::BuchiPack(request_fields);
+
+            // ── Call handler with request ──
+            let handler_result = self.call_function_with_values(&handler, &[request_pack]);
+
+            let response_value = match handler_result {
+                Ok(v) => v,
+                Err(e) => {
+                    // Handler error → send 500 Internal Server Error
+                    let error_body = format!("Internal Server Error: {}", e.message);
+                    let error_response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        error_body.len(),
+                        error_body
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, error_response.as_bytes());
+                    request_count += 1;
+                    continue;
+                }
+            };
+
+            // ── Encode response and write back ──
+            let encoded = encode_response(&response_value);
+            match extract_result_value(&encoded) {
+                Some(inner) => {
+                    if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
+                        let _ = std::io::Write::write_all(&mut stream, wire_bytes);
+                    }
+                }
+                None => {
+                    // Encode failed → send 500
+                    let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut stream, fallback);
+                }
+            }
+
+            // v1: 1 connection = 1 request, close after response
+            // (stream drops here, closing the connection)
+            request_count += 1;
+        }
+
+        // Server completed successfully
+        let result_inner = Value::BuchiPack(vec![
+            ("ok".into(), Value::Bool(true)),
+            ("requests".into(), Value::Int(request_count)),
+        ]);
+        let result = make_result_success(result_inner);
+        Ok(Some(Signal::Value(make_fulfilled_async(result))))
     }
 
     fn eval_net_bytes_arg(
@@ -1128,5 +1443,392 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         // Should NOT say "OK" for unknown status
         assert!(text.starts_with("HTTP/1.1 599 \r\n"));
+    }
+
+    // ── Helper function tests ──
+
+    #[test]
+    fn test_make_fulfilled_async() {
+        let inner = Value::Int(42);
+        let async_val = make_fulfilled_async(inner);
+        match async_val {
+            Value::Async(a) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                assert!(matches!(*a.value, Value::Int(42)));
+            }
+            _ => panic!("expected Async"),
+        }
+    }
+
+    #[test]
+    fn test_extract_result_value_success() {
+        let result = make_result_success(Value::BuchiPack(vec![
+            ("ok".into(), Value::Bool(true)),
+        ]));
+        let inner = extract_result_value(&result);
+        assert!(inner.is_some());
+    }
+
+    #[test]
+    fn test_extract_result_value_failure() {
+        let result = make_result_failure_msg("TestError", "test failed");
+        let inner = extract_result_value(&result);
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn test_get_field_helpers() {
+        let fields = vec![
+            ("complete".into(), Value::Bool(true)),
+            ("count".into(), Value::Int(42)),
+            ("name".into(), Value::Str("test".into())),
+        ];
+        assert_eq!(get_field_bool(&fields, "complete"), Some(true));
+        assert_eq!(get_field_int(&fields, "count"), Some(42));
+        assert!(get_field_value(&fields, "name").is_some());
+        assert!(get_field_value(&fields, "missing").is_none());
+    }
+
+    // ── httpServe integration tests ──
+
+    use crate::lexer::Span;
+    use crate::parser::{BuchiField, Param};
+
+    fn dummy_span() -> Span {
+        Span::new(0, 0, 1, 1)
+    }
+
+    /// Build a simple handler lambda expression that returns 200 OK with a given body.
+    fn make_handler_expr(body_text: &str) -> Expr {
+        Expr::Lambda(
+            vec![Param {
+                name: "req".into(),
+                type_annotation: None,
+                default_value: None,
+                span: dummy_span(),
+            }],
+            Box::new(Expr::BuchiPack(
+                vec![
+                    BuchiField {
+                        name: "status".into(),
+                        value: Expr::IntLit(200, dummy_span()),
+                        span: dummy_span(),
+                    },
+                    BuchiField {
+                        name: "headers".into(),
+                        value: Expr::ListLit(
+                            vec![Expr::BuchiPack(
+                                vec![
+                                    BuchiField {
+                                        name: "name".into(),
+                                        value: Expr::StringLit("content-type".into(), dummy_span()),
+                                        span: dummy_span(),
+                                    },
+                                    BuchiField {
+                                        name: "value".into(),
+                                        value: Expr::StringLit("text/plain".into(), dummy_span()),
+                                        span: dummy_span(),
+                                    },
+                                ],
+                                dummy_span(),
+                            )],
+                            dummy_span(),
+                        ),
+                        span: dummy_span(),
+                    },
+                    BuchiField {
+                        name: "body".into(),
+                        value: Expr::StringLit(body_text.into(), dummy_span()),
+                        span: dummy_span(),
+                    },
+                ],
+                dummy_span(),
+            )),
+            dummy_span(),
+        )
+    }
+
+    #[test]
+    fn test_http_serve_bind_failure_returns_fulfilled_async() {
+        // Bind a listener to grab a port, then try httpServe on same port.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let mut interp = Interpreter::new();
+        interp.env.define_force(
+            "httpServe",
+            Value::Str("__net_builtin_httpServe".into()),
+        );
+        let args = vec![
+            Expr::IntLit(port as i64, dummy_span()),
+            make_handler_expr("ok"),
+            Expr::IntLit(1, dummy_span()),
+        ];
+
+        let result = interp.try_net_func("httpServe", &args).unwrap().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                // The result should be a failure (bind error)
+                let inner = extract_result_value(&a.value);
+                assert!(inner.is_none(), "Expected bind failure, but got success");
+            }
+            _ => panic!("expected Async value"),
+        }
+    }
+
+    #[test]
+    fn test_http_serve_max_requests_1_self_terminates() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18100);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("Hello from Taida!"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        // Wait for server to start
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Send an HTTP request
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+
+        // Read response
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(response_str.contains("HTTP/1.1 200 OK"), "Expected 200 OK, got: {}", response_str);
+        assert!(response_str.contains("Hello from Taida!"), "Expected body in response");
+
+        // Server should have terminated
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value);
+                assert!(inner.is_some(), "Expected success result");
+                let inner = inner.unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    #[test]
+    fn test_http_serve_request_pack_has_all_fields() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18200);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("ok"),
+                Expr::IntLit(1, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Send POST request with body
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(&mut client, b"POST /data?key=val HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(response_str.contains("200 OK"), "Expected 200 OK");
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    #[test]
+    fn test_http_serve_max_requests_3() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18300);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("ok"),
+                Expr::IntLit(3, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Send 3 requests
+        for _ in 0..3 {
+            let mut client =
+                std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut response = Vec::new();
+            let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            loop {
+                let mut buf = [0u8; 4096];
+                match std::io::Read::read(&mut client, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            let resp = String::from_utf8_lossy(&response);
+            assert!(resp.contains("200 OK"));
+        }
+
+        // Server should terminate
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_int(inner, "requests"), Some(3));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    #[test]
+    fn test_http_serve_malformed_request_returns_400() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(18400);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.env.define_force(
+                "httpServe",
+                Value::Str("__net_builtin_httpServe".into()),
+            );
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("ok"),
+                Expr::IntLit(1, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Send malformed request
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(&mut client, b"NOT_HTTP\x00\x01\x02\r\n\r\n").unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        let resp = String::from_utf8_lossy(&response);
+        assert!(resp.contains("400 Bad Request"), "Expected 400, got: {}", resp);
+
+        server_handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_http_serve_missing_args() {
+        let mut interp = Interpreter::new();
+        interp.env.define_force(
+            "httpServe",
+            Value::Str("__net_builtin_httpServe".into()),
+        );
+        let result = interp.try_net_func("httpServe", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("missing argument 'port'"));
+    }
+
+    #[test]
+    fn test_http_serve_missing_handler() {
+        let mut interp = Interpreter::new();
+        interp.env.define_force(
+            "httpServe",
+            Value::Str("__net_builtin_httpServe".into()),
+        );
+        let args = vec![Expr::IntLit(8080, dummy_span())];
+        let result = interp.try_net_func("httpServe", &args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("missing argument 'handler'"));
+    }
+
+    #[test]
+    fn test_http_serve_port_validation() {
+        let mut interp = Interpreter::new();
+        interp.env.define_force(
+            "httpServe",
+            Value::Str("__net_builtin_httpServe".into()),
+        );
+        let handler = make_handler_expr("ok");
+        let args = vec![Expr::IntLit(99999, dummy_span()), handler];
+        let result = interp.try_net_func("httpServe", &args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("port must be 0-65535"));
     }
 }
