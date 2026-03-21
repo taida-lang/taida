@@ -48,25 +48,35 @@ impl Interpreter {
     /// Try to handle a net built-in function call.
     /// Returns None if the name is not a recognized net function
     /// or if the function was not imported from taida-lang/net (sentinel guard).
+    ///
+    /// Supports alias imports: `>>> taida-lang/net => @(httpServe as serve)`
+    /// binds `serve = "__net_builtin_httpServe"`. The guard extracts the original
+    /// function name from the `__net_builtin_` prefix rather than deriving it
+    /// from the local call name.
     pub(crate) fn try_net_func(
         &mut self,
         name: &str,
         args: &[Expr],
     ) -> Result<Option<Signal>, RuntimeError> {
-        // Sentinel guard: only dispatch if imported from taida-lang/net
-        let sentinel = format!("__net_builtin_{}", name);
-        if !matches!(self.env.get(name), Some(Value::Str(tag)) if tag == &sentinel) {
-            return Ok(None);
-        }
+        // Sentinel guard: extract original function name from __net_builtin_ prefix.
+        // This supports alias imports where the local name differs from the export name.
+        let original_name = match self.env.get(name) {
+            Some(Value::Str(tag)) if tag.starts_with("__net_builtin_") => {
+                tag["__net_builtin_".len()..].to_string()
+            }
+            _ => return Ok(None),
+        };
 
-        match name {
+        match original_name.as_str() {
             // ── Legacy surface — delegate to os_eval implementations ──
+            // Note: these symbols are also reachable via the unguarded try_os_func()
+            // when imported from taida-lang/os. That is known debt, not a NET-0 scope fix.
             "dnsResolve" | "tcpConnect" | "tcpListen" | "tcpAccept"
             | "socketSend" | "socketSendAll" | "socketRecv"
             | "socketSendBytes" | "socketRecvBytes" | "socketRecvExact"
             | "udpBind" | "udpSendTo" | "udpRecvFrom"
             | "socketClose" | "listenerClose" | "udpClose" => {
-                self.try_os_func(name, args)
+                self.try_os_func(&original_name, args)
             }
 
             // ── HTTP v1 — stub (implementation in NET-1/NET-2) ──
@@ -74,7 +84,7 @@ impl Interpreter {
                 Err(RuntimeError {
                     message: format!(
                         "{} is not yet implemented (taida-lang/net HTTP v1 pending)",
-                        name
+                        original_name
                     ),
                 })
             }
@@ -126,6 +136,25 @@ mod tests {
         assert!(
             err.message.contains("not yet implemented"),
             "error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_sentinel_guard_with_alias() {
+        // >>> taida-lang/net => @(httpServe as serve)
+        // env["serve"] = "__net_builtin_httpServe" → should dispatch correctly
+        let mut interp = Interpreter::new();
+        interp
+            .env
+            .define_force("serve", Value::Str("__net_builtin_httpServe".into()));
+        let args: Vec<Expr> = vec![];
+        let result = interp.try_net_func("serve", &args);
+        assert!(result.is_err(), "aliased stub should return RuntimeError");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("httpServe"),
+            "error should reference original name: {}",
             err.message
         );
     }
