@@ -3055,13 +3055,15 @@ function __taida_net_httpParseRequestHead(input) {
     queryLen = 0;
   }
 
-  // Version
+  // Version (strict: must match HTTP/x.y exactly when head is complete)
   const versionStr = requestLine.substring(sp2 + 1);
   let major = 1, minor = 1;
   const vMatch = versionStr.match(/^HTTP\/(\d+)\.(\d+)$/);
   if (vMatch) {
     major = parseInt(vMatch[1], 10);
     minor = parseInt(vMatch[2], 10);
+  } else if (complete) {
+    return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid HTTP version');
   }
 
   // Headers (lines[1] .. lines[n-1], stop at empty line)
@@ -3101,9 +3103,11 @@ function __taida_net_httpParseRequestHead(input) {
       if (clCount > 1) {
         return __taida_net_result_fail('ParseError', 'Malformed HTTP request: duplicate Content-Length header');
       }
-      const clVal = parseInt(line.substring(valueOff + colonIdx + 1 - valueOff).trim(), 10);
-      // Re-extract value correctly
       const rawVal = line.substring(colonIdx + 1).trim();
+      // Strict: entire value must be digits (parseInt would accept "5abc" as 5)
+      if (!/^\d+$/.test(rawVal)) {
+        return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
+      }
       const parsedCl = parseInt(rawVal, 10);
       if (isNaN(parsedCl) || parsedCl < 0) {
         return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
@@ -3223,8 +3227,9 @@ function __taida_net_httpEncodeResponse(response) {
 }
 
 // httpServe(port, handler, maxRequests?, timeoutMs?) -> Async[Result[@(ok, requests), _]]
-// TCP server using Node.js net module. Sequential, 1 connection = 1 request, close after response.
-// bind to 127.0.0.1 (never 0.0.0.0). maxRequests=0 means unlimited.
+// TCP server using Node.js net module. Strictly sequential: one connection at a time.
+// 1 connection = 1 request, close after response. bind to 127.0.0.1 (never 0.0.0.0).
+// maxRequests=0 means unlimited.
 async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
   if (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535) {
     return new __TaidaAsync(
@@ -3246,19 +3251,167 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
       null, 'fulfilled');
   }
 
-  // Create TCP server bound to 127.0.0.1
   return new Promise((resolveOuter) => {
     let requestCount = 0;
     let serverClosed = false;
+    let processing = false;
+    const socketQueue = [];
+    const MAX_REQUEST_BUF = 1048576;
 
     const server = net.createServer({ allowHalfOpen: false });
 
     function finish(ok) {
       if (serverClosed) return;
       serverClosed = true;
+      for (const s of socketQueue) s.destroy();
+      socketQueue.length = 0;
       server.close(() => {});
       const inner = Object.freeze({ ok: ok, requests: requestCount });
       resolveOuter(new __TaidaAsync(__taida_net_result_ok(inner), null, 'fulfilled'));
+    }
+
+    function requestDone() {
+      requestCount++;
+      processing = false;
+      if (maxReq > 0 && requestCount >= maxReq) { finish(true); return; }
+      drainQueue();
+    }
+
+    function drainQueue() {
+      if (processing || serverClosed || socketQueue.length === 0) return;
+      if (maxReq > 0 && requestCount >= maxReq) { finish(true); return; }
+      processing = true;
+      const socket = socketQueue.shift();
+      processSocket(socket);
+    }
+
+    function processSocket(socket) {
+      const chunks = [];
+      let totalLen = 0;
+      let handled = false;
+
+      function send400() {
+        if (handled) return;
+        handled = true;
+        if (!socket.destroyed && socket.writable) {
+          socket.write('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
+            socket.destroy();
+          });
+        } else {
+          socket.destroy();
+        }
+        requestDone();
+      }
+
+      function send500(msg) {
+        if (handled) return;
+        handled = true;
+        const errBody = 'Internal Server Error: ' + String(msg);
+        if (!socket.destroyed && socket.writable) {
+          socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Length: ' + Buffer.byteLength(errBody) + '\r\nConnection: close\r\n\r\n' + errBody, () => {
+            socket.destroy();
+          });
+        } else {
+          socket.destroy();
+        }
+        requestDone();
+      }
+
+      socket.setTimeout(timeout);
+      socket.on('timeout', send400);
+
+      socket.on('end', () => {
+        // Client closed write side. If request wasn't complete, reject.
+        if (!handled) send400();
+      });
+
+      socket.on('error', () => {
+        if (!handled) { handled = true; socket.destroy(); requestDone(); }
+      });
+
+      socket.on('close', () => {
+        // Last resort: if socket closed without us finishing, count it.
+        if (!handled) { handled = true; requestDone(); }
+      });
+
+      socket.on('data', (chunk) => {
+        if (handled || serverClosed) { socket.destroy(); return; }
+        chunks.push(chunk);
+        totalLen += chunk.length;
+        if (totalLen > MAX_REQUEST_BUF) { send400(); return; }
+
+        const buf = Buffer.concat(chunks);
+
+        // Phase 1: check if head is complete
+        let headEnd = -1;
+        for (let i = 0; i <= buf.length - 4; i++) {
+          if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) {
+            headEnd = i + 4;
+            break;
+          }
+        }
+        if (headEnd < 0) return; // keep reading
+
+        const parseResult = __taida_net_httpParseRequestHead(new Uint8Array(buf));
+        const parsed = parseResult && parseResult.__value;
+        if (!parsed || (parseResult.throw !== null && parseResult.throw !== undefined)) {
+          send400(); return;
+        }
+        if (!parsed.complete) return; // keep reading
+
+        const contentLength = parsed.contentLength || 0;
+        const bodyNeeded = parsed.consumed + contentLength;
+
+        // Phase 2: wait for full body
+        if (buf.length < bodyNeeded) return; // keep reading
+
+        // Full request received — stop listening for more data
+        socket.removeAllListeners('data');
+        socket.removeAllListeners('timeout');
+        socket.removeAllListeners('end');
+
+        // Build request pack (same shape as Interpreter)
+        const raw = new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
+        const remoteAddr = socket.remoteAddress || '127.0.0.1';
+        const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
+
+        const request = Object.freeze({
+          raw: raw,
+          method: parsed.method,
+          path: parsed.path,
+          query: parsed.query,
+          version: parsed.version,
+          headers: parsed.headers,
+          body: __taida_net_span(parsed.consumed, contentLength),
+          bodyOffset: parsed.consumed,
+          contentLength: contentLength,
+          remoteHost: cleanHost,
+          remotePort: socket.remotePort || 0,
+        });
+
+        // Call handler
+        let responseVal;
+        try {
+          responseVal = handler(request);
+          if (responseVal && typeof responseVal.then === 'function') {
+            responseVal.then((val) => {
+              __taida_net_sendResponse(socket, val, () => {
+                if (!handled) { handled = true; requestDone(); }
+              });
+            }).catch((err) => {
+              send500(err && err.message || err);
+            });
+            return;
+          }
+        } catch (err) {
+          send500(err && err.message || err);
+          return;
+        }
+
+        __taida_net_sendResponse(socket, responseVal, () => {
+          if (!handled) { handled = true; requestDone(); }
+        });
+      });
     }
 
     server.on('error', (err) => {
@@ -3272,144 +3425,11 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
 
     server.on('connection', (socket) => {
       if (serverClosed) { socket.destroy(); return; }
-
-      const MAX_REQUEST_BUF = 1048576;
-      const chunks = [];
-      let totalLen = 0;
-
-      socket.setTimeout(timeout);
-      socket.on('timeout', () => {
-        // Timeout before full request -> 400
-        socket.write('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
-          socket.destroy();
-        });
-        requestCount++;
-        if (maxReq > 0 && requestCount >= maxReq) finish(true);
-      });
-
-      socket.on('data', (chunk) => {
-        if (serverClosed) { socket.destroy(); return; }
-        chunks.push(chunk);
-        totalLen += chunk.length;
-        if (totalLen > MAX_REQUEST_BUF) {
-          socket.write('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
-            socket.destroy();
-          });
-          requestCount++;
-          if (maxReq > 0 && requestCount >= maxReq) finish(true);
-          return;
-        }
-
-        const buf = Buffer.concat(chunks);
-
-        // Phase 1: check if head is complete (\r\n\r\n)
-        let headEnd = -1;
-        for (let i = 0; i <= buf.length - 4; i++) {
-          if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) {
-            headEnd = i + 4;
-            break;
-          }
-        }
-        if (headEnd < 0) return; // keep reading
-
-        // Parse head to get Content-Length
-        const parseResult = __taida_net_httpParseRequestHead(new Uint8Array(buf));
-        const parsed = parseResult && parseResult.__value;
-        if (!parsed || (parseResult.throw !== null && parseResult.throw !== undefined)) {
-          // Malformed -> 400
-          socket.write('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
-            socket.destroy();
-          });
-          requestCount++;
-          if (maxReq > 0 && requestCount >= maxReq) finish(true);
-          return;
-        }
-
-        if (!parsed.complete) return; // keep reading
-
-        const contentLength = parsed.contentLength || 0;
-        const bodyNeeded = parsed.consumed + contentLength;
-
-        // Phase 2: wait for full body
-        if (buf.length < bodyNeeded) return; // keep reading
-
-        // Remove data listener to prevent re-entry
-        socket.removeAllListeners('data');
-        socket.removeAllListeners('timeout');
-
-        // Build request pack (same shape as Interpreter)
-        const raw = new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
-        const bodyStart = parsed.consumed;
-        const bodyLen = contentLength;
-        const remoteAddr = socket.remoteAddress || '127.0.0.1';
-        const remotePort = socket.remotePort || 0;
-        // Clean IPv6-mapped IPv4 addresses
-        const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
-
-        const request = Object.freeze({
-          raw: raw,
-          method: parsed.method,
-          path: parsed.path,
-          query: parsed.query,
-          version: parsed.version,
-          headers: parsed.headers,
-          body: __taida_net_span(bodyStart, bodyLen),
-          bodyOffset: bodyStart,
-          contentLength: contentLength,
-          remoteHost: cleanHost,
-          remotePort: remotePort,
-        });
-
-        // Call handler
-        let responseVal;
-        try {
-          responseVal = handler(request);
-          // If handler returns a promise, await it
-          if (responseVal && typeof responseVal.then === 'function') {
-            responseVal.then((val) => {
-              __taida_net_sendResponse(socket, val, () => {
-                requestCount++;
-                if (maxReq > 0 && requestCount >= maxReq) finish(true);
-              });
-            }).catch((err) => {
-              const errBody = 'Internal Server Error: ' + String(err && err.message || err);
-              socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Length: ' + Buffer.byteLength(errBody) + '\r\nConnection: close\r\n\r\n' + errBody, () => {
-                socket.destroy();
-              });
-              requestCount++;
-              if (maxReq > 0 && requestCount >= maxReq) finish(true);
-            });
-            return;
-          }
-        } catch (err) {
-          const errBody = 'Internal Server Error: ' + String(err && err.message || err);
-          socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Length: ' + Buffer.byteLength(errBody) + '\r\nConnection: close\r\n\r\n' + errBody, () => {
-            socket.destroy();
-          });
-          requestCount++;
-          if (maxReq > 0 && requestCount >= maxReq) finish(true);
-          return;
-        }
-
-        __taida_net_sendResponse(socket, responseVal, () => {
-          requestCount++;
-          if (maxReq > 0 && requestCount >= maxReq) finish(true);
-        });
-      });
-
-      socket.on('error', () => {
-        socket.destroy();
-      });
-
-      socket.on('close', () => {
-        // Connection closed by client before we processed it
-      });
+      socketQueue.push(socket);
+      drainQueue();
     });
 
-    server.listen(port, '127.0.0.1', () => {
-      // Server is now listening
-      // If maxReq is 0, it runs indefinitely (until process exit)
-    });
+    server.listen(port, '127.0.0.1');
   });
 }
 

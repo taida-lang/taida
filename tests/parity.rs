@@ -5637,6 +5637,84 @@ stdout(encoded.bytes.length())
     );
 }
 
+/// NET-3c: malformed HTTP version parity (both backends must reject)
+#[test]
+fn test_net_parse_request_head_invalid_version_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // "HTTX/1.1" is not valid HTTP version — both backends should return failure
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTX/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+// Both backends should reject: ok=false, kind=ParseError
+stdout(result.__value.ok)
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "parse_badver");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net parse bad version");
+    let js = run_net_js(&dir, "parse_badver")
+        .expect("js failed for net parse bad version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: invalid HTTP version parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    // Both should report failure
+    assert!(
+        interp.contains("false"),
+        "Both backends should reject invalid HTTP version, got: {}",
+        interp
+    );
+}
+
+/// NET-3c: malformed Content-Length parity (both backends must reject "5abc")
+#[test]
+fn test_net_parse_request_head_invalid_content_length_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+// Both backends should reject: ok=false, kind=ParseError
+stdout(result.__value.ok)
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "parse_badcl");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for net parse bad CL");
+    let js = run_net_js(&dir, "parse_badcl")
+        .expect("js failed for net parse bad CL");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: invalid Content-Length parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert!(
+        interp.contains("false"),
+        "Both backends should reject invalid Content-Length, got: {}",
+        interp
+    );
+}
+
 /// NET-3d: httpServe bounded server parity (Interpreter vs JS)
 /// Runs httpServe with maxRequests=1, sends a raw HTTP request, and verifies response + result.
 #[test]
