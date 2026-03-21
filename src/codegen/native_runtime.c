@@ -8893,17 +8893,20 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
         return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid request line");
     }
 
-    // Parse version: HTTP/x.y
+    // Parse version: must be exactly "HTTP/x.y" where x,y are single ASCII digits
+    // Strict: reject HTTP/a.b, HTTP/12.34, HTTP/1, etc. (parity with Interpreter/JS)
     int http_major = 1, http_minor = 1;
-    if (first_crlf - version_start >= 8 &&
-        data[version_start] == 'H' && data[version_start+1] == 'T' &&
+    int version_len = first_crlf - version_start;
+    if (version_len == 8 &&
+        data[version_start]   == 'H' && data[version_start+1] == 'T' &&
         data[version_start+2] == 'T' && data[version_start+3] == 'P' &&
-        data[version_start+4] == '/') {
+        data[version_start+4] == '/' &&
+        data[version_start+5] >= '0' && data[version_start+5] <= '9' &&
+        data[version_start+6] == '.' &&
+        data[version_start+7] >= '0' && data[version_start+7] <= '9') {
         http_major = data[version_start+5] - '0';
-        if (version_start + 7 < first_crlf && data[version_start+6] == '.') {
-            http_minor = data[version_start+7] - '0';
-        }
-    } else {
+        http_minor = data[version_start+7] - '0';
+    } else if (complete) {
         if (free_data) free(data);
         return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid HTTP version");
     }
@@ -8954,16 +8957,20 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
             if (data[j] == ':') { colon = j; break; }
         }
         if (colon >= line_end) {
-            if (free_data) free(data);
-            return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid header line");
+            // No colon found: if head is complete this is malformed, otherwise incomplete
+            if (complete) {
+                if (free_data) free(data);
+                return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid header line");
+            }
+            break;  // incomplete — stop parsing headers
         }
 
-        // Header name: pos..colon, value: after colon + optional leading SP
+        // Header name: pos..colon, value: after colon + optional leading SP/HT
         size_t name_start = pos;
         size_t name_len = colon - pos;
         size_t val_start = colon + 1;
-        // Skip leading spaces
-        while (val_start < line_end && data[val_start] == ' ') val_start++;
+        // Skip leading spaces and tabs (parity with Interpreter's httparse and JS's trim)
+        while (val_start < line_end && (data[val_start] == ' ' || data[val_start] == '\t')) val_start++;
         size_t val_len = line_end - val_start;
 
         taida_val header_pack = taida_pack_new(2);
@@ -8992,10 +8999,10 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
                     return taida_net_result_fail("ParseError", "Malformed HTTP request: duplicate Content-Length header");
                 }
                 // Validate: trimmed value must be all digits
-                // val_start..val_start+val_len (already trimmed leading spaces)
-                // Also trim trailing spaces
+                // val_start..val_start+val_len (already trimmed leading spaces/tabs)
+                // Also trim trailing spaces and tabs (parity with Interpreter's .trim() and JS's .trim())
                 size_t cl_end = val_start + val_len;
-                while (cl_end > val_start && data[cl_end-1] == ' ') cl_end--;
+                while (cl_end > val_start && (data[cl_end-1] == ' ' || data[cl_end-1] == '\t')) cl_end--;
                 size_t cl_len = cl_end - val_start;
                 if (cl_len == 0) {
                     if (free_data) free(data);
@@ -9083,17 +9090,34 @@ taida_val taida_net_http_encode_response(taida_val response) {
         return taida_net_result_fail("EncodeError", "httpEncodeResponse: argument must be a BuchiPack @(...)");
     }
 
-    // Extract status
-    taida_val status = taida_pack_get(response, taida_str_hash((taida_val)"status"));
+    // Extract status (required, must be Int in 100-999)
+    taida_val status_hash = taida_str_hash((taida_val)"status");
+    if (!taida_pack_has_hash(response, status_hash)) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'status'");
+    }
+    taida_val status = taida_pack_get(response, status_hash);
     if (status < 100 || status > 999) {
-        return taida_net_result_fail("EncodeError", "httpEncodeResponse: status must be 100-999");
+        char err_msg[128];
+        snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: status must be 100-999, got %d", (int)status);
+        return taida_net_result_fail("EncodeError", err_msg);
     }
 
-    // Extract headers list
-    taida_val headers_ptr = taida_pack_get(response, taida_str_hash((taida_val)"headers"));
+    // Extract headers (required, must be a List)
+    taida_val headers_hash = taida_str_hash((taida_val)"headers");
+    if (!taida_pack_has_hash(response, headers_hash)) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'headers'");
+    }
+    taida_val headers_ptr = taida_pack_get(response, headers_hash);
+    if (!taida_is_list(headers_ptr)) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: headers must be a List");
+    }
 
-    // Extract body (Bytes or Str)
-    taida_val body_ptr = taida_pack_get(response, taida_str_hash((taida_val)"body"));
+    // Extract body (required, must be Bytes or Str)
+    taida_val body_hash = taida_str_hash((taida_val)"body");
+    if (!taida_pack_has_hash(response, body_hash)) {
+        return taida_net_result_fail("EncodeError", "httpEncodeResponse: missing required field 'body'");
+    }
+    taida_val body_ptr = taida_pack_get(response, body_hash);
     unsigned char *body_data = NULL;
     size_t body_len = 0;
     int free_body = 0;
@@ -9113,8 +9137,7 @@ taida_val taida_net_http_encode_response(taida_val response) {
             body_data = (unsigned char*)body_ptr;
             body_len = slen;
         } else {
-            body_data = (unsigned char*)"";
-            body_len = 0;
+            return taida_net_result_fail("EncodeError", "httpEncodeResponse: body must be Bytes or Str");
         }
     }
 
@@ -9142,19 +9165,37 @@ taida_val taida_net_http_encode_response(taida_val response) {
     taida_val name_hash = taida_str_hash((taida_val)"name");
     taida_val value_hash = taida_str_hash((taida_val)"value");
 
-    if (taida_is_list(headers_ptr)) {
+    {
         taida_val *hlist = (taida_val*)headers_ptr;
         taida_val hcount = hlist[2];
         for (taida_val i = 0; i < hcount; i++) {
             taida_val hdr = hlist[4 + i];
-            if (!taida_is_buchi_pack(hdr)) continue;
+            if (!taida_is_buchi_pack(hdr)) {
+                if (free_body) free(body_data);
+                free(buf);
+                char err_msg[128];
+                snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d] must be @(name, value)", (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
             taida_val hname = taida_pack_get(hdr, name_hash);
             taida_val hvalue = taida_pack_get(hdr, value_hash);
             const char *hname_s = (const char*)hname;
             const char *hvalue_s = (const char*)hvalue;
             size_t hn_len = 0, hv_len = 0;
-            if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) continue;
-            if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) continue;
+            if (!taida_read_cstr_len_safe(hname_s, 8192, &hn_len)) {
+                if (free_body) free(body_data);
+                free(buf);
+                char err_msg[128];
+                snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].name must be Str", (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
+            if (!taida_read_cstr_len_safe(hvalue_s, 65536, &hv_len)) {
+                if (free_body) free(body_data);
+                free(buf);
+                char err_msg[128];
+                snprintf(err_msg, sizeof(err_msg), "httpEncodeResponse: headers[%d].value must be Str", (int)i);
+                return taida_net_result_fail("EncodeError", err_msg);
+            }
 
             // Check for CRLF injection
             int has_crlf = 0;
@@ -9248,6 +9289,25 @@ taida_val taida_net_http_encode_response(taida_val response) {
     return taida_net_result_ok(result);
 }
 
+// ── net_send_all: short-write safe send helper ──────────────────
+// Loops send() until all bytes are written or an error occurs.
+// Returns 0 on success, -1 on error.
+static int taida_net_send_all(int fd, const void *buf, size_t len) {
+    const unsigned char *p = (const unsigned char*)buf;
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t n = send(fd, p, remaining, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;  // peer closed
+        p += (size_t)n;
+        remaining -= (size_t)n;
+    }
+    return 0;
+}
+
 // ── httpServe(port, handler, maxRequests, timeoutMs) ────────────
 // HTTP/1.1 server: bind, accept loop, parse, call handler, encode, respond.
 // Returns Async[Result[@(ok: Bool, requests: Int), _]]
@@ -9283,13 +9343,9 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         return taida_async_resolved(taida_net_result_fail("BindError", errbuf));
     }
 
-    // Set read timeout
-    if (timeout_ms > 0) {
-        struct timeval tv;
-        tv.tv_sec = (long)(timeout_ms / 1000);
-        tv.tv_usec = (long)((timeout_ms % 1000) * 1000);
-        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
+    // Note: SO_RCVTIMEO is set on each accepted client socket, NOT on the listener.
+    // Setting it on the listener would cause accept() to fail with EAGAIN/EWOULDBLOCK
+    // when no connection arrives within the timeout, crashing the server. (parity with Interpreter/JS)
 
     int64_t request_count = 0;
     #define NET_MAX_REQUEST_BUF 1048576  // 1 MiB
@@ -9374,7 +9430,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         if (!head_complete || head_malformed) {
             // Send 400 Bad Request
             const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            send(client_fd, bad, strlen(bad), 0);
+            taida_net_send_all(client_fd, bad, strlen(bad));
             close(client_fd);
             free(buf);
             request_count++;
@@ -9398,7 +9454,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         // Reject if body is incomplete
         if (content_length > 0 && total_read < body_needed) {
             const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            send(client_fd, bad, strlen(bad), 0);
+            taida_net_send_all(client_fd, bad, strlen(bad));
             close(client_fd);
             free(buf);
             request_count++;
@@ -9515,14 +9571,14 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
                     taida_val wb_len = wb[1];
                     unsigned char *wb_buf = (unsigned char*)TAIDA_MALLOC((size_t)wb_len, "net_serve_send");
                     for (taida_val i = 0; i < wb_len; i++) wb_buf[i] = (unsigned char)wb[2 + i];
-                    send(client_fd, wb_buf, (size_t)wb_len, 0);
+                    taida_net_send_all(client_fd, wb_buf, (size_t)wb_len);
                     free(wb_buf);
                 }
             }
         } else {
             // Encode failed: send 500
             const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            send(client_fd, fallback, strlen(fallback), 0);
+            taida_net_send_all(client_fd, fallback, strlen(fallback));
         }
 
         // v1: 1 connection = 1 request, close after response

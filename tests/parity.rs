@@ -6348,3 +6348,169 @@ stdout(r.requests)
         cleanup_net_project(&dir);
     }
 }
+
+/// NET-4 review F1: malformed HTTP version "HTTP/a.b" must be rejected (Interpreter vs Native)
+#[test]
+fn test_net_parse_malformed_http_version_native_parity() {
+    // "HTTP/a.b" has non-digit major/minor — both backends must reject as malformed
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+stdout(result.__value.message.length())
+"#;
+
+    let dir = setup_net_project(source, "native_parse_badver_ab");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for malformed HTTP version");
+    let native = run_net_native(&dir, "native_parse_badver_ab")
+        .expect("native failed for malformed HTTP version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F1: malformed HTTP version native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "Both backends should reject HTTP/a.b, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F1: HTTP version with extra digits "HTTP/12.34" must be rejected (Interpreter vs Native)
+#[test]
+fn test_net_parse_multi_digit_http_version_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+stdout(result.__value.message.length())
+"#;
+
+    let dir = setup_net_project(source, "native_parse_badver_1234");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for multi-digit HTTP version");
+    let native = run_net_native(&dir, "native_parse_badver_1234")
+        .expect("native failed for multi-digit HTTP version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F1: multi-digit HTTP version native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "Both backends should reject HTTP/12.34, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F3: httpEncodeResponse with non-Str body must return EncodeError (Interpreter vs Native)
+#[test]
+fn test_net_encode_response_invalid_body_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[], body <= 1)
+result <= httpEncodeResponse(resp)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "native_encode_bad_body");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for invalid body encode");
+    let native = run_net_native(&dir, "native_encode_bad_body")
+        .expect("native failed for invalid body encode");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F3: invalid body encode native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("EncodeError"),
+        "Both backends should return EncodeError for body <= 1, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F4: Content-Length with tab whitespace must be parsed correctly (Interpreter vs Native)
+#[test]
+fn test_net_parse_content_length_tab_trim_native_parity() {
+    // Content-Length:\t5 — tab between colon and value
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length:\t5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "native_parse_cl_tab");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for CL tab trim");
+    let native = run_net_native(&dir, "native_parse_cl_tab")
+        .expect("native failed for CL tab trim");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F4: Content-Length tab trim native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("5"),
+        "Content-Length should be 5 with tab whitespace, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F1+F4: 3-way parity for malformed version (all backends)
+#[test]
+fn test_net_parse_malformed_version_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "3way_parse_badver");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for 3-way bad version");
+    let js = run_net_js(&dir, "3way_parse_badver")
+        .expect("js failed for 3-way bad version");
+    let native = run_net_native(&dir, "3way_parse_badver")
+        .expect("native failed for 3-way bad version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "3-way: malformed version Interp vs JS mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "3-way: malformed version Interp vs Native mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
