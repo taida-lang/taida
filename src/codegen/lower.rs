@@ -825,9 +825,11 @@ impl Lowering {
     }
 
     /// taida-lang/net package function → C runtime function mapping.
-    /// Current net package reuses the existing socket runtime path.
+    /// Legacy surface reuses the existing socket runtime path.
+    /// HTTP v1 surface maps to dedicated taida_net_* runtime functions.
     fn net_func_mapping(sym: &str) -> Option<&'static str> {
         match sym {
+            // Legacy surface (shared with os)
             "dnsResolve" => Some("taida_os_dns_resolve"),
             "tcpConnect" => Some("taida_os_tcp_connect"),
             "tcpListen" => Some("taida_os_tcp_listen"),
@@ -844,6 +846,10 @@ impl Lowering {
             "socketClose" => Some("taida_os_socket_close"),
             "listenerClose" => Some("taida_os_listener_close"),
             "udpClose" => Some("taida_os_socket_close"),
+            // HTTP v1 surface
+            "httpServe" => Some("taida_net_http_serve"),
+            "httpParseRequestHead" => Some("taida_net_http_parse_request_head"),
+            "httpEncodeResponse" => Some("taida_net_http_encode_response"),
             _ => None,
         }
     }
@@ -2755,6 +2761,47 @@ impl Lowering {
                     }
                     _ => {}
                 }
+            }
+
+            // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000)
+            // handler is a function/closure, passed as a function pointer.
+            // maxRequests and timeoutMs are optional with defaults.
+            if name == "httpServe"
+                && self
+                    .stdlib_runtime_funcs
+                    .get("httpServe")
+                    .map_or(false, |v| v == "taida_net_http_serve")
+            {
+                if args.is_empty() || args.len() > 4 {
+                    return Err(LowerError {
+                        message:
+                            "httpServe requires 2 to 4 arguments: httpServe(port, handler[, maxRequests, timeoutMs])"
+                                .to_string(),
+                    });
+                }
+                let port = self.lower_expr(func, &args[0])?;
+                let handler = self.lower_expr(func, &args[1])?;
+                let max_requests = if let Some(arg) = args.get(2) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 0)); // default: 0 = unlimited
+                    v
+                };
+                let timeout_ms = if let Some(arg) = args.get(3) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 5000)); // default: 5000ms
+                    v
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_http_serve".to_string(),
+                    vec![port, handler, max_requests, timeout_ms],
+                ));
+                return Ok(result);
             }
 
             if name == "debug" {
