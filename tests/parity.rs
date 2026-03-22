@@ -7259,8 +7259,9 @@ stdout(r.requests)
 
 // ── NET-5d: legacy net surface re-verification ─────────────────
 
-/// NET-5d: import taida-lang/net with both legacy and HTTP v1 symbols — 3-way parity
+/// NET-5d: import taida-lang/net with both legacy (TCP) and HTTP v1 symbols — 3-way parity
 /// Verifies that legacy symbols and new HTTP v1 symbols can coexist in a single import.
+/// Uses tcpListen as a legacy symbol alongside httpParseRequestHead (HTTP v1).
 #[test]
 fn test_net5d_legacy_and_v1_coexist_3way_parity() {
     if !node_available() {
@@ -7268,14 +7269,19 @@ fn test_net5d_legacy_and_v1_coexist_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead, httpEncodeResponse)
+    // Import both legacy (dnsResolve, socketClose) and HTTP v1 (httpParseRequestHead, httpEncodeResponse)
+    // from taida-lang/net. dnsResolve/socketClose are legacy re-exports from taida-lang/os.
+    // Verifies that mixed legacy+v1 import doesn't cause errors and HTTP v1 works correctly.
+    let source = r#">>> taida-lang/net => @(dnsResolve, socketClose, httpParseRequestHead, httpEncodeResponse)
 
+// HTTP v1 symbol: httpParseRequestHead (coexists with legacy dnsResolve, socketClose)
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
 result ]=> parsed
 stdout(parsed.method.len)
 
+// HTTP v1 symbol: httpEncodeResponse
 resp <= @(status <= 200, headers <= @[], body <= "ok")
 encResult <= httpEncodeResponse(resp)
 encResult ]=> encoded
@@ -7292,27 +7298,40 @@ stdout(encoded.bytes.length())
     assert_eq!(interp, native, "NET-5d: coexist Interp vs Native\nInterp: {}\nNative: {}", interp, native);
 }
 
-/// NET-5d: sentinel guard -- calling httpServe without import resolves as user function
+/// NET-5d: sentinel guard -- calling httpServe/httpParseRequestHead/httpEncodeResponse
+/// without import resolves as user function on all 3 backends.
 #[test]
 fn test_net5d_sentinel_guard_no_import() {
-    // Single-line function defs need `=> :ReturnType` to terminate
-    let source = r#"httpServe a b = a + b => :Int
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
 
-result <= httpServe(10, 20)
-stdout(result)
+    let source = r#"httpServe a b = a + b => :Int
+httpParseRequestHead a = a + 2 => :Int
+httpEncodeResponse a = a + 1 => :Int
+
+stdout(httpServe(10, 20))
+stdout(httpParseRequestHead(5))
+stdout(httpEncodeResponse(9))
 "#;
 
     let dir = setup_net_project(source, "5d_sentinel");
     let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5d_sentinel").expect("js failed");
+    let native = run_net_native(&dir, "5d_sentinel").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, "30", "Without net import, httpServe should be user function. got: {}", interp);
+    assert_eq!(interp, "30\n7\n10", "Interp sentinel guard failed: {}", interp);
+    assert_eq!(interp, js, "NET-5d sentinel: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5d sentinel: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
 }
 
 // ── NET-5e: example verification ───────────────────────────────
 
 /// NET-5e: net_http_parse_encode example — 3-way parity
-/// Runs the parse/encode example on all 3 backends and verifies identical output.
+/// Runs the actual example file source on all 3 backends and verifies identical output.
+/// Source must match examples/net_http_parse_encode.td exactly to prevent example drift.
 #[test]
 fn test_net5e_parse_encode_example_3way_parity() {
     if !node_available() {
@@ -7320,7 +7339,7 @@ fn test_net5e_parse_encode_example_3way_parity() {
         return;
     }
 
-    // Use consumed (Int) instead of complete (Bool) to avoid native Bool display issue
+    // Source identical to examples/net_http_parse_encode.td (lines 6-29)
     let source = r#">>> taida-lang/net => @(httpParseRequestHead, httpEncodeResponse)
 
 // Parse a raw HTTP request
@@ -7329,6 +7348,7 @@ bytesLax ]=> bytes
 parseResult <= httpParseRequestHead(bytes)
 parseResult ]=> parsed
 
+// Note: use consumed (Int) instead of complete (Bool) for 3-backend parity
 stdout(parsed.consumed)
 stdout(parsed.method.start)
 stdout(parsed.method.len)
@@ -7354,4 +7374,135 @@ stdout(encoded.bytes.length())
 
     assert_eq!(interp, js, "NET-5e: example Interp vs JS\nInterp: {}\nJS: {}", interp, js);
     assert_eq!(interp, native, "NET-5e: example Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+// ── NET-5 review fix: scope-aware net builtin shadowing ──────────────────
+
+/// NET-5 shadow fix: when a function parameter shadows httpServe,
+/// the call inside the function body must use the parameter (user function),
+/// not the net builtin. All 3 backends must produce identical output.
+#[test]
+fn test_net5_shadow_http_serve_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // httpServe is imported but shadowed by a function parameter.
+    // Inside wrap, httpServe refers to the parameter (add), not the builtin.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+wrap httpServe =
+  httpServe(10, 20)
+=> :Int
+
+add a b = a + b => :Int
+stdout(wrap(add))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_serve");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_serve").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_serve").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 30 (add(10, 20) = 30)
+    assert_eq!(interp.trim(), "30", "NET-5 shadow: Interpreter should produce 30, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+/// NET-5 shadow fix: httpParseRequestHead shadowed by parameter.
+#[test]
+fn test_net5_shadow_http_parse_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+apply httpParseRequestHead x =
+  httpParseRequestHead(x)
+=> :Int
+
+double n = n + n => :Int
+stdout(apply(double, 7))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_parse").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_parse").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 14 (double(7) = 14)
+    assert_eq!(interp.trim(), "14", "NET-5 shadow: Interpreter should produce 14, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+/// NET-5 shadow fix: httpEncodeResponse shadowed by parameter.
+#[test]
+fn test_net5_shadow_http_encode_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+apply httpEncodeResponse x =
+  httpEncodeResponse(x)
+=> :Int
+
+triple n = n * 3 => :Int
+stdout(apply(triple, 5))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_encode").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_encode").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 15 (triple(5) = 15)
+    assert_eq!(interp.trim(), "15", "NET-5 shadow: Interpreter should produce 15, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+}
+
+/// NET-5 shadow fix: lambda parameter shadows httpServe.
+/// Uses Map mold to invoke a lambda where httpServe is shadowed by the element parameter name.
+#[test]
+fn test_net5_shadow_lambda_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // The function `callWith` takes httpServe as a parameter (shadowing the import),
+    // then passes it to a list operation where the lambda body calls the shadowed function.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+callWith httpServe =
+  items <= @[5]
+  Map[items, _ x = httpServe(x)]() ]=> result
+  result
+=> :@[Int]
+
+triple n = n * 3 => :Int
+stdout(callWith(triple))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_lambda");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_lambda").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_lambda").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: @[15] (triple(5) = 15, mapped over @[5])
+    assert!(interp.trim().contains("15"), "NET-5 shadow lambda: Interpreter should contain 15, got: {}", interp);
+    assert_eq!(interp, js, "NET-5 shadow lambda: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
+    assert_eq!(interp, native, "NET-5 shadow lambda: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
 }

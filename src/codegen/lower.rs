@@ -110,6 +110,10 @@ pub struct Lowering {
     /// 例: `x <= Bool["maybe"]()` → lax_inner_types["x"] = "Bool"
     /// `x ]=> val` で val の型を正しく推定するために使用
     lax_inner_types: std::collections::HashMap<String, String>,
+    /// Net builtin names shadowed by a parameter in the current function scope.
+    /// When a name is here, stdlib_runtime_funcs dispatch for that name is skipped
+    /// and the call is treated as a parameter/variable call instead.
+    shadowed_net_builtins: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -263,6 +267,7 @@ impl Lowering {
             imported_value_names: std::collections::HashSet::new(),
             exported_symbols: std::collections::HashSet::new(),
             lax_inner_types: std::collections::HashMap::new(),
+            shadowed_net_builtins: std::collections::HashSet::new(),
         }
     }
 
@@ -825,6 +830,15 @@ impl Lowering {
     }
 
     /// taida-lang/net package function → C runtime function mapping.
+    /// Names of taida-lang/net HTTP v1 builtins that require scope-aware dispatch.
+    const NET_BUILTIN_NAMES: &'static [&'static str] =
+        &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
+
+    /// Check if a name is a net HTTP v1 builtin that is currently shadowed by a parameter.
+    fn is_net_builtin_shadowed(&self, name: &str) -> bool {
+        self.shadowed_net_builtins.contains(name)
+    }
+
     /// Legacy surface reuses the existing socket runtime path.
     /// HTTP v1 surface maps to dedicated taida_net_* runtime functions.
     fn net_func_mapping(sym: &str) -> Option<&'static str> {
@@ -1441,6 +1455,18 @@ impl Lowering {
         let mangled = self.resolve_user_func_symbol(&func_def.name);
         let mut ir_func = IrFunction::new_with_params(mangled, params.clone());
 
+        // Scope-aware net builtin shadowing: if a parameter name matches a net builtin,
+        // suppress stdlib_runtime_funcs dispatch inside this function body.
+        let mut newly_shadowed_net: Vec<String> = Vec::new();
+        for p in &func_def.params {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str())
+                && !self.shadowed_net_builtins.contains(&p.name)
+            {
+                self.shadowed_net_builtins.insert(p.name.clone());
+                newly_shadowed_net.push(p.name.clone());
+            }
+        }
+
         // ヒープ変数トラッカーをリセット
         self.current_heap_vars.clear();
 
@@ -1673,6 +1699,11 @@ impl Lowering {
             let zero = ir_func.alloc_var();
             ir_func.push(IrInst::ConstInt(zero, 0));
             ir_func.push(IrInst::Return(zero));
+        }
+
+        // Restore: remove net builtin names shadowed by this function's params
+        for name in &newly_shadowed_net {
+            self.shadowed_net_builtins.remove(name);
         }
 
         Ok(ir_func)
@@ -2766,7 +2797,9 @@ impl Lowering {
             // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000)
             // handler is a function/closure, passed as a function pointer.
             // maxRequests and timeoutMs are optional with defaults.
+            // Skip if the name is shadowed by a parameter in the current function scope.
             if name == "httpServe"
+                && !self.is_net_builtin_shadowed("httpServe")
                 && self
                     .stdlib_runtime_funcs
                     .get("httpServe")
@@ -2881,7 +2914,10 @@ impl Lowering {
             }
 
             // stdlib ランタイム関数呼び出し（std/math, std/io etc.）
-            if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned() {
+            // Skip if the name is a net builtin that is shadowed by a parameter.
+            if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned()
+                && !self.is_net_builtin_shadowed(name)
+            {
                 // stdout/stderr: auto-convert non-string args to string
                 if (name == "stdout" || name == "stderr") && args.len() == 1 {
                     let arg = &args[0];
@@ -3975,6 +4011,17 @@ impl Lowering {
             params.iter().map(|p| p.name.as_str()).collect();
         let free_vars = self.collect_free_vars(body, &param_names);
 
+        // Scope-aware net builtin shadowing for lambda parameters
+        let mut newly_shadowed_net: Vec<String> = Vec::new();
+        for p in params {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str())
+                && !self.shadowed_net_builtins.contains(&p.name)
+            {
+                self.shadowed_net_builtins.insert(p.name.clone());
+                newly_shadowed_net.push(p.name.clone());
+            }
+        }
+
         // 全ラムダを統一的にクロージャとして生成する。
         // キャプチャなしでも __env を第1引数として受け取り（未使用）、
         // MakeClosure で空の環境と共にクロージャ構造体を生成する。
@@ -4006,6 +4053,12 @@ impl Lowering {
             // （キャプチャなしの場合は空の環境パック）
             let dst = func.alloc_var();
             func.push(IrInst::MakeClosure(dst, lambda_name, free_vars));
+
+            // Restore: remove net builtin names shadowed by lambda params
+            for name in &newly_shadowed_net {
+                self.shadowed_net_builtins.remove(name);
+            }
+
             Ok(dst)
         }
     }

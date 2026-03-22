@@ -11,7 +11,8 @@ bytesLax ]=> bytes
 parseResult <= httpParseRequestHead(bytes)
 parseResult ]=> parsed
 
-stdout(parsed.complete)
+// Note: use consumed (Int) instead of complete (Bool) for 3-backend parity
+stdout(parsed.consumed)
 stdout(parsed.method.start)
 stdout(parsed.method.len)
 stdout(parsed.path.len)
