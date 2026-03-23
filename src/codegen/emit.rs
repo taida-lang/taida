@@ -245,6 +245,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Val],
         },
+        "taida_set_return_tag" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_get_return_tag" => RuntimeAbi {
+            params: &[],
+            returns: &[Val],
+        },
         // BuchiPack field call (polymorphic dispatch: args are boxed values)
         "taida_pack_call_field0" => RuntimeAbi {
             params: &[Ptr, Val],

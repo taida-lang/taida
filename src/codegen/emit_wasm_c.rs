@@ -489,6 +489,12 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_get_call_arg_tag" => {
             "int64_t taida_get_call_arg_tag(int64_t index);".to_string()
         }
+        "taida_set_return_tag" => {
+            "int64_t taida_set_return_tag(int64_t tag);".to_string()
+        }
+        "taida_get_return_tag" => {
+            "int64_t taida_get_return_tag(void);".to_string()
+        }
         "taida_pack_get_idx" => {
             "int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);".to_string()
         }

@@ -8100,3 +8100,137 @@ stdout(result.__value.message)
         native
     );
 }
+
+/// NB-14 mixed-arg: encodeWrap(true, id(true)) where arg 0 has a known tag (Bool)
+/// but arg 1 passes through a generic `id` function (UNKNOWN). The unset slot must
+/// remain UNKNOWN, not default to INT.
+#[test]
+fn test_nb14_mixed_arg_bool_status_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+encodeWrap a b =
+  @(status <= b, headers <= @[], body <= "ok")
+
+result <= httpEncodeResponse(encodeWrap(true, id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_mixed_arg_status");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for NB-14 mixed-arg bool status");
+    let native = run_net_native(&dir, "nb14_mixed_arg_status")
+        .expect("native failed for NB-14 mixed-arg bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(), native.trim(),
+        "NB-14 mixed-arg: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14 mixed-arg: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21 mixed-arg: encodeWrap(true, id(true)) where the body comes from a generic
+/// `id` function. The unset tag slot must not collapse to INT.
+#[test]
+fn test_nb21_mixed_arg_bool_body_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+encodeWrap a b =
+  @(status <= 200, headers <= @[], body <= b)
+
+result <= httpEncodeResponse(encodeWrap(true, id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_mixed_arg_body");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for NB-21 mixed-arg bool body");
+    let native = run_net_native(&dir, "nb21_mixed_arg_body")
+        .expect("native failed for NB-21 mixed-arg bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(), native.trim(),
+        "NB-21 mixed-arg: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21 mixed-arg: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-14 IIFE: (_ b = @(status <= b, ...))(id(true)) — direct lambda call must
+/// propagate return_tag from id(true) into the IIFE's arg tag slot.
+#[test]
+fn test_nb14_iife_bool_status_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+result <= httpEncodeResponse((_ b = @(status <= b, headers <= @[], body <= "ok"))(id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_iife_status");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for NB-14 IIFE bool status");
+    let native = run_net_native(&dir, "nb14_iife_status")
+        .expect("native failed for NB-14 IIFE bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(), native.trim(),
+        "NB-14 IIFE: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14 IIFE: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21 IIFE: (_ b = @(status <= 200, ..., body <= b))(id(true)) — body path.
+#[test]
+fn test_nb21_iife_bool_body_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+result <= httpEncodeResponse((_ b = @(status <= 200, headers <= @[], body <= b))(id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_iife_body");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for NB-21 IIFE bool body");
+    let native = run_net_native(&dir, "nb21_iife_body")
+        .expect("native failed for NB-21 IIFE bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(), native.trim(),
+        "NB-21 IIFE: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21 IIFE: Native should say 'got true', got: {}",
+        native
+    );
+}

@@ -387,14 +387,14 @@ taida_val taida_get_call_arg_tag(taida_val index);
 //   Caller: taida_pop_call_tags() after CallUser returns
 // The stack ensures nested calls do not overwrite the outer call's tags.
 #define TAG_STACK_DEPTH 64
-#define TAG_FRAME_SIZE 64
+#define TAG_FRAME_SIZE 256
 
 static int64_t __taida_tag_stack[TAG_STACK_DEPTH][TAG_FRAME_SIZE];
 static int __taida_tag_stack_top = 0;
 
 void taida_push_call_tags(void) {
     if (__taida_tag_stack_top < TAG_STACK_DEPTH) {
-        memset(__taida_tag_stack[__taida_tag_stack_top], 0, sizeof(__taida_tag_stack[0]));
+        memset(__taida_tag_stack[__taida_tag_stack_top], 0xFF, sizeof(__taida_tag_stack[0]));
         __taida_tag_stack_top++;
     }
 }
@@ -417,6 +417,22 @@ taida_val taida_get_call_arg_tag(taida_val index) {
         return __taida_tag_stack[__taida_tag_stack_top - 1][index];
     }
     return TAIDA_TAG_UNKNOWN;
+}
+
+// NB-14: Return type tag propagation.
+// Allows type info to survive through generic function returns (e.g. `id x = x`).
+// Callee sets before return, caller reads after CallUser.
+static int64_t __taida_return_tag = TAIDA_TAG_UNKNOWN;
+
+taida_val taida_set_return_tag(taida_val tag) {
+    __taida_return_tag = tag;
+    return 0;
+}
+
+taida_val taida_get_return_tag(void) {
+    taida_val tag = __taida_return_tag;
+    __taida_return_tag = TAIDA_TAG_UNKNOWN;
+    return tag;
 }
 
 void taida_gorilla(void) { exit(1); }
