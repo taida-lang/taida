@@ -3321,6 +3321,19 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
         requestDone();
       }
 
+      function send413() {
+        if (handled) return;
+        handled = true;
+        if (!socket.destroyed && socket.writable) {
+          socket.write('HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
+            socket.destroy();
+          });
+        } else {
+          socket.destroy();
+        }
+        requestDone();
+      }
+
       function send500(msg) {
         if (handled) return;
         handled = true;
@@ -3378,6 +3391,10 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
         if (!parsed.complete) return; // keep reading
 
         const contentLength = parsed.contentLength || 0;
+
+        // NB-3: Early reject if Content-Length exceeds buffer limit (413 Content Too Large)
+        if (contentLength > MAX_REQUEST_BUF) { send413(); return; }
+
         const bodyNeeded = parsed.consumed + contentLength;
 
         // Phase 2: wait for full body

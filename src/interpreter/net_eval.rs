@@ -730,6 +730,14 @@ impl Interpreter {
                 }
             };
 
+            // NB-3: Early reject if Content-Length exceeds buffer limit (413 Content Too Large)
+            if content_length as usize > MAX_REQUEST_BUF {
+                let too_large = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut stream, too_large);
+                request_count += 1;
+                continue;
+            }
+
             // Phase 2: read until the full body arrives (Content-Length bytes after head)
             let body_needed = head_consumed + content_length as usize;
             while total_read < body_needed && total_read < MAX_REQUEST_BUF {

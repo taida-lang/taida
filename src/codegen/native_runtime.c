@@ -9498,6 +9498,16 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             continue;
         }
 
+        // NB-3: Early reject if Content-Length exceeds buffer limit (413 Content Too Large)
+        if (content_length > NET_MAX_REQUEST_BUF) {
+            const char *too_large = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            taida_net_send_all(client_fd, too_large, strlen(too_large));
+            close(client_fd);
+            free(buf);
+            request_count++;
+            continue;
+        }
+
         // Phase 2: Read until full body arrives
         size_t body_needed = head_consumed + (size_t)content_length;
         while (total_read < body_needed && total_read < NET_MAX_REQUEST_BUF) {
