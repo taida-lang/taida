@@ -116,6 +116,10 @@ pub struct Lowering {
     /// When a name is here, stdlib_runtime_funcs dispatch for that name is skipped
     /// and the call is treated as a parameter/variable call instead.
     shadowed_net_builtins: std::collections::HashSet<String>,
+    /// NB-14: Parameter name -> IrVar holding the runtime type tag from the caller.
+    /// Used to propagate Bool/Int distinction through function boundaries.
+    /// Populated at function entry via taida_get_call_arg_tag().
+    param_tag_vars: std::collections::HashMap<String, IrVar>,
 }
 
 #[derive(Debug)]
@@ -271,6 +275,7 @@ impl Lowering {
             exported_symbols: std::collections::HashSet::new(),
             lax_inner_types: std::collections::HashMap::new(),
             shadowed_net_builtins: std::collections::HashSet::new(),
+            param_tag_vars: std::collections::HashMap::new(),
         }
     }
 
@@ -1531,6 +1536,32 @@ impl Lowering {
             }
         }
 
+        // NB-14: Emit taida_get_call_arg_tag() for parameters whose type cannot be
+        // determined at compile time. This reads the type tag that the caller set via
+        // taida_set_call_arg_tag(), enabling Bool/Int disambiguation in pack field tags.
+        let prev_param_tag_vars = std::mem::take(&mut self.param_tag_vars);
+        for (i, param) in func_def.params.iter().enumerate() {
+            // Only emit for parameters that don't have a compile-time type
+            let has_known_type = self.bool_vars.contains(&param.name)
+                || self.int_vars.contains(&param.name)
+                || self.float_vars.contains(&param.name)
+                || self.string_vars.contains(&param.name)
+                || self.pack_vars.contains(&param.name)
+                || self.list_vars.contains(&param.name)
+                || self.closure_vars.contains(&param.name);
+            if !has_known_type {
+                let idx_var = ir_func.alloc_var();
+                ir_func.push(IrInst::ConstInt(idx_var, i as i64));
+                let tag_var = ir_func.alloc_var();
+                ir_func.push(IrInst::Call(
+                    tag_var,
+                    "taida_get_call_arg_tag".to_string(),
+                    vec![idx_var],
+                ));
+                self.param_tag_vars.insert(param.name.clone(), tag_var);
+            }
+        }
+
         // ローカル関数定義の前処理: 関数本体内の FuncDef を先に IR 化して登録する。
         // 内部関数が親スコープの変数を参照する場合はクロージャとして生成する。
         for stmt in &func_def.body {
@@ -1713,6 +1744,8 @@ impl Lowering {
 
         // Restore net builtin shadow set to pre-function state
         self.shadowed_net_builtins = prev_shadowed_net;
+        // NB-14: Restore param_tag_vars to pre-function state
+        self.param_tag_vars = prev_param_tag_vars;
 
         Ok(ir_func)
     }
@@ -3001,6 +3034,9 @@ impl Lowering {
 
             // ユーザー定義関数呼び出し
             if self.user_funcs.contains(name) {
+                // NB-14: Emit arg tag setup before CallUser for Bool/Int disambiguation.
+                // Only emit for args whose compile-time tag is known and non-INT.
+                self.emit_call_arg_tags(func, args);
                 let arg_vars = self.lower_user_call_effective_args_from_exprs(func, name, args)?;
                 let result = func.alloc_var();
                 let mangled = self.resolve_user_func_symbol(name);
@@ -3060,6 +3096,8 @@ impl Lowering {
                         func.push(IrInst::CallIndirect(result, callee_var, arg_vars));
                         return Ok(result);
                     } else {
+                        // NB-14: Emit arg tags for direct lambda calls
+                        self.emit_call_arg_tags(func, args);
                         let result = func.alloc_var();
                         func.push(IrInst::CallUser(result, lambda_name, arg_vars));
                         return Ok(result);
@@ -3440,7 +3478,23 @@ impl Lowering {
             func.push(IrInst::PackSet(pack_var, i, val));
             // A-4c: Set type tag for this field value
             let val_tag = self.expr_type_tag(&field.value);
-            if val_tag != 0 {
+            if val_tag == -1 {
+                // NB-14: UNKNOWN tag -- check if the value comes from a function
+                // parameter with a runtime tag var (caller-propagated Bool/Int info).
+                if let Some(tag_var) = self.get_param_tag_var(&field.value) {
+                    // Use the runtime tag from the caller via taida_pack_set_tag()
+                    let idx_var2 = func.alloc_var();
+                    func.push(IrInst::ConstInt(idx_var2, i as i64));
+                    let dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        dummy,
+                        "taida_pack_set_tag".to_string(),
+                        vec![pack_var, idx_var2, tag_var],
+                    ));
+                } else {
+                    func.push(IrInst::PackSetTag(pack_var, i, val_tag));
+                }
+            } else if val_tag != 0 {
                 func.push(IrInst::PackSetTag(pack_var, i, val_tag));
             }
             // retain-on-store: 再帰 release に対応するため子を retain
@@ -4966,6 +5020,52 @@ impl Lowering {
             Expr::Unmold(_, _) => -1,        // TAIDA_TAG_UNKNOWN: could be anything
             _ if self.expr_is_bool(expr) => 2,
             _ => -1, // TAIDA_TAG_UNKNOWN
+        }
+    }
+
+    /// NB-14: Get the runtime param tag IrVar for an expression, if it's a function
+    /// parameter with a caller-propagated type tag.
+    /// Returns Some(tag_var) if the expression is an Ident whose name is in param_tag_vars.
+    fn get_param_tag_var(&self, expr: &Expr) -> Option<IrVar> {
+        if let Expr::Ident(name, _) = expr {
+            self.param_tag_vars.get(name).copied()
+        } else {
+            None
+        }
+    }
+
+    /// NB-14: Emit taida_set_call_arg_tag() for each argument with a known non-default
+    /// type tag before a CallUser. This propagates Bool/Float/Str/etc. type info from
+    /// the caller to the callee so that pack field tags can be set correctly.
+    fn emit_call_arg_tags(&mut self, func: &mut IrFunction, args: &[Expr]) {
+        for (i, arg) in args.iter().enumerate() {
+            let tag = self.expr_type_tag(arg);
+            // Only emit for non-INT tags (INT=0 is the default and doesn't need propagation)
+            // Also skip UNKNOWN (-1) since that would overwrite any existing tag
+            if tag > 0 {
+                let idx_var = func.alloc_var();
+                func.push(IrInst::ConstInt(idx_var, i as i64));
+                let tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(tag_var, tag));
+                let dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    dummy,
+                    "taida_set_call_arg_tag".to_string(),
+                    vec![idx_var, tag_var],
+                ));
+            } else if tag == -1 {
+                // UNKNOWN: if we have a param_tag_var for this, propagate it transitively
+                if let Some(existing_tag_var) = self.get_param_tag_var(arg) {
+                    let idx_var = func.alloc_var();
+                    func.push(IrInst::ConstInt(idx_var, i as i64));
+                    let dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        dummy,
+                        "taida_set_call_arg_tag".to_string(),
+                        vec![idx_var, existing_tag_var],
+                    ));
+                }
+            }
         }
     }
 

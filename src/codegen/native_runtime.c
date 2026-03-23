@@ -369,8 +369,40 @@ taida_val taida_codepoint_mold_str(taida_val value);
 taida_val taida_utf8_encode_mold(taida_val value);
 taida_val taida_utf8_decode_mold(taida_val value);
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end);
+// NB-14: Call-site arg tag propagation (Bool/Int disambiguation)
+taida_val taida_set_call_arg_tag(taida_val index, taida_val tag);
+taida_val taida_get_call_arg_tag(taida_val index);
 
 // Taida runtime functions
+
+// NB-14/NB-21: Call-site argument type tag propagation.
+// Bool and Int are indistinguishable at the value level (both are unboxed i64).
+// When a Bool value passes through a function parameter into a BuchiPack field,
+// the field tag becomes UNKNOWN because the compiler cannot infer the parameter type.
+// This mechanism propagates the caller's compile-time type tag to the callee:
+//   Caller: taida_set_call_arg_tag(i, tag) before CallUser
+//   Callee: taida_get_call_arg_tag(i) at function entry
+// The callee uses the retrieved tag to set pack field tags correctly.
+#define TAIDA_MAX_ARG_TAGS 64
+static taida_val __taida_call_arg_tags[TAIDA_MAX_ARG_TAGS];
+
+taida_val taida_set_call_arg_tag(taida_val index, taida_val tag) {
+    if (index >= 0 && index < TAIDA_MAX_ARG_TAGS) {
+        __taida_call_arg_tags[index] = tag;
+    }
+    return 0;
+}
+
+taida_val taida_get_call_arg_tag(taida_val index) {
+    if (index >= 0 && index < TAIDA_MAX_ARG_TAGS) {
+        taida_val tag = __taida_call_arg_tags[index];
+        // Reset after read to avoid stale tags from prior calls
+        __taida_call_arg_tags[index] = TAIDA_TAG_UNKNOWN;
+        return tag;
+    }
+    return TAIDA_TAG_UNKNOWN;
+}
+
 void taida_gorilla(void) { exit(1); }
 
 taida_val taida_debug_int(taida_val value) {
@@ -1931,8 +1963,9 @@ static const char *taida_tag_name(taida_val tag) {
 // NB-14/NB-21: Runtime type detection for UNKNOWN-tagged values.
 // When the compiler cannot determine the field tag (e.g., dynamic argument passing),
 // we inspect the runtime value to determine its actual type.
-// Limitation: Bool and Int are indistinguishable at runtime (both are unboxed scalars),
-// so Bool values with UNKNOWN tag will be detected as Int.
+// Note: Bool and Int are indistinguishable at the value level (both are unboxed scalars).
+// Call-site arg tag propagation (taida_set/get_call_arg_tag) ensures that the pack
+// field tag carries the correct Bool tag through function parameters.
 static taida_val taida_runtime_detect_tag(taida_val value) {
     // Heap types can be distinguished by magic headers
     if (value == 0 || (value > 0 && value < 4096)) return TAIDA_TAG_INT;  // small scalar

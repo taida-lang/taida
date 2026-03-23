@@ -7968,3 +7968,68 @@ wrap(1000000)
     assert_eq!(js_lines[1], "TypeError", "NB-31 typed_param: JS kind must be TypeError, got: {}", js_lines[1]);
     assert_eq!(native_lines[1], "TypeError", "NB-31 typed_param: Native kind must be TypeError, got: {}", native_lines[1]);
 }
+
+/// NB-14: httpEncodeResponse with dynamically-typed Bool status via function parameter
+/// must produce "status must be Int, got true" in Native (not "got 1").
+/// Reproduction: `encodeWrap s = @(status <= s, ...)` called with `encodeWrap(true)`.
+#[test]
+fn test_nb14_dynamic_bool_status_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+encodeWrap s =
+  @(status <= s, headers <= @[], body <= "ok")
+
+result <= httpEncodeResponse(encodeWrap(true))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_bool_status");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for NB-14 bool status");
+    let native = run_net_native(&dir, "nb14_bool_status")
+        .expect("native failed for NB-14 bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(), native.trim(),
+        "NB-14: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21: httpEncodeResponse with dynamically-typed Bool body via function parameter
+/// must produce "body must be Bytes or Str, got true" in Native (not "got 1").
+#[test]
+fn test_nb21_dynamic_bool_body_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+encodeWrap x =
+  @(status <= 200, headers <= @[], body <= x)
+
+result <= httpEncodeResponse(encodeWrap(true))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_bool_body");
+    let interp = run_net_interpreter(&dir)
+        .expect("interpreter failed for NB-21 bool body");
+    let native = run_net_native(&dir, "nb21_bool_body")
+        .expect("native failed for NB-21 bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(), native.trim(),
+        "NB-21: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21: Native should say 'got true', got: {}",
+        native
+    );
+}

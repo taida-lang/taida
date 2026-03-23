@@ -228,6 +228,15 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val, Val],
             returns: &[Ptr],
         },
+        // NB-14: Call-site arg tag propagation (Bool/Int disambiguation)
+        "taida_set_call_arg_tag" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_get_call_arg_tag" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         // BuchiPack field call (polymorphic dispatch: args are boxed values)
         "taida_pack_call_field0" => RuntimeAbi {
             params: &[Ptr, Val],

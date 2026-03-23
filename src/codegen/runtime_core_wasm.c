@@ -1547,6 +1547,27 @@ int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag) {
     return pack_ptr;
 }
 
+// NB-14: Call-site argument type tag propagation (Bool/Int disambiguation).
+// WASM has the same Bool/Int representation issue as Native.
+#define WASM_MAX_ARG_TAGS 64
+static int64_t __wasm_call_arg_tags[WASM_MAX_ARG_TAGS];
+
+int64_t taida_set_call_arg_tag(int64_t index, int64_t tag) {
+    if (index >= 0 && index < WASM_MAX_ARG_TAGS) {
+        __wasm_call_arg_tags[index] = tag;
+    }
+    return 0;
+}
+
+int64_t taida_get_call_arg_tag(int64_t index) {
+    if (index >= 0 && index < WASM_MAX_ARG_TAGS) {
+        int64_t tag = __wasm_call_arg_tags[index];
+        __wasm_call_arg_tags[index] = -1; // reset to UNKNOWN
+        return tag;
+    }
+    return -1; // UNKNOWN
+}
+
 int64_t taida_pack_get_tag(int64_t pack_ptr, int64_t index) {
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     return pack[1 + index * 3 + 1];
