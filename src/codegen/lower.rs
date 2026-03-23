@@ -3034,13 +3034,23 @@ impl Lowering {
 
             // ユーザー定義関数呼び出し
             if self.user_funcs.contains(name) {
-                // NB-14: Emit arg tag setup before CallUser for Bool/Int disambiguation.
-                // Only emit for args whose compile-time tag is known and non-INT.
-                self.emit_call_arg_tags(func, args);
+                // NB-14: Stack-based arg tag propagation. Only push/pop when at least
+                // one argument needs tag propagation (avoids overhead for simple calls
+                // like mutual recursion where all args are Int).
+                let needs_tags = self.needs_call_arg_tags(args);
+                if needs_tags {
+                    let push_dummy = func.alloc_var();
+                    func.push(IrInst::Call(push_dummy, "taida_push_call_tags".to_string(), vec![]));
+                    self.emit_call_arg_tags(func, args);
+                }
                 let arg_vars = self.lower_user_call_effective_args_from_exprs(func, name, args)?;
                 let result = func.alloc_var();
                 let mangled = self.resolve_user_func_symbol(name);
                 func.push(IrInst::CallUser(result, mangled, arg_vars));
+                if needs_tags {
+                    let pop_dummy = func.alloc_var();
+                    func.push(IrInst::Call(pop_dummy, "taida_pop_call_tags".to_string(), vec![]));
+                }
                 return Ok(result);
             }
 
@@ -3096,10 +3106,19 @@ impl Lowering {
                         func.push(IrInst::CallIndirect(result, callee_var, arg_vars));
                         return Ok(result);
                     } else {
-                        // NB-14: Emit arg tags for direct lambda calls
-                        self.emit_call_arg_tags(func, args);
+                        // NB-14: Stack-based arg tag propagation for direct lambda calls
+                        let needs_tags = self.needs_call_arg_tags(args);
+                        if needs_tags {
+                            let push_dummy = func.alloc_var();
+                            func.push(IrInst::Call(push_dummy, "taida_push_call_tags".to_string(), vec![]));
+                            self.emit_call_arg_tags(func, args);
+                        }
                         let result = func.alloc_var();
                         func.push(IrInst::CallUser(result, lambda_name, arg_vars));
+                        if needs_tags {
+                            let pop_dummy = func.alloc_var();
+                            func.push(IrInst::Call(pop_dummy, "taida_pop_call_tags".to_string(), vec![]));
+                        }
                         return Ok(result);
                     }
                 }
@@ -5032,6 +5051,23 @@ impl Lowering {
         } else {
             None
         }
+    }
+
+    /// NB-14: Check whether any argument requires call-site tag propagation.
+    /// Returns true if at least one arg has a non-INT compile-time tag or a transitive
+    /// param_tag_var. Used to avoid unnecessary push/pop overhead for simple calls.
+    fn needs_call_arg_tags(&self, args: &[Expr]) -> bool {
+        for arg in args.iter() {
+            let tag = self.expr_type_tag(arg);
+            if tag > 0 {
+                return true;
+            } else if tag == -1 {
+                if self.get_param_tag_var(arg).is_some() {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// NB-14: Emit taida_set_call_arg_tag() for each argument with a known non-default

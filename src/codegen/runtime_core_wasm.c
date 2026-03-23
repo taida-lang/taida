@@ -1547,23 +1547,38 @@ int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag) {
     return pack_ptr;
 }
 
-// NB-14: Call-site argument type tag propagation (Bool/Int disambiguation).
+// NB-14: Stack-based call-site argument type tag propagation (Bool/Int disambiguation).
 // WASM has the same Bool/Int representation issue as Native.
-#define WASM_MAX_ARG_TAGS 64
-static int64_t __wasm_call_arg_tags[WASM_MAX_ARG_TAGS];
+// The stack ensures nested calls do not overwrite the outer call's tags.
+#define WASM_TAG_STACK_DEPTH 64
+#define WASM_TAG_FRAME_SIZE 64
+
+static int64_t __wasm_tag_stack[WASM_TAG_STACK_DEPTH][WASM_TAG_FRAME_SIZE];
+static int __wasm_tag_stack_top = 0;
+
+void taida_push_call_tags(void) {
+    if (__wasm_tag_stack_top < WASM_TAG_STACK_DEPTH) {
+        memset(__wasm_tag_stack[__wasm_tag_stack_top], 0, sizeof(__wasm_tag_stack[0]));
+        __wasm_tag_stack_top++;
+    }
+}
+
+void taida_pop_call_tags(void) {
+    if (__wasm_tag_stack_top > 0) {
+        __wasm_tag_stack_top--;
+    }
+}
 
 int64_t taida_set_call_arg_tag(int64_t index, int64_t tag) {
-    if (index >= 0 && index < WASM_MAX_ARG_TAGS) {
-        __wasm_call_arg_tags[index] = tag;
+    if (__wasm_tag_stack_top > 0 && index >= 0 && index < WASM_TAG_FRAME_SIZE) {
+        __wasm_tag_stack[__wasm_tag_stack_top - 1][index] = tag;
     }
     return 0;
 }
 
 int64_t taida_get_call_arg_tag(int64_t index) {
-    if (index >= 0 && index < WASM_MAX_ARG_TAGS) {
-        int64_t tag = __wasm_call_arg_tags[index];
-        __wasm_call_arg_tags[index] = -1; // reset to UNKNOWN
-        return tag;
+    if (__wasm_tag_stack_top > 0 && index >= 0 && index < WASM_TAG_FRAME_SIZE) {
+        return __wasm_tag_stack[__wasm_tag_stack_top - 1][index];
     }
     return -1; // UNKNOWN
 }

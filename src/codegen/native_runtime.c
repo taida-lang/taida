@@ -370,35 +370,51 @@ taida_val taida_utf8_encode_mold(taida_val value);
 taida_val taida_utf8_decode_mold(taida_val value);
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end);
 // NB-14: Call-site arg tag propagation (Bool/Int disambiguation)
+void taida_push_call_tags(void);
+void taida_pop_call_tags(void);
 taida_val taida_set_call_arg_tag(taida_val index, taida_val tag);
 taida_val taida_get_call_arg_tag(taida_val index);
 
 // Taida runtime functions
 
-// NB-14/NB-21: Call-site argument type tag propagation.
+// NB-14/NB-21: Stack-based call-site argument type tag propagation.
 // Bool and Int are indistinguishable at the value level (both are unboxed i64).
 // When a Bool value passes through a function parameter into a BuchiPack field,
 // the field tag becomes UNKNOWN because the compiler cannot infer the parameter type.
 // This mechanism propagates the caller's compile-time type tag to the callee:
-//   Caller: taida_set_call_arg_tag(i, tag) before CallUser
+//   Caller: taida_push_call_tags() + taida_set_call_arg_tag(i, tag) before CallUser
 //   Callee: taida_get_call_arg_tag(i) at function entry
-// The callee uses the retrieved tag to set pack field tags correctly.
-#define TAIDA_MAX_ARG_TAGS 64
-static taida_val __taida_call_arg_tags[TAIDA_MAX_ARG_TAGS];
+//   Caller: taida_pop_call_tags() after CallUser returns
+// The stack ensures nested calls do not overwrite the outer call's tags.
+#define TAG_STACK_DEPTH 64
+#define TAG_FRAME_SIZE 64
+
+static int64_t __taida_tag_stack[TAG_STACK_DEPTH][TAG_FRAME_SIZE];
+static int __taida_tag_stack_top = 0;
+
+void taida_push_call_tags(void) {
+    if (__taida_tag_stack_top < TAG_STACK_DEPTH) {
+        memset(__taida_tag_stack[__taida_tag_stack_top], 0, sizeof(__taida_tag_stack[0]));
+        __taida_tag_stack_top++;
+    }
+}
+
+void taida_pop_call_tags(void) {
+    if (__taida_tag_stack_top > 0) {
+        __taida_tag_stack_top--;
+    }
+}
 
 taida_val taida_set_call_arg_tag(taida_val index, taida_val tag) {
-    if (index >= 0 && index < TAIDA_MAX_ARG_TAGS) {
-        __taida_call_arg_tags[index] = tag;
+    if (__taida_tag_stack_top > 0 && index >= 0 && index < TAG_FRAME_SIZE) {
+        __taida_tag_stack[__taida_tag_stack_top - 1][index] = tag;
     }
     return 0;
 }
 
 taida_val taida_get_call_arg_tag(taida_val index) {
-    if (index >= 0 && index < TAIDA_MAX_ARG_TAGS) {
-        taida_val tag = __taida_call_arg_tags[index];
-        // Reset after read to avoid stale tags from prior calls
-        __taida_call_arg_tags[index] = TAIDA_TAG_UNKNOWN;
-        return tag;
+    if (__taida_tag_stack_top > 0 && index >= 0 && index < TAG_FRAME_SIZE) {
+        return __taida_tag_stack[__taida_tag_stack_top - 1][index];
     }
     return TAIDA_TAG_UNKNOWN;
 }

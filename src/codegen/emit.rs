@@ -228,7 +228,15 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val, Val],
             returns: &[Ptr],
         },
-        // NB-14: Call-site arg tag propagation (Bool/Int disambiguation)
+        // NB-14: Stack-based call-site arg tag propagation (Bool/Int disambiguation)
+        "taida_push_call_tags" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
+        "taida_pop_call_tags" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
         "taida_set_call_arg_tag" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Val],

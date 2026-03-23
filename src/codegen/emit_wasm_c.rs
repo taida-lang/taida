@@ -476,7 +476,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_pack_set_tag" => {
             "int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);".to_string()
         }
-        // NB-14: Call-site arg tag propagation
+        // NB-14: Stack-based call-site arg tag propagation
+        "taida_push_call_tags" => {
+            "void taida_push_call_tags(void);".to_string()
+        }
+        "taida_pop_call_tags" => {
+            "void taida_pop_call_tags(void);".to_string()
+        }
         "taida_set_call_arg_tag" => {
             "int64_t taida_set_call_arg_tag(int64_t index, int64_t tag);".to_string()
         }
@@ -1291,6 +1297,8 @@ fn emit_inst(
                 || name == "taida_error_ceiling_pop"
                 || name == "taida_register_type_parent"
                 || name == "taida_gorilla"
+                || name == "taida_push_call_tags"
+                || name == "taida_pop_call_tags"
             {
                 write!(c, "{}{}(", indent, name).unwrap();
                 for (i, arg) in args.iter().enumerate() {
