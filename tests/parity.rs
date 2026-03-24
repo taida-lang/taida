@@ -8234,3 +8234,95 @@ stdout(result.__value.message)
         native
     );
 }
+
+// ── NB-11: Non-ASCII path span parity ──────────────────────────────
+
+/// NB-11: URL-encoded non-ASCII path should produce identical span offsets
+/// across all 3 backends. Tests latin1 byte-to-character 1:1 property in JS.
+/// Uses the actual UTF-8 character directly (Taida has no \u escape).
+#[test]
+fn test_nb11_non_ascii_path_span_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Path "/caf\xC3\xA9" contains 2-byte UTF-8 sequence for e-acute (U+00E9).
+    // In raw bytes the path is 5 bytes: /cafe\xcc\xa9 (but the char is \xc3\xa9, so 5 bytes: / c a f \xc3\xa9)
+    // Bytes[] encodes the Taida string to UTF-8, so the byte offsets should match.
+    // The e-acute character is embedded directly as a UTF-8 literal in the Rust source.
+    let source = ">>> taida-lang/net => @(httpParseRequestHead)\n\
+\n\
+bytesLax <= Bytes[\"GET /caf\u{00e9}?q=1 HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n\"]()\n\
+bytesLax ]=> bytes\n\
+result <= httpParseRequestHead(bytes)\n\
+result ]=> parsed\n\
+\n\
+stdout(parsed.method.start)\n\
+stdout(parsed.method.len)\n\
+stdout(parsed.path.start)\n\
+stdout(parsed.path.len)\n\
+stdout(parsed.query.start)\n\
+stdout(parsed.query.len)\n\
+stdout(parsed.version.major)\n\
+stdout(parsed.version.minor)\n\
+stdout(parsed.contentLength)\n\
+";
+
+    let dir = setup_net_project(source, "nb11_non_ascii_path");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "nb11_non_ascii_path").expect("js failed");
+    let native = run_net_native(&dir, "nb11_non_ascii_path").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NB-11: non-ASCII path span Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NB-11: non-ASCII path span Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NB-11: Header with non-ASCII value (high bytes) should parse identically.
+#[test]
+fn test_nb11_non_ascii_header_value_span_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // X-Name header with value containing a 2-byte UTF-8 character (e-acute).
+    let source = ">>> taida-lang/net => @(httpParseRequestHead)\n\
+\n\
+bytesLax <= Bytes[\"GET / HTTP/1.1\\r\\nHost: localhost\\r\\nX-Name: caf\u{00e9}\\r\\n\\r\\n\"]()\n\
+bytesLax ]=> bytes\n\
+result <= httpParseRequestHead(bytes)\n\
+result ]=> parsed\n\
+\n\
+stdout(parsed.consumed)\n\
+stdout(parsed.path.start)\n\
+stdout(parsed.path.len)\n\
+stdout(parsed.bodyOffset)\n\
+";
+
+    let dir = setup_net_project(source, "nb11_non_ascii_header");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "nb11_non_ascii_header").expect("js failed");
+    let native = run_net_native(&dir, "nb11_non_ascii_header").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NB-11: non-ASCII header Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NB-11: non-ASCII header Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}

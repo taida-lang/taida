@@ -117,6 +117,21 @@ impl JsCodegen {
             && !self.shadowed_net_builtins.contains(name)
     }
 
+    /// Try to write a net builtin rewrite. Returns true if the name was a net
+    /// builtin and was rewritten (with optional suffix appended), false otherwise.
+    /// This centralizes the 4-site rewrite pattern for net builtins.
+    fn try_write_net_builtin(&mut self, name: &str, suffix: &str) -> bool {
+        if !self.should_rewrite_net_builtin(name) {
+            return false;
+        }
+        match name {
+            "httpServe" => { self.write(&format!("__taida_net_httpServe{}", suffix)); true }
+            "httpParseRequestHead" => { self.write(&format!("__taida_net_httpParseRequestHead{}", suffix)); true }
+            "httpEncodeResponse" => { self.write(&format!("__taida_net_httpEncodeResponse{}", suffix)); true }
+            _ => false,
+        }
+    }
+
     /// Program 全体を JS に変換
     pub fn generate(&mut self, program: &Program) -> Result<String, JsError> {
         let mut result = String::new();
@@ -1841,9 +1856,7 @@ impl JsCodegen {
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
                             // taida-lang/net HTTP v1 (only when imported)
-                            "httpServe" if self.should_rewrite_net_builtin("httpServe") => self.write("__taida_net_httpServe"),
-                            "httpParseRequestHead" if self.should_rewrite_net_builtin("httpParseRequestHead") => self.write("__taida_net_httpParseRequestHead"),
-                            "httpEncodeResponse" if self.should_rewrite_net_builtin("httpEncodeResponse") => self.write("__taida_net_httpEncodeResponse"),
+                            _ if self.try_write_net_builtin(name, "") => {}
                             _ => self.gen_expr(callee)?,
                         }
                     } else {
@@ -1911,9 +1924,7 @@ impl JsCodegen {
                         "poolClose" => self.write("__taida_os_poolClose"),
                         "poolHealth" => self.write("__taida_os_poolHealth"),
                         // taida-lang/net HTTP v1 (only when imported)
-                        "httpServe" if self.should_rewrite_net_builtin("httpServe") => self.write("__taida_net_httpServe"),
-                        "httpParseRequestHead" if self.should_rewrite_net_builtin("httpParseRequestHead") => self.write("__taida_net_httpParseRequestHead"),
-                        "httpEncodeResponse" if self.should_rewrite_net_builtin("httpEncodeResponse") => self.write("__taida_net_httpEncodeResponse"),
+                        _ if self.try_write_net_builtin(name, "") => {}
                         _ => self.gen_expr(callee)?,
                     }
                 } else {
@@ -2615,9 +2626,7 @@ impl JsCodegen {
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
                             // taida-lang/net HTTP v1 (only when imported)
-                            "httpServe" if self.should_rewrite_net_builtin("httpServe") => self.write("__taida_net_httpServe"),
-                            "httpParseRequestHead" if self.should_rewrite_net_builtin("httpParseRequestHead") => self.write("__taida_net_httpParseRequestHead"),
-                            "httpEncodeResponse" if self.should_rewrite_net_builtin("httpEncodeResponse") => self.write("__taida_net_httpEncodeResponse"),
+                            _ if self.try_write_net_builtin(name, "") => {}
                             _ => self.write(name),
                         }
                     } else {
@@ -2792,9 +2801,7 @@ impl JsCodegen {
                     "poolClose" => self.write("__taida_os_poolClose(__p)"),
                     "poolHealth" => self.write("__taida_os_poolHealth(__p)"),
                     // taida-lang/net HTTP v1 (only when imported)
-                    "httpServe" if self.should_rewrite_net_builtin("httpServe") => self.write("__taida_net_httpServe(__p)"),
-                    "httpParseRequestHead" if self.should_rewrite_net_builtin("httpParseRequestHead") => self.write("__taida_net_httpParseRequestHead(__p)"),
-                    "httpEncodeResponse" if self.should_rewrite_net_builtin("httpEncodeResponse") => self.write("__taida_net_httpEncodeResponse(__p)"),
+                    _ if self.try_write_net_builtin(name, "(__p)") => {}
                     _ => self.write(&format!("{}(__p)", name)),
                 },
                 _ => {

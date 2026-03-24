@@ -112,6 +112,29 @@ fn extract_result_value(result: &Value) -> Option<&Vec<(String, Value)>> {
     }
 }
 
+/// Extract the __value from a Result BuchiPack by consuming it, returning None on failure.
+/// This avoids cloning the parsed fields when ownership can be transferred.
+fn extract_result_value_owned(result: Value) -> Option<Vec<(String, Value)>> {
+    let fields = match result {
+        Value::BuchiPack(f) => f,
+        _ => return None,
+    };
+    // Check that throw is Unit (success)
+    match fields.iter().find(|(k, _)| k == "throw") {
+        Some((_, Value::Unit)) => {}
+        _ => return None,
+    }
+    // Find and move __value out
+    for (k, v) in fields {
+        if k == "__value" {
+            if let Value::BuchiPack(inner) = v {
+                return Some(inner);
+            }
+        }
+    }
+    None
+}
+
 /// Get a Bool field from a BuchiPack field list.
 fn get_field_bool(fields: &[(String, Value)], key: &str) -> Option<bool> {
     match fields.iter().find(|(k, _)| k == key) {
@@ -717,7 +740,8 @@ impl Interpreter {
                 }
 
                 let parse_result = parse_request_head(&buf[..total_read]);
-                match extract_result_value(&parse_result) {
+                // First check with borrow: is parse successful and head complete?
+                let completion_info = match extract_result_value(&parse_result) {
                     None => break HeadResult::Malformed,
                     Some(inner) => {
                         if get_field_bool(inner, "complete").unwrap_or(false) {
@@ -725,8 +749,17 @@ impl Interpreter {
                                 get_field_int(inner, "consumed").unwrap_or(0) as usize;
                             let cl =
                                 get_field_int(inner, "contentLength").unwrap_or(0);
-                            break HeadResult::Complete(inner.clone(), consumed, cl);
+                            Some((consumed, cl))
+                        } else {
+                            None
                         }
+                    }
+                };
+                // Borrow ends here; now move owned fields out if head was complete
+                if let Some((consumed, cl)) = completion_info {
+                    match extract_result_value_owned(parse_result) {
+                        Some(fields) => break HeadResult::Complete(fields, consumed, cl),
+                        None => break HeadResult::Malformed,
                     }
                 }
             };

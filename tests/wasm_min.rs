@@ -1387,3 +1387,123 @@ stdout(rect.__type + " " + rect.color + " " + s + " " + w + " " + h)
         .expect("RC-6: wasm-min should succeed");
     assert_eq!(interp, wasm, "RC-6/WASM: custom multilevel mismatch");
 }
+
+// ── NB-30: Net HTTP API compile error integration tests ──────────────
+
+/// NB-30: httpServe in wasm-min must produce compile error (not silent success).
+#[test]
+fn test_nb30_wasm_min_net_http_serve_compile_error() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+httpServe(8080, handler, 1, 1000) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+    let td_path = std::env::temp_dir().join("taida_nb30_serve.td");
+    let wasm_path = std::env::temp_dir().join("taida_nb30_serve.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-min")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NB-30: wasm-min should reject httpServe, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("httpServe") || stderr.contains("net"),
+        "NB-30: compile error should mention httpServe or net.\nstderr: {}",
+        stderr
+    );
+}
+
+/// NB-30: httpParseRequestHead in wasm-min must produce compile error.
+#[test]
+fn test_nb30_wasm_min_net_http_parse_compile_error() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+stdout(result.__value.consumed)
+"#;
+    let td_path = std::env::temp_dir().join("taida_nb30_parse.td");
+    let wasm_path = std::env::temp_dir().join("taida_nb30_parse.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-min")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NB-30: wasm-min should reject httpParseRequestHead, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("httpParseRequestHead") || stderr.contains("net"),
+        "NB-30: compile error should mention httpParseRequestHead or net.\nstderr: {}",
+        stderr
+    );
+}
+
+/// NB-30: httpEncodeResponse in wasm-min must produce compile error.
+#[test]
+fn test_nb30_wasm_min_net_http_encode_compile_error() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+result <= httpEncodeResponse(@(status <= 200, headers <= @[], body <= "Hello"))
+stdout(result.__value.kind)
+"#;
+    let td_path = std::env::temp_dir().join("taida_nb30_encode.td");
+    let wasm_path = std::env::temp_dir().join("taida_nb30_encode.wasm");
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-min")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "NB-30: wasm-min should reject httpEncodeResponse, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("httpEncodeResponse") || stderr.contains("net"),
+        "NB-30: compile error should mention httpEncodeResponse or net.\nstderr: {}",
+        stderr
+    );
+}
