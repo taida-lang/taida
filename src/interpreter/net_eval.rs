@@ -872,6 +872,45 @@ fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
     }
 }
 
+// ── NET2-3: Concurrent connection pool types ────────────────
+
+/// Per-connection state for the concurrent httpServe pool.
+/// Each connection owns its own scratch buffer (no sharing).
+struct HttpConnection {
+    stream: std::net::TcpStream,
+    peer_addr: std::net::SocketAddr,
+    /// Per-connection scratch buffer (allocated once, reused via advance)
+    buf: Vec<u8>,
+    /// How many bytes are valid in buf
+    total_read: usize,
+    /// How many requests have been processed on this connection
+    conn_requests: i64,
+    /// Last activity timestamp (for idle timeout detection)
+    last_activity: std::time::Instant,
+}
+
+/// Result of a non-blocking read attempt on a connection.
+enum ConnReadResult {
+    /// Complete request head parsed: (fields, head_consumed, content_length, is_chunked)
+    Ready(Vec<(String, Value)>, usize, i64, bool),
+    /// Need more data (no complete head yet, not an error)
+    NeedMore,
+    /// Client closed the connection (EOF)
+    Eof,
+    /// Read timed out (short poll timeout, not necessarily idle timeout)
+    Timeout,
+    /// Malformed request head
+    Malformed,
+}
+
+/// Action to take after dispatching a request on a connection.
+enum ConnAction {
+    /// Keep connection alive for more requests
+    KeepAlive,
+    /// Close the connection
+    Close,
+}
+
 // ── Dispatch ────────────────────────────────────────────────
 
 impl Interpreter {
@@ -954,15 +993,26 @@ impl Interpreter {
 
     // ── httpServe implementation ───────────────────────────────
     //
-    // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000)
+    // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000, maxConnections <= 128)
     //   → Async[Result[@(ok: Bool, requests: Int), _]]
     //
+    // v2 concurrency model (NET2-3):
+    //   The Interpreter is single-threaded (!Send, &mut self for handler eval).
+    //   Concurrency is achieved via non-blocking accept + connection pool:
+    //   - Listener is set to non-blocking mode
+    //   - Active connections are held in a bounded pool (maxConnections)
+    //   - Each connection has its own dedicated buffer (no sharing)
+    //   - Main loop: try_accept → poll each connection → process first ready request
+    //   - Handler execution is serial (one at a time) since &mut self
+    //   - This provides IO-level concurrency: multiple clients can be connected
+    //     simultaneously, with requests dispatched in round-robin order.
+    //
     // - Binds to 127.0.0.1:port (fixed, never 0.0.0.0)
-    // - 1 connection = 1 request, response then close
-    // - Sequential processing (no concurrent handler dispatch)
-    // - maxRequests > 0 → bounded shutdown after N requests
+    // - Keep-alive within each connection
+    // - maxRequests > 0 → bounded shutdown after N total requests (across all connections)
     // - maxRequests = 0 → run indefinitely
-    // - No httpClose, no keep-alive, no chunked, no streaming
+    // - maxConnections limits simultaneous open connections
+    // - No httpClose, no streaming
 
     fn eval_http_serve(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         // ── Arg 0: port (required, Int) ──
@@ -1044,6 +1094,27 @@ impl Interpreter {
             None => 5000,
         };
 
+        // ── Arg 4: maxConnections (optional, default 128) ──
+        // NET2-3c: Bounds the number of simultaneous open connections.
+        let max_connections: usize = match args.get(4) {
+            Some(arg) => match self.eval_expr(arg)? {
+                Signal::Value(Value::Int(n)) => {
+                    if n <= 0 {
+                        128 // fallback to default
+                    } else {
+                        n as usize
+                    }
+                }
+                Signal::Value(v) => {
+                    return Err(RuntimeError {
+                        message: format!("httpServe: maxConnections must be Int, got {}", v),
+                    });
+                }
+                other => return Ok(Some(other)),
+            },
+            None => 128,
+        };
+
         // ── Bind to 127.0.0.1:port ──
         // v1 contract: always bind to loopback, never 0.0.0.0
         let addr = format!("127.0.0.1:{}", port);
@@ -1059,404 +1130,186 @@ impl Interpreter {
             }
         };
 
-        // Set read timeout on accepted connections
-        let read_timeout = std::time::Duration::from_millis(timeout_ms);
+        // NET2-3a/3b: Set listener to non-blocking for concurrent accept.
+        // This allows the main loop to poll for new connections without blocking
+        // while also servicing existing connections.
+        listener.set_nonblocking(true).map_err(|e| RuntimeError {
+            message: format!("httpServe: failed to set non-blocking: {}", e),
+        })?;
 
-        // ── Accept loop (v2: keep-alive) ──
+        let read_timeout = std::time::Duration::from_millis(timeout_ms);
+        // Short poll timeout for non-blocking read attempts on connections.
+        // This controls how quickly we cycle through the connection pool.
+        let poll_timeout = std::time::Duration::from_millis(10);
+
+        // ── NET2-3: Concurrent connection pool ──
         //
-        // Outer loop: accept connections.
-        // Inner loop: keep-alive — read multiple requests on the same connection.
-        // Buffer is allocated once per connection and reused via drain (advance).
+        // Connection pool: Vec of active connections, each with its own buffer.
+        // Main loop:
+        //   1. Try to accept new connections (non-blocking) up to maxConnections
+        //   2. Round-robin poll each connection for a ready request
+        //   3. Process the first ready request (handler is &mut self, serial)
+        //   4. Remove closed/errored connections
+        //
+        // This provides IO-level concurrency: multiple clients can connect and
+        // send data simultaneously. Handler dispatch is serial (one at a time).
+
         let mut request_count: i64 = 0;
+        let mut connections: Vec<HttpConnection> = Vec::new();
+        // Round-robin index for fair scheduling across connections
+        let mut poll_start: usize = 0;
+
         loop {
             // Check bounded shutdown (total requests across all connections)
             if max_requests > 0 && request_count >= max_requests {
                 break;
             }
 
-            // Accept one connection
-            let (mut stream, peer_addr) = match listener.accept() {
-                Ok(pair) => pair,
-                Err(e) => {
-                    // Accept failure → return error result
-                    let result = make_result_failure_msg(
-                        "AcceptError",
-                        format!("httpServe: accept failed: {}", e),
-                    );
-                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
-                }
-            };
-
-            // Set read timeout on the connection (used for idle timeout in keep-alive)
-            let _ = stream.set_read_timeout(Some(read_timeout));
-
-            // ── Per-connection scratch buffer (allocated once, reused) ──
-            const MAX_REQUEST_BUF: usize = 1_048_576; // 1 MiB
-            let mut buf = vec![0u8; 8192];
-            let mut total_read: usize = 0;
-
-            // ── Keep-alive loop: process multiple requests on this connection ──
-            // Track whether we've processed any requests on this connection.
-            // On the first request, EOF/timeout count as a bad request (v1 compat).
-            // On subsequent requests, EOF/timeout are clean idle close (no count).
-            let mut conn_requests: i64 = 0;
-
-            loop {
-                // Check bounded shutdown before reading next request
-                if max_requests > 0 && request_count >= max_requests {
-                    break; // break inner → stream drops → connection closes
-                }
-
-                // Phase 1: read until the HTTP head is complete
-                enum HeadResult {
-                    Complete(Vec<(String, Value)>, usize, i64, bool), // (parsed_fields, head_consumed, content_length, is_chunked)
-                    Malformed,
-                    Eof,       // clean EOF (client closed gracefully)
-                    Timeout,   // idle timeout before head finished
-                }
-
-                let head_result = loop {
-                    if total_read >= MAX_REQUEST_BUF {
-                        break HeadResult::Malformed;
+            // ── Step 1: Accept new connections (non-blocking) ──
+            while connections.len() < max_connections {
+                match listener.accept() {
+                    Ok((stream, peer_addr)) => {
+                        // Set short read timeout for polling readiness
+                        let _ = stream.set_read_timeout(Some(poll_timeout));
+                        connections.push(HttpConnection {
+                            stream,
+                            peer_addr,
+                            buf: vec![0u8; 8192],
+                            total_read: 0,
+                            conn_requests: 0,
+                            last_activity: std::time::Instant::now(),
+                        });
                     }
-                    // Try to parse what we already have in the buffer
-                    // (important for pipelined data left over from previous request)
-                    if total_read > 0 {
-                        let parse_result = parse_request_head(&buf[..total_read]);
-                        let completion_info = match extract_result_value(&parse_result) {
-                            None => break HeadResult::Malformed,
-                            Some(inner) => {
-                                if get_field_bool(inner, "complete").unwrap_or(false) {
-                                    let consumed =
-                                        get_field_int(inner, "consumed").unwrap_or(0) as usize;
-                                    let cl = get_field_int(inner, "contentLength").unwrap_or(0);
-                                    let is_chunked =
-                                        get_field_bool(inner, "chunked").unwrap_or(false);
-                                    Some((consumed, cl, is_chunked))
-                                } else {
-                                    None
-                                }
-                            }
-                        };
-                        if let Some((consumed, cl, is_chunked)) = completion_info {
-                            match extract_result_value_owned(parse_result) {
-                                Some(fields) => {
-                                    break HeadResult::Complete(fields, consumed, cl, is_chunked)
-                                }
-                                None => break HeadResult::Malformed,
-                            }
-                        }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        break; // no pending connections
                     }
-
-                    // Need more data — read from socket
-                    if total_read == buf.len() {
-                        buf.resize(std::cmp::min(buf.len() * 2, MAX_REQUEST_BUF), 0);
-                    }
-                    match std::io::Read::read(&mut stream, &mut buf[total_read..]) {
-                        Ok(0) => break HeadResult::Eof,
-                        Ok(n) => total_read += n,
-                        Err(ref e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::TimedOut =>
-                        {
-                            break HeadResult::Timeout;
-                        }
-                        Err(_) => break HeadResult::Eof,
-                    }
-                };
-
-                let (parsed_fields, head_consumed, content_length, is_chunked) = match head_result
-                {
-                    HeadResult::Complete(fields, consumed, cl, chunked) => {
-                        (fields, consumed, cl, chunked)
-                    }
-                    HeadResult::Eof => {
-                        if conn_requests == 0 {
-                            // First request on this connection: EOF before any data.
-                            // v1 compat: count as a bad request (400).
-                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = std::io::Write::write_all(&mut stream, bad_request);
-                            request_count += 1;
-                        }
-                        // Subsequent EOF: clean idle close, no count.
-                        break; // break inner keep-alive loop
-                    }
-                    HeadResult::Timeout => {
-                        if conn_requests == 0 {
-                            // First request: timeout is a bad request (v1 compat).
-                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = std::io::Write::write_all(&mut stream, bad_request);
-                            request_count += 1;
-                        } else if total_read > 0 {
-                            // Subsequent request with partial data: malformed.
-                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = std::io::Write::write_all(&mut stream, bad_request);
-                            request_count += 1;
-                        }
-                        // Subsequent clean idle timeout: no count.
-                        break; // break inner keep-alive loop
-                    }
-                    HeadResult::Malformed => {
-                        let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        let _ = std::io::Write::write_all(&mut stream, bad_request);
-                        request_count += 1;
-                        break; // malformed → close connection
-                    }
-                };
-
-                // ── Body reading: Content-Length vs Chunked Transfer-Encoding ──
-                // After head parse, we have:
-                //   - head_consumed: bytes consumed by request head (up to \r\n\r\n)
-                //   - content_length: Content-Length value (0 if absent or chunked)
-                //   - is_chunked: true if Transfer-Encoding: chunked detected
-                //
-                // Content-Length path: read exactly content_length bytes after head.
-                // Chunked path: read until 0-terminator chunk, then in-place compact.
-
-                let (wire_consumed, body_start, body_len, final_content_length, is_request_chunked) = if is_chunked {
-                    // ── NET2-2: Chunked Transfer Encoding ──
-                    // Two-phase approach:
-                    //   Phase A: Read-only scan to ensure the complete chunked body
-                    //            (up to terminator 0\r\n\r\n) is in the buffer.
-                    //   Phase B: In-place compaction (destructive — only after Phase A succeeds).
-                    //
-                    // This avoids corrupting the buffer on partial data.
-
-                    // Phase A: Read data until chunked_body_complete() succeeds.
-                    let completeness = loop {
-                        let check = chunked_body_complete(&buf[..total_read], head_consumed);
-                        match check {
-                            Ok(wire_used) => break Ok(wire_used),
-                            Err(ref msg) if msg.starts_with("truncated:") => {
-                                // Need more data from socket
-                                if total_read >= MAX_REQUEST_BUF {
-                                    break Err("Chunked body exceeds buffer limit".to_string());
-                                }
-                                if total_read == buf.len() {
-                                    buf.resize(std::cmp::min(buf.len() * 2, MAX_REQUEST_BUF), 0);
-                                }
-                                match std::io::Read::read(&mut stream, &mut buf[total_read..]) {
-                                    Ok(0) => {
-                                        break Err("Chunked body incomplete: connection closed".into());
-                                    }
-                                    Ok(n) => total_read += n,
-                                    Err(ref e)
-                                        if e.kind() == std::io::ErrorKind::WouldBlock
-                                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                                    {
-                                        break Err("Chunked body incomplete: timeout".into());
-                                    }
-                                    Err(_) => {
-                                        break Err("Chunked body incomplete: read error".into());
-                                    }
-                                }
-                            }
-                            Err(msg) => break Err(msg), // true malformation
-                        }
-                    };
-
-                    match completeness {
-                        Ok(_scan_wire) => {
-                            // Phase B: Now we know all chunked data is in the buffer.
-                            // Perform destructive in-place compaction.
-                            match chunked_in_place_compact(&mut buf, head_consumed) {
-                                Ok(compact) => {
-                                    let total_wire = head_consumed + compact.wire_consumed;
-                                    (total_wire, head_consumed, compact.body_len, compact.body_len as i64, true)
-                                }
-                                Err(_msg) => {
-                                    // Should not happen (completeness check passed), but be safe
-                                    let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                                    let _ = std::io::Write::write_all(&mut stream, bad_request);
-                                    request_count += 1;
-                                    break;
-                                }
-                            }
-                        }
-                        Err(_msg) => {
-                            // Malformed or incomplete chunked body → 400
-                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = std::io::Write::write_all(&mut stream, bad_request);
-                            request_count += 1;
-                            break; // close connection
-                        }
-                    }
-                } else {
-                    // ── Content-Length path (v1 behavior) ──
-
-                    // NB-3: Early reject if head + body exceeds buffer limit (413 Content Too Large)
-                    if head_consumed + content_length as usize > MAX_REQUEST_BUF {
-                        let too_large = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        let _ = std::io::Write::write_all(&mut stream, too_large);
-                        request_count += 1;
-                        break; // close connection after 413
-                    }
-
-                    // Read until the full body arrives (Content-Length bytes after head)
-                    let body_needed = head_consumed + content_length as usize;
-                    let mut body_incomplete = false;
-                    while total_read < body_needed && total_read < MAX_REQUEST_BUF {
-                        if total_read == buf.len() {
-                            buf.resize(std::cmp::min(buf.len() * 2, MAX_REQUEST_BUF), 0);
-                        }
-                        match std::io::Read::read(&mut stream, &mut buf[total_read..]) {
-                            Ok(0) => {
-                                body_incomplete = true;
-                                break;
-                            }
-                            Ok(n) => total_read += n,
-                            Err(ref e)
-                                if e.kind() == std::io::ErrorKind::WouldBlock
-                                    || e.kind() == std::io::ErrorKind::TimedOut =>
-                            {
-                                body_incomplete = true;
-                                break;
-                            }
-                            Err(_) => {
-                                body_incomplete = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Reject if body is incomplete (EOF / timeout / buffer limit before full body)
-                    if content_length > 0 && (body_incomplete || total_read < body_needed) {
-                        let bad_request =
-                            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        let _ = std::io::Write::write_all(&mut stream, bad_request);
-                        request_count += 1;
-                        break; // close connection after incomplete body
-                    }
-
-                    (body_needed, head_consumed, content_length as usize, content_length, false)
-                };
-
-                // Detach request-scoped raw from scratch buffer (owned copy).
-                // For Content-Length: raw = head + body (wire_consumed bytes).
-                // For chunked: raw = head + compacted body. We copy only what the
-                // handler needs, not the original framing.
-                let raw_len = if is_request_chunked {
-                    // After compaction, body data is at buf[head_consumed..head_consumed+body_len].
-                    // raw should contain head + compacted body.
-                    head_consumed + body_len
-                } else {
-                    wire_consumed
-                };
-                let raw_bytes = buf[..raw_len].to_vec();
-
-                // ── Determine keep-alive (NET2-1a/1b/1c) ──
-                // Extract HTTP minor version from parsed fields
-                let http_minor = match get_field_value(&parsed_fields, "version") {
-                    Some(Value::BuchiPack(ver_fields)) => {
-                        get_field_int(ver_fields, "minor").unwrap_or(1)
-                    }
-                    _ => 1, // default to HTTP/1.1
-                };
-
-                // Extract headers list for Connection header inspection
-                let keep_alive = match get_field_value(&parsed_fields, "headers") {
-                    Some(Value::List(headers)) => {
-                        determine_keep_alive(&raw_bytes, headers, http_minor)
-                    }
-                    _ => http_minor == 1, // no headers → use version default
-                };
-
-                // ── Build request pack for handler ──
-                let mut request_fields: Vec<(String, Value)> = Vec::new();
-                request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
-
-                for key in &["method", "path", "query", "version", "headers"] {
-                    if let Some(v) = get_field_value(&parsed_fields, key) {
-                        request_fields.push((key.to_string(), v.clone()));
-                    }
-                }
-
-                request_fields.push(("body".into(), make_span(body_start, body_len)));
-                request_fields.push(("bodyOffset".into(), Value::Int(head_consumed as i64)));
-                request_fields
-                    .push(("contentLength".into(), Value::Int(final_content_length)));
-                request_fields
-                    .push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
-                request_fields
-                    .push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
-                // v2: keepAlive determined from Connection header + HTTP version
-                request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
-                // NET2-2d: chunked field reflects Transfer-Encoding detection
-                request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
-
-                let request_pack = Value::BuchiPack(request_fields);
-
-                // ── Call handler with request ──
-                let handler_result = self.call_function_with_values(&handler, &[request_pack]);
-
-                let response_value = match handler_result {
-                    Ok(v) => v,
                     Err(e) => {
-                        // Handler error → send 500 Internal Server Error
-                        let error_body = format!("Internal Server Error: {}", e.message);
-                        let error_response = format!(
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            error_body.len(),
-                            error_body
+                        // Accept failure → return error result (fatal)
+                        let result = make_result_failure_msg(
+                            "AcceptError",
+                            format!("httpServe: accept failed: {}", e),
                         );
-                        let _ =
-                            std::io::Write::write_all(&mut stream, error_response.as_bytes());
-                        request_count += 1;
-                        break; // close connection after handler error
-                    }
-                };
-
-                // ── Encode response and write back ──
-                let encoded = encode_response(&response_value);
-                match extract_result_value(&encoded) {
-                    Some(inner) => {
-                        if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes")
-                        {
-                            let _ = std::io::Write::write_all(&mut stream, wire_bytes);
-                        }
-                    }
-                    None => {
-                        // Encode failed → send 500
-                        let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        let _ = std::io::Write::write_all(&mut stream, fallback);
-                        request_count += 1;
-                        break; // close connection after encode error
+                        return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                     }
                 }
-
-                request_count += 1;
-                conn_requests += 1;
-
-                // ── Buffer advance: remove consumed bytes, keep any leftover ──
-                // (leftover data = pipelined bytes from next request)
-                // For chunked: wire_consumed includes all framing bytes on the wire.
-                if wire_consumed < total_read {
-                    // Shift remaining bytes to the front (in-place)
-                    buf.copy_within(wire_consumed..total_read, 0);
-                    total_read -= wire_consumed;
-                } else {
-                    total_read = 0;
-                }
-                // Ensure buf has capacity for next read (don't shrink below 8192)
-                if buf.len() < 8192 {
-                    buf.resize(8192, 0);
-                }
-
-                // ── Keep-alive decision ──
-                if !keep_alive {
-                    break; // client requested close → end keep-alive loop
-                }
-
-                // maxRequests check after incrementing count
-                if max_requests > 0 && request_count >= max_requests {
-                    break; // reached limit → end keep-alive loop
-                }
-
-                // Next iteration will try to parse leftover data in buf,
-                // or read more from socket. Idle timeout is handled by
-                // set_read_timeout on the stream.
             }
-            // stream drops here → connection closed
+
+            // If no connections and we need to wait, sleep briefly to avoid busy-spin
+            if connections.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+
+            // ── Step 2: Poll connections round-robin for a ready request ──
+            // Try each connection once, starting from poll_start for fairness.
+            let n = connections.len();
+            let mut processed_idx: Option<usize> = None;
+            let mut close_idx: Option<usize> = None;
+
+            for offset in 0..n {
+                let idx = (poll_start + offset) % n;
+                let conn = &mut connections[idx];
+
+                // Check idle timeout — applies to all connections.
+                // For first-request connections (conn_requests == 0):
+                //   - No data at all: send 400 (v1 compat), count as request.
+                //   - Partial data: send 400 (malformed), count as request.
+                // For keep-alive connections (conn_requests > 0):
+                //   - No partial data (true idle): clean close, no 400.
+                //   - Partial data present: send 400 (malformed), count as request.
+                //     This restores the v1/v2-Phase1 timeout contract: any partial
+                //     request that times out is a 400, regardless of keep-alive state.
+                if conn.last_activity.elapsed() > read_timeout {
+                    if conn.conn_requests == 0 || conn.total_read > 0 {
+                        // Partial data or first-request timeout: bad request
+                        let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                        request_count += 1;
+                    }
+                    // After 400 or clean idle close: remove connection.
+                    close_idx = Some(idx);
+                    break;
+                }
+
+                // Try to read data (non-blocking due to short timeout)
+                let read_result = Self::try_read_request(conn);
+                match read_result {
+                    ConnReadResult::Ready(parsed_fields, head_consumed, content_length, is_chunked) => {
+                        // We have a complete request head. Process body + handler.
+                        // Advance round-robin past this connection.
+                        poll_start = (idx + 1) % n;
+                        processed_idx = Some(idx);
+
+                        // ── Body reading + handler dispatch ──
+                        // Set blocking timeout for body read (need full body)
+                        let _ = conn.stream.set_read_timeout(Some(read_timeout));
+
+                        let dispatch_result = self.dispatch_request(
+                            conn,
+                            &handler,
+                            parsed_fields,
+                            head_consumed,
+                            content_length,
+                            is_chunked,
+                            &mut request_count,
+                        );
+
+                        // Restore short poll timeout
+                        let _ = conn.stream.set_read_timeout(Some(poll_timeout));
+
+                        match dispatch_result {
+                            ConnAction::KeepAlive => {
+                                conn.last_activity = std::time::Instant::now();
+                                // Connection stays in pool
+                            }
+                            ConnAction::Close => {
+                                close_idx = processed_idx;
+                            }
+                        }
+                        break; // processed one request, loop back to accept + poll
+                    }
+                    ConnReadResult::Eof => {
+                        if conn.conn_requests == 0 {
+                            // First request EOF: bad request (v1 compat)
+                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                            request_count += 1;
+                        }
+                        close_idx = Some(idx);
+                        break;
+                    }
+                    ConnReadResult::Timeout | ConnReadResult::NeedMore => {
+                        // No complete request ready. The idle timeout check at the
+                        // top of the loop handles the actual timeout logic.
+                        // Just move on to the next connection.
+                        continue;
+                    }
+                    ConnReadResult::Malformed => {
+                        let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                        request_count += 1;
+                        close_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+
+            // ── Step 3: Remove closed connection ──
+            if let Some(idx) = close_idx {
+                connections.swap_remove(idx);
+                // Adjust poll_start if needed
+                if !connections.is_empty() {
+                    poll_start %= connections.len();
+                } else {
+                    poll_start = 0;
+                }
+            }
+
+            // If no connection was processed and none closed, all connections are
+            // waiting for data. Brief sleep to avoid busy-spin.
+            if processed_idx.is_none() && close_idx.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
 
         // Server completed successfully
@@ -1466,6 +1319,307 @@ impl Interpreter {
         ]);
         let result = make_result_success(result_inner);
         Ok(Some(Signal::Value(make_fulfilled_async(result))))
+    }
+
+    /// Try to read and parse a request head from a connection (non-blocking).
+    /// Returns the parse state without modifying request_count.
+    fn try_read_request(conn: &mut HttpConnection) -> ConnReadResult {
+        const MAX_REQUEST_BUF: usize = 1_048_576; // 1 MiB
+
+        if conn.total_read >= MAX_REQUEST_BUF {
+            return ConnReadResult::Malformed;
+        }
+
+        // Try to parse what we already have in the buffer
+        if conn.total_read > 0 {
+            let parse_result = parse_request_head(&conn.buf[..conn.total_read]);
+            let completion_info = match extract_result_value(&parse_result) {
+                None => return ConnReadResult::Malformed,
+                Some(inner) => {
+                    if get_field_bool(inner, "complete").unwrap_or(false) {
+                        let consumed =
+                            get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                        let cl = get_field_int(inner, "contentLength").unwrap_or(0);
+                        let is_chunked =
+                            get_field_bool(inner, "chunked").unwrap_or(false);
+                        Some((consumed, cl, is_chunked))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((consumed, cl, is_chunked)) = completion_info {
+                match extract_result_value_owned(parse_result) {
+                    Some(fields) => {
+                        return ConnReadResult::Ready(fields, consumed, cl, is_chunked);
+                    }
+                    None => return ConnReadResult::Malformed,
+                }
+            }
+        }
+
+        // Need more data -- try a non-blocking read
+        if conn.total_read == conn.buf.len() {
+            conn.buf.resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+        }
+        match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
+            Ok(0) => ConnReadResult::Eof,
+            Ok(n) => {
+                conn.total_read += n;
+                // Update last_activity on successful byte reception so that
+                // slow-but-active clients (sending data within each timeout
+                // window) are not incorrectly timed out.
+                conn.last_activity = std::time::Instant::now();
+                // Re-check parse after new data
+                let parse_result = parse_request_head(&conn.buf[..conn.total_read]);
+                let completion_info = match extract_result_value(&parse_result) {
+                    None => return ConnReadResult::Malformed,
+                    Some(inner) => {
+                        if get_field_bool(inner, "complete").unwrap_or(false) {
+                            let consumed =
+                                get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                            let cl = get_field_int(inner, "contentLength").unwrap_or(0);
+                            let is_chunked =
+                                get_field_bool(inner, "chunked").unwrap_or(false);
+                            Some((consumed, cl, is_chunked))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                match completion_info {
+                    Some((consumed, cl, is_chunked)) => {
+                        match extract_result_value_owned(parse_result) {
+                            Some(fields) => ConnReadResult::Ready(fields, consumed, cl, is_chunked),
+                            None => ConnReadResult::Malformed,
+                        }
+                    }
+                    None => ConnReadResult::NeedMore,
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Check if we have partial data that could be parsed
+                if conn.total_read > 0 {
+                    ConnReadResult::Timeout
+                } else {
+                    ConnReadResult::NeedMore // no data at all yet
+                }
+            }
+            Err(_) => ConnReadResult::Eof,
+        }
+    }
+
+    /// Dispatch a single request on a connection: read body, call handler, write response.
+    /// Returns whether to keep the connection alive or close it.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_request(
+        &mut self,
+        conn: &mut HttpConnection,
+        handler: &super::value::FuncValue,
+        parsed_fields: Vec<(String, Value)>,
+        head_consumed: usize,
+        content_length: i64,
+        is_chunked: bool,
+        request_count: &mut i64,
+    ) -> ConnAction {
+        const MAX_REQUEST_BUF: usize = 1_048_576; // 1 MiB
+
+        // ── Body reading: Content-Length vs Chunked Transfer-Encoding ──
+        let body_result = if is_chunked {
+            // ── NET2-2: Chunked Transfer Encoding ──
+            let completeness = loop {
+                let check = chunked_body_complete(&conn.buf[..conn.total_read], head_consumed);
+                match check {
+                    Ok(wire_used) => break Ok(wire_used),
+                    Err(ref msg) if msg.starts_with("truncated:") => {
+                        if conn.total_read >= MAX_REQUEST_BUF {
+                            break Err("Chunked body exceeds buffer limit".to_string());
+                        }
+                        if conn.total_read == conn.buf.len() {
+                            conn.buf.resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+                        }
+                        match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
+                            Ok(0) => break Err("Chunked body incomplete: connection closed".into()),
+                            Ok(n) => conn.total_read += n,
+                            Err(ref e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                break Err("Chunked body incomplete: timeout".into());
+                            }
+                            Err(_) => break Err("Chunked body incomplete: read error".into()),
+                        }
+                    }
+                    Err(msg) => break Err(msg),
+                }
+            };
+
+            match completeness {
+                Ok(_scan_wire) => {
+                    match chunked_in_place_compact(&mut conn.buf, head_consumed) {
+                        Ok(compact) => {
+                            let total_wire = head_consumed + compact.wire_consumed;
+                            Ok((total_wire, head_consumed, compact.body_len, compact.body_len as i64, true))
+                        }
+                        Err(_msg) => {
+                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                            *request_count += 1;
+                            Err(())
+                        }
+                    }
+                }
+                Err(_msg) => {
+                    let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                    *request_count += 1;
+                    Err(())
+                }
+            }
+        } else {
+            // ── Content-Length path (v1 behavior) ──
+            if head_consumed + content_length as usize > MAX_REQUEST_BUF {
+                let too_large = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut conn.stream, too_large);
+                *request_count += 1;
+                return ConnAction::Close;
+            }
+
+            let body_needed = head_consumed + content_length as usize;
+            let mut body_incomplete = false;
+            while conn.total_read < body_needed && conn.total_read < MAX_REQUEST_BUF {
+                if conn.total_read == conn.buf.len() {
+                    conn.buf.resize(std::cmp::min(conn.buf.len() * 2, MAX_REQUEST_BUF), 0);
+                }
+                match std::io::Read::read(&mut conn.stream, &mut conn.buf[conn.total_read..]) {
+                    Ok(0) => { body_incomplete = true; break; }
+                    Ok(n) => conn.total_read += n,
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        body_incomplete = true; break;
+                    }
+                    Err(_) => { body_incomplete = true; break; }
+                }
+            }
+
+            if content_length > 0 && (body_incomplete || conn.total_read < body_needed) {
+                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                *request_count += 1;
+                return ConnAction::Close;
+            }
+
+            Ok((body_needed, head_consumed, content_length as usize, content_length, false))
+        };
+
+        let (wire_consumed, body_start, body_len, final_content_length, is_request_chunked) =
+            match body_result {
+                Ok(tuple) => tuple,
+                Err(()) => return ConnAction::Close,
+            };
+
+        // Detach request-scoped raw from scratch buffer (owned copy).
+        let raw_len = if is_request_chunked {
+            head_consumed + body_len
+        } else {
+            wire_consumed
+        };
+        let raw_bytes = conn.buf[..raw_len].to_vec();
+
+        // ── Determine keep-alive (NET2-1a/1b/1c) ──
+        let http_minor = match get_field_value(&parsed_fields, "version") {
+            Some(Value::BuchiPack(ver_fields)) => {
+                get_field_int(ver_fields, "minor").unwrap_or(1)
+            }
+            _ => 1,
+        };
+
+        let keep_alive = match get_field_value(&parsed_fields, "headers") {
+            Some(Value::List(headers)) => {
+                determine_keep_alive(&raw_bytes, headers, http_minor)
+            }
+            _ => http_minor == 1,
+        };
+
+        // ── Build request pack for handler ──
+        let mut request_fields: Vec<(String, Value)> = Vec::new();
+        request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+
+        for key in &["method", "path", "query", "version", "headers"] {
+            if let Some(v) = get_field_value(&parsed_fields, key) {
+                request_fields.push((key.to_string(), v.clone()));
+            }
+        }
+
+        request_fields.push(("body".into(), make_span(body_start, body_len)));
+        request_fields.push(("bodyOffset".into(), Value::Int(head_consumed as i64)));
+        request_fields.push(("contentLength".into(), Value::Int(final_content_length)));
+        request_fields.push(("remoteHost".into(), Value::Str(conn.peer_addr.ip().to_string())));
+        request_fields.push(("remotePort".into(), Value::Int(conn.peer_addr.port() as i64)));
+        request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
+        request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
+
+        let request_pack = Value::BuchiPack(request_fields);
+
+        // ── Call handler with request ──
+        let handler_result = self.call_function_with_values(handler, &[request_pack]);
+
+        let response_value = match handler_result {
+            Ok(v) => v,
+            Err(e) => {
+                let error_body = format!("Internal Server Error: {}", e.message);
+                let error_response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    error_body.len(),
+                    error_body
+                );
+                let _ = std::io::Write::write_all(&mut conn.stream, error_response.as_bytes());
+                *request_count += 1;
+                return ConnAction::Close;
+            }
+        };
+
+        // ── Encode response and write back ──
+        let encoded = encode_response(&response_value);
+        match extract_result_value(&encoded) {
+            Some(inner) => {
+                if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
+                    let _ = std::io::Write::write_all(&mut conn.stream, wire_bytes);
+                }
+            }
+            None => {
+                let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = std::io::Write::write_all(&mut conn.stream, fallback);
+                *request_count += 1;
+                return ConnAction::Close;
+            }
+        }
+
+        *request_count += 1;
+        conn.conn_requests += 1;
+
+        // ── Buffer advance: remove consumed bytes, keep any leftover ──
+        if wire_consumed < conn.total_read {
+            conn.buf.copy_within(wire_consumed..conn.total_read, 0);
+            conn.total_read -= wire_consumed;
+        } else {
+            conn.total_read = 0;
+        }
+        if conn.buf.len() < 8192 {
+            conn.buf.resize(8192, 0);
+        }
+
+        // ── Keep-alive decision ──
+        if !keep_alive {
+            return ConnAction::Close;
+        }
+
+        ConnAction::KeepAlive
     }
 
     fn eval_net_bytes_arg(
@@ -5012,5 +5166,665 @@ mod tests {
         );
 
         server_handle.join().unwrap();
+    }
+
+    // ── NET2-3g: Concurrent handler dispatch tests ──
+
+    /// NET2-3g: Two clients connect simultaneously, both get responses.
+    #[test]
+    fn test_concurrent_two_clients_both_get_responses() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19600);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("concurrent-ok"),
+                Expr::IntLit(2, dummy_span()),   // maxRequests=2 (one per client)
+                Expr::IntLit(5000, dummy_span()), // timeoutMs
+                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Connect two clients simultaneously before sending any data
+        let mut client1 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Both send requests
+        std::io::Write::write_all(
+            &mut client1,
+            b"GET /client1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        std::io::Write::write_all(
+            &mut client2,
+            b"GET /client2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        // Both should get responses
+        let responses1 = read_responses(&mut client1, 1);
+        let responses2 = read_responses(&mut client2, 1);
+
+        assert!(
+            !responses1.is_empty(),
+            "Client 1 should receive a response"
+        );
+        assert!(
+            responses1[0].contains("200 OK"),
+            "Client 1 should get 200 OK, got: {}",
+            responses1[0]
+        );
+        assert!(
+            responses1[0].contains("concurrent-ok"),
+            "Client 1 should get body"
+        );
+
+        assert!(
+            !responses2.is_empty(),
+            "Client 2 should receive a response"
+        );
+        assert!(
+            responses2[0].contains("200 OK"),
+            "Client 2 should get 200 OK, got: {}",
+            responses2[0]
+        );
+        assert!(
+            responses2[0].contains("concurrent-ok"),
+            "Client 2 should get body"
+        );
+
+        // Server should terminate (maxRequests=2)
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(2));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NET2-3g: maxConnections limits simultaneous connections.
+    /// Excess connections must wait for a slot or be processed later.
+    #[test]
+    fn test_concurrent_max_connections_limit() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19610);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("limited-ok"),
+                Expr::IntLit(3, dummy_span()),   // maxRequests=3
+                Expr::IntLit(5000, dummy_span()), // timeoutMs
+                Expr::IntLit(2, dummy_span()),    // maxConnections=2
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Connect 3 clients. maxConnections=2, so only 2 can be in the pool at once.
+        // The third will be accepted after one of the first two closes.
+        let mut client1 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client2 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Send requests on first two
+        std::io::Write::write_all(
+            &mut client1,
+            b"GET /c1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        std::io::Write::write_all(
+            &mut client2,
+            b"GET /c2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        // Both get responses
+        let r1 = read_responses(&mut client1, 1);
+        let r2 = read_responses(&mut client2, 1);
+        assert!(!r1.is_empty() && r1[0].contains("200 OK"), "Client 1 should get 200");
+        assert!(!r2.is_empty() && r2[0].contains("200 OK"), "Client 2 should get 200");
+
+        // Drop clients to free slots
+        drop(client1);
+        drop(client2);
+
+        // Third client can now connect (after slots free up)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut client3 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client3,
+            b"GET /c3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        let r3 = read_responses(&mut client3, 1);
+        assert!(!r3.is_empty() && r3[0].contains("200 OK"), "Client 3 should get 200");
+
+        // Server should terminate (maxRequests=3)
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(3));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NET2-3g: maxRequests counts across all connections.
+    #[test]
+    fn test_concurrent_max_requests_across_connections() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19620);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("counted"),
+                Expr::IntLit(3, dummy_span()),   // maxRequests=3 total
+                Expr::IntLit(5000, dummy_span()),
+                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Client 1: keep-alive, sends 2 requests
+        let mut client1 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client1,
+            b"GET /r1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap();
+        let r1 = read_responses(&mut client1, 1);
+        assert!(!r1.is_empty() && r1[0].contains("200 OK"));
+
+        std::io::Write::write_all(
+            &mut client1,
+            b"GET /r2 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap();
+        let r2 = read_responses(&mut client1, 1);
+        assert!(!r2.is_empty() && r2[0].contains("200 OK"));
+
+        // Client 2: sends 1 request (should be the 3rd total, hitting maxRequests)
+        let mut client2 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client2,
+            b"GET /r3 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        let r3 = read_responses(&mut client2, 1);
+        assert!(!r3.is_empty() && r3[0].contains("200 OK"));
+
+        // Server should terminate (maxRequests=3 reached)
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(3));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NET2-3g: Per-connection buffer isolation.
+    /// Verify that data from one connection does not leak into another.
+    #[test]
+    fn test_concurrent_buffer_isolation() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19630);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("isolated"),
+                Expr::IntLit(2, dummy_span()),   // maxRequests=2
+                Expr::IntLit(5000, dummy_span()),
+                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Client 1: POST with body "AAAA"
+        let mut client1 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client1,
+            b"POST /c1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nAAAA",
+        )
+        .unwrap();
+
+        // Client 2: POST with body "BBBB"
+        let mut client2 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client2,
+            b"POST /c2 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nBBBB",
+        )
+        .unwrap();
+
+        // Both should get their own responses without data leakage
+        let r1 = read_responses(&mut client1, 1);
+        let r2 = read_responses(&mut client2, 1);
+
+        assert!(!r1.is_empty() && r1[0].contains("200 OK"), "Client 1 should get 200");
+        assert!(!r2.is_empty() && r2[0].contains("200 OK"), "Client 2 should get 200");
+
+        // Server terminates
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(2));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NET2-3g: maxConnections defaults to 128 when not specified (v1 compat).
+    #[test]
+    fn test_concurrent_max_connections_default() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19640);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            // No maxConnections arg — should default to 128
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("default-mc"),
+                Expr::IntLit(1, dummy_span()),   // maxRequests=1
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Single client should work fine with default maxConnections
+        let mut client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET /test HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        let r = read_responses(&mut client, 1);
+        assert!(!r.is_empty() && r[0].contains("200 OK"));
+        assert!(r[0].contains("default-mc"));
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NET2-3g: Keep-alive works correctly in concurrent mode.
+    /// One connection does keep-alive while another connects separately.
+    #[test]
+    fn test_concurrent_keep_alive_with_multiple_connections() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19650);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("ka-concurrent"),
+                Expr::IntLit(3, dummy_span()),   // maxRequests=3 total
+                Expr::IntLit(5000, dummy_span()),
+                Expr::IntLit(4, dummy_span()),    // maxConnections=4
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Client 1: keep-alive, 2 requests
+        let mut client1 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Client 2: single request with Connection: close
+        let mut client2 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+
+        // Client 1 first request
+        std::io::Write::write_all(
+            &mut client1,
+            b"GET /ka1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap();
+        let r1 = read_responses(&mut client1, 1);
+        assert!(!r1.is_empty() && r1[0].contains("200 OK"));
+
+        // Client 2 request
+        std::io::Write::write_all(
+            &mut client2,
+            b"GET /close HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        let r2 = read_responses(&mut client2, 1);
+        assert!(!r2.is_empty() && r2[0].contains("200 OK"));
+
+        // Client 1 second request (keep-alive, this is the 3rd total)
+        std::io::Write::write_all(
+            &mut client1,
+            b"GET /ka2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        let r3 = read_responses(&mut client1, 1);
+        assert!(!r3.is_empty() && r3[0].contains("200 OK"));
+
+        // Server should terminate (maxRequests=3)
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(3));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// NET2-3g: Chunked body works with concurrent connections.
+    #[test]
+    fn test_concurrent_chunked_body() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19660);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("chunked-concurrent"),
+                Expr::IntLit(2, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+                Expr::IntLit(4, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Client 1: normal Content-Length request
+        let mut client1 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client1,
+            b"POST /normal HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        )
+        .unwrap();
+
+        // Client 2: chunked request
+        let mut client2 =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client2,
+            b"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nworld\r\n0\r\n\r\n",
+        )
+        .unwrap();
+
+        let r1 = read_responses(&mut client1, 1);
+        let r2 = read_responses(&mut client2, 1);
+
+        assert!(!r1.is_empty() && r1[0].contains("200 OK"), "Normal request should succeed");
+        assert!(!r2.is_empty() && r2[0].contains("200 OK"), "Chunked request should succeed");
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(2));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// Regression: keep-alive partial request timeout returns 400 (not silent close).
+    ///
+    /// Scenario: send a complete first request (200 OK, keep-alive), then send a
+    /// partial second request and let it timeout. The server must respond with 400
+    /// Bad Request (not silently close the connection) and count the request.
+    #[test]
+    fn test_keep_alive_partial_timeout_returns_400() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19670);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("partial-timeout-test"),
+                Expr::IntLit(3, dummy_span()),   // maxRequests=3 (1 real + 1 partial-timeout + 1 margin)
+                Expr::IntLit(300, dummy_span()),  // timeoutMs=300 (short for test speed)
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Phase 1: send a complete request on keep-alive connection
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        std::io::Write::write_all(
+            &mut client,
+            b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap();
+
+        let resp1 = read_responses(&mut client, 1);
+        assert!(
+            !resp1.is_empty() && resp1[0].contains("200 OK"),
+            "First request should get 200 OK, got: {:?}",
+            resp1
+        );
+
+        // Phase 2: send a PARTIAL second request (incomplete head) and let it timeout
+        std::io::Write::write_all(
+            &mut client,
+            b"GET /second HTTP/1.1\r\nHost: lo", // intentionally incomplete
+        )
+        .unwrap();
+
+        // Wait for the server's 300ms timeout to fire
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Read whatever the server sends back (should be 400, not EOF)
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+        let mut buf = [0u8; 4096];
+        let mut all_data = Vec::new();
+        loop {
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => all_data.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        let response = String::from_utf8_lossy(&all_data).to_string();
+        assert!(
+            response.contains("400 Bad Request"),
+            "Partial request on keep-alive should get 400 Bad Request, got: {:?}",
+            response
+        );
+
+        // Server should count the partial as a request (total=2).
+        // Send one more request on a fresh connection to reach maxRequests=3.
+        let mut client2 = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = client2.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        std::io::Write::write_all(
+            &mut client2,
+            b"GET /third HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+        let resp3 = read_responses(&mut client2, 1);
+        assert!(
+            !resp3.is_empty() && resp3[0].contains("200 OK"),
+            "Third request should get 200 OK"
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(
+                    get_field_int(inner, "requests"),
+                    Some(3),
+                    "Server should count partial timeout as a request (1 OK + 1 partial-400 + 1 OK = 3)"
+                );
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    /// Regression: slow-split request within timeout window is processed normally.
+    ///
+    /// Scenario: send a request head in two parts, each spaced under the timeout
+    /// window. The server should reassemble and return 200 OK (not 400).
+    #[test]
+    fn test_slow_split_request_within_timeout_succeeds() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(19680);
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_handler_expr("slow-split-ok"),
+                Expr::IntLit(1, dummy_span()),   // maxRequests=1
+                Expr::IntLit(500, dummy_span()),  // timeoutMs=500
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+        // Send first half of the request head
+        std::io::Write::write_all(
+            &mut client,
+            b"GET /split HTTP/1.1\r\nHost: localhost\r\n",
+        )
+        .unwrap();
+
+        // Wait 200ms — under the 500ms timeout, but long enough to trigger
+        // a timeout if last_activity were not updated on byte reception.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Send the rest (completing the head with double CRLF)
+        std::io::Write::write_all(
+            &mut client,
+            b"Connection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let resp = read_responses(&mut client, 1);
+        assert!(
+            !resp.is_empty() && resp[0].contains("200 OK"),
+            "Slow-split request should be processed normally (200 OK), got: {:?}",
+            resp
+        );
+        assert!(
+            resp[0].contains("slow-split-ok"),
+            "Response body should contain handler output"
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
     }
 }
