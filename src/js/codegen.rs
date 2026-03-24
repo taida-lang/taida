@@ -125,9 +125,18 @@ impl JsCodegen {
             return false;
         }
         match name {
-            "httpServe" => { self.write(&format!("__taida_net_httpServe{}", suffix)); true }
-            "httpParseRequestHead" => { self.write(&format!("__taida_net_httpParseRequestHead{}", suffix)); true }
-            "httpEncodeResponse" => { self.write(&format!("__taida_net_httpEncodeResponse{}", suffix)); true }
+            "httpServe" => {
+                self.write(&format!("__taida_net_httpServe{}", suffix));
+                true
+            }
+            "httpParseRequestHead" => {
+                self.write(&format!("__taida_net_httpParseRequestHead{}", suffix));
+                true
+            }
+            "httpEncodeResponse" => {
+                self.write(&format!("__taida_net_httpEncodeResponse{}", suffix));
+                true
+            }
             _ => false,
         }
     }
@@ -137,9 +146,10 @@ impl JsCodegen {
         let mut result = String::new();
 
         // Pre-pass: detect taida-lang/net import (guards net builtin rewriting)
-        self.has_net_import = program.statements.iter().any(|s| {
-            matches!(s, Statement::Import(imp) if imp.path == "taida-lang/net")
-        });
+        self.has_net_import = program
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::Import(imp) if imp.path == "taida-lang/net"));
 
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
         self.detect_trampoline_funcs(&program.statements);
@@ -550,8 +560,7 @@ impl JsCodegen {
                 // Track local assignment shadow: if the target name matches a net
                 // builtin, subsequent calls in the same scope must use the local
                 // value, not the builtin rewrite.
-                if self.has_net_import
-                    && Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str())
+                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str())
                 {
                     self.shadowed_net_builtins.insert(assign.target.clone());
                 }
@@ -581,8 +590,7 @@ impl JsCodegen {
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
                 // Track local unmold-forward shadow for net builtins
-                if self.has_net_import
-                    && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
+                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
                 {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
@@ -602,8 +610,7 @@ impl JsCodegen {
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
                 // Track local unmold-backward shadow for net builtins
-                if self.has_net_import
-                    && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
+                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
                 {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }

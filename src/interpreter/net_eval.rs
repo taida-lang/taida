@@ -13,10 +13,12 @@
 ///   httpServe, httpParseRequestHead, httpEncodeResponse
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
-
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
 use crate::parser::Expr;
+
+/// (status_code, headers, body_bytes)
+type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
 /// Legacy (16) + HTTP v1 (3) = 19 symbols.
@@ -126,10 +128,10 @@ fn extract_result_value_owned(result: Value) -> Option<Vec<(String, Value)>> {
     }
     // Find and move __value out
     for (k, v) in fields {
-        if k == "__value" {
-            if let Value::BuchiPack(inner) = v {
-                return Some(inner);
-            }
+        if k == "__value"
+            && let Value::BuchiPack(inner) = v
+        {
+            return Some(inner);
         }
     }
     None
@@ -165,9 +167,7 @@ fn parse_request_head(bytes: &[u8]) -> Value {
     let mut req = httparse::Request::new(&mut header_buf);
 
     match req.parse(bytes) {
-        Ok(httparse::Status::Complete(consumed)) => {
-            build_parse_result(&req, bytes, consumed, true)
-        }
+        Ok(httparse::Status::Complete(consumed)) => build_parse_result(&req, bytes, consumed, true),
         Ok(httparse::Status::Partial) => {
             // Incomplete: try to extract what we can, but mark complete=false
             // Re-parse to get partial data (httparse populates fields even on Partial)
@@ -211,10 +211,7 @@ fn build_parse_result(
     // version
     let version = Value::BuchiPack(vec![
         ("major".into(), Value::Int(1)),
-        (
-            "minor".into(),
-            Value::Int(req.version.unwrap_or(1) as i64),
-        ),
+        ("minor".into(), Value::Int(req.version.unwrap_or(1) as i64)),
     ]);
 
     // headers as list of @(name: span, value: span)
@@ -314,10 +311,7 @@ fn encode_response(response: &Value) -> Value {
     if no_body && !body_bytes.is_empty() {
         return make_result_failure_msg(
             "EncodeError",
-            format!(
-                "httpEncodeResponse: status {} must not have a body",
-                status
-            ),
+            format!("httpEncodeResponse: status {} must not have a body", status),
         );
     }
 
@@ -341,9 +335,7 @@ fn encode_response(response: &Value) -> Value {
             .iter()
             .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
         if !has_content_length {
-            buf.extend_from_slice(
-                format!("Content-Length: {}\r\n", body_bytes.len()).as_bytes(),
-            );
+            buf.extend_from_slice(format!("Content-Length: {}\r\n", body_bytes.len()).as_bytes());
         }
     }
 
@@ -356,9 +348,7 @@ fn encode_response(response: &Value) -> Value {
     make_result_success(result)
 }
 
-fn extract_response_fields(
-    response: &Value,
-) -> Result<(i64, Vec<(String, String)>, Vec<u8>), String> {
+fn extract_response_fields(response: &Value) -> Result<ResponseFields, String> {
     let fields = match response {
         Value::BuchiPack(fields) => fields,
         _ => return Err("httpEncodeResponse: argument must be a BuchiPack @(...)".into()),
@@ -367,12 +357,7 @@ fn extract_response_fields(
     // status (required, must be Int)
     let status = match fields.iter().find(|(k, _)| k == "status") {
         Some((_, Value::Int(n))) => *n,
-        Some((_, v)) => {
-            return Err(format!(
-                "httpEncodeResponse: status must be Int, got {}",
-                v
-            ))
-        }
+        Some((_, v)) => return Err(format!("httpEncodeResponse: status must be Int, got {}", v)),
         None => return Err("httpEncodeResponse: missing required field 'status'".into()),
     };
     if !(100..=999).contains(&status) {
@@ -389,7 +374,7 @@ fn extract_response_fields(
             return Err(format!(
                 "httpEncodeResponse: headers must be a List, got {}",
                 v
-            ))
+            ));
         }
         None => return Err("httpEncodeResponse: missing required field 'headers'".into()),
     };
@@ -401,7 +386,7 @@ fn extract_response_fields(
                 return Err(format!(
                     "httpEncodeResponse: headers[{}] must be @(name, value)",
                     i
-                ))
+                ));
             }
         };
         let name = match hf.iter().find(|(k, _)| k == "name") {
@@ -410,7 +395,7 @@ fn extract_response_fields(
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].name must be Str",
                     i
-                ))
+                ));
             }
         };
         let value = match hf.iter().find(|(k, _)| k == "value") {
@@ -419,7 +404,7 @@ fn extract_response_fields(
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].value must be Str",
                     i
-                ))
+                ));
             }
         };
         // NB-7: Enforce header name/value length limits (parity with Native)
@@ -459,7 +444,7 @@ fn extract_response_fields(
             return Err(format!(
                 "httpEncodeResponse: body must be Bytes or Str, got {}",
                 v
-            ))
+            ));
         }
         None => return Err("httpEncodeResponse: missing required field 'body'".into()),
     };
@@ -532,13 +517,10 @@ impl Interpreter {
             // ── Legacy surface — delegate to os_eval implementations ──
             // Note: these symbols are also reachable via the unguarded try_os_func()
             // when imported from taida-lang/os. That is known debt, not a NET-0 scope fix.
-            "dnsResolve" | "tcpConnect" | "tcpListen" | "tcpAccept"
-            | "socketSend" | "socketSendAll" | "socketRecv"
-            | "socketSendBytes" | "socketRecvBytes" | "socketRecvExact"
-            | "udpBind" | "udpSendTo" | "udpRecvFrom"
-            | "socketClose" | "listenerClose" | "udpClose" => {
-                self.try_os_func(&original_name, args)
-            }
+            "dnsResolve" | "tcpConnect" | "tcpListen" | "tcpAccept" | "socketSend"
+            | "socketSendAll" | "socketRecv" | "socketSendBytes" | "socketRecvBytes"
+            | "socketRecvExact" | "udpBind" | "udpSendTo" | "udpRecvFrom" | "socketClose"
+            | "listenerClose" | "udpClose" => self.try_os_func(&original_name, args),
 
             // ── httpParseRequestHead(bytes) → Result[@(parsed), _] ──
             "httpParseRequestHead" => {
@@ -556,7 +538,7 @@ impl Interpreter {
                     None => {
                         return Err(RuntimeError {
                             message: "httpEncodeResponse: missing response argument".into(),
-                        })
+                        });
                     }
                 };
                 Ok(Some(Signal::Value(encode_response(&response))))
@@ -582,15 +564,12 @@ impl Interpreter {
     // - maxRequests = 0 → run indefinitely
     // - No httpClose, no keep-alive, no chunked, no streaming
 
-    fn eval_http_serve(
-        &mut self,
-        args: &[Expr],
-    ) -> Result<Option<Signal>, RuntimeError> {
+    fn eval_http_serve(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         // ── Arg 0: port (required, Int) ──
         let port: u16 = match args.first() {
             Some(arg) => match self.eval_expr(arg)? {
                 Signal::Value(Value::Int(n)) => {
-                    if n < 0 || n > 65535 {
+                    if !(0..=65535).contains(&n) {
                         return Err(RuntimeError {
                             message: format!("httpServe: port must be 0-65535, got {}", n),
                         });
@@ -745,10 +724,8 @@ impl Interpreter {
                     None => break HeadResult::Malformed,
                     Some(inner) => {
                         if get_field_bool(inner, "complete").unwrap_or(false) {
-                            let consumed =
-                                get_field_int(inner, "consumed").unwrap_or(0) as usize;
-                            let cl =
-                                get_field_int(inner, "contentLength").unwrap_or(0);
+                            let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
+                            let cl = get_field_int(inner, "contentLength").unwrap_or(0);
                             Some((consumed, cl))
                         } else {
                             None
@@ -804,7 +781,8 @@ impl Interpreter {
 
             // Reject if body is incomplete (EOF / timeout / buffer limit before full body)
             if content_length > 0 && total_read < body_needed {
-                let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let bad_request =
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = std::io::Write::write_all(&mut stream, bad_request);
                 request_count += 1;
                 continue;
@@ -1092,11 +1070,7 @@ mod tests {
         let result = parse_request_head(raw);
         let inner = extract_result_inner(&result);
         // query span should have len=0
-        let query = match inner
-            .iter()
-            .find(|(k, _)| k == "query")
-            .map(|(_, v)| v)
-        {
+        let query = match inner.iter().find(|(k, _)| k == "query").map(|(_, v)| v) {
             Some(Value::BuchiPack(f)) => f,
             _ => panic!("no query"),
         };
@@ -1222,10 +1196,9 @@ mod tests {
 
     fn is_result_failure(result: &Value) -> bool {
         match result {
-            Value::BuchiPack(f) => !matches!(
-                f.iter().find(|(k, _)| k == "throw"),
-                Some((_, Value::Unit))
-            ),
+            Value::BuchiPack(f) => {
+                !matches!(f.iter().find(|(k, _)| k == "throw"), Some((_, Value::Unit)))
+            }
             _ => false,
         }
     }
@@ -1317,7 +1290,8 @@ mod tests {
     fn test_parse_content_length_max_safe_integer_boundary() {
         // Exactly Number.MAX_SAFE_INTEGER = 9007199254740991 (2^53 - 1) — should succeed.
         // This is the cross-backend upper limit (JS Number precision boundary).
-        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740991\r\nHost: localhost\r\n\r\n";
+        let raw =
+            b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740991\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(!is_result_failure(&result));
         let inner = extract_result_inner(&result);
@@ -1328,7 +1302,8 @@ mod tests {
     fn test_parse_content_length_max_safe_integer_plus_one() {
         // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — must be rejected.
         // Beyond this value, JS Number loses precision, breaking cross-backend parity.
-        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740992\r\nHost: localhost\r\n\r\n";
+        let raw =
+            b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740992\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(is_result_failure(&result));
         assert!(get_failure_message(&result).contains("invalid Content-Length"));
@@ -1368,7 +1343,8 @@ mod tests {
     fn test_parse_content_length_leading_zeros_17_digits() {
         // "00000000000000005" (17 chars) should be accepted as 5.
         // JS must strip leading zeros before length check for parity.
-        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 00000000000000005\r\nHost: localhost\r\n\r\n";
+        let raw =
+            b"POST /data HTTP/1.1\r\nContent-Length: 00000000000000005\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(!is_result_failure(&result));
         let inner = extract_result_inner(&result);
@@ -1378,7 +1354,8 @@ mod tests {
     #[test]
     fn test_parse_content_length_all_zeros_long() {
         // "00000000000000000" (17 zeros) should be accepted as 0.
-        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 00000000000000000\r\nHost: localhost\r\n\r\n";
+        let raw =
+            b"POST /data HTTP/1.1\r\nContent-Length: 00000000000000000\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(!is_result_failure(&result));
         let inner = extract_result_inner(&result);
@@ -1399,7 +1376,8 @@ mod tests {
     fn test_parse_content_length_leading_zeros_over_max_safe() {
         // Leading zeros + value > MAX_SAFE_INTEGER must still be rejected.
         // "009007199254740992" = 9007199254740992 > MAX_SAFE_INTEGER
-        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 009007199254740992\r\nHost: localhost\r\n\r\n";
+        let raw =
+            b"POST /data HTTP/1.1\r\nContent-Length: 009007199254740992\r\nHost: localhost\r\n\r\n";
         let result = parse_request_head(raw);
         assert!(is_result_failure(&result));
         assert!(get_failure_message(&result).contains("invalid Content-Length"));
@@ -1786,9 +1764,7 @@ mod tests {
 
     #[test]
     fn test_extract_result_value_success() {
-        let result = make_result_success(Value::BuchiPack(vec![
-            ("ok".into(), Value::Bool(true)),
-        ]));
+        let result = make_result_success(Value::BuchiPack(vec![("ok".into(), Value::Bool(true))]));
         let inner = extract_result_value(&result);
         assert!(inner.is_some());
     }
@@ -1816,11 +1792,7 @@ mod tests {
     // ── NB-23: Multiple header span verification ──
 
     /// Helper to extract span (start, len) from a header entry.
-    fn get_header_span(
-        headers: &[Value],
-        idx: usize,
-        field: &str,
-    ) -> (i64, i64) {
+    fn get_header_span(headers: &[Value], idx: usize, field: &str) -> (i64, i64) {
         let entry = match &headers[idx] {
             Value::BuchiPack(f) => f,
             _ => panic!("header[{}] is not BuchiPack", idx),
@@ -2201,10 +2173,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let mut interp = Interpreter::new();
-        interp.env.define_force(
-            "httpServe",
-            Value::Str("__net_builtin_httpServe".into()),
-        );
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(port as i64, dummy_span()),
             make_handler_expr("ok"),
@@ -2232,10 +2203,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("Hello from Taida!"),
@@ -2250,7 +2220,8 @@ mod tests {
 
         // Send an HTTP request
         let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
 
         // Read response
         let mut response = Vec::new();
@@ -2271,8 +2242,15 @@ mod tests {
         }
 
         let response_str = String::from_utf8_lossy(&response);
-        assert!(response_str.contains("HTTP/1.1 200 OK"), "Expected 200 OK, got: {}", response_str);
-        assert!(response_str.contains("Hello from Taida!"), "Expected body in response");
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "Expected 200 OK, got: {}",
+            response_str
+        );
+        assert!(
+            response_str.contains("Hello from Taida!"),
+            "Expected body in response"
+        );
 
         // Server should have terminated
         let result = server_handle.join().unwrap();
@@ -2298,10 +2276,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("ok"),
@@ -2314,7 +2291,11 @@ mod tests {
 
         // Send POST request with body
         let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        std::io::Write::write_all(&mut client, b"POST /data?key=val HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"POST /data?key=val HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+        )
+        .unwrap();
 
         let mut response = Vec::new();
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
@@ -2351,10 +2332,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("ok"),
@@ -2367,9 +2347,9 @@ mod tests {
 
         // Send 3 requests
         for _ in 0..3 {
-            let mut client =
-                std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-            std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
             let mut response = Vec::new();
             let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(2)));
             loop {
@@ -2404,10 +2384,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("ok"),
@@ -2434,7 +2413,11 @@ mod tests {
         }
 
         let resp = String::from_utf8_lossy(&response);
-        assert!(resp.contains("400 Bad Request"), "Expected 400, got: {}", resp);
+        assert!(
+            resp.contains("400 Bad Request"),
+            "Expected 400, got: {}",
+            resp
+        );
 
         server_handle.join().unwrap();
     }
@@ -2442,35 +2425,42 @@ mod tests {
     #[test]
     fn test_http_serve_missing_args() {
         let mut interp = Interpreter::new();
-        interp.env.define_force(
-            "httpServe",
-            Value::Str("__net_builtin_httpServe".into()),
-        );
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
         let result = interp.try_net_func("httpServe", &[]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("missing argument 'port'"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("missing argument 'port'")
+        );
     }
 
     #[test]
     fn test_http_serve_missing_handler() {
         let mut interp = Interpreter::new();
-        interp.env.define_force(
-            "httpServe",
-            Value::Str("__net_builtin_httpServe".into()),
-        );
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
         let args = vec![Expr::IntLit(8080, dummy_span())];
         let result = interp.try_net_func("httpServe", &args);
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("missing argument 'handler'"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("missing argument 'handler'")
+        );
     }
 
     #[test]
     fn test_http_serve_port_validation() {
         let mut interp = Interpreter::new();
-        interp.env.define_force(
-            "httpServe",
-            Value::Str("__net_builtin_httpServe".into()),
-        );
+        interp
+            .env
+            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
         let handler = make_handler_expr("ok");
         let args = vec![Expr::IntLit(99999, dummy_span()), handler];
         let result = interp.try_net_func("httpServe", &args);
@@ -2488,10 +2478,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("split-ok"),
@@ -2503,14 +2492,12 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Send head in two fragments with a small delay between them
         std::io::Write::write_all(&mut client, b"GET / HT").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
-        std::io::Write::write_all(&mut client, b"TP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
+        std::io::Write::write_all(&mut client, b"TP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
 
         let mut response = Vec::new();
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
@@ -2551,10 +2538,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("body-ok"),
@@ -2566,8 +2552,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Send complete head with Content-Length, but body arrives in a separate write
         std::io::Write::write_all(
@@ -2621,10 +2606,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("should-not-reach"),
@@ -2636,8 +2620,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Send head claiming 100-byte body, but only send 5 bytes then close
         std::io::Write::write_all(
@@ -2685,10 +2668,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("should-not-reach"),
@@ -2728,10 +2710,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("should-not-reach"),
@@ -2743,8 +2724,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Send partial HTTP request (no \r\n\r\n terminator) then close
         std::io::Write::write_all(&mut client, b"GET /hello HTTP/1.1\r\nHost: loc").unwrap();
@@ -2793,10 +2773,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("should not reach"),
@@ -2818,8 +2797,7 @@ mod tests {
             cl_value
         );
 
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         let _ = client.set_write_timeout(Some(std::time::Duration::from_secs(3)));
         std::io::Write::write_all(&mut client, request.as_bytes()).unwrap();
 
@@ -2885,7 +2863,11 @@ mod tests {
         // For 7-digit CL: cl = max - 52 - 7 = 1048517, which is 7 digits ✓
         let cl_digits = 7;
         let cl_value = max - template_len - cl_digits;
-        assert_eq!(cl_value.to_string().len(), cl_digits, "CL digit count mismatch");
+        assert_eq!(
+            cl_value.to_string().len(),
+            cl_digits,
+            "CL digit count mismatch"
+        );
 
         let request_head = format!("{}{}{}", header_template, cl_value, header_suffix);
         let head_len = request_head.len();
@@ -2898,10 +2880,9 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("ok"),
@@ -2913,8 +2894,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         let _ = client.set_write_timeout(Some(std::time::Duration::from_secs(5)));
         // Send head + exactly cl_value bytes of body
         std::io::Write::write_all(&mut client, request_head.as_bytes()).unwrap();
@@ -2966,14 +2946,13 @@ mod tests {
         let server_port = port;
         let server_handle = std::thread::spawn(move || {
             let mut interp = Interpreter::new();
-            interp.env.define_force(
-                "httpServe",
-                Value::Str("__net_builtin_httpServe".into()),
-            );
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
             let args = vec![
                 Expr::IntLit(server_port as i64, dummy_span()),
                 make_handler_expr("should-not-reach"),
-                Expr::IntLit(1, dummy_span()),  // maxRequests=1
+                Expr::IntLit(1, dummy_span()),   // maxRequests=1
                 Expr::IntLit(500, dummy_span()), // timeoutMs=500 (short timeout)
             ];
             interp.try_net_func("httpServe", &args).unwrap().unwrap()
@@ -2983,8 +2962,7 @@ mod tests {
 
         // Connect but send NO data — the server should timeout after ~500ms
         let start = std::time::Instant::now();
-        let mut client =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
 
         // Set a generous read timeout on the client side so we don't hang forever
         let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));

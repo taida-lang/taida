@@ -1017,9 +1017,7 @@ impl Lowering {
                                 self.float_returning_funcs.insert(func_def.name.clone());
                             }
                             // NB-31: Track Int/Num-returning functions for callable_type_tag
-                            crate::parser::TypeExpr::Named(n)
-                                if n == "Int" || n == "Num" =>
-                            {
+                            crate::parser::TypeExpr::Named(n) if n == "Int" || n == "Num" => {
                                 self.int_returning_funcs.insert(func_def.name.clone());
                             }
                             crate::parser::TypeExpr::List(_) => {
@@ -1766,15 +1764,15 @@ impl Lowering {
                         "taida_set_return_tag".to_string(),
                         vec![tag_var],
                     ));
-                } else if tag == -1 {
-                    if let Some(ptv) = self.get_param_tag_var(ret_expr) {
-                        let dummy = ir_func.alloc_var();
-                        ir_func.push(IrInst::Call(
-                            dummy,
-                            "taida_set_return_tag".to_string(),
-                            vec![ptv],
-                        ));
-                    }
+                } else if tag == -1
+                    && let Some(ptv) = self.get_param_tag_var(ret_expr)
+                {
+                    let dummy = ir_func.alloc_var();
+                    ir_func.push(IrInst::Call(
+                        dummy,
+                        "taida_set_return_tag".to_string(),
+                        vec![ptv],
+                    ));
                 }
             }
             ir_func.push(IrInst::Return(ret));
@@ -2909,7 +2907,7 @@ impl Lowering {
                 && self
                     .stdlib_runtime_funcs
                     .get("httpServe")
-                    .map_or(false, |v| v == "taida_net_http_serve")
+                    .is_some_and(|v| v == "taida_net_http_serve")
             {
                 if args.is_empty() || args.len() > 4 {
                     return Err(LowerError {
@@ -3086,7 +3084,11 @@ impl Lowering {
                 let needs_tags = self.needs_call_arg_tags(args);
                 if needs_tags {
                     let push_dummy = func.alloc_var();
-                    func.push(IrInst::Call(push_dummy, "taida_push_call_tags".to_string(), vec![]));
+                    func.push(IrInst::Call(
+                        push_dummy,
+                        "taida_push_call_tags".to_string(),
+                        vec![],
+                    ));
                     // Pre-lower tags: set tags for args with compile-time known types
                     self.emit_call_arg_tags(func, args);
                 }
@@ -3103,19 +3105,28 @@ impl Lowering {
                     // Post-lower tags: set tags for args whose type came from a call's return tag
                     self.emit_post_lower_arg_tags(func, args, &explicit_arg_vars);
                 }
-                let arg_vars = self.lower_user_call_effective_args_from_vars(func, name, explicit_arg_vars)?;
+                let arg_vars =
+                    self.lower_user_call_effective_args_from_vars(func, name, explicit_arg_vars)?;
                 let result = func.alloc_var();
                 let mangled = self.resolve_user_func_symbol(name);
                 func.push(IrInst::CallUser(result, mangled, arg_vars));
                 // NB-14: Capture return type tag from callee (skip in tail position for TCO)
                 if !self.in_tail_call_return {
                     let return_tag = func.alloc_var();
-                    func.push(IrInst::Call(return_tag, "taida_get_return_tag".to_string(), vec![]));
+                    func.push(IrInst::Call(
+                        return_tag,
+                        "taida_get_return_tag".to_string(),
+                        vec![],
+                    ));
                     self.return_tag_vars.insert(result, return_tag);
                 }
                 if needs_tags {
                     let pop_dummy = func.alloc_var();
-                    func.push(IrInst::Call(pop_dummy, "taida_pop_call_tags".to_string(), vec![]));
+                    func.push(IrInst::Call(
+                        pop_dummy,
+                        "taida_pop_call_tags".to_string(),
+                        vec![],
+                    ));
                 }
                 return Ok(result);
             }
@@ -3168,7 +3179,11 @@ impl Lowering {
                         let needs_tags = self.needs_call_arg_tags(args);
                         if needs_tags {
                             let push_dummy = func.alloc_var();
-                            func.push(IrInst::Call(push_dummy, "taida_push_call_tags".to_string(), vec![]));
+                            func.push(IrInst::Call(
+                                push_dummy,
+                                "taida_push_call_tags".to_string(),
+                                vec![],
+                            ));
                             self.emit_call_arg_tags(func, args);
                         }
                         let saved_tail = self.in_tail_call_return;
@@ -3187,12 +3202,20 @@ impl Lowering {
                         // NB-14: Capture return type tag from lambda (skip in tail position)
                         if !self.in_tail_call_return {
                             let return_tag = func.alloc_var();
-                            func.push(IrInst::Call(return_tag, "taida_get_return_tag".to_string(), vec![]));
+                            func.push(IrInst::Call(
+                                return_tag,
+                                "taida_get_return_tag".to_string(),
+                                vec![],
+                            ));
                             self.return_tag_vars.insert(result, return_tag);
                         }
                         if needs_tags {
                             let pop_dummy = func.alloc_var();
-                            func.push(IrInst::Call(pop_dummy, "taida_pop_call_tags".to_string(), vec![]));
+                            func.push(IrInst::Call(
+                                pop_dummy,
+                                "taida_pop_call_tags".to_string(),
+                                vec![],
+                            ));
                         }
                         return Ok(result);
                     } else {
@@ -3201,7 +3224,11 @@ impl Lowering {
                         let needs_tags = self.needs_call_arg_tags(args);
                         if needs_tags {
                             let push_dummy = func.alloc_var();
-                            func.push(IrInst::Call(push_dummy, "taida_push_call_tags".to_string(), vec![]));
+                            func.push(IrInst::Call(
+                                push_dummy,
+                                "taida_push_call_tags".to_string(),
+                                vec![],
+                            ));
                             self.emit_call_arg_tags(func, args);
                         }
                         // Lower args with tail flag cleared for nested CallUser
@@ -3220,12 +3247,20 @@ impl Lowering {
                         // NB-14: Capture return type tag from callee (skip in tail position)
                         if !self.in_tail_call_return {
                             let return_tag = func.alloc_var();
-                            func.push(IrInst::Call(return_tag, "taida_get_return_tag".to_string(), vec![]));
+                            func.push(IrInst::Call(
+                                return_tag,
+                                "taida_get_return_tag".to_string(),
+                                vec![],
+                            ));
                             self.return_tag_vars.insert(result, return_tag);
                         }
                         if needs_tags {
                             let pop_dummy = func.alloc_var();
-                            func.push(IrInst::Call(pop_dummy, "taida_pop_call_tags".to_string(), vec![]));
+                            func.push(IrInst::Call(
+                                pop_dummy,
+                                "taida_pop_call_tags".to_string(),
+                                vec![],
+                            ));
                         }
                         return Ok(result);
                     }
@@ -4309,15 +4344,15 @@ impl Lowering {
                         "taida_set_return_tag".to_string(),
                         vec![tag_var],
                     ));
-                } else if tag == -1 {
-                    if let Some(ptv) = self.get_param_tag_var(body) {
-                        let dummy = lambda_fn.alloc_var();
-                        lambda_fn.push(IrInst::Call(
-                            dummy,
-                            "taida_set_return_tag".to_string(),
-                            vec![ptv],
-                        ));
-                    }
+                } else if tag == -1
+                    && let Some(ptv) = self.get_param_tag_var(body)
+                {
+                    let dummy = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::Call(
+                        dummy,
+                        "taida_set_return_tag".to_string(),
+                        vec![ptv],
+                    ));
                 }
             }
 
@@ -5247,12 +5282,11 @@ impl Lowering {
                     return true;
                 }
                 // FuncCall to user function may carry a return type tag
-                if let Expr::FuncCall(callee_box, _, _) = arg {
-                    if let Expr::Ident(callee_name, _) = callee_box.as_ref() {
-                        if self.user_funcs.contains(callee_name) {
-                            return true;
-                        }
-                    }
+                if let Expr::FuncCall(callee_box, _, _) = arg
+                    && let Expr::Ident(callee_name, _) = callee_box.as_ref()
+                    && self.user_funcs.contains(callee_name)
+                {
+                    return true;
                 }
             }
         }
@@ -5375,19 +5409,33 @@ impl Lowering {
     /// MethodCall, FuncCall, etc.
     fn noncallable_type_tag(&self, expr: &Expr) -> Option<i64> {
         // Bool (2) — handles BoolLit, bool_vars, comparison ops, boolean methods
-        if self.expr_is_bool(expr) { return Some(2); }
+        if self.expr_is_bool(expr) {
+            return Some(2);
+        }
         // Float (1) — handles FloatLit, float_vars, float BinaryOp, float-returning funcs
-        if self.expr_returns_float(expr) { return Some(1); }
+        if self.expr_returns_float(expr) {
+            return Some(1);
+        }
         // String (3) — handles StringLit, TemplateLit, string_vars, string methods/funcs
-        if self.expr_is_string_full(expr) { return Some(3); }
+        if self.expr_is_string_full(expr) {
+            return Some(3);
+        }
         // Pack (4) — handles BuchiPack, TypeInst, pack_vars
-        if self.expr_is_pack(expr) { return Some(4); }
+        if self.expr_is_pack(expr) {
+            return Some(4);
+        }
         // List (5) — handles ListLit, list_vars, list methods/funcs
-        if self.expr_is_list(expr) { return Some(5); }
+        if self.expr_is_list(expr) {
+            return Some(5);
+        }
         // Int (0) — literals, int_vars, arithmetic ops, int-returning methods/funcs
-        if self.expr_is_int(expr) { return Some(0); }
+        if self.expr_is_int(expr) {
+            return Some(0);
+        }
         // MoldInst always returns a Pack-like value
-        if matches!(expr, Expr::MoldInst(_, _, _, _)) { return Some(4); }
+        if matches!(expr, Expr::MoldInst(_, _, _, _)) {
+            return Some(4);
+        }
         None
     }
 

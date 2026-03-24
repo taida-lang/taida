@@ -837,7 +837,7 @@ fn wasm_full_parity_all_examples() {
     let expected_rejected: Vec<&str> = vec![
         // PR-4: 13_async, 14_unmold_backward, compile_async now pass with wasm async support
         // PR-3: 09_modules, compile_module, compile_module_value now pass with module inlining
-        "net_http_parse_encode",     // net package import cannot resolve in standalone wasm compile
+        "net_http_parse_encode", // net package import cannot resolve in standalone wasm compile
     ];
 
     // Expected allowlist: examples where native backend itself fails (build or run).

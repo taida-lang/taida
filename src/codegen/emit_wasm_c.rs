@@ -1597,11 +1597,7 @@ mod tests {
     ];
 
     /// NET-6: Human-readable API names expected in error messages.
-    const NET_API_NAMES: &[&str] = &[
-        "httpServe",
-        "httpParseRequestHead",
-        "httpEncodeResponse",
-    ];
+    const NET_API_NAMES: &[&str] = &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
 
     /// NET-6b: wasm-min rejects all 3 net HTTP API functions with profile-specific error.
     #[test]
@@ -1613,17 +1609,21 @@ mod tests {
             assert!(
                 msg.contains("wasm-min"),
                 "error for {} should contain 'wasm-min', got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
             assert!(
                 msg.contains(api_name),
                 "error for {} should contain '{}', got: {}",
-                rt_name, api_name, msg
+                rt_name,
+                api_name,
+                msg
             );
             assert!(
                 msg.contains("taida-lang/net"),
                 "error for {} should reference taida-lang/net, got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
         }
     }
@@ -1638,17 +1638,21 @@ mod tests {
             assert!(
                 msg.contains("wasm-wasi"),
                 "error for {} should contain 'wasm-wasi', got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
             assert!(
                 msg.contains(api_name),
                 "error for {} should contain '{}', got: {}",
-                rt_name, api_name, msg
+                rt_name,
+                api_name,
+                msg
             );
             assert!(
                 msg.contains("taida-lang/net"),
                 "error for {} should reference taida-lang/net, got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
         }
     }
@@ -1663,17 +1667,21 @@ mod tests {
             assert!(
                 msg.contains("wasm-edge"),
                 "error for {} should contain 'wasm-edge', got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
             assert!(
                 msg.contains(api_name),
                 "error for {} should contain '{}', got: {}",
-                rt_name, api_name, msg
+                rt_name,
+                api_name,
+                msg
             );
             assert!(
                 msg.contains("taida-lang/net"),
                 "error for {} should reference taida-lang/net, got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
         }
     }
@@ -1688,17 +1696,21 @@ mod tests {
             assert!(
                 msg.contains("wasm-full"),
                 "error for {} should contain 'wasm-full', got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
             assert!(
                 msg.contains(api_name),
                 "error for {} should contain '{}', got: {}",
-                rt_name, api_name, msg
+                rt_name,
+                api_name,
+                msg
             );
             assert!(
                 msg.contains("taida-lang/net"),
                 "error for {} should reference taida-lang/net, got: {}",
-                rt_name, msg
+                rt_name,
+                msg
             );
         }
     }
@@ -1718,13 +1730,17 @@ mod tests {
                 assert!(
                     result.is_err(),
                     "{} should reject {}",
-                    profile_name, rt_name
+                    profile_name,
+                    rt_name
                 );
                 let msg = result.unwrap_err().message;
                 assert!(
                     msg.contains(profile_name),
                     "error for {} on {} should contain '{}', got: {}",
-                    rt_name, profile_name, profile_name, msg
+                    rt_name,
+                    profile_name,
+                    profile_name,
+                    msg
                 );
             }
         }
@@ -1744,7 +1760,9 @@ mod tests {
             );
             // Should NOT suggest other WASM profiles (net is unsupported on ALL WASM)
             assert!(
-                !msg.contains("wasm-wasi") && !msg.contains("wasm-edge") && !msg.contains("wasm-full"),
+                !msg.contains("wasm-wasi")
+                    && !msg.contains("wasm-edge")
+                    && !msg.contains("wasm-full"),
                 "error should not suggest other WASM profiles for net API, got: {}",
                 msg
             );
@@ -1759,7 +1777,8 @@ mod tests {
         for rt_name in NET_RUNTIME_FUNCS {
             assert!(
                 wasm_full_runtime_prototype(rt_name).is_none(),
-                "wasm_full_runtime_prototype should not accept {}", rt_name
+                "wasm_full_runtime_prototype should not accept {}",
+                rt_name
             );
         }
     }
@@ -1783,22 +1802,29 @@ mod tests {
             funcs.insert("taida_net_http_parse_request_head".to_string());
 
             let result = validate_net_http_api_for_wasm(&funcs, *profile);
-            assert!(result.is_err(), "{} should reject net HTTP API", profile_name);
+            assert!(
+                result.is_err(),
+                "{} should reject net HTTP API",
+                profile_name
+            );
             let msg = result.unwrap_err().message;
             assert!(
                 msg.contains("taida-lang/net"),
                 "{}: error should reference taida-lang/net, got: {}",
-                profile_name, msg
+                profile_name,
+                msg
             );
             assert!(
                 msg.contains("httpParseRequestHead"),
                 "{}: error should name the API, got: {}",
-                profile_name, msg
+                profile_name,
+                msg
             );
             assert!(
                 msg.contains(profile_name),
                 "{}: error should contain profile name, got: {}",
-                profile_name, msg
+                profile_name,
+                msg
             );
         }
     }
@@ -1811,9 +1837,17 @@ mod tests {
         funcs.insert("taida_io_stdout".to_string());
 
         // No net functions → should pass
-        for profile in &[WasmProfile::Min, WasmProfile::Wasi, WasmProfile::Edge, WasmProfile::Full] {
+        for profile in &[
+            WasmProfile::Min,
+            WasmProfile::Wasi,
+            WasmProfile::Edge,
+            WasmProfile::Full,
+        ] {
             let result = validate_net_http_api_for_wasm(&funcs, *profile);
-            assert!(result.is_ok(), "should not reject when no net functions are present");
+            assert!(
+                result.is_ok(),
+                "should not reject when no net functions are present"
+            );
         }
     }
 }

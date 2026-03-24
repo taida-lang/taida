@@ -586,11 +586,11 @@ fn js_skip_list() -> Vec<&'static str> {
 /// All other interpreter failures are treated as test failures.
 fn interpreter_skip_list() -> Vec<&'static str> {
     vec![
-        "module_math",      // helper module, not standalone
-        "module_utils",     // helper module, not standalone
-        "helper_val",       // helper module, not standalone
-        "transpile_npm",    // npm: imports only work in JS transpiler
-        "net_http_hello",   // server example, requires dedicated loopback test harness
+        "module_math",           // helper module, not standalone
+        "module_utils",          // helper module, not standalone
+        "helper_val",            // helper module, not standalone
+        "transpile_npm",         // npm: imports only work in JS transpiler
+        "net_http_hello",        // server example, requires dedicated loopback test harness
         "net_http_parse_encode", // net package example, requires project root + deps
     ]
 }
@@ -5371,7 +5371,11 @@ fn setup_net_project(source: &str, label: &str) -> PathBuf {
     .expect("write packages.tdm");
 
     // Create .taida/deps/taida-lang/net/ with the bundled stub
-    let deps_net = dir.join(".taida").join("deps").join("taida-lang").join("net");
+    let deps_net = dir
+        .join(".taida")
+        .join("deps")
+        .join("taida-lang")
+        .join("net");
     fs::create_dir_all(&deps_net).expect("create deps/taida-lang/net");
 
     // Write the net package stub (same as CoreBundledProvider::net_package_source)
@@ -5389,10 +5393,7 @@ fn cleanup_net_project(dir: &Path) {
 
 fn run_net_interpreter(project_dir: &Path) -> Option<String> {
     let td_path = project_dir.join("main.td");
-    let output = Command::new(taida_bin())
-        .arg(&td_path)
-        .output()
-        .ok()?;
+    let output = Command::new(taida_bin()).arg(&td_path).output().ok()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!(
@@ -5466,10 +5467,8 @@ stdout(parsed.contentLength)
 "#;
 
     let dir = setup_net_project(source, "parse");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net parse parity");
-    let js = run_net_js(&dir, "parse")
-        .expect("js failed for net parse parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse parity");
+    let js = run_net_js(&dir, "parse").expect("js failed for net parse parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5502,10 +5501,8 @@ stdout(parsed.query.len)
 "#;
 
     let dir = setup_net_project(source, "parse_query");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net parse query parity");
-    let js = run_net_js(&dir, "parse_query")
-        .expect("js failed for net parse query parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse query parity");
+    let js = run_net_js(&dir, "parse_query").expect("js failed for net parse query parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5536,10 +5533,8 @@ stdout(parsed.bodyOffset)
 "#;
 
     let dir = setup_net_project(source, "parse_post");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net parse post parity");
-    let js = run_net_js(&dir, "parse_post")
-        .expect("js failed for net parse post parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse post parity");
+    let js = run_net_js(&dir, "parse_post").expect("js failed for net parse post parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5566,10 +5561,8 @@ stdout(encoded.bytes.length())
 "#;
 
     let dir = setup_net_project(source, "encode");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net encode parity");
-    let js = run_net_js(&dir, "encode")
-        .expect("js failed for net encode parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net encode parity");
+    let js = run_net_js(&dir, "encode").expect("js failed for net encode parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5596,10 +5589,8 @@ stdout(encoded.bytes.length())
 "#;
 
     let dir = setup_net_project(source, "encode_404");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net encode 404 parity");
-    let js = run_net_js(&dir, "encode_404")
-        .expect("js failed for net encode 404 parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net encode 404 parity");
+    let js = run_net_js(&dir, "encode_404").expect("js failed for net encode 404 parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5626,10 +5617,8 @@ stdout(encoded.bytes.length())
 "#;
 
     let dir = setup_net_project(source, "encode_204");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net encode 204 parity");
-    let js = run_net_js(&dir, "encode_204")
-        .expect("js failed for net encode 204 parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net encode 204 parity");
+    let js = run_net_js(&dir, "encode_204").expect("js failed for net encode 204 parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5660,10 +5649,8 @@ stdout(result.__value.kind)
 "#;
 
     let dir = setup_net_project(source, "parse_badver");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net parse bad version");
-    let js = run_net_js(&dir, "parse_badver")
-        .expect("js failed for net parse bad version");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse bad version");
+    let js = run_net_js(&dir, "parse_badver").expect("js failed for net parse bad version");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5699,10 +5686,8 @@ stdout(result.__value.kind)
 "#;
 
     let dir = setup_net_project(source, "parse_badcl");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for net parse bad CL");
-    let js = run_net_js(&dir, "parse_badcl")
-        .expect("js failed for net parse bad CL");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse bad CL");
+    let js = run_net_js(&dir, "parse_badcl").expect("js failed for net parse bad CL");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5738,10 +5723,8 @@ stdout(result.__value.contentLength)
 "#;
 
     let dir = setup_net_project(source_accept, "parse_maxsafe_accept");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for max safe accept");
-    let js = run_net_js(&dir, "parse_maxsafe_accept")
-        .expect("js failed for max safe accept");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for max safe accept");
+    let js = run_net_js(&dir, "parse_maxsafe_accept").expect("js failed for max safe accept");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -5767,10 +5750,8 @@ stdout(result.__value.kind)
 "#;
 
     let dir2 = setup_net_project(source_reject, "parse_maxsafe_reject");
-    let interp2 = run_net_interpreter(&dir2)
-        .expect("interpreter failed for max safe reject");
-    let js2 = run_net_js(&dir2, "parse_maxsafe_reject")
-        .expect("js failed for max safe reject");
+    let interp2 = run_net_interpreter(&dir2).expect("interpreter failed for max safe reject");
+    let js2 = run_net_js(&dir2, "parse_maxsafe_reject").expect("js failed for max safe reject");
     cleanup_net_project(&dir2);
 
     assert_eq!(
@@ -5866,12 +5847,8 @@ stdout(r.requests)
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .ok();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
             let mut stream = stream;
             let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
             if std::io::Write::write_all(&mut stream, request).is_err() {
@@ -5921,9 +5898,7 @@ stdout(r.requests)
         );
 
         // Wait for server process to exit (it should self-terminate after maxRequests=1)
-        let output = child
-            .wait_with_output()
-            .expect("wait for server process");
+        let output = child.wait_with_output().expect("wait for server process");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
 
         assert_eq!(
@@ -5955,10 +5930,7 @@ fn run_net_native(project_dir: &Path, label: &str) -> Option<String> {
 
     if !compile.status.success() {
         let stderr = String::from_utf8_lossy(&compile.stderr);
-        eprintln!(
-            "run_net_native compile failed for {}:\n{}",
-            label, stderr
-        );
+        eprintln!("run_net_native compile failed for {}:\n{}", label, stderr);
         return None;
     }
 
@@ -5967,10 +5939,7 @@ fn run_net_native(project_dir: &Path, label: &str) -> Option<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!(
-            "run_net_native run failed for {}:\n{}",
-            label, stderr
-        );
+        eprintln!("run_net_native run failed for {}:\n{}", label, stderr);
         return None;
     }
     Some(normalize(&String::from_utf8_lossy(&output.stdout)))
@@ -6002,10 +5971,9 @@ stdout(parsed.contentLength)
 "#;
 
     let dir = setup_net_project(source, "native_parse");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native parse parity");
-    let native = run_net_native(&dir, "native_parse")
-        .expect("native failed for native parse parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for native parse parity");
+    let native =
+        run_net_native(&dir, "native_parse").expect("native failed for native parse parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -6033,8 +6001,8 @@ stdout(parsed.query.len)
 "#;
 
     let dir = setup_net_project(source, "native_parse_query");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native parse query parity");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native parse query parity");
     let native = run_net_native(&dir, "native_parse_query")
         .expect("native failed for native parse query parity");
     cleanup_net_project(&dir);
@@ -6062,8 +6030,8 @@ stdout(parsed.bodyOffset)
 "#;
 
     let dir = setup_net_project(source, "native_parse_post");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native parse post parity");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native parse post parity");
     let native = run_net_native(&dir, "native_parse_post")
         .expect("native failed for native parse post parity");
     cleanup_net_project(&dir);
@@ -6087,10 +6055,9 @@ stdout(encoded.bytes.length())
 "#;
 
     let dir = setup_net_project(source, "native_encode");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native encode parity");
-    let native = run_net_native(&dir, "native_encode")
-        .expect("native failed for native encode parity");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for native encode parity");
+    let native =
+        run_net_native(&dir, "native_encode").expect("native failed for native encode parity");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -6112,8 +6079,8 @@ stdout(encoded.bytes.length())
 "#;
 
     let dir = setup_net_project(source, "native_encode_404");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native encode 404 parity");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native encode 404 parity");
     let native = run_net_native(&dir, "native_encode_404")
         .expect("native failed for native encode 404 parity");
     cleanup_net_project(&dir);
@@ -6137,8 +6104,8 @@ stdout(encoded.bytes.length())
 "#;
 
     let dir = setup_net_project(source, "native_encode_204");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native encode 204 parity");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native encode 204 parity");
     let native = run_net_native(&dir, "native_encode_204")
         .expect("native failed for native encode 204 parity");
     cleanup_net_project(&dir);
@@ -6166,10 +6133,9 @@ stdout(result.__value.message.length())
 "#;
 
     let dir = setup_net_project(source, "native_parse_badcl");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for native parse bad CL");
-    let native = run_net_native(&dir, "native_parse_badcl")
-        .expect("native failed for native parse bad CL");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for native parse bad CL");
+    let native =
+        run_net_native(&dir, "native_parse_badcl").expect("native failed for native parse bad CL");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -6281,12 +6247,8 @@ stdout(r.requests)
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .ok();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
             let mut stream = stream;
             let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
             if std::io::Write::write_all(&mut stream, request).is_err() {
@@ -6336,9 +6298,7 @@ stdout(r.requests)
         );
 
         // Wait for server process to exit
-        let output = child
-            .wait_with_output()
-            .expect("wait for server process");
+        let output = child.wait_with_output().expect("wait for server process");
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
 
         assert_eq!(
@@ -6366,8 +6326,7 @@ stdout(result.__value.message.length())
 "#;
 
     let dir = setup_net_project(source, "native_parse_badver_ab");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for malformed HTTP version");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for malformed HTTP version");
     let native = run_net_native(&dir, "native_parse_badver_ab")
         .expect("native failed for malformed HTTP version");
     cleanup_net_project(&dir);
@@ -6398,8 +6357,8 @@ stdout(result.__value.message.length())
 "#;
 
     let dir = setup_net_project(source, "native_parse_badver_1234");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for multi-digit HTTP version");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for multi-digit HTTP version");
     let native = run_net_native(&dir, "native_parse_badver_1234")
         .expect("native failed for multi-digit HTTP version");
     cleanup_net_project(&dir);
@@ -6428,8 +6387,7 @@ stdout(result.__value.kind)
 "#;
 
     let dir = setup_net_project(source, "native_encode_bad_body");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for invalid body encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for invalid body encode");
     let native = run_net_native(&dir, "native_encode_bad_body")
         .expect("native failed for invalid body encode");
     cleanup_net_project(&dir);
@@ -6461,10 +6419,9 @@ stdout(parsed.contentLength)
 "#;
 
     let dir = setup_net_project(source, "native_parse_cl_tab");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for CL tab trim");
-    let native = run_net_native(&dir, "native_parse_cl_tab")
-        .expect("native failed for CL tab trim");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for CL tab trim");
+    let native =
+        run_net_native(&dir, "native_parse_cl_tab").expect("native failed for CL tab trim");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -6497,12 +6454,10 @@ stdout(result.__value.kind)
 "#;
 
     let dir = setup_net_project(source, "3way_parse_badver");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for 3-way bad version");
-    let js = run_net_js(&dir, "3way_parse_badver")
-        .expect("js failed for 3-way bad version");
-    let native = run_net_native(&dir, "3way_parse_badver")
-        .expect("native failed for 3-way bad version");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for 3-way bad version");
+    let js = run_net_js(&dir, "3way_parse_badver").expect("js failed for 3-way bad version");
+    let native =
+        run_net_native(&dir, "3way_parse_badver").expect("native failed for 3-way bad version");
     cleanup_net_project(&dir);
 
     assert_eq!(
@@ -6553,8 +6508,16 @@ stdout(parsed.contentLength)
     let native = run_net_native(&dir, "5a_parse_get").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: simple GET Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: simple GET Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5a: simple GET Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: simple GET Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5a: httpParseRequestHead with query string — 3-way parity
@@ -6585,8 +6548,16 @@ stdout(parsed.query.len)
     let native = run_net_native(&dir, "5a_parse_query").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: query Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: query Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5a: query Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: query Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5a: httpParseRequestHead POST with Content-Length — 3-way parity
@@ -6615,8 +6586,16 @@ stdout(parsed.bodyOffset)
     let native = run_net_native(&dir, "5a_parse_post").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: POST body Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: POST body Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5a: POST body Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: POST body Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5a: malformed Content-Length "5abc" — 3-way rejection parity
@@ -6642,9 +6621,21 @@ stdout(result.__value.kind)
     let native = run_net_native(&dir, "5a_parse_badcl").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: bad CL Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: bad CL Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("ParseError"), "All backends should reject invalid CL, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NET-5a: bad CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: bad CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "All backends should reject invalid CL, got: {}",
+        interp
+    );
 }
 
 /// NET-5a: MAX_SAFE_INTEGER Content-Length boundary — 3-way parity
@@ -6671,9 +6662,21 @@ stdout(result.__value.contentLength)
     let native = run_net_native(&dir, "5a_maxsafe_accept").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: MAX_SAFE accept Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: MAX_SAFE accept Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("9007199254740991"), "MAX_SAFE_INTEGER should be accepted, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NET-5a: MAX_SAFE accept Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: MAX_SAFE accept Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("9007199254740991"),
+        "MAX_SAFE_INTEGER should be accepted, got: {}",
+        interp
+    );
 
     // Reject: 9007199254740992
     let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
@@ -6691,8 +6694,16 @@ stdout(result.__value.kind)
     let native2 = run_net_native(&dir2, "5a_maxsafe_reject").expect("native failed");
     cleanup_net_project(&dir2);
 
-    assert_eq!(interp2, js2, "NET-5a: MAX_SAFE+1 reject Interp vs JS\nInterp: {}\nJS: {}", interp2, js2);
-    assert_eq!(interp2, native2, "NET-5a: MAX_SAFE+1 reject Interp vs Native\nInterp: {}\nNative: {}", interp2, native2);
+    assert_eq!(
+        interp2, js2,
+        "NET-5a: MAX_SAFE+1 reject Interp vs JS\nInterp: {}\nJS: {}",
+        interp2, js2
+    );
+    assert_eq!(
+        interp2, native2,
+        "NET-5a: MAX_SAFE+1 reject Interp vs Native\nInterp: {}\nNative: {}",
+        interp2, native2
+    );
 }
 
 /// NB-20: Content-Length leading-zero padded values — 3-way parity
@@ -6721,9 +6732,21 @@ stdout(result.__value.contentLength)
     let native = run_net_native(&dir, "nb20_lz_accept").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NB-20: leading-zero CL Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NB-20: leading-zero CL Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("5"), "Leading-zero padded CL '00000000000000005' should parse as 5, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NB-20: leading-zero CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NB-20: leading-zero CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("5"),
+        "Leading-zero padded CL '00000000000000005' should parse as 5, got: {}",
+        interp
+    );
 
     // Test 2: "0042" should be accepted as 42
     let source_0042 = r#">>> taida-lang/net => @(httpParseRequestHead)
@@ -6741,9 +6764,21 @@ stdout(result.__value.contentLength)
     let native2 = run_net_native(&dir2, "nb20_lz_0042").expect("native failed");
     cleanup_net_project(&dir2);
 
-    assert_eq!(interp2, js2, "NB-20: '0042' CL Interp vs JS\nInterp: {}\nJS: {}", interp2, js2);
-    assert_eq!(interp2, native2, "NB-20: '0042' CL Interp vs Native\nInterp: {}\nNative: {}", interp2, native2);
-    assert!(interp2.contains("42"), "Leading-zero padded CL '0042' should parse as 42, got: {}", interp2);
+    assert_eq!(
+        interp2, js2,
+        "NB-20: '0042' CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp2, js2
+    );
+    assert_eq!(
+        interp2, native2,
+        "NB-20: '0042' CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp2, native2
+    );
+    assert!(
+        interp2.contains("42"),
+        "Leading-zero padded CL '0042' should parse as 42, got: {}",
+        interp2
+    );
 
     // Test 3: all-zeros "00000000000000000" (17 zeros) should be accepted as 0
     let source_allzeros = r#">>> taida-lang/net => @(httpParseRequestHead)
@@ -6761,9 +6796,21 @@ stdout(result.__value.contentLength)
     let native3 = run_net_native(&dir3, "nb20_lz_allzeros").expect("native failed");
     cleanup_net_project(&dir3);
 
-    assert_eq!(interp3, js3, "NB-20: all-zeros CL Interp vs JS\nInterp: {}\nJS: {}", interp3, js3);
-    assert_eq!(interp3, native3, "NB-20: all-zeros CL Interp vs Native\nInterp: {}\nNative: {}", interp3, native3);
-    assert!(interp3.contains("0"), "All-zeros CL '00000000000000000' should parse as 0, got: {}", interp3);
+    assert_eq!(
+        interp3, js3,
+        "NB-20: all-zeros CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp3, js3
+    );
+    assert_eq!(
+        interp3, native3,
+        "NB-20: all-zeros CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp3, native3
+    );
+    assert!(
+        interp3.contains("0"),
+        "All-zeros CL '00000000000000000' should parse as 0, got: {}",
+        interp3
+    );
 
     // Test 4: leading zeros + value > MAX_SAFE_INTEGER must still be rejected
     let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
@@ -6781,9 +6828,21 @@ stdout(result.__value.kind)
     let native4 = run_net_native(&dir4, "nb20_lz_over_max").expect("native failed");
     cleanup_net_project(&dir4);
 
-    assert_eq!(interp4, js4, "NB-20: leading-zero + over MAX_SAFE Interp vs JS\nInterp: {}\nJS: {}", interp4, js4);
-    assert_eq!(interp4, native4, "NB-20: leading-zero + over MAX_SAFE Interp vs Native\nInterp: {}\nNative: {}", interp4, native4);
-    assert!(interp4.contains("ParseError"), "Leading-zero + over MAX_SAFE should be rejected, got: {}", interp4);
+    assert_eq!(
+        interp4, js4,
+        "NB-20: leading-zero + over MAX_SAFE Interp vs JS\nInterp: {}\nJS: {}",
+        interp4, js4
+    );
+    assert_eq!(
+        interp4, native4,
+        "NB-20: leading-zero + over MAX_SAFE Interp vs Native\nInterp: {}\nNative: {}",
+        interp4, native4
+    );
+    assert!(
+        interp4.contains("ParseError"),
+        "Leading-zero + over MAX_SAFE should be rejected, got: {}",
+        interp4
+    );
 }
 
 /// NET-5a: malformed HTTP version "HTTP/a.b" — 3-way rejection parity
@@ -6809,9 +6868,21 @@ stdout(result.__value.kind)
     let native = run_net_native(&dir, "5a_badver_ab").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: bad version Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: bad version Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("ParseError"), "All backends should reject HTTP/a.b, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NET-5a: bad version Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: bad version Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "All backends should reject HTTP/a.b, got: {}",
+        interp
+    );
 }
 
 /// NET-5a: multi-digit HTTP version "HTTP/12.34" — 3-way rejection parity
@@ -6837,9 +6908,21 @@ stdout(result.__value.kind)
     let native = run_net_native(&dir, "5a_badver_1234").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: multi-digit version Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: multi-digit version Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("ParseError"), "All backends should reject HTTP/12.34, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NET-5a: multi-digit version Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: multi-digit version Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "All backends should reject HTTP/12.34, got: {}",
+        interp
+    );
 }
 
 /// NET-5a: Content-Length with tab whitespace — 3-way parity
@@ -6866,9 +6949,21 @@ stdout(parsed.contentLength)
     let native = run_net_native(&dir, "5a_parse_cl_tab").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5a: CL tab Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5a: CL tab Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("5"), "Content-Length should be 5 with tab, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NET-5a: CL tab Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: CL tab Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("5"),
+        "Content-Length should be 5 with tab, got: {}",
+        interp
+    );
 }
 
 // ── NET-5b: 3-way encode fixture parity ────────────────────────
@@ -6895,8 +6990,16 @@ stdout(encoded.bytes.length())
     let native = run_net_native(&dir, "5b_encode_200").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5b: 200 text Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5b: 200 text Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5b: 200 text Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: 200 text Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5b: httpEncodeResponse 404 empty body — 3-way parity
@@ -6921,8 +7024,16 @@ stdout(encoded.bytes.length())
     let native = run_net_native(&dir, "5b_encode_404").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5b: 404 empty Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5b: 404 empty Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5b: 404 empty Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: 404 empty Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5b: httpEncodeResponse 204 no body — 3-way parity
@@ -6947,8 +7058,16 @@ stdout(encoded.bytes.length())
     let native = run_net_native(&dir, "5b_encode_204").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5b: 204 no body Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5b: 204 no body Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5b: 204 no body Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: 204 no body Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5b: httpEncodeResponse invalid body (non-Str) — 3-way error parity
@@ -6973,9 +7092,21 @@ stdout(result.__value.kind)
     let native = run_net_native(&dir, "5b_encode_bad_body").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5b: bad body Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5b: bad body Interp vs Native\nInterp: {}\nNative: {}", interp, native);
-    assert!(interp.contains("EncodeError"), "All backends should return EncodeError, got: {}", interp);
+    assert_eq!(
+        interp, js,
+        "NET-5b: bad body Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: bad body Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("EncodeError"),
+        "All backends should return EncodeError, got: {}",
+        interp
+    );
 }
 
 /// NET-5b: httpEncodeResponse with multiple headers — 3-way parity
@@ -7007,8 +7138,16 @@ stdout(encoded.bytes.length())
     let native = run_net_native(&dir, "5b_encode_multi_hdr").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5b: multi-header Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5b: multi-header Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5b: multi-header Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: multi-header Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 // ── NET-5c: 3-way bounded server parity ────────────────────────
@@ -7147,19 +7286,24 @@ stdout(r.requests)
         if !got_response {
             let _ = child.kill();
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not respond on port {}", backend, port);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port
+            );
         }
 
         let resp_str = String::from_utf8_lossy(&response).to_string();
         assert!(
             resp_str.contains("200 OK"),
             "{} backend: expected '200 OK', got: {:?}",
-            backend, resp_str
+            backend,
+            resp_str
         );
         assert!(
             resp_str.contains("got-post"),
             "{} backend: expected body 'got-post', got: {:?}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         let output = child.wait_with_output().expect("wait for server");
@@ -7180,7 +7324,11 @@ stdout(r.requests)
         "NET-5c: POST serve Interp vs Native\nInterp: {}\nNative: {}",
         outputs[0].1, outputs[2].1
     );
-    assert_eq!(outputs[0].1, "1", "All backends should report requests=1, got: {:?}", outputs[0].1);
+    assert_eq!(
+        outputs[0].1, "1",
+        "All backends should report requests=1, got: {:?}",
+        outputs[0].1
+    );
 }
 
 /// NET-5c: httpServe response contains custom header — 3-way parity
@@ -7321,19 +7469,24 @@ stdout(r.requests)
         if !got_response {
             let _ = child.kill();
             cleanup_net_project(&dir);
-            panic!("{} backend: server did not respond on port {}", backend, port);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port
+            );
         }
 
         let resp_str = String::from_utf8_lossy(&response).to_string();
         assert!(
             resp_str.contains("x-taida-test: net5c"),
             "{} backend: expected custom header 'x-taida-test: net5c', got:\n{}",
-            backend, resp_str
+            backend,
+            resp_str
         );
         assert!(
             resp_str.contains("application/json"),
             "{} backend: expected content-type header, got:\n{}",
-            backend, resp_str
+            backend,
+            resp_str
         );
 
         let output = child.wait_with_output().expect("wait for server");
@@ -7385,8 +7538,16 @@ stdout(encoded.bytes.length())
     let native = run_net_native(&dir, "5d_coexist").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5d: coexist Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5d: coexist Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5d: coexist Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5d: coexist Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5d: sentinel guard -- calling httpServe/httpParseRequestHead/httpEncodeResponse
@@ -7413,9 +7574,21 @@ stdout(httpEncodeResponse(9))
     let native = run_net_native(&dir, "5d_sentinel").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, "30\n7\n10", "Interp sentinel guard failed: {}", interp);
-    assert_eq!(interp, js, "NET-5d sentinel: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5d sentinel: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, "30\n7\n10",
+        "Interp sentinel guard failed: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5d sentinel: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5d sentinel: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 // ── NET-5e: example verification ───────────────────────────────
@@ -7463,8 +7636,16 @@ stdout(encoded.bytes.length())
     let native = run_net_native(&dir, "5e_example").expect("native failed");
     cleanup_net_project(&dir);
 
-    assert_eq!(interp, js, "NET-5e: example Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5e: example Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp, js,
+        "NET-5e: example Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5e: example Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 // ── NET-5 review fix: scope-aware net builtin shadowing ──────────────────
@@ -7498,9 +7679,22 @@ stdout(wrap(add))
     cleanup_net_project(&dir);
 
     // Expected: 30 (add(10, 20) = 30)
-    assert_eq!(interp.trim(), "30", "NET-5 shadow: Interpreter should produce 30, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        "30",
+        "NET-5 shadow: Interpreter should produce 30, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5 shadow fix: httpParseRequestHead shadowed by parameter.
@@ -7528,9 +7722,22 @@ stdout(apply(double, 7))
     cleanup_net_project(&dir);
 
     // Expected: 14 (double(7) = 14)
-    assert_eq!(interp.trim(), "14", "NET-5 shadow: Interpreter should produce 14, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        "14",
+        "NET-5 shadow: Interpreter should produce 14, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5 shadow fix: httpEncodeResponse shadowed by parameter.
@@ -7558,9 +7765,22 @@ stdout(apply(triple, 5))
     cleanup_net_project(&dir);
 
     // Expected: 15 (triple(5) = 15)
-    assert_eq!(interp.trim(), "15", "NET-5 shadow: Interpreter should produce 15, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        "15",
+        "NET-5 shadow: Interpreter should produce 15, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5 shadow fix: lambda parameter shadows httpServe.
@@ -7593,9 +7813,21 @@ stdout(callWith(triple))
     cleanup_net_project(&dir);
 
     // Expected: @[15] (triple(5) = 15, mapped over @[5])
-    assert!(interp.trim().contains("15"), "NET-5 shadow lambda: Interpreter should contain 15, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 shadow lambda: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 shadow lambda: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert!(
+        interp.trim().contains("15"),
+        "NET-5 shadow lambda: Interpreter should contain 15, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow lambda: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow lambda: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 // ── NET-5 review fix 2: local assignment shadow ──────────────────────────
@@ -7627,9 +7859,22 @@ stdout(wrap())
     cleanup_net_project(&dir);
 
     // Expected: 30 (add(10, 20) = 30)
-    assert_eq!(interp.trim(), "30", "NET-5 assignment shadow httpServe: Interpreter should produce 30, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 assignment shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 assignment shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        "30",
+        "NET-5 assignment shadow httpServe: Interpreter should produce 30, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5 assignment shadow: httpParseRequestHead reassigned via local assignment.
@@ -7658,9 +7903,22 @@ stdout(wrap())
     cleanup_net_project(&dir);
 
     // Expected: 14 (double(7) = 14)
-    assert_eq!(interp.trim(), "14", "NET-5 assignment shadow httpParseRequestHead: Interpreter should produce 14, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 assignment shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 assignment shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        "14",
+        "NET-5 assignment shadow httpParseRequestHead: Interpreter should produce 14, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5 assignment shadow: httpEncodeResponse reassigned via local assignment.
@@ -7689,9 +7947,22 @@ stdout(wrap())
     cleanup_net_project(&dir);
 
     // Expected: 15 (triple(5) = 15)
-    assert_eq!(interp.trim(), "15", "NET-5 assignment shadow httpEncodeResponse: Interpreter should produce 15, got: {}", interp);
-    assert_eq!(interp, js, "NET-5 assignment shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 assignment shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        "15",
+        "NET-5 assignment shadow httpEncodeResponse: Interpreter should produce 15, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 /// NET-5 assignment shadow: shadow does NOT leak to a sibling function scope.
@@ -7737,9 +8008,23 @@ stdout(outer(multiply))
 
     // Expected: "30\n12" (add(10,20)=30, multiply(3,4)=12)
     let expected = "30\n12";
-    assert_eq!(interp.trim(), expected, "NET-5 assignment shadow no-leak: Interpreter should produce {}, got: {}", expected, interp);
-    assert_eq!(interp, js, "NET-5 assignment shadow no-leak: Interp vs JS\nInterp: {}\nJS: {}", interp, js);
-    assert_eq!(interp, native, "NET-5 assignment shadow no-leak: Interp vs Native\nInterp: {}\nNative: {}", interp, native);
+    assert_eq!(
+        interp.trim(),
+        expected,
+        "NET-5 assignment shadow no-leak: Interpreter should produce {}, got: {}",
+        expected,
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow no-leak: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow no-leak: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }
 
 // ── NB-31: httpServe handler callable check regression tests ──
@@ -7885,11 +8170,27 @@ stdout(result.__value.kind)
     let js_lines: Vec<&str> = js.trim().lines().collect();
     let native_lines: Vec<&str> = native.trim().lines().collect();
 
-    assert!(js_lines.len() >= 2, "NB-31 arith: JS output too short: {:?}", js);
-    assert!(native_lines.len() >= 2, "NB-31 arith: Native output too short: {:?}", native);
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31 arith: JS output too short: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31 arith: Native output too short: {:?}",
+        native
+    );
 
-    assert_eq!(js_lines[1], "TypeError", "NB-31 arith: JS kind must be TypeError, got: {}", js_lines[1]);
-    assert_eq!(native_lines[1], "TypeError", "NB-31 arith: Native kind must be TypeError, got: {}", native_lines[1]);
+    assert_eq!(
+        js_lines[1], "TypeError",
+        "NB-31 arith: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert_eq!(
+        native_lines[1], "TypeError",
+        "NB-31 arith: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
 }
 
 /// NB-31: Int-returning function path (mk n = n + 1 => :Int / bad <= mk(999999)).
@@ -7923,11 +8224,27 @@ stdout(result.__value.kind)
     let js_lines: Vec<&str> = js.trim().lines().collect();
     let native_lines: Vec<&str> = native.trim().lines().collect();
 
-    assert!(js_lines.len() >= 2, "NB-31 func_ret: JS output too short: {:?}", js);
-    assert!(native_lines.len() >= 2, "NB-31 func_ret: Native output too short: {:?}", native);
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31 func_ret: JS output too short: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31 func_ret: Native output too short: {:?}",
+        native
+    );
 
-    assert_eq!(js_lines[1], "TypeError", "NB-31 func_ret: JS kind must be TypeError, got: {}", js_lines[1]);
-    assert_eq!(native_lines[1], "TypeError", "NB-31 func_ret: Native kind must be TypeError, got: {}", native_lines[1]);
+    assert_eq!(
+        js_lines[1], "TypeError",
+        "NB-31 func_ret: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert_eq!(
+        native_lines[1], "TypeError",
+        "NB-31 func_ret: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
 }
 
 /// NB-31: Typed Int parameter path (wrap bad: Int = ...).
@@ -7962,11 +8279,27 @@ wrap(1000000)
     let js_lines: Vec<&str> = js.trim().lines().collect();
     let native_lines: Vec<&str> = native.trim().lines().collect();
 
-    assert!(js_lines.len() >= 2, "NB-31 typed_param: JS output too short: {:?}", js);
-    assert!(native_lines.len() >= 2, "NB-31 typed_param: Native output too short: {:?}", native);
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31 typed_param: JS output too short: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31 typed_param: Native output too short: {:?}",
+        native
+    );
 
-    assert_eq!(js_lines[1], "TypeError", "NB-31 typed_param: JS kind must be TypeError, got: {}", js_lines[1]);
-    assert_eq!(native_lines[1], "TypeError", "NB-31 typed_param: Native kind must be TypeError, got: {}", native_lines[1]);
+    assert_eq!(
+        js_lines[1], "TypeError",
+        "NB-31 typed_param: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert_eq!(
+        native_lines[1], "TypeError",
+        "NB-31 typed_param: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
 }
 
 /// NB-14: httpEncodeResponse with dynamically-typed Bool status via function parameter
@@ -7984,16 +8317,17 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb14_bool_status");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-14 bool status");
-    let native = run_net_native(&dir, "nb14_bool_status")
-        .expect("native failed for NB-14 bool status");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-14 bool status");
+    let native =
+        run_net_native(&dir, "nb14_bool_status").expect("native failed for NB-14 bool status");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-14: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8016,16 +8350,16 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb21_bool_body");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-21 bool body");
-    let native = run_net_native(&dir, "nb21_bool_body")
-        .expect("native failed for NB-21 bool body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-21 bool body");
+    let native = run_net_native(&dir, "nb21_bool_body").expect("native failed for NB-21 bool body");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-21: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8050,16 +8384,18 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb14_nested_status");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-14 nested bool status");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for NB-14 nested bool status");
     let native = run_net_native(&dir, "nb14_nested_status")
         .expect("native failed for NB-14 nested bool status");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-14 nested: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8083,16 +8419,17 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb21_nested_body");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-21 nested bool body");
-    let native = run_net_native(&dir, "nb21_nested_body")
-        .expect("native failed for NB-21 nested bool body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-21 nested bool body");
+    let native =
+        run_net_native(&dir, "nb21_nested_body").expect("native failed for NB-21 nested bool body");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-21 nested: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8119,16 +8456,18 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb14_mixed_arg_status");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-14 mixed-arg bool status");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for NB-14 mixed-arg bool status");
     let native = run_net_native(&dir, "nb14_mixed_arg_status")
         .expect("native failed for NB-14 mixed-arg bool status");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-14 mixed-arg: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8154,16 +8493,18 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb21_mixed_arg_body");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-21 mixed-arg bool body");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for NB-21 mixed-arg bool body");
     let native = run_net_native(&dir, "nb21_mixed_arg_body")
         .expect("native failed for NB-21 mixed-arg bool body");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-21 mixed-arg: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8186,16 +8527,17 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb14_iife_status");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-14 IIFE bool status");
-    let native = run_net_native(&dir, "nb14_iife_status")
-        .expect("native failed for NB-14 IIFE bool status");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-14 IIFE bool status");
+    let native =
+        run_net_native(&dir, "nb14_iife_status").expect("native failed for NB-14 IIFE bool status");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-14 IIFE: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
@@ -8217,16 +8559,17 @@ stdout(result.__value.message)
 "#;
 
     let dir = setup_net_project(source, "nb21_iife_body");
-    let interp = run_net_interpreter(&dir)
-        .expect("interpreter failed for NB-21 IIFE bool body");
-    let native = run_net_native(&dir, "nb21_iife_body")
-        .expect("native failed for NB-21 IIFE bool body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-21 IIFE bool body");
+    let native =
+        run_net_native(&dir, "nb21_iife_body").expect("native failed for NB-21 IIFE bool body");
     cleanup_net_project(&dir);
 
     assert_eq!(
-        interp.trim(), native.trim(),
+        interp.trim(),
+        native.trim(),
         "NB-21 IIFE: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
-        interp, native
+        interp,
+        native
     );
     assert!(
         native.contains("got true"),
