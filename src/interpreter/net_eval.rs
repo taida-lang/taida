@@ -1033,12 +1033,12 @@ mod tests {
         let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\nHost: localhost\r\n\r\nhello";
         let result = parse_request_head(raw);
         let inner = extract_result_inner(&result);
-        assert_eq!(get_bool(&inner, "complete"), true);
-        assert_eq!(get_int(&inner, "contentLength"), 5);
+        assert!(get_bool(inner, "complete"));
+        assert_eq!(get_int(inner, "contentLength"), 5);
         // bodyOffset should equal consumed (end of headers)
-        let consumed = get_int(&inner, "consumed");
+        let consumed = get_int(inner, "consumed");
         assert!(consumed > 0);
-        assert_eq!(get_int(&inner, "bodyOffset"), consumed);
+        assert_eq!(get_int(inner, "bodyOffset"), consumed);
     }
 
     #[test]
@@ -1046,7 +1046,7 @@ mod tests {
         let raw = b"GET / HTTP/1.1\r\nHost: local";
         let result = parse_request_head(raw);
         let inner = extract_result_inner(&result);
-        assert_eq!(get_bool(&inner, "complete"), false);
+        assert!(!get_bool(inner, "complete"));
     }
 
     #[test]
@@ -3029,7 +3029,7 @@ mod tests {
         let result = parse_request_head(raw);
         assert!(!is_result_failure(&result));
         let inner = extract_result_inner(&result);
-        assert_eq!(get_bool(inner, "complete"), true);
+        assert!(get_bool(inner, "complete"));
         // contentLength must be 0 when Content-Length header is absent
         assert_eq!(
             get_int(inner, "contentLength"),
