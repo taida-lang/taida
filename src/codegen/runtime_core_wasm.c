@@ -1547,6 +1547,56 @@ int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag) {
     return pack_ptr;
 }
 
+// NB-14: Stack-based call-site argument type tag propagation (Bool/Int disambiguation).
+// WASM has the same Bool/Int representation issue as Native.
+// The stack ensures nested calls do not overwrite the outer call's tags.
+#define WASM_TAG_STACK_DEPTH 64
+#define WASM_TAG_FRAME_SIZE 256
+
+static int64_t __wasm_tag_stack[WASM_TAG_STACK_DEPTH][WASM_TAG_FRAME_SIZE];
+static int __wasm_tag_stack_top = 0;
+
+void taida_push_call_tags(void) {
+    if (__wasm_tag_stack_top < WASM_TAG_STACK_DEPTH) {
+        memset(__wasm_tag_stack[__wasm_tag_stack_top], 0xFF, sizeof(__wasm_tag_stack[0]));
+        __wasm_tag_stack_top++;
+    }
+}
+
+void taida_pop_call_tags(void) {
+    if (__wasm_tag_stack_top > 0) {
+        __wasm_tag_stack_top--;
+    }
+}
+
+int64_t taida_set_call_arg_tag(int64_t index, int64_t tag) {
+    if (__wasm_tag_stack_top > 0 && index >= 0 && index < WASM_TAG_FRAME_SIZE) {
+        __wasm_tag_stack[__wasm_tag_stack_top - 1][index] = tag;
+    }
+    return 0;
+}
+
+int64_t taida_get_call_arg_tag(int64_t index) {
+    if (__wasm_tag_stack_top > 0 && index >= 0 && index < WASM_TAG_FRAME_SIZE) {
+        return __wasm_tag_stack[__wasm_tag_stack_top - 1][index];
+    }
+    return -1; // UNKNOWN
+}
+
+// NB-14: Return type tag propagation (WASM mirror of native_runtime.c).
+static int64_t __wasm_return_tag = -1; // UNKNOWN
+
+int64_t taida_set_return_tag(int64_t tag) {
+    __wasm_return_tag = tag;
+    return 0;
+}
+
+int64_t taida_get_return_tag(void) {
+    int64_t tag = __wasm_return_tag;
+    __wasm_return_tag = -1;
+    return tag;
+}
+
 int64_t taida_pack_get_tag(int64_t pack_ptr, int64_t index) {
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     return pack[1 + index * 3 + 1];

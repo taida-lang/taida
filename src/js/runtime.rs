@@ -2929,6 +2929,575 @@ function sha256(value) {
   // Fallback: pure-JS SHA-256 (should not reach here in Node.js)
   return '';
 }
+
+// ── taida-lang/net: HTTP v1 runtime ─────────────────────────────
+
+// Helper: create net Result success (reuses __taida_result_create)
+function __taida_net_result_ok(inner) {
+  return __taida_result_create(inner, null, null);
+}
+
+// Helper: create net Result failure with kind/message
+function __taida_net_result_fail(kind, message) {
+  const inner = Object.freeze({ ok: false, code: -1, message: message, kind: kind });
+  const errVal = { __type: 'HttpError', type: 'HttpError', message: message, fields: { kind: kind } };
+  return __taida_result_create(inner, errVal, null);
+}
+
+// Helper: create a span object @(start, len)
+function __taida_net_span(start, len) {
+  return Object.freeze({ start: start, len: len });
+}
+
+// Status reason phrases (mirrors Interpreter status_reason)
+function __taida_net_status_reason(code) {
+  const reasons = {
+    100:'Continue',101:'Switching Protocols',
+    200:'OK',201:'Created',202:'Accepted',204:'No Content',
+    205:'Reset Content',206:'Partial Content',
+    301:'Moved Permanently',302:'Found',304:'Not Modified',
+    307:'Temporary Redirect',308:'Permanent Redirect',
+    400:'Bad Request',401:'Unauthorized',403:'Forbidden',404:'Not Found',
+    405:'Method Not Allowed',408:'Request Timeout',409:'Conflict',410:'Gone',
+    413:'Content Too Large',415:'Unsupported Media Type',418:"I'm a Teapot",
+    422:'Unprocessable Content',429:'Too Many Requests',
+    500:'Internal Server Error',502:'Bad Gateway',503:'Service Unavailable',504:'Gateway Timeout',
+  };
+  return reasons[code] || '';
+}
+
+// httpParseRequestHead(bytes) -> Result[@(parsed), _]
+// Parses HTTP/1.1 request head from raw bytes (Uint8Array or string).
+// Returns the same shape as the Interpreter: @(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength)
+function __taida_net_httpParseRequestHead(input) {
+  let bytes;
+  if (input instanceof Uint8Array) {
+    bytes = input;
+  } else if (typeof input === 'string') {
+    bytes = Buffer.from(input, 'utf-8');
+  } else {
+    return __taida_net_result_fail('ParseError', 'httpParseRequestHead: argument must be Bytes or Str');
+  }
+
+  // Find \r\n\r\n (end of head)
+  let headEnd = -1;
+  for (let i = 0; i <= bytes.length - 4; i++) {
+    if (bytes[i] === 13 && bytes[i+1] === 10 && bytes[i+2] === 13 && bytes[i+3] === 10) {
+      headEnd = i + 4;
+      break;
+    }
+  }
+
+  const complete = headEnd >= 0;
+  const headBytes = complete ? bytes.subarray(0, headEnd) : bytes;
+  const headStr = Buffer.from(headBytes).toString('latin1');
+
+  // Split header from the rest
+  const lines = headStr.split('\r\n');
+  if (lines.length === 0 || lines[0].length === 0) {
+    if (!complete) {
+      // Incomplete: return partial with complete=false
+      return __taida_net_result_ok(Object.freeze({
+        complete: false, consumed: 0,
+        method: __taida_net_span(0, 0), path: __taida_net_span(0, 0),
+        query: __taida_net_span(0, 0), version: Object.freeze({ major: 1, minor: 1 }),
+        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0,
+      }));
+    }
+    return __taida_net_result_fail('ParseError', 'Malformed HTTP request: empty request line');
+  }
+
+  // Parse request line: METHOD SP PATH SP HTTP/x.y
+  const requestLine = lines[0];
+  const sp1 = requestLine.indexOf(' ');
+  if (sp1 < 0) {
+    if (!complete) {
+      return __taida_net_result_ok(Object.freeze({
+        complete: false, consumed: 0,
+        method: __taida_net_span(0, 0), path: __taida_net_span(0, 0),
+        query: __taida_net_span(0, 0), version: Object.freeze({ major: 1, minor: 1 }),
+        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0,
+      }));
+    }
+    return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid request line');
+  }
+  const sp2 = requestLine.indexOf(' ', sp1 + 1);
+  if (sp2 < 0) {
+    if (!complete) {
+      return __taida_net_result_ok(Object.freeze({
+        complete: false, consumed: 0,
+        method: __taida_net_span(0, sp1), path: __taida_net_span(0, 0),
+        query: __taida_net_span(0, 0), version: Object.freeze({ major: 1, minor: 1 }),
+        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0,
+      }));
+    }
+    return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid request line');
+  }
+
+  // Method span
+  const methodStart = 0;
+  const methodLen = sp1;
+
+  // Path + query (split on '?')
+  const fullPath = requestLine.substring(sp1 + 1, sp2);
+  const fullPathStart = sp1 + 1;
+  const qIdx = fullPath.indexOf('?');
+  let pathStart, pathLen, queryStart, queryLen;
+  if (qIdx >= 0) {
+    pathStart = fullPathStart;
+    pathLen = qIdx;
+    queryStart = fullPathStart + qIdx + 1;
+    queryLen = fullPath.length - qIdx - 1;
+  } else {
+    pathStart = fullPathStart;
+    pathLen = fullPath.length;
+    queryStart = 0;
+    queryLen = 0;
+  }
+
+  // Version (strict: must match HTTP/x.y exactly when head is complete)
+  const versionStr = requestLine.substring(sp2 + 1);
+  let major = 1, minor = 1;
+  const vMatch = versionStr.match(/^HTTP\/(\d)\.(\d)$/);
+  if (vMatch) {
+    major = parseInt(vMatch[1], 10);
+    minor = parseInt(vMatch[2], 10);
+    // NB-32: restrict to HTTP/1.0 and HTTP/1.1 only (parity with Interpreter/httparse)
+    // Reject immediately once version is fully parsed, regardless of head completeness
+    if (major !== 1 || (minor !== 0 && minor !== 1)) {
+      return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid HTTP version');
+    }
+  } else if (complete) {
+    return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid HTTP version');
+  }
+
+  // Headers (lines[1] .. lines[n-1], stop at empty line)
+  const headersList = [];
+  let contentLength = 0;
+  let clCount = 0;
+  // Track byte offset of each header line for span calculation
+  let lineOffset = requestLine.length + 2; // skip request line + \r\n
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length === 0) break; // end of headers
+    // NB-4/NB-6: enforce max 64 headers (parity with Interpreter/httparse)
+    if (headersList.length >= 64) {
+      return __taida_net_result_fail('ParseError', 'Malformed HTTP request: too many headers');
+    }
+    const colonIdx = line.indexOf(':');
+    if (colonIdx < 0) {
+      // Malformed header line
+      if (complete) {
+        return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid header line');
+      }
+      break;
+    }
+    const nameStart = lineOffset;
+    const nameLen = colonIdx;
+    // Value: skip leading SP/HT after colon, and trim trailing SP/HT (NB-34: parity with Interpreter/httparse)
+    let valueOff = colonIdx + 1;
+    while (valueOff < line.length && (line[valueOff] === ' ' || line[valueOff] === '\t')) valueOff++;
+    let valueEnd = line.length;
+    while (valueEnd > valueOff && (line[valueEnd - 1] === ' ' || line[valueEnd - 1] === '\t')) valueEnd--;
+    const valueStart = lineOffset + valueOff;
+    const valueLen = valueEnd - valueOff;
+
+    headersList.push(Object.freeze({
+      name: __taida_net_span(nameStart, nameLen),
+      value: __taida_net_span(valueStart, valueLen),
+    }));
+
+    // Check Content-Length
+    const headerName = line.substring(0, colonIdx);
+    if (headerName.toLowerCase() === 'content-length') {
+      clCount++;
+      if (clCount > 1) {
+        return __taida_net_result_fail('ParseError', 'Malformed HTTP request: duplicate Content-Length header');
+      }
+      const rawVal = line.substring(colonIdx + 1).trim();
+      // Strict: entire value must be digits (parseInt would accept "5abc" as 5)
+      if (!/^\d+$/.test(rawVal)) {
+        return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
+      }
+      // Strip leading zeros for numeric comparison (RFC 9110: Content-Length = 1*DIGIT,
+      // leading zeros are valid). Interpreter uses parse::<i64>() and Native uses manual
+      // digit accumulation — both ignore leading zeros. JS must match.
+      const clStripped = rawVal.replace(/^0+/, '') || '0';
+      // Cap at Number.MAX_SAFE_INTEGER (2^53 - 1 = 9007199254740991) for
+      // cross-backend parity. JS Number loses precision beyond this value,
+      // so both backends must reject to keep contentLength identical.
+      // String comparison: reject if >16 digits, or exactly 16 digits and > '9007199254740991'.
+      if (clStripped.length > 16 || (clStripped.length === 16 && clStripped > '9007199254740991')) {
+        return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
+      }
+      const parsedCl = parseInt(rawVal, 10);
+      if (isNaN(parsedCl) || parsedCl < 0) {
+        return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid Content-Length value');
+      }
+      contentLength = parsedCl;
+    }
+    lineOffset += line.length + 2; // +2 for \r\n
+  }
+
+  const consumed = complete ? headEnd : 0;
+  const parsed = Object.freeze({
+    complete: complete,
+    consumed: consumed,
+    method: __taida_net_span(methodStart, methodLen),
+    path: __taida_net_span(pathStart, pathLen),
+    query: __taida_net_span(queryStart, queryLen),
+    version: Object.freeze({ major: major, minor: minor }),
+    headers: Object.freeze(headersList),
+    bodyOffset: consumed,
+    contentLength: contentLength,
+  });
+  return __taida_net_result_ok(parsed);
+}
+
+// httpEncodeResponse(response) -> Result[@(bytes: Bytes), _]
+// Encodes a response pack @(status, headers, body) into HTTP/1.1 wire bytes.
+function __taida_net_httpEncodeResponse(response) {
+  if (!response || typeof response !== 'object') {
+    return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: argument must be a BuchiPack @(...)');
+  }
+
+  const status = response.status;
+  if (typeof status !== 'number' || !Number.isInteger(status)) {
+    return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: status must be Int, got ' + String(status));
+  }
+  if (status < 100 || status > 999) {
+    return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: status must be 100-999, got ' + status);
+  }
+
+  // RFC 9110: 1xx, 204, 205, 304 MUST NOT contain a message body
+  const noBody = (status >= 100 && status < 200) || status === 204 || status === 205 || status === 304;
+
+  const headers = response.headers;
+  if (!Array.isArray(headers)) {
+    return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers must be a List, got ' + String(headers));
+  }
+
+  // Validate and collect headers
+  const headerPairs = [];
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    if (!h || typeof h !== 'object') {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '] must be @(name, value)');
+    }
+    const name = h.name;
+    const value = h.value;
+    if (typeof name !== 'string') {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name must be Str');
+    }
+    if (typeof value !== 'string') {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value must be Str');
+    }
+    // NB-7: Enforce header name/value length limits in UTF-8 bytes (parity with Interpreter/Native)
+    if (Buffer.byteLength(name, 'utf-8') > 8192) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name exceeds 8192 bytes');
+    }
+    if (Buffer.byteLength(value, 'utf-8') > 65536) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value exceeds 65536 bytes');
+    }
+    // Reject CRLF in header name/value
+    if (name.includes('\r') || name.includes('\n')) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name contains CR/LF');
+    }
+    if (value.includes('\r') || value.includes('\n')) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value contains CR/LF');
+    }
+    headerPairs.push([name, value]);
+  }
+
+  // Body
+  let bodyBytes;
+  const bodyVal = response.body;
+  if (bodyVal instanceof Uint8Array) {
+    bodyBytes = bodyVal;
+  } else if (typeof bodyVal === 'string') {
+    bodyBytes = Buffer.from(bodyVal, 'utf-8');
+  } else if (bodyVal === undefined || bodyVal === null) {
+    return __taida_net_result_fail('EncodeError', "httpEncodeResponse: missing required field 'body'");
+  } else {
+    return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: body must be Bytes or Str, got ' + String(bodyVal));
+  }
+
+  if (noBody && bodyBytes.length > 0) {
+    return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: status ' + status + ' must not have a body');
+  }
+
+  // Build wire bytes
+  const reason = __taida_net_status_reason(status);
+  let head = 'HTTP/1.1 ' + status + ' ' + reason + '\r\n';
+
+  let hasContentLength = false;
+  for (const [name, value] of headerPairs) {
+    if (noBody && name.toLowerCase() === 'content-length') continue;
+    head += name + ': ' + value + '\r\n';
+    if (name.toLowerCase() === 'content-length') hasContentLength = true;
+  }
+
+  if (!noBody && !hasContentLength) {
+    head += 'Content-Length: ' + bodyBytes.length + '\r\n';
+  }
+  head += '\r\n';
+
+  const headBuf = Buffer.from(head, 'latin1');
+  let result;
+  if (noBody || bodyBytes.length === 0) {
+    result = new Uint8Array(headBuf);
+  } else {
+    result = new Uint8Array(headBuf.length + bodyBytes.length);
+    result.set(headBuf, 0);
+    result.set(bodyBytes, headBuf.length);
+  }
+
+  return __taida_net_result_ok(Object.freeze({ bytes: result }));
+}
+
+// httpServe(port, handler, maxRequests?, timeoutMs?) -> Async[Result[@(ok, requests), _]]
+// TCP server using Node.js net module. Strictly sequential: one connection at a time.
+// 1 connection = 1 request, close after response. bind to 127.0.0.1 (never 0.0.0.0).
+// maxRequests=0 means unlimited.
+async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs) {
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535) {
+    return new __TaidaAsync(
+      __taida_net_result_fail('BindError', 'httpServe: port must be 0-65535, got ' + String(port)),
+      null, 'fulfilled');
+  }
+  if (typeof handler !== 'function') {
+    return new __TaidaAsync(
+      __taida_net_result_fail('TypeError', 'httpServe: handler must be a Function'),
+      null, 'fulfilled');
+  }
+  const maxReq = (typeof maxRequests === 'number' && Number.isInteger(maxRequests)) ? maxRequests : 0;
+  // NB-9: timeoutMs <= 0 falls back to 5000ms (v1 default).
+  // socket.setTimeout(0) means "disable timeout" in Node.js = wait forever; 0 must not reach the socket.
+  const timeout = (typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs > 0) ? timeoutMs : 5000;
+
+  const net = __os_net;
+  if (!net) {
+    return new __TaidaAsync(
+      __taida_net_result_fail('BindError', 'httpServe: net module not available'),
+      null, 'fulfilled');
+  }
+
+  return new Promise((resolveOuter) => {
+    let requestCount = 0;
+    let serverClosed = false;
+    let processing = false;
+    const socketQueue = [];
+    const MAX_REQUEST_BUF = 1048576;
+
+    const server = net.createServer({ allowHalfOpen: false });
+
+    function finish(ok) {
+      if (serverClosed) return;
+      serverClosed = true;
+      for (const s of socketQueue) s.destroy();
+      socketQueue.length = 0;
+      server.close(() => {});
+      const inner = Object.freeze({ ok: ok, requests: requestCount });
+      resolveOuter(new __TaidaAsync(__taida_net_result_ok(inner), null, 'fulfilled'));
+    }
+
+    function requestDone() {
+      requestCount++;
+      processing = false;
+      if (maxReq > 0 && requestCount >= maxReq) { finish(true); return; }
+      drainQueue();
+    }
+
+    function drainQueue() {
+      if (processing || serverClosed || socketQueue.length === 0) return;
+      if (maxReq > 0 && requestCount >= maxReq) { finish(true); return; }
+      processing = true;
+      const socket = socketQueue.shift();
+      processSocket(socket);
+    }
+
+    function processSocket(socket) {
+      const chunks = [];
+      let totalLen = 0;
+      let handled = false;
+
+      function send400() {
+        if (handled) return;
+        handled = true;
+        if (!socket.destroyed && socket.writable) {
+          socket.write('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
+            socket.destroy();
+          });
+        } else {
+          socket.destroy();
+        }
+        requestDone();
+      }
+
+      function send413() {
+        if (handled) return;
+        handled = true;
+        if (!socket.destroyed && socket.writable) {
+          socket.write('HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
+            socket.destroy();
+          });
+        } else {
+          socket.destroy();
+        }
+        requestDone();
+      }
+
+      function send500(msg) {
+        if (handled) return;
+        handled = true;
+        const errBody = 'Internal Server Error: ' + String(msg);
+        if (!socket.destroyed && socket.writable) {
+          socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Length: ' + Buffer.byteLength(errBody) + '\r\nConnection: close\r\n\r\n' + errBody, () => {
+            socket.destroy();
+          });
+        } else {
+          socket.destroy();
+        }
+        requestDone();
+      }
+
+      socket.setTimeout(timeout);
+      socket.on('timeout', send400);
+
+      socket.on('end', () => {
+        // Client closed write side. If request wasn't complete, reject.
+        if (!handled) send400();
+      });
+
+      socket.on('error', () => {
+        if (!handled) { handled = true; socket.destroy(); requestDone(); }
+      });
+
+      socket.on('close', () => {
+        // Last resort: if socket closed without us finishing, count it.
+        if (!handled) { handled = true; requestDone(); }
+      });
+
+      socket.on('data', (chunk) => {
+        if (handled || serverClosed) { socket.destroy(); return; }
+        chunks.push(chunk);
+        totalLen += chunk.length;
+        if (totalLen > MAX_REQUEST_BUF) { send400(); return; }
+
+        const buf = Buffer.concat(chunks);
+
+        // Phase 1: check if head is complete
+        let headEnd = -1;
+        for (let i = 0; i <= buf.length - 4; i++) {
+          if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) {
+            headEnd = i + 4;
+            break;
+          }
+        }
+        if (headEnd < 0) return; // keep reading
+
+        const parseResult = __taida_net_httpParseRequestHead(new Uint8Array(buf));
+        const parsed = parseResult && parseResult.__value;
+        if (!parsed || (parseResult.throw !== null && parseResult.throw !== undefined)) {
+          send400(); return;
+        }
+        if (!parsed.complete) return; // keep reading
+
+        const contentLength = parsed.contentLength || 0;
+
+        // NB-3: Early reject if head + body exceeds buffer limit (413 Content Too Large)
+        if (parsed.consumed + contentLength > MAX_REQUEST_BUF) { send413(); return; }
+
+        const bodyNeeded = parsed.consumed + contentLength;
+
+        // Phase 2: wait for full body
+        if (buf.length < bodyNeeded) return; // keep reading
+
+        // Full request received — stop listening for more data
+        socket.removeAllListeners('data');
+        socket.removeAllListeners('timeout');
+        socket.removeAllListeners('end');
+
+        // NB-33: Build request pack — raw is sliced to current request only (exclude pipelined tail)
+        const raw = new Uint8Array(buf.buffer, buf.byteOffset, bodyNeeded);
+        const remoteAddr = socket.remoteAddress || '127.0.0.1';
+        const cleanHost = remoteAddr.startsWith('::ffff:') ? remoteAddr.substring(7) : remoteAddr;
+
+        const request = Object.freeze({
+          raw: raw,
+          method: parsed.method,
+          path: parsed.path,
+          query: parsed.query,
+          version: parsed.version,
+          headers: parsed.headers,
+          body: __taida_net_span(parsed.consumed, contentLength),
+          bodyOffset: parsed.consumed,
+          contentLength: contentLength,
+          remoteHost: cleanHost,
+          remotePort: socket.remotePort || 0,
+        });
+
+        // Call handler
+        let responseVal;
+        try {
+          responseVal = handler(request);
+          if (responseVal && typeof responseVal.then === 'function') {
+            responseVal.then((val) => {
+              __taida_net_sendResponse(socket, val, () => {
+                if (!handled) { handled = true; requestDone(); }
+              });
+            }).catch((err) => {
+              send500(err && err.message || err);
+            });
+            return;
+          }
+        } catch (err) {
+          send500(err && err.message || err);
+          return;
+        }
+
+        __taida_net_sendResponse(socket, responseVal, () => {
+          if (!handled) { handled = true; requestDone(); }
+        });
+      });
+    }
+
+    server.on('error', (err) => {
+      if (serverClosed) return;
+      serverClosed = true;
+      server.close(() => {});
+      resolveOuter(new __TaidaAsync(
+        __taida_net_result_fail('BindError', 'httpServe: failed to bind to 127.0.0.1:' + port + ': ' + err.message),
+        null, 'fulfilled'));
+    });
+
+    server.on('connection', (socket) => {
+      if (serverClosed) { socket.destroy(); return; }
+      socketQueue.push(socket);
+      drainQueue();
+    });
+
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+// Helper: encode response and write to socket, then destroy
+function __taida_net_sendResponse(socket, responseVal, onDone) {
+  const encoded = __taida_net_httpEncodeResponse(responseVal);
+  const encInner = encoded && encoded.__value;
+  if (encInner && encInner.bytes) {
+    socket.write(Buffer.from(encInner.bytes), () => {
+      socket.destroy();
+      if (onDone) onDone();
+    });
+  } else {
+    // Encode failed -> 500
+    socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', () => {
+      socket.destroy();
+      if (onDone) onDone();
+    });
+  }
+}
 "#;
 
 #[cfg(test)]

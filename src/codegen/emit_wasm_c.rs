@@ -73,6 +73,43 @@ pub fn validate_wasm_min_capabilities(ir_module: &IrModule) -> Result<(), WasmCE
     }
 }
 
+/// NET-6 fix: early-out validation for taida-lang/net HTTP API on WASM profiles.
+///
+/// When `httpParseRequestHead(Bytes[...])` is compiled for wasm-edge, the `Bytes`
+/// mold hits a generic unsupported runtime error before the net-specific error.
+/// This pre-check fires based on the collected runtime function set, ensuring the
+/// net-specific diagnostic always takes priority over argument-level errors.
+fn validate_net_http_api_for_wasm(
+    needed_funcs: &HashSet<String>,
+    profile: WasmProfile,
+) -> Result<(), WasmCEmitError> {
+    const NET_HTTP_FUNCS: &[(&str, &str)] = &[
+        ("taida_net_http_serve", "httpServe"),
+        ("taida_net_http_parse_request_head", "httpParseRequestHead"),
+        ("taida_net_http_encode_response", "httpEncodeResponse"),
+    ];
+
+    for &(runtime_name, api_name) in NET_HTTP_FUNCS {
+        if needed_funcs.contains(runtime_name) {
+            let profile_name = match profile {
+                WasmProfile::Min => "wasm-min",
+                WasmProfile::Wasi => "wasm-wasi",
+                WasmProfile::Edge => "wasm-edge",
+                WasmProfile::Full => "wasm-full",
+            };
+            return Err(WasmCEmitError {
+                message: format!(
+                    "{} does not support taida-lang/net HTTP API '{}'. \
+                     Use the interpreter, JS, or native backend instead.",
+                    profile_name, api_name
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn collect_unsupported_insts(insts: &[IrInst], _out: &mut Vec<String>) {
     for inst in insts {
         match inst {
@@ -258,6 +295,11 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
         collect_needed_runtime_funcs(&func.body, &mut needed_funcs);
     }
 
+    // NET-6 fix: check for net HTTP API usage before individual prototype checks.
+    // Arguments like Bytes[...] may hit a generic unsupported error first,
+    // masking the net-specific diagnostic. Early-out ensures the intended message.
+    validate_net_http_api_for_wasm(&needed_funcs, profile)?;
+
     for name in &needed_funcs {
         writeln!(c, "{}", runtime_func_prototype(name, profile)?).unwrap();
     }
@@ -433,6 +475,25 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         "taida_pack_set_tag" => {
             "int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);".to_string()
+        }
+        // NB-14: Stack-based call-site arg tag propagation
+        "taida_push_call_tags" => {
+            "void taida_push_call_tags(void);".to_string()
+        }
+        "taida_pop_call_tags" => {
+            "void taida_pop_call_tags(void);".to_string()
+        }
+        "taida_set_call_arg_tag" => {
+            "int64_t taida_set_call_arg_tag(int64_t index, int64_t tag);".to_string()
+        }
+        "taida_get_call_arg_tag" => {
+            "int64_t taida_get_call_arg_tag(int64_t index);".to_string()
+        }
+        "taida_set_return_tag" => {
+            "int64_t taida_set_return_tag(int64_t tag);".to_string()
+        }
+        "taida_get_return_tag" => {
+            "int64_t taida_get_return_tag(void);".to_string()
         }
         "taida_pack_get_idx" => {
             "int64_t taida_pack_get_idx(int64_t pack_ptr, int64_t index);".to_string()
@@ -915,6 +976,34 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                     .to_string(),
             });
         }
+        // NET-6: taida-lang/net HTTP API is unsupported on all WASM profiles.
+        // All 3 HTTP v1 functions (httpServe, httpParseRequestHead, httpEncodeResponse)
+        // produce explicit compile errors with profile-specific diagnostics.
+        // Source of truth: .dev/NET_WASM_POLICY.md
+        "taida_net_http_serve"
+        | "taida_net_http_parse_request_head"
+        | "taida_net_http_encode_response" =>
+        {
+            let profile_name = match profile {
+                WasmProfile::Min => "wasm-min",
+                WasmProfile::Wasi => "wasm-wasi",
+                WasmProfile::Edge => "wasm-edge",
+                WasmProfile::Full => "wasm-full",
+            };
+            let api_name = match name {
+                "taida_net_http_serve" => "httpServe",
+                "taida_net_http_parse_request_head" => "httpParseRequestHead",
+                "taida_net_http_encode_response" => "httpEncodeResponse",
+                _ => name,
+            };
+            return Err(WasmCEmitError {
+                message: format!(
+                    "{} does not support taida-lang/net HTTP API '{}'. \
+                     Use the interpreter, JS, or native backend instead.",
+                    profile_name, api_name
+                ),
+            });
+        }
         // WF-2: wasm-full extended runtime functions (Tier 1)
         _ if profile == WasmProfile::Full => {
             // wasm-full accepts all runtime functions -- prototype is generated
@@ -1214,6 +1303,8 @@ fn emit_inst(
                 || name == "taida_error_ceiling_pop"
                 || name == "taida_register_type_parent"
                 || name == "taida_gorilla"
+                || name == "taida_push_call_tags"
+                || name == "taida_pop_call_tags"
             {
                 write!(c, "{}{}(", indent, name).unwrap();
                 for (i, arg) in args.iter().enumerate() {
@@ -1488,4 +1579,275 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// NET-6: WASM capability gating tests for taida-lang/net HTTP API
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// NET-6: All 3 net HTTP v1 runtime function names.
+    const NET_RUNTIME_FUNCS: &[&str] = &[
+        "taida_net_http_serve",
+        "taida_net_http_parse_request_head",
+        "taida_net_http_encode_response",
+    ];
+
+    /// NET-6: Human-readable API names expected in error messages.
+    const NET_API_NAMES: &[&str] = &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
+
+    /// NET-6b: wasm-min rejects all 3 net HTTP API functions with profile-specific error.
+    #[test]
+    fn test_wasm_min_rejects_net_http_api() {
+        for (rt_name, api_name) in NET_RUNTIME_FUNCS.iter().zip(NET_API_NAMES.iter()) {
+            let result = runtime_func_prototype(rt_name, WasmProfile::Min);
+            assert!(result.is_err(), "wasm-min should reject {}", rt_name);
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("wasm-min"),
+                "error for {} should contain 'wasm-min', got: {}",
+                rt_name,
+                msg
+            );
+            assert!(
+                msg.contains(api_name),
+                "error for {} should contain '{}', got: {}",
+                rt_name,
+                api_name,
+                msg
+            );
+            assert!(
+                msg.contains("taida-lang/net"),
+                "error for {} should reference taida-lang/net, got: {}",
+                rt_name,
+                msg
+            );
+        }
+    }
+
+    /// NET-6c: wasm-wasi rejects all 3 net HTTP API functions with profile-specific error.
+    #[test]
+    fn test_wasm_wasi_rejects_net_http_api() {
+        for (rt_name, api_name) in NET_RUNTIME_FUNCS.iter().zip(NET_API_NAMES.iter()) {
+            let result = runtime_func_prototype(rt_name, WasmProfile::Wasi);
+            assert!(result.is_err(), "wasm-wasi should reject {}", rt_name);
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("wasm-wasi"),
+                "error for {} should contain 'wasm-wasi', got: {}",
+                rt_name,
+                msg
+            );
+            assert!(
+                msg.contains(api_name),
+                "error for {} should contain '{}', got: {}",
+                rt_name,
+                api_name,
+                msg
+            );
+            assert!(
+                msg.contains("taida-lang/net"),
+                "error for {} should reference taida-lang/net, got: {}",
+                rt_name,
+                msg
+            );
+        }
+    }
+
+    /// NET-6d: wasm-edge rejects all 3 net HTTP API functions with profile-specific error.
+    #[test]
+    fn test_wasm_edge_rejects_net_http_api() {
+        for (rt_name, api_name) in NET_RUNTIME_FUNCS.iter().zip(NET_API_NAMES.iter()) {
+            let result = runtime_func_prototype(rt_name, WasmProfile::Edge);
+            assert!(result.is_err(), "wasm-edge should reject {}", rt_name);
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("wasm-edge"),
+                "error for {} should contain 'wasm-edge', got: {}",
+                rt_name,
+                msg
+            );
+            assert!(
+                msg.contains(api_name),
+                "error for {} should contain '{}', got: {}",
+                rt_name,
+                api_name,
+                msg
+            );
+            assert!(
+                msg.contains("taida-lang/net"),
+                "error for {} should reference taida-lang/net, got: {}",
+                rt_name,
+                msg
+            );
+        }
+    }
+
+    /// NET-6e: wasm-full rejects all 3 net HTTP API functions with profile-specific error.
+    #[test]
+    fn test_wasm_full_rejects_net_http_api() {
+        for (rt_name, api_name) in NET_RUNTIME_FUNCS.iter().zip(NET_API_NAMES.iter()) {
+            let result = runtime_func_prototype(rt_name, WasmProfile::Full);
+            assert!(result.is_err(), "wasm-full should reject {}", rt_name);
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("wasm-full"),
+                "error for {} should contain 'wasm-full', got: {}",
+                rt_name,
+                msg
+            );
+            assert!(
+                msg.contains(api_name),
+                "error for {} should contain '{}', got: {}",
+                rt_name,
+                api_name,
+                msg
+            );
+            assert!(
+                msg.contains("taida-lang/net"),
+                "error for {} should reference taida-lang/net, got: {}",
+                rt_name,
+                msg
+            );
+        }
+    }
+
+    /// NET-6f: error messages contain profile name for all 4 profiles x 3 functions.
+    #[test]
+    fn test_net_http_error_contains_profile_name() {
+        let profiles = [
+            (WasmProfile::Min, "wasm-min"),
+            (WasmProfile::Wasi, "wasm-wasi"),
+            (WasmProfile::Edge, "wasm-edge"),
+            (WasmProfile::Full, "wasm-full"),
+        ];
+        for (profile, profile_name) in &profiles {
+            for rt_name in NET_RUNTIME_FUNCS {
+                let result = runtime_func_prototype(rt_name, *profile);
+                assert!(
+                    result.is_err(),
+                    "{} should reject {}",
+                    profile_name,
+                    rt_name
+                );
+                let msg = result.unwrap_err().message;
+                assert!(
+                    msg.contains(profile_name),
+                    "error for {} on {} should contain '{}', got: {}",
+                    rt_name,
+                    profile_name,
+                    profile_name,
+                    msg
+                );
+            }
+        }
+    }
+
+    /// NET-6: net HTTP API errors suggest interpreter, JS, or native -- not other WASM profiles.
+    #[test]
+    fn test_net_http_error_suggests_correct_backends() {
+        for rt_name in NET_RUNTIME_FUNCS {
+            let result = runtime_func_prototype(rt_name, WasmProfile::Min);
+            let msg = result.unwrap_err().message;
+            // Should suggest non-WASM backends
+            assert!(
+                msg.contains("interpreter") || msg.contains("native") || msg.contains("JS"),
+                "error should suggest non-WASM backends, got: {}",
+                msg
+            );
+            // Should NOT suggest other WASM profiles (net is unsupported on ALL WASM)
+            assert!(
+                !msg.contains("wasm-wasi")
+                    && !msg.contains("wasm-edge")
+                    && !msg.contains("wasm-full"),
+                "error should not suggest other WASM profiles for net API, got: {}",
+                msg
+            );
+        }
+    }
+
+    /// NET-6: the net block is reached before wasm-full's catch-all wildcard.
+    /// This verifies wasm-full doesn't silently accept net functions through wasm_full_runtime_prototype.
+    #[test]
+    fn test_wasm_full_net_not_in_full_runtime_prototype() {
+        // wasm_full_runtime_prototype should NOT have entries for net functions
+        for rt_name in NET_RUNTIME_FUNCS {
+            assert!(
+                wasm_full_runtime_prototype(rt_name).is_none(),
+                "wasm_full_runtime_prototype should not accept {}",
+                rt_name
+            );
+        }
+    }
+
+    /// NET-6 fix: validate_net_http_api_for_wasm fires before individual prototype checks.
+    /// This ensures net-specific errors take priority over argument-level errors
+    /// (e.g., Bytes mold hitting a generic unsupported error on wasm-edge).
+    #[test]
+    fn test_validate_net_http_api_early_out() {
+        let profiles = [
+            (WasmProfile::Min, "wasm-min"),
+            (WasmProfile::Wasi, "wasm-wasi"),
+            (WasmProfile::Edge, "wasm-edge"),
+            (WasmProfile::Full, "wasm-full"),
+        ];
+        for (profile, profile_name) in &profiles {
+            // A set containing both Bytes mold AND httpParseRequestHead
+            // should produce a net-specific error, not a Bytes error
+            let mut funcs = HashSet::new();
+            funcs.insert("taida_bytes_mold".to_string());
+            funcs.insert("taida_net_http_parse_request_head".to_string());
+
+            let result = validate_net_http_api_for_wasm(&funcs, *profile);
+            assert!(
+                result.is_err(),
+                "{} should reject net HTTP API",
+                profile_name
+            );
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("taida-lang/net"),
+                "{}: error should reference taida-lang/net, got: {}",
+                profile_name,
+                msg
+            );
+            assert!(
+                msg.contains("httpParseRequestHead"),
+                "{}: error should name the API, got: {}",
+                profile_name,
+                msg
+            );
+            assert!(
+                msg.contains(profile_name),
+                "{}: error should contain profile name, got: {}",
+                profile_name,
+                msg
+            );
+        }
+    }
+
+    /// NET-6 fix: validate_net_http_api_for_wasm does NOT fire when no net functions are present.
+    #[test]
+    fn test_validate_net_http_api_no_false_positive() {
+        let mut funcs = HashSet::new();
+        funcs.insert("taida_bytes_mold".to_string());
+        funcs.insert("taida_io_stdout".to_string());
+
+        // No net functions → should pass
+        for profile in &[
+            WasmProfile::Min,
+            WasmProfile::Wasi,
+            WasmProfile::Edge,
+            WasmProfile::Full,
+        ] {
+            let result = validate_net_http_api_for_wasm(&funcs, *profile);
+            assert!(
+                result.is_ok(),
+                "should not reject when no net functions are present"
+            );
+        }
+    }
 }

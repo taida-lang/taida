@@ -32,6 +32,11 @@ pub struct JsCodegen {
     entry_root: Option<std::path::PathBuf>,
     /// Output root directory — for output placement logic
     out_root: Option<std::path::PathBuf>,
+    /// Whether the current module imports taida-lang/net (guards net builtin rewriting)
+    has_net_import: bool,
+    /// Net builtin names that are shadowed by a parameter/local in the current scope.
+    /// When a name is in this set, call-site rewriting to __taida_net_* is suppressed.
+    shadowed_net_builtins: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -74,6 +79,8 @@ impl JsCodegen {
             output_file: None,
             entry_root: None,
             out_root: None,
+            has_net_import: false,
+            shadowed_net_builtins: std::collections::HashSet::new(),
         }
     }
 
@@ -97,9 +104,52 @@ impl JsCodegen {
         self.out_root = Some(out_root.to_path_buf());
     }
 
+    /// Names of taida-lang/net HTTP v1 builtins that require scope-aware call-site rewriting.
+    const NET_BUILTIN_NAMES: &'static [&'static str] =
+        &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
+
+    /// Check if a net builtin name should be rewritten to its __taida_net_* form.
+    /// Returns true only when the module has a net import AND the name is not
+    /// shadowed by a parameter/local in the current scope.
+    fn should_rewrite_net_builtin(&self, name: &str) -> bool {
+        self.has_net_import
+            && Self::NET_BUILTIN_NAMES.contains(&name)
+            && !self.shadowed_net_builtins.contains(name)
+    }
+
+    /// Try to write a net builtin rewrite. Returns true if the name was a net
+    /// builtin and was rewritten (with optional suffix appended), false otherwise.
+    /// This centralizes the 4-site rewrite pattern for net builtins.
+    fn try_write_net_builtin(&mut self, name: &str, suffix: &str) -> bool {
+        if !self.should_rewrite_net_builtin(name) {
+            return false;
+        }
+        match name {
+            "httpServe" => {
+                self.write(&format!("__taida_net_httpServe{}", suffix));
+                true
+            }
+            "httpParseRequestHead" => {
+                self.write(&format!("__taida_net_httpParseRequestHead{}", suffix));
+                true
+            }
+            "httpEncodeResponse" => {
+                self.write(&format!("__taida_net_httpEncodeResponse{}", suffix));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Program 全体を JS に変換
     pub fn generate(&mut self, program: &Program) -> Result<String, JsError> {
         let mut result = String::new();
+
+        // Pre-pass: detect taida-lang/net import (guards net builtin rewriting)
+        self.has_net_import = program
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::Import(imp) if imp.path == "taida-lang/net"));
 
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
         self.detect_trampoline_funcs(&program.statements);
@@ -507,6 +557,13 @@ impl JsCodegen {
                 }
                 self.gen_expr(&assign.value)?;
                 self.write(";\n");
+                // Track local assignment shadow: if the target name matches a net
+                // builtin, subsequent calls in the same scope must use the local
+                // value, not the builtin rewrite.
+                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str())
+                {
+                    self.shadowed_net_builtins.insert(assign.target.clone());
+                }
                 Ok(())
             }
             Statement::FuncDef(func_def) => self.gen_func_def(func_def),
@@ -532,6 +589,11 @@ impl JsCodegen {
                 ));
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
+                // Track local unmold-forward shadow for net builtins
+                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
+                {
+                    self.shadowed_net_builtins.insert(unmold.target.clone());
+                }
                 Ok(())
             }
             Statement::UnmoldBackward(unmold) => {
@@ -547,6 +609,11 @@ impl JsCodegen {
                 ));
                 self.gen_expr(&unmold.source)?;
                 self.write(");\n");
+                // Track local unmold-backward shadow for net builtins
+                if self.has_net_import && Self::NET_BUILTIN_NAMES.contains(&unmold.target.as_str())
+                {
+                    self.shadowed_net_builtins.insert(unmold.target.clone());
+                }
                 Ok(())
             }
         }
@@ -562,6 +629,16 @@ impl JsCodegen {
         // Save async context — set to true for async functions so ]=> generates `await`
         let prev_async_context = self.in_async_context;
         self.in_async_context = needs_async;
+
+        // Scope-aware net builtin shadowing: snapshot before function body,
+        // restore after. This covers both parameter shadows and local assignment
+        // shadows (e.g. `httpServe <= add`) within the function scope.
+        let prev_shadowed_net = self.shadowed_net_builtins.clone();
+        for p in &func_def.params {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+                self.shadowed_net_builtins.insert(p.name.clone());
+            }
+        }
 
         if needs_trampoline {
             // Trampoline-based TCO: generate inner function, then trampoline wrapper
@@ -617,6 +694,9 @@ impl JsCodegen {
             self.output = result;
             self.writeln("}\n");
         }
+
+        // Restore net builtin shadow set to pre-function state
+        self.shadowed_net_builtins = prev_shadowed_net;
 
         // Restore async context
         self.in_async_context = prev_async_context;
@@ -1255,6 +1335,11 @@ impl JsCodegen {
         if import.path == "taida-lang/crypto" {
             return Ok(());
         }
+        // taida-lang/net: core-bundled, HTTP v1 runtime functions already embedded
+        if import.path == "taida-lang/net" {
+            self.has_net_import = true;
+            return Ok(());
+        }
 
         let symbols: Vec<String> = import
             .symbols
@@ -1777,6 +1862,8 @@ impl JsCodegen {
                             "poolRelease" => self.write("__taida_os_poolRelease"),
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // taida-lang/net HTTP v1 (only when imported)
+                            _ if self.try_write_net_builtin(name, "") => {}
                             _ => self.gen_expr(callee)?,
                         }
                     } else {
@@ -1843,6 +1930,8 @@ impl JsCodegen {
                         "poolRelease" => self.write("__taida_os_poolRelease"),
                         "poolClose" => self.write("__taida_os_poolClose"),
                         "poolHealth" => self.write("__taida_os_poolHealth"),
+                        // taida-lang/net HTTP v1 (only when imported)
+                        _ if self.try_write_net_builtin(name, "") => {}
                         _ => self.gen_expr(callee)?,
                     }
                 } else {
@@ -2333,9 +2422,17 @@ impl JsCodegen {
             }
             Expr::Lambda(params, body, _) => {
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
+                let prev_shadowed_net = self.shadowed_net_builtins.clone();
+                for p in params {
+                    if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+                        self.shadowed_net_builtins.insert(p.name.clone());
+                    }
+                }
                 self.write(&format!("(({}) => ", param_names.join(", ")));
                 self.gen_expr(body)?;
                 self.write(")");
+                self.shadowed_net_builtins = prev_shadowed_net;
                 Ok(())
             }
             Expr::Throw(inner, _) => {
@@ -2535,6 +2632,8 @@ impl JsCodegen {
                             "poolRelease" => self.write("__taida_os_poolRelease"),
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // taida-lang/net HTTP v1 (only when imported)
+                            _ if self.try_write_net_builtin(name, "") => {}
                             _ => self.write(name),
                         }
                     } else {
@@ -2708,6 +2807,8 @@ impl JsCodegen {
                     "poolRelease" => self.write("__taida_os_poolRelease(__p)"),
                     "poolClose" => self.write("__taida_os_poolClose(__p)"),
                     "poolHealth" => self.write("__taida_os_poolHealth(__p)"),
+                    // taida-lang/net HTTP v1 (only when imported)
+                    _ if self.try_write_net_builtin(name, "(__p)") => {}
                     _ => self.write(&format!("{}(__p)", name)),
                 },
                 _ => {
@@ -2812,6 +2913,11 @@ const OS_ASYNC_FUNCS: &[&str] = &[
     "dnsResolve",
     "poolAcquire",
     "poolClose",
+    // taida-lang/net HTTP v1 — call-site rewriting is guarded by has_net_import,
+    // but async detection here is intentionally left unguarded to avoid threading
+    // has_net_import through all recursive free functions. Over-inclusion only
+    // affects the unlikely case of a user-defined `httpServe` without net import.
+    "httpServe",
 ];
 
 fn callee_is_os_async_func(callee: &Expr) -> bool {

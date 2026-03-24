@@ -66,6 +66,8 @@ pub struct Lowering {
     bool_returning_funcs: std::collections::HashSet<String>,
     /// 戻り値が Float のユーザー定義関数名セット
     float_returning_funcs: std::collections::HashSet<String>,
+    /// NB-31: 戻り値が Int/Num のユーザー定義関数名セット
+    int_returning_funcs: std::collections::HashSet<String>,
     /// BuchiPack/TypeInst を保持する変数名のセット（F-58 メソッド名衝突回避用）
     pack_vars: std::collections::HashSet<String>,
     /// BuchiPack/TypeInst を返すユーザー定義関数名セット
@@ -110,6 +112,21 @@ pub struct Lowering {
     /// 例: `x <= Bool["maybe"]()` → lax_inner_types["x"] = "Bool"
     /// `x ]=> val` で val の型を正しく推定するために使用
     lax_inner_types: std::collections::HashMap<String, String>,
+    /// Net builtin names shadowed by a parameter in the current function scope.
+    /// When a name is here, stdlib_runtime_funcs dispatch for that name is skipped
+    /// and the call is treated as a parameter/variable call instead.
+    shadowed_net_builtins: std::collections::HashSet<String>,
+    /// NB-14: Parameter name -> IrVar holding the runtime type tag from the caller.
+    /// Used to propagate Bool/Int distinction through function boundaries.
+    /// Populated at function entry via taida_get_call_arg_tag().
+    param_tag_vars: std::collections::HashMap<String, IrVar>,
+    /// NB-14: IrVar (CallUser result) -> IrVar (return type tag from that call).
+    /// Populated after CallUser by calling taida_get_return_tag().
+    /// Used to propagate type tags through function return values.
+    return_tag_vars: std::collections::HashMap<IrVar, IrVar>,
+    /// NB-14: When true, the current CallUser is in tail position (return value).
+    /// Skip get_return_tag to preserve C compiler tail call optimization (WASM/mutual recursion).
+    in_tail_call_return: bool,
 }
 
 #[derive(Debug)]
@@ -244,6 +261,7 @@ impl Lowering {
             string_returning_funcs: std::collections::HashSet::new(),
             bool_returning_funcs: std::collections::HashSet::new(),
             float_returning_funcs: std::collections::HashSet::new(),
+            int_returning_funcs: std::collections::HashSet::new(),
             pack_vars: std::collections::HashSet::new(),
             pack_returning_funcs: std::collections::HashSet::new(),
             list_vars: std::collections::HashSet::new(),
@@ -263,6 +281,10 @@ impl Lowering {
             imported_value_names: std::collections::HashSet::new(),
             exported_symbols: std::collections::HashSet::new(),
             lax_inner_types: std::collections::HashMap::new(),
+            shadowed_net_builtins: std::collections::HashSet::new(),
+            param_tag_vars: std::collections::HashMap::new(),
+            return_tag_vars: std::collections::HashMap::new(),
+            in_tail_call_return: false,
         }
     }
 
@@ -825,9 +847,20 @@ impl Lowering {
     }
 
     /// taida-lang/net package function → C runtime function mapping.
-    /// Current net package reuses the existing socket runtime path.
+    /// Names of taida-lang/net HTTP v1 builtins that require scope-aware dispatch.
+    const NET_BUILTIN_NAMES: &'static [&'static str] =
+        &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
+
+    /// Check if a name is a net HTTP v1 builtin that is currently shadowed by a parameter.
+    fn is_net_builtin_shadowed(&self, name: &str) -> bool {
+        self.shadowed_net_builtins.contains(name)
+    }
+
+    /// Legacy surface reuses the existing socket runtime path.
+    /// HTTP v1 surface maps to dedicated taida_net_* runtime functions.
     fn net_func_mapping(sym: &str) -> Option<&'static str> {
         match sym {
+            // Legacy surface (shared with os)
             "dnsResolve" => Some("taida_os_dns_resolve"),
             "tcpConnect" => Some("taida_os_tcp_connect"),
             "tcpListen" => Some("taida_os_tcp_listen"),
@@ -844,6 +877,10 @@ impl Lowering {
             "socketClose" => Some("taida_os_socket_close"),
             "listenerClose" => Some("taida_os_listener_close"),
             "udpClose" => Some("taida_os_socket_close"),
+            // HTTP v1 surface
+            "httpServe" => Some("taida_net_http_serve"),
+            "httpParseRequestHead" => Some("taida_net_http_parse_request_head"),
+            "httpEncodeResponse" => Some("taida_net_http_encode_response"),
             _ => None,
         }
     }
@@ -978,6 +1015,10 @@ impl Lowering {
                             }
                             crate::parser::TypeExpr::Named(n) if n == "Float" => {
                                 self.float_returning_funcs.insert(func_def.name.clone());
+                            }
+                            // NB-31: Track Int/Num-returning functions for callable_type_tag
+                            crate::parser::TypeExpr::Named(n) if n == "Int" || n == "Num" => {
+                                self.int_returning_funcs.insert(func_def.name.clone());
                             }
                             crate::parser::TypeExpr::List(_) => {
                                 self.list_returning_funcs.insert(func_def.name.clone());
@@ -1303,6 +1344,9 @@ impl Lowering {
             if let Statement::Assignment(assign) = stmt {
                 self.top_level_vars.insert(assign.target.clone());
                 // 型情報を事前登録（2nd pass の lower_func_def 内で正しく型判定するため）
+                if self.expr_is_int(&assign.value) {
+                    self.int_vars.insert(assign.target.clone());
+                }
                 if self.expr_is_string_full(&assign.value) {
                     self.string_vars.insert(assign.target.clone());
                 }
@@ -1435,6 +1479,16 @@ impl Lowering {
         let mangled = self.resolve_user_func_symbol(&func_def.name);
         let mut ir_func = IrFunction::new_with_params(mangled, params.clone());
 
+        // Scope-aware net builtin shadowing: snapshot before function body,
+        // restore after. This covers both parameter shadows and local assignment
+        // shadows (e.g. `httpServe <= add`) within the function scope.
+        let prev_shadowed_net = self.shadowed_net_builtins.clone();
+        for p in &func_def.params {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+                self.shadowed_net_builtins.insert(p.name.clone());
+            }
+        }
+
         // ヒープ変数トラッカーをリセット
         self.current_heap_vars.clear();
 
@@ -1486,6 +1540,32 @@ impl Lowering {
                         self.int_vars.insert(param.name.clone());
                     }
                 }
+            }
+        }
+
+        // NB-14: Emit taida_get_call_arg_tag() for parameters whose type cannot be
+        // determined at compile time. This reads the type tag that the caller set via
+        // taida_set_call_arg_tag(), enabling Bool/Int disambiguation in pack field tags.
+        let prev_param_tag_vars = std::mem::take(&mut self.param_tag_vars);
+        for (i, param) in func_def.params.iter().enumerate() {
+            // Only emit for parameters that don't have a compile-time type
+            let has_known_type = self.bool_vars.contains(&param.name)
+                || self.int_vars.contains(&param.name)
+                || self.float_vars.contains(&param.name)
+                || self.string_vars.contains(&param.name)
+                || self.pack_vars.contains(&param.name)
+                || self.list_vars.contains(&param.name)
+                || self.closure_vars.contains(&param.name);
+            if !has_known_type {
+                let idx_var = ir_func.alloc_var();
+                ir_func.push(IrInst::ConstInt(idx_var, i as i64));
+                let tag_var = ir_func.alloc_var();
+                ir_func.push(IrInst::Call(
+                    tag_var,
+                    "taida_get_call_arg_tag".to_string(),
+                    vec![idx_var],
+                ));
+                self.param_tag_vars.insert(param.name.clone(), tag_var);
             }
         }
 
@@ -1662,12 +1742,50 @@ impl Lowering {
 
         // 暗黙の戻り値
         if let Some(ret) = last_var {
+            // NB-14: Set return type tag so callers can propagate it.
+            // This enables type info to survive through generic functions like `id x = x`
+            // and transitive chains like `g x = f(x)`.
+            if let Some(&rtv) = self.return_tag_vars.get(&ret) {
+                // Return value came from a CallUser — propagate that call's return tag
+                let dummy = ir_func.alloc_var();
+                ir_func.push(IrInst::Call(
+                    dummy,
+                    "taida_set_return_tag".to_string(),
+                    vec![rtv],
+                ));
+            } else if let Some(ret_expr) = last_expr {
+                let tag = self.expr_type_tag(ret_expr);
+                if tag > 0 {
+                    let tag_var = ir_func.alloc_var();
+                    ir_func.push(IrInst::ConstInt(tag_var, tag));
+                    let dummy = ir_func.alloc_var();
+                    ir_func.push(IrInst::Call(
+                        dummy,
+                        "taida_set_return_tag".to_string(),
+                        vec![tag_var],
+                    ));
+                } else if tag == -1
+                    && let Some(ptv) = self.get_param_tag_var(ret_expr)
+                {
+                    let dummy = ir_func.alloc_var();
+                    ir_func.push(IrInst::Call(
+                        dummy,
+                        "taida_set_return_tag".to_string(),
+                        vec![ptv],
+                    ));
+                }
+            }
             ir_func.push(IrInst::Return(ret));
         } else {
             let zero = ir_func.alloc_var();
             ir_func.push(IrInst::ConstInt(zero, 0));
             ir_func.push(IrInst::Return(zero));
         }
+
+        // Restore net builtin shadow set to pre-function state
+        self.shadowed_net_builtins = prev_shadowed_net;
+        // NB-14: Restore param_tag_vars to pre-function state
+        self.param_tag_vars = prev_param_tag_vars;
 
         Ok(ir_func)
     }
@@ -1962,6 +2080,10 @@ impl Lowering {
                     func.push(IrInst::GlobalSet(hash, val));
                 }
 
+                // NB-31: int を返す式の結果を追跡（callable_type_tag 精度向上）
+                if self.expr_is_int(&assign.value) {
+                    self.int_vars.insert(assign.target.clone());
+                }
                 // float を返す式の結果を追跡
                 if self.expr_returns_float(&assign.value) {
                     self.float_vars.insert(assign.target.clone());
@@ -1999,6 +2121,13 @@ impl Lowering {
                 } else if self.closure_vars.contains(&assign.target) {
                     // キャプチャありラムダ = クロージャ = ヒープオブジェクト
                     self.current_heap_vars.push(assign.target.clone());
+                }
+
+                // Track local assignment shadow: if the target name matches a net
+                // builtin, subsequent calls in the same scope must use the local
+                // variable, not the builtin dispatch.
+                if Self::NET_BUILTIN_NAMES.contains(&assign.target.as_str()) {
+                    self.shadowed_net_builtins.insert(assign.target.clone());
                 }
 
                 Ok(())
@@ -2190,6 +2319,10 @@ impl Lowering {
                 func.push(IrInst::DefVar(uf.target.clone(), result));
                 // Track type from mold source for debug display
                 self.track_unmold_type(&uf.target, &uf.source);
+                // Track local unmold-forward shadow for net builtins
+                if Self::NET_BUILTIN_NAMES.contains(&uf.target.as_str()) {
+                    self.shadowed_net_builtins.insert(uf.target.clone());
+                }
                 Ok(())
             }
             Statement::UnmoldBackward(ub) => {
@@ -2204,6 +2337,10 @@ impl Lowering {
                 func.push(IrInst::DefVar(ub.target.clone(), result));
                 // Track type from mold source for debug display
                 self.track_unmold_type(&ub.target, &ub.source);
+                // Track local unmold-backward shadow for net builtins
+                if Self::NET_BUILTIN_NAMES.contains(&ub.target.as_str()) {
+                    self.shadowed_net_builtins.insert(ub.target.clone());
+                }
                 Ok(())
             } // All statement types are now handled above.
               // This branch should not be reached.
@@ -2331,7 +2468,11 @@ impl Lowering {
                     return Ok(dummy);
                 }
                 // 自己再帰でない場合は通常の呼び出し
-                self.lower_func_call(func, callee, args)
+                // NB-14: Mark as tail call to skip get_return_tag (preserves C TCO for WASM)
+                self.in_tail_call_return = true;
+                let result = self.lower_func_call(func, callee, args);
+                self.in_tail_call_return = false;
+                result
             }
             // CondBranch: 各アームの末尾を再帰的にチェック
             Expr::CondBranch(arms, _) => self.lower_cond_branch_tail(func, arms),
@@ -2757,6 +2898,56 @@ impl Lowering {
                 }
             }
 
+            // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000)
+            // handler is a function/closure, passed as a function pointer.
+            // maxRequests and timeoutMs are optional with defaults.
+            // Skip if the name is shadowed by a parameter in the current function scope.
+            if name == "httpServe"
+                && !self.is_net_builtin_shadowed("httpServe")
+                && self
+                    .stdlib_runtime_funcs
+                    .get("httpServe")
+                    .is_some_and(|v| v == "taida_net_http_serve")
+            {
+                if args.is_empty() || args.len() > 4 {
+                    return Err(LowerError {
+                        message:
+                            "httpServe requires 2 to 4 arguments: httpServe(port, handler[, maxRequests, timeoutMs])"
+                                .to_string(),
+                    });
+                }
+                let port = self.lower_expr(func, &args[0])?;
+                let handler = self.lower_expr(func, &args[1])?;
+                let max_requests = if let Some(arg) = args.get(2) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 0)); // default: 0 = unlimited
+                    v
+                };
+                let timeout_ms = if let Some(arg) = args.get(3) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 5000)); // default: 5000ms
+                    v
+                };
+                // NB-31: Pass compile-time handler type tag so the C runtime
+                // can reject non-callable values (large ints, strings, packs)
+                // without relying on the heuristic _taida_is_callable_impl.
+                // Tag 6 = CLOSURE, 10 = named function ref, -1 = unknown.
+                let handler_tag = self.callable_type_tag(&args[1]);
+                let handler_tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(handler_tag_var, handler_tag));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_http_serve".to_string(),
+                    vec![port, handler, max_requests, timeout_ms, handler_tag_var],
+                ));
+                return Ok(result);
+            }
+
             if name == "debug" {
                 return self.lower_debug_call(func, args);
             }
@@ -2834,7 +3025,10 @@ impl Lowering {
             }
 
             // stdlib ランタイム関数呼び出し（std/math, std/io etc.）
-            if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned() {
+            // Skip if the name is a net builtin that is shadowed by a parameter.
+            if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned()
+                && !self.is_net_builtin_shadowed(name)
+            {
                 // stdout/stderr: auto-convert non-string args to string
                 if (name == "stdout" || name == "stderr") && args.len() == 1 {
                     let arg = &args[0];
@@ -2884,10 +3078,56 @@ impl Lowering {
 
             // ユーザー定義関数呼び出し
             if self.user_funcs.contains(name) {
-                let arg_vars = self.lower_user_call_effective_args_from_exprs(func, name, args)?;
+                // NB-14: Stack-based arg tag propagation. Only push/pop when at least
+                // one argument needs tag propagation (avoids overhead for simple calls
+                // like mutual recursion where all args are Int).
+                let needs_tags = self.needs_call_arg_tags(args);
+                if needs_tags {
+                    let push_dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        push_dummy,
+                        "taida_push_call_tags".to_string(),
+                        vec![],
+                    ));
+                    // Pre-lower tags: set tags for args with compile-time known types
+                    self.emit_call_arg_tags(func, args);
+                }
+                // Lower args (may include nested CallUser that populate return_tag_vars).
+                // Clear tail flag during arg lowering so nested CallUser emit get_return_tag.
+                let saved_tail = self.in_tail_call_return;
+                self.in_tail_call_return = false;
+                let mut explicit_arg_vars = Vec::with_capacity(args.len());
+                for arg in args {
+                    explicit_arg_vars.push(self.lower_expr(func, arg)?);
+                }
+                self.in_tail_call_return = saved_tail;
+                if needs_tags {
+                    // Post-lower tags: set tags for args whose type came from a call's return tag
+                    self.emit_post_lower_arg_tags(func, args, &explicit_arg_vars);
+                }
+                let arg_vars =
+                    self.lower_user_call_effective_args_from_vars(func, name, explicit_arg_vars)?;
                 let result = func.alloc_var();
                 let mangled = self.resolve_user_func_symbol(name);
                 func.push(IrInst::CallUser(result, mangled, arg_vars));
+                // NB-14: Capture return type tag from callee (skip in tail position for TCO)
+                if !self.in_tail_call_return {
+                    let return_tag = func.alloc_var();
+                    func.push(IrInst::Call(
+                        return_tag,
+                        "taida_get_return_tag".to_string(),
+                        vec![],
+                    ));
+                    self.return_tag_vars.insert(result, return_tag);
+                }
+                if needs_tags {
+                    let pop_dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        pop_dummy,
+                        "taida_pop_call_tags".to_string(),
+                        vec![],
+                    ));
+                }
                 return Ok(result);
             }
 
@@ -2914,11 +3154,6 @@ impl Lowering {
         // callee を評価し、結果をクロージャ/関数ポインタとして間接呼び出しする
         {
             let callee_var = self.lower_expr(func, callee)?;
-            let mut arg_vars = Vec::new();
-            for arg in args {
-                let var = self.lower_expr(func, arg)?;
-                arg_vars.push(var);
-            }
 
             // callee がキャプチャなしラムダ（FuncAddr）の場合も
             // CallIndirect でクロージャとして呼ぶと壊れるため、
@@ -2939,15 +3174,104 @@ impl Lowering {
                         |inst| matches!(inst, IrInst::MakeClosure(v, _, _) if *v == callee_var),
                     );
                     if is_closure {
+                        // NB-14: Stack-based arg tag propagation for IIFE closure calls
+                        // (symmetric with named-function path at lower.rs:3082)
+                        let needs_tags = self.needs_call_arg_tags(args);
+                        if needs_tags {
+                            let push_dummy = func.alloc_var();
+                            func.push(IrInst::Call(
+                                push_dummy,
+                                "taida_push_call_tags".to_string(),
+                                vec![],
+                            ));
+                            self.emit_call_arg_tags(func, args);
+                        }
+                        let saved_tail = self.in_tail_call_return;
+                        self.in_tail_call_return = false;
+                        let mut arg_vars = Vec::new();
+                        for arg in args {
+                            let var = self.lower_expr(func, arg)?;
+                            arg_vars.push(var);
+                        }
+                        self.in_tail_call_return = saved_tail;
+                        if needs_tags {
+                            self.emit_post_lower_arg_tags(func, args, &arg_vars);
+                        }
                         let result = func.alloc_var();
                         func.push(IrInst::CallIndirect(result, callee_var, arg_vars));
+                        // NB-14: Capture return type tag from lambda (skip in tail position)
+                        if !self.in_tail_call_return {
+                            let return_tag = func.alloc_var();
+                            func.push(IrInst::Call(
+                                return_tag,
+                                "taida_get_return_tag".to_string(),
+                                vec![],
+                            ));
+                            self.return_tag_vars.insert(result, return_tag);
+                        }
+                        if needs_tags {
+                            let pop_dummy = func.alloc_var();
+                            func.push(IrInst::Call(
+                                pop_dummy,
+                                "taida_pop_call_tags".to_string(),
+                                vec![],
+                            ));
+                        }
                         return Ok(result);
                     } else {
+                        // NB-14: Stack-based arg tag propagation for direct lambda calls
+                        // (symmetric with named-function path at lower.rs:3082)
+                        let needs_tags = self.needs_call_arg_tags(args);
+                        if needs_tags {
+                            let push_dummy = func.alloc_var();
+                            func.push(IrInst::Call(
+                                push_dummy,
+                                "taida_push_call_tags".to_string(),
+                                vec![],
+                            ));
+                            self.emit_call_arg_tags(func, args);
+                        }
+                        // Lower args with tail flag cleared for nested CallUser
+                        let saved_tail = self.in_tail_call_return;
+                        self.in_tail_call_return = false;
+                        let mut explicit_arg_vars = Vec::with_capacity(args.len());
+                        for arg in args {
+                            explicit_arg_vars.push(self.lower_expr(func, arg)?);
+                        }
+                        self.in_tail_call_return = saved_tail;
+                        if needs_tags {
+                            self.emit_post_lower_arg_tags(func, args, &explicit_arg_vars);
+                        }
                         let result = func.alloc_var();
-                        func.push(IrInst::CallUser(result, lambda_name, arg_vars));
+                        func.push(IrInst::CallUser(result, lambda_name, explicit_arg_vars));
+                        // NB-14: Capture return type tag from callee (skip in tail position)
+                        if !self.in_tail_call_return {
+                            let return_tag = func.alloc_var();
+                            func.push(IrInst::Call(
+                                return_tag,
+                                "taida_get_return_tag".to_string(),
+                                vec![],
+                            ));
+                            self.return_tag_vars.insert(result, return_tag);
+                        }
+                        if needs_tags {
+                            let pop_dummy = func.alloc_var();
+                            func.push(IrInst::Call(
+                                pop_dummy,
+                                "taida_pop_call_tags".to_string(),
+                                vec![],
+                            ));
+                        }
                         return Ok(result);
                     }
                 }
+            }
+
+            // その他の非Lambda callee: 先に引数をlower
+            let mut arg_vars = Vec::new();
+            for arg in args {
+                let var = self.lower_expr(func, arg)?;
+                arg_vars.push(var);
             }
 
             // その他: 関数呼び出し結果やフィールドアクセス結果を間接呼び出し
@@ -3323,7 +3647,23 @@ impl Lowering {
             func.push(IrInst::PackSet(pack_var, i, val));
             // A-4c: Set type tag for this field value
             let val_tag = self.expr_type_tag(&field.value);
-            if val_tag != 0 {
+            if val_tag == -1 {
+                // NB-14: UNKNOWN tag -- check if the value comes from a function
+                // parameter with a runtime tag var (caller-propagated Bool/Int info).
+                if let Some(tag_var) = self.get_param_tag_var(&field.value) {
+                    // Use the runtime tag from the caller via taida_pack_set_tag()
+                    let idx_var2 = func.alloc_var();
+                    func.push(IrInst::ConstInt(idx_var2, i as i64));
+                    let dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        dummy,
+                        "taida_pack_set_tag".to_string(),
+                        vec![pack_var, idx_var2, tag_var],
+                    ));
+                } else {
+                    func.push(IrInst::PackSetTag(pack_var, i, val_tag));
+                }
+            } else if val_tag != 0 {
                 func.push(IrInst::PackSetTag(pack_var, i, val_tag));
             }
             // retain-on-store: 再帰 release に対応するため子を retain
@@ -3928,6 +4268,14 @@ impl Lowering {
             params.iter().map(|p| p.name.as_str()).collect();
         let free_vars = self.collect_free_vars(body, &param_names);
 
+        // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
+        let prev_shadowed_net = self.shadowed_net_builtins.clone();
+        for p in params {
+            if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
+                self.shadowed_net_builtins.insert(p.name.clone());
+            }
+        }
+
         // 全ラムダを統一的にクロージャとして生成する。
         // キャプチャなしでも __env を第1引数として受け取り（未使用）、
         // MakeClosure で空の環境と共にクロージャ構造体を生成する。
@@ -3949,8 +4297,71 @@ impl Lowering {
                 }
             }
 
+            // NB-14: Emit taida_get_call_arg_tag() for lambda params whose type
+            // cannot be determined at compile time. This is the callee-side mirror
+            // of the caller-side push/set/pop in the IIFE CallIndirect path.
+            let prev_param_tag_vars = std::mem::take(&mut self.param_tag_vars);
+            let prev_return_tag_vars = std::mem::take(&mut self.return_tag_vars);
+            for (i, param) in params.iter().enumerate() {
+                let has_known_type = self.bool_vars.contains(&param.name)
+                    || self.int_vars.contains(&param.name)
+                    || self.float_vars.contains(&param.name)
+                    || self.string_vars.contains(&param.name)
+                    || self.pack_vars.contains(&param.name)
+                    || self.list_vars.contains(&param.name)
+                    || self.closure_vars.contains(&param.name);
+                if !has_known_type {
+                    let idx_var = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::ConstInt(idx_var, i as i64));
+                    let tag_var = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::Call(
+                        tag_var,
+                        "taida_get_call_arg_tag".to_string(),
+                        vec![idx_var],
+                    ));
+                    self.param_tag_vars.insert(param.name.clone(), tag_var);
+                }
+            }
+
             let body_var = self.lower_expr(&mut lambda_fn, body)?;
+
+            // NB-14: Set return type tag before Return (symmetric with lower_func_def)
+            if let Some(&rtv) = self.return_tag_vars.get(&body_var) {
+                let dummy = lambda_fn.alloc_var();
+                lambda_fn.push(IrInst::Call(
+                    dummy,
+                    "taida_set_return_tag".to_string(),
+                    vec![rtv],
+                ));
+            } else {
+                let tag = self.expr_type_tag(body);
+                if tag > 0 {
+                    let tag_var = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::ConstInt(tag_var, tag));
+                    let dummy = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::Call(
+                        dummy,
+                        "taida_set_return_tag".to_string(),
+                        vec![tag_var],
+                    ));
+                } else if tag == -1
+                    && let Some(ptv) = self.get_param_tag_var(body)
+                {
+                    let dummy = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::Call(
+                        dummy,
+                        "taida_set_return_tag".to_string(),
+                        vec![ptv],
+                    ));
+                }
+            }
+
             lambda_fn.push(IrInst::Return(body_var));
+
+            // NB-14: Restore param/return tag vars to pre-lambda state
+            // (lambda-scope IrVars must not leak into outer function scope)
+            self.param_tag_vars = prev_param_tag_vars;
+            self.return_tag_vars = prev_return_tag_vars;
 
             self.user_funcs.insert(lambda_name.clone());
             self.lambda_funcs.push(lambda_fn);
@@ -3959,6 +4370,10 @@ impl Lowering {
             // （キャプチャなしの場合は空の環境パック）
             let dst = func.alloc_var();
             func.push(IrInst::MakeClosure(dst, lambda_name, free_vars));
+
+            // Restore net builtin shadow set to pre-lambda state
+            self.shadowed_net_builtins = prev_shadowed_net;
+
             Ok(dst)
         }
     }
@@ -4769,7 +5184,7 @@ impl Lowering {
     }
 
     /// A-4c: 式から Pack フィールド値の型タグを推論する
-    /// Returns: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure
+    /// Returns: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure, -1=Unknown
     pub(crate) fn expr_type_tag(&self, expr: &Expr) -> i64 {
         match expr {
             Expr::IntLit(_, _) => 0,                              // TAIDA_TAG_INT
@@ -4793,11 +5208,12 @@ impl Lowering {
                 } else if self.closure_vars.contains(name) {
                     6
                 } else {
-                    0
+                    -1 // TAIDA_TAG_UNKNOWN: type cannot be determined at compile time
                 }
             }
             Expr::FuncCall(callee, _, _) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
+                    // Known Int-returning: length, indexOf, etc. already match MethodCall above
                     if self.bool_returning_funcs.contains(name.as_str()) {
                         return 2;
                     }
@@ -4818,7 +5234,7 @@ impl Lowering {
                         return 5;
                     }
                 }
-                0
+                -1 // TAIDA_TAG_UNKNOWN: return type cannot be determined at compile time
             }
             Expr::MethodCall(_, method, _, _) => {
                 if self.expr_is_bool(expr) {
@@ -4826,17 +5242,201 @@ impl Lowering {
                 }
                 match method.as_str() {
                     "toString" | "toUpperCase" | "toLowerCase" => 3,
-                    "length" | "indexOf" | "lastIndexOf" => 0,
+                    "length" | "indexOf" | "lastIndexOf" => 0, // known Int-returning methods
                     "map" | "filter" | "flatMap" | "sort" | "unique" | "flatten" | "reverse"
                     | "concat" | "append" | "prepend" | "zip" | "enumerate" => 5,
-                    _ => 0,
+                    _ => -1, // TAIDA_TAG_UNKNOWN
                 }
             }
             Expr::MoldInst(_, _, _, _) => 4, // Mold instantiation returns a Pack
-            Expr::Unmold(_, _) => 0,         // Could be anything
+            Expr::Unmold(_, _) => -1,        // TAIDA_TAG_UNKNOWN: could be anything
             _ if self.expr_is_bool(expr) => 2,
-            _ => 0,
+            _ => -1, // TAIDA_TAG_UNKNOWN
         }
+    }
+
+    /// NB-14: Get the runtime param tag IrVar for an expression, if it's a function
+    /// parameter with a caller-propagated type tag.
+    /// Returns Some(tag_var) if the expression is an Ident whose name is in param_tag_vars.
+    fn get_param_tag_var(&self, expr: &Expr) -> Option<IrVar> {
+        if let Expr::Ident(name, _) = expr {
+            self.param_tag_vars.get(name).copied()
+        } else {
+            None
+        }
+    }
+
+    /// NB-14: Check whether any argument requires call-site tag propagation.
+    /// Returns true if at least one arg has a non-INT compile-time tag, a transitive
+    /// param_tag_var, or is a FuncCall to a user function (which may carry a return tag).
+    fn needs_call_arg_tags(&self, args: &[Expr]) -> bool {
+        for (i, arg) in args.iter().enumerate() {
+            if i >= Self::TAG_FRAME_SIZE {
+                break;
+            }
+            let tag = self.expr_type_tag(arg);
+            if tag > 0 {
+                return true;
+            } else if tag == -1 {
+                if self.get_param_tag_var(arg).is_some() {
+                    return true;
+                }
+                // FuncCall to user function may carry a return type tag
+                if let Expr::FuncCall(callee_box, _, _) = arg
+                    && let Expr::Ident(callee_name, _) = callee_box.as_ref()
+                    && self.user_funcs.contains(callee_name)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// NB-14: Emit taida_set_call_arg_tag() for each argument with a known non-default
+    /// type tag before a CallUser. This propagates Bool/Float/Str/etc. type info from
+    /// the caller to the callee so that pack field tags can be set correctly.
+    /// Note: TAG_FRAME_SIZE (256) is the maximum number of tagged arguments per call.
+    /// Arguments beyond this limit are skipped (tag defaults to INT/0 in the callee).
+    /// 256 exceeds any practical function arity in Taida.
+    const TAG_FRAME_SIZE: usize = 256;
+
+    fn emit_call_arg_tags(&mut self, func: &mut IrFunction, args: &[Expr]) {
+        for (i, arg) in args.iter().enumerate() {
+            if i >= Self::TAG_FRAME_SIZE {
+                break;
+            }
+            let tag = self.expr_type_tag(arg);
+            // Only emit for non-INT tags (INT=0 is the default and doesn't need propagation)
+            // Also skip UNKNOWN (-1) since that would overwrite any existing tag
+            if tag > 0 {
+                let idx_var = func.alloc_var();
+                func.push(IrInst::ConstInt(idx_var, i as i64));
+                let tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(tag_var, tag));
+                let dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    dummy,
+                    "taida_set_call_arg_tag".to_string(),
+                    vec![idx_var, tag_var],
+                ));
+            } else if tag == -1 {
+                // UNKNOWN: if we have a param_tag_var for this, propagate it transitively
+                if let Some(existing_tag_var) = self.get_param_tag_var(arg) {
+                    let idx_var = func.alloc_var();
+                    func.push(IrInst::ConstInt(idx_var, i as i64));
+                    let dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        dummy,
+                        "taida_set_call_arg_tag".to_string(),
+                        vec![idx_var, existing_tag_var],
+                    ));
+                }
+            }
+        }
+    }
+
+    /// NB-14: Emit taida_set_call_arg_tag() for arguments whose type was determined
+    /// AFTER lowering (via return type tag from a nested CallUser). This complements
+    /// emit_call_arg_tags which handles compile-time known types before lowering.
+    fn emit_post_lower_arg_tags(
+        &self,
+        func: &mut IrFunction,
+        args: &[Expr],
+        explicit_arg_vars: &[IrVar],
+    ) {
+        for (i, arg_var) in explicit_arg_vars.iter().enumerate() {
+            if i >= Self::TAG_FRAME_SIZE || i >= args.len() {
+                break;
+            }
+            // Skip args already handled by emit_call_arg_tags (known type or param_tag_var)
+            let tag = self.expr_type_tag(&args[i]);
+            if tag > 0 {
+                continue; // Already set in pre-lower pass
+            }
+            if tag == -1 && self.get_param_tag_var(&args[i]).is_some() {
+                continue; // Already set in pre-lower pass
+            }
+            // Check if this arg's IrVar has a return_tag_var (from a nested CallUser)
+            if let Some(&rtv) = self.return_tag_vars.get(arg_var) {
+                let idx_var = func.alloc_var();
+                func.push(IrInst::ConstInt(idx_var, i as i64));
+                let dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    dummy,
+                    "taida_set_call_arg_tag".to_string(),
+                    vec![idx_var, rtv],
+                ));
+            }
+        }
+    }
+
+    /// NB-31: Determine compile-time callable type tag for httpServe handler.
+    /// Returns:
+    ///   6  (TAIDA_TAG_CLOSURE) — lambda or closure variable
+    ///  10  (TAIDA_TAG_FUNC)    — named function reference (user_funcs / lambda_vars)
+    ///  -1  (TAIDA_TAG_UNKNOWN) — dynamic / cannot determine at compile time
+    ///   other (0..5, etc.)     — statically known non-callable type
+    ///
+    /// Strategy: check callable first, then delegate to noncallable_type_tag()
+    /// which uses the existing expr_returns_float / expr_is_string_full / expr_is_bool /
+    /// expr_is_pack / expr_is_list helpers + arithmetic Int detection.
+    fn callable_type_tag(&self, expr: &Expr) -> i64 {
+        // 1. Callable detection
+        match expr {
+            Expr::Lambda(_, _, _) => return 6, // TAIDA_TAG_CLOSURE
+            Expr::Ident(name, _) => {
+                if self.closure_vars.contains(name) {
+                    return 6; // TAIDA_TAG_CLOSURE
+                }
+                if self.user_funcs.contains(name) || self.lambda_vars.contains_key(name) {
+                    return 10; // TAIDA_TAG_FUNC
+                }
+            }
+            _ => {}
+        }
+        // 2. Non-callable detection — use rich expression-type helpers
+        if let Some(tag) = self.noncallable_type_tag(expr) {
+            return tag;
+        }
+        -1 // TAIDA_TAG_UNKNOWN
+    }
+
+    /// NB-31: Determine if an expression is a known non-callable type.
+    /// Returns Some(tag) for statically known non-callable, None for unknown.
+    /// Leverages existing expr_returns_float / expr_is_string_full / expr_is_bool /
+    /// expr_is_pack / expr_is_list which already handle literals, variables, BinaryOp,
+    /// MethodCall, FuncCall, etc.
+    fn noncallable_type_tag(&self, expr: &Expr) -> Option<i64> {
+        // Bool (2) — handles BoolLit, bool_vars, comparison ops, boolean methods
+        if self.expr_is_bool(expr) {
+            return Some(2);
+        }
+        // Float (1) — handles FloatLit, float_vars, float BinaryOp, float-returning funcs
+        if self.expr_returns_float(expr) {
+            return Some(1);
+        }
+        // String (3) — handles StringLit, TemplateLit, string_vars, string methods/funcs
+        if self.expr_is_string_full(expr) {
+            return Some(3);
+        }
+        // Pack (4) — handles BuchiPack, TypeInst, pack_vars
+        if self.expr_is_pack(expr) {
+            return Some(4);
+        }
+        // List (5) — handles ListLit, list_vars, list methods/funcs
+        if self.expr_is_list(expr) {
+            return Some(5);
+        }
+        // Int (0) — literals, int_vars, arithmetic ops, int-returning methods/funcs
+        if self.expr_is_int(expr) {
+            return Some(0);
+        }
+        // MoldInst always returns a Pack-like value
+        if matches!(expr, Expr::MoldInst(_, _, _, _)) {
+            return Some(4);
+        }
+        None
     }
 
     /// retain-on-store: Pack/List/Closure/Str をフィールドに格納する際に retain する。
@@ -4917,6 +5517,38 @@ impl Lowering {
                         | "zip"
                         | "enumerate"
                 )
+            }
+            _ => false,
+        }
+    }
+
+    /// NB-31: 式が Int を返すかどうかを判定（noncallable_type_tag 用）
+    /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
+    fn expr_is_int(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLit(_, _) => true,
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) => self.expr_is_int(inner),
+            Expr::Ident(name, _) => self.int_vars.contains(name),
+            // Arithmetic ops: Int if neither side is Float
+            Expr::BinaryOp(lhs, op, rhs, _) => {
+                matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+                    && !self.expr_returns_float(lhs)
+                    && !self.expr_returns_float(rhs)
+            }
+            // Methods that always return Int
+            Expr::MethodCall(_, method, _, _) => {
+                matches!(
+                    method.as_str(),
+                    "length" | "indexOf" | "lastIndexOf" | "count"
+                )
+            }
+            // Functions with :Int/:Num return type
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    self.int_returning_funcs.contains(name.as_str())
+                } else {
+                    false
+                }
             }
             _ => false,
         }

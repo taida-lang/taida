@@ -576,6 +576,8 @@ fn js_skip_list() -> Vec<&'static str> {
         "wasm_wasi_exists",              // wasm-wasi specific (requires wasmtime)
         "wasm_wasi_write_failure",       // wasm-wasi specific (requires wasmtime)
         "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
+        "net_http_hello",                // server example, requires dedicated loopback test harness
+        "net_http_parse_encode",         // net package example, requires project root + deps
     ]
 }
 
@@ -584,10 +586,12 @@ fn js_skip_list() -> Vec<&'static str> {
 /// All other interpreter failures are treated as test failures.
 fn interpreter_skip_list() -> Vec<&'static str> {
     vec![
-        "module_math",   // helper module, not standalone
-        "module_utils",  // helper module, not standalone
-        "helper_val",    // helper module, not standalone
-        "transpile_npm", // npm: imports only work in JS transpiler
+        "module_math",           // helper module, not standalone
+        "module_utils",          // helper module, not standalone
+        "helper_val",            // helper module, not standalone
+        "transpile_npm",         // npm: imports only work in JS transpiler
+        "net_http_hello",        // server example, requires dedicated loopback test harness
+        "net_http_parse_encode", // net package example, requires project root + deps
     ]
 }
 
@@ -5341,4 +5345,3327 @@ fn test_quality_cross_module_parity() {
             failures.join("\n\n"),
         );
     }
+}
+
+// ── taida-lang/net: Phase 3 JS parity tests ──────────────────────
+
+/// Create a temp project directory with taida-lang/net properly linked.
+/// Returns (project_dir, cleanup_guard) — the project dir contains a .taida/deps/taida-lang/net/ symlink
+/// to the global bundled dir, and a main.td with the provided source.
+fn setup_net_project(source: &str, label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("taida_net3_{}_{}", label, nanos));
+    fs::create_dir_all(&dir).expect("create project dir");
+
+    // Write main.td
+    fs::write(dir.join("main.td"), source).expect("write main.td");
+
+    // Write packages.tdm (required for project root detection in JS build)
+    fs::write(
+        dir.join("packages.tdm"),
+        "// Minimal packages.tdm for net test project\n",
+    )
+    .expect("write packages.tdm");
+
+    // Create .taida/deps/taida-lang/net/ with the bundled stub
+    let deps_net = dir
+        .join(".taida")
+        .join("deps")
+        .join("taida-lang")
+        .join("net");
+    fs::create_dir_all(&deps_net).expect("create deps/taida-lang/net");
+
+    // Write the net package stub (same as CoreBundledProvider::net_package_source)
+    let net_stub = r#"// taida-lang/net — Core bundled network package
+<<< @(dnsResolve, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose, httpServe, httpParseRequestHead, httpEncodeResponse)
+"#;
+    fs::write(deps_net.join("main.td"), net_stub).expect("write net stub");
+
+    dir
+}
+
+fn cleanup_net_project(dir: &Path) {
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn run_net_interpreter(project_dir: &Path) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let output = Command::new(taida_bin()).arg(&td_path).output().ok()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "run_net_interpreter failed for {}:\n{}",
+            td_path.display(),
+            stderr
+        );
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn run_net_js(project_dir: &Path, label: &str) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let js_path = unique_temp_path("taida_net3_js", label, "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .ok()?;
+
+    if !transpile.status.success() {
+        let stderr = String::from_utf8_lossy(&transpile.stderr);
+        eprintln!("run_net_js transpile failed: {}", stderr);
+        let _ = fs::remove_file(&js_path);
+        return None;
+    }
+
+    let run_output = Command::new("node").arg(&js_path).output().ok()?;
+    let _ = fs::remove_file(&js_path);
+
+    if !run_output.status.success() {
+        let stderr = String::from_utf8_lossy(&run_output.stderr);
+        eprintln!("run_net_js node failed: {}", stderr);
+        return None;
+    }
+
+    Some(normalize(&String::from_utf8_lossy(&run_output.stdout)))
+}
+
+/// NET-3c: httpParseRequestHead parse fixture parity (Interpreter vs JS)
+#[test]
+fn test_net_parse_request_head_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+// Simple GET request
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.complete)
+stdout(parsed.method.start)
+stdout(parsed.method.len)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.len)
+stdout(parsed.version.major)
+stdout(parsed.version.minor)
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse parity");
+    let js = run_net_js(&dir, "parse").expect("js failed for net parse parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpParseRequestHead parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpParseRequestHead with query string parity
+#[test]
+fn test_net_parse_request_head_query_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET /path?x=1&y=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.complete)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.start)
+stdout(parsed.query.len)
+"#;
+
+    let dir = setup_net_project(source, "parse_query");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse query parity");
+    let js = run_net_js(&dir, "parse_query").expect("js failed for net parse query parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpParseRequestHead query parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpParseRequestHead with POST body and Content-Length
+#[test]
+fn test_net_parse_request_head_post_body_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.complete)
+stdout(parsed.contentLength)
+stdout(parsed.bodyOffset)
+"#;
+
+    let dir = setup_net_project(source, "parse_post");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse post parity");
+    let js = run_net_js(&dir, "parse_post").expect("js failed for net parse post parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpParseRequestHead POST body parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpEncodeResponse encode fixture parity (Interpreter vs JS)
+#[test]
+fn test_net_encode_response_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "Hello")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net encode parity");
+    let js = run_net_js(&dir, "encode").expect("js failed for net encode parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpEncodeResponse parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpEncodeResponse 404 empty body parity
+#[test]
+fn test_net_encode_response_404_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 404, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "encode_404");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net encode 404 parity");
+    let js = run_net_js(&dir, "encode_404").expect("js failed for net encode 404 parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpEncodeResponse 404 parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: httpEncodeResponse 204 no body parity
+#[test]
+fn test_net_encode_response_204_no_body_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 204, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "encode_204");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net encode 204 parity");
+    let js = run_net_js(&dir, "encode_204").expect("js failed for net encode 204 parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: httpEncodeResponse 204 parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+}
+
+/// NET-3c: malformed HTTP version parity (both backends must reject)
+#[test]
+fn test_net_parse_request_head_invalid_version_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // "HTTX/1.1" is not valid HTTP version — both backends should return failure
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTX/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+// Both backends should reject: ok=false, kind=ParseError
+stdout(result.__value.ok)
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "parse_badver");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse bad version");
+    let js = run_net_js(&dir, "parse_badver").expect("js failed for net parse bad version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: invalid HTTP version parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    // Both should report failure
+    assert!(
+        interp.contains("false"),
+        "Both backends should reject invalid HTTP version, got: {}",
+        interp
+    );
+}
+
+/// NET-3c: malformed Content-Length parity (both backends must reject "5abc")
+#[test]
+fn test_net_parse_request_head_invalid_content_length_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+// Both backends should reject: ok=false, kind=ParseError
+stdout(result.__value.ok)
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "parse_badcl");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for net parse bad CL");
+    let js = run_net_js(&dir, "parse_badcl").expect("js failed for net parse bad CL");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c: invalid Content-Length parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert!(
+        interp.contains("false"),
+        "Both backends should reject invalid Content-Length, got: {}",
+        interp
+    );
+}
+
+/// NET-3c2: Content-Length MAX_SAFE_INTEGER boundary parity
+/// 9007199254740991 (accept) and 9007199254740992 (reject)
+#[test]
+fn test_net_parse_request_head_content_length_max_safe_integer_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Test 1: MAX_SAFE_INTEGER should be accepted
+    let source_accept = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740991\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+// success: __value is the parsed request pack directly
+stdout(result.__value.contentLength)
+"#;
+
+    let dir = setup_net_project(source_accept, "parse_maxsafe_accept");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for max safe accept");
+    let js = run_net_js(&dir, "parse_maxsafe_accept").expect("js failed for max safe accept");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-3c2: MAX_SAFE_INTEGER accept parity mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert!(
+        interp.contains("9007199254740991"),
+        "Content-Length value should be exact, got: {}",
+        interp
+    );
+
+    // Test 2: MAX_SAFE_INTEGER + 1 should be rejected
+    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740992\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.ok)
+stdout(result.__value.kind)
+"#;
+
+    let dir2 = setup_net_project(source_reject, "parse_maxsafe_reject");
+    let interp2 = run_net_interpreter(&dir2).expect("interpreter failed for max safe reject");
+    let js2 = run_net_js(&dir2, "parse_maxsafe_reject").expect("js failed for max safe reject");
+    cleanup_net_project(&dir2);
+
+    assert_eq!(
+        interp2, js2,
+        "NET-3c2: MAX_SAFE_INTEGER+1 reject parity mismatch\nInterp: {}\nJS: {}",
+        interp2, js2
+    );
+    assert!(
+        interp2.contains("false"),
+        "MAX_SAFE_INTEGER+1 should be rejected, got: {}",
+        interp2
+    );
+}
+
+/// NET-3d: httpServe bounded server parity (Interpreter vs JS)
+/// Runs httpServe with maxRequests=1, sends a raw HTTP request, and verifies response + result.
+#[test]
+fn test_net_http_serve_bounded_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let backends = vec!["interp", "js"];
+
+    for backend in &backends {
+        // Use a fresh ephemeral port: bind, get port, immediately release
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "pong")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("serve_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path = unique_temp_path("taida_net3_serve_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                // Give Node.js time to read the file before deleting
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready, then send the actual request on a *new* connection
+        // The probe connection is separate and should NOT count as the one request.
+        // Strategy: keep trying to connect + send + read until we get a valid response.
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port,
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "{} backend: response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("pong"),
+            "{} backend: response body should contain 'pong', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        // Wait for server process to exit (it should self-terminate after maxRequests=1)
+        let output = child.wait_with_output().expect("wait for server process");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+
+        assert_eq!(
+            stdout, "true\n1",
+            "{} backend: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// ── NET-4: Native backend parity ──────────────────────────────
+
+/// Compile and run a net .td via native backend, return stdout.
+fn run_net_native(project_dir: &Path, label: &str) -> Option<String> {
+    let td_path = project_dir.join("main.td");
+    let bin_path = unique_temp_path("taida_net4_native", label, "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .ok()?;
+
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        eprintln!("run_net_native compile failed for {}:\n{}", label, stderr);
+        return None;
+    }
+
+    let output = Command::new(&bin_path).output().ok()?;
+    let _ = fs::remove_file(&bin_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("run_net_native run failed for {}:\n{}", label, stderr);
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// NET-4d: httpParseRequestHead parse fixture parity (Interpreter vs Native)
+/// Note: Bool fields (complete, ok) are tested via string interpolation to avoid
+/// native backend type tag loss on raw pack field access.
+#[test]
+fn test_net_parse_request_head_interp_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+// Simple GET request
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+// Use consumed > 0 as proxy for complete (avoids native Bool display issue)
+stdout(parsed.consumed)
+stdout(parsed.method.start)
+stdout(parsed.method.len)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.len)
+stdout(parsed.version.major)
+stdout(parsed.version.minor)
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "native_parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for native parse parity");
+    let native =
+        run_net_native(&dir, "native_parse").expect("native failed for native parse parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: httpParseRequestHead parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4d: httpParseRequestHead with query string parity (Interpreter vs Native)
+#[test]
+fn test_net_parse_request_head_query_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET /path?x=1&y=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.consumed)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.start)
+stdout(parsed.query.len)
+"#;
+
+    let dir = setup_net_project(source, "native_parse_query");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native parse query parity");
+    let native = run_net_native(&dir, "native_parse_query")
+        .expect("native failed for native parse query parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: httpParseRequestHead query parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4d: httpParseRequestHead with POST body (Interpreter vs Native)
+#[test]
+fn test_net_parse_request_head_post_body_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.consumed)
+stdout(parsed.contentLength)
+stdout(parsed.bodyOffset)
+"#;
+
+    let dir = setup_net_project(source, "native_parse_post");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native parse post parity");
+    let native = run_net_native(&dir, "native_parse_post")
+        .expect("native failed for native parse post parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: httpParseRequestHead POST body parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4d: httpEncodeResponse encode fixture parity (Interpreter vs Native)
+#[test]
+fn test_net_encode_response_interp_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "Hello")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "native_encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for native encode parity");
+    let native =
+        run_net_native(&dir, "native_encode").expect("native failed for native encode parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: httpEncodeResponse parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4d: httpEncodeResponse 404 parity (Interpreter vs Native)
+#[test]
+fn test_net_encode_response_404_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 404, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "native_encode_404");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native encode 404 parity");
+    let native = run_net_native(&dir, "native_encode_404")
+        .expect("native failed for native encode 404 parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: httpEncodeResponse 404 parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4d: httpEncodeResponse 204 no-body parity (Interpreter vs Native)
+#[test]
+fn test_net_encode_response_204_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 204, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "native_encode_204");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for native encode 204 parity");
+    let native = run_net_native(&dir, "native_encode_204")
+        .expect("native failed for native encode 204 parity");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: httpEncodeResponse 204 parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4d: malformed Content-Length parity (Interpreter vs Native)
+#[test]
+fn test_net_parse_request_head_invalid_content_length_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+// Both backends should reject with kind=ParseError
+// (avoid result.__value.ok — native Bool display limitation)
+stdout(result.__value.kind)
+stdout(result.__value.message.length())
+"#;
+
+    let dir = setup_net_project(source, "native_parse_badcl");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for native parse bad CL");
+    let native =
+        run_net_native(&dir, "native_parse_badcl").expect("native failed for native parse bad CL");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "NET-4d: invalid Content-Length native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-4e: httpServe bounded server parity (all 3 backends)
+#[test]
+fn test_net_http_serve_bounded_all_backends_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let backends = vec!["interp", "js", "native"];
+
+    for backend in &backends {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "pong")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+// Use requests count only (avoids native Bool display issue with r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("serve3_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path = unique_temp_path("taida_net4_serve_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_net4_serve_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("Native compile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native");
+                thread::sleep(Duration::from_millis(200));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server to be ready, then send request
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port,
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "{} backend: response should contain '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("pong"),
+            "{} backend: response body should contain 'pong', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        // Wait for server process to exit
+        let output = child.wait_with_output().expect("wait for server process");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+
+        assert_eq!(
+            stdout, "1",
+            "{} backend: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+/// NET-4 review F1: malformed HTTP version "HTTP/a.b" must be rejected (Interpreter vs Native)
+#[test]
+fn test_net_parse_malformed_http_version_native_parity() {
+    // "HTTP/a.b" has non-digit major/minor — both backends must reject as malformed
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+stdout(result.__value.message.length())
+"#;
+
+    let dir = setup_net_project(source, "native_parse_badver_ab");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for malformed HTTP version");
+    let native = run_net_native(&dir, "native_parse_badver_ab")
+        .expect("native failed for malformed HTTP version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F1: malformed HTTP version native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "Both backends should reject HTTP/a.b, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F1: HTTP version with extra digits "HTTP/12.34" must be rejected (Interpreter vs Native)
+#[test]
+fn test_net_parse_multi_digit_http_version_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+stdout(result.__value.message.length())
+"#;
+
+    let dir = setup_net_project(source, "native_parse_badver_1234");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for multi-digit HTTP version");
+    let native = run_net_native(&dir, "native_parse_badver_1234")
+        .expect("native failed for multi-digit HTTP version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F1: multi-digit HTTP version native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "Both backends should reject HTTP/12.34, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F3: httpEncodeResponse with non-Str body must return EncodeError (Interpreter vs Native)
+#[test]
+fn test_net_encode_response_invalid_body_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[], body <= 1)
+result <= httpEncodeResponse(resp)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "native_encode_bad_body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for invalid body encode");
+    let native = run_net_native(&dir, "native_encode_bad_body")
+        .expect("native failed for invalid body encode");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F3: invalid body encode native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("EncodeError"),
+        "Both backends should return EncodeError for body <= 1, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F4: Content-Length with tab whitespace must be parsed correctly (Interpreter vs Native)
+#[test]
+fn test_net_parse_content_length_tab_trim_native_parity() {
+    // Content-Length:\t5 — tab between colon and value
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length:\t5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "native_parse_cl_tab");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for CL tab trim");
+    let native =
+        run_net_native(&dir, "native_parse_cl_tab").expect("native failed for CL tab trim");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, native,
+        "F4: Content-Length tab trim native parity mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("5"),
+        "Content-Length should be 5 with tab whitespace, got: {}",
+        interp
+    );
+}
+
+/// NET-4 review F1+F4: 3-way parity for malformed version (all backends)
+#[test]
+fn test_net_parse_malformed_version_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "3way_parse_badver");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for 3-way bad version");
+    let js = run_net_js(&dir, "3way_parse_badver").expect("js failed for 3-way bad version");
+    let native =
+        run_net_native(&dir, "3way_parse_badver").expect("native failed for 3-way bad version");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "3-way: malformed version Interp vs JS mismatch\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "3-way: malformed version Interp vs Native mismatch\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET-5: Parity / Hardening ──────────────────────────────────
+
+// ── NET-5a: 3-way parse fixture parity ─────────────────────────
+
+/// NET-5a: httpParseRequestHead simple GET — 3-way parity (Interp vs JS vs Native)
+#[test]
+fn test_net5a_parse_simple_get_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.consumed)
+stdout(parsed.method.start)
+stdout(parsed.method.len)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.len)
+stdout(parsed.version.major)
+stdout(parsed.version.minor)
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "5a_parse_get");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_parse_get").expect("js failed");
+    let native = run_net_native(&dir, "5a_parse_get").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: simple GET Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: simple GET Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5a: httpParseRequestHead with query string — 3-way parity
+#[test]
+fn test_net5a_parse_query_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET /path?x=1&y=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.consumed)
+stdout(parsed.path.start)
+stdout(parsed.path.len)
+stdout(parsed.query.start)
+stdout(parsed.query.len)
+"#;
+
+    let dir = setup_net_project(source, "5a_parse_query");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_parse_query").expect("js failed");
+    let native = run_net_native(&dir, "5a_parse_query").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: query Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: query Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5a: httpParseRequestHead POST with Content-Length — 3-way parity
+#[test]
+fn test_net5a_parse_post_body_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.consumed)
+stdout(parsed.contentLength)
+stdout(parsed.bodyOffset)
+"#;
+
+    let dir = setup_net_project(source, "5a_parse_post");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_parse_post").expect("js failed");
+    let native = run_net_native(&dir, "5a_parse_post").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: POST body Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: POST body Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5a: malformed Content-Length "5abc" — 3-way rejection parity
+#[test]
+fn test_net5a_parse_invalid_content_length_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "5a_parse_badcl");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_parse_badcl").expect("js failed");
+    let native = run_net_native(&dir, "5a_parse_badcl").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: bad CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: bad CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "All backends should reject invalid CL, got: {}",
+        interp
+    );
+}
+
+/// NET-5a: MAX_SAFE_INTEGER Content-Length boundary — 3-way parity
+#[test]
+fn test_net5a_parse_content_length_max_safe_integer_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Accept: 9007199254740991
+    let source_accept = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740991\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir = setup_net_project(source_accept, "5a_maxsafe_accept");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_maxsafe_accept").expect("js failed");
+    let native = run_net_native(&dir, "5a_maxsafe_accept").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: MAX_SAFE accept Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: MAX_SAFE accept Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("9007199254740991"),
+        "MAX_SAFE_INTEGER should be accepted, got: {}",
+        interp
+    );
+
+    // Reject: 9007199254740992
+    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740992\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir2 = setup_net_project(source_reject, "5a_maxsafe_reject");
+    let interp2 = run_net_interpreter(&dir2).expect("interpreter failed");
+    let js2 = run_net_js(&dir2, "5a_maxsafe_reject").expect("js failed");
+    let native2 = run_net_native(&dir2, "5a_maxsafe_reject").expect("native failed");
+    cleanup_net_project(&dir2);
+
+    assert_eq!(
+        interp2, js2,
+        "NET-5a: MAX_SAFE+1 reject Interp vs JS\nInterp: {}\nJS: {}",
+        interp2, js2
+    );
+    assert_eq!(
+        interp2, native2,
+        "NET-5a: MAX_SAFE+1 reject Interp vs Native\nInterp: {}\nNative: {}",
+        interp2, native2
+    );
+}
+
+/// NB-20: Content-Length leading-zero padded values — 3-way parity
+/// "00000000000000005" (17 chars) should be accepted as 5 in all 3 backends.
+/// Previously JS rejected this because rawVal.length > 16 without stripping leading zeros.
+#[test]
+fn test_nb20_content_length_leading_zeros_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Test 1: "00000000000000005" (17 chars) should be accepted as 5
+    let source_accept = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 00000000000000005\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir = setup_net_project(source_accept, "nb20_lz_accept");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "nb20_lz_accept").expect("js failed");
+    let native = run_net_native(&dir, "nb20_lz_accept").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NB-20: leading-zero CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NB-20: leading-zero CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("5"),
+        "Leading-zero padded CL '00000000000000005' should parse as 5, got: {}",
+        interp
+    );
+
+    // Test 2: "0042" should be accepted as 42
+    let source_0042 = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0042\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir2 = setup_net_project(source_0042, "nb20_lz_0042");
+    let interp2 = run_net_interpreter(&dir2).expect("interpreter failed");
+    let js2 = run_net_js(&dir2, "nb20_lz_0042").expect("js failed");
+    let native2 = run_net_native(&dir2, "nb20_lz_0042").expect("native failed");
+    cleanup_net_project(&dir2);
+
+    assert_eq!(
+        interp2, js2,
+        "NB-20: '0042' CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp2, js2
+    );
+    assert_eq!(
+        interp2, native2,
+        "NB-20: '0042' CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp2, native2
+    );
+    assert!(
+        interp2.contains("42"),
+        "Leading-zero padded CL '0042' should parse as 42, got: {}",
+        interp2
+    );
+
+    // Test 3: all-zeros "00000000000000000" (17 zeros) should be accepted as 0
+    let source_allzeros = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 00000000000000000\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.contentLength)
+"#;
+
+    let dir3 = setup_net_project(source_allzeros, "nb20_lz_allzeros");
+    let interp3 = run_net_interpreter(&dir3).expect("interpreter failed");
+    let js3 = run_net_js(&dir3, "nb20_lz_allzeros").expect("js failed");
+    let native3 = run_net_native(&dir3, "nb20_lz_allzeros").expect("native failed");
+    cleanup_net_project(&dir3);
+
+    assert_eq!(
+        interp3, js3,
+        "NB-20: all-zeros CL Interp vs JS\nInterp: {}\nJS: {}",
+        interp3, js3
+    );
+    assert_eq!(
+        interp3, native3,
+        "NB-20: all-zeros CL Interp vs Native\nInterp: {}\nNative: {}",
+        interp3, native3
+    );
+    assert!(
+        interp3.contains("0"),
+        "All-zeros CL '00000000000000000' should parse as 0, got: {}",
+        interp3
+    );
+
+    // Test 4: leading zeros + value > MAX_SAFE_INTEGER must still be rejected
+    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 009007199254740992\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir4 = setup_net_project(source_reject, "nb20_lz_over_max");
+    let interp4 = run_net_interpreter(&dir4).expect("interpreter failed");
+    let js4 = run_net_js(&dir4, "nb20_lz_over_max").expect("js failed");
+    let native4 = run_net_native(&dir4, "nb20_lz_over_max").expect("native failed");
+    cleanup_net_project(&dir4);
+
+    assert_eq!(
+        interp4, js4,
+        "NB-20: leading-zero + over MAX_SAFE Interp vs JS\nInterp: {}\nJS: {}",
+        interp4, js4
+    );
+    assert_eq!(
+        interp4, native4,
+        "NB-20: leading-zero + over MAX_SAFE Interp vs Native\nInterp: {}\nNative: {}",
+        interp4, native4
+    );
+    assert!(
+        interp4.contains("ParseError"),
+        "Leading-zero + over MAX_SAFE should be rejected, got: {}",
+        interp4
+    );
+}
+
+/// NET-5a: malformed HTTP version "HTTP/a.b" — 3-way rejection parity
+#[test]
+fn test_net5a_parse_malformed_version_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "5a_badver_ab");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_badver_ab").expect("js failed");
+    let native = run_net_native(&dir, "5a_badver_ab").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: bad version Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: bad version Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "All backends should reject HTTP/a.b, got: {}",
+        interp
+    );
+}
+
+/// NET-5a: multi-digit HTTP version "HTTP/12.34" — 3-way rejection parity
+#[test]
+fn test_net5a_parse_multi_digit_version_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "5a_badver_1234");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_badver_1234").expect("js failed");
+    let native = run_net_native(&dir, "5a_badver_1234").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: multi-digit version Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: multi-digit version Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("ParseError"),
+        "All backends should reject HTTP/12.34, got: {}",
+        interp
+    );
+}
+
+/// NET-5a: Content-Length with tab whitespace — 3-way parity
+#[test]
+fn test_net5a_parse_content_length_tab_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length:\t5\r\n\r\nhello"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+
+stdout(parsed.contentLength)
+"#;
+
+    let dir = setup_net_project(source, "5a_parse_cl_tab");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5a_parse_cl_tab").expect("js failed");
+    let native = run_net_native(&dir, "5a_parse_cl_tab").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5a: CL tab Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5a: CL tab Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("5"),
+        "Content-Length should be 5 with tab, got: {}",
+        interp
+    );
+}
+
+// ── NET-5b: 3-way encode fixture parity ────────────────────────
+
+/// NET-5b: httpEncodeResponse 200 text body — 3-way parity
+#[test]
+fn test_net5b_encode_200_text_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "Hello")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "5b_encode_200");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5b_encode_200").expect("js failed");
+    let native = run_net_native(&dir, "5b_encode_200").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5b: 200 text Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: 200 text Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5b: httpEncodeResponse 404 empty body — 3-way parity
+#[test]
+fn test_net5b_encode_404_empty_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 404, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "5b_encode_404");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5b_encode_404").expect("js failed");
+    let native = run_net_native(&dir, "5b_encode_404").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5b: 404 empty Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: 404 empty Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5b: httpEncodeResponse 204 no body — 3-way parity
+#[test]
+fn test_net5b_encode_204_nobody_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 204, headers <= @[], body <= "")
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "5b_encode_204");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5b_encode_204").expect("js failed");
+    let native = run_net_native(&dir, "5b_encode_204").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5b: 204 no body Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: 204 no body Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5b: httpEncodeResponse invalid body (non-Str) — 3-way error parity
+#[test]
+fn test_net5b_encode_invalid_body_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(status <= 200, headers <= @[], body <= 1)
+result <= httpEncodeResponse(resp)
+
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "5b_encode_bad_body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5b_encode_bad_body").expect("js failed");
+    let native = run_net_native(&dir, "5b_encode_bad_body").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5b: bad body Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: bad body Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+    assert!(
+        interp.contains("EncodeError"),
+        "All backends should return EncodeError, got: {}",
+        interp
+    );
+}
+
+/// NET-5b: httpEncodeResponse with multiple headers — 3-way parity
+#[test]
+fn test_net5b_encode_multi_header_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+resp <= @(
+  status <= 200,
+  headers <= @[
+    @(name <= "content-type", value <= "text/html"),
+    @(name <= "x-custom", value <= "test123")
+  ],
+  body <= "<h1>Hi</h1>"
+)
+result <= httpEncodeResponse(resp)
+result ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "5b_encode_multi_hdr");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5b_encode_multi_hdr").expect("js failed");
+    let native = run_net_native(&dir, "5b_encode_multi_hdr").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5b: multi-header Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5b: multi-header Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET-5c: 3-way bounded server parity ────────────────────────
+
+/// NET-5c: httpServe bounded server with POST body — 3-way parity
+/// Sends a POST request with a body to all 3 backends and verifies
+/// the handler can access request fields and return a response containing them.
+#[test]
+fn test_net5c_serve_post_body_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let backends = vec!["interp", "js", "native"];
+    let mut outputs: Vec<(String, String)> = Vec::new(); // (backend, stdout)
+
+    for backend in &backends {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= "got-post")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("5c_serve_post_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path = unique_temp_path("taida_net5c_serve_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_net5c_serve_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("Native compile failed for {}: {}", backend, stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native");
+                thread::sleep(Duration::from_millis(200));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Send POST request
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+            let request = b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nhello world";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("200 OK"),
+            "{} backend: expected '200 OK', got: {:?}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("got-post"),
+            "{} backend: expected body 'got-post', got: {:?}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        outputs.push((backend.to_string(), stdout));
+
+        cleanup_net_project(&dir);
+    }
+
+    // All 3 backends should produce identical stdout
+    assert_eq!(
+        outputs[0].1, outputs[1].1,
+        "NET-5c: POST serve Interp vs JS\nInterp: {}\nJS: {}",
+        outputs[0].1, outputs[1].1
+    );
+    assert_eq!(
+        outputs[0].1, outputs[2].1,
+        "NET-5c: POST serve Interp vs Native\nInterp: {}\nNative: {}",
+        outputs[0].1, outputs[2].1
+    );
+    assert_eq!(
+        outputs[0].1, "1",
+        "All backends should report requests=1, got: {:?}",
+        outputs[0].1
+    );
+}
+
+/// NET-5c: httpServe response contains custom header — 3-way parity
+/// Verifies that all 3 backends include user-specified response headers in wire output.
+#[test]
+fn test_net5c_serve_custom_header_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let backends = vec!["interp", "js", "native"];
+
+    for backend in &backends {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(
+    status <= 200,
+    headers <= @[
+      @(name <= "content-type", value <= "application/json"),
+      @(name <= "x-taida-test", value <= "net5c")
+    ],
+    body <= "{{}}"
+  )
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("5c_serve_hdr_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter"),
+            "js" => {
+                let js_path = unique_temp_path("taida_net5c_hdr_js", backend, "mjs");
+                let transpile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("js")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&js_path)
+                    .output()
+                    .expect("transpile");
+                if !transpile.status.success() {
+                    let stderr = String::from_utf8_lossy(&transpile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&js_path);
+                    panic!("JS transpile failed: {}", stderr);
+                }
+                let child = Command::new("node")
+                    .arg(&js_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn node");
+                thread::sleep(Duration::from_millis(500));
+                let _ = fs::remove_file(&js_path);
+                child
+            }
+            "native" => {
+                let bin_path = unique_temp_path("taida_net5c_hdr_native", backend, "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                if !compile.status.success() {
+                    let stderr = String::from_utf8_lossy(&compile.stderr);
+                    cleanup_net_project(&dir);
+                    let _ = fs::remove_file(&bin_path);
+                    panic!("Native compile failed: {}", stderr);
+                }
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("spawn native");
+                thread::sleep(Duration::from_millis(200));
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        let mut response = Vec::new();
+        let mut got_response = false;
+        for _ in 0..80 {
+            thread::sleep(Duration::from_millis(100));
+            let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            let mut stream = stream;
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            if std::io::Write::write_all(&mut stream, request).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !response.is_empty() {
+                got_response = true;
+                break;
+            }
+        }
+
+        if !got_response {
+            let _ = child.kill();
+            cleanup_net_project(&dir);
+            panic!(
+                "{} backend: server did not respond on port {}",
+                backend, port
+            );
+        }
+
+        let resp_str = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            resp_str.contains("x-taida-test: net5c"),
+            "{} backend: expected custom header 'x-taida-test: net5c', got:\n{}",
+            backend,
+            resp_str
+        );
+        assert!(
+            resp_str.contains("application/json"),
+            "{} backend: expected content-type header, got:\n{}",
+            backend,
+            resp_str
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "1",
+            "{} backend: httpServe result mismatch. stdout: {:?}",
+            backend, stdout
+        );
+
+        cleanup_net_project(&dir);
+    }
+}
+
+// ── NET-5d: legacy net surface re-verification ─────────────────
+
+/// NET-5d: import taida-lang/net with both legacy (TCP) and HTTP v1 symbols — 3-way parity
+/// Verifies that legacy symbols and new HTTP v1 symbols can coexist in a single import.
+/// Uses tcpListen as a legacy symbol alongside httpParseRequestHead (HTTP v1).
+#[test]
+fn test_net5d_legacy_and_v1_coexist_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Import both legacy (dnsResolve, socketClose) and HTTP v1 (httpParseRequestHead, httpEncodeResponse)
+    // from taida-lang/net. dnsResolve/socketClose are legacy re-exports from taida-lang/os.
+    // Verifies that mixed legacy+v1 import doesn't cause errors and HTTP v1 works correctly.
+    let source = r#">>> taida-lang/net => @(dnsResolve, socketClose, httpParseRequestHead, httpEncodeResponse)
+
+// HTTP v1 symbol: httpParseRequestHead (coexists with legacy dnsResolve, socketClose)
+bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
+bytesLax ]=> bytes
+result <= httpParseRequestHead(bytes)
+result ]=> parsed
+stdout(parsed.method.len)
+
+// HTTP v1 symbol: httpEncodeResponse
+resp <= @(status <= 200, headers <= @[], body <= "ok")
+encResult <= httpEncodeResponse(resp)
+encResult ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "5d_coexist");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5d_coexist").expect("js failed");
+    let native = run_net_native(&dir, "5d_coexist").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5d: coexist Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5d: coexist Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5d: sentinel guard -- calling httpServe/httpParseRequestHead/httpEncodeResponse
+/// without import resolves as user function on all 3 backends.
+#[test]
+fn test_net5d_sentinel_guard_no_import() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#"httpServe a b = a + b => :Int
+httpParseRequestHead a = a + 2 => :Int
+httpEncodeResponse a = a + 1 => :Int
+
+stdout(httpServe(10, 20))
+stdout(httpParseRequestHead(5))
+stdout(httpEncodeResponse(9))
+"#;
+
+    let dir = setup_net_project(source, "5d_sentinel");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5d_sentinel").expect("js failed");
+    let native = run_net_native(&dir, "5d_sentinel").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, "30\n7\n10",
+        "Interp sentinel guard failed: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5d sentinel: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5d sentinel: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET-5e: example verification ───────────────────────────────
+
+/// NET-5e: net_http_parse_encode example — 3-way parity
+/// Runs the actual example file source on all 3 backends and verifies identical output.
+/// Source must match examples/net_http_parse_encode.td exactly to prevent example drift.
+#[test]
+fn test_net5e_parse_encode_example_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Source identical to examples/net_http_parse_encode.td (lines 6-29)
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead, httpEncodeResponse)
+
+// Parse a raw HTTP request
+bytesLax <= Bytes["GET /hello?name=taida HTTP/1.1\r\nHost: localhost\r\nAccept: text/plain\r\n\r\n"]()
+bytesLax ]=> bytes
+parseResult <= httpParseRequestHead(bytes)
+parseResult ]=> parsed
+
+// Note: use consumed (Int) instead of complete (Bool) for 3-backend parity
+stdout(parsed.consumed)
+stdout(parsed.method.start)
+stdout(parsed.method.len)
+stdout(parsed.path.len)
+stdout(parsed.query.len)
+
+// Encode a response
+resp <= @(
+  status <= 200,
+  headers <= @[@(name <= "content-type", value <= "text/plain")],
+  body <= "Hello, taida!"
+)
+encodeResult <= httpEncodeResponse(resp)
+encodeResult ]=> encoded
+stdout(encoded.bytes.length())
+"#;
+
+    let dir = setup_net_project(source, "5e_example");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5e_example").expect("js failed");
+    let native = run_net_native(&dir, "5e_example").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NET-5e: example Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5e: example Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET-5 review fix: scope-aware net builtin shadowing ──────────────────
+
+/// NET-5 shadow fix: when a function parameter shadows httpServe,
+/// the call inside the function body must use the parameter (user function),
+/// not the net builtin. All 3 backends must produce identical output.
+#[test]
+fn test_net5_shadow_http_serve_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // httpServe is imported but shadowed by a function parameter.
+    // Inside wrap, httpServe refers to the parameter (add), not the builtin.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+wrap httpServe =
+  httpServe(10, 20)
+=> :Int
+
+add a b = a + b => :Int
+stdout(wrap(add))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_serve");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_serve").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_serve").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 30 (add(10, 20) = 30)
+    assert_eq!(
+        interp.trim(),
+        "30",
+        "NET-5 shadow: Interpreter should produce 30, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5 shadow fix: httpParseRequestHead shadowed by parameter.
+#[test]
+fn test_net5_shadow_http_parse_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+apply httpParseRequestHead x =
+  httpParseRequestHead(x)
+=> :Int
+
+double n = n + n => :Int
+stdout(apply(double, 7))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_parse").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_parse").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 14 (double(7) = 14)
+    assert_eq!(
+        interp.trim(),
+        "14",
+        "NET-5 shadow: Interpreter should produce 14, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5 shadow fix: httpEncodeResponse shadowed by parameter.
+#[test]
+fn test_net5_shadow_http_encode_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+apply httpEncodeResponse x =
+  httpEncodeResponse(x)
+=> :Int
+
+triple n = n * 3 => :Int
+stdout(apply(triple, 5))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_encode").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_encode").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 15 (triple(5) = 15)
+    assert_eq!(
+        interp.trim(),
+        "15",
+        "NET-5 shadow: Interpreter should produce 15, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5 shadow fix: lambda parameter shadows httpServe.
+/// Uses Map mold to invoke a lambda where httpServe is shadowed by the element parameter name.
+#[test]
+fn test_net5_shadow_lambda_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // The function `callWith` takes httpServe as a parameter (shadowing the import),
+    // then passes it to a list operation where the lambda body calls the shadowed function.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+callWith httpServe =
+  items <= @[5]
+  Map[items, _ x = httpServe(x)]() ]=> result
+  result
+=> :@[Int]
+
+triple n = n * 3 => :Int
+stdout(callWith(triple))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_lambda");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_lambda").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_lambda").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: @[15] (triple(5) = 15, mapped over @[5])
+    assert!(
+        interp.trim().contains("15"),
+        "NET-5 shadow lambda: Interpreter should contain 15, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 shadow lambda: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 shadow lambda: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NET-5 review fix 2: local assignment shadow ──────────────────────────
+
+/// NET-5 assignment shadow: when httpServe is reassigned via local assignment
+/// (`httpServe <= add`), subsequent calls must use the local value.
+#[test]
+fn test_net5_shadow_assignment_http_serve_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+add a b = a + b => :Int
+wrap =
+  httpServe <= add
+  httpServe(10, 20)
+=> :Int
+
+stdout(wrap())
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_serve");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_serve").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_serve").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 30 (add(10, 20) = 30)
+    assert_eq!(
+        interp.trim(),
+        "30",
+        "NET-5 assignment shadow httpServe: Interpreter should produce 30, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow httpServe: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow httpServe: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5 assignment shadow: httpParseRequestHead reassigned via local assignment.
+#[test]
+fn test_net5_shadow_assignment_http_parse_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+
+double n = n + n => :Int
+wrap =
+  httpParseRequestHead <= double
+  httpParseRequestHead(7)
+=> :Int
+
+stdout(wrap())
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_parse");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_parse").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_parse").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 14 (double(7) = 14)
+    assert_eq!(
+        interp.trim(),
+        "14",
+        "NET-5 assignment shadow httpParseRequestHead: Interpreter should produce 14, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow httpParseRequestHead: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow httpParseRequestHead: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5 assignment shadow: httpEncodeResponse reassigned via local assignment.
+#[test]
+fn test_net5_shadow_assignment_http_encode_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+triple n = n * 3 => :Int
+wrap =
+  httpEncodeResponse <= triple
+  httpEncodeResponse(5)
+=> :Int
+
+stdout(wrap())
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_encode");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_encode").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_encode").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: 15 (triple(5) = 15)
+    assert_eq!(
+        interp.trim(),
+        "15",
+        "NET-5 assignment shadow httpEncodeResponse: Interpreter should produce 15, got: {}",
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow httpEncodeResponse: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow httpEncodeResponse: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NET-5 assignment shadow: shadow does NOT leak to a sibling function scope.
+/// After wrap() uses httpServe as a local var, a call to httpServe in another
+/// function (or at top level in a different function) must still resolve to the builtin.
+#[test]
+fn test_net5_shadow_assignment_no_leak_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // wrap() shadows httpServe with a local assignment. outer() does NOT shadow it.
+    // outer() calls httpServe which should still refer to the net builtin (but since
+    // we can't easily test server start, we test that the shadow is correctly scoped
+    // by having two functions: one that shadows and one that does not).
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+add a b = a + b => :Int
+wrap =
+  httpServe <= add
+  httpServe(10, 20)
+=> :Int
+
+// outer does NOT shadow httpServe — it should still see the builtin.
+// But calling the builtin would start a server, so we test scoping differently:
+// we define another function that also takes httpServe as a param to confirm
+// the assignment shadow in wrap does not persist.
+outer httpServe =
+  httpServe(3, 4)
+=> :Int
+
+multiply a b = a * b => :Int
+stdout(wrap())
+stdout(outer(multiply))
+"#;
+
+    let dir = setup_net_project(source, "5_shadow_assign_noleak");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "5_shadow_assign_noleak").expect("js failed");
+    let native = run_net_native(&dir, "5_shadow_assign_noleak").expect("native failed");
+    cleanup_net_project(&dir);
+
+    // Expected: "30\n12" (add(10,20)=30, multiply(3,4)=12)
+    let expected = "30\n12";
+    assert_eq!(
+        interp.trim(),
+        expected,
+        "NET-5 assignment shadow no-leak: Interpreter should produce {}, got: {}",
+        expected,
+        interp
+    );
+    assert_eq!(
+        interp, js,
+        "NET-5 assignment shadow no-leak: Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NET-5 assignment shadow no-leak: Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+// ── NB-31: httpServe handler callable check regression tests ──
+
+/// NB-31: Passing a large Int as handler to httpServe must NOT crash the Native
+/// binary (previously caused a segfault via indirect call to an integer value).
+/// JS and Native should both return a TypeError Result instead of crashing.
+/// Tests BOTH literal and variable-path Int handlers to cover compile-time tag.
+#[test]
+fn test_nb31_http_serve_int_handler_js_native_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Variable-path: bad <= 1000000; httpServe(0, bad, ...)
+    // This exercises the int_vars → callable_type_tag path in lower.rs.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= 1000000
+asyncResult <= httpServe(0, bad, 1, 1000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_int_handler");
+
+    // -- JS backend --
+    let js = run_net_js(&dir, "nb31_int_handler")
+        .expect("NB-31: JS backend should not crash with Int handler");
+
+    // -- Native backend --
+    let native = run_net_native(&dir, "nb31_int_handler")
+        .expect("NB-31: Native backend should not crash with Int handler");
+
+    cleanup_net_project(&dir);
+
+    // Both should produce error result with ok=false and kind=TypeError
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31: JS output should have at least 2 lines, got: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31: Native output should have at least 2 lines, got: {:?}",
+        native
+    );
+
+    // ok should be false (or "0" in native where bool may render as int)
+    assert!(
+        js_lines[0] == "false" || js_lines[0] == "0",
+        "NB-31: JS ok field should be false, got: {}",
+        js_lines[0]
+    );
+    assert!(
+        native_lines[0] == "false" || native_lines[0] == "0",
+        "NB-31: Native ok field should be false, got: {}",
+        native_lines[0]
+    );
+
+    // Both must return TypeError — this is the critical assertion.
+    assert!(
+        js_lines[1] == "TypeError",
+        "NB-31: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert!(
+        native_lines[1] == "TypeError",
+        "NB-31: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
+}
+
+/// NB-31: Interpreter should return RuntimeError for non-callable handler.
+/// This is a different behavior from JS/Native (which return a Result),
+/// but we verify it doesn't silently succeed.
+/// Uses variable-path Int handler to match the JS/Native test.
+#[test]
+fn test_nb31_http_serve_int_handler_interpreter_error() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= 1000000
+asyncResult <= httpServe(0, bad, 1, 1000)
+stdout("should not reach here")
+"#;
+
+    let dir = setup_net_project(source, "nb31_interp_error");
+    let td_path = dir.join("main.td");
+
+    let output = Command::new(taida_bin())
+        .arg(&td_path)
+        .output()
+        .expect("spawn interpreter");
+
+    cleanup_net_project(&dir);
+
+    // Interpreter should fail (exit code != 0)
+    assert!(
+        !output.status.success(),
+        "NB-31: Interpreter should reject non-callable handler (exit non-zero)"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("handler must be a Function"),
+        "NB-31: Interpreter stderr should mention handler type error, got: {}",
+        stderr
+    );
+}
+
+/// NB-31: Arithmetic Int expression path (bad <= 999999 + 1).
+/// Exercises noncallable_type_tag → expr_is_int → BinaryOp detection.
+#[test]
+fn test_nb31_http_serve_arithmetic_int_handler_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= 999999 + 1
+asyncResult <= httpServe(0, bad, 1, 1000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_arith");
+
+    let js = run_net_js(&dir, "nb31_arith")
+        .expect("NB-31: JS should not crash with arithmetic Int handler");
+    let native = run_net_native(&dir, "nb31_arith")
+        .expect("NB-31: Native should not crash with arithmetic Int handler");
+
+    cleanup_net_project(&dir);
+
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31 arith: JS output too short: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31 arith: Native output too short: {:?}",
+        native
+    );
+
+    assert_eq!(
+        js_lines[1], "TypeError",
+        "NB-31 arith: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert_eq!(
+        native_lines[1], "TypeError",
+        "NB-31 arith: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
+}
+
+/// NB-31: Int-returning function path (mk n = n + 1 => :Int / bad <= mk(999999)).
+/// Exercises noncallable_type_tag → expr_is_int → FuncCall return type.
+#[test]
+fn test_nb31_http_serve_func_return_int_handler_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+mk n = n + 1 => :Int
+bad <= mk(999999)
+asyncResult <= httpServe(0, bad, 1, 1000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+stdout(result.__value.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_func_ret");
+
+    let js = run_net_js(&dir, "nb31_func_ret")
+        .expect("NB-31: JS should not crash with func-return Int handler");
+    let native = run_net_native(&dir, "nb31_func_ret")
+        .expect("NB-31: Native should not crash with func-return Int handler");
+
+    cleanup_net_project(&dir);
+
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31 func_ret: JS output too short: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31 func_ret: Native output too short: {:?}",
+        native
+    );
+
+    assert_eq!(
+        js_lines[1], "TypeError",
+        "NB-31 func_ret: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert_eq!(
+        native_lines[1], "TypeError",
+        "NB-31 func_ret: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
+}
+
+/// NB-31: Typed Int parameter path (wrap bad: Int = ...).
+/// Exercises callable_type_tag → Ident → int_vars (param registration).
+#[test]
+fn test_nb31_http_serve_typed_param_int_handler_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+wrap bad: Int =
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  stdout(result.__value.ok.toString())
+  stdout(result.__value.kind)
+
+wrap(1000000)
+"#;
+
+    let dir = setup_net_project(source, "nb31_typed_param");
+
+    let js = run_net_js(&dir, "nb31_typed_param")
+        .expect("NB-31: JS should not crash with typed Int param handler");
+    let native = run_net_native(&dir, "nb31_typed_param")
+        .expect("NB-31: Native should not crash with typed Int param handler");
+
+    cleanup_net_project(&dir);
+
+    let js_lines: Vec<&str> = js.trim().lines().collect();
+    let native_lines: Vec<&str> = native.trim().lines().collect();
+
+    assert!(
+        js_lines.len() >= 2,
+        "NB-31 typed_param: JS output too short: {:?}",
+        js
+    );
+    assert!(
+        native_lines.len() >= 2,
+        "NB-31 typed_param: Native output too short: {:?}",
+        native
+    );
+
+    assert_eq!(
+        js_lines[1], "TypeError",
+        "NB-31 typed_param: JS kind must be TypeError, got: {}",
+        js_lines[1]
+    );
+    assert_eq!(
+        native_lines[1], "TypeError",
+        "NB-31 typed_param: Native kind must be TypeError, got: {}",
+        native_lines[1]
+    );
+}
+
+/// NB-14: httpEncodeResponse with dynamically-typed Bool status via function parameter
+/// must produce "status must be Int, got true" in Native (not "got 1").
+/// Reproduction: `encodeWrap s = @(status <= s, ...)` called with `encodeWrap(true)`.
+#[test]
+fn test_nb14_dynamic_bool_status_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+encodeWrap s =
+  @(status <= s, headers <= @[], body <= "ok")
+
+result <= httpEncodeResponse(encodeWrap(true))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_bool_status");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-14 bool status");
+    let native =
+        run_net_native(&dir, "nb14_bool_status").expect("native failed for NB-14 bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-14: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21: httpEncodeResponse with dynamically-typed Bool body via function parameter
+/// must produce "body must be Bytes or Str, got true" in Native (not "got 1").
+#[test]
+fn test_nb21_dynamic_bool_body_native_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+encodeWrap x =
+  @(status <= 200, headers <= @[], body <= x)
+
+result <= httpEncodeResponse(encodeWrap(true))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_bool_body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-21 bool body");
+    let native = run_net_native(&dir, "nb21_bool_body").expect("native failed for NB-21 bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-21: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-14 nested: httpEncodeResponse(encodeWrap(idBool(true))) must preserve Bool tag
+/// through nested call chain. The inner idBool call must not overwrite the outer
+/// call's tag frame. Both Interpreter and Native should say "got true".
+#[test]
+fn test_nb14_nested_call_bool_status_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+idBool x = x => :Bool
+encodeWrap s =
+  @(status <= s, headers <= @[], body <= "ok")
+
+result <= httpEncodeResponse(encodeWrap(idBool(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_nested_status");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for NB-14 nested bool status");
+    let native = run_net_native(&dir, "nb14_nested_status")
+        .expect("native failed for NB-14 nested bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-14 nested: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14 nested: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21 nested: httpEncodeResponse(encodeWrap(idBool(true))) with Bool body
+/// must preserve Bool tag through nested call chain.
+#[test]
+fn test_nb21_nested_call_bool_body_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+idBool x = x => :Bool
+encodeWrap x =
+  @(status <= 200, headers <= @[], body <= x)
+
+result <= httpEncodeResponse(encodeWrap(idBool(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_nested_body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-21 nested bool body");
+    let native =
+        run_net_native(&dir, "nb21_nested_body").expect("native failed for NB-21 nested bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-21 nested: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21 nested: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-14 mixed-arg: encodeWrap(true, id(true)) where arg 0 has a known tag (Bool)
+/// but arg 1 passes through a generic `id` function (UNKNOWN). The unset slot must
+/// remain UNKNOWN, not default to INT.
+#[test]
+fn test_nb14_mixed_arg_bool_status_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+encodeWrap a b =
+  @(status <= b, headers <= @[], body <= "ok")
+
+result <= httpEncodeResponse(encodeWrap(true, id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_mixed_arg_status");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for NB-14 mixed-arg bool status");
+    let native = run_net_native(&dir, "nb14_mixed_arg_status")
+        .expect("native failed for NB-14 mixed-arg bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-14 mixed-arg: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14 mixed-arg: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21 mixed-arg: encodeWrap(true, id(true)) where the body comes from a generic
+/// `id` function. The unset tag slot must not collapse to INT.
+#[test]
+fn test_nb21_mixed_arg_bool_body_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+encodeWrap a b =
+  @(status <= 200, headers <= @[], body <= b)
+
+result <= httpEncodeResponse(encodeWrap(true, id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_mixed_arg_body");
+    let interp =
+        run_net_interpreter(&dir).expect("interpreter failed for NB-21 mixed-arg bool body");
+    let native = run_net_native(&dir, "nb21_mixed_arg_body")
+        .expect("native failed for NB-21 mixed-arg bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-21 mixed-arg: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21 mixed-arg: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-14 IIFE: (_ b = @(status <= b, ...))(id(true)) — direct lambda call must
+/// propagate return_tag from id(true) into the IIFE's arg tag slot.
+#[test]
+fn test_nb14_iife_bool_status_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+result <= httpEncodeResponse((_ b = @(status <= b, headers <= @[], body <= "ok"))(id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb14_iife_status");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-14 IIFE bool status");
+    let native =
+        run_net_native(&dir, "nb14_iife_status").expect("native failed for NB-14 IIFE bool status");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-14 IIFE: dynamic Bool status parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-14 IIFE: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+/// NB-21 IIFE: (_ b = @(status <= 200, ..., body <= b))(id(true)) — body path.
+#[test]
+fn test_nb21_iife_bool_body_parity() {
+    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+
+id x =
+  x
+
+result <= httpEncodeResponse((_ b = @(status <= 200, headers <= @[], body <= b))(id(true)))
+stdout(result.__value.message)
+"#;
+
+    let dir = setup_net_project(source, "nb21_iife_body");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed for NB-21 IIFE bool body");
+    let native =
+        run_net_native(&dir, "nb21_iife_body").expect("native failed for NB-21 IIFE bool body");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp.trim(),
+        native.trim(),
+        "NB-21 IIFE: dynamic Bool body parity mismatch\nInterp: {}\nNative: {}",
+        interp,
+        native
+    );
+    assert!(
+        native.contains("got true"),
+        "NB-21 IIFE: Native should say 'got true', got: {}",
+        native
+    );
+}
+
+// ── NB-11: Non-ASCII path span parity ──────────────────────────────
+
+/// NB-11: URL-encoded non-ASCII path should produce identical span offsets
+/// across all 3 backends. Tests latin1 byte-to-character 1:1 property in JS.
+/// Uses the actual UTF-8 character directly (Taida has no \u escape).
+#[test]
+fn test_nb11_non_ascii_path_span_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // Path "/caf\xC3\xA9" contains 2-byte UTF-8 sequence for e-acute (U+00E9).
+    // In raw bytes the path is 5 bytes: /cafe\xcc\xa9 (but the char is \xc3\xa9, so 5 bytes: / c a f \xc3\xa9)
+    // Bytes[] encodes the Taida string to UTF-8, so the byte offsets should match.
+    // The e-acute character is embedded directly as a UTF-8 literal in the Rust source.
+    let source = ">>> taida-lang/net => @(httpParseRequestHead)\n\
+\n\
+bytesLax <= Bytes[\"GET /caf\u{00e9}?q=1 HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n\"]()\n\
+bytesLax ]=> bytes\n\
+result <= httpParseRequestHead(bytes)\n\
+result ]=> parsed\n\
+\n\
+stdout(parsed.method.start)\n\
+stdout(parsed.method.len)\n\
+stdout(parsed.path.start)\n\
+stdout(parsed.path.len)\n\
+stdout(parsed.query.start)\n\
+stdout(parsed.query.len)\n\
+stdout(parsed.version.major)\n\
+stdout(parsed.version.minor)\n\
+stdout(parsed.contentLength)\n\
+";
+
+    let dir = setup_net_project(source, "nb11_non_ascii_path");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "nb11_non_ascii_path").expect("js failed");
+    let native = run_net_native(&dir, "nb11_non_ascii_path").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NB-11: non-ASCII path span Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NB-11: non-ASCII path span Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
+}
+
+/// NB-11: Header with non-ASCII value (high bytes) should parse identically.
+#[test]
+fn test_nb11_non_ascii_header_value_span_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    // X-Name header with value containing a 2-byte UTF-8 character (e-acute).
+    let source = ">>> taida-lang/net => @(httpParseRequestHead)\n\
+\n\
+bytesLax <= Bytes[\"GET / HTTP/1.1\\r\\nHost: localhost\\r\\nX-Name: caf\u{00e9}\\r\\n\\r\\n\"]()\n\
+bytesLax ]=> bytes\n\
+result <= httpParseRequestHead(bytes)\n\
+result ]=> parsed\n\
+\n\
+stdout(parsed.consumed)\n\
+stdout(parsed.path.start)\n\
+stdout(parsed.path.len)\n\
+stdout(parsed.bodyOffset)\n\
+";
+
+    let dir = setup_net_project(source, "nb11_non_ascii_header");
+    let interp = run_net_interpreter(&dir).expect("interpreter failed");
+    let js = run_net_js(&dir, "nb11_non_ascii_header").expect("js failed");
+    let native = run_net_native(&dir, "nb11_non_ascii_header").expect("native failed");
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        interp, js,
+        "NB-11: non-ASCII header Interp vs JS\nInterp: {}\nJS: {}",
+        interp, js
+    );
+    assert_eq!(
+        interp, native,
+        "NB-11: non-ASCII header Interp vs Native\nInterp: {}\nNative: {}",
+        interp, native
+    );
 }

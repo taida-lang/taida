@@ -228,6 +228,31 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val, Val],
             returns: &[Ptr],
         },
+        // NB-14: Stack-based call-site arg tag propagation (Bool/Int disambiguation)
+        "taida_push_call_tags" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
+        "taida_pop_call_tags" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
+        "taida_set_call_arg_tag" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_get_call_arg_tag" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_set_return_tag" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_get_return_tag" => RuntimeAbi {
+            params: &[],
+            returns: &[Val],
+        },
         // BuchiPack field call (polymorphic dispatch: args are boxed values)
         "taida_pack_call_field0" => RuntimeAbi {
             params: &[Ptr, Val],
@@ -1528,6 +1553,23 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_pool_health" => RuntimeAbi {
             params: &[Ptr],
+            returns: &[Ptr],
+        },
+
+        // ── taida-lang/net HTTP v1 ──
+        // taida_net_http_parse_request_head(input: Ptr) -> Ptr
+        "taida_net_http_parse_request_head" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // taida_net_http_encode_response(response: Ptr) -> Ptr
+        "taida_net_http_encode_response" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // NB-31: taida_net_http_serve(port, handler, max_requests, timeout_ms, handler_type_tag) -> Ptr
+        "taida_net_http_serve" => RuntimeAbi {
+            params: &[Val, Ptr, Val, Val, Val],
             returns: &[Ptr],
         },
 
