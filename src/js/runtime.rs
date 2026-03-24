@@ -2968,7 +2968,7 @@ function __taida_net_status_reason(code) {
 
 // httpParseRequestHead(bytes) -> Result[@(parsed), _]
 // Parses HTTP/1.1 request head from raw bytes (Uint8Array or string).
-// Returns the same shape as the Interpreter: @(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength)
+// Returns the same shape as the Interpreter: @(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength, chunked)
 function __taida_net_httpParseRequestHead(input) {
   let bytes;
   if (input instanceof Uint8Array) {
@@ -3001,7 +3001,7 @@ function __taida_net_httpParseRequestHead(input) {
         complete: false, consumed: 0,
         method: __taida_net_span(0, 0), path: __taida_net_span(0, 0),
         query: __taida_net_span(0, 0), version: Object.freeze({ major: 1, minor: 1 }),
-        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0,
+        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0, chunked: false,
       }));
     }
     return __taida_net_result_fail('ParseError', 'Malformed HTTP request: empty request line');
@@ -3016,7 +3016,7 @@ function __taida_net_httpParseRequestHead(input) {
         complete: false, consumed: 0,
         method: __taida_net_span(0, 0), path: __taida_net_span(0, 0),
         query: __taida_net_span(0, 0), version: Object.freeze({ major: 1, minor: 1 }),
-        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0,
+        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0, chunked: false,
       }));
     }
     return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid request line');
@@ -3028,7 +3028,7 @@ function __taida_net_httpParseRequestHead(input) {
         complete: false, consumed: 0,
         method: __taida_net_span(0, sp1), path: __taida_net_span(0, 0),
         query: __taida_net_span(0, 0), version: Object.freeze({ major: 1, minor: 1 }),
-        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0,
+        headers: Object.freeze([]), bodyOffset: 0, contentLength: 0, chunked: false,
       }));
     }
     return __taida_net_result_fail('ParseError', 'Malformed HTTP request: invalid request line');
@@ -3075,6 +3075,7 @@ function __taida_net_httpParseRequestHead(input) {
   const headersList = [];
   let contentLength = 0;
   let clCount = 0;
+  let hasTransferEncodingChunked = false;
   // Track byte offset of each header line for span calculation
   let lineOffset = requestLine.length + 2; // skip request line + \r\n
   for (let i = 1; i < lines.length; i++) {
@@ -3136,7 +3137,22 @@ function __taida_net_httpParseRequestHead(input) {
       }
       contentLength = parsedCl;
     }
+    // NET2-2a: Detect Transfer-Encoding: chunked (parity with Interpreter)
+    if (headerName.toLowerCase() === 'transfer-encoding') {
+      // Scan comma-separated tokens for "chunked" (case-insensitive)
+      const tokens = line.substring(colonIdx + 1).split(',');
+      for (const token of tokens) {
+        if (token.trim().toLowerCase() === 'chunked') {
+          hasTransferEncodingChunked = true;
+        }
+      }
+    }
     lineOffset += line.length + 2; // +2 for \r\n
+  }
+
+  // NET2-2e: Reject Content-Length + Transfer-Encoding: chunked (RFC 7230 section 3.3.3)
+  if (hasTransferEncodingChunked && clCount > 0) {
+    return __taida_net_result_fail('ParseError', 'Malformed HTTP request: Content-Length and Transfer-Encoding: chunked are mutually exclusive');
   }
 
   const consumed = complete ? headEnd : 0;
@@ -3150,6 +3166,7 @@ function __taida_net_httpParseRequestHead(input) {
     headers: Object.freeze(headersList),
     bodyOffset: consumed,
     contentLength: contentLength,
+    chunked: hasTransferEncodingChunked,
   });
   return __taida_net_result_ok(parsed);
 }

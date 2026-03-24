@@ -8976,7 +8976,7 @@ static const char *taida_net_status_reason(int code) {
 
 // ── httpParseRequestHead(bytes) ─────────────────────────────────
 // Hand-written HTTP/1.1 request head parser (no external deps).
-// Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength), _]
+// Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength, chunked), _]
 taida_val taida_net_http_parse_request_head(taida_val input) {
     // Extract raw bytes from Bytes or Str
     unsigned char *data = NULL;
@@ -9029,7 +9029,7 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
         // No CRLF found at all — incomplete if no head_end, try to check for obvious malformed
         if (!complete) {
             // Could be incomplete — return incomplete result
-            taida_val parsed = taida_pack_new(9);
+            taida_val parsed = taida_pack_new(10);
             taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
             taida_pack_set(parsed, 0, 0);  // false
             taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
@@ -9059,6 +9059,9 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
             taida_pack_set(parsed, 7, 0);
             taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
             taida_pack_set(parsed, 8, 0);
+            taida_pack_set_hash(parsed, 9, taida_str_hash((taida_val)"chunked"));
+            taida_pack_set(parsed, 9, 0);  // false
+            taida_pack_set_tag(parsed, 9, TAIDA_TAG_BOOL);
             if (free_data) free(data);
             return taida_net_result_ok(parsed);
         }
@@ -9138,6 +9141,7 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
     taida_val headers_list = taida_list_new();
     int64_t content_length = 0;
     int cl_count = 0;
+    int has_te_chunked = 0;
     size_t pos = (size_t)(first_crlf + 2);  // after first \r\n
 
     int header_count = 0;
@@ -9249,11 +9253,54 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
             }
         }
 
+        // NET2-2a: Detect Transfer-Encoding: chunked (parity with Interpreter)
+        if (name_len == 17) {
+            const char *te_expected = "transfer-encoding";
+            int is_te = 1;
+            for (size_t k = 0; k < 17; k++) {
+                char c = (char)data[name_start + k];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c != te_expected[k]) { is_te = 0; break; }
+            }
+            if (is_te) {
+                // Scan comma-separated tokens for "chunked" (case-insensitive)
+                size_t tk_start = val_start;
+                while (tk_start < val_start + val_len) {
+                    // Skip leading whitespace
+                    while (tk_start < val_start + val_len && (data[tk_start] == ' ' || data[tk_start] == '\t')) tk_start++;
+                    // Find comma or end
+                    size_t tk_end = tk_start;
+                    while (tk_end < val_start + val_len && data[tk_end] != ',') tk_end++;
+                    // Trim trailing whitespace of token
+                    size_t tk_trim = tk_end;
+                    while (tk_trim > tk_start && (data[tk_trim - 1] == ' ' || data[tk_trim - 1] == '\t')) tk_trim--;
+                    size_t tk_len = tk_trim - tk_start;
+                    if (tk_len == 7) {
+                        const char *chunked_str = "chunked";
+                        int match = 1;
+                        for (size_t m = 0; m < 7; m++) {
+                            char c = (char)data[tk_start + m];
+                            if (c >= 'A' && c <= 'Z') c += 32;
+                            if (c != chunked_str[m]) { match = 0; break; }
+                        }
+                        if (match) has_te_chunked = 1;
+                    }
+                    tk_start = tk_end + 1;  // skip comma
+                }
+            }
+        }
+
         pos = line_end + 2;  // skip \r\n
     }
 
+    // NET2-2e: Reject Content-Length + Transfer-Encoding: chunked (RFC 7230 section 3.3.3)
+    if (has_te_chunked && cl_count > 0) {
+        if (free_data) free(data);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: Content-Length and Transfer-Encoding: chunked are mutually exclusive");
+    }
+
     // Build result pack
-    taida_val parsed = taida_pack_new(9);
+    taida_val parsed = taida_pack_new(10);
     taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
     taida_pack_set(parsed, 0, complete ? 1 : 0);
     taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
@@ -9287,6 +9334,10 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
 
     taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
     taida_pack_set(parsed, 8, (taida_val)content_length);
+
+    taida_pack_set_hash(parsed, 9, taida_str_hash((taida_val)"chunked"));
+    taida_pack_set(parsed, 9, has_te_chunked ? 1 : 0);
+    taida_pack_set_tag(parsed, 9, TAIDA_TAG_BOOL);
 
     if (free_data) free(data);
     return taida_net_result_ok(parsed);
