@@ -9714,3 +9714,199 @@ stdout(r.ok)
         cleanup_net_project(&dir);
     }
 }
+
+/// NET2-4e: Malformed chunked body — additional variant parity.
+/// Tests multiple malformed chunk-size patterns beyond "5X":
+///   - empty chunk-size ("\r\nHello\r\n...")
+///   - negative chunk-size ("-1\r\nX\r\n...")
+/// Each must be rejected with 400 or connection close by both backends.
+#[test]
+fn test_net2_4e_malformed_chunked_variants_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let malformed_patterns: &[(&str, &[u8])] = &[
+        (
+            "empty chunk-size",
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\r\nHello\r\n0\r\n\r\n",
+        ),
+        (
+            "negative chunk-size",
+            b"POST /data HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n-1\r\nX\r\n0\r\n\r\n",
+        ),
+    ];
+
+    for backend in &["interp", "js"] {
+        for (label, payload) in malformed_patterns {
+            let port = find_free_loopback_port();
+            let source = format!(
+                r#">>> taida-lang/net => @(httpServe, readBody)
+
+handler req =
+  body <= readBody(req)
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+            );
+
+            let dir = setup_net_project(
+                &source,
+                &format!("net4_malvar_{}_{}", label.replace(' ', "_"), backend),
+            );
+            let (mut child, js_path) = spawn_net_server_backend(
+                &dir,
+                backend,
+                &format!("malvar_{}_{}", label.replace(' ', "_"), backend),
+            );
+
+            let response = send_http_request(port, payload);
+
+            if response.is_none() {
+                // Server closed connection without response — acceptable rejection
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                if let Some(p) = &js_path {
+                    let _ = fs::remove_file(p);
+                }
+                cleanup_net_project(&dir);
+                continue;
+            }
+
+            let resp_bytes = response.unwrap();
+            let resp_str = String::from_utf8_lossy(&resp_bytes);
+            assert!(
+                resp_str.contains("400 Bad Request"),
+                "{} backend: malformed chunk-size '{}' should be rejected with 400, got: {}",
+                backend,
+                label,
+                resp_str
+            );
+
+            let output = child.wait_with_output().expect("wait for server");
+            let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+            assert_eq!(
+                stdout, "true\n1",
+                "{} backend: malformed chunked ({}) server should report ok=true, requests=1. Got: {}",
+                backend, label, stdout
+            );
+
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
+            cleanup_net_project(&dir);
+        }
+    }
+}
+
+/// NET2-4e: maxConnections=1 concurrent access parity — Interpreter vs JS.
+/// Starts a server with maxConnections=1, maxRequests=3, and sends 2 requests
+/// sequentially (after a readiness probe).  The first request fills the single
+/// slot; after it closes, the second request occupies the freed slot.
+/// Both must succeed, proving the single-slot pool recycles correctly across
+/// both backends.
+#[test]
+fn test_net2_4e_max_connections_concurrent_interp_js_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    for backend in &["interp", "js"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "slot-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 3, 10000, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.ok)
+stdout(r.requests)
+"#
+        );
+
+        let dir = setup_net_project(&source, &format!("net4_maxconc_{}", backend));
+        let (mut child, js_path) =
+            spawn_net_server_backend(&dir, backend, &format!("maxconc_{}", backend));
+
+        // Readiness probe (consumes request slot 1 of 3)
+        let probe_resp = send_http_request(
+            port,
+            b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        if probe_resp.is_none() {
+            let _ = child.kill();
+            if let Some(p) = &js_path {
+                let _ = fs::remove_file(p);
+            }
+            cleanup_net_project(&dir);
+            panic!(
+                "{} backend: server did not start on port {} for maxConnections concurrent test",
+                backend, port
+            );
+        }
+
+        // Client A: fills the single connection slot, then closes (request 2 of 3)
+        let resp_a = send_http_request(
+            port,
+            b"GET /a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp_a.is_some(),
+            "{} backend: client A must get a response with maxConnections=1",
+            backend
+        );
+        let body_a = String::from_utf8_lossy(resp_a.as_ref().unwrap());
+        assert!(
+            body_a.contains("slot-ok"),
+            "{} backend: client A response should contain 'slot-ok', got: {}",
+            backend,
+            body_a
+        );
+
+        // Brief wait to let the slot recycle
+        thread::sleep(Duration::from_millis(100));
+
+        // Client B: after A closed, the slot is freed (request 3 of 3)
+        let resp_b = send_http_request(
+            port,
+            b"GET /b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp_b.is_some(),
+            "{} backend: client B must get a response after slot freed (maxConnections=1)",
+            backend
+        );
+        let body_b = String::from_utf8_lossy(resp_b.as_ref().unwrap());
+        assert!(
+            body_b.contains("slot-ok"),
+            "{} backend: client B response should contain 'slot-ok', got: {}",
+            backend,
+            body_b
+        );
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(
+            stdout, "true\n3",
+            "{} backend: maxConnections=1 server should report ok=true, requests=3 (1 probe + 2 real). Got: {}",
+            backend, stdout
+        );
+
+        if let Some(p) = &js_path {
+            let _ = fs::remove_file(p);
+        }
+        cleanup_net_project(&dir);
+    }
+}
