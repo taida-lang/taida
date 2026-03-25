@@ -105,8 +105,12 @@ impl JsCodegen {
     }
 
     /// Names of taida-lang/net HTTP v1 builtins that require scope-aware call-site rewriting.
-    const NET_BUILTIN_NAMES: &'static [&'static str] =
-        &["httpServe", "httpParseRequestHead", "httpEncodeResponse"];
+    const NET_BUILTIN_NAMES: &'static [&'static str] = &[
+        "httpServe",
+        "httpParseRequestHead",
+        "httpEncodeResponse",
+        "readBody",
+    ];
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
     /// Returns true only when the module has a net import AND the name is not
@@ -135,6 +139,10 @@ impl JsCodegen {
             }
             "httpEncodeResponse" => {
                 self.write(&format!("__taida_net_httpEncodeResponse{}", suffix));
+                true
+            }
+            "readBody" => {
+                self.write(&format!("__taida_net_readBody{}", suffix));
                 true
             }
             _ => false,
