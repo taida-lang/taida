@@ -848,8 +848,12 @@ impl Lowering {
 
     /// taida-lang/net package function → C runtime function mapping.
     /// Names of taida-lang/net HTTP v1 builtins that require scope-aware dispatch.
-    const NET_BUILTIN_NAMES: &'static [&'static str] =
-        &["httpServe", "httpParseRequestHead", "httpEncodeResponse", "readBody"];
+    const NET_BUILTIN_NAMES: &'static [&'static str] = &[
+        "httpServe",
+        "httpParseRequestHead",
+        "httpEncodeResponse",
+        "readBody",
+    ];
 
     /// Check if a name is a net HTTP v1 builtin that is currently shadowed by a parameter.
     fn is_net_builtin_shadowed(&self, name: &str) -> bool {
@@ -2953,7 +2957,14 @@ impl Lowering {
                 func.push(IrInst::Call(
                     result,
                     "taida_net_http_serve".to_string(),
-                    vec![port, handler, max_requests, timeout_ms, max_connections, handler_tag_var],
+                    vec![
+                        port,
+                        handler,
+                        max_requests,
+                        timeout_ms,
+                        max_connections,
+                        handler_tag_var,
+                    ],
                 ));
                 return Ok(result);
             }

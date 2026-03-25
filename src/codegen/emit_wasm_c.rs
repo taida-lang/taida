@@ -1601,7 +1601,12 @@ mod tests {
     ];
 
     /// NET-6: Human-readable API names expected in error messages.
-    const NET_API_NAMES: &[&str] = &["httpServe", "httpParseRequestHead", "httpEncodeResponse", "readBody"];
+    const NET_API_NAMES: &[&str] = &[
+        "httpServe",
+        "httpParseRequestHead",
+        "httpEncodeResponse",
+        "readBody",
+    ];
 
     /// NET-6b: wasm-min rejects all 3 net HTTP API functions with profile-specific error.
     #[test]
