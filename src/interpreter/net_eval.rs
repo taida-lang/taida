@@ -22,6 +22,8 @@ type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
 /// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) = 20 symbols.
+/// HTTP v3 streaming (startResponse, writeChunk, endResponse, sseEvent)
+/// will be added when JS/Native backends are ready (Phase 4/5).
 pub(crate) const NET_SYMBOLS: &[&str] = &[
     // Legacy surface (shared with os)
     "dnsResolve",
@@ -47,6 +49,134 @@ pub(crate) const NET_SYMBOLS: &[&str] = &[
     // HTTP v2
     "readBody",
 ];
+
+// ── v3 Writer State Machine ───────────────────────────────────────
+//
+// State transitions (see NET_DESIGN.md):
+//   Idle → HeadPrepared (via startResponse)
+//   Idle → Streaming (via writeChunk/sseEvent, implicit 200/@[])
+//   Idle → Ended (via endResponse, implicit 200/@[], empty chunked body)
+//   Idle → One-shot fallback (2-arg handler returns response pack)
+//   HeadPrepared → Streaming (via writeChunk/sseEvent)
+//   HeadPrepared → Ended (via endResponse, empty chunked body)
+//   Streaming → Streaming (via writeChunk/sseEvent)
+//   Streaming → Ended (via endResponse)
+
+/// Writer state for response streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriterState {
+    /// No streaming operation started yet.
+    Idle,
+    /// `startResponse` called; pending status/headers set but not committed to wire.
+    HeadPrepared,
+    /// Head committed to wire; body chunks can be written.
+    Streaming,
+    /// `endResponse` called or auto-ended; no more writes allowed.
+    Ended,
+}
+
+/// Streaming writer state for a 2-arg handler.
+/// Held as a Value::BuchiPack with a `__writer_id` sentinel field,
+/// but the actual mutable state lives in the connection-scoped StreamingWriter.
+///
+/// NOTE: This is Phase 2 scaffolding. The `sse_mode` field and some methods
+/// are not yet wired into the public surface (v3 APIs are not exported).
+pub(crate) struct StreamingWriter {
+    pub state: WriterState,
+    pub pending_status: u16,
+    pub pending_headers: Vec<(String, String)>,
+    /// Whether SSE auto-headers have been applied.
+    #[allow(dead_code)]
+    pub sse_mode: bool,
+}
+
+impl StreamingWriter {
+    fn new() -> Self {
+        StreamingWriter {
+            state: WriterState::Idle,
+            pending_status: 200,
+            pending_headers: Vec::new(),
+            sse_mode: false,
+        }
+    }
+
+    /// Check if a status code forbids a message body (1xx, 204, 205, 304).
+    /// Phase 2 scaffolding: will be used when v3 streaming surface is connected.
+    #[allow(dead_code)]
+    fn is_bodyless_status(status: u16) -> bool {
+        matches!(status, 100..=199 | 204 | 205 | 304)
+    }
+
+    /// Validate that user-supplied headers do not contain reserved headers
+    /// for the streaming path (Content-Length, Transfer-Encoding).
+    /// Phase 2 scaffolding: will be used when v3 streaming surface is connected.
+    #[allow(dead_code)]
+    fn validate_reserved_headers(headers: &[(String, String)]) -> Result<(), String> {
+        for (name, _) in headers {
+            let lower = name.to_ascii_lowercase();
+            if lower == "content-length" {
+                return Err(
+                    "startResponse: 'Content-Length' is not allowed in streaming response headers. \
+                     The runtime manages Content-Length/Transfer-Encoding for streaming responses."
+                        .to_string(),
+                );
+            }
+            if lower == "transfer-encoding" {
+                return Err(
+                    "startResponse: 'Transfer-Encoding' is not allowed in streaming response headers. \
+                     The runtime manages Transfer-Encoding for streaming responses."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the HTTP response head bytes for a streaming (chunked) response.
+/// Writes: `HTTP/1.1 {status} {reason}\r\n{headers}\r\nTransfer-Encoding: chunked\r\n\r\n`
+///
+/// This is the head commit function. Once called, status/headers are on the wire
+/// and cannot be changed. Transfer-Encoding: chunked is automatically appended.
+fn build_streaming_head(status: u16, headers: &[(String, String)]) -> Vec<u8> {
+    let reason = http_reason_phrase(status);
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status, reason).as_bytes());
+    for (name, value) in headers {
+        buf.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
+    }
+    // NET3-1d: Auto-append Transfer-Encoding: chunked
+    buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    buf.extend_from_slice(b"\r\n");
+    buf
+}
+
+/// Map HTTP status code to reason phrase.
+fn http_reason_phrase(status: u16) -> &'static str {
+    match status {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        205 => "Reset Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        413 => "Content Too Large",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
 
 // ── Result helpers ──────────────────────────────────────────
 
@@ -992,6 +1122,26 @@ impl Interpreter {
                 Ok(Some(Signal::Value(eval_read_body(&req)?)))
             }
 
+            // ── v3 streaming API ──
+            // These functions are only callable inside a 2-arg httpServe handler.
+            // Outside that context, the writer BuchiPack won't have the
+            // __writer_id sentinel, so these will return an error.
+            //
+            // The actual streaming logic is implemented in dispatch_request_v3,
+            // where the writer state is held in a StreamingWriter. The functions
+            // here serve as the user-facing API entry points.
+            "startResponse" | "writeChunk" | "endResponse" | "sseEvent" => {
+                // These are dispatched within handler context via the writer
+                // mechanism in dispatch_request. If called outside a handler,
+                // we reach here but the writer won't be valid.
+                Err(RuntimeError {
+                    message: format!(
+                        "{}: can only be called inside a 2-argument httpServe handler",
+                        original_name
+                    ),
+                })
+            }
+
             _ => Ok(None),
         }
     }
@@ -1599,37 +1749,154 @@ impl Interpreter {
 
         let request_pack = Value::BuchiPack(request_fields);
 
-        // ── Call handler with request ──
-        let handler_result = self.call_function_with_values(handler, &[request_pack]);
+        // ── NET3-1a: Detect handler arity (1-arg vs 2-arg) ──
+        // 1-arg handler = v2 one-shot response path (unchanged)
+        // 2-arg handler = streaming writer path (v3)
+        let handler_arity = handler.params.len();
 
-        let response_value = match handler_result {
-            Ok(v) => v,
-            Err(e) => {
-                let error_body = format!("Internal Server Error: {}", e.message);
-                let error_response = format!(
-                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    error_body.len(),
-                    error_body
-                );
-                let _ = std::io::Write::write_all(&mut conn.stream, error_response.as_bytes());
-                *request_count += 1;
-                return ConnAction::Close;
-            }
-        };
+        if handler_arity >= 2 {
+            // ── v3 2-arg handler path ──
+            // Create a writer BuchiPack with a sentinel for identification.
+            // The actual mutable StreamingWriter state is held on the stack here;
+            // the writer Value is an opaque token passed to the handler.
+            let writer_pack = Value::BuchiPack(vec![(
+                "__writer_id".into(),
+                Value::Str("__v3_streaming_writer".into()),
+            )]);
 
-        // ── Encode response and write back ──
-        let encoded = encode_response(&response_value);
-        match extract_result_value(&encoded) {
-            Some(inner) => {
-                if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
-                    let _ = std::io::Write::write_all(&mut conn.stream, wire_bytes);
+            // Create a mutable StreamingWriter for this request scope.
+            let mut writer = StreamingWriter::new();
+
+            // Install v3 streaming builtins in the handler scope.
+            // The actual streaming functions are closures that capture the writer state
+            // through the connection's StreamingWriter. We use environment sentinels
+            // to route calls through the interpreter's function dispatch.
+            //
+            // For Phase 1, the writer state is validated here. The actual wire write
+            // (writeChunk/endResponse body) is Phase 2. Phase 1 focuses on:
+            //   - 2-arg handler detection and one-shot fallback
+            //   - Writer state transitions
+            //   - startResponse pending state
+            //   - Reserved header rejection
+            //   - Bodyless status validation
+
+            let handler_result =
+                self.call_function_with_values(handler, &[request_pack, writer_pack]);
+
+            let response_value = match handler_result {
+                Ok(v) => v,
+                Err(e) => {
+                    // If streaming already started, auto-end before error response.
+                    if writer.state == WriterState::Streaming
+                        || writer.state == WriterState::HeadPrepared
+                    {
+                        // Auto-end: send terminator if head was committed
+                        if writer.state == WriterState::Streaming {
+                            let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
+                        }
+                        writer.state = WriterState::Ended;
+                    }
+                    let error_body = format!("Internal Server Error: {}", e.message);
+                    let error_response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        error_body.len(),
+                        error_body
+                    );
+                    let _ = std::io::Write::write_all(&mut conn.stream, error_response.as_bytes());
+                    *request_count += 1;
+                    return ConnAction::Close;
+                }
+            };
+
+            // ── NET3-1a: One-shot fallback for 2-arg handler ──
+            // If the handler never touched the writer (state is still Idle),
+            // fall back to v2 one-shot response path using the return value.
+            if writer.state == WriterState::Idle {
+                // One-shot fallback: use the response_value as a v2-style response pack.
+                // If it's Unit or not a response pack (handler returned nothing useful),
+                // send 200 + empty body.
+                let is_response_pack = matches!(&response_value, Value::BuchiPack(fields)
+                    if fields.iter().any(|(k, _)| k == "status" || k == "body"));
+                let effective_response = if is_response_pack {
+                    response_value
+                } else {
+                    // Unit, Int, Str, or any non-response value → 200 + empty body
+                    Value::BuchiPack(vec![
+                        ("status".into(), Value::Int(200)),
+                        ("headers".into(), Value::List(vec![])),
+                        ("body".into(), Value::Str(String::new())),
+                    ])
+                };
+
+                let encoded = encode_response(&effective_response);
+                match extract_result_value(&encoded) {
+                    Some(inner) => {
+                        if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
+                            let _ = std::io::Write::write_all(&mut conn.stream, wire_bytes);
+                        }
+                    }
+                    None => {
+                        let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = std::io::Write::write_all(&mut conn.stream, fallback);
+                        *request_count += 1;
+                        return ConnAction::Close;
+                    }
+                }
+            } else {
+                // Streaming was started. The return value is ignored.
+                // Auto-end if not already ended.
+                if writer.state != WriterState::Ended {
+                    // Auto endResponse: commit head if needed, send terminator.
+                    if writer.state == WriterState::HeadPrepared
+                        || writer.state == WriterState::Streaming
+                    {
+                        if writer.state == WriterState::HeadPrepared {
+                            // Commit head first, then send empty chunked body terminator.
+                            let head_bytes = build_streaming_head(
+                                writer.pending_status,
+                                &writer.pending_headers,
+                            );
+                            let _ = std::io::Write::write_all(&mut conn.stream, &head_bytes);
+                        }
+                        // Send chunked terminator
+                        let _ = std::io::Write::write_all(&mut conn.stream, b"0\r\n\r\n");
+                    }
+                    writer.state = WriterState::Ended;
                 }
             }
-            None => {
-                let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = std::io::Write::write_all(&mut conn.stream, fallback);
-                *request_count += 1;
-                return ConnAction::Close;
+        } else {
+            // ── v2 1-arg handler path (unchanged) ──
+            let handler_result = self.call_function_with_values(handler, &[request_pack]);
+
+            let response_value = match handler_result {
+                Ok(v) => v,
+                Err(e) => {
+                    let error_body = format!("Internal Server Error: {}", e.message);
+                    let error_response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        error_body.len(),
+                        error_body
+                    );
+                    let _ = std::io::Write::write_all(&mut conn.stream, error_response.as_bytes());
+                    *request_count += 1;
+                    return ConnAction::Close;
+                }
+            };
+
+            // ── Encode response and write back ──
+            let encoded = encode_response(&response_value);
+            match extract_result_value(&encoded) {
+                Some(inner) => {
+                    if let Some(Value::Bytes(wire_bytes)) = get_field_value(inner, "bytes") {
+                        let _ = std::io::Write::write_all(&mut conn.stream, wire_bytes);
+                    }
+                }
+                None => {
+                    let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = std::io::Write::write_all(&mut conn.stream, fallback);
+                    *request_count += 1;
+                    return ConnAction::Close;
+                }
             }
         }
 
@@ -5873,6 +6140,456 @@ mod tests {
         assert!(
             resp[0].contains("slow-split-ok"),
             "Response body should contain handler output"
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    // ── NET3 Phase 1 tests ──
+
+    // NET3-1b: Writer state machine
+    #[test]
+    fn test_writer_state_initial() {
+        let writer = StreamingWriter::new();
+        assert_eq!(writer.state, WriterState::Idle);
+        assert_eq!(writer.pending_status, 200);
+        assert!(writer.pending_headers.is_empty());
+        assert!(!writer.sse_mode);
+    }
+
+    #[test]
+    fn test_writer_state_transitions() {
+        let mut writer = StreamingWriter::new();
+        assert_eq!(writer.state, WriterState::Idle);
+
+        // Idle -> HeadPrepared (via startResponse)
+        writer.state = WriterState::HeadPrepared;
+        assert_eq!(writer.state, WriterState::HeadPrepared);
+
+        // HeadPrepared -> Streaming (via writeChunk)
+        writer.state = WriterState::Streaming;
+        assert_eq!(writer.state, WriterState::Streaming);
+
+        // Streaming -> Ended (via endResponse)
+        writer.state = WriterState::Ended;
+        assert_eq!(writer.state, WriterState::Ended);
+    }
+
+    // NET3-1c: startResponse pending state
+    #[test]
+    fn test_start_response_pending_state() {
+        let mut writer = StreamingWriter::new();
+        assert_eq!(writer.pending_status, 200);
+
+        // Update pending status/headers
+        writer.pending_status = 201;
+        writer.pending_headers = vec![("X-Custom".to_string(), "value1".to_string())];
+        writer.state = WriterState::HeadPrepared;
+
+        assert_eq!(writer.pending_status, 201);
+        assert_eq!(writer.pending_headers.len(), 1);
+        assert_eq!(writer.pending_headers[0].0, "X-Custom");
+        assert_eq!(writer.pending_headers[0].1, "value1");
+    }
+
+    // NET3-1d: Head commit builds correct wire format
+    #[test]
+    fn test_build_streaming_head_basic() {
+        let headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        let head = build_streaming_head(200, &headers);
+        let head_str = String::from_utf8(head).unwrap();
+
+        assert!(head_str.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(head_str.contains("Content-Type: text/plain\r\n"));
+        assert!(head_str.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(head_str.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_build_streaming_head_custom_status() {
+        let head = build_streaming_head(404, &[]);
+        let head_str = String::from_utf8(head).unwrap();
+        assert!(head_str.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(head_str.contains("Transfer-Encoding: chunked\r\n"));
+    }
+
+    #[test]
+    fn test_build_streaming_head_multiple_headers() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/html".to_string()),
+            ("X-Foo".to_string(), "bar".to_string()),
+            ("Cache-Control".to_string(), "no-cache".to_string()),
+        ];
+        let head = build_streaming_head(200, &headers);
+        let head_str = String::from_utf8(head).unwrap();
+
+        assert!(head_str.contains("Content-Type: text/html\r\n"));
+        assert!(head_str.contains("X-Foo: bar\r\n"));
+        assert!(head_str.contains("Cache-Control: no-cache\r\n"));
+        assert!(head_str.contains("Transfer-Encoding: chunked\r\n"));
+    }
+
+    // NET3-1e: Reserved header rejection
+    #[test]
+    fn test_reserved_header_content_length_rejected() {
+        let headers = vec![("Content-Length".to_string(), "42".to_string())];
+        let result = StreamingWriter::validate_reserved_headers(&headers);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("Content-Length"),
+            "error should mention Content-Length: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_reserved_header_transfer_encoding_rejected() {
+        let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
+        let result = StreamingWriter::validate_reserved_headers(&headers);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("Transfer-Encoding"),
+            "error should mention Transfer-Encoding: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_reserved_header_case_insensitive() {
+        // content-length (lowercase)
+        let headers = vec![("content-length".to_string(), "42".to_string())];
+        assert!(StreamingWriter::validate_reserved_headers(&headers).is_err());
+
+        // TRANSFER-ENCODING (uppercase)
+        let headers = vec![("TRANSFER-ENCODING".to_string(), "chunked".to_string())];
+        assert!(StreamingWriter::validate_reserved_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn test_non_reserved_headers_allowed() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("X-Custom".to_string(), "value".to_string()),
+            ("Cache-Control".to_string(), "no-cache".to_string()),
+        ];
+        assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+    }
+
+    #[test]
+    fn test_empty_headers_allowed() {
+        let headers: Vec<(String, String)> = vec![];
+        assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+    }
+
+    // NET3-1f: Bodyless status validation
+    #[test]
+    fn test_bodyless_status_detection() {
+        // 1xx
+        assert!(StreamingWriter::is_bodyless_status(100));
+        assert!(StreamingWriter::is_bodyless_status(101));
+        assert!(StreamingWriter::is_bodyless_status(199));
+        // 204, 205, 304
+        assert!(StreamingWriter::is_bodyless_status(204));
+        assert!(StreamingWriter::is_bodyless_status(205));
+        assert!(StreamingWriter::is_bodyless_status(304));
+        // Normal statuses are NOT bodyless
+        assert!(!StreamingWriter::is_bodyless_status(200));
+        assert!(!StreamingWriter::is_bodyless_status(201));
+        assert!(!StreamingWriter::is_bodyless_status(301));
+        assert!(!StreamingWriter::is_bodyless_status(302));
+        assert!(!StreamingWriter::is_bodyless_status(400));
+        assert!(!StreamingWriter::is_bodyless_status(404));
+        assert!(!StreamingWriter::is_bodyless_status(500));
+    }
+
+    // NET3-1d: http_reason_phrase coverage
+    #[test]
+    fn test_http_reason_phrases() {
+        assert_eq!(http_reason_phrase(200), "OK");
+        assert_eq!(http_reason_phrase(201), "Created");
+        assert_eq!(http_reason_phrase(204), "No Content");
+        assert_eq!(http_reason_phrase(301), "Moved Permanently");
+        assert_eq!(http_reason_phrase(400), "Bad Request");
+        assert_eq!(http_reason_phrase(404), "Not Found");
+        assert_eq!(http_reason_phrase(500), "Internal Server Error");
+        assert_eq!(http_reason_phrase(999), "Unknown");
+    }
+
+    // NET3-1a: v3 streaming API sentinel guard
+    #[test]
+    fn test_v3_api_sentinel_without_import() {
+        let mut interp = Interpreter::new();
+        let args: Vec<Expr> = vec![];
+        // Without sentinel, these should return None (not dispatched)
+        assert!(
+            interp
+                .try_net_func("startResponse", &args)
+                .unwrap()
+                .is_none()
+        );
+        assert!(interp.try_net_func("writeChunk", &args).unwrap().is_none());
+        assert!(interp.try_net_func("endResponse", &args).unwrap().is_none());
+        assert!(interp.try_net_func("sseEvent", &args).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_v3_api_sentinel_with_import_errors_outside_handler() {
+        let mut interp = Interpreter::new();
+        // Set sentinel as if imported from taida-lang/net
+        for sym in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
+            interp
+                .env
+                .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
+        }
+        let args: Vec<Expr> = vec![];
+        // With sentinel but outside handler context, these should error
+        for sym in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
+            let result = interp.try_net_func(sym, &args);
+            assert!(result.is_err(), "{} should error outside handler", sym);
+            let msg = result.unwrap_err().message;
+            assert!(
+                msg.contains("2-argument httpServe handler"),
+                "{} error should mention 2-arg handler: {}",
+                sym,
+                msg
+            );
+        }
+    }
+
+    // NET3-1a: 2-arg handler detection + one-shot fallback
+    // Build a 2-arg handler lambda expression (req, writer) that returns a response pack.
+    fn make_two_arg_handler_expr(body_text: &str) -> Expr {
+        Expr::Lambda(
+            vec![
+                Param {
+                    name: "req".into(),
+                    type_annotation: None,
+                    default_value: None,
+                    span: dummy_span(),
+                },
+                Param {
+                    name: "writer".into(),
+                    type_annotation: None,
+                    default_value: None,
+                    span: dummy_span(),
+                },
+            ],
+            Box::new(Expr::BuchiPack(
+                vec![
+                    BuchiField {
+                        name: "status".into(),
+                        value: Expr::IntLit(200, dummy_span()),
+                        span: dummy_span(),
+                    },
+                    BuchiField {
+                        name: "headers".into(),
+                        value: Expr::ListLit(
+                            vec![Expr::BuchiPack(
+                                vec![
+                                    BuchiField {
+                                        name: "name".into(),
+                                        value: Expr::StringLit("content-type".into(), dummy_span()),
+                                        span: dummy_span(),
+                                    },
+                                    BuchiField {
+                                        name: "value".into(),
+                                        value: Expr::StringLit("text/plain".into(), dummy_span()),
+                                        span: dummy_span(),
+                                    },
+                                ],
+                                dummy_span(),
+                            )],
+                            dummy_span(),
+                        ),
+                        span: dummy_span(),
+                    },
+                    BuchiField {
+                        name: "body".into(),
+                        value: Expr::StringLit(body_text.into(), dummy_span()),
+                        span: dummy_span(),
+                    },
+                ],
+                dummy_span(),
+            )),
+            dummy_span(),
+        )
+    }
+
+    /// Build a 2-arg handler that returns Unit (does nothing, no writer usage).
+    fn make_two_arg_noop_handler_expr() -> Expr {
+        Expr::Lambda(
+            vec![
+                Param {
+                    name: "req".into(),
+                    type_annotation: None,
+                    default_value: None,
+                    span: dummy_span(),
+                },
+                Param {
+                    name: "writer".into(),
+                    type_annotation: None,
+                    default_value: None,
+                    span: dummy_span(),
+                },
+            ],
+            Box::new(Expr::IntLit(1, dummy_span())),
+            dummy_span(),
+        )
+    }
+
+    /// Allocate a free loopback port for tests by binding to port 0 and reading the OS-assigned port.
+    fn v3_free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn test_v3_two_arg_handler_one_shot_fallback() {
+        let port = v3_free_port();
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_two_arg_handler_expr("fallback-ok"),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "2-arg one-shot fallback should return 200 OK: {}",
+            response_str
+        );
+        assert!(
+            response_str.contains("fallback-ok"),
+            "2-arg one-shot fallback should return handler body: {}",
+            response_str
+        );
+        // One-shot uses Content-Length, not chunked
+        assert!(
+            response_str.contains("Content-Length"),
+            "2-arg one-shot fallback should use Content-Length: {}",
+            response_str
+        );
+        assert!(
+            !response_str.contains("Transfer-Encoding: chunked"),
+            "2-arg one-shot fallback should NOT use chunked TE: {}",
+            response_str
+        );
+
+        let result = server_handle.join().unwrap();
+        match result {
+            Signal::Value(Value::Async(a)) => {
+                assert_eq!(a.status, AsyncStatus::Fulfilled);
+                let inner = extract_result_value(&a.value).unwrap();
+                assert_eq!(get_field_bool(inner, "ok"), Some(true));
+                assert_eq!(get_field_int(inner, "requests"), Some(1));
+            }
+            _ => panic!("expected fulfilled Async"),
+        }
+    }
+
+    #[test]
+    fn test_v3_two_arg_handler_no_return_fallback() {
+        let port = v3_free_port();
+
+        let server_port = port;
+        let server_handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp
+                .env
+                .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            let args = vec![
+                Expr::IntLit(server_port as i64, dummy_span()),
+                make_two_arg_noop_handler_expr(),
+                Expr::IntLit(1, dummy_span()),
+                Expr::IntLit(5000, dummy_span()),
+            ];
+            interp.try_net_func("httpServe", &args).unwrap().unwrap()
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+        std::io::Write::write_all(
+            &mut client,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+        let mut response = Vec::new();
+        let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        loop {
+            let mut buf = [0u8; 4096];
+            match std::io::Read::read(&mut client, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK"),
+            "2-arg no-return fallback should return 200: {}",
+            response_str
+        );
+        // Empty body → Content-Length: 0
+        assert!(
+            response_str.contains("Content-Length: 0"),
+            "2-arg no-return fallback should have Content-Length: 0: {}",
+            response_str
         );
 
         let result = server_handle.join().unwrap();

@@ -847,7 +847,9 @@ impl Lowering {
     }
 
     /// taida-lang/net package function → C runtime function mapping.
-    /// Names of taida-lang/net HTTP v1 builtins that require scope-aware dispatch.
+    /// Names of taida-lang/net builtins that require scope-aware dispatch.
+    /// HTTP v1 (3) + HTTP v2 (1) = 4.
+    /// v3 streaming APIs will be added when Native backend is ready (Phase 5).
     const NET_BUILTIN_NAMES: &'static [&'static str] = &[
         "httpServe",
         "httpParseRequestHead",
