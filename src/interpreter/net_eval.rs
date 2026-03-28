@@ -21,9 +21,7 @@ use crate::parser::Expr;
 type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// All symbols exported by the net package.
-/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) = 20 symbols.
-/// HTTP v3 streaming (startResponse, writeChunk, endResponse, sseEvent)
-/// will be added when JS/Native backends are ready (Phase 4/5).
+/// Legacy (16) + HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) = 24 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &[
     // Legacy surface (shared with os)
     "dnsResolve",
@@ -48,6 +46,11 @@ pub(crate) const NET_SYMBOLS: &[&str] = &[
     "httpEncodeResponse",
     // HTTP v2
     "readBody",
+    // HTTP v3 streaming
+    "startResponse",
+    "writeChunk",
+    "endResponse",
+    "sseEvent",
 ];
 
 // ── v3 Writer State Machine ───────────────────────────────────────
@@ -2503,13 +2506,18 @@ mod tests {
 
     #[test]
     fn test_net_symbols_count() {
-        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 = 20
-        assert_eq!(NET_SYMBOLS.len(), 20);
+        // 16 legacy + 3 HTTP v1 + 1 HTTP v2 + 4 HTTP v3 = 24
+        assert_eq!(NET_SYMBOLS.len(), 24);
         assert!(NET_SYMBOLS.contains(&"dnsResolve"));
         assert!(NET_SYMBOLS.contains(&"httpServe"));
         assert!(NET_SYMBOLS.contains(&"httpParseRequestHead"));
         assert!(NET_SYMBOLS.contains(&"httpEncodeResponse"));
         assert!(NET_SYMBOLS.contains(&"readBody"));
+        // v3 streaming
+        assert!(NET_SYMBOLS.contains(&"startResponse"));
+        assert!(NET_SYMBOLS.contains(&"writeChunk"));
+        assert!(NET_SYMBOLS.contains(&"endResponse"));
+        assert!(NET_SYMBOLS.contains(&"sseEvent"));
     }
 
     // ── Sentinel guard tests ──

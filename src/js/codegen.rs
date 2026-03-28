@@ -112,6 +112,11 @@ impl JsCodegen {
         "httpParseRequestHead",
         "httpEncodeResponse",
         "readBody",
+        // v3 streaming API
+        "startResponse",
+        "writeChunk",
+        "endResponse",
+        "sseEvent",
     ];
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
@@ -145,6 +150,23 @@ impl JsCodegen {
             }
             "readBody" => {
                 self.write(&format!("__taida_net_readBody{}", suffix));
+                true
+            }
+            // v3 streaming API
+            "startResponse" => {
+                self.write(&format!("__taida_net_startResponse{}", suffix));
+                true
+            }
+            "writeChunk" => {
+                self.write(&format!("__taida_net_writeChunk{}", suffix));
+                true
+            }
+            "endResponse" => {
+                self.write(&format!("__taida_net_endResponse{}", suffix));
+                true
+            }
+            "sseEvent" => {
+                self.write(&format!("__taida_net_sseEvent{}", suffix));
                 true
             }
             _ => false,

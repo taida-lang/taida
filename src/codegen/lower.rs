@@ -848,13 +848,16 @@ impl Lowering {
 
     /// taida-lang/net package function → C runtime function mapping.
     /// Names of taida-lang/net builtins that require scope-aware dispatch.
-    /// HTTP v1 (3) + HTTP v2 (1) = 4.
-    /// v3 streaming APIs will be added when Native backend is ready (Phase 5).
+    /// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) = 8.
     const NET_BUILTIN_NAMES: &'static [&'static str] = &[
         "httpServe",
         "httpParseRequestHead",
         "httpEncodeResponse",
         "readBody",
+        "startResponse",
+        "writeChunk",
+        "endResponse",
+        "sseEvent",
     ];
 
     /// Check if a name is a net HTTP v1 builtin that is currently shadowed by a parameter.
@@ -889,6 +892,11 @@ impl Lowering {
             "httpEncodeResponse" => Some("taida_net_http_encode_response"),
             // HTTP v2 surface
             "readBody" => Some("taida_net_read_body"),
+            // HTTP v3 streaming surface
+            "startResponse" => Some("taida_net_start_response"),
+            "writeChunk" => Some("taida_net_write_chunk"),
+            "endResponse" => Some("taida_net_end_response"),
+            "sseEvent" => Some("taida_net_sse_event"),
             _ => None,
         }
     }
@@ -2955,6 +2963,12 @@ impl Lowering {
                 let handler_tag = self.callable_type_tag(&args[1]);
                 let handler_tag_var = func.alloc_var();
                 func.push(IrInst::ConstInt(handler_tag_var, handler_tag));
+                // NET3-5a: Pass compile-time handler arity so the C runtime
+                // can distinguish 1-arg (one-shot) vs 2-arg (streaming) handlers.
+                // -1 = unknown (dynamic).
+                let handler_arity = self.handler_arity(&args[1]);
+                let handler_arity_var = func.alloc_var();
+                func.push(IrInst::ConstInt(handler_arity_var, handler_arity));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
@@ -2966,6 +2980,7 @@ impl Lowering {
                         timeout_ms,
                         max_connections,
                         handler_tag_var,
+                        handler_arity_var,
                     ],
                 ));
                 return Ok(result);
@@ -5404,6 +5419,27 @@ impl Lowering {
     /// Strategy: check callable first, then delegate to noncallable_type_tag()
     /// which uses the existing expr_returns_float / expr_is_string_full / expr_is_bool /
     /// expr_is_pack / expr_is_list helpers + arithmetic Int detection.
+    /// NET3-5a: Determine compile-time handler parameter count for httpServe.
+    /// Returns the number of parameters if statically known, -1 if dynamic.
+    fn handler_arity(&self, expr: &Expr) -> i64 {
+        match expr {
+            Expr::Lambda(params, _, _) => params.len() as i64,
+            Expr::Ident(name, _) => {
+                if let Some(params) = self.func_param_defs.get(name.as_str()) {
+                    return params.len() as i64;
+                }
+                // Check if it's a lambda var (single-param lambda assigned to variable)
+                if let Some(lambda_name) = self.lambda_vars.get(name.as_str()) {
+                    if let Some(params) = self.func_param_defs.get(lambda_name.as_str()) {
+                        return params.len() as i64;
+                    }
+                }
+                -1 // dynamic / unknown
+            }
+            _ => -1,
+        }
+    }
+
     fn callable_type_tag(&self, expr: &Expr) -> i64 {
         // 1. Callable detection
         match expr {
