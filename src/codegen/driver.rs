@@ -2326,16 +2326,8 @@ mod tests {
             "Native runtime should define taida_net3_validate_writer"
         );
         // Each API function must call it.
-        for api in &[
-            "startResponse",
-            "writeChunk",
-            "endResponse",
-            "sseEvent",
-        ] {
-            let pattern = format!(
-                "taida_net3_validate_writer(writer, \"{}\")",
-                api
-            );
+        for api in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
+            let pattern = format!("taida_net3_validate_writer(writer, \"{}\")", api);
             assert!(
                 NATIVE_C.contains(&pattern),
                 "Native {} should validate writer token",
@@ -2375,7 +2367,9 @@ mod tests {
         );
         // On failure, keep_alive must be forced off to close the connection.
         assert!(
-            NATIVE_C.contains("if (auto_end_failed) {\n                            // Force connection close"),
+            NATIVE_C.contains(
+                "if (auto_end_failed) {\n                            // Force connection close"
+            ),
             "auto-end failure must force keep_alive = 0 for connection close"
         );
     }

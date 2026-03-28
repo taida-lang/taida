@@ -142,9 +142,17 @@ impl StreamingWriter {
 /// - The pointers are set before `call_function_with_values` and cleared after it returns.
 /// - The pointees (StreamingWriter, TcpStream) live on the stack in `dispatch_request`
 ///   and outlive the handler call.
+/// - NB3-9: `borrowed` flag prevents re-entrant access to the raw pointers,
+///   eliminating the theoretical UB from nested streaming API calls (e.g.
+///   `writeChunk(writer, writeChunk(writer, "data"))`).
 pub(crate) struct ActiveStreamingWriter {
     pub writer: *mut StreamingWriter,
     pub stream: *mut std::net::TcpStream,
+    /// NB3-9: Re-entrancy guard. Set to true while a streaming API function
+    /// holds `&mut *self.writer` / `&mut *self.stream`. If another streaming
+    /// API call is attempted while this is true, it returns a RuntimeError
+    /// instead of creating a second `&mut` to the same pointee.
+    pub borrowed: bool,
 }
 
 /// Build the HTTP response head bytes for a streaming response.
@@ -1187,10 +1195,45 @@ impl Interpreter {
             // These functions are only callable inside a 2-arg httpServe handler.
             // The active_streaming_writer field is set during handler execution
             // and provides access to the StreamingWriter state and TcpStream.
-            "startResponse" => self.eval_start_response(args),
-            "writeChunk" => self.eval_write_chunk(args),
-            "endResponse" => self.eval_end_response(args),
-            "sseEvent" => self.eval_sse_event(args),
+            //
+            // NB3-9: Re-entrancy guard — prevent nested streaming API calls
+            // (e.g. `writeChunk(writer, writeChunk(writer, "data"))`) from
+            // creating overlapping &mut references to the same StreamingWriter.
+            // The guard is set here at the dispatch level so every streaming
+            // function is protected uniformly, and cleared after the call
+            // returns (or errors).
+            "startResponse" | "writeChunk" | "endResponse" | "sseEvent" => {
+                // Check re-entrancy before dispatching.
+                if let Some(ref active) = self.active_streaming_writer
+                    && active.borrowed
+                {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: cannot be called while another streaming API call is in progress (re-entrant call detected)",
+                            name
+                        ),
+                    });
+                }
+                // Set the guard.
+                if let Some(ref mut active) = self.active_streaming_writer {
+                    active.borrowed = true;
+                }
+
+                let result = match name {
+                    "startResponse" => self.eval_start_response(args),
+                    "writeChunk" => self.eval_write_chunk(args),
+                    "endResponse" => self.eval_end_response(args),
+                    "sseEvent" => self.eval_sse_event(args),
+                    _ => unreachable!(),
+                };
+
+                // Clear the guard after the call completes (success or error).
+                if let Some(ref mut active) = self.active_streaming_writer {
+                    active.borrowed = false;
+                }
+
+                result
+            }
 
             _ => Ok(None),
         }
@@ -1576,20 +1619,14 @@ impl Interpreter {
             // headers were already set by the user via startResponse. If not,
             // auto-headers cannot be retroactively added to the response.
             if writer.state == WriterState::Streaming {
-                let has_sse_content_type = writer
-                    .pending_headers
-                    .iter()
-                    .any(|(k, v)| {
-                        k.to_ascii_lowercase() == "content-type"
-                            && v.to_ascii_lowercase().contains("text/event-stream")
-                    });
-                let has_cache_no_cache = writer
-                    .pending_headers
-                    .iter()
-                    .any(|(k, v)| {
-                        k.to_ascii_lowercase() == "cache-control"
-                            && v.to_ascii_lowercase().contains("no-cache")
-                    });
+                let has_sse_content_type = writer.pending_headers.iter().any(|(k, v)| {
+                    k.eq_ignore_ascii_case("content-type")
+                        && v.to_ascii_lowercase().contains("text/event-stream")
+                });
+                let has_cache_no_cache = writer.pending_headers.iter().any(|(k, v)| {
+                    k.eq_ignore_ascii_case("cache-control")
+                        && v.to_ascii_lowercase().contains("no-cache")
+                });
                 if !has_sse_content_type || !has_cache_no_cache {
                     return Err(RuntimeError {
                         message: "sseEvent: head already committed without SSE headers. \
@@ -1607,7 +1644,7 @@ impl Interpreter {
                 let has_content_type = writer
                     .pending_headers
                     .iter()
-                    .any(|(k, _)| k.to_ascii_lowercase() == "content-type");
+                    .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
                 if !has_content_type {
                     writer.pending_headers.push((
                         "Content-Type".to_string(),
@@ -1619,7 +1656,7 @@ impl Interpreter {
                 let has_cache_control = writer
                     .pending_headers
                     .iter()
-                    .any(|(k, _)| k.to_ascii_lowercase() == "cache-control");
+                    .any(|(k, _)| k.eq_ignore_ascii_case("cache-control"));
                 if !has_cache_control {
                     writer
                         .pending_headers
@@ -1673,8 +1710,7 @@ impl Interpreter {
         let suffix = b"\r\n";
 
         // Capacity: 1 (hex) + 3 (event line) + 3*n (data lines) + 1 (term) + 1 (suffix)
-        let mut bufs: Vec<std::io::IoSlice<'_>> =
-            Vec::with_capacity(3 + 3 * data_lines.len() + 3);
+        let mut bufs: Vec<std::io::IoSlice<'_>> = Vec::with_capacity(3 + 3 * data_lines.len() + 3);
         bufs.push(std::io::IoSlice::new(hex_prefix.as_bytes()));
 
         if !event_name.is_empty() {
@@ -2325,6 +2361,7 @@ impl Interpreter {
             self.active_streaming_writer = Some(ActiveStreamingWriter {
                 writer: &mut writer as *mut StreamingWriter,
                 stream: &mut conn.stream as *mut std::net::TcpStream,
+                borrowed: false,
             });
 
             let handler_result =
@@ -8651,9 +8688,10 @@ mod tests {
         let handler = make_streaming_handler(vec![
             Statement::Expr(make_start_response_call(
                 200,
-                vec![
-                    ("Content-Type".to_string(), "text/event-stream; charset=utf-8".to_string()),
-                ],
+                vec![(
+                    "Content-Type".to_string(),
+                    "text/event-stream; charset=utf-8".to_string(),
+                )],
             )),
             Statement::Expr(make_write_chunk_call("raw-first")),
             Statement::Expr(make_sse_event_call("message", "after-chunk")),
@@ -8706,7 +8744,10 @@ mod tests {
             Statement::Expr(make_start_response_call(
                 200,
                 vec![
-                    ("Content-Type".to_string(), "text/event-stream; charset=utf-8".to_string()),
+                    (
+                        "Content-Type".to_string(),
+                        "text/event-stream; charset=utf-8".to_string(),
+                    ),
                     ("Cache-Control".to_string(), "no-cache".to_string()),
                 ],
             )),

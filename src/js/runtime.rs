@@ -3695,7 +3695,6 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           }
           socket.on('drain', onDrain);
           writer._onDrain = onDrain; // stash for removal
-          Object.freeze(Object.assign(Object.create(null), { __writer_id: '__v3_streaming_writer' }));
 
           let responseVal;
           try {

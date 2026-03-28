@@ -3551,8 +3551,28 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
     return 0;
 }
 
+// NB3-8: Get string byte length from heap header metadata when available,
+// falling back to taida_read_cstr_len_safe for static strings.
+// Returns 1 on success (length stored in *out_len), 0 on failure.
+static int taida_str_byte_len(const char *s, size_t *out_len) {
+    if (!s) return 0;
+    uintptr_t ptr = (uintptr_t)s;
+    if (ptr < 4096) return 0;
+    // Check if this is a heap string with hidden header
+    taida_val *hdr = ((taida_val*)s) - 2;
+    if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val) * 2)) {
+        taida_val tag = hdr[0];
+        if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
+            if (out_len) *out_len = (size_t)hdr[1];
+            return 1;
+        }
+    }
+    // Static string — fall back to NUL scan
+    return taida_read_cstr_len_safe(s, 16 * 1024 * 1024, out_len);
+}
+
 static int taida_hashmap_key_valid(taida_val key_ptr) {
-    // All values are valid keys in Taida. 
+    // All values are valid keys in Taida.
     // Null (0) is traditionally not a key, but we can allow it as Int(0).
     return 1;
 }
@@ -7558,6 +7578,7 @@ taida_val taida_os_argv(void) {
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <sys/uio.h>  // NET3-5c: writev() for zero-copy chunk writes
+#include <signal.h>   // NB3-5: SIGPIPE suppression for peer-close resilience
 
 // Helper: create a resolved Async[value] (fulfilled)
 // NO-3: auto-detect value type for ownership tracking
@@ -8013,7 +8034,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
 
     size_t sent_total = 0;
     while (sent_total < (size_t)req_len) {
-        ssize_t sent = send(sockfd, request + sent_total, (size_t)req_len - sent_total, 0);
+        ssize_t sent = send(sockfd, request + sent_total, (size_t)req_len - sent_total, MSG_NOSIGNAL);
         if (sent <= 0) {
             free(request);
             close(sockfd);
@@ -8315,7 +8336,7 @@ taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_va
     }
 
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
-    ssize_t sent = send((int)socket_fd, payload_buf, payload_len, 0);
+    ssize_t sent = send((int)socket_fd, payload_buf, payload_len, MSG_NOSIGNAL);
     free(payload_buf);
     if (sent < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
@@ -8358,7 +8379,7 @@ taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taid
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     size_t sent_total = 0;
     while (sent_total < payload_len) {
-        ssize_t sent = send((int)socket_fd, payload_buf + sent_total, payload_len - sent_total, 0);
+        ssize_t sent = send((int)socket_fd, payload_buf + sent_total, payload_len - sent_total, MSG_NOSIGNAL);
         if (sent < 0) {
             if (errno == EINTR) continue;
             free(payload_buf);
@@ -9636,7 +9657,9 @@ static int taida_net_send_all(int fd, const void *buf, size_t len) {
     const unsigned char *p = (const unsigned char*)buf;
     size_t remaining = len;
     while (remaining > 0) {
-        ssize_t n = send(fd, p, remaining, 0);
+        // NB3-5: MSG_NOSIGNAL prevents SIGPIPE on peer-closed sockets,
+        // causing send() to return EPIPE instead of killing the process.
+        ssize_t n = send(fd, p, remaining, MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -10371,7 +10394,12 @@ taida_val taida_net_write_chunk(taida_val writer, taida_val data) {
     iov[2].iov_base = (void*)"\r\n";
     iov[2].iov_len = 2;
 
-    taida_net_writev_all(fd, iov, 3);
+    // NB3-5: Check writev_all return value for write errors (e.g. peer RST).
+    if (taida_net_writev_all(fd, iov, 3) != 0) {
+        if (heap_payload) free(heap_payload);
+        fprintf(stderr, "writeChunk: failed to send chunk data\n");
+        exit(1);
+    }
 
     if (heap_payload) free(heap_payload);
     return 0; // Unit
@@ -10419,15 +10447,18 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
         fprintf(stderr, "sseEvent: can only be called inside a 2-argument httpServe handler\n");
         exit(1);
     }
-    // Validate event and data are strings
+    // Validate event and data are strings.
+    // NB3-8: Use taida_str_byte_len which reads heap string length from header
+    // metadata instead of scanning for NUL. This is correct for non-ASCII
+    // (multi-byte UTF-8) strings and avoids parity issues with Interpreter/JS.
     const char *event_str = (const char*)event;
     const char *data_str = (const char*)data;
     size_t event_len = 0, data_len = 0;
-    if (!taida_read_cstr_len_safe(event_str, 65536, &event_len)) {
+    if (!taida_str_byte_len(event_str, &event_len)) {
         fprintf(stderr, "sseEvent: event must be Str\n");
         exit(1);
     }
-    if (!taida_read_cstr_len_safe(data_str, 16 * 1024 * 1024, &data_len)) {
+    if (!taida_str_byte_len(data_str, &data_len)) {
         fprintf(stderr, "sseEvent: data must be Str\n");
         exit(1);
     }
@@ -10622,7 +10653,12 @@ taida_val taida_net_sse_event(taida_val writer, taida_val event, taida_val data)
     iov[iov_count].iov_len = 2;
     iov_count++;
 
-    taida_net_writev_all(fd, iov, iov_count);
+    // NB3-5: Check writev_all return value for write errors (e.g. peer RST).
+    if (taida_net_writev_all(fd, iov, iov_count) != 0) {
+        if (iov != stack_iov) free(iov);
+        fprintf(stderr, "sseEvent: failed to send SSE chunk data\n");
+        exit(1);
+    }
 
     if (iov != stack_iov) free(iov);
 
@@ -11075,6 +11111,14 @@ static void *net_worker_thread(void *arg) {
             // NET3-5a: Detect handler arity and dispatch accordingly.
             // 1-arg handler = v2 one-shot response path.
             // 2-arg handler = v3 streaming writer path with one-shot fallback.
+            // NB3-4: When handler_arity == -1 (unknown/dynamic), use the safe
+            // 1-arg (v2) path. Calling a 1-arg compiled function via a 2-arg
+            // cast (taida_invoke_callback2) is C undefined behaviour. The v2
+            // path is always correct: if the handler is actually 2-arg, it
+            // simply won't receive the writer and the one-shot response path
+            // handles the return value. Users who need v3 streaming with a
+            // dynamic handler can bind it directly in the httpServe call so
+            // that lower.rs resolves the arity at compile time.
             if (pool->handler_arity >= 2) {
                 // ── v3 2-arg handler path ──
                 // Create thread-local writer state for this request.
@@ -11219,6 +11263,14 @@ static void *net_worker_thread(void *arg) {
 // NET3-5a: handler_arity added — 2 = streaming writer, 1 = one-shot, -1 = unknown.
 // Returns Async[Result[@(ok: Bool, requests: Int), _]]
 taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_requests, taida_val timeout_ms, taida_val max_connections, taida_val handler_type_tag, taida_val handler_arity) {
+    // NB3-5: Suppress SIGPIPE process-wide. Without this, writev() or
+    // send() on a peer-closed socket delivers SIGPIPE which terminates the
+    // process before the return-value error path can execute. This is the
+    // standard pattern for HTTP servers (nginx, Apache, Go net/http all do
+    // the same). MSG_NOSIGNAL covers send() individually, but writev() has
+    // no per-call flag — signal(SIGPIPE, SIG_IGN) is the only portable way.
+    signal(SIGPIPE, SIG_IGN);
+
     // NB-2: port range validation (parity with Interpreter/JS)
     if (port < 0 || port > 65535) {
         char errbuf[256];
