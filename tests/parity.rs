@@ -16504,10 +16504,10 @@ stdout(r.ok)
             spawn_net_server(&source, &format!("net4_rba_ch_{}", backend), backend);
 
         // Send chunked TE body.
-        let chunked_request = format!(
+        let chunked_request =
             "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
              5\r\nHello\r\n7\r\n, World\r\n0\r\n\r\n"
-        );
+                .to_string();
 
         let response = send_http_request(port, chunked_request.as_bytes());
         let response = match response {
@@ -18020,10 +18020,11 @@ stdout(r.requests)
             let opcode = all_data[pos] & 0x0F;
             let plen = (all_data[pos + 1] & 0x7F) as usize;
             pos += 2;
-            if opcode == 0x1 && pos + plen <= all_data.len() {
-                if &all_data[pos..pos + plen] == b"transition" {
-                    got_echo = true;
-                }
+            if opcode == 0x1
+                && pos + plen <= all_data.len()
+                && &all_data[pos..pos + plen] == b"transition"
+            {
+                got_echo = true;
             }
             pos += plen;
         }

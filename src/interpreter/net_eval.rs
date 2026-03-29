@@ -1171,10 +1171,10 @@ fn is_body_stream_request(req: &Value) -> bool {
 fn extract_body_token(req: &Value) -> Option<u64> {
     if let Value::BuchiPack(fields) = req {
         for (k, v) in fields {
-            if k == "__body_token" {
-                if let Value::Int(n) = v {
-                    return Some(*n as u64);
-                }
+            if k == "__body_token"
+                && let Value::Int(n) = v
+            {
+                return Some(*n as u64);
             }
         }
     }
@@ -1347,16 +1347,16 @@ impl Interpreter {
                 // delegate to readBodyAll to stream from socket.
                 if is_body_stream_request(&req) {
                     // NB4-7: Verify token before delegating.
-                    if let Some(ref active) = self.active_streaming_writer {
-                        if !active.body_state.is_null() {
-                            let body = unsafe { &*active.body_state };
-                            let pack_token = extract_body_token(&req);
-                            if pack_token != Some(body.request_token) {
-                                return Err(RuntimeError {
+                    if let Some(ref active) = self.active_streaming_writer
+                        && !active.body_state.is_null()
+                    {
+                        let body = unsafe { &*active.body_state };
+                        let pack_token = extract_body_token(&req);
+                        if pack_token != Some(body.request_token) {
+                            return Err(RuntimeError {
                                     message: "readBody: request pack does not match the current active request. \
                                              The request may be stale or fabricated.".into(),
                                 });
-                            }
                         }
                     }
                     return self.eval_read_body_all_impl("readBody");
@@ -1395,19 +1395,19 @@ impl Interpreter {
                 }
 
                 // NB4-7: Verify that the request pack's token matches the active body state.
-                if let Some(ref active) = self.active_streaming_writer {
-                    if !active.body_state.is_null() {
-                        let body = unsafe { &*active.body_state };
-                        let pack_token = extract_body_token(&req);
-                        if pack_token != Some(body.request_token) {
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "{}: request pack does not match the current active request. \
+                if let Some(ref active) = self.active_streaming_writer
+                    && !active.body_state.is_null()
+                {
+                    let body = unsafe { &*active.body_state };
+                    let pack_token = extract_body_token(&req);
+                    if pack_token != Some(body.request_token) {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: request pack does not match the current active request. \
                                      The request may be stale or fabricated.",
-                                    original_name
-                                ),
-                            });
-                        }
+                                original_name
+                            ),
+                        });
                     }
                 }
 
@@ -2596,16 +2596,16 @@ impl Interpreter {
                         None
                     }
                 });
-                if let Some(ref active) = self.active_streaming_writer {
-                    if active.ws_token == 0 || pack_token != Some(active.ws_token) {
-                        return Err(RuntimeError {
-                            message: format!(
-                                "{}: WebSocket connection does not match the current active connection. \
+                if let Some(ref active) = self.active_streaming_writer
+                    && (active.ws_token == 0 || pack_token != Some(active.ws_token))
+                {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{}: WebSocket connection does not match the current active connection. \
                                  The connection may be stale or fabricated.",
-                                api_name
-                            ),
-                        });
-                    }
+                            api_name
+                        ),
+                    });
                 }
                 Ok(())
             }
@@ -2646,18 +2646,17 @@ impl Interpreter {
 
         // NB4-10: Verify that the request pack's token matches the active body state.
         // This prevents stale/fabricated request packs from triggering an upgrade.
-        if let Some(ref active) = self.active_streaming_writer {
-            if !active.body_state.is_null() {
-                let body = unsafe { &*active.body_state };
-                let pack_token = extract_body_token(&req);
-                if pack_token != Some(body.request_token) {
-                    return Err(RuntimeError {
-                        message:
-                            "wsUpgrade: request pack does not match the current active request. \
+        if let Some(ref active) = self.active_streaming_writer
+            && !active.body_state.is_null()
+        {
+            let body = unsafe { &*active.body_state };
+            let pack_token = extract_body_token(&req);
+            if pack_token != Some(body.request_token) {
+                return Err(RuntimeError {
+                    message: "wsUpgrade: request pack does not match the current active request. \
                                  The request may be stale or fabricated."
-                                .into(),
-                    });
-                }
+                        .into(),
+                });
             }
         }
 
@@ -2789,7 +2788,7 @@ impl Interpreter {
 
         // Validate: Sec-WebSocket-Version: 13
         let version_val = get_header_value(headers, raw, "Sec-WebSocket-Version");
-        if !version_val.as_ref().is_some_and(|v| v.trim() == "13") {
+        if version_val.as_ref().is_none_or(|v| v.trim() != "13") {
             return Ok(Some(Signal::Value(Self::make_lax_ws_empty())));
         }
 
@@ -2874,6 +2873,7 @@ impl Interpreter {
     /// Sends a WebSocket text or binary frame.
     /// - Str → text frame (opcode 0x1)
     /// - Bytes → binary frame (opcode 0x2)
+    ///
     /// Server-to-client: MASK=0.
     fn eval_ws_send(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         if self.active_streaming_writer.is_none() {
@@ -3817,7 +3817,7 @@ impl Interpreter {
             let ws_was_closed = self
                 .active_streaming_writer
                 .as_ref()
-                .map_or(false, |a| a.ws_closed);
+                .is_some_and(|a| a.ws_closed);
 
             // Clear the active writer — handler execution is done.
             self.active_streaming_writer = None;
