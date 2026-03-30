@@ -394,11 +394,8 @@ impl TransportAcceptor for TlsAcceptor {
         stream.set_write_timeout(Some(handshake_timeout))?;
 
         // Create TLS server connection.
-        let tls_conn = rustls::ServerConnection::new(self.tls_config.clone()).map_err(|e| {
-            io::Error::other(
-                format!("TLS server connection error: {}", e),
-            )
-        })?;
+        let tls_conn = rustls::ServerConnection::new(self.tls_config.clone())
+            .map_err(|e| io::Error::other(format!("TLS server connection error: {}", e)))?;
 
         // Perform blocking TLS handshake.
         let mut tls_transport = TlsTransport::new(tls_conn, stream);
