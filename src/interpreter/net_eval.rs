@@ -1242,14 +1242,14 @@ fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
 /// so existing streaming helpers work unchanged.
 pub(crate) enum ConnStream {
     Plain(std::net::TcpStream),
-    Tls(super::net_transport::TlsTransport),
+    Tls(Box<super::net_transport::TlsTransport>),
 }
 
 impl std::io::Read for ConnStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             ConnStream::Plain(s) => std::io::Read::read(s, buf),
-            ConnStream::Tls(t) => super::net_transport::Transport::read(t, buf),
+            ConnStream::Tls(t) => super::net_transport::Transport::read(t.as_mut(), buf),
         }
     }
 }
@@ -1259,7 +1259,7 @@ impl std::io::Write for ConnStream {
         match self {
             ConnStream::Plain(s) => std::io::Write::write(s, buf),
             ConnStream::Tls(t) => {
-                super::net_transport::Transport::write_all(t, buf)?;
+                super::net_transport::Transport::write_all(t.as_mut(), buf)?;
                 Ok(buf.len())
             }
         }
@@ -1268,14 +1268,14 @@ impl std::io::Write for ConnStream {
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             ConnStream::Plain(s) => std::io::Write::flush(s),
-            ConnStream::Tls(t) => super::net_transport::Transport::flush(t),
+            ConnStream::Tls(t) => super::net_transport::Transport::flush(t.as_mut()),
         }
     }
 
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
             ConnStream::Plain(s) => std::io::Write::write_all(s, buf),
-            ConnStream::Tls(t) => super::net_transport::Transport::write_all(t, buf),
+            ConnStream::Tls(t) => super::net_transport::Transport::write_all(t.as_mut(), buf),
         }
     }
 }
@@ -1285,27 +1285,6 @@ impl ConnStream {
         match self {
             ConnStream::Plain(s) => s.set_read_timeout(dur),
             ConnStream::Tls(t) => t.stream_ref().set_read_timeout(dur),
-        }
-    }
-
-    fn set_write_timeout(&self, dur: Option<std::time::Duration>) -> std::io::Result<()> {
-        match self {
-            ConnStream::Plain(s) => s.set_write_timeout(dur),
-            ConnStream::Tls(t) => t.stream_ref().set_write_timeout(dur),
-        }
-    }
-
-    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
-        match self {
-            ConnStream::Plain(s) => s.shutdown(how),
-            ConnStream::Tls(t) => t.stream_ref().shutdown(how),
-        }
-    }
-
-    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
-        match self {
-            ConnStream::Plain(s) => s.peer_addr(),
-            ConnStream::Tls(t) => t.stream_ref().peer_addr(),
         }
     }
 }
@@ -3172,23 +3151,18 @@ impl Interpreter {
                             });
                         }
                         // Validate reason UTF-8 if present.
-                        if payload.len() > 2
-                            && std::str::from_utf8(&payload[2..]).is_err() {
-                                let close_payload = [0x03, 0xEA]; // 1002
-                                let _ = Self::write_ws_frame(
-                                    stream,
-                                    Self::WS_OPCODE_CLOSE,
-                                    &close_payload,
-                                );
-                                if let Some(ref mut active) = self.active_streaming_writer {
-                                    active.ws_closed = true;
-                                }
-                                return Err(RuntimeError {
-                                    message:
-                                        "wsReceive: protocol error: invalid UTF-8 in close reason"
-                                            .into(),
-                                });
+                        if payload.len() > 2 && std::str::from_utf8(&payload[2..]).is_err() {
+                            let close_payload = [0x03, 0xEA]; // 1002
+                            let _ =
+                                Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &close_payload);
+                            if let Some(ref mut active) = self.active_streaming_writer {
+                                active.ws_closed = true;
                             }
+                            return Err(RuntimeError {
+                                message: "wsReceive: protocol error: invalid UTF-8 in close reason"
+                                    .into(),
+                            });
+                        }
                         // Valid close: echo the code in the reply.
                         let reply = [(code >> 8) as u8, (code & 0xFF) as u8];
                         let _ = Self::write_ws_frame(stream, Self::WS_OPCODE_CLOSE, &reply);
@@ -3779,7 +3753,7 @@ impl Interpreter {
                                 &mut tls_transport,
                                 read_timeout,
                             ) {
-                                Ok(()) => ConnStream::Tls(tls_transport),
+                                Ok(()) => ConnStream::Tls(Box::new(tls_transport)),
                                 Err(_) => {
                                     // NET5-0c: handshake failure = close + don't call handler.
                                     continue;
