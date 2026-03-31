@@ -13439,6 +13439,11 @@ static void *net_worker_thread(void *arg) {
 #define H2_MAX_MAX_FRAME_SIZE     16777215
 #define H2_DEFAULT_HEADER_TABLE_SIZE 4096
 #define H2_DEFAULT_MAX_CONCURRENT_STREAMS 128
+// RFC 9113 Section 6.9.1: flow-control window MUST NOT exceed 2^31-1
+#define H2_MAX_FLOW_CONTROL_WINDOW ((int64_t)0x7FFFFFFF)
+// Safety limits for HPACK bomb / memory exhaustion protection
+#define H2_MAX_CONTINUATION_BUFFER_SIZE (128 * 1024)
+#define H2_MAX_DECODED_HEADER_LIST_SIZE (64 * 1024)
 
 // Frame types
 #define H2_FRAME_DATA         0x0
@@ -14150,6 +14155,18 @@ static int h2_write_frame(int fd, uint8_t frame_type, uint8_t flags,
     return 0;
 }
 
+// Validate that decoded header list does not exceed safety limit.
+// Returns 0 on success, -1 if headers are too large.
+// RFC 9113 Section 6.5.2: size = sum of (name_len + value_len + 32) per entry.
+static int h2_validate_header_list_size(const H2Header *headers, int count) {
+    size_t total = 0;
+    for (int i = 0; i < count; i++) {
+        total += strlen(headers[i].name) + strlen(headers[i].value) + 32;
+        if (total > H2_MAX_DECODED_HEADER_LIST_SIZE) return -1;
+    }
+    return 0;
+}
+
 // Read one frame. Returns 1 on success, 0 on clean close, -1 on error/protocol violation.
 // On success, *payload_out is malloc'd (caller must free), *payload_len_out is set.
 static int h2_read_frame(int fd, uint32_t max_frame_size,
@@ -14429,6 +14446,11 @@ typedef struct {
     int error_reason;
 } H2RequestFields;
 
+// error_reason values for duplicate pseudo-headers
+#define H2_REQ_ERR_DUPLICATE_PSEUDO 4
+// error_reason values for empty pseudo-header values
+#define H2_REQ_ERR_EMPTY_PSEUDO     5
+
 static void h2_extract_request_fields(const H2Header *headers, int count, H2RequestFields *out) {
     memset(out, 0, sizeof(*out));
     out->regular_headers = NULL;
@@ -14438,6 +14460,7 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
 
     char scheme[16] = "";
     int saw_regular = 0;
+    int saw_method = 0, saw_path = 0, saw_authority = 0, saw_scheme = 0;
     H2Header *regs = (H2Header*)TAIDA_MALLOC(sizeof(H2Header) * (size_t)(count + 1), "h2_regular_headers");
     if (!regs) return;
     int reg_count = 0;
@@ -14450,12 +14473,37 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
                 return; // ordering violation
             }
             if (strcmp(headers[i].name, ":method") == 0) {
+                // RFC 9113 Section 8.3.1: each pseudo-header MUST NOT appear more than once
+                if (saw_method) {
+                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
+                    free(regs);
+                    return;
+                }
+                saw_method = 1;
                 snprintf(out->method, sizeof(out->method), "%s", headers[i].value);
             } else if (strcmp(headers[i].name, ":path") == 0) {
+                if (saw_path) {
+                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
+                    free(regs);
+                    return;
+                }
+                saw_path = 1;
                 snprintf(out->path, sizeof(out->path), "%s", headers[i].value);
             } else if (strcmp(headers[i].name, ":authority") == 0) {
+                if (saw_authority) {
+                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
+                    free(regs);
+                    return;
+                }
+                saw_authority = 1;
                 snprintf(out->authority, sizeof(out->authority), "%s", headers[i].value);
             } else if (strcmp(headers[i].name, ":scheme") == 0) {
+                if (saw_scheme) {
+                    out->error_reason = H2_REQ_ERR_DUPLICATE_PSEUDO;
+                    free(regs);
+                    return;
+                }
+                saw_scheme = 1;
                 snprintf(scheme, sizeof(scheme), "%s", headers[i].value);
             } else {
                 // Unknown pseudo-header: reject as PROTOCOL_ERROR
@@ -14687,9 +14735,12 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
 // Append data to the CONTINUATION buffer (resizing as needed).
 static int h2_continuation_append(H2Conn *conn, const unsigned char *data, uint32_t len) {
     if (len == 0) return 0;
+    // Safety limit: prevent HPACK bomb / memory exhaustion
+    if (conn->continuation_len + (size_t)len > H2_MAX_CONTINUATION_BUFFER_SIZE) return -1;
     if (conn->continuation_len + len > conn->continuation_cap) {
         size_t new_cap = conn->continuation_cap ? conn->continuation_cap * 2 : 4096;
         while (new_cap < conn->continuation_len + len) new_cap *= 2;
+        if (new_cap > H2_MAX_CONTINUATION_BUFFER_SIZE) new_cap = H2_MAX_CONTINUATION_BUFFER_SIZE;
         unsigned char *nb = (unsigned char*)realloc(conn->continuation_buf, new_cap);
         if (!nb) return -1;
         conn->continuation_buf = nb;
@@ -14837,6 +14888,15 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                         free(payload);
                         goto h2_conn_done;
                     }
+                    // Safety: enforce header list size limit (HPACK bomb protection)
+                    if (h2_validate_header_list_size(hdrs, hdr_count) < 0) {
+                        free(hdrs);
+                        h2_send_goaway(client_fd, conn.last_peer_stream_id,
+                                       H2_ERROR_INTERNAL_ERROR, "decoded header list too large");
+                        conn.goaway_sent = 1;
+                        free(payload);
+                        goto h2_conn_done;
+                    }
                     s->request_headers = hdrs;
                     s->request_header_count = hdr_count;
                     s->state = H2_STREAM_HALF_CLOSED_REMOTE;
@@ -14910,10 +14970,29 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                                           (uint32_t)payload[3];
                     if (increment == 0) { protocol_error = 1; break; }
                     if (frame_stream_id == 0) {
-                        conn.conn_send_window += increment;
+                        // RFC 9113 Section 6.9.1: window MUST NOT exceed 2^31-1
+                        int64_t new_window = conn.conn_send_window + (int64_t)increment;
+                        if (new_window > H2_MAX_FLOW_CONTROL_WINDOW) {
+                            free(payload);
+                            h2_send_goaway(client_fd, conn.last_peer_stream_id,
+                                           H2_ERROR_FLOW_CONTROL_ERROR,
+                                           "WINDOW_UPDATE would overflow connection window");
+                            conn.goaway_sent = 1;
+                            goto h2_conn_done;
+                        }
+                        conn.conn_send_window = new_window;
                     } else {
                         H2Stream *s = h2_conn_find_stream(&conn, frame_stream_id);
-                        if (s) s->send_window += increment;
+                        if (s) {
+                            int64_t new_window = s->send_window + (int64_t)increment;
+                            if (new_window > H2_MAX_FLOW_CONTROL_WINDOW) {
+                                h2_send_rst_stream(client_fd, frame_stream_id,
+                                                   H2_ERROR_FLOW_CONTROL_ERROR);
+                                s->state = H2_STREAM_CLOSED;
+                            } else {
+                                s->send_window = new_window;
+                            }
+                        }
                     }
                     break;
                 }
@@ -14984,6 +15063,15 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                         free(hdrs);
                         h2_send_goaway(client_fd, conn.last_peer_stream_id,
                                        H2_ERROR_COMPRESSION_ERROR, "HPACK decode error in CONTINUATION");
+                        conn.goaway_sent = 1;
+                        free(payload);
+                        goto h2_conn_done;
+                    }
+                    // Safety: enforce header list size limit (HPACK bomb protection)
+                    if (h2_validate_header_list_size(hdrs, hdr_count) < 0) {
+                        free(hdrs);
+                        h2_send_goaway(client_fd, conn.last_peer_stream_id,
+                                       H2_ERROR_INTERNAL_ERROR, "decoded header list too large in CONTINUATION");
                         conn.goaway_sent = 1;
                         free(payload);
                         goto h2_conn_done;

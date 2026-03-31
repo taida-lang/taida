@@ -46,6 +46,20 @@ const DEFAULT_HEADER_TABLE_SIZE: u32 = 4_096;
 /// Maximum concurrent streams default (server-controlled).
 const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 128;
 
+/// Maximum flow-control window size (RFC 9113 Section 6.9.1).
+/// A sender MUST NOT allow a flow-control window to exceed 2^31 - 1 octets.
+const MAX_FLOW_CONTROL_WINDOW: i64 = 0x7FFFFFFF;
+
+/// Maximum CONTINUATION buffer size before we reject the header block.
+/// This protects against memory exhaustion from HPACK bombs or malformed
+/// CONTINUATION sequences. 128KB is generous for real-world header blocks.
+const MAX_CONTINUATION_BUFFER_SIZE: usize = 128 * 1024;
+
+/// Maximum total decoded header list size (name + value + 32 overhead per entry).
+/// RFC 9113 Section 6.5.2: SETTINGS_MAX_HEADER_LIST_SIZE advisory limit.
+/// We enforce 64KB as a hard safety limit to prevent HPACK bombs.
+const MAX_DECODED_HEADER_LIST_SIZE: usize = 64 * 1024;
+
 // ── Frame Types (RFC 9113 Section 6) ────────────────────────────────
 
 pub(crate) const FRAME_DATA: u8 = 0x0;
@@ -1105,6 +1119,30 @@ impl std::fmt::Display for H2Error {
     }
 }
 
+/// Validate that the decoded header list does not exceed the safety limit.
+/// RFC 9113 Section 6.5.2: The value is based on the uncompressed size of
+/// header fields, including the length of the name and value in octets
+/// plus an overhead of 32 octets for each header field.
+pub(crate) fn validate_header_list_size(
+    headers: &[(String, String)],
+) -> Result<(), H2Error> {
+    let mut total_size: usize = 0;
+    for (name, value) in headers {
+        total_size += name.len() + value.len() + 32;
+        if total_size > MAX_DECODED_HEADER_LIST_SIZE {
+            return Err(H2Error::Connection(
+                ERROR_INTERNAL_ERROR,
+                format!(
+                    "decoded header list size {} exceeds safety limit {}",
+                    total_size,
+                    MAX_DECODED_HEADER_LIST_SIZE
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── H2 Protocol Operations ──────────────────────────────────────────
 
 /// Validate the HTTP/2 connection preface from the client.
@@ -1633,6 +1671,16 @@ pub(crate) fn process_frame(
             if !end_headers {
                 // CONTINUATION sequence: buffer the fragment and wait for
                 // CONTINUATION frames until END_HEADERS is received.
+                if header_block.len() > MAX_CONTINUATION_BUFFER_SIZE {
+                    return Err(H2Error::Connection(
+                        ERROR_INTERNAL_ERROR,
+                        format!(
+                            "header block fragment {} bytes exceeds safety limit {}",
+                            header_block.len(),
+                            MAX_CONTINUATION_BUFFER_SIZE
+                        ),
+                    ));
+                }
                 conn.continuation_buf = header_block.to_vec();
                 conn.continuation_stream_id = stream_id;
                 // Preserve END_STREAM from the original HEADERS (it applies
@@ -1649,6 +1697,9 @@ pub(crate) fn process_frame(
             let headers = conn.decoder.decode(header_block).map_err(|e| {
                 H2Error::Connection(ERROR_COMPRESSION_ERROR, format!("{}", e))
             })?;
+
+            // Safety: enforce header list size limit (HPACK bomb protection).
+            validate_header_list_size(&headers)?;
 
             let end_stream = header.flags & FLAG_END_STREAM != 0;
 
@@ -1784,9 +1835,33 @@ pub(crate) fn process_frame(
             }
 
             if header.stream_id == 0 {
-                conn.conn_send_window += increment as i64;
+                // RFC 9113 Section 6.9.1: A change to SETTINGS_INITIAL_WINDOW_SIZE can cause
+                // the available space in a flow-control window to become negative. A sender
+                // MUST NOT allow a flow-control window to exceed 2^31-1 octets.
+                let new_window = conn.conn_send_window + increment as i64;
+                if new_window > MAX_FLOW_CONTROL_WINDOW {
+                    return Err(H2Error::Connection(
+                        ERROR_FLOW_CONTROL_ERROR,
+                        format!(
+                            "WINDOW_UPDATE would overflow connection send window: {} + {} > 2^31-1",
+                            conn.conn_send_window, increment
+                        ),
+                    ));
+                }
+                conn.conn_send_window = new_window;
             } else if let Some(stream) = conn.streams.get_mut(&header.stream_id) {
-                stream.send_window += increment as i64;
+                let new_window = stream.send_window + increment as i64;
+                if new_window > MAX_FLOW_CONTROL_WINDOW {
+                    return Err(H2Error::Stream(
+                        header.stream_id,
+                        ERROR_FLOW_CONTROL_ERROR,
+                        format!(
+                            "WINDOW_UPDATE would overflow stream {} send window: {} + {} > 2^31-1",
+                            header.stream_id, stream.send_window, increment
+                        ),
+                    ));
+                }
+                stream.send_window = new_window;
             }
             // If stream not found, ignore (RFC 9113 Section 6.9: WINDOW_UPDATE on idle stream)
 
@@ -1877,6 +1952,21 @@ pub(crate) fn process_frame(
             }
 
             // Append this fragment to the buffer.
+            // Safety limit: prevent HPACK bomb / memory exhaustion.
+            if conn.continuation_buf.len() + payload.len() > MAX_CONTINUATION_BUFFER_SIZE {
+                conn.continuation_stream_id = 0;
+                conn.continuation_flags = 0;
+                conn.continuation_buf.clear();
+                return Err(H2Error::Connection(
+                    ERROR_INTERNAL_ERROR,
+                    format!(
+                        "CONTINUATION accumulated header block {} + {} bytes exceeds safety limit {}",
+                        conn.continuation_buf.len(),
+                        payload.len(),
+                        MAX_CONTINUATION_BUFFER_SIZE
+                    ),
+                ));
+            }
             conn.continuation_buf.extend_from_slice(payload);
 
             let end_headers = header.flags & FLAG_END_HEADERS != 0;
@@ -1895,6 +1985,9 @@ pub(crate) fn process_frame(
             let headers = conn.decoder.decode(&header_block).map_err(|e| {
                 H2Error::Connection(ERROR_COMPRESSION_ERROR, format!("{}", e))
             })?;
+
+            // Safety: enforce header list size limit (HPACK bomb protection).
+            validate_header_list_size(&headers)?;
 
             let end_stream = original_flags & FLAG_END_STREAM != 0;
 
@@ -1958,10 +2051,48 @@ pub(crate) fn extract_request_fields(
                 ));
             }
             match name.as_str() {
-                ":method" => method = Some(value.clone()),
-                ":path" => path = Some(value.clone()),
-                ":authority" => authority = Some(value.clone()),
-                ":scheme" => scheme = Some(value.clone()),
+                ":method" => {
+                    // RFC 9113 Section 8.3.1: Each pseudo-header MUST NOT appear
+                    // more than once in a header block.
+                    if method.is_some() {
+                        return Err(H2Error::Stream(
+                            0,
+                            ERROR_PROTOCOL_ERROR,
+                            "duplicate :method pseudo-header".into(),
+                        ));
+                    }
+                    method = Some(value.clone());
+                }
+                ":path" => {
+                    if path.is_some() {
+                        return Err(H2Error::Stream(
+                            0,
+                            ERROR_PROTOCOL_ERROR,
+                            "duplicate :path pseudo-header".into(),
+                        ));
+                    }
+                    path = Some(value.clone());
+                }
+                ":authority" => {
+                    if authority.is_some() {
+                        return Err(H2Error::Stream(
+                            0,
+                            ERROR_PROTOCOL_ERROR,
+                            "duplicate :authority pseudo-header".into(),
+                        ));
+                    }
+                    authority = Some(value.clone());
+                }
+                ":scheme" => {
+                    if scheme.is_some() {
+                        return Err(H2Error::Stream(
+                            0,
+                            ERROR_PROTOCOL_ERROR,
+                            "duplicate :scheme pseudo-header".into(),
+                        ));
+                    }
+                    scheme = Some(value.clone());
+                }
                 _ => {
                     return Err(H2Error::Stream(
                         0,
@@ -1979,9 +2110,26 @@ pub(crate) fn extract_request_fields(
     let method = method.ok_or_else(|| {
         H2Error::Stream(0, ERROR_PROTOCOL_ERROR, "missing :method pseudo-header".into())
     })?;
+    // RFC 9113 Section 8.3.1: :method value MUST NOT be empty.
+    if method.is_empty() {
+        return Err(H2Error::Stream(
+            0,
+            ERROR_PROTOCOL_ERROR,
+            "empty :method pseudo-header value".into(),
+        ));
+    }
+
     let path = path.ok_or_else(|| {
         H2Error::Stream(0, ERROR_PROTOCOL_ERROR, "missing :path pseudo-header".into())
     })?;
+    // RFC 9113 Section 8.3.1: :path value MUST NOT be empty for non-CONNECT requests.
+    if path.is_empty() {
+        return Err(H2Error::Stream(
+            0,
+            ERROR_PROTOCOL_ERROR,
+            "empty :path pseudo-header value".into(),
+        ));
+    }
 
     // RFC 9113 Section 8.3.1: :scheme is required for request pseudo-headers.
     let _scheme = scheme.ok_or_else(|| {
@@ -3297,5 +3445,778 @@ mod tests {
         assert_eq!(path, "/api");
         assert_eq!(authority, "example.com");
         assert_eq!(regular.len(), 1);
+    }
+
+    // ── NET6-5a: Malformed input / edge case hardening tests ─────
+
+    #[test]
+    fn test_window_update_overflow_connection() {
+        // RFC 9113 Section 6.9.1: flow-control window MUST NOT exceed 2^31-1.
+        let mut conn = H2Connection::new();
+        // Set connection send window near max
+        conn.conn_send_window = 0x7FFFFF00;
+
+        let wu_header = FrameHeader {
+            length: 4,
+            frame_type: FRAME_WINDOW_UPDATE,
+            flags: 0,
+            stream_id: 0,
+        };
+        // Increment that would push past 2^31-1
+        let increment: u32 = 0x00000200;
+        let payload = increment.to_be_bytes();
+
+        let result = process_frame(&mut conn, &wu_header, &payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, msg) => {
+                assert_eq!(code, ERROR_FLOW_CONTROL_ERROR);
+                assert!(msg.contains("overflow"), "msg: {}", msg);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_window_update_overflow_stream() {
+        // RFC 9113 Section 6.9.1: stream-level window MUST NOT exceed 2^31-1.
+        let mut conn = H2Connection::new();
+        // Create a stream via HEADERS
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let encoded = encoder.encode(&headers);
+        let h = FrameHeader {
+            length: encoded.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+            stream_id: 1,
+        };
+        let _ = process_frame(&mut conn, &h, &encoded);
+
+        // Set stream send window near max
+        if let Some(stream) = conn.streams.get_mut(&1) {
+            stream.send_window = 0x7FFFFF00;
+        }
+
+        let wu_header = FrameHeader {
+            length: 4,
+            frame_type: FRAME_WINDOW_UPDATE,
+            flags: 0,
+            stream_id: 1,
+        };
+        let increment: u32 = 0x00000200;
+        let payload = increment.to_be_bytes();
+
+        let result = process_frame(&mut conn, &wu_header, &payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(sid, code, msg) => {
+                assert_eq!(sid, 1);
+                assert_eq!(code, ERROR_FLOW_CONTROL_ERROR);
+                assert!(msg.contains("overflow"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_window_update_within_limit_succeeds() {
+        // Normal WINDOW_UPDATE that stays within limits should succeed.
+        let mut conn = H2Connection::new();
+        let wu_header = FrameHeader {
+            length: 4,
+            frame_type: FRAME_WINDOW_UPDATE,
+            flags: 0,
+            stream_id: 0,
+        };
+        let increment: u32 = 1000;
+        let payload = increment.to_be_bytes();
+
+        let old_window = conn.conn_send_window;
+        let result = process_frame(&mut conn, &wu_header, &payload);
+        assert!(result.is_ok());
+        assert_eq!(conn.conn_send_window, old_window + 1000);
+    }
+
+    #[test]
+    fn test_duplicate_method_pseudo_header_rejected() {
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":method".to_string(), "POST".to_string()), // Duplicate!
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let result = extract_request_fields(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, msg) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+                assert!(msg.contains("duplicate"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_path_pseudo_header_rejected() {
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/a".to_string()),
+            (":path".to_string(), "/b".to_string()), // Duplicate!
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let result = extract_request_fields(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, msg) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+                assert!(msg.contains("duplicate"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_scheme_pseudo_header_rejected() {
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":scheme".to_string(), "http".to_string()), // Duplicate!
+        ];
+        let result = extract_request_fields(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, msg) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+                assert!(msg.contains("duplicate"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_authority_pseudo_header_rejected() {
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":authority".to_string(), "a.com".to_string()),
+            (":authority".to_string(), "b.com".to_string()), // Duplicate!
+        ];
+        let result = extract_request_fields(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, msg) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+                assert!(msg.contains("duplicate"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_empty_method_value_rejected() {
+        let headers = vec![
+            (":method".to_string(), "".to_string()), // Empty!
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let result = extract_request_fields(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, msg) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+                assert!(msg.contains("empty"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_empty_path_value_rejected() {
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "".to_string()), // Empty!
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let result = extract_request_fields(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, msg) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+                assert!(msg.contains("empty"), "msg: {}", msg);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_header_list_size_validation_within_limit() {
+        let headers = vec![
+            ("content-type".to_string(), "text/plain".to_string()),
+            ("accept".to_string(), "*/*".to_string()),
+        ];
+        assert!(validate_header_list_size(&headers).is_ok());
+    }
+
+    #[test]
+    fn test_header_list_size_validation_exceeds_limit() {
+        // Create a header list that exceeds 64KB
+        let mut headers = Vec::new();
+        for i in 0..1000 {
+            headers.push((
+                format!("x-header-{}", i),
+                "a".repeat(100), // each entry ~142 bytes (name + value + 32)
+            ));
+        }
+        let result = validate_header_list_size(&headers);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, msg) => {
+                assert_eq!(code, ERROR_INTERNAL_ERROR);
+                assert!(msg.contains("safety limit"), "msg: {}", msg);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_continuation_buffer_size_limit() {
+        // Simulate CONTINUATION accumulation beyond safety limit.
+        let mut conn = H2Connection::new();
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let encoded = encoder.encode(&headers);
+
+        // Start a HEADERS without END_HEADERS
+        let h = FrameHeader {
+            length: encoded.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_STREAM, // No END_HEADERS
+            stream_id: 1,
+        };
+        let _ = process_frame(&mut conn, &h, &encoded);
+        assert_eq!(conn.continuation_stream_id, 1);
+
+        // Try to send a very large CONTINUATION frame (> MAX_CONTINUATION_BUFFER_SIZE)
+        let large_payload = vec![0u8; MAX_CONTINUATION_BUFFER_SIZE + 1];
+        let cont = FrameHeader {
+            length: large_payload.len() as u32,
+            frame_type: FRAME_CONTINUATION,
+            flags: FLAG_END_HEADERS,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &cont, &large_payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, msg) => {
+                assert_eq!(code, ERROR_INTERNAL_ERROR);
+                assert!(msg.contains("safety limit"), "msg: {}", msg);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_settings_initial_window_size_overflow_rejected() {
+        // RFC 9113 Section 6.5.2: SETTINGS_INITIAL_WINDOW_SIZE > 2^31-1 is
+        // FLOW_CONTROL_ERROR.
+        let mut conn = H2Connection::new();
+        let settings = vec![(SETTINGS_INITIAL_WINDOW_SIZE, 0x80000000)]; // > 2^31-1
+        let result = apply_peer_settings(&mut conn, &settings);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FLOW_CONTROL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_settings_max_frame_size_out_of_range_rejected() {
+        // MAX_FRAME_SIZE must be in [16384, 16777215].
+        let mut conn = H2Connection::new();
+
+        // Too small
+        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, 100)];
+        let result = apply_peer_settings(&mut conn, &settings);
+        assert!(result.is_err());
+
+        // Too large
+        let mut conn2 = H2Connection::new();
+        let settings2 = vec![(SETTINGS_MAX_FRAME_SIZE, 16_777_216)]; // 2^24
+        let result2 = apply_peer_settings(&mut conn2, &settings2);
+        assert!(result2.is_err());
+
+        // Just right
+        let mut conn3 = H2Connection::new();
+        let settings3 = vec![(SETTINGS_MAX_FRAME_SIZE, 16_384)]; // minimum valid
+        assert!(apply_peer_settings(&mut conn3, &settings3).is_ok());
+    }
+
+    #[test]
+    fn test_settings_enable_push_invalid_rejected() {
+        // ENABLE_PUSH must be 0 or 1.
+        let mut conn = H2Connection::new();
+        let settings = vec![(SETTINGS_ENABLE_PUSH, 2)];
+        let result = apply_peer_settings(&mut conn, &settings);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_settings_payload_not_multiple_of_six_rejected() {
+        // SETTINGS payload length must be a multiple of 6.
+        let bad_payload = [0u8; 7]; // 7 is not a multiple of 6
+        let result = parse_settings(&bad_payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FRAME_SIZE_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_data_on_stream_zero_rejected() {
+        // DATA frame on stream 0 is a PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 5,
+            frame_type: FRAME_DATA,
+            flags: 0,
+            stream_id: 0,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 5]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_headers_on_even_stream_rejected() {
+        // HEADERS on even stream ID is a PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let encoded = encoder.encode(&headers);
+        let h = FrameHeader {
+            length: encoded.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+            stream_id: 2, // Even!
+        };
+        let result = process_frame(&mut conn, &h, &encoded);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_headers_decreasing_stream_id_rejected() {
+        // New stream ID must be strictly greater than previous.
+        let mut conn = H2Connection::new();
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let encoded = encoder.encode(&headers);
+
+        // First request on stream 3
+        let h1 = FrameHeader {
+            length: encoded.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+            stream_id: 3,
+        };
+        assert!(process_frame(&mut conn, &h1, &encoded).is_ok());
+
+        // Second request on stream 1 (lower!) should fail
+        let encoded2 = encoder.encode(&headers);
+        let h2 = FrameHeader {
+            length: encoded2.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h2, &encoded2);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rst_stream_on_stream_zero_rejected() {
+        // RST_STREAM on stream 0 is a PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 4,
+            frame_type: FRAME_RST_STREAM,
+            flags: 0,
+            stream_id: 0,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 4]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rst_stream_wrong_length_rejected() {
+        // RST_STREAM must be exactly 4 bytes.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 3,
+            frame_type: FRAME_RST_STREAM,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 3]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FRAME_SIZE_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_priority_wrong_length_rejected() {
+        // PRIORITY must be exactly 5 bytes.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 4,
+            frame_type: FRAME_PRIORITY,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 4]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FRAME_SIZE_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_push_promise_rejected() {
+        // PUSH_PROMISE from client is always rejected.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 4,
+            frame_type: FRAME_PUSH_PROMISE,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 4]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ping_wrong_stream_rejected() {
+        // PING on non-zero stream is a PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 8,
+            frame_type: FRAME_PING,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 8]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ping_wrong_length_rejected() {
+        // PING must be exactly 8 bytes.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 7,
+            frame_type: FRAME_PING,
+            flags: 0,
+            stream_id: 0,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 7]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FRAME_SIZE_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_settings_ack_with_payload_rejected() {
+        // SETTINGS ACK with non-zero length is a FRAME_SIZE_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 6,
+            frame_type: FRAME_SETTINGS,
+            flags: FLAG_ACK,
+            stream_id: 0,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 6]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FRAME_SIZE_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_settings_on_non_zero_stream_rejected() {
+        // SETTINGS on non-zero stream is a PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 0,
+            frame_type: FRAME_SETTINGS,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h, &[]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_window_update_zero_increment_connection_rejected() {
+        // WINDOW_UPDATE with zero increment on connection is PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 4,
+            frame_type: FRAME_WINDOW_UPDATE,
+            flags: 0,
+            stream_id: 0,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 4]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_window_update_zero_increment_stream_rejected() {
+        // WINDOW_UPDATE with zero increment on stream is PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 4,
+            frame_type: FRAME_WINDOW_UPDATE,
+            flags: 0,
+            stream_id: 1,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 4]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Stream(_, code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_frame_type_ignored() {
+        // Unknown frame types MUST be ignored (RFC 9113 Section 4.1).
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 10,
+            frame_type: 0xFE, // Unknown type
+            flags: 0,
+            stream_id: 0,
+        };
+        let result = process_frame(&mut conn, &h, &[0u8; 10]);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_headers_padded_exceeds_payload() {
+        // HEADERS with padding length exceeding payload is PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        let h = FrameHeader {
+            length: 3,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_PADDED | FLAG_END_HEADERS | FLAG_END_STREAM,
+            stream_id: 1,
+        };
+        // Padding length byte = 100, but only 2 more bytes available
+        let payload = [100, 0, 0];
+        let result = process_frame(&mut conn, &h, &payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_data_padded_exceeds_payload() {
+        // DATA with padding length exceeding payload is PROTOCOL_ERROR.
+        let mut conn = H2Connection::new();
+        // Create a stream first
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "POST".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+        ];
+        let encoded = encoder.encode(&headers);
+        let hdr = FrameHeader {
+            length: encoded.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS,
+            stream_id: 1,
+        };
+        let _ = process_frame(&mut conn, &hdr, &encoded);
+
+        // Now send DATA with bad padding
+        let data_h = FrameHeader {
+            length: 3,
+            frame_type: FRAME_DATA,
+            flags: FLAG_PADDED,
+            stream_id: 1,
+        };
+        let payload = [100, 0, 0]; // pad_len=100 but only 2 bytes left
+        let result = process_frame(&mut conn, &data_h, &payload);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_PROTOCOL_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hpack_integer_overflow_rejected() {
+        // HPACK integer with too many continuation bytes should be rejected.
+        let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // prefix=0xFF, then 5 continuation bytes
+        let result = decode_integer(&data, 7);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hpack_truncated_string_rejected() {
+        // HPACK string with length exceeding available data should be rejected.
+        let data = [0x0A]; // length=10, but no data follows
+        let result = decode_string(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hpack_index_zero_rejected() {
+        // HPACK index 0 is reserved and must be rejected.
+        let mut decoder = HpackDecoder::new(4096);
+        // 0x80 = indexed header, index = 0 (after stripping the prefix bit)
+        // Actually, 0x80 with 7-bit prefix means value = 0, which is index 0
+        let data = [0x80]; // indexed, index=0
+        let result = decoder.decode(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_connection_preface_too_short() {
+        let data = b"PRI * HTTP/2.0";
+        let mut cursor = std::io::Cursor::new(data.as_slice());
+        let result = validate_connection_preface(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_connection_preface_wrong_content() {
+        let data = b"PRI * HTTP/1.1\r\n\r\nSM\r\n\r\n"; // 1.1 instead of 2.0
+        let mut cursor = std::io::Cursor::new(data.as_slice());
+        let result = validate_connection_preface(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_frame_size_exceeds_max_rejected() {
+        // read_frame should reject frames exceeding max_frame_size.
+        let header = FrameHeader {
+            length: DEFAULT_MAX_FRAME_SIZE + 1,
+            frame_type: FRAME_DATA,
+            flags: 0,
+            stream_id: 1,
+        };
+        let header_bytes = header.serialize();
+        let mut data = Vec::from(header_bytes);
+        data.extend(vec![0u8; (DEFAULT_MAX_FRAME_SIZE + 1) as usize]);
+        let mut cursor = std::io::Cursor::new(data);
+        let result = read_frame(&mut cursor, DEFAULT_MAX_FRAME_SIZE);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            H2Error::Connection(code, _) => {
+                assert_eq!(code, ERROR_FRAME_SIZE_ERROR);
+            }
+            other => panic!("expected Connection error, got {:?}", other),
+        }
     }
 }
