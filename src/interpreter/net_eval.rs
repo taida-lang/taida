@@ -4234,6 +4234,7 @@ impl Interpreter {
         use super::net_h2::*;
 
         let mut total_request_count: i64 = 0;
+        let mut total_connection_count: i64 = 0;
 
         // Accept connections one at a time (serial, single-threaded model).
         // Each connection is fully serviced before accepting the next.
@@ -4309,6 +4310,11 @@ impl Interpreter {
                 continue;
             }
 
+            total_connection_count += 1;
+            // NB6-47: emit connection count to stderr (side channel for benchmarks).
+            // This keeps the public result pack contract clean (@(requests: Int) only).
+            eprintln!("[h2-conn] {}", total_connection_count);
+
             // HTTP/2 connection frame loop.
             // Process frames until the connection is closed or max_requests is reached.
             let conn_result = self.h2_connection_loop(
@@ -4366,6 +4372,10 @@ impl Interpreter {
         use super::net_h2::*;
 
         let mut settings_ack_pending = false;
+        // NB6-38: Reusable buffer for frame reading — avoids per-frame heap allocation
+        // on the hot path. read_frame_reuse() writes into this buffer and returns a
+        // borrowed slice, so no allocation occurs after the initial capacity is reached.
+        let mut frame_buf: Vec<u8> = Vec::with_capacity(16_384);
 
         loop {
             // Check bounded shutdown
@@ -4373,8 +4383,8 @@ impl Interpreter {
                 return Ok(());
             }
 
-            // Read next frame
-            let (header, payload) = match read_frame(stream, h2_conn.local_settings.max_frame_size) {
+            // Read next frame (NB6-38: reuse frame_buf to avoid per-frame heap alloc)
+            let (header, payload) = match read_frame_reuse(stream, h2_conn.local_settings.max_frame_size, &mut frame_buf) {
                 Ok(frame) => frame,
                 Err(H2Error::Io(ref e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof
@@ -4412,17 +4422,17 @@ impl Interpreter {
                 settings_ack_pending = true;
             }
 
-            // Check for PING that needs response
+            // Check for PING that needs response (NB6-38: minimal copy — PING is always 8 bytes)
             let is_ping_needing_ack = header.frame_type == super::net_h2::FRAME_PING
                 && header.flags & super::net_h2::FLAG_ACK == 0;
             let ping_data = if is_ping_needing_ack {
-                Some(payload.clone())
+                Some(payload.to_vec())
             } else {
                 None
             };
 
             // Process frame through the h2 state machine
-            let completed_request = match process_frame(h2_conn, &header, &payload) {
+            let completed_request = match process_frame(h2_conn, &header, payload) {
                 Ok(req) => req,
                 Err(H2Error::Connection(error_code, ref msg)) => {
                     let _ = send_goaway(

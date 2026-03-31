@@ -23910,6 +23910,165 @@ stdout(r.requests)
     );
 }
 
+/// NET6-3b-4 (NB6-25): Native h2 32-stream multiplex benchmark.
+/// Sends 32 requests over a SINGLE TLS+h2 connection using curl --parallel.
+/// This is the NET_DESIGN.md "32-stream multiplex" gate — measures actual h2
+/// multiplexing within one connection, not new-connection-per-request overhead.
+///
+/// Design lock assertion: server-side connection count == 1, proving all 32
+/// streams were multiplexed over a single TLS+h2 connection.
+///
+/// Gated behind RUN_BENCHMARKS=1.
+#[test]
+fn test_net6_3b_native_h2_32_stream_multiplex_benchmark() {
+    if std::env::var("RUN_BENCHMARKS").unwrap_or_default() != "1" {
+        eprintln!("SKIP: set RUN_BENCHMARKS=1 to run h2 benchmarks");
+        return;
+    }
+    if !cc_available() || !openssl_available() || !curl_h2_available() {
+        eprintln!("SKIP: cc/openssl/curl --http2 not available");
+        return;
+    }
+
+    // Check curl --parallel support (curl 7.66+)
+    let curl_ver = Command::new("curl").arg("--help").arg("all").output();
+    let has_parallel = curl_ver.map_or(false, |o| {
+        String::from_utf8_lossy(&o.stdout).contains("--parallel")
+    });
+    if !has_parallel {
+        eprintln!("SKIP: curl --parallel not available (requires curl 7.66+)");
+        return;
+    }
+
+    let cert_path = unique_temp_path("taida_h2_bench_cert", "net6_3b_4", "pem");
+    let key_path = unique_temp_path("taida_h2_bench_key", "net6_3b_4", "pem");
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: cert gen failed");
+        return;
+    }
+
+    const N_STREAMS: u64 = 32;
+    // Server accepts enough requests for the multiplex batch.
+    // NB6-47: connection count is observed via stderr side channel ([h2-conn] N),
+    // not via result pack. Result pack contract: @(requests: Int) only.
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+handler req =
+  @(status <= 200, headers <= @[], body <= "mux-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+asyncResult <= httpServe({port}, handler, {n}, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port, n = N_STREAMS,
+        cert = cert_path.display(), key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "net6_3b_4_mux");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_h2_bench_4", "net6_3b", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build").arg("--target").arg("native")
+        .arg(&td_path).arg("-o").arg(&bin_path)
+        .output().expect("compile net6_3b_4");
+    assert!(compile.status.success(),
+        "NET6-3b-4: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().expect("spawn net6_3b_4 server");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true; break;
+        }
+    }
+    if !ready {
+        let _ = child.kill(); let _ = child.wait();
+        let _ = fs::remove_file(&bin_path);
+        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        panic!("NET6-3b-4: server not ready on port {}", port);
+    }
+
+    // NB6-25: Send 32 requests over a SINGLE h2 connection using curl --parallel.
+    // curl --parallel with multiple URL arguments multiplexes them on one connection.
+    let url = format!("https://127.0.0.1:{}/mux", port);
+    let mut curl_args: Vec<String> = vec![
+        "--http2".into(), "--insecure".into(), "--silent".into(),
+        "--max-time".into(), "15".into(),
+        "--parallel".into(),
+        "--parallel-max".into(), N_STREAMS.to_string(),
+    ];
+    // Add N_STREAMS URL arguments — curl multiplexes these over one connection
+    for _ in 0..N_STREAMS {
+        curl_args.push("-o".into());
+        curl_args.push("/dev/null".into());
+        curl_args.push("-w".into());
+        curl_args.push("%{http_version}:%{http_code}\\n".into());
+        curl_args.push(url.clone());
+    }
+
+    let t_start = std::time::Instant::now();
+    let curl_out = Command::new("curl")
+        .args(&curl_args)
+        .output();
+    let elapsed_ms = t_start.elapsed().as_millis() as u64;
+
+    let server_out = child.wait_with_output().expect("wait net6_3b_4");
+    let _ = fs::remove_file(&bin_path);
+    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    let ok_count = curl_out.as_ref().map_or(0u64, |o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.starts_with("2:2"))
+            .count() as u64
+    });
+
+    // Parse server stdout: single line — request count.
+    let raw_out = normalize(&String::from_utf8_lossy(&server_out.stdout));
+    let server_requests: u64 = raw_out.trim().lines().next()
+        .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    // NB6-47: Parse connection count from stderr side channel ([h2-conn] N lines).
+    let stderr_str = String::from_utf8_lossy(&server_out.stderr);
+    let server_connections: u64 = stderr_str.lines()
+        .filter_map(|l| l.strip_prefix("[h2-conn] "))
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+        .last()
+        .unwrap_or(0);
+
+    let req_per_s = if elapsed_ms > 0 { ok_count * 1000 / elapsed_ms } else { 0 };
+
+    eprintln!(
+        "NET6-3b-4 [native h2 32-stream MULTIPLEX] ok={}/{} req/s={} total={}ms \
+         | connections={} | server_requests={} \
+         | Design gate: 32-stream multiplex over single TLS+h2 connection",
+        ok_count, N_STREAMS, req_per_s, elapsed_ms, server_connections, server_requests
+    );
+
+    // NB6-25 fail-fast: all three assertions must pass
+    assert!(
+        ok_count >= N_STREAMS * 80 / 100,
+        "NET6-3b-4: expected >=80% success rate for multiplex, got {}/{}", ok_count, N_STREAMS
+    );
+    assert_eq!(
+        server_requests, N_STREAMS as u64,
+        "NET6-3b-4: expected {} requests on server, got {}", N_STREAMS, server_requests
+    );
+    assert_eq!(
+        server_connections, 1,
+        "NET6-3b-4 (NB6-25 design lock): expected 1 connection (single TLS+h2), got {}. \
+         All {} streams must be multiplexed over a single connection.",
+        server_connections, N_STREAMS
+    );
+}
+
 // ── Phase 4: JS Compatibility Backend ──────────────────────────────
 
 // NET6-4a-1: JS h1 basic serve works end-to-end after v6 scatter-gather changes.
@@ -24613,47 +24772,74 @@ fn test_net6_5b_native_h2_hardening_present() {
 
 #[test]
 fn test_net6_5b_wasm_compile_error_policy() {
-    // WASM policy: httpServe should produce compile errors on all 4 WASM profiles.
-    // This is verified by the existing WASM tests but we add an explicit check.
-    let source = std::fs::read_to_string("src/codegen/emit_wasm_c.rs")
-        .expect("read emit_wasm_c.rs");
-    // The WASM emitter should block net functions
-    assert!(
-        source.contains("httpServe") || source.contains("net"),
-        "NET6-5b audit: WASM emitter should reference net/httpServe for compile error policy"
-    );
+    // NB6-23: WASM policy verified via actual compilation, not source scan.
+    // httpServe with h2 protocol must produce compile errors on all 4 WASM profiles.
+    // This is the Phase 5b release gate for WASM policy compliance.
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h2-wasm-test")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+httpServe(8080, handler, 1, 1000, 128, @(cert <= "c.pem", key <= "k.pem", protocol <= "h2")) ]=> serverResult
+stdout(serverResult.ok)
+"#;
+
+    for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
+        let td_path = std::env::temp_dir().join(format!("taida_net6_5b_wasm_policy_{}.td", profile));
+        let wasm_path = std::env::temp_dir().join(format!("taida_net6_5b_wasm_policy_{}.wasm", profile));
+        std::fs::write(&td_path, source).expect("write test .td");
+
+        let output = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg(profile)
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run taida build");
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "NET6-5b WASM policy: {} should reject httpServe(h2), but compile succeeded.\nstderr: {}",
+            profile,
+            stderr
+        );
+        assert!(
+            stderr.contains("httpServe") || stderr.contains("net"),
+            "NET6-5b WASM policy: {} compile error should mention httpServe or net.\nstderr: {}",
+            profile,
+            stderr
+        );
+    }
 }
 
 #[test]
 fn test_net6_5b_release_gate_v6_test_counts() {
-    // Release gate: verify minimum test counts for v6.
-    // This test documents the expected test coverage and fails if coverage drops.
+    // NB6-23: Release gate verified via `cargo test --list`, not source scan.
+    // Ensures key v6 regression tests are discoverable by the test runner.
     //
-    // Phase 1: 11 parity tests (scatter-gather + protocol + compat + NB6-10)
-    // Phase 2: unit tests in net_h2.rs (covered by cargo test --lib)
-    // Phase 3: 6 tests (3 integration + 3 benchmark)
-    // Phase 4: 5 tests (2 h1 + 3 h2 unsupported)
-    // Phase 5a: 1 parity test + 40 unit tests in net_h2.rs
-    // Phase 5b: 10 audit tests
-    //
-    // Total parity-level v6 tests: 11 + 6 + 5 + 1 + 10 = 33
-    // Total net_h2 unit tests: 91
+    // Phase 1: scatter-gather + protocol + compat + NB6-10
+    // Phase 3: integration + benchmark
+    // Phase 4: JS h1 + h2 unsupported
+    // Phase 5a: h2 TLS rejection
+    // Phase 5b: audit tests + this gate
 
-    // Verify net_h2.rs unit test count by counting test functions
-    let h2_source = std::fs::read_to_string("src/interpreter/net_h2.rs")
-        .expect("read net_h2.rs");
-    let h2_test_count = h2_source.matches("fn test_").count();
-    assert!(
-        h2_test_count >= 91,
-        "NET6-5b release gate: expected >= 91 unit tests in net_h2.rs, found {}",
-        h2_test_count
-    );
+    // Use `cargo test --list` to discover actual test names in the binary
+    let list_output = Command::new("cargo")
+        .args(&["test", "--test", "parity", "--", "--list"])
+        .output()
+        .expect("cargo test --list failed");
 
-    // Verify that key v6 test functions exist in this file
-    let parity_source = std::fs::read_to_string("tests/parity.rs")
-        .expect("read parity.rs");
+    let test_list = String::from_utf8_lossy(&list_output.stdout);
 
-    let v6_test_names = [
+    // Key v6 regression tests that MUST exist in the compiled test binary
+    let v6_required_tests = [
         "test_net6_1a_scatter_gather_basic_3way_parity",
         "test_net6_1b_h2_protocol_rejected_3way_parity",
         "test_net6_1c_large_body_scatter_gather_3way_parity",
@@ -24663,14 +24849,31 @@ fn test_net6_5b_release_gate_v6_test_counts() {
         "test_net6_5a_h2_no_tls_rejected_all_backends",
         "test_net6_5b_scatter_gather_is_default_send_path",
         "test_net6_5b_release_gate_v6_test_counts",
+        "test_net6_5b_wasm_compile_error_policy",
     ];
-    for name in &v6_test_names {
+    for name in &v6_required_tests {
         assert!(
-            parity_source.contains(name),
-            "NET6-5b release gate: required test '{}' not found in parity.rs",
+            test_list.contains(name),
+            "NET6-5b release gate: required test '{}' not found in `cargo test --list` output",
             name
         );
     }
+
+    // Verify net_h2 unit tests exist via cargo test --lib --list
+    let lib_list_output = Command::new("cargo")
+        .args(&["test", "--lib", "--", "--list", "net_h2"])
+        .output()
+        .expect("cargo test --lib --list failed");
+
+    let lib_test_list = String::from_utf8_lossy(&lib_list_output.stdout);
+    let h2_test_count = lib_test_list.lines()
+        .filter(|line| line.contains("net_h2") && line.ends_with(": test"))
+        .count();
+    assert!(
+        h2_test_count >= 91,
+        "NET6-5b release gate: expected >= 91 net_h2 unit tests in `cargo test --lib --list`, found {}",
+        h2_test_count
+    );
 }
 
 // ── NB6 Blocker Fix Verification Tests ──────────────────────────────────────
@@ -24917,5 +25120,235 @@ fn test_nb6_37_native_dyntable_strdup_check() {
     assert!(
         insert_section.contains("!dup_name || !dup_value"),
         "NB6-37: h2_dyntable_insert must check strdup return values for NULL"
+    );
+}
+
+/// NB6-44: h2 POST-with-body parity test.
+///
+/// Tests POST request handling over HTTP/2 with TLS (Interpreter reference).
+/// Verifies that HEADERS(no END_STREAM) + DATA(END_STREAM) sequence is handled
+/// correctly, returning the request method in the response body.
+#[test]
+fn test_nb6_44_h2_post_body_interp_verified() {
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    // --- Interpreter POST verification (must pass) ---
+    let cert_path = unique_temp_path("taida_h2_post_cert", "nb6_44_interp", "pem");
+    let key_path = unique_temp_path("taida_h2_post_key", "nb6_44_interp", "pem");
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: cert gen failed");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= req.method)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "nb6_44_post_interp");
+    let td_path = dir.join("main.td");
+
+    let mut child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn interp h2 server");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        panic!("NB6-44 interp: server not ready on port {}", port);
+    }
+
+    let curl_out = Command::new("curl")
+        .args(&[
+            "--http2",
+            "--insecure",
+            "--silent",
+            "--max-time", "5",
+            "--data", "{\"key\":\"value\"}",
+            "-H", "Content-Type: application/json",
+            &format!("https://127.0.0.1:{}/post-test", port),
+        ])
+        .output()
+        .expect("curl POST request");
+
+    let server_out = child.wait_with_output().expect("wait for interp server");
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    let interp_body = String::from_utf8_lossy(&curl_out.stdout).to_string();
+    let interp_count = normalize(&String::from_utf8_lossy(&server_out.stdout));
+
+    assert!(
+        interp_body.contains("POST"),
+        "NB6-44 interp: expected 'POST' in response body, got: {:?}",
+        interp_body
+    );
+    assert_eq!(
+        interp_count.trim(), "1",
+        "NB6-44 interp: expected '1' request count, got: {:?}",
+        interp_count
+    );
+}
+
+/// NB6-44: Native h2 POST-with-body parity test (fail-fast).
+/// The native h2 backend MUST handle POST requests with a body identically to
+/// the Interpreter: HEADERS(no END_STREAM) + DATA(END_STREAM) -> handler dispatch.
+/// This test asserts HTTP/2 200, correct response body, and request count == 1.
+#[test]
+fn test_nb6_44_native_h2_post_body_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    let cert_path = unique_temp_path("taida_h2_post_cert", "nb6_44_native", "pem");
+    let key_path = unique_temp_path("taida_h2_post_key", "nb6_44_native", "pem");
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: cert gen failed");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= req.method)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "nb6_44_post_native");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_h2_post_native", &format!("{}", port), "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    assert!(
+        compile.status.success(),
+        "NB6-44 native compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn native h2");
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(&bin_path);
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        panic!("NB6-44 native: server not ready on port {}", port);
+    }
+
+    // Send POST with curl — capture both body and status metadata
+    let curl_out = Command::new("curl")
+        .args(&[
+            "--http2",
+            "--insecure",
+            "--silent",
+            "--max-time", "5",
+            "--data", "{\"key\":\"value\"}",
+            "-H", "Content-Type: application/json",
+            &format!("https://127.0.0.1:{}/post-test", port),
+        ])
+        .output()
+        .expect("curl POST request");
+
+    let server_out = child.wait_with_output().expect("wait for native server");
+    let _ = fs::remove_file(&bin_path);
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    let response_body = String::from_utf8_lossy(&curl_out.stdout).to_string();
+    let server_stdout = normalize(&String::from_utf8_lossy(&server_out.stdout));
+
+    // NB6-44 fail-fast: all three assertions must pass
+    assert!(
+        curl_out.status.success(),
+        "NB6-44 native: curl failed with exit code {:?}",
+        curl_out.status.code()
+    );
+    assert!(
+        response_body.contains("POST"),
+        "NB6-44 native: expected 'POST' in response body, got: {:?}",
+        response_body
+    );
+    assert_eq!(
+        server_stdout.trim(), "1",
+        "NB6-44 native: expected '1' request count, got: {:?}",
+        server_stdout
     );
 }

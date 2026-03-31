@@ -1188,6 +1188,9 @@ pub(crate) fn validate_connection_preface<R: Read>(reader: &mut R) -> Result<(),
 
 /// Read a single HTTP/2 frame (header + payload) from the stream.
 /// Returns (FrameHeader, payload_bytes).
+/// Note: Production hot path uses read_frame_reuse() instead (NB6-38).
+/// This allocating variant is retained for unit tests.
+#[allow(dead_code)]
 pub(crate) fn read_frame<R: Read>(
     reader: &mut R,
     max_frame_size: u32,
@@ -1215,7 +1218,7 @@ pub(crate) fn read_frame<R: Read>(
 }
 
 /// NB6-38: Read an HTTP/2 frame reusing the provided buffer to avoid per-frame heap alloc.
-#[allow(dead_code)]
+/// Used by h2_connection_loop() on the hot path instead of read_frame() which allocates per frame.
 pub(crate) fn read_frame_reuse<'a, R: Read>(
     reader: &mut R,
     max_frame_size: u32,

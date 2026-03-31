@@ -13844,15 +13844,23 @@ static int h2_huffman_decode(const unsigned char *src, size_t src_len,
         bits_left += 8;
 
         while (bits_left >= 5) {
-            // Fast path: try 8-bit LUT if we have at least 8 bits
-            if (bits_left >= 8) {
-                uint8_t prefix = (uint8_t)(bits >> (bits_left - 8));
+            // Fast path: try 8-bit LUT.
+            // When bits_left >= 8, extract the top 8 bits directly.
+            // When 5 <= bits_left < 8, left-shift to form an 8-bit prefix
+            // and check that the matched code fits within bits_left.
+            {
+                uint8_t prefix;
+                if (bits_left >= 8) {
+                    prefix = (uint8_t)(bits >> (bits_left - 8));
+                } else {
+                    prefix = (uint8_t)(bits << (8 - bits_left));
+                }
                 H2HuffLookup *entry = &h2_huff_lut[prefix];
-                if (entry->bits > 0) {
+                if (entry->bits > 0 && entry->bits <= bits_left) {
                     if (out >= (int)dst_cap) return -1;
                     dst[out++] = entry->sym;
                     bits_left -= entry->bits;
-                    bits &= ((uint64_t)1 << bits_left) - 1;
+                    bits &= bits_left ? (((uint64_t)1 << bits_left) - 1) : 0;
                     continue;
                 }
             }
@@ -15316,27 +15324,31 @@ h2_conn_done:
     free(connp);
 }
 
+typedef struct { int64_t requests; } H2ServeResult;
+
 // ── taida_net_h2_serve ─────────────────────────────────────────────────────
 // Full HTTP/2 server loop: bind → accept → TLS handshake → ALPN check → serve.
-// max_requests=0 means unlimited. Returns total request count.
-static int64_t taida_net_h2_serve(int port, taida_val handler, int handler_arity,
-                                   int64_t max_requests, int64_t timeout_ms,
-                                   const char *cert_path, const char *key_path) {
+// max_requests=0 means unlimited. Returns request count and connection count.
+static H2ServeResult taida_net_h2_serve(int port, taida_val handler, int handler_arity,
+                                         int64_t max_requests, int64_t timeout_ms,
+                                         const char *cert_path, const char *key_path) {
+    H2ServeResult fail_result = {-1};
+
     // Load OpenSSL (required for h2 — h2c is out of scope)
     if (!taida_ossl_load()) {
-        return -1;
+        return fail_result;
     }
 
     // Create TLS context with ALPN h2 / http/1.1
     char errbuf[512];
     OSSL_SSL_CTX *ssl_ctx = taida_tls_create_ctx_h2(cert_path, key_path, errbuf, sizeof(errbuf));
     if (!ssl_ctx) {
-        return -1;
+        return fail_result;
     }
 
     // Bind to 127.0.0.1:port
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) { taida_ossl.SSL_CTX_free(ssl_ctx); return -1; }
+    if (sockfd < 0) { taida_ossl.SSL_CTX_free(ssl_ctx); return fail_result; }
     int opt = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     struct sockaddr_in addr;
@@ -15345,13 +15357,14 @@ static int64_t taida_net_h2_serve(int port, taida_val handler, int handler_arity
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     addr.sin_port = htons((unsigned short)port);
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(sockfd); taida_ossl.SSL_CTX_free(ssl_ctx); return -1;
+        close(sockfd); taida_ossl.SSL_CTX_free(ssl_ctx); return fail_result;
     }
     if (listen(sockfd, 128) < 0) {
-        close(sockfd); taida_ossl.SSL_CTX_free(ssl_ctx); return -1;
+        close(sockfd); taida_ossl.SSL_CTX_free(ssl_ctx); return fail_result;
     }
 
     int64_t request_count = 0;
+    int64_t connection_count = 0;
     signal(SIGPIPE, SIG_IGN);
 
     while (max_requests == 0 || request_count < max_requests) {
@@ -15402,6 +15415,11 @@ static int64_t taida_net_h2_serve(int port, taida_val handler, int handler_arity
             close(client_fd);
             continue;
         }
+
+        connection_count++;
+        // NB6-47: emit connection count to stderr (side channel for benchmarks).
+        // This keeps the public result pack contract clean (@(requests: Int) only).
+        fprintf(stderr, "[h2-conn] %lld\n", (long long)connection_count);
 
         // Set TLS for this connection's I/O
         tl_ssl = ssl;
@@ -15456,7 +15474,8 @@ static int64_t taida_net_h2_serve(int port, taida_val handler, int handler_arity
 
     close(sockfd);
     taida_ossl.SSL_CTX_free(ssl_ctx);
-    return request_count;
+    H2ServeResult ok_result = {request_count};
+    return ok_result;
 }
 
 // ── httpServe(port, handler, maxRequests, timeoutMs, maxConnections) ──
@@ -15603,11 +15622,11 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             // taida_net_h2_serve creates its own h2-specific ssl_ctx via taida_tls_create_ctx_h2.
             // Free the h1 ssl_ctx before delegating to h2 serve.
             if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); ssl_ctx = NULL; }
-            int64_t h2_requests = taida_net_h2_serve(
+            H2ServeResult h2_result = taida_net_h2_serve(
                 (int)port, handler, (int)handler_arity,
                 max_requests, timeout_ms,
                 h2_cert_path, h2_key_path);
-            if (h2_requests < 0) {
+            if (h2_result.requests < 0) {
                 return taida_async_resolved(taida_net_result_fail("H2ServeError",
                     "httpServe: HTTP/2 server failed to start. "
                     "Check cert/key paths and OpenSSL availability."));
@@ -15617,7 +15636,8 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             taida_pack_set(h2_inner, 0, 1);
             taida_pack_set_tag(h2_inner, 0, TAIDA_TAG_BOOL);
             taida_pack_set_hash(h2_inner, 1, taida_str_hash((taida_val)"requests"));
-            taida_pack_set(h2_inner, 1, (taida_val)h2_requests);
+            taida_pack_set(h2_inner, 1, (taida_val)h2_result.requests);
+            taida_pack_set_tag(h2_inner, 1, TAIDA_TAG_INT);
             return taida_async_resolved(taida_net_result_ok(h2_inner));
         } else {
             if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
