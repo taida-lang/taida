@@ -3908,43 +3908,47 @@ impl Interpreter {
             }
         }
 
-        // v6 NET6-1b: Protocol validation.
-        // HTTP/2 is opt-in. If protocol="h2" is requested, reject until Phase 2 implements it.
-        // Unknown protocol values are rejected immediately.
-        if let Some(ref proto) = requested_protocol {
-            match proto.as_str() {
-                "h1.1" | "http/1.1" => {
-                    // Explicit HTTP/1.1 — same as default, no action needed.
-                }
-                "h2" => {
-                    // v6 NET6-1b: HTTP/2 not yet implemented in Interpreter.
-                    // Phase 2 (NET6-2a) will unlock this path.
-                    let result = make_result_failure_msg(
-                        "H2NotYetImplemented",
-                        "httpServe: HTTP/2 (protocol: \"h2\") is not yet implemented. \
-                         It will be available in a future release.",
-                    );
-                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
-                }
-                other => {
+        // v6 NET6-1b / NET6-2a: Protocol validation.
+        // HTTP/2 is opt-in. Unknown protocol values are rejected immediately.
+        let is_h2 = match requested_protocol.as_deref() {
+            Some("h1.1") | Some("http/1.1") => false, // Explicit HTTP/1.1
+            Some("h2") => {
+                // v6 NET6-2a: HTTP/2 requires TLS (h2c is out of scope).
+                if tls_cert_path.is_none() || tls_key_path.is_none() {
                     let result = make_result_failure_msg(
                         "ProtocolError",
-                        format!(
-                            "httpServe: unknown protocol \"{}\". \
-                             Supported values: \"h1.1\", \"h2\"",
-                            other
-                        ),
+                        "httpServe: HTTP/2 (protocol: \"h2\") requires TLS (cert + key). \
+                         Cleartext HTTP/2 (h2c) is not supported.",
                     );
                     return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                 }
+                true
             }
-        }
+            Some(other) => {
+                let result = make_result_failure_msg(
+                    "ProtocolError",
+                    format!(
+                        "httpServe: unknown protocol \"{}\". \
+                         Supported values: \"h1.1\", \"h2\"",
+                        other
+                    ),
+                );
+                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            }
+            None => false,
+        };
 
-        // v5: Load TLS config if cert/key provided (NET5-2a).
+        // v5/v6: Load TLS config if cert/key provided.
+        // NET6-2a: If h2 is requested, use ALPN-enabled config.
         let tls_config: Option<std::sync::Arc<rustls::ServerConfig>> =
             match (tls_cert_path.as_deref(), tls_key_path.as_deref()) {
                 (Some(cert), Some(key)) => {
-                    match super::net_transport::load_tls_config(cert, key) {
+                    let load_result = if is_h2 {
+                        super::net_transport::load_tls_config_h2(cert, key)
+                    } else {
+                        super::net_transport::load_tls_config(cert, key)
+                    };
+                    match load_result {
                         Ok(config) => Some(config),
                         Err(msg) => {
                             // cert/key load failure → startup Result failure (NET5-0c).
@@ -3979,6 +3983,19 @@ impl Interpreter {
         })?;
 
         let read_timeout = std::time::Duration::from_millis(timeout_ms);
+
+        // ── NET6-2a: HTTP/2 serve loop (Interpreter reference implementation) ──
+        if is_h2 {
+            return self.serve_h2(
+                listener,
+                tls_config.expect("h2 requires TLS"),
+                handler,
+                max_requests,
+                max_connections,
+                read_timeout,
+            );
+        }
+
         // Short poll timeout for non-blocking read attempts on connections.
         // This controls how quickly we cycle through the connection pool.
         let poll_timeout = std::time::Duration::from_millis(10);
@@ -4192,6 +4209,495 @@ impl Interpreter {
         ]);
         let result = make_result_success(result_inner);
         Ok(Some(Signal::Value(make_fulfilled_async(result))))
+    }
+
+    /// NET6-2a/2b/2c: HTTP/2 serve loop (Interpreter reference implementation).
+    ///
+    /// Accepts TLS connections with ALPN h2 negotiation, validates the HTTP/2
+    /// connection preface, then enters a frame-level protocol loop that:
+    /// - Receives HEADERS/DATA frames and dispatches complete requests to the handler
+    /// - Sends HPACK-encoded response HEADERS + DATA frames
+    /// - Handles SETTINGS, PING, WINDOW_UPDATE, GOAWAY, RST_STREAM
+    /// - Respects connection/stream flow control windows
+    ///
+    /// Design: serial handler dispatch (consistent with h1 path), but with
+    /// stream multiplexing at the frame level within each connection.
+    fn serve_h2(
+        &mut self,
+        listener: std::net::TcpListener,
+        tls_config: std::sync::Arc<rustls::ServerConfig>,
+        handler: super::value::FuncValue,
+        max_requests: i64,
+        _max_connections: usize,
+        read_timeout: std::time::Duration,
+    ) -> Result<Option<Signal>, RuntimeError> {
+        use super::net_h2::*;
+
+        let mut total_request_count: i64 = 0;
+
+        // Accept connections one at a time (serial, single-threaded model).
+        // Each connection is fully serviced before accepting the next.
+        // This is consistent with the Interpreter's blocking model while
+        // supporting stream multiplexing within each connection.
+        loop {
+            if max_requests > 0 && total_request_count >= max_requests {
+                break;
+            }
+
+            // Accept new connection (blocking).
+            listener.set_nonblocking(false).map_err(|e| RuntimeError {
+                message: format!("httpServe h2: failed to set blocking: {}", e),
+            })?;
+            let _ = listener.set_nonblocking(false);
+            let (tcp_stream, peer_addr) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let result = make_result_failure_msg(
+                        "AcceptError",
+                        format!("httpServe h2: accept failed: {}", e),
+                    );
+                    return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+                }
+            };
+
+            // TLS handshake with ALPN.
+            let _ = tcp_stream.set_nonblocking(false);
+            let _ = tcp_stream.set_read_timeout(Some(read_timeout));
+            let _ = tcp_stream.set_write_timeout(Some(read_timeout));
+
+            let tls_conn = match rustls::ServerConnection::new(tls_config.clone()) {
+                Ok(c) => c,
+                Err(_) => continue, // TLS setup error, skip connection
+            };
+            let mut tls_transport =
+                super::net_transport::TlsTransport::new(tls_conn, tcp_stream);
+            match super::net_transport::complete_tls_handshake(
+                &mut tls_transport,
+                read_timeout,
+            ) {
+                Ok(()) => {}
+                Err(_) => continue, // Handshake failure, skip connection
+            }
+
+            // Check ALPN negotiation result.
+            let alpn = tls_transport.alpn_protocol();
+            match alpn {
+                Some(b"h2") => {} // HTTP/2 negotiated — proceed
+                Some(b"http/1.1") | None => {
+                    // Client didn't negotiate h2. Since protocol="h2" was explicitly
+                    // requested, we don't fallback. Close the connection.
+                    // This is the "no silent fallback" policy from NET_DESIGN.md.
+                    continue;
+                }
+                Some(_) => continue, // Unknown ALPN protocol
+            }
+
+            // Read/write through a transport wrapper that implements Read+Write.
+            let mut conn_stream = ConnStream::Tls(Box::new(tls_transport));
+            let _ = conn_stream.set_read_timeout(Some(read_timeout));
+
+            // Validate HTTP/2 connection preface from client.
+            if let Err(_e) = validate_connection_preface(&mut conn_stream) {
+                continue; // Invalid preface, close connection
+            }
+
+            // Initialize HTTP/2 connection state.
+            let mut h2_conn = H2Connection::new();
+
+            // Send our server SETTINGS frame.
+            if let Err(_e) = send_settings(&mut conn_stream, &h2_conn.local_settings) {
+                continue;
+            }
+
+            // HTTP/2 connection frame loop.
+            // Process frames until the connection is closed or max_requests is reached.
+            let conn_result = self.h2_connection_loop(
+                &mut conn_stream,
+                &mut h2_conn,
+                &handler,
+                &peer_addr,
+                max_requests,
+                &mut total_request_count,
+            );
+
+            // Send GOAWAY on graceful shutdown.
+            if !h2_conn.goaway_sent {
+                let _ = send_goaway(
+                    &mut conn_stream,
+                    h2_conn.last_peer_stream_id,
+                    0, // NO_ERROR
+                    b"",
+                );
+            }
+
+            if let Err(e) = conn_result {
+                // Connection-level error — already handled via GOAWAY.
+                // Log for debugging but don't propagate.
+                let _ = e; // Suppress unused warning
+            }
+
+            // Check if we should stop accepting connections
+            if max_requests > 0 && total_request_count >= max_requests {
+                break;
+            }
+        }
+
+        let result_inner = Value::BuchiPack(vec![
+            ("ok".into(), Value::Bool(true)),
+            ("requests".into(), Value::Int(total_request_count)),
+        ]);
+        let result = make_result_success(result_inner);
+        Ok(Some(Signal::Value(make_fulfilled_async(result))))
+    }
+
+    /// HTTP/2 connection-level frame processing loop.
+    ///
+    /// Reads frames, processes them through the h2 state machine, and dispatches
+    /// complete requests to the handler. Responses are sent as HEADERS + DATA frames.
+    fn h2_connection_loop(
+        &mut self,
+        stream: &mut ConnStream,
+        h2_conn: &mut super::net_h2::H2Connection,
+        handler: &super::value::FuncValue,
+        peer_addr: &std::net::SocketAddr,
+        max_requests: i64,
+        total_request_count: &mut i64,
+    ) -> Result<(), RuntimeError> {
+        use super::net_h2::*;
+
+        let mut settings_ack_pending = false;
+
+        loop {
+            // Check bounded shutdown
+            if max_requests > 0 && *total_request_count >= max_requests {
+                return Ok(());
+            }
+
+            // Read next frame
+            let (header, payload) = match read_frame(stream, h2_conn.local_settings.max_frame_size) {
+                Ok(frame) => frame,
+                Err(H2Error::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+                        || e.kind() == std::io::ErrorKind::ConnectionReset
+                        || e.kind() == std::io::ErrorKind::BrokenPipe =>
+                {
+                    // Clean connection close
+                    return Ok(());
+                }
+                Err(H2Error::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Timeout — close connection
+                    return Ok(());
+                }
+                Err(H2Error::Connection(error_code, ref msg)) => {
+                    // Protocol error — send GOAWAY and close
+                    let _ = send_goaway(
+                        stream,
+                        h2_conn.last_peer_stream_id,
+                        error_code,
+                        msg.as_bytes(),
+                    );
+                    h2_conn.goaway_sent = true;
+                    return Ok(());
+                }
+                Err(_) => return Ok(()),
+            };
+
+            // Check if we need to send SETTINGS ACK after receiving client's SETTINGS
+            if header.frame_type == super::net_h2::FRAME_SETTINGS
+                && header.flags & super::net_h2::FLAG_ACK == 0
+            {
+                settings_ack_pending = true;
+            }
+
+            // Check for PING that needs response
+            let is_ping_needing_ack = header.frame_type == super::net_h2::FRAME_PING
+                && header.flags & super::net_h2::FLAG_ACK == 0;
+            let ping_data = if is_ping_needing_ack {
+                Some(payload.clone())
+            } else {
+                None
+            };
+
+            // Process frame through the h2 state machine
+            let completed_request = match process_frame(h2_conn, &header, &payload) {
+                Ok(req) => req,
+                Err(H2Error::Connection(error_code, ref msg)) => {
+                    let _ = send_goaway(
+                        stream,
+                        h2_conn.last_peer_stream_id,
+                        error_code,
+                        msg.as_bytes(),
+                    );
+                    h2_conn.goaway_sent = true;
+                    return Ok(());
+                }
+                Err(H2Error::Stream(stream_id, error_code, _)) => {
+                    let _ = send_rst_stream(stream, stream_id, error_code);
+                    continue;
+                }
+                Err(H2Error::Compression(ref msg)) => {
+                    let _ = send_goaway(
+                        stream,
+                        h2_conn.last_peer_stream_id,
+                        0x9, // COMPRESSION_ERROR
+                        msg.as_bytes(),
+                    );
+                    h2_conn.goaway_sent = true;
+                    return Ok(());
+                }
+                Err(H2Error::Io(_)) => return Ok(()),
+            };
+
+            // Send SETTINGS ACK if needed
+            if settings_ack_pending {
+                if send_settings_ack(stream).is_err() {
+                    return Ok(());
+                }
+                settings_ack_pending = false;
+            }
+
+            // Send PING ACK if needed
+            if ping_data.as_ref().is_some_and(|data| send_ping_ack(stream, data).is_err()) {
+                return Ok(());
+            }
+
+            // If a request is complete, dispatch to handler
+            if let Some((stream_id, h2_headers, body)) = completed_request {
+                // Send WINDOW_UPDATE for connection and stream to replenish receive window
+                let data_received = body.len() as u32;
+                if data_received > 0 {
+                    let _ = send_window_update(stream, 0, data_received);
+                    let _ = send_window_update(stream, stream_id, data_received);
+                    h2_conn.conn_recv_window += data_received as i64;
+                    if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
+                        s.recv_window += data_received as i64;
+                    }
+                }
+
+                // Convert h2 pseudo-headers + headers into request pack
+                let (method, path, authority, regular_headers) =
+                    match extract_request_fields(&h2_headers) {
+                        Ok(fields) => fields,
+                        Err(_) => {
+                            let _ = send_rst_stream(stream, stream_id, 0x1); // PROTOCOL_ERROR
+                            continue;
+                        }
+                    };
+
+                // Parse query from path
+                let (path_part, query_part) = match path.find('?') {
+                    Some(pos) => (&path[..pos], &path[pos + 1..]),
+                    None => (path.as_str(), ""),
+                };
+
+                // Build request pack for handler (h2 requests use 1-arg handler path).
+                let mut request_fields: Vec<(String, Value)> = vec![
+                    ("method".into(), Value::Str(method)),
+                    ("path".into(), Value::Str(path_part.to_string())),
+                    ("query".into(), Value::Str(query_part.to_string())),
+                    (
+                        "version".into(),
+                        Value::BuchiPack(vec![
+                            ("major".into(), Value::Int(2)),
+                            ("minor".into(), Value::Int(0)),
+                        ]),
+                    ),
+                ];
+
+                // Convert h2 headers to the same format as h1
+                let mut header_values: Vec<Value> = Vec::new();
+                for (name, value) in &regular_headers {
+                    header_values.push(Value::BuchiPack(vec![
+                        ("name".into(), Value::Str(name.clone())),
+                        ("value".into(), Value::Str(value.clone())),
+                    ]));
+                }
+                // Add :authority as host header for compatibility
+                if !authority.is_empty() {
+                    header_values.push(Value::BuchiPack(vec![
+                        ("name".into(), Value::Str("host".into())),
+                        ("value".into(), Value::Str(authority.clone())),
+                    ]));
+                }
+                request_fields.push(("headers".into(), Value::List(header_values)));
+
+                // Body
+                let raw_len = body.len();
+                request_fields.push(("body".into(), make_span(0, raw_len)));
+                request_fields.push(("bodyOffset".into(), Value::Int(0)));
+                request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
+                request_fields.push(("raw".into(), Value::Bytes(body)));
+                request_fields.push((
+                    "remoteHost".into(),
+                    Value::Str(peer_addr.ip().to_string()),
+                ));
+                request_fields.push((
+                    "remotePort".into(),
+                    Value::Int(peer_addr.port() as i64),
+                ));
+                request_fields.push(("keepAlive".into(), Value::Bool(true)));
+                request_fields.push(("chunked".into(), Value::Bool(false)));
+                request_fields.push(("protocol".into(), Value::Str("h2".into())));
+
+                let request_pack = Value::BuchiPack(request_fields);
+
+                // Call handler with request pack (1-arg path for h2).
+                let handler_result =
+                    self.call_function_with_values(handler, &[request_pack]);
+
+                *total_request_count += 1;
+                h2_conn.request_count += 1;
+
+                // Extract response from handler result
+                match handler_result {
+                    Ok(response) => {
+                        // Send h2 response
+                        if self.send_h2_response(
+                            stream,
+                            h2_conn,
+                            stream_id,
+                            &response,
+                        ).is_err() {
+                            // Write error — close connection
+                            return Ok(());
+                        }
+                    }
+                    Err(_) => {
+                        // Handler error — send 500
+                        let _ = send_response_headers(
+                            stream,
+                            &mut h2_conn.encoder,
+                            stream_id,
+                            500,
+                            &[],
+                            true,
+                            h2_conn.peer_settings.max_frame_size,
+                        );
+                    }
+                }
+
+                // Mark stream as closed
+                if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
+                    s.state = super::net_h2::StreamState::Closed;
+                }
+
+                // Clean up closed streams to prevent unbounded growth
+                h2_conn.streams.retain(|_, s| s.state != super::net_h2::StreamState::Closed);
+            }
+        }
+    }
+
+    /// Send an HTTP/2 response (HEADERS + DATA frames) for a completed request.
+    fn send_h2_response(
+        &self,
+        stream: &mut ConnStream,
+        h2_conn: &mut super::net_h2::H2Connection,
+        stream_id: u32,
+        response: &Value,
+    ) -> Result<(), RuntimeError> {
+        use super::net_h2::*;
+
+        let (status, headers, body_bytes) = match extract_response_fields(response) {
+            Ok(fields) => fields,
+            Err(msg) => {
+                // Invalid response — send 500
+                let _ = send_response_headers(
+                    stream,
+                    &mut h2_conn.encoder,
+                    stream_id,
+                    500,
+                    &[],
+                    true,
+                    h2_conn.peer_settings.max_frame_size,
+                );
+                return Err(RuntimeError {
+                    message: format!("httpServe h2: {}", msg),
+                });
+            }
+        };
+
+        let no_body = (100..200).contains(&status) || status == 204 || status == 205 || status == 304;
+
+        if no_body || body_bytes.is_empty() {
+            // Headers only, END_STREAM on HEADERS frame
+            if let Err(e) = send_response_headers(
+                stream,
+                &mut h2_conn.encoder,
+                stream_id,
+                status as u16,
+                &headers,
+                true,
+                h2_conn.peer_settings.max_frame_size,
+            ) {
+                return Err(RuntimeError {
+                    message: format!("httpServe h2: failed to send headers: {}", e),
+                });
+            }
+        } else {
+            // Add content-length header
+            let has_cl = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-length"));
+            let mut all_headers = headers.clone();
+            if !has_cl {
+                all_headers.push(("content-length".to_string(), body_bytes.len().to_string()));
+            }
+
+            // Send HEADERS (no END_STREAM yet)
+            if let Err(e) = send_response_headers(
+                stream,
+                &mut h2_conn.encoder,
+                stream_id,
+                status as u16,
+                &all_headers,
+                false,
+                h2_conn.peer_settings.max_frame_size,
+            ) {
+                return Err(RuntimeError {
+                    message: format!("httpServe h2: failed to send headers: {}", e),
+                });
+            }
+
+            // Send DATA with END_STREAM, respecting flow control windows.
+            // We need mutable access to both conn_send_window and
+            // stream.send_window. To satisfy the borrow checker, copy
+            // the stream window out, call the function, then write it back.
+            let mut stream_sw = h2_conn
+                .streams
+                .get(&stream_id)
+                .map_or(i64::MAX, |s| s.send_window);
+            let data_result = send_response_data(
+                stream,
+                stream_id,
+                &body_bytes,
+                true,
+                h2_conn.peer_settings.max_frame_size,
+                &mut h2_conn.conn_send_window,
+                &mut stream_sw,
+            );
+            // Write back the updated stream send window.
+            if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
+                s.send_window = stream_sw;
+            }
+
+            if let Err(e) = data_result {
+                // Flow control window exhausted or I/O error.
+                // In a full async implementation we would wait for WINDOW_UPDATE,
+                // but this blocking interpreter cannot read frames during a
+                // synchronous write path. Send RST_STREAM to cleanly abort the
+                // stream so the peer does not hang waiting for the remaining body.
+                let _ = send_rst_stream(stream, stream_id, ERROR_FLOW_CONTROL_ERROR);
+                return Err(RuntimeError {
+                    message: format!(
+                        "httpServe h2: failed to send response body on stream {}: {}",
+                        stream_id, e
+                    ),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Try to read and parse a request head from a connection (non-blocking).

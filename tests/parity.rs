@@ -22357,14 +22357,16 @@ stdout(result.throw.message)
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         cleanup_net_project(&dir);
 
+        // NET6-2a: Interpreter now implements HTTP/2, but requires TLS.
+        // Without cert/key, protocol="h2" returns ProtocolError about h2c.
         assert!(
-            stdout.contains("HTTP/2"),
-            "NET6-1b-1 interp: expected message mentioning HTTP/2, got: {:?}",
+            stdout.contains("HTTP/2") || stdout.contains("h2"),
+            "NET6-1b-1 interp: expected message mentioning HTTP/2 or h2, got: {:?}",
             stdout
         );
         assert!(
-            stdout.contains("not yet implemented"),
-            "NET6-1b-1 interp: expected 'not yet implemented' in message, got: {:?}",
+            stdout.contains("requires TLS") || stdout.contains("not supported"),
+            "NET6-1b-1 interp: expected 'requires TLS' for h2 without cert/key, got: {:?}",
             stdout
         );
     }
