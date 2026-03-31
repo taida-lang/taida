@@ -23527,8 +23527,8 @@ stdout(r.requests)
             panic!("NET6-3a-3 {}: server not ready on port {}", backend, port);
         }
 
-        // Fetch with curl --http2
-        let curl_out = Command::new("curl")
+        // Fetch with curl --http2 (retry up to 3 times for CI H2/TLS readiness)
+        let mut curl_out = Command::new("curl")
             .args([
                 "--http2",
                 "--insecure",
@@ -23539,6 +23539,23 @@ stdout(r.requests)
             ])
             .output()
             .expect("curl request");
+        for _ in 0..3 {
+            if !curl_out.stdout.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+            curl_out = Command::new("curl")
+                .args([
+                    "--http2",
+                    "--insecure",
+                    "--silent",
+                    "--max-time",
+                    "5",
+                    &format!("https://127.0.0.1:{}/", port),
+                ])
+                .output()
+                .expect("curl retry");
+        }
 
         let server_out = child.wait_with_output().expect("wait for server");
         let _ = fs::remove_file(&cert_path);
