@@ -22438,14 +22438,16 @@ stdout(result.throw.message)
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
 
+        // NET6-3a: Native now implements h2. Without cert/key, returns ProtocolError
+        // "requires TLS" — same as Interpreter. Both require TLS for h2 (h2c out of scope).
         assert!(
-            stdout.contains("HTTP/2"),
-            "NET6-1b-1 native: expected message mentioning HTTP/2, got: {:?}",
+            stdout.contains("HTTP/2") || stdout.contains("h2"),
+            "NET6-1b-1 native: expected message mentioning HTTP/2 or h2, got: {:?}",
             stdout
         );
         assert!(
-            stdout.contains("not yet implemented"),
-            "NET6-1b-1 native: expected 'not yet implemented' in message, got: {:?}",
+            stdout.contains("requires TLS") || stdout.contains("not supported"),
+            "NET6-1b-1 native: expected 'requires TLS' for h2 without cert/key, got: {:?}",
             stdout
         );
     }
@@ -23073,4 +23075,780 @@ stdout(result.throw.message)
             stdout
         );
     }
+}
+
+// ── NET6-3a: Native HTTP/2 Performance Backend parity tests ──────────────────
+
+/// Check whether the installed curl binary supports HTTP/2 (Features: ... HTTP2 ...).
+fn curl_h2_available() -> bool {
+    if !curl_available() {
+        return false;
+    }
+    match Command::new("curl").arg("--version").output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains("HTTP2"),
+        Err(_) => false,
+    }
+}
+
+/// Generate a self-signed cert+key pair into the given paths.
+/// Returns true on success.
+fn gen_self_signed_cert(cert_path: &std::path::Path, key_path: &std::path::Path) -> bool {
+    Command::new("openssl")
+        .args(&[
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-subj", "/CN=127.0.0.1",
+            "-keyout", key_path.to_str().unwrap_or(""),
+            "-out", cert_path.to_str().unwrap_or(""),
+            "-days", "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// NET6-3a-1: `protocol="h2"` without cert/key returns ProtocolError "requires TLS"
+/// on both Interpreter and Native (2-way parity).
+/// After NET6-3a, both backends behave identically: h2 without TLS = ProtocolError.
+#[test]
+fn test_net6_3a_h2_no_tls_interp_native_parity() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-reach")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    let interp_out = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net6_3a_no_tls_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("run interpreter");
+        cleanup_net_project(&dir);
+        normalize(&String::from_utf8_lossy(&output.stdout))
+    };
+
+    // Native
+    let native_out = {
+        if !cc_available() {
+            eprintln!("SKIP: cc not available, skipping NET6-3a-1 native");
+            return;
+        }
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net6_3a_no_tls_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_net6_3a_no_tls", "native", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        assert!(
+            compile.status.success(),
+            "NET6-3a-1: native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&bin_path).output().expect("run native");
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+        normalize(&String::from_utf8_lossy(&run.stdout))
+    };
+
+    // Both should mention h2/HTTP/2 and "requires TLS"
+    assert!(
+        interp_out.contains("requires TLS") || interp_out.contains("not supported"),
+        "NET6-3a-1 interp: expected 'requires TLS' or 'not supported', got: {:?}",
+        interp_out
+    );
+    assert!(
+        native_out.contains("requires TLS") || native_out.contains("not supported"),
+        "NET6-3a-1 native: expected 'requires TLS' or 'not supported', got: {:?}",
+        native_out
+    );
+    // Verify both reject h2 (message mentions h2 or HTTP/2)
+    assert!(
+        interp_out.contains("h2") || interp_out.contains("HTTP/2"),
+        "NET6-3a-1 interp: expected message to mention h2/HTTP/2, got: {:?}",
+        interp_out
+    );
+    assert!(
+        native_out.contains("h2") || native_out.contains("HTTP/2"),
+        "NET6-3a-1 native: expected message to mention h2/HTTP/2, got: {:?}",
+        native_out
+    );
+}
+
+/// NET6-3a-2: Native h2 server with TLS actually serves HTTP/2 requests.
+/// Uses `curl --http2 --insecure` to verify real h2 negotiation.
+/// Skips if openssl, curl --http2, or cc is not available.
+#[test]
+fn test_net6_3a_native_h2_serves_request_with_tls() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    let cert_path = unique_temp_path("taida_h2_cert", "net6_3a_native", "pem");
+    let key_path = unique_temp_path("taida_h2_key", "net6_3a_native", "pem");
+
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: failed to generate self-signed cert");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "x-proto", value <= req.protocol)], body <= "h2-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "net6_3a_native_h2_serve");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_h2_native_serve", "net6_3a", "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native h2 server");
+
+    if !compile.status.success() {
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+        panic!(
+            "NET6-3a-2: native compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn native h2 server");
+
+    // Wait for server to be ready
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+        panic!("NET6-3a-2: native h2 server did not bind on port {}", port);
+    }
+
+    // Use curl --http2 to make a real HTTP/2 request
+    let curl_out = Command::new("curl")
+        .args(&[
+            "--http2",
+            "--insecure",
+            "--silent",
+            "--max-time", "5",
+            "-w", "%{http_version}:%{http_code}",
+            "-o", "/dev/null",
+            &format!("https://127.0.0.1:{}/test", port),
+        ])
+        .output()
+        .expect("run curl");
+
+    // Wait for server to finish (it exits after 1 request)
+    let server_output = child.wait_with_output().expect("wait for server");
+    let server_stdout = normalize(&String::from_utf8_lossy(&server_output.stdout));
+
+    let _ = fs::remove_file(&cert_path);
+    let _ = fs::remove_file(&key_path);
+    let _ = fs::remove_file(&bin_path);
+    cleanup_net_project(&dir);
+
+    let curl_stdout = String::from_utf8_lossy(&curl_out.stdout);
+    // curl -w "%{http_version}:%{http_code}" outputs e.g. "2:200"
+    assert!(
+        curl_stdout.contains("2:200") || curl_stdout.starts_with("2"),
+        "NET6-3a-2: expected HTTP/2 (2:200) from curl, got: {:?}",
+        curl_stdout
+    );
+    assert_eq!(
+        server_stdout, "1",
+        "NET6-3a-2: expected server stdout '1' (1 request), got: {:?}",
+        server_stdout
+    );
+}
+
+/// NET6-3a-3: Interpreter and Native h2 servers produce identical response bodies.
+/// Uses `curl --http2 --insecure` on both backends and checks the body matches.
+/// Skips if openssl, curl --http2, or cc is not available.
+#[test]
+fn test_net6_3a_h2_interp_native_serve_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    let source_fn = |port: u16, cert: &str, key: &str| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "parity-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port, cert = cert, key = key
+        )
+    };
+
+    let mut results: Vec<(String, String)> = Vec::new();
+
+    for backend in &["interp", "native"] {
+        let cert_path = unique_temp_path("taida_h2_cert", &format!("net6_3a_{}", backend), "pem");
+        let key_path = unique_temp_path("taida_h2_key", &format!("net6_3a_{}", backend), "pem");
+
+        if !gen_self_signed_cert(&cert_path, &key_path) {
+            eprintln!("SKIP: cert gen failed for {}", backend);
+            return;
+        }
+
+        let port = find_free_loopback_port();
+        let source = source_fn(port, cert_path.to_str().unwrap_or(""), key_path.to_str().unwrap_or(""));
+
+        let dir = setup_net_project(&source, &format!("net6_3a_parity_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => {
+                Command::new(taida_bin())
+                    .arg(&td_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn interp h2 server")
+            }
+            "native" => {
+                let bin_path = unique_temp_path(
+                    "taida_h2_native_parity",
+                    &format!("{}", port),
+                    "bin",
+                );
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "NET6-3a-3 native compile failed: {}",
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn native h2");
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&cert_path);
+            let _ = fs::remove_file(&key_path);
+            cleanup_net_project(&dir);
+            panic!("NET6-3a-3 {}: server not ready on port {}", backend, port);
+        }
+
+        // Fetch with curl --http2
+        let curl_out = Command::new("curl")
+            .args(&[
+                "--http2",
+                "--insecure",
+                "--silent",
+                "--max-time", "5",
+                &format!("https://127.0.0.1:{}/", port),
+            ])
+            .output()
+            .expect("curl request");
+
+        let server_out = child.wait_with_output().expect("wait for server");
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+
+        let body = String::from_utf8_lossy(&curl_out.stdout).to_string();
+        let server_stdout = normalize(&String::from_utf8_lossy(&server_out.stdout));
+        results.push((body, server_stdout));
+    }
+
+    assert_eq!(results.len(), 2, "NET6-3a-3: expected results for both backends");
+
+    let (interp_body, interp_count) = &results[0];
+    let (native_body, native_count) = &results[1];
+
+    assert!(
+        interp_body.contains("parity-ok"),
+        "NET6-3a-3 interp: expected 'parity-ok' body, got: {:?}",
+        interp_body
+    );
+    assert!(
+        native_body.contains("parity-ok"),
+        "NET6-3a-3 native: expected 'parity-ok' body, got: {:?}",
+        native_body
+    );
+    assert_eq!(
+        interp_count, "1",
+        "NET6-3a-3 interp: expected '1' requests, got: {:?}",
+        interp_count
+    );
+    assert_eq!(
+        native_count, "1",
+        "NET6-3a-3 native: expected '1' requests, got: {:?}",
+        native_count
+    );
+    assert_eq!(
+        interp_body, native_body,
+        "NET6-3a-3: Interpreter and Native h2 response bodies differ: interp={:?} native={:?}",
+        interp_body, native_body
+    );
+}
+
+// ── NET6-3b: Native HTTP/2 Performance Gate ────────────────────────────────
+//
+// Performance north star: may_minihttp (HTTP/1.1 reference implementation)
+// Benchmark gate per NET_DESIGN.md §Performance Gate:
+//   - h2 single-stream hello: measure req/s
+//   - h2 32-stream (serial within 1 connection): measure req/s
+//   - h2 64KiB data: measure throughput MiB/s
+//   - h1 regression gate: < 15% regression from v5 native baseline
+//
+// These tests are gated behind RUN_BENCHMARKS=1 to avoid CI flakiness.
+// They always PASS structurally; timing numbers are printed for audit.
+//
+// may_minihttp north star (reference values for HTTP/1.1):
+//   - hello world: ~310,000 req/s (single-core, Linux, loopback)
+//   - Expected Native h2 gap: 2x–5x slower due to TLS + HPACK overhead
+//   - If gap exceeds 10x for single-stream hello, that is blocker territory.
+
+/// NET6-3b-1: Native h2 single-stream hello — latency and req/s measurement.
+/// Sends 100 sequential requests to the native h2 server and records timing.
+/// Gated behind RUN_BENCHMARKS=1. Always passes; prints results for audit.
+#[test]
+fn test_net6_3b_native_h2_single_stream_hello_benchmark() {
+    if std::env::var("RUN_BENCHMARKS").unwrap_or_default() != "1" {
+        eprintln!("SKIP: set RUN_BENCHMARKS=1 to run h2 benchmarks");
+        return;
+    }
+    if !cc_available() || !openssl_available() || !curl_h2_available() {
+        eprintln!("SKIP: cc/openssl/curl --http2 not available");
+        return;
+    }
+
+    let cert_path = unique_temp_path("taida_h2_bench_cert", "net6_3b_1", "pem");
+    let key_path = unique_temp_path("taida_h2_bench_key", "net6_3b_1", "pem");
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: cert gen failed");
+        return;
+    }
+
+    const N_REQUESTS: u64 = 100;
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+handler req =
+  @(status <= 200, headers <= @[], body <= "bench-hello")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+asyncResult <= httpServe({port}, handler, {n}, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port, n = N_REQUESTS,
+        cert = cert_path.display(), key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "net6_3b_1_hello");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_h2_bench_1", "net6_3b", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build").arg("--target").arg("native")
+        .arg(&td_path).arg("-o").arg(&bin_path)
+        .output().expect("compile net6_3b_1");
+    assert!(compile.status.success(),
+        "NET6-3b-1: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().expect("spawn net6_3b_1 server");
+    let _ = fs::remove_file(&bin_path);
+
+    // Wait for server ready
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true; break;
+        }
+    }
+    if !ready {
+        let _ = child.kill(); let _ = child.wait();
+        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        panic!("NET6-3b-1: server not ready on port {}", port);
+    }
+
+    // Measure N sequential curl requests
+    let url = format!("https://127.0.0.1:{}/bench", port);
+    let t_start = std::time::Instant::now();
+    let mut ok_count = 0u64;
+    for _ in 0..N_REQUESTS {
+        let out = Command::new("curl")
+            .args(&["--http2", "--insecure", "--silent", "--max-time", "5",
+                    "-w", "%{http_version}:%{http_code}", "-o", "/dev/null", &url])
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            if s.starts_with("2:2") { ok_count += 1; }
+        }
+    }
+    let elapsed_ms = t_start.elapsed().as_millis() as u64;
+
+    let server_out = child.wait_with_output().expect("wait net6_3b_1");
+    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    let req_per_s = if elapsed_ms > 0 { ok_count * 1000 / elapsed_ms } else { 0 };
+    let latency_ms = if ok_count > 0 { elapsed_ms / ok_count } else { 0 };
+    let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
+        .trim().parse().unwrap_or(0);
+
+    eprintln!(
+        "NET6-3b-1 [native h2 single-stream hello] ok={}/{} req/s={} latency={}ms \
+         | may_minihttp north-star ~310000 req/s (HTTP/1.1 plaintext, loopback) | gap=~{}x",
+        ok_count, N_REQUESTS, req_per_s, latency_ms,
+        if req_per_s > 0 { 310000u64 / req_per_s } else { 0 }
+    );
+
+    // Structural assertions (correctness, not timing)
+    assert!(
+        ok_count >= N_REQUESTS * 90 / 100,
+        "NET6-3b-1: expected >=90% success rate, got {}/{}", ok_count, N_REQUESTS
+    );
+    assert_eq!(
+        server_count, ok_count,
+        "NET6-3b-1: server request count mismatch: server={} curl_ok={}", server_count, ok_count
+    );
+}
+
+/// NET6-3b-2: Native h2 multi-request throughput (32 serial requests within measurement window).
+/// Measures total throughput for 32 sequential requests.
+/// Gated behind RUN_BENCHMARKS=1. Always passes; prints results for audit.
+#[test]
+fn test_net6_3b_native_h2_32_request_throughput_benchmark() {
+    if std::env::var("RUN_BENCHMARKS").unwrap_or_default() != "1" {
+        eprintln!("SKIP: set RUN_BENCHMARKS=1 to run h2 benchmarks");
+        return;
+    }
+    if !cc_available() || !openssl_available() || !curl_h2_available() {
+        eprintln!("SKIP: cc/openssl/curl --http2 not available");
+        return;
+    }
+
+    let cert_path = unique_temp_path("taida_h2_bench_cert", "net6_3b_2", "pem");
+    let key_path = unique_temp_path("taida_h2_bench_key", "net6_3b_2", "pem");
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: cert gen failed");
+        return;
+    }
+
+    const N_REQUESTS: u64 = 32;
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+handler req =
+  @(status <= 200, headers <= @[], body <= "stream-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+asyncResult <= httpServe({port}, handler, {n}, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port, n = N_REQUESTS,
+        cert = cert_path.display(), key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "net6_3b_2_32req");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_h2_bench_2", "net6_3b", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build").arg("--target").arg("native")
+        .arg(&td_path).arg("-o").arg(&bin_path)
+        .output().expect("compile net6_3b_2");
+    assert!(compile.status.success(),
+        "NET6-3b-2: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().expect("spawn net6_3b_2 server");
+    let _ = fs::remove_file(&bin_path);
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true; break;
+        }
+    }
+    if !ready {
+        let _ = child.kill(); let _ = child.wait();
+        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        panic!("NET6-3b-2: server not ready on port {}", port);
+    }
+
+    let url = format!("https://127.0.0.1:{}/stream", port);
+    let t_start = std::time::Instant::now();
+    let mut ok_count = 0u64;
+    for _ in 0..N_REQUESTS {
+        let out = Command::new("curl")
+            .args(&["--http2", "--insecure", "--silent", "--max-time", "5",
+                    "-w", "%{http_version}:%{http_code}", "-o", "/dev/null", &url])
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            if s.starts_with("2:2") { ok_count += 1; }
+        }
+    }
+    let elapsed_ms = t_start.elapsed().as_millis() as u64;
+
+    let server_out = child.wait_with_output().expect("wait net6_3b_2");
+    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    let req_per_s = if elapsed_ms > 0 { ok_count * 1000 / elapsed_ms } else { 0 };
+    let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
+        .trim().parse().unwrap_or(0);
+
+    eprintln!(
+        "NET6-3b-2 [native h2 32-request serial] ok={}/{} req/s={} total={}ms \
+         | Design gate: >=90% success rate | h2 multiplexing (within 1 conn) reduces overhead vs new-conn-per-req",
+        ok_count, N_REQUESTS, req_per_s, elapsed_ms
+    );
+
+    assert!(
+        ok_count >= N_REQUESTS * 90 / 100,
+        "NET6-3b-2: expected >=90% success rate, got {}/{}", ok_count, N_REQUESTS
+    );
+    assert_eq!(
+        server_count, ok_count,
+        "NET6-3b-2: server count mismatch: server={} curl_ok={}", server_count, ok_count
+    );
+}
+
+/// NET6-3b-3: Native h2 64KiB data throughput.
+/// Server responds with a 65536-byte body. Measures effective throughput.
+/// Gated behind RUN_BENCHMARKS=1. Always passes; prints results for audit.
+#[test]
+fn test_net6_3b_native_h2_64kib_data_benchmark() {
+    if std::env::var("RUN_BENCHMARKS").unwrap_or_default() != "1" {
+        eprintln!("SKIP: set RUN_BENCHMARKS=1 to run h2 benchmarks");
+        return;
+    }
+    if !cc_available() || !openssl_available() || !curl_h2_available() {
+        eprintln!("SKIP: cc/openssl/curl --http2 not available");
+        return;
+    }
+
+    let cert_path = unique_temp_path("taida_h2_bench_cert", "net6_3b_3", "pem");
+    let key_path = unique_temp_path("taida_h2_bench_key", "net6_3b_3", "pem");
+    if !gen_self_signed_cert(&cert_path, &key_path) {
+        eprintln!("SKIP: cert gen failed");
+        return;
+    }
+
+    // Build a 64KiB (65536 chars) response body as a Taida string literal.
+    // Use 'X' repeated 65536 times.
+    let body_64k: String = "X".repeat(65536);
+    const N_REQUESTS: u64 = 10;
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+handler req =
+  @(status <= 200, headers <= @[], body <= "{body}")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+asyncResult <= httpServe({port}, handler, {n}, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        body = body_64k,
+        port = port, n = N_REQUESTS,
+        cert = cert_path.display(), key = key_path.display(),
+    );
+
+    let dir = setup_net_project(&source, "net6_3b_3_64k");
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_h2_bench_3", "net6_3b", "bin");
+    let compile = Command::new(taida_bin())
+        .arg("build").arg("--target").arg("native")
+        .arg(&td_path).arg("-o").arg(&bin_path)
+        .output().expect("compile net6_3b_3");
+    assert!(compile.status.success(),
+        "NET6-3b-3: compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().expect("spawn net6_3b_3 server");
+    let _ = fs::remove_file(&bin_path);
+
+    let mut ready = false;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            ready = true; break;
+        }
+    }
+    if !ready {
+        let _ = child.kill(); let _ = child.wait();
+        let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+        panic!("NET6-3b-3: server not ready on port {}", port);
+    }
+
+    let url = format!("https://127.0.0.1:{}/data64k", port);
+    let t_start = std::time::Instant::now();
+    let mut ok_count = 0u64;
+    let mut total_bytes: u64 = 0;
+    for _ in 0..N_REQUESTS {
+        let out = Command::new("curl")
+            .args(&["--http2", "--insecure", "--silent", "--max-time", "10",
+                    "-w", "%{http_version}:%{http_code}:%{size_download}",
+                    "-o", "/dev/null", &url])
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            // Format: "2:200:65536"
+            let parts: Vec<&str> = s.trim().splitn(3, ':').collect();
+            if parts.len() == 3 && parts[0] == "2" && parts[1] == "200" {
+                ok_count += 1;
+                total_bytes += parts[2].parse::<u64>().unwrap_or(0);
+            }
+        }
+    }
+    let elapsed_ms = t_start.elapsed().as_millis() as u64;
+
+    let server_out = child.wait_with_output().expect("wait net6_3b_3");
+    let _ = fs::remove_file(&cert_path); let _ = fs::remove_file(&key_path);
+    cleanup_net_project(&dir);
+
+    let throughput_mib_s = if elapsed_ms > 0 {
+        (total_bytes as f64 / (1024.0 * 1024.0)) / (elapsed_ms as f64 / 1000.0)
+    } else { 0.0 };
+    let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
+        .trim().parse().unwrap_or(0);
+
+    eprintln!(
+        "NET6-3b-3 [native h2 64KiB data] ok={}/{} throughput={:.1}MiB/s total_bytes={} elapsed={}ms \
+         | Design gate: >=90% success, body size=65536 bytes per response",
+        ok_count, N_REQUESTS, throughput_mib_s, total_bytes, elapsed_ms
+    );
+
+    assert!(
+        ok_count >= N_REQUESTS * 90 / 100,
+        "NET6-3b-3: expected >=90% success rate, got {}/{}", ok_count, N_REQUESTS
+    );
+    // Each successful response must have delivered the full 64KiB
+    if ok_count > 0 {
+        let avg_bytes = total_bytes / ok_count;
+        assert!(
+            avg_bytes >= 65536 * 90 / 100,
+            "NET6-3b-3: average response body too small: {} bytes (expected ~65536)", avg_bytes
+        );
+    }
+    assert_eq!(
+        server_count, ok_count,
+        "NET6-3b-3: server count mismatch: server={} curl_ok={}", server_count, ok_count
+    );
 }
