@@ -23499,10 +23499,14 @@ stdout(r.requests)
 //
 // Performance north star: may_minihttp (HTTP/1.1 reference implementation)
 // Benchmark gate per NET_DESIGN.md §Performance Gate:
-//   - h2 single-stream hello: measure req/s
-//   - h2 32-stream (serial within 1 connection): measure req/s
-//   - h2 64KiB data: measure throughput MiB/s
+//   - h2 new-connection hello: measure req/s (each curl = new TLS + h2 connection)
+//   - h2 32 new-connection requests: measure req/s (serial, new connection per request)
+//   - h2 64KiB data: measure throughput MiB/s (new connection per request)
 //   - h1 regression gate: < 15% regression from v5 native baseline
+//
+// NOTE: Each iteration spawns a new curl process, establishing a fresh TLS+h2
+// connection per request. This does NOT measure h2 multiplexing within a single
+// connection. These benchmarks reflect new-connection-per-request overhead.
 //
 // These tests are gated behind RUN_BENCHMARKS=1 to avoid CI flakiness.
 // They always PASS structurally; timing numbers are printed for audit.
@@ -23510,10 +23514,10 @@ stdout(r.requests)
 // may_minihttp north star (reference values for HTTP/1.1):
 //   - hello world: ~310,000 req/s (single-core, Linux, loopback)
 //   - Expected Native h2 gap: 2x–5x slower due to TLS + HPACK overhead
-//   - If gap exceeds 10x for single-stream hello, that is blocker territory.
+//   - If gap exceeds 10x for new-connection hello, that is blocker territory.
 
-/// NET6-3b-1: Native h2 single-stream hello — latency and req/s measurement.
-/// Sends 100 sequential requests to the native h2 server and records timing.
+/// NET6-3b-1: Native h2 new-connection hello — latency and req/s measurement.
+/// Sends 100 sequential requests (each a new curl/TLS/h2 connection) and records timing.
 /// Gated behind RUN_BENCHMARKS=1. Always passes; prints results for audit.
 #[test]
 fn test_net6_3b_native_h2_single_stream_hello_benchmark() {
@@ -23579,7 +23583,7 @@ stdout(r.requests)
         panic!("NET6-3b-1: server not ready on port {}", port);
     }
 
-    // Measure N sequential curl requests
+    // Measure N sequential curl requests (new connection per request)
     let url = format!("https://127.0.0.1:{}/bench", port);
     let t_start = std::time::Instant::now();
     let mut ok_count = 0u64;
@@ -23605,7 +23609,7 @@ stdout(r.requests)
         .trim().parse().unwrap_or(0);
 
     eprintln!(
-        "NET6-3b-1 [native h2 single-stream hello] ok={}/{} req/s={} latency={}ms \
+        "NET6-3b-1 [native h2 new-conn hello] ok={}/{} req/s={} latency={}ms \
          | may_minihttp north-star ~310000 req/s (HTTP/1.1 plaintext, loopback) | gap=~{}x",
         ok_count, N_REQUESTS, req_per_s, latency_ms,
         if req_per_s > 0 { 310000u64 / req_per_s } else { 0 }
@@ -23622,8 +23626,8 @@ stdout(r.requests)
     );
 }
 
-/// NET6-3b-2: Native h2 multi-request throughput (32 serial requests within measurement window).
-/// Measures total throughput for 32 sequential requests.
+/// NET6-3b-2: Native h2 32 new-connection requests — throughput measurement.
+/// Measures total throughput for 32 sequential requests (new curl/TLS/h2 connection each).
 /// Gated behind RUN_BENCHMARKS=1. Always passes; prints results for audit.
 #[test]
 fn test_net6_3b_native_h2_32_request_throughput_benchmark() {
@@ -23712,8 +23716,8 @@ stdout(r.requests)
         .trim().parse().unwrap_or(0);
 
     eprintln!(
-        "NET6-3b-2 [native h2 32-request serial] ok={}/{} req/s={} total={}ms \
-         | Design gate: >=90% success rate | h2 multiplexing (within 1 conn) reduces overhead vs new-conn-per-req",
+        "NET6-3b-2 [native h2 32 new-conn requests] ok={}/{} req/s={} total={}ms \
+         | Design gate: >=90% success rate | new curl connection per request (no h2 multiplexing)",
         ok_count, N_REQUESTS, req_per_s, elapsed_ms
     );
 
@@ -23727,8 +23731,8 @@ stdout(r.requests)
     );
 }
 
-/// NET6-3b-3: Native h2 64KiB data throughput.
-/// Server responds with a 65536-byte body. Measures effective throughput.
+/// NET6-3b-3: Native h2 64KiB data throughput (new connection per request).
+/// Server responds with a 65536-byte body. Each request is a new curl/TLS/h2 connection.
 /// Gated behind RUN_BENCHMARKS=1. Always passes; prints results for audit.
 #[test]
 fn test_net6_3b_native_h2_64kib_data_benchmark() {

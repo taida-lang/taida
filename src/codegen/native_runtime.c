@@ -14413,6 +14413,12 @@ static int h2_process_settings(H2Conn *conn, const unsigned char *payload, uint3
 
 // ── H2 request extraction from decoded pseudo-headers ─────────────────────
 
+// error_reason values for H2RequestFields (0 = no error)
+#define H2_REQ_ERR_NONE            0
+#define H2_REQ_ERR_ORDERING        1
+#define H2_REQ_ERR_UNKNOWN_PSEUDO  2
+#define H2_REQ_ERR_MISSING_PSEUDO  3
+
 typedef struct {
     char method[16];
     char path[2048];
@@ -14420,6 +14426,7 @@ typedef struct {
     H2Header *regular_headers;
     int regular_count;
     int ok;
+    int error_reason;
 } H2RequestFields;
 
 static void h2_extract_request_fields(const H2Header *headers, int count, H2RequestFields *out) {
@@ -14427,6 +14434,7 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
     out->regular_headers = NULL;
     out->regular_count = 0;
     out->ok = 0;
+    out->error_reason = H2_REQ_ERR_NONE;
 
     char scheme[16] = "";
     int saw_regular = 0;
@@ -14436,7 +14444,11 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
 
     for (int i = 0; i < count; i++) {
         if (headers[i].name[0] == ':') {
-            if (saw_regular) { free(regs); return; } // ordering violation
+            if (saw_regular) {
+                out->error_reason = H2_REQ_ERR_ORDERING;
+                free(regs);
+                return; // ordering violation
+            }
             if (strcmp(headers[i].name, ":method") == 0) {
                 snprintf(out->method, sizeof(out->method), "%s", headers[i].value);
             } else if (strcmp(headers[i].name, ":path") == 0) {
@@ -14445,6 +14457,12 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
                 snprintf(out->authority, sizeof(out->authority), "%s", headers[i].value);
             } else if (strcmp(headers[i].name, ":scheme") == 0) {
                 snprintf(scheme, sizeof(scheme), "%s", headers[i].value);
+            } else {
+                // Unknown pseudo-header: reject as PROTOCOL_ERROR
+                // (matches Interpreter: H2Error::Stream with ERROR_PROTOCOL_ERROR)
+                out->error_reason = H2_REQ_ERR_UNKNOWN_PSEUDO;
+                free(regs);
+                return;
             }
         } else {
             saw_regular = 1;
@@ -14455,7 +14473,9 @@ static void h2_extract_request_fields(const H2Header *headers, int count, H2Requ
     }
 
     if (out->method[0] == '\0' || out->path[0] == '\0' || scheme[0] == '\0') {
-        free(regs); return; // missing required pseudo-headers
+        out->error_reason = H2_REQ_ERR_MISSING_PSEUDO;
+        free(regs);
+        return; // missing required pseudo-headers
     }
     out->regular_headers = regs;
     out->regular_count = reg_count;
@@ -14851,9 +14871,13 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                         goto h2_conn_done;
                     }
                     if (data_len > s->recv_window) {
+                        // Stream-level violation: RST_STREAM + close stream + continue
+                        // (matches Interpreter: H2Error::Stream → send_rst_stream → continue)
                         h2_send_rst_stream(client_fd, frame_stream_id, H2_ERROR_FLOW_CONTROL_ERROR);
+                        s->state = H2_STREAM_CLOSED;
+                        h2_conn_remove_closed_streams(&conn);
                         free(payload);
-                        goto h2_conn_done;
+                        continue;
                     }
                     conn.conn_recv_window -= data_len;
                     s->recv_window -= data_len;
