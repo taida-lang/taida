@@ -7859,6 +7859,8 @@ static int taida_tls_writev_all(int fd, struct iovec *iov, int iovcnt) {
         unsigned char stack_buf[8192];
         unsigned char *buf = (total <= sizeof(stack_buf)) ? stack_buf
             : (unsigned char*)TAIDA_MALLOC(total, "tls_writev_linear");
+        // NB6-32: NULL check for heap allocation — OOM must not cause UB
+        if (buf == NULL) return -1;
         size_t pos = 0;
         for (int i = 0; i < iovcnt; i++) {
             if (iov[i].iov_len > 0) {
@@ -13594,13 +13596,16 @@ static size_t h2_entry_size(const char *name, const char *value) {
 }
 
 static void h2_dyntable_evict_to_fit(H2HpackDynTable *dt, size_t needed) {
+    // NB6-33: Oldest entries are at the front (index 0). Evict from front.
     while (dt->len > 0 && dt->current_size + needed > dt->max_size) {
-        // Evict oldest (last entry)
-        int last = dt->len - 1;
-        dt->current_size -= h2_entry_size(dt->entries[last].name, dt->entries[last].value);
-        free(dt->entries[last].name);
-        free(dt->entries[last].value);
+        dt->current_size -= h2_entry_size(dt->entries[0].name, dt->entries[0].value);
+        free(dt->entries[0].name);
+        free(dt->entries[0].value);
+        // Shift remaining entries left by 1
         dt->len--;
+        if (dt->len > 0) {
+            memmove(&dt->entries[0], &dt->entries[1], (size_t)dt->len * sizeof(H2HpackDynEntry));
+        }
     }
 }
 
@@ -13619,10 +13624,18 @@ static void h2_dyntable_insert(H2HpackDynTable *dt, const char *name, const char
         dt->cap = new_cap;
     }
 
-    // Shift all entries right to insert at index 0 (newest first)
-    memmove(&dt->entries[1], &dt->entries[0], (size_t)dt->len * sizeof(H2HpackDynEntry));
-    dt->entries[0].name = strdup(name);
-    dt->entries[0].value = strdup(value);
+    // NB6-33: Append at end — O(1) instead of memmove O(n).
+    // Newest entries are at the end (index len-1), oldest at front (index 0).
+    // NB6-37: Check strdup return values to avoid segfault on OOM.
+    char *dup_name = strdup(name);
+    char *dup_value = strdup(value);
+    if (!dup_name || !dup_value) {
+        free(dup_name);
+        free(dup_value);
+        return;
+    }
+    dt->entries[dt->len].name = dup_name;
+    dt->entries[dt->len].value = dup_value;
     dt->len++;
     dt->current_size += sz;
 }
@@ -13634,6 +13647,7 @@ static void h2_dyntable_set_max_size(H2HpackDynTable *dt, size_t new_max) {
 
 // Get entry by 1-based combined index (static + dynamic).
 // Returns 0 on success, -1 on out-of-range.
+// NB6-33: Dynamic table is stored newest-at-end. HPACK index 0 = newest = entries[len-1].
 static int h2_hpack_get_indexed(H2HpackDynTable *dt, size_t index,
                                  const char **name_out, const char **value_out) {
     if (index == 0) return -1;
@@ -13644,8 +13658,10 @@ static int h2_hpack_get_indexed(H2HpackDynTable *dt, size_t index,
     }
     size_t dyn_idx = index - H2_STATIC_TABLE_LEN;
     if ((int)dyn_idx >= dt->len) return -1;
-    *name_out = dt->entries[dyn_idx].name;
-    *value_out = dt->entries[dyn_idx].value;
+    // Map HPACK dynamic index to array position: index 0 = newest = entries[len-1]
+    int array_idx = dt->len - 1 - (int)dyn_idx;
+    *name_out = dt->entries[array_idx].name;
+    *value_out = dt->entries[array_idx].value;
     return 0;
 }
 
@@ -13779,10 +13795,46 @@ static const H2HuffEntry H2_HUFFMAN_TABLE[] = {
 };
 #define H2_HUFFMAN_TABLE_LEN (sizeof(H2_HUFFMAN_TABLE)/sizeof(H2_HUFFMAN_TABLE[0]))
 
+// NB6-34: 8-bit prefix lookup table for fast Huffman decode.
+// Entries with code length <= 8 are decoded in O(1). Longer codes fall back
+// to a reduced linear scan (only entries with bits > 8).
+typedef struct {
+    uint8_t sym;
+    uint8_t bits;  // 0 means no match at this prefix (need longer codes)
+} H2HuffLookup;
+
+static H2HuffLookup h2_huff_lut[256];
+static int h2_huff_lut_initialized = 0;
+
+// Build the 8-bit lookup table from the Huffman code table.
+// Each 8-bit value maps to the symbol decoded by matching the MSBs.
+static void h2_huff_build_lut(void) {
+    if (h2_huff_lut_initialized) return;
+    memset(h2_huff_lut, 0, sizeof(h2_huff_lut));
+    for (size_t t = 0; t < H2_HUFFMAN_TABLE_LEN; t++) {
+        uint8_t code_len = H2_HUFFMAN_TABLE[t].bits;
+        if (code_len == 0 || code_len > 8) continue;
+        // Shift code to fill 8-bit prefix, then fill all suffixes
+        uint32_t code = H2_HUFFMAN_TABLE[t].code;
+        int pad = 8 - code_len;
+        uint32_t base = code << pad;
+        uint32_t count = (uint32_t)1 << pad;
+        for (uint32_t j = 0; j < count; j++) {
+            uint32_t idx = base | j;
+            if (idx < 256) {
+                h2_huff_lut[idx].sym = H2_HUFFMAN_TABLE[t].sym;
+                h2_huff_lut[idx].bits = code_len;
+            }
+        }
+    }
+    h2_huff_lut_initialized = 1;
+}
+
 // Decode a Huffman-encoded byte string into dst.
 // Returns decoded byte count, or -1 on error.
 static int h2_huffman_decode(const unsigned char *src, size_t src_len,
                               unsigned char *dst, size_t dst_cap) {
+    h2_huff_build_lut();
     uint64_t bits = 0;
     uint8_t bits_left = 0;
     int out = 0;
@@ -13792,13 +13844,27 @@ static int h2_huffman_decode(const unsigned char *src, size_t src_len,
         bits_left += 8;
 
         while (bits_left >= 5) {
+            // Fast path: try 8-bit LUT if we have at least 8 bits
+            if (bits_left >= 8) {
+                uint8_t prefix = (uint8_t)(bits >> (bits_left - 8));
+                H2HuffLookup *entry = &h2_huff_lut[prefix];
+                if (entry->bits > 0) {
+                    if (out >= (int)dst_cap) return -1;
+                    dst[out++] = entry->sym;
+                    bits_left -= entry->bits;
+                    bits &= ((uint64_t)1 << bits_left) - 1;
+                    continue;
+                }
+            }
+            // Slow path: linear scan for codes > 8 bits
             int found = 0;
             for (size_t t = 0; t < H2_HUFFMAN_TABLE_LEN; t++) {
                 uint8_t code_len = H2_HUFFMAN_TABLE[t].bits;
+                if (code_len <= 8) continue;  // Already handled by LUT
                 if (bits_left < code_len) continue;
                 uint8_t shift = bits_left - code_len;
                 uint32_t candidate = (uint32_t)(bits >> shift);
-                if (candidate == H2_HUFFMAN_TABLE[t].code && code_len > 0) {
+                if (candidate == H2_HUFFMAN_TABLE[t].code) {
                     if (out >= (int)dst_cap) return -1;
                     dst[out++] = H2_HUFFMAN_TABLE[t].sym;
                     bits_left -= code_len;
@@ -13863,11 +13929,17 @@ static int h2_hpack_encode_string(unsigned char *buf, size_t buf_cap, const char
 
 // ── H2 HPACK full header block decode/encode ──────────────────────────────
 
-#define H2_MAX_HEADERS 64
-#define H2_HEADER_BUF_SIZE 4096  // Per header value buffer
+// NB6-29: Increased from 64 to 128 headers.
+// NB6-30: Prevents premature COMPRESSION_ERROR for legitimate many-header requests.
+#define H2_MAX_HEADERS 128
+// NB6-29: Increased from 4096 to 16384 for value, 256 to 1024 for name.
+// Brings Native closer to Interpreter's unlimited dynamic strings while keeping
+// bounded memory. Interpreter still enforces MAX_DECODED_HEADER_LIST_SIZE (64KB).
+#define H2_HEADER_NAME_SIZE 1024
+#define H2_HEADER_BUF_SIZE 16384
 
 typedef struct {
-    char name[256];
+    char name[H2_HEADER_NAME_SIZE];
     char value[H2_HEADER_BUF_SIZE];
 } H2Header;
 
@@ -13900,7 +13972,7 @@ static int h2_hpack_decode_block(const unsigned char *data, size_t data_len,
             int consumed = h2_hpack_decode_int(data + pos, data_len - pos, 6, &index);
             if (consumed < 0) return -1;
             pos += (size_t)consumed;
-            char name_buf[256], value_buf[H2_HEADER_BUF_SIZE];
+            char name_buf[H2_HEADER_NAME_SIZE], value_buf[H2_HEADER_BUF_SIZE];
             if (index == 0) {
                 int ns = h2_hpack_decode_string(data + pos, data_len - pos, name_buf, sizeof(name_buf));
                 if (ns < 0) return -1;
@@ -13931,7 +14003,7 @@ static int h2_hpack_decode_block(const unsigned char *data, size_t data_len,
             int consumed = h2_hpack_decode_int(data + pos, data_len - pos, prefix, &index);
             if (consumed < 0) return -1;
             pos += (size_t)consumed;
-            char name_buf[256], value_buf[H2_HEADER_BUF_SIZE];
+            char name_buf[H2_HEADER_NAME_SIZE], value_buf[H2_HEADER_BUF_SIZE];
             if (index == 0) {
                 int ns = h2_hpack_decode_string(data + pos, data_len - pos, name_buf, sizeof(name_buf));
                 if (ns < 0) return -1;
@@ -14051,8 +14123,10 @@ typedef struct {
     uint8_t continuation_flags;
 } H2Conn;
 
+// NB6-41: Search from end — most recent streams are at higher indices,
+// and the hot-path frame loop typically references the latest stream.
 static H2Stream *h2_conn_find_stream(H2Conn *conn, uint32_t stream_id) {
-    for (int i = 0; i < conn->stream_count; i++) {
+    for (int i = conn->stream_count - 1; i >= 0; i--) {
         if (conn->streams[i].stream_id == stream_id) return &conn->streams[i];
     }
     return NULL;
@@ -14309,14 +14383,23 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
         count++;
     }
 
-    // Encode into a temporary buffer
-    size_t hdr_buf_cap = 65536;
-    unsigned char *hdr_buf = (unsigned char*)TAIDA_MALLOC(hdr_buf_cap, "h2_hdr_block");
-    if (!hdr_buf) return -1;
+    // NB6-24: Use 8KB stack buffer + heap fallback instead of fixed 64KB malloc.
+    // Most response headers are small (< 1KB); 8KB covers typical cases without heap.
+    unsigned char hdr_stack[8192];
+    size_t hdr_buf_cap = sizeof(hdr_stack);
+    unsigned char *hdr_buf = hdr_stack;
 
     int enc_len = h2_hpack_encode_block(hdr_buf, hdr_buf_cap, enc_dyn,
                                          (const H2Header*)all_headers, count);
-    if (enc_len < 0) { free(hdr_buf); return -1; }
+    // If stack buffer was too small, retry with heap
+    if (enc_len < 0 && hdr_buf == hdr_stack) {
+        hdr_buf_cap = 65536;
+        hdr_buf = (unsigned char*)TAIDA_MALLOC(hdr_buf_cap, "h2_hdr_block_fallback");
+        if (!hdr_buf) return -1;
+        enc_len = h2_hpack_encode_block(hdr_buf, hdr_buf_cap, enc_dyn,
+                                         (const H2Header*)all_headers, count);
+    }
+    if (enc_len < 0) { if (hdr_buf != hdr_stack) free(hdr_buf); return -1; }
 
     uint32_t max_sz = peer_max_frame_size;
     if ((uint32_t)enc_len <= max_sz) {
@@ -14324,7 +14407,7 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
         uint8_t flags = H2_FLAG_END_HEADERS;
         if (end_stream) flags |= H2_FLAG_END_STREAM;
         int rc = h2_write_frame(fd, H2_FRAME_HEADERS, flags, stream_id, hdr_buf, (uint32_t)enc_len);
-        free(hdr_buf);
+        if (hdr_buf != hdr_stack) free(hdr_buf);
         return rc;
     }
 
@@ -14332,7 +14415,7 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
     uint8_t flags = 0;
     if (end_stream) flags |= H2_FLAG_END_STREAM;
     if (h2_write_frame(fd, H2_FRAME_HEADERS, flags, stream_id, hdr_buf, max_sz) < 0) {
-        free(hdr_buf); return -1;
+        if (hdr_buf != hdr_stack) free(hdr_buf); return -1;
     }
     uint32_t offset = max_sz;
     while (offset < (uint32_t)enc_len) {
@@ -14342,11 +14425,11 @@ static int h2_send_response_headers(int fd, H2HpackDynTable *enc_dyn,
         uint8_t cont_flags = is_last ? H2_FLAG_END_HEADERS : 0;
         if (h2_write_frame(fd, H2_FRAME_CONTINUATION, cont_flags, stream_id,
                            hdr_buf + offset, chunk) < 0) {
-            free(hdr_buf); return -1;
+            if (hdr_buf != hdr_stack) free(hdr_buf); return -1;
         }
         offset += chunk;
     }
-    free(hdr_buf);
+    if (hdr_buf != hdr_stack) free(hdr_buf);
     return 0;
 }
 
@@ -14690,11 +14773,8 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
         query_part[0] = '\0';
     }
 
-    // Build Bytes for raw body
-    taida_val raw_bytes = taida_list_new();
-    for (size_t bi = 0; bi < body_len; bi++) {
-        raw_bytes = taida_list_append(raw_bytes, (taida_val)body[bi]);
-    }
+    // NB6-26: Build proper Bytes (not List) for raw body — matches Interpreter's Value::Bytes(body)
+    taida_val raw_bytes = taida_bytes_from_raw(body, (taida_val)body_len);
 
     // version pack @(major: 2, minor: 0)
     taida_val version_pack = taida_pack_new(2);
@@ -14705,8 +14785,9 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
     taida_pack_set(version_pack, 1, (taida_val)0);
     taida_pack_set_tag(version_pack, 1, TAIDA_TAG_INT);
 
-    // Request pack: 13 fields
-    taida_val req = taida_pack_new(13);
+    // NB6-28: Request pack: 14 fields (was 13 — missing "chunked")
+    // Matches Interpreter's 14-field request pack.
+    taida_val req = taida_pack_new(14);
     int f = 0;
     #define SET_FIELD(nm, val, tag) do { \
         taida_pack_set_hash(req, f, taida_str_hash((taida_val)(nm))); \
@@ -14720,13 +14801,18 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
     SET_FIELD("query",       (taida_val)taida_str_new_copy(query_part),      TAIDA_TAG_STR);
     SET_FIELD("version",     version_pack,                                 TAIDA_TAG_PACK);
     SET_FIELD("headers",     hdr_list,                                     TAIDA_TAG_LIST);
+    // NB6-26: Use TAIDA_TAG_PACK for Bytes (consistent with h1 path — Bytes use PACK tag in Native)
     SET_FIELD("body",        raw_bytes,                                    TAIDA_TAG_PACK);
     SET_FIELD("bodyOffset",  (taida_val)0,                                 TAIDA_TAG_INT);
     SET_FIELD("contentLength",(taida_val)(int64_t)body_len,                TAIDA_TAG_INT);
+    // NB6-27: Retain raw_bytes before setting as second field to prevent double-free
+    taida_retain(raw_bytes);
     SET_FIELD("raw",         raw_bytes,                                    TAIDA_TAG_PACK);
     SET_FIELD("remoteHost",  (taida_val)taida_str_new_copy(peer_host),       TAIDA_TAG_STR);
     SET_FIELD("remotePort",  (taida_val)(int64_t)peer_port,                TAIDA_TAG_INT);
     SET_FIELD("keepAlive",   (taida_val)1,                                 TAIDA_TAG_BOOL);
+    // NB6-28: Add missing "chunked" field (HTTP/2 never uses chunked TE)
+    SET_FIELD("chunked",     (taida_val)0,                                 TAIDA_TAG_BOOL);
     SET_FIELD("protocol",    (taida_val)taida_str_new_copy("h2"),            TAIDA_TAG_STR);
     #undef SET_FIELD
     return req;
@@ -14756,7 +14842,10 @@ static int h2_continuation_append(H2Conn *conn, const unsigned char *data, uint3
 // Returns after connection closes or max_requests reached.
 // conn_send_window_ptr and stream_send_window_ptr are temporarily per-call.
 static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
-    H2Conn conn;
+    // NB6-40: Heap-allocate H2Conn (~18KB) to avoid deep-stack overflow risk.
+    H2Conn *connp = (H2Conn*)TAIDA_MALLOC(sizeof(H2Conn), "h2_conn");
+    if (!connp) return;
+    #define conn (*connp)
     h2_conn_init(&conn);
 
     // Validate connection preface
@@ -15011,6 +15100,8 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
 
                 case H2_FRAME_RST_STREAM: {
                     if (frame_stream_id == 0) { protocol_error = 1; break; }
+                    // NB6-31: RFC 9113 Section 6.4 — RST_STREAM payload MUST be exactly 4 bytes
+                    if (payload_len != 4) { protocol_error = 1; break; }
                     H2Stream *s = h2_conn_find_stream(&conn, frame_stream_id);
                     if (s) s->state = H2_STREAM_CLOSED;
                     break;
@@ -15221,6 +15312,8 @@ h2_conn_done:
         h2_send_goaway(client_fd, conn.last_peer_stream_id, H2_ERROR_NO_ERROR, "");
     }
     h2_conn_free(&conn);
+    #undef conn
+    free(connp);
 }
 
 // ── taida_net_h2_serve ─────────────────────────────────────────────────────

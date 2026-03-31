@@ -4466,20 +4466,31 @@ impl Interpreter {
 
             // If a request is complete, dispatch to handler
             if let Some((stream_id, h2_headers, body)) = completed_request {
-                // Send WINDOW_UPDATE for connection and stream to replenish receive window
+                // NB6-42: Only send WINDOW_UPDATE when window drops below half of initial.
+                // Avoids per-DATA-frame WINDOW_UPDATE overhead for small bodies.
                 let data_received = body.len() as u32;
                 if data_received > 0 {
-                    let _ = send_window_update(stream, 0, data_received);
-                    let _ = send_window_update(stream, stream_id, data_received);
-                    h2_conn.conn_recv_window += data_received as i64;
+                    let initial_window = DEFAULT_INITIAL_WINDOW_SIZE as i64;
+                    // Connection window
+                    if h2_conn.conn_recv_window < initial_window / 2 {
+                        let replenish = initial_window - h2_conn.conn_recv_window;
+                        let _ = send_window_update(stream, 0, replenish as u32);
+                        h2_conn.conn_recv_window += replenish;
+                    }
+                    // Stream window
                     if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
-                        s.recv_window += data_received as i64;
+                        if s.recv_window < initial_window / 2 {
+                            let replenish = initial_window - s.recv_window;
+                            let _ = send_window_update(stream, stream_id, replenish as u32);
+                            s.recv_window += replenish;
+                        }
                     }
                 }
 
                 // Convert h2 pseudo-headers + headers into request pack
+                // NB6-36: pass actual stream_id so errors target the correct stream
                 let (method, path, authority, regular_headers) =
-                    match extract_request_fields(&h2_headers) {
+                    match extract_request_fields_with_stream_id(&h2_headers, stream_id) {
                         Ok(fields) => fields,
                         Err(_) => {
                             let _ = send_rst_stream(stream, stream_id, 0x1); // PROTOCOL_ERROR

@@ -22,7 +22,7 @@
 /// - Stream multiplexing within a single connection (serial handler dispatch)
 /// - Connection-local buffer reuse (no aggregate buffers on the hot path)
 /// - HPACK with static table + dynamic table (RFC 7541)
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 
 // ── HTTP/2 Constants ────────────────────────────────────────────────
@@ -32,7 +32,7 @@ use std::io::{self, Read, Write};
 pub(crate) const CONNECTION_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Default initial window size for flow control (RFC 9113 Section 6.9.2).
-const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65_535;
+pub(crate) const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65_535;
 
 /// Default max frame size (RFC 9113 Section 6.5.2).
 const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384;
@@ -183,6 +183,30 @@ const HPACK_STATIC_TABLE: &[(&str, &str)] = &[
     ("www-authenticate", ""),             // 61
 ];
 
+/// NB6-39: Pre-built HashMap for O(1) static table name lookup (encoder).
+/// Maps header name -> first 1-based index in HPACK_STATIC_TABLE.
+static STATIC_NAME_MAP: std::sync::LazyLock<HashMap<&'static str, usize>> =
+    std::sync::LazyLock::new(|| {
+        let mut m = HashMap::new();
+        for (i, &(name, _)) in HPACK_STATIC_TABLE.iter().enumerate().skip(1) {
+            m.entry(name).or_insert(i);
+        }
+        m
+    });
+
+/// NB6-39: Pre-built HashMap for O(1) static table exact (name+value) lookup.
+/// Maps (name, value) -> 1-based index. Only includes entries with non-empty values.
+static STATIC_EXACT_MAP: std::sync::LazyLock<HashMap<(&'static str, &'static str), usize>> =
+    std::sync::LazyLock::new(|| {
+        let mut m = HashMap::new();
+        for (i, &(name, value)) in HPACK_STATIC_TABLE.iter().enumerate().skip(1) {
+            if !value.is_empty() {
+                m.insert((name, value), i);
+            }
+        }
+        m
+    });
+
 // ── Frame Parsing / Serialization ───────────────────────────────────
 
 /// A parsed HTTP/2 frame header (9 bytes).
@@ -282,7 +306,8 @@ impl HpackEntry {
 
 /// HPACK decoder state (per-connection).
 pub(crate) struct HpackDecoder {
-    dynamic_table: Vec<HpackEntry>,
+    // NB6-33: VecDeque for O(1) push_front / pop_back instead of O(n) Vec::insert(0, ..)
+    dynamic_table: VecDeque<HpackEntry>,
     max_table_size: usize,
     current_table_size: usize,
 }
@@ -290,7 +315,7 @@ pub(crate) struct HpackDecoder {
 impl HpackDecoder {
     pub fn new(max_size: u32) -> Self {
         HpackDecoder {
-            dynamic_table: Vec::new(),
+            dynamic_table: VecDeque::new(),
             max_table_size: max_size as usize,
             current_table_size: 0,
         }
@@ -421,7 +446,8 @@ impl HpackDecoder {
 
         // Evict entries until we have room
         while self.current_table_size + entry_size > self.max_table_size {
-            if let Some(evicted) = self.dynamic_table.pop() {
+            // NB6-33: pop_back() on VecDeque is O(1)
+            if let Some(evicted) = self.dynamic_table.pop_back() {
                 self.current_table_size -= evicted.size();
             } else {
                 break;
@@ -431,7 +457,8 @@ impl HpackDecoder {
         // Only add if the entry fits
         if entry_size <= self.max_table_size {
             self.current_table_size += entry_size;
-            self.dynamic_table.insert(0, entry);
+            // NB6-33: push_front() on VecDeque is O(1) instead of Vec::insert(0, ..) O(n)
+            self.dynamic_table.push_front(entry);
         }
     }
 
@@ -440,7 +467,7 @@ impl HpackDecoder {
         self.max_table_size = new_size;
         // Evict entries that no longer fit
         while self.current_table_size > self.max_table_size {
-            if let Some(evicted) = self.dynamic_table.pop() {
+            if let Some(evicted) = self.dynamic_table.pop_back() {
                 self.current_table_size -= evicted.size();
             } else {
                 break;
@@ -453,7 +480,8 @@ impl HpackDecoder {
 
 /// HPACK encoder state (per-connection).
 pub(crate) struct HpackEncoder {
-    dynamic_table: Vec<HpackEntry>,
+    // NB6-33: VecDeque for O(1) push_front / pop_back instead of O(n) Vec::insert(0, ..)
+    dynamic_table: VecDeque<HpackEntry>,
     max_table_size: usize,
     current_table_size: usize,
 }
@@ -461,7 +489,7 @@ pub(crate) struct HpackEncoder {
 impl HpackEncoder {
     pub fn new(max_size: u32) -> Self {
         HpackEncoder {
-            dynamic_table: Vec::new(),
+            dynamic_table: VecDeque::new(),
             max_table_size: max_size as usize,
             current_table_size: 0,
         }
@@ -494,30 +522,22 @@ impl HpackEncoder {
     }
 
     /// Find exact match in static table. Returns 1-based index.
+    /// NB6-39: O(1) HashMap lookup instead of O(62) linear scan.
     fn find_static_exact(&self, name: &str, value: &str) -> Option<usize> {
-        for (i, &(n, v)) in HPACK_STATIC_TABLE.iter().enumerate().skip(1) {
-            if n == name && v == value && !v.is_empty() {
-                return Some(i);
-            }
-        }
-        None
+        STATIC_EXACT_MAP.get(&(name, value)).copied()
     }
 
     /// Find name-only match in static table. Returns 1-based index.
+    /// NB6-39: O(1) HashMap lookup instead of O(62) linear scan.
     fn find_static_name(&self, name: &str) -> Option<usize> {
-        for (i, &(n, _)) in HPACK_STATIC_TABLE.iter().enumerate().skip(1) {
-            if n == name {
-                return Some(i);
-            }
-        }
-        None
+        STATIC_NAME_MAP.get(name).copied()
     }
 
     /// Update the maximum dynamic table size.
     pub fn update_max_size(&mut self, new_size: usize) {
         self.max_table_size = new_size;
         while self.current_table_size > self.max_table_size {
-            if let Some(evicted) = self.dynamic_table.pop() {
+            if let Some(evicted) = self.dynamic_table.pop_back() {
                 self.current_table_size -= evicted.size();
             } else {
                 break;
@@ -531,7 +551,7 @@ impl HpackEncoder {
         let entry_size = entry.size();
 
         while self.current_table_size + entry_size > self.max_table_size {
-            if let Some(evicted) = self.dynamic_table.pop() {
+            if let Some(evicted) = self.dynamic_table.pop_back() {
                 self.current_table_size -= evicted.size();
             } else {
                 break;
@@ -540,7 +560,8 @@ impl HpackEncoder {
 
         if entry_size <= self.max_table_size {
             self.current_table_size += entry_size;
-            self.dynamic_table.insert(0, entry);
+            // NB6-33: push_front() on VecDeque is O(1) instead of Vec::insert(0, ..) O(n)
+            self.dynamic_table.push_front(entry);
         }
     }
 }
@@ -1027,9 +1048,9 @@ pub(crate) struct H2Connection {
     pub goaway_sent: bool,
     /// Total requests processed (for bounded shutdown).
     pub request_count: i64,
-    /// Connection-level read buffer (reused across frames).
+    /// NB6-38: Reusable payload buffer for frame reading (avoids per-frame heap alloc).
     #[allow(dead_code)]
-    pub read_buf: Vec<u8>,
+    pub payload_buf: Vec<u8>,
     /// Buffered header block fragment during HEADERS/CONTINUATION sequence.
     /// Non-empty when we have received a HEADERS frame without END_HEADERS
     /// and are waiting for CONTINUATION frames.
@@ -1078,7 +1099,8 @@ impl H2Connection {
             last_peer_stream_id: 0,
             goaway_sent: false,
             request_count: 0,
-            read_buf: vec![0u8; 16_384 + 9], // max frame size + header
+            // NB6-38: Reusable payload buffer, sized for max frame payload + header
+            payload_buf: Vec::with_capacity(16_384 + 9),
             continuation_buf: Vec::new(),
             continuation_stream_id: 0,
             continuation_flags: 0,
@@ -1192,7 +1214,40 @@ pub(crate) fn read_frame<R: Read>(
     Ok((header, payload))
 }
 
-/// Write an HTTP/2 frame to the stream.
+/// NB6-38: Read an HTTP/2 frame reusing the provided buffer to avoid per-frame heap alloc.
+#[allow(dead_code)]
+pub(crate) fn read_frame_reuse<'a, R: Read>(
+    reader: &mut R,
+    max_frame_size: u32,
+    buf: &'a mut Vec<u8>,
+) -> Result<(FrameHeader, &'a [u8]), H2Error> {
+    let mut header_buf = [0u8; 9];
+    reader.read_exact(&mut header_buf)?;
+    let header = FrameHeader::parse(&header_buf);
+
+    if header.length > max_frame_size {
+        return Err(H2Error::Connection(
+            ERROR_FRAME_SIZE_ERROR,
+            format!(
+                "frame length {} exceeds max_frame_size {}",
+                header.length, max_frame_size
+            ),
+        ));
+    }
+
+    let len = header.length as usize;
+    buf.resize(len, 0);
+    if len > 0 {
+        reader.read_exact(&mut buf[..len])?;
+    }
+
+    Ok((header, &buf[..len]))
+}
+
+/// Write an HTTP/2 frame to the stream (without flushing).
+/// NB6-35: Removed per-frame flush(). Callers should use BufWriter and flush
+/// once per logical response unit (e.g., after HEADERS+DATA sequence) to avoid
+/// 5+ TLS records / syscalls per response.
 pub(crate) fn write_frame<W: Write>(
     writer: &mut W,
     frame_type: u8,
@@ -1211,7 +1266,6 @@ pub(crate) fn write_frame<W: Write>(
     if !payload.is_empty() {
         writer.write_all(payload)?;
     }
-    writer.flush()?;
     Ok(())
 }
 
@@ -2026,8 +2080,20 @@ pub(crate) type RequestFields = (String, String, String, Vec<(String, String)>);
 /// Validates per RFC 9113 Section 8.3:
 /// - Pseudo-headers MUST appear before all regular headers.
 /// - `:method`, `:path`, and `:scheme` are required for requests.
+/// NB6-36: Accept actual stream_id to embed in errors instead of hardcoded 0.
+/// Backward-compat wrapper with stream_id=0 for unit tests.
+#[allow(dead_code)]
 pub(crate) fn extract_request_fields(
     headers: &[(String, String)],
+) -> Result<RequestFields, H2Error> {
+    extract_request_fields_with_stream_id(headers, 0)
+}
+
+/// Extract request pseudo-headers and regular headers from a decoded header list.
+/// `stream_id` is embedded in any error for correct RST_STREAM targeting.
+pub(crate) fn extract_request_fields_with_stream_id(
+    headers: &[(String, String)],
+    stream_id: u32,
 ) -> Result<RequestFields, H2Error> {
     let mut method = None;
     let mut path = None;
@@ -2042,7 +2108,7 @@ pub(crate) fn extract_request_fields(
             // in a header block after a regular header field.
             if saw_regular_header {
                 return Err(H2Error::Stream(
-                    0,
+                    stream_id,
                     ERROR_PROTOCOL_ERROR,
                     format!(
                         "pseudo-header {} after regular header (ordering violation)",
@@ -2056,7 +2122,7 @@ pub(crate) fn extract_request_fields(
                     // more than once in a header block.
                     if method.is_some() {
                         return Err(H2Error::Stream(
-                            0,
+                            stream_id,
                             ERROR_PROTOCOL_ERROR,
                             "duplicate :method pseudo-header".into(),
                         ));
@@ -2066,7 +2132,7 @@ pub(crate) fn extract_request_fields(
                 ":path" => {
                     if path.is_some() {
                         return Err(H2Error::Stream(
-                            0,
+                            stream_id,
                             ERROR_PROTOCOL_ERROR,
                             "duplicate :path pseudo-header".into(),
                         ));
@@ -2076,7 +2142,7 @@ pub(crate) fn extract_request_fields(
                 ":authority" => {
                     if authority.is_some() {
                         return Err(H2Error::Stream(
-                            0,
+                            stream_id,
                             ERROR_PROTOCOL_ERROR,
                             "duplicate :authority pseudo-header".into(),
                         ));
@@ -2086,7 +2152,7 @@ pub(crate) fn extract_request_fields(
                 ":scheme" => {
                     if scheme.is_some() {
                         return Err(H2Error::Stream(
-                            0,
+                            stream_id,
                             ERROR_PROTOCOL_ERROR,
                             "duplicate :scheme pseudo-header".into(),
                         ));
@@ -2095,7 +2161,7 @@ pub(crate) fn extract_request_fields(
                 }
                 _ => {
                     return Err(H2Error::Stream(
-                        0,
+                        stream_id,
                         ERROR_PROTOCOL_ERROR,
                         format!("unknown pseudo-header: {}", name),
                     ));
@@ -2108,24 +2174,24 @@ pub(crate) fn extract_request_fields(
     }
 
     let method = method.ok_or_else(|| {
-        H2Error::Stream(0, ERROR_PROTOCOL_ERROR, "missing :method pseudo-header".into())
+        H2Error::Stream(stream_id, ERROR_PROTOCOL_ERROR, "missing :method pseudo-header".into())
     })?;
     // RFC 9113 Section 8.3.1: :method value MUST NOT be empty.
     if method.is_empty() {
         return Err(H2Error::Stream(
-            0,
+            stream_id,
             ERROR_PROTOCOL_ERROR,
             "empty :method pseudo-header value".into(),
         ));
     }
 
     let path = path.ok_or_else(|| {
-        H2Error::Stream(0, ERROR_PROTOCOL_ERROR, "missing :path pseudo-header".into())
+        H2Error::Stream(stream_id, ERROR_PROTOCOL_ERROR, "missing :path pseudo-header".into())
     })?;
     // RFC 9113 Section 8.3.1: :path value MUST NOT be empty for non-CONNECT requests.
     if path.is_empty() {
         return Err(H2Error::Stream(
-            0,
+            stream_id,
             ERROR_PROTOCOL_ERROR,
             "empty :path pseudo-header value".into(),
         ));
@@ -2133,7 +2199,7 @@ pub(crate) fn extract_request_fields(
 
     // RFC 9113 Section 8.3.1: :scheme is required for request pseudo-headers.
     let _scheme = scheme.ok_or_else(|| {
-        H2Error::Stream(0, ERROR_PROTOCOL_ERROR, "missing :scheme pseudo-header".into())
+        H2Error::Stream(stream_id, ERROR_PROTOCOL_ERROR, "missing :scheme pseudo-header".into())
     })?;
 
     let authority = authority.unwrap_or_default();

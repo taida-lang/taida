@@ -24672,3 +24672,250 @@ fn test_net6_5b_release_gate_v6_test_counts() {
         );
     }
 }
+
+// ── NB6 Blocker Fix Verification Tests ──────────────────────────────────────
+
+/// NB6-26/27/28: Verify Native h2 request pack uses Bytes (not List), retains
+/// for shared body/raw, and includes 14 fields (with "chunked").
+#[test]
+fn test_nb6_26_27_28_native_h2_request_pack_parity() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+
+    // NB6-26: Must use taida_bytes_from_raw (not taida_list_new + append)
+    assert!(
+        source.contains("taida_bytes_from_raw(body, (taida_val)body_len)"),
+        "NB6-26: Native h2 request pack must use taida_bytes_from_raw for body/raw"
+    );
+
+    // NB6-27: Must retain raw_bytes before second SET_FIELD
+    assert!(
+        source.contains("taida_retain(raw_bytes)"),
+        "NB6-27: Native h2 request pack must retain raw_bytes to prevent double-free"
+    );
+
+    // NB6-28: Must allocate 14 fields (was 13, missing 'chunked')
+    assert!(
+        source.contains("taida_pack_new(14)"),
+        "NB6-28: Native h2 request pack must have 14 fields (including chunked)"
+    );
+
+    // NB6-28: 'chunked' field must be present
+    let h2_build_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("h2_build_request_pack"))
+        .take(100)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        h2_build_section.contains("SET_FIELD(\"chunked\""),
+        "NB6-28: Native h2 request pack must include 'chunked' field"
+    );
+}
+
+/// NB6-31: Verify Native RST_STREAM validates payload length.
+#[test]
+fn test_nb6_31_native_rst_stream_payload_length_check() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+
+    // The RST_STREAM handler must check payload_len != 4
+    let rst_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("case H2_FRAME_RST_STREAM"))
+        .take(10)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rst_section.contains("payload_len != 4"),
+        "NB6-31: Native RST_STREAM handler must validate payload length == 4 (RFC 9113 6.4)"
+    );
+}
+
+/// NB6-32: Verify Native TLS writev NULL check.
+#[test]
+fn test_nb6_32_native_tls_writev_null_check() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+
+    // The tls_writev_all function must check for NULL after heap alloc
+    let writev_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("tls_writev_linear"))
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        writev_section.contains("buf == NULL"),
+        "NB6-32: taida_tls_writev_all must check heap alloc for NULL"
+    );
+}
+
+/// NB6-33: Verify HPACK dynamic table uses VecDeque (Rust) / append-at-end (C).
+#[test]
+fn test_nb6_33_hpack_dyntable_o1_insert() {
+    // Interpreter: VecDeque instead of Vec
+    let h2_source = std::fs::read_to_string("src/interpreter/net_h2.rs")
+        .expect("read net_h2.rs");
+    assert!(
+        h2_source.contains("VecDeque<HpackEntry>"),
+        "NB6-33: Interpreter HPACK dynamic table must use VecDeque for O(1) insert"
+    );
+    assert!(
+        h2_source.contains("push_front(entry)"),
+        "NB6-33: Interpreter HPACK must use push_front instead of insert(0, ..)"
+    );
+
+    // Native: no memmove for insert
+    let c_source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    // The insert function should append at end, not memmove
+    let insert_section: String = c_source
+        .lines()
+        .skip_while(|l| !l.contains("static void h2_dyntable_insert"))
+        .take(30)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !insert_section.contains("memmove(&dt->entries[1]"),
+        "NB6-33: Native HPACK dyntable insert must not memmove for O(n) shift"
+    );
+    assert!(
+        insert_section.contains("dt->entries[dt->len]"),
+        "NB6-33: Native HPACK dyntable must append at end (O(1))"
+    );
+}
+
+/// NB6-34: Verify Native Huffman decoder uses lookup table optimization.
+#[test]
+fn test_nb6_34_native_huffman_lut() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    assert!(
+        source.contains("h2_huff_lut"),
+        "NB6-34: Native Huffman decoder must use 8-bit prefix lookup table"
+    );
+    assert!(
+        source.contains("h2_huff_build_lut"),
+        "NB6-34: Native must build Huffman LUT at initialization"
+    );
+}
+
+/// NB6-35: Verify write_frame does not flush per-frame.
+#[test]
+fn test_nb6_35_no_per_frame_flush() {
+    let source = std::fs::read_to_string("src/interpreter/net_h2.rs")
+        .expect("read net_h2.rs");
+    // Find the write_frame function body
+    let write_frame_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("pub(crate) fn write_frame<W: Write>"))
+        .take(20)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !write_frame_section.contains("writer.flush()"),
+        "NB6-35: write_frame must not flush per-frame"
+    );
+}
+
+/// NB6-29/30: Verify Native HPACK header buffer sizes increased.
+#[test]
+fn test_nb6_29_30_native_header_buffer_sizes() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    assert!(
+        source.contains("H2_MAX_HEADERS 128"),
+        "NB6-30: Native H2_MAX_HEADERS must be >= 128"
+    );
+    assert!(
+        source.contains("H2_HEADER_NAME_SIZE 1024"),
+        "NB6-29: Native header name buffer must be >= 1024"
+    );
+    assert!(
+        source.contains("H2_HEADER_BUF_SIZE 16384"),
+        "NB6-29: Native header value buffer must be >= 16384"
+    );
+}
+
+/// NB6-24: Verify Native h2 response headers use stack+heap fallback.
+#[test]
+fn test_nb6_24_native_h2_header_stack_fallback() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    // Must have hdr_stack buffer instead of fixed 64KB malloc
+    let hdr_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("h2_send_response_headers"))
+        .take(40)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        hdr_section.contains("hdr_stack[8192]"),
+        "NB6-24: Native h2 response headers must use stack buffer"
+    );
+    assert!(
+        hdr_section.contains("hdr_buf == hdr_stack"),
+        "NB6-24: Native h2 must distinguish stack vs heap for free"
+    );
+}
+
+/// NB6-39: Verify Interpreter HPACK encoder uses HashMap for static table lookup.
+#[test]
+fn test_nb6_39_hpack_encoder_hashmap_lookup() {
+    let source = std::fs::read_to_string("src/interpreter/net_h2.rs")
+        .expect("read net_h2.rs");
+    assert!(
+        source.contains("STATIC_EXACT_MAP"),
+        "NB6-39: Interpreter HPACK encoder must use HashMap for exact static table lookup"
+    );
+    assert!(
+        source.contains("STATIC_NAME_MAP"),
+        "NB6-39: Interpreter HPACK encoder must use HashMap for name-only static table lookup"
+    );
+}
+
+/// NB6-40: Verify Native H2Conn is heap-allocated.
+#[test]
+fn test_nb6_40_native_h2conn_heap_alloc() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    assert!(
+        source.contains("TAIDA_MALLOC(sizeof(H2Conn)"),
+        "NB6-40: Native H2Conn must be heap-allocated (not stack)"
+    );
+}
+
+/// NB6-41: Verify Native h2_conn_find_stream searches from end.
+#[test]
+fn test_nb6_41_native_stream_find_from_end() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let find_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("h2_conn_find_stream"))
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        find_section.contains("stream_count - 1"),
+        "NB6-41: h2_conn_find_stream must search from end (most recent streams first)"
+    );
+}
+
+/// NB6-37: Verify Native h2_dyntable_insert checks strdup return values.
+#[test]
+fn test_nb6_37_native_dyntable_strdup_check() {
+    let source = std::fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let insert_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("static void h2_dyntable_insert"))
+        .take(35)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        insert_section.contains("!dup_name || !dup_value"),
+        "NB6-37: h2_dyntable_insert must check strdup return values for NULL"
+    );
+}
