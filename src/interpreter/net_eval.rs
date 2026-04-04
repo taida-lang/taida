@@ -3925,7 +3925,7 @@ impl Interpreter {
             }
             Some("h3") => {
                 // v7 NET7-1c: HTTP/3 requires TLS (cert + key). Validate before
-                // returning the not-yet-implemented error so the cert/key contract
+                // dispatching to the h3 serve path so the cert/key contract
                 // is established from Phase 1 onward.
                 if tls_cert_path.is_none() || tls_key_path.is_none() {
                     let result = make_result_failure_msg(
@@ -3934,15 +3934,18 @@ impl Interpreter {
                     );
                     return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                 }
-                // v7 Phase 1: h3 is recognized but not yet implemented on the
-                // Interpreter backend. Unlock target: Phase 3 (NET7-3a).
-                let result = make_result_failure_msg(
-                    "H3NotYetImplemented",
-                    "httpServe: HTTP/3 (protocol: \"h3\") is not yet implemented on the \
-                     interpreter backend. Use the native backend for HTTP/3 support \
-                     (available after Phase 2).",
+                // v7 Phase 3 (NET7-3a): Dispatch to H3 serve path.
+                // This mirrors the Native backend's taida_net_h3_serve():
+                //   1. Run H3 protocol layer self-tests (QPACK round-trip, request validation)
+                //   2. Gate on QUIC transport availability
+                //   3. Return appropriate error/success
+                return self.serve_h3(
+                    tls_cert_path.clone().unwrap(),
+                    tls_key_path.clone().unwrap(),
+                    handler,
+                    max_requests,
+                    port,
                 );
-                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
             }
             Some(other) => {
                 let result = make_result_failure_msg(
@@ -4738,6 +4741,126 @@ impl Interpreter {
         }
 
         Ok(())
+    }
+
+    /// HTTP/3 serve entry point (NET7-3a: Interpreter parity backend).
+    ///
+    /// Mirrors the Native backend's `taida_net_h3_serve()`:
+    ///   1. Run H3 protocol layer self-tests (QPACK round-trip, request validation)
+    ///   2. Attempt to load QUIC transport library
+    ///   3. Return appropriate error/success result
+    ///
+    /// The H3 protocol layer (QPACK, frame encoding, stream state, request
+    /// extraction, response building, graceful shutdown) is fully implemented
+    /// in `net_h3.rs`. The QUIC transport binding is gated on library
+    /// availability, matching the Native backend's dlopen gate pattern.
+    ///
+    /// Design contracts (NET_DESIGN.md):
+    ///   - cert/key required (validated before reaching here)
+    ///   - 0-RTT: default-off, not exposed
+    ///   - Handler dispatch: same 14-field request pack as h1/h2
+    ///   - Graceful shutdown: GOAWAY -> drain -> close
+    ///   - Bounded-copy discipline: 1 packet = at most 1 materialization
+    ///   - Transport I/O does NOT use the existing Transport trait (NB7-7)
+    fn serve_h3(
+        &mut self,
+        _cert_path: String,
+        _key_path: String,
+        _handler: super::value::FuncValue,
+        _max_requests: i64,
+        _port: u16,
+    ) -> Result<Option<Signal>, RuntimeError> {
+        use super::net_h3;
+
+        // NB7-9/NB7-10: Run embedded self-tests to validate QPACK round-trip
+        // and H3 request pseudo-header validation, matching Native behavior.
+        match net_h3::run_selftests() {
+            net_h3::SelftestResult::Ok => {}
+            net_h3::SelftestResult::QpackFailure(rc) => {
+                let result = make_result_failure_msg(
+                    "H3SelftestFailed",
+                    format!(
+                        "httpServe: HTTP/3 protocol layer self-test failed. \
+                         QPACK encode/decode round-trip failed (code: {}).",
+                        rc
+                    ),
+                );
+                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            }
+            net_h3::SelftestResult::ValidationFailure(rc) => {
+                let result = make_result_failure_msg(
+                    "H3SelftestFailed",
+                    format!(
+                        "httpServe: HTTP/3 protocol layer self-test failed. \
+                         Request pseudo-header validation failed (code: {}).",
+                        rc
+                    ),
+                );
+                return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+            }
+        }
+
+        // QUIC transport gate: attempt to load a QUIC library.
+        // The Interpreter uses the same gating pattern as the Native backend:
+        // the H3 protocol semantics are fully implemented, but the actual
+        // QUIC transport requires an external library.
+        //
+        // Phase 3: Try to load libquiche via dlopen. If unavailable, return
+        // H3QuicUnavailable (matching Native). If found but pending
+        // integration, return H3TransportPending (matching Native).
+        //
+        // We use raw FFI to call dlopen/dlclose directly (Rust links against
+        // libc on Linux/macOS), matching the Native backend's exact check.
+        unsafe extern "C" {
+            fn dlopen(filename: *const std::os::raw::c_char, flags: std::os::raw::c_int)
+                -> *mut std::os::raw::c_void;
+            fn dlclose(handle: *mut std::os::raw::c_void) -> std::os::raw::c_int;
+        }
+        const RTLD_LAZY: std::os::raw::c_int = 1;
+
+        let quiche_available = unsafe {
+            let handle = dlopen(
+                b"libquiche.so\0".as_ptr() as *const _,
+                RTLD_LAZY,
+            );
+            if handle.is_null() {
+                let handle2 = dlopen(
+                    b"libquiche.so.0\0".as_ptr() as *const _,
+                    RTLD_LAZY,
+                );
+                if handle2.is_null() {
+                    false
+                } else {
+                    dlclose(handle2);
+                    true
+                }
+            } else {
+                dlclose(handle);
+                true
+            }
+        };
+
+        if !quiche_available {
+            // QUIC transport library not available — same as Native.
+            let result = make_result_failure_msg(
+                "H3QuicUnavailable",
+                "httpServe: HTTP/3 requires QUIC transport (libquiche.so). \
+                 Install quiche or equivalent QUIC library. \
+                 The HTTP/3 protocol layer (QPACK, frames, stream management) \
+                 is ready; only the QUIC transport binding is missing.",
+            );
+            return Ok(Some(Signal::Value(make_fulfilled_async(result))));
+        }
+
+        // quiche found but integration pending — same as Native Phase 2.
+        let result = make_result_failure_msg(
+            "H3TransportPending",
+            "httpServe: HTTP/3 QUIC transport library found but integration \
+             is pending. The HTTP/3 protocol layer (QPACK, frame encoding, \
+             stream state, request/response mapping, graceful shutdown) is \
+             implemented. QUIC transport wiring will complete in Phase 5 hardening.",
+        );
+        Ok(Some(Signal::Value(make_fulfilled_async(result))))
     }
 
     /// Try to read and parse a request head from a connection (non-blocking).

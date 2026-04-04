@@ -727,6 +727,13 @@ fn decode_huffman(data: &[u8]) -> Result<String, H2Error> {
         .map_err(|_| H2Error::Compression("HPACK: Huffman decoded to invalid UTF-8".into()))
 }
 
+/// Public Huffman decode for QPACK reuse (QPACK uses the same Huffman table as HPACK).
+/// Returns `Some(decoded_string)` on success, `None` on error.
+/// Used by `net_h3.rs` for QPACK string decoding (RFC 9204 Section 4.1.2).
+pub(crate) fn huffman_decode(data: &[u8]) -> Option<String> {
+    decode_huffman(data).ok()
+}
+
 /// Try to decode one Huffman symbol from the bit buffer.
 /// Returns (symbol_byte, bits_consumed) if successful.
 fn try_decode_huffman_symbol(bits: u64, bits_left: u8) -> Option<(u8, u8)> {
