@@ -27795,3 +27795,626 @@ stdout(result.__value.kind)
         stdout
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// NET v7 Phase 4 — JS Compatibility Backend / Unsupported Contract
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Phase 4 confirms that the JS backend remains a stable h1/h2 compatibility
+// backend after all Phase 2 (Native H3 reference) and Phase 3 (Interpreter
+// H3 parity) changes. It also locks the h3 unsupported contract for JS
+// with explicit message pinning and 3-way backend divergence documentation.
+//
+// NET7-4a: JS h1/h2 compatibility maintained
+// NET7-4b: h3 explicit unsupported / future upgrade path locked
+
+// ── NET7-4a: JS h1/h2 compatibility ────────────────────────────────
+
+/// NET7-4a-1: JS h1 basic serve still works end-to-end after Phase 2/3 changes.
+/// This is a regression gate confirming that the H3 reference/parity work in
+/// Phases 2-3 did not break the JS h1 path.
+#[test]
+fn test_net7_4a_js_h1_serve_after_phase3() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "x-v7-phase4", value <= "js-h1-ok")], body <= "hello-v7-phase4")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "v7_4a_js_h1");
+    let td_path = dir.join("main.td");
+    let js_path = unique_temp_path("taida_v7_4a_js", "h1_basic", "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(
+        transpile.status.success(),
+        "NET7-4a-1: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let child = Command::new("node")
+        .arg(&js_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+
+    let _resp = send_h1_get_and_assert(port, "NET7-4a-1", "hello-v7-phase4", &["x-v7-phase4"]);
+
+    let output = child.wait_with_output().expect("wait for node");
+    assert!(
+        output.status.success(),
+        "NET7-4a-1: JS server process exited with failure: {:?}",
+        output.status
+    );
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    assert_eq!(
+        stdout, "1",
+        "NET7-4a-1: JS h1 server should report requests=1, got: {:?}",
+        stdout
+    );
+}
+
+/// NET7-4a-2: JS h1 with explicit protocol="h1.1" has parity with Interpreter
+/// after Phase 2/3 changes. Both backends serve h1 identically.
+#[test]
+fn test_net7_4a_js_h11_parity_with_interp_after_phase3() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "v7-explicit-h11")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h1.1"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port
+        )
+    };
+
+    // JS backend
+    let port_js = find_free_loopback_port();
+    let source_js = source_template(port_js);
+    let dir_js = setup_net_project(&source_js, "v7_4a_js_h11_parity");
+    let td_path_js = dir_js.join("main.td");
+    let js_path = unique_temp_path("taida_v7_4a_js", "h11_parity", "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path_js)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(
+        transpile.status.success(),
+        "NET7-4a-2: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let child_js = Command::new("node")
+        .arg(&js_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn node");
+
+    let _resp_js = send_h1_get_and_assert(port_js, "NET7-4a-2 js", "v7-explicit-h11", &[]);
+
+    let output_js = child_js.wait_with_output().expect("wait for node");
+    assert!(
+        output_js.status.success(),
+        "NET7-4a-2: JS server process exited with failure: {:?}",
+        output_js.status
+    );
+    let stdout_js = normalize(&String::from_utf8_lossy(&output_js.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir_js);
+
+    // Interpreter backend
+    let port_interp = find_free_loopback_port();
+    let source_interp = source_template(port_interp);
+    let dir_interp = setup_net_project(&source_interp, "v7_4a_interp_h11_parity");
+    let td_path_interp = dir_interp.join("main.td");
+
+    let child_interp = Command::new(taida_bin())
+        .arg(&td_path_interp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let _resp_interp = send_h1_get_and_assert(port_interp, "NET7-4a-2 interp", "v7-explicit-h11", &[]);
+
+    let output_interp = child_interp.wait_with_output().expect("wait for interp");
+    assert!(
+        output_interp.status.success(),
+        "NET7-4a-2: Interpreter process exited with failure: {:?}",
+        output_interp.status
+    );
+    let stdout_interp = normalize(&String::from_utf8_lossy(&output_interp.stdout));
+    cleanup_net_project(&dir_interp);
+
+    assert_eq!(
+        stdout_js, "1",
+        "NET7-4a-2 js: expected requests=1, got: {:?}",
+        stdout_js
+    );
+    assert_eq!(
+        stdout_interp, "1",
+        "NET7-4a-2 interp: expected requests=1, got: {:?}",
+        stdout_interp
+    );
+    assert_eq!(
+        stdout_js, stdout_interp,
+        "NET7-4a-2: JS and Interpreter must produce identical h1.1 output. \
+         JS={:?} Interp={:?}",
+        stdout_js, stdout_interp
+    );
+}
+
+/// NET7-4a-3: JS h2 unsupported contract is unchanged after Phase 2/3.
+/// The H2Unsupported error kind and message are stable.
+#[test]
+fn test_net7_4a_js_h2_still_unsupported_after_phase3() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+stdout(result.throw.message)
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "v7_4a_js_h2");
+    let td_path = dir.join("main.td");
+    let js_path = unique_temp_path("taida_v7_4a_js", "h2_unsupported", "mjs");
+
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(transpile.status.success());
+
+    let js_output = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("run node");
+    let stdout = normalize(&String::from_utf8_lossy(&js_output.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    // Error kind must be H2Unsupported
+    assert!(
+        stdout.contains("H2Unsupported"),
+        "NET7-4a-3: JS h2 error kind must be H2Unsupported, got: {:?}",
+        stdout
+    );
+    // Message contract must be preserved from v6
+    assert!(
+        stdout.contains("httpServe: HTTP/2 (protocol: \"h2\") is not supported on the JS backend"),
+        "NET7-4a-3: JS H2Unsupported message prefix must be preserved, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Use the interpreter or native backend for HTTP/2 support"),
+        "NET7-4a-3: JS H2Unsupported guidance suffix must be preserved, got: {:?}",
+        stdout
+    );
+}
+
+// ── NET7-4b: h3 explicit unsupported / future upgrade path ─────────
+
+/// NET7-4b-1: JS h3 unsupported message stability contract.
+/// The exact error message is part of the public contract for JS users.
+/// This test pins the message content to prevent accidental changes,
+/// mirroring NET6-4b-3 (which pinned the h2 unsupported message).
+#[test]
+fn test_net7_4b_js_h3_unsupported_message_contract() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "v7_4b_msg_js");
+    let js_path = unique_temp_path("taida_v7_4b_js", "msg_contract", "mjs");
+    let t = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(t.status.success());
+    let out = Command::new("node").arg(&js_path).output().expect("node");
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    // Pin the exact message content
+    assert!(
+        stdout.contains("httpServe: HTTP/3 (protocol: \"h3\") is not supported on the JS backend"),
+        "NET7-4b-1: expected exact H3Unsupported message prefix, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Use the native or interpreter backend for HTTP/3 support"),
+        "NET7-4b-1: expected guidance suffix in message, got: {:?}",
+        stdout
+    );
+}
+
+/// NET7-4b-2: JS h3 returns H3Unsupported kind (not ProtocolError, not TlsError).
+/// This confirms the error kind is H3Unsupported regardless of cert/key presence.
+/// Without cert/key: JS returns H3Unsupported (not ProtocolError).
+/// With cert/key: JS returns H3Unsupported (not TlsError, per NB7-6).
+#[test]
+fn test_net7_4b_js_h3_kind_regardless_of_cert_key() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_with_cert = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    let source_without_cert = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    // With cert/key: should be H3Unsupported (not TlsError)
+    let kind_with_cert = {
+        let port = find_free_loopback_port();
+        let dir = setup_net_project(&source_with_cert(port), "v7_4b_js_h3_with_cert");
+        let js_path = unique_temp_path("taida_v7_4b_js", "h3_cert", "mjs");
+        let t = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(dir.join("main.td"))
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(t.status.success());
+        let out = Command::new("node").arg(&js_path).output().expect("node");
+        let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+        stdout
+    };
+
+    // Without cert/key: should also be H3Unsupported (not ProtocolError on JS)
+    let kind_without_cert = {
+        let port = find_free_loopback_port();
+        let dir = setup_net_project(&source_without_cert(port), "v7_4b_js_h3_no_cert");
+        let js_path = unique_temp_path("taida_v7_4b_js", "h3_nocert", "mjs");
+        let t = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(dir.join("main.td"))
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(t.status.success());
+        let out = Command::new("node").arg(&js_path).output().expect("node");
+        let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+        stdout
+    };
+
+    assert!(
+        kind_with_cert.contains("H3Unsupported"),
+        "NET7-4b-2: JS h3 with cert/key must return H3Unsupported (not TlsError), got: {:?}",
+        kind_with_cert
+    );
+    assert!(
+        !kind_with_cert.contains("TlsError"),
+        "NET7-4b-2: JS h3 with cert/key must NOT return TlsError (NB7-6), got: {:?}",
+        kind_with_cert
+    );
+    assert!(
+        kind_without_cert.contains("H3Unsupported"),
+        "NET7-4b-2: JS h3 without cert/key must return H3Unsupported, got: {:?}",
+        kind_without_cert
+    );
+}
+
+/// NET7-4b-3: 3-way h3 backend divergence is documented.
+/// Native/Interpreter: H3QuicUnavailable or H3TransportPending (runtime state dependent)
+/// JS: H3Unsupported (permanent)
+/// This confirms the v7 backend contract:
+///   h3 = Native + Interpreter (2-way parity), JS = H3Unsupported (permanent)
+#[test]
+fn test_net7_4b_h3_3backend_divergence_documented() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "h3-divergence")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    let interp_kind = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_4b_div_interp");
+        let td_path = dir.join("main.td");
+        let output = Command::new(taida_bin())
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+        stdout
+    };
+
+    // JS
+    let js_kind = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_4b_div_js");
+        let js_path = unique_temp_path("taida_v7_4b", "div_js", "mjs");
+        let t = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("js")
+            .arg(dir.join("main.td"))
+            .arg("-o")
+            .arg(&js_path)
+            .output()
+            .expect("transpile");
+        assert!(t.status.success());
+        let out = Command::new("node").arg(&js_path).output().expect("node");
+        let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+        let _ = fs::remove_file(&js_path);
+        cleanup_net_project(&dir);
+        stdout
+    };
+
+    // Native
+    let native_kind = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "v7_4b_div_native");
+        let bin_path = unique_temp_path("taida_v7_4b", "div_native", "bin");
+        let c = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(dir.join("main.td"))
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile");
+        assert!(
+            c.status.success(),
+            "NET7-4b-3: Native compile failed: {}",
+            String::from_utf8_lossy(&c.stderr)
+        );
+        let native_out = Command::new(&bin_path).output().expect("native");
+        let stdout = normalize(&String::from_utf8_lossy(&native_out.stdout));
+        let _ = fs::remove_file(&bin_path);
+        cleanup_net_project(&dir);
+        stdout
+    };
+
+    // Interpreter: H3QuicUnavailable or H3TransportPending (h3 is implemented, runtime gate)
+    assert!(
+        interp_kind.contains("H3QuicUnavailable") || interp_kind.contains("H3TransportPending"),
+        "NET7-4b-3 interp: expected H3QuicUnavailable or H3TransportPending, got: {:?}",
+        interp_kind
+    );
+
+    // JS: H3Unsupported (permanent, backend limitation)
+    assert!(
+        js_kind.contains("H3Unsupported"),
+        "NET7-4b-3 js: expected H3Unsupported (permanent), got: {:?}",
+        js_kind
+    );
+
+    // Native: H3QuicUnavailable or H3TransportPending (h3 is implemented, runtime gate)
+    assert!(
+        native_kind.contains("H3QuicUnavailable") || native_kind.contains("H3TransportPending"),
+        "NET7-4b-3 native: expected H3QuicUnavailable or H3TransportPending, got: {:?}",
+        native_kind
+    );
+
+    // Interpreter and Native should have the same error class
+    // (both runtime-gated, not unsupported)
+    assert_eq!(
+        interp_kind.contains("H3QuicUnavailable"),
+        native_kind.contains("H3QuicUnavailable"),
+        "NET7-4b-3: Interpreter and Native must agree on H3 error kind. \
+         Interpreter={:?}, Native={:?}",
+        interp_kind, native_kind
+    );
+
+    // JS should NOT contain any runtime-gated error kinds
+    // (it's permanently unsupported, not runtime-dependent)
+    assert!(
+        !js_kind.contains("H3QuicUnavailable") && !js_kind.contains("H3TransportPending"),
+        "NET7-4b-3: JS must NOT return runtime-gated H3 errors (it's permanently unsupported), got: {:?}",
+        js_kind
+    );
+}
+
+/// NET7-4b-4: JS h3 unsupported error mentions correct alternative backends.
+/// The error must guide users to "native or interpreter" (not just one backend).
+/// This documents the future upgrade path: switch backends, not wait for JS h3.
+#[test]
+fn test_net7_4b_js_h3_unsupported_guidance_mentions_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "nope")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "v7_4b_guidance_js");
+    let js_path = unique_temp_path("taida_v7_4b_js", "guidance", "mjs");
+    let t = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile");
+    assert!(t.status.success());
+    let out = Command::new("node").arg(&js_path).output().expect("node");
+    let stdout = normalize(&String::from_utf8_lossy(&out.stdout));
+    let _ = fs::remove_file(&js_path);
+    cleanup_net_project(&dir);
+
+    // Must mention "native" as an alternative
+    assert!(
+        stdout.contains("native"),
+        "NET7-4b-4: H3Unsupported message must mention 'native' as upgrade path, got: {:?}",
+        stdout
+    );
+    // Must mention "interpreter" as an alternative
+    assert!(
+        stdout.contains("interpreter"),
+        "NET7-4b-4: H3Unsupported message must mention 'interpreter' as upgrade path, got: {:?}",
+        stdout
+    );
+    // Must identify what is not supported
+    assert!(
+        stdout.contains("HTTP/3") || stdout.contains("h3"),
+        "NET7-4b-4: H3Unsupported message must mention HTTP/3 or h3, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("not supported"),
+        "NET7-4b-4: H3Unsupported message must say 'not supported', got: {:?}",
+        stdout
+    );
+}
