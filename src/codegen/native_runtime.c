@@ -15641,7 +15641,8 @@ static const H3QpackStaticEntry H3_QPACK_STATIC_TABLE[] = {
 static int h3_qpack_decode_int(const unsigned char *data, size_t data_len,
                                 uint8_t prefix_bits, uint64_t *out, size_t *consumed) {
     if (data_len == 0) return -1;
-    uint8_t mask = (uint8_t)((1 << prefix_bits) - 1);
+    // Guard against prefix_bits == 8 overflow: (1u8 << 8) wraps to 0.
+    uint8_t mask = (prefix_bits >= 8) ? 0xFF : (uint8_t)((1 << prefix_bits) - 1);
     uint64_t val = data[0] & mask;
     if (val < (uint64_t)mask) {
         *out = val;
@@ -16037,6 +16038,16 @@ static int h3_varint_decode(const unsigned char *data, size_t data_len,
     for (size_t i = 1; i < len; i++) {
         val = (val << 8) | data[i];
     }
+
+    // NET7-5a: Reject non-canonical encoding (RFC 9000 Section 16).
+    // Values that could fit in fewer bytes but use a larger encoding are malformed.
+    switch (prefix) {
+        case 1: if (val <= 63)      return -1; break;  // 2-byte encoding
+        case 2: if (val <= 16383)   return -1; break;  // 4-byte encoding
+        case 3: /* 8-byte accepts anything */          break;
+        default: /* 1-byte always valid */              break;
+    }
+
     *out = val;
     *consumed = len;
     return 0;
@@ -16096,6 +16107,7 @@ static int h3_encode_frame(unsigned char *buf, size_t buf_cap,
 
 // Decode an H3 frame header (type + length) from a buffer.
 // Returns 0 on success, -1 on error.
+// NET7-5a hardening: validates that declared frame_length fits within available data.
 static int h3_decode_frame_header(const unsigned char *data, size_t data_len,
                                    uint64_t *frame_type, uint64_t *frame_length,
                                    size_t *header_size) {
@@ -16103,8 +16115,15 @@ static int h3_decode_frame_header(const unsigned char *data, size_t data_len,
     if (h3_varint_decode(data, data_len, frame_type, &tc) < 0) return -1;
     if (h3_varint_decode(data + tc, data_len - tc, frame_length, &lc) < 0) return -1;
     *header_size = tc + lc;
+    // NET7-5a: Bounded-copy — declared payload length must not exceed available data.
+    // Rejects malformed frames where frame_length > remaining buffer (truncation or attack).
+    if (*header_size + (size_t)*frame_length > data_len) return -1;
     return 0;
 }
+
+// Maximum SETTINGS pairs before rejection (NET7-5a hardening).
+// RFC 9114 does not define a hard limit, but unbounded iteration is a DoS vector.
+#define H3_MAX_SETTINGS_PAIRS 64
 
 // ── H3 SETTINGS encode/decode ─────────────────────────────────────────────
 
@@ -16128,9 +16147,14 @@ static int h3_encode_settings(unsigned char *buf, size_t buf_cap) {
 }
 
 // Decode SETTINGS frame payload.
+// NET7-5a hardening: bounded iteration to prevent DoS via oversized SETTINGS frame.
 static int h3_decode_settings(H3Conn *conn, const unsigned char *data, size_t data_len) {
     size_t pos = 0;
+    int pair_count = 0;
     while (pos < data_len) {
+        // NET7-5a: bounded iteration
+        if (pair_count >= H3_MAX_SETTINGS_PAIRS) return -1;
+        pair_count += 1;
         uint64_t id, val;
         size_t ic, vc;
         if (h3_varint_decode(data + pos, data_len - pos, &id, &ic) < 0) return -1;

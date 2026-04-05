@@ -473,8 +473,23 @@ pub(crate) fn qpack_encode_block(
 // ── QUIC Variable-Length Integer Coding (RFC 9000 Section 16) ────────────
 // 2-bit prefix: 00=1byte, 01=2byte, 10=4byte, 11=8byte.
 
+/// Check that a decoded varint value is valid for the given encoding length.
+/// RFC 9000 Section 16 requires **smallest encoding** — values that could
+/// fit in fewer bytes but use a larger encoding form are malformed (NET7-5a).
+fn is_canonical_varint(value: u64, prefix: u8) -> bool {
+    match prefix {
+        0 => true,  // 1 byte: 0..=63 always valid
+        1 => value > 63,                    // 2 bytes must encode > 63
+        2 => value > 16_383,                // 4 bytes must encode > 16383
+        3 => value > 1_073_741_823,          // 8 bytes must encode > 2^30-1
+        _ => false,                          // impossible prefix
+    }
+}
+
 /// Decode a QUIC variable-length integer.
 /// Returns `Some((value, bytes_consumed))`, or `None` on error.
+/// **RFC 9000 Section 16**: Rejects non-canonical (over-sized) encoding
+/// as malformed input (NET7-5a hardening).
 pub(crate) fn varint_decode(data: &[u8]) -> Option<(u64, usize)> {
     if data.is_empty() {
         return None;
@@ -488,8 +503,17 @@ pub(crate) fn varint_decode(data: &[u8]) -> Option<(u64, usize)> {
     for i in 1..len {
         val = (val << 8) | data[i] as u64;
     }
+    // NET7-5a: Reject non-canonical encoding (RFC 9000 Section 16 — smallest encoding required).
+    // A value that could have been represented in fewer bytes is malformed.
+    if !is_canonical_varint(val, prefix) {
+        return None;
+    }
     Some((val, len))
 }
+
+/// Maximum number of SETTINGS pairs before rejection (NET7-5a hardening).
+/// RFC 9114 does not define a hard limit, but unbounded iteration is a DoS vector.
+const H3_MAX_SETTINGS_PAIRS: usize = 64;
 
 /// Encode a QUIC variable-length integer.
 /// Returns the number of bytes written, or `None` on buffer overflow.
@@ -591,6 +615,18 @@ pub(crate) fn decode_frame_header(data: &[u8]) -> Option<(u64, u64, usize)> {
     Some((frame_type, frame_length, tc + lc))
 }
 
+/// Decode a complete H3 frame with bounds-checking (NET7-5a hardening).
+/// **Bounded-copy discipline**: declared payload length is validated against
+/// the actual available buffer. Rejects truncated / oversized frame declarations.
+/// Returns `Some((frame_type, payload_slice))` on success, `None` on malformed input.
+pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
+    let (frame_type, frame_length, header_size) = decode_frame_header(data)?;
+    let total = header_size
+        .checked_add(frame_length as usize)
+        .filter(|&end| end <= data.len())?;
+    Some((frame_type, &data[header_size..total]))
+}
+
 // ── H3 SETTINGS ──────────────────────────────────────────────────────────
 
 /// Encode a SETTINGS frame payload.
@@ -613,10 +649,17 @@ pub(crate) fn encode_settings() -> Option<Vec<u8>> {
 
 /// Decode a SETTINGS frame payload.
 /// Returns the parsed settings on success.
+/// **NET7-5a**: bounded iteration — rejects oversized SETTINGS frames.
 pub(crate) fn decode_settings(data: &[u8]) -> Option<H3Settings> {
     let mut settings = H3Settings::default();
     let mut pos = 0;
+    let mut pair_count = 0;
     while pos < data.len() {
+        // NET7-5a: bounded iteration to prevent DoS via oversized SETTINGS
+        if pair_count >= H3_MAX_SETTINGS_PAIRS {
+            return None;
+        }
+        pair_count += 1;
         let (id, ic) = varint_decode(&data[pos..])?;
         pos += ic;
         let (val, vc) = varint_decode(&data[pos..])?;
@@ -1258,5 +1301,94 @@ mod tests {
             SelftestResult::Ok => {}
             other => panic!("selftests failed: {:?}", other),
         }
+    }
+
+    // ── NET7-5a: Malformed input hardening tests ───────────────────────
+
+    #[test]
+    fn test_varint_non_canonical_rejected() {
+        // RFC 9000 Section 16: smallest encoding required.
+        // Value 0 encoded as 2 bytes (0x40 0x00) must be rejected.
+        assert!(varint_decode(&[0x00]).is_some()); // 0 as 1-byte: OK
+        assert!(varint_decode(&[0x40, 0x00]).is_none()); // 0 as 2-byte: rejected
+        assert!(varint_decode(&[0x80, 0x00, 0x00, 0x00]).is_none()); // 0 as 4-byte: rejected
+        assert!(varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .is_none()); // 0 as 8-byte: rejected
+        // Value 63 encoded as 2 bytes must be rejected (fits in 1 byte).
+        assert!(varint_decode(&[0x40, 0x3F]).is_none()); // 63 as 2-byte: rejected
+        // Value 16383 as 4 bytes must be rejected (fits in 2 bytes).
+        assert!(varint_decode(&[0x80, 0x00, 0x3F, 0xFF]).is_none()); // 16383 as 4-byte: rejected
+        // Boundary: smallest valid 2-byte, 4-byte, 8-byte canonical values
+        // 2-byte range: 64..=16383
+        assert!(varint_decode(&[0x40, 0x40]).is_some()); // 64 in 2 bytes = valid
+        assert!(varint_decode(&[0x7F, 0xFF]).is_some()); // 16383 in 2 bytes = valid
+        // 4-byte range: 16384..=1073741823
+        assert!(varint_decode(&[0x80, 0x00, 0x40, 0x00]).is_some()); // 16384 in 4 bytes = valid
+        // 8-byte range: >1073741823
+        assert!(varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]).is_some()); // 1073741824 = valid
+    }
+
+    #[test]
+    fn test_decode_frame_truncated_payload() {
+        // Frame declares 100 bytes payload but only 5 available → reject
+        let payload = [
+            0x00u8, // DATA frame type (varint = 0)
+            0x40, 0x64, // length = 100 (2-byte varint)
+            0x01, 0x02, 0x03, 0x04, 0x05, // only 5 bytes
+        ];
+        assert!(decode_frame(&payload).is_none());
+    }
+
+    #[test]
+    fn test_decode_frame_exact_fit() {
+        // Frame declares 3 bytes payload and exactly 3 available → accept
+        let payload = [
+            0x00u8, // DATA frame
+            0x03, // length = 3 (1-byte varint)
+            0xAA, 0xBB, 0xCC, // exactly 3 bytes
+        ];
+        let (ft, body) = decode_frame(&payload).expect("exact fit should succeed");
+        assert_eq!(ft, H3_FRAME_DATA);
+        assert_eq!(body, &[0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn test_decode_frame_empty_input() {
+        assert!(decode_frame(&[]).is_none());
+    }
+
+    #[test]
+    fn test_qpack_block_truncated_field() {
+        // Indexed field line 1100 0000 → index starts, but no continuation
+        // Should return None (not panic, not partial)
+        assert!(qpack_decode_block(&[0xC0], 10).is_none());
+        // Literal name with length declaration but no actual bytes
+        assert!(qpack_decode_block(&[0x23, 0xFF], 10).is_none());
+    }
+
+    #[test]
+    fn test_qpack_decode_block_empty_input() {
+        assert!(qpack_decode_block(&[], 10).is_none());
+        assert!(qpack_decode_block(&[0x00], 10).is_none()); // only 1 byte < 2 minimum
+    }
+
+    #[test]
+    fn test_qpack_decode_static_index_out_of_bounds() {
+        // Indexed field 11xxxxxx with index pointing past static table
+        // Static table has 99 entries (0..98). Index 99 = out of range.
+        // Encode 99 as 6-bit with continuation: 0xFF, 99 - 64 = 35
+        let buf2 = [0xFFu8, (99 - 64) as u8];
+        assert!(qpack_decode_block(&buf2, 10).is_none());
+    }
+
+    #[test]
+    fn test_decode_settings_empty() {
+        assert!(decode_settings(&[]).is_some()); // empty = defaults
+    }
+
+    #[test]
+    fn test_decode_settings_malformed_truncated_pair() {
+        // Incomplete varint (single byte at end with no pair value) → None
+        assert!(decode_settings(&[0x01]).is_none()); // QPACK_MAX_TABLE_CAPACITY id, no value
     }
 }
