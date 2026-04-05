@@ -28548,13 +28548,16 @@ stdout(result.throw.message)
 fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
     let native_src = fs::read_to_string("src/codegen/native_runtime.c")
         .expect("read native_runtime.c");
-    let interp_src = fs::read_to_string("src/interpreter/net_h3.rs")
-        .expect("read net_h3.rs");
+    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
+        .expect("read net_h3/qpack.rs");
+    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}");
 
     // Interpreter must have the is_canonical_varint helper function.
     assert!(
         interp_src.contains("is_canonical_varint"),
-        "NET7-5a: Interpreter net_h3.rs must have is_canonical_varint function"
+        "NET7-5a: Interpreter net_h3 must have is_canonical_varint function"
     );
 
     // Native must have the canonical check inside h3_varint_decode.
@@ -28585,8 +28588,15 @@ fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
 /// h3_decode_frame_header (C) must also be used with a boundary check.
 #[test]
 fn test_net7_5a_h3_frame_bounds_hardening_source() {
-    let interp_src = fs::read_to_string("src/interpreter/net_h3.rs")
-        .expect("read net_h3.rs");
+    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
+        .expect("read net_h3/qpack.rs");
+    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        .expect("read net_h3/connection.rs");
+    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
+        .expect("read net_h3/request.rs");
+    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
     let native_src = fs::read_to_string("src/codegen/native_runtime.c")
         .expect("read native_runtime.c");
 
@@ -28619,8 +28629,15 @@ fn test_net7_5a_h3_frame_bounds_hardening_source() {
 /// — runtime interop is covered by QPACK selftests + native runtime gate.
 #[test]
 fn test_net7_5b_h3_frame_type_source_parity() {
-    let interp_src = fs::read_to_string("src/interpreter/net_h3.rs")
-        .expect("read net_h3.rs");
+    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
+        .expect("read net_h3/qpack.rs");
+    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        .expect("read net_h3/connection.rs");
+    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
+        .expect("read net_h3/request.rs");
+    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
     let native_src = fs::read_to_string("src/codegen/native_runtime.c")
         .expect("read native_runtime.c");
 
@@ -28692,8 +28709,15 @@ main =
 fn test_net7_5c_h3_bounded_copy_structural_audit() {
     let native_src = fs::read_to_string("src/codegen/native_runtime.c")
         .expect("read native_runtime.c");
-    let interp_src = fs::read_to_string("src/interpreter/net_h3.rs")
-        .expect("read net_h3.rs");
+    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
+        .expect("read net_h3/qpack.rs");
+    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        .expect("read net_h3/connection.rs");
+    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
+        .expect("read net_h3/request.rs");
+    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
 
     // Native: qpack_decode_block uses stack-allocated H3Header array (bounded by max_headers param).
     // The caller passes the max, and the function never exceeds it.
