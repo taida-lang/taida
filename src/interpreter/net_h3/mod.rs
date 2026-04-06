@@ -31,7 +31,8 @@
 /// 8. **Request extraction**: Pseudo-header validation matching H2 semantics
 /// 9. **Response builders**: QPACK-encoded HEADERS + DATA frames
 /// 10. **Self-tests**: QPACK round-trip and request validation (parity with Native)
-/// 11. **Design Decisions**
+/// 11. **QUIC Transport Substrate (NET7-9b)**: quinn-based UDP + TLS ALPN h3 accept
+/// 12. **Design Decisions**
 ///
 /// # Design Decisions
 ///
@@ -47,6 +48,8 @@ mod qpack;
 mod frame;
 mod request;
 mod connection;
+// NET7-9b: QUIC transport substrate (quinn) — Phase 9
+mod quic;
 
 // ── Re-exports: preserve exact same public API as the old monolithic net_h3.rs ──
 // NB7-73: These re-exports are intentional API surface. They are used by
@@ -85,6 +88,8 @@ pub(crate) use frame::{
     H3_FRAME_DATA, H3_FRAME_HEADERS, H3_FRAME_CANCEL_PUSH,
     H3_FRAME_SETTINGS, H3_FRAME_PUSH_PROMISE, H3_FRAME_GOAWAY, H3_FRAME_MAX_PUSH_ID,
     H3_ERROR_NO_ERROR, H3_ERROR_GENERAL_PROTOCOL_ERROR, H3_ERROR_INTERNAL_ERROR,
+    H3_ERROR_STREAM_CREATION_ERROR, H3_ERROR_FRAME_UNEXPECTED,
+    H3_ERROR_FRAME_ERROR, H3_ERROR_REQUEST_INCOMPLETE,
     H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, H3_SETTINGS_MAX_FIELD_SECTION_SIZE,
     H3_SETTINGS_QPACK_BLOCKED_STREAMS,
     encode_frame, decode_frame_header, decode_frame,
@@ -105,6 +110,15 @@ pub(crate) use connection::{
     H3StreamState, H3Stream,
     H3ConnState, H3HandlerContext,
     H3Connection,
+};
+
+// NET7-9b: QUIC transport substrate (quinn) — Phase 9
+#[allow(unused_imports)]
+pub(crate) use quic::{
+    create_quic_endpoint,
+    accept_connection,
+    H3_ALPN,
+    DEFAULT_H3_PORT,
 };
 
 #[cfg(test)]

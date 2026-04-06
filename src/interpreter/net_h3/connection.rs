@@ -12,6 +12,9 @@ use super::qpack::{
 };
 use super::frame::{encode_goaway, H3_MAX_STREAMS, H3_DEFAULT_MAX_FIELD_SECTION_SIZE};
 
+/// NB7-96: Pre-allocated capacity for per-connection stream tracking.
+const H3_STREAM_PREALLOC: usize = 8;
+
 
 // ── H3 Stream State Machine ──────────────────────────────────────────────
 
@@ -133,8 +136,9 @@ impl H3Connection {
         // NB7-22, NB7-23: Error scope comment — H3 protocol errors are stream errors
         // (H3_ERR_REQUEST_INCOMPLETE/400 equivalent). Connection errors
         // (H3_ERR_GENERAL_PROTOCOL_ERROR) apply only to framing violations. NB7-23
+        // NB7-96: Pre-allocate stream Vec to avoid hot-path re-allocs.
         H3Connection {
-            streams: Vec::new(),
+            streams: Vec::with_capacity(H3_STREAM_PREALLOC),
             max_field_section_size: H3_DEFAULT_MAX_FIELD_SECTION_SIZE,
             last_peer_stream_id: 0,
             goaway_sent: false,

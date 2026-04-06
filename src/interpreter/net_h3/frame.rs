@@ -103,7 +103,7 @@ pub(crate) const H3_FRAME_GOAWAY: u64 = 0x07;
 #[allow(dead_code)]
 pub(crate) const H3_FRAME_MAX_PUSH_ID: u64 = 0x0D;
 
-// ── H3 Error Codes (RFC 9114 Section 8.1) ────────────────────────────────
+// ── H3 Error Codes (RFC 9114 Section 8.1 — IANA Registry) ───────────────
 
 #[allow(dead_code)]
 pub(crate) const H3_ERROR_NO_ERROR: u64 = 0x0100;
@@ -111,6 +111,30 @@ pub(crate) const H3_ERROR_NO_ERROR: u64 = 0x0100;
 pub(crate) const H3_ERROR_GENERAL_PROTOCOL_ERROR: u64 = 0x0101;
 #[allow(dead_code)]
 pub(crate) const H3_ERROR_INTERNAL_ERROR: u64 = 0x0102;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_STREAM_CREATION_ERROR: u64 = 0x0103;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_CLOSED_CRITICAL_STREAM: u64 = 0x0104;
+/// NB7-92: IANA-registered H3 application error code for unexpected frames.
+pub(crate) const H3_ERROR_FRAME_UNEXPECTED: u64 = 0x0105;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_FRAME_ERROR: u64 = 0x0106;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_EXCESSIVE_LOAD: u64 = 0x0107;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_ID_ERROR: u64 = 0x0108;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_SETTINGS_ERROR: u64 = 0x0109;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_MISSING_SETTINGS: u64 = 0x010A;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_REQUEST_INCOMPLETE: u64 = 0x010B;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_REQUEST_REJECTED: u64 = 0x010C;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_REQUEST_CANCELLED: u64 = 0x010D;
+#[allow(dead_code)]
+pub(crate) const H3_ERROR_CONNECT_ERROR: u64 = 0x010F;
 
 // ── H3 Settings Identifiers (RFC 9114 Section 7.2.4.1) ──────────────────
 

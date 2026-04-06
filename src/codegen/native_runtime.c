@@ -15645,6 +15645,208 @@ static const H3QpackStaticEntry H3_QPACK_STATIC_TABLE[] = {
 };
 #define H3_QPACK_STATIC_TABLE_LEN (sizeof(H3_QPACK_STATIC_TABLE) / sizeof(H3_QPACK_STATIC_TABLE[0]))
 
+// ── QPACK Dynamic Table (RFC 9204 Section 4.3) (NET7-10d) ────────────────
+// Parity with Interpreter's H3DynamicTable. Uses a bounded array (oldest
+// first, newest last) with absolute indices for eviction semantics.
+
+#define H3_DYNAMIC_TABLE_MAX_ENTRIES 256
+
+typedef struct {
+    char name[128];
+    char value[256];
+    uint64_t index;   // absolute index
+    int active;       // 0 = free, 1 = occupied
+} H3DynamicTableEntry;
+
+typedef struct {
+    H3DynamicTableEntry entries[H3_DYNAMIC_TABLE_MAX_ENTRIES];
+    size_t current_size;       // sum of name.len + value.len + 32 per entry
+    size_t max_capacity;       // maximum capacity in bytes
+    uint64_t next_absolute_index;
+    uint64_t largest_ref;      // TotalInsertions - 1
+    uint64_t total_inserted;   // never decreases, even on eviction
+} H3DynamicTable;
+
+/// Initialize a dynamic table with the given byte capacity.
+static void h3_dynamic_table_init(H3DynamicTable *dt, size_t capacity) {
+    dt->current_size = 0;
+    dt->max_capacity = capacity;
+    dt->next_absolute_index = 0;
+    dt->largest_ref = 0;
+    dt->total_inserted = 0;
+    for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+        dt->entries[i].active = 0;
+        dt->entries[i].index = 0;
+        dt->entries[i].name[0] = '\0';
+        dt->entries[i].value[0] = '\0';
+    }
+}
+
+/// Number of active entries.
+static size_t h3_dt_len(const H3DynamicTable *dt) {
+    size_t count = 0;
+    for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+        if (dt->entries[i].active) count++;
+    }
+    return count;
+}
+
+static int h3_dt_is_empty(const H3DynamicTable *dt) {
+    return h3_dt_len(dt) == 0;
+}
+
+static size_t h3_dt_current_size(const H3DynamicTable *dt) {
+    return dt->current_size;
+}
+
+static size_t h3_dt_capacity(const H3DynamicTable *dt) {
+    return dt->max_capacity;
+}
+
+static uint64_t h3_dt_largest_ref(const H3DynamicTable *dt) {
+    return dt->largest_ref;
+}
+
+static uint64_t h3_dt_total_inserted(const H3DynamicTable *dt) {
+    return dt->total_inserted;
+}
+
+/// Evict oldest entries until current_size <= new_capacity.
+static void h3_dt_evict_to_capacity(H3DynamicTable *dt, size_t new_capacity) {
+    for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+        if (dt->entries[i].active && dt->current_size > new_capacity) {
+            size_t entry_size = strlen(dt->entries[i].name) + strlen(dt->entries[i].value) + 32;
+            dt->current_size = dt->current_size > entry_size ? dt->current_size - entry_size : 0;
+            dt->entries[i].active = 0;
+            dt->entries[i].name[0] = '\0';
+            dt->entries[i].value[0] = '\0';
+        } else {
+            break;
+        }
+    }
+    dt->max_capacity = new_capacity;
+}
+
+/// Insert an entry, evicting oldest entries if needed.
+/// Returns 1 on success, 0 if entry alone exceeds capacity.
+static int h3_dt_insert(H3DynamicTable *dt, const char *name, const char *value) {
+    size_t nlen = strlen(name);
+    size_t vlen = strlen(value);
+    size_t entry_size = nlen + vlen + 32;
+
+    if (entry_size > dt->max_capacity) return 0;
+
+    // Evict to make room
+    while (dt->current_size + entry_size > dt->max_capacity) {
+        int found = 0;
+        for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+            if (dt->entries[i].active) {
+                size_t ev_sz = strlen(dt->entries[i].name) + strlen(dt->entries[i].value) + 32;
+                dt->current_size = dt->current_size > ev_sz ? dt->current_size - ev_sz : 0;
+                dt->entries[i].active = 0;
+                dt->entries[i].name[0] = '\0';
+                dt->entries[i].value[0] = '\0';
+                found = 1;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+        if (!dt->entries[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return 0; // table full
+
+    uint64_t abs_idx = dt->next_absolute_index;
+    dt->next_absolute_index++;
+    dt->total_inserted++;
+    dt->largest_ref = dt->total_inserted - 1;
+
+    // Extra eviction safety (shouldn't be needed after loop above)
+    while (dt->current_size + entry_size > dt->max_capacity) {
+        int found = 0;
+        for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+            if (dt->entries[i].active) {
+                size_t ev_sz = strlen(dt->entries[i].name) + strlen(dt->entries[i].value) + 32;
+                dt->current_size = dt->current_size > ev_sz ? dt->current_size - ev_sz : 0;
+                dt->entries[i].active = 0;
+                dt->entries[i].name[0] = '\0';
+                dt->entries[i].value[0] = '\0';
+                found = 1;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+
+    dt->entries[slot].active = 1;
+    dt->entries[slot].index = abs_idx;
+    strncpy(dt->entries[slot].name, name, sizeof(dt->entries[slot].name) - 1);
+    dt->entries[slot].name[sizeof(dt->entries[slot].name) - 1] = '\0';
+    strncpy(dt->entries[slot].value, value, sizeof(dt->entries[slot].value) - 1);
+    dt->entries[slot].value[sizeof(dt->entries[slot].value) - 1] = '\0';
+    dt->current_size += entry_size;
+    return 1;
+}
+
+/// Look up by absolute index. Returns pointer to entry, or NULL.
+static const H3DynamicTableEntry *h3_dt_lookup_absolute(
+    const H3DynamicTable *dt, uint64_t abs_idx) {
+    for (int i = 0; i < H3_DYNAMIC_TABLE_MAX_ENTRIES; i++) {
+        if (dt->entries[i].active && dt->entries[i].index == abs_idx) {
+            return &dt->entries[i];
+        }
+    }
+    return NULL;
+}
+
+/// Look up by post-base index (RFC 9204 Section 4.5.3).
+/// Post-base index 0 = most recently inserted (largest_ref).
+/// Post-base index N = entry with absolute_index = largest_ref - N.
+/// NB7-61 parity: dual-bound check (total_inserted + active count).
+static const H3DynamicTableEntry *h3_dt_lookup_post_base(
+    const H3DynamicTable *dt, uint64_t post_base_idx) {
+    if (h3_dt_largest_ref(dt) == 0 && post_base_idx == 0 && h3_dt_is_empty(dt)) {
+        return NULL;
+    }
+    if (post_base_idx >= h3_dt_total_inserted(dt)) return NULL;
+    uint64_t abs = h3_dt_largest_ref(dt) > post_base_idx
+        ? h3_dt_largest_ref(dt) - post_base_idx : 0;
+    if (abs >= h3_dt_total_inserted(dt)) return NULL;
+    return h3_dt_lookup_absolute(dt, abs);
+}
+
+/// Duplicate existing entry by re-inserting it.
+static int h3_dt_duplicate(H3DynamicTable *dt, uint64_t source_index) {
+    const H3DynamicTableEntry *src = h3_dt_lookup_absolute(dt, source_index);
+    if (!src) return 0;
+    return h3_dt_insert(dt, src->name, src->value);
+}
+
+/// Set new capacity, evicting entries if needed.
+static void h3_dt_set_capacity(H3DynamicTable *dt, size_t new_capacity) {
+    if (new_capacity < dt->max_capacity) {
+        h3_dt_evict_to_capacity(dt, new_capacity);
+    } else {
+        dt->max_capacity = new_capacity;
+    }
+}
+
+/// Convert relative index to absolute.
+/// Relative index 0 = most recently inserted entry.
+static int h3_dt_relative_to_absolute(
+    const H3DynamicTable *dt, uint64_t relative_idx, uint64_t *out_abs) {
+    if (relative_idx >= h3_dt_total_inserted(dt) || h3_dt_is_empty(dt)) return 0;
+    uint64_t abs = h3_dt_largest_ref(dt) > relative_idx
+        ? h3_dt_largest_ref(dt) - relative_idx : 0;
+    if (!h3_dt_lookup_absolute(dt, abs)) return 0;
+    *out_abs = abs;
+    return 1;
+}
+
 // ── QPACK integer coding (RFC 9204 Section 4.1.1) ────────────────────────
 // QPACK uses the same integer coding as HPACK (RFC 7541 Section 5.1) but
 // may use different prefix sizes.
@@ -15739,26 +15941,29 @@ static int h3_qpack_encode_string(unsigned char *buf, size_t buf_cap, const char
 }
 
 // ── QPACK header block decode (RFC 9204 Section 4.5) ──────────────────────
-// Phase 2 reference: decode encoded field section without dynamic table.
-// v7 QPACK scope: static table only (no dynamic table in Phase 2).
-// The required insert count and delta base are always 0 for static-only.
+// v7 QPACK scope: static + dynamic table (NET7-10d).
+// The decode_block now accepts an optional dynamic table parameter.
 
 // Reuse H2Header for H3 headers (same name/value buffer structure).
 typedef H2Header H3Header;
 
-static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
-                                  H3Header *headers, int max_headers) {
+/// Decode a QPACK header block with optional dynamic table (NET7-10d).
+/// If dynamic_table is NULL, behaves as static-table-only (legacy mode).
+static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_len,
+                                  H3Header *headers, int max_headers,
+                                  const H3DynamicTable *dynamic_table) {
     if (data_len < 2) return -1;
 
     // Required Insert Count (prefix int, 8-bit prefix)
     uint64_t req_insert_count;
     size_t consumed;
     if (h3_qpack_decode_int(data, data_len, 8, &req_insert_count, &consumed) < 0) return -1;
-    if (req_insert_count != 0) return -1; // Phase 2: no dynamic table
+
+    // If dynamic table is required but not provided, reject.
+    if (req_insert_count != 0 && dynamic_table == NULL) return -1;
 
     // Sign bit + Delta Base (prefix int, 7-bit prefix)
     if (consumed >= data_len) return -1;
-    // int sign_bit = (data[consumed] & 0x80) != 0; // unused in static-only mode
     uint64_t delta_base;
     size_t db_consumed;
     if (h3_qpack_decode_int(data + consumed, data_len - consumed, 7, &delta_base, &db_consumed) < 0) return -1;
@@ -15766,7 +15971,7 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
 
     int hdr_count = 0;
     while (consumed < data_len) {
-        if (hdr_count >= max_headers) return -1; // NB7-11: overflow = decode error (H2 parity)
+        if (hdr_count >= max_headers) return -1;
         uint8_t byte = data[consumed];
 
         if (byte & 0x80) {
@@ -15784,7 +15989,20 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
                 snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value),
                          "%s", H3_QPACK_STATIC_TABLE[index].value);
             } else {
-                return -1; // Phase 2: no dynamic table
+                // Dynamic table indexed by relative index (NET7-10d)
+                if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
+                if (req_insert_count == 0) return -1;
+                uint64_t max_relative = req_insert_count > delta_base
+                    ? req_insert_count - delta_base : 0;
+                if (index >= max_relative) return -1;
+                uint64_t abs = h3_dt_largest_ref(dynamic_table);
+                if (abs >= delta_base) abs -= delta_base; else abs = 0;
+                if (abs >= index) abs -= index; else abs = 0;
+                // Now abs is: largest_ref - delta_base - index
+                const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, abs);
+                if (!entry) return -1;
+                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
+                snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value), "%s", entry->value);
             }
             hdr_count++;
         } else if (byte & 0x40) {
@@ -15802,7 +16020,12 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
                 snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name),
                          "%s", H3_QPACK_STATIC_TABLE[name_index].name);
             } else {
-                return -1; // Phase 2: no dynamic table
+                // Dynamic table name reference (NET7-10d)
+                if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
+                // Name index is absolute in dynamic table scope
+                const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, name_index);
+                if (!entry) return -1;
+                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
             }
 
             // Value string
@@ -15814,32 +16037,23 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
             hdr_count++;
         } else if (byte & 0x20) {
             // Literal Field Line With Literal Name (Section 4.5.6): 001Nxxxx
-            // Instruction byte layout: 001N Hxxx
-            //   N = never-indexed bit (bit 4)
-            //   H = name Huffman bit (bit 3)
-            //   xxx = 3-bit prefix for name length integer
-            // int is_never_indexed = (byte & 0x10) != 0;
-
-            // Decode name: 3-bit prefix integer for length, then raw/Huffman bytes
-            {
-                int name_huffman = (byte & 0x08) != 0;
-                uint64_t name_len;
-                size_t nli_consumed;
-                if (h3_qpack_decode_int(data + consumed, data_len - consumed, 3, &name_len, &nli_consumed) < 0) return -1;
-                consumed += nli_consumed;
-                if (consumed + (size_t)name_len > data_len) return -1;
-                if (name_huffman) {
-                    int dec = h2_huffman_decode(data + consumed, (size_t)name_len,
-                                               headers[hdr_count].name, sizeof(headers[hdr_count].name) - 1);
-                    if (dec < 0) return -1;
-                    headers[hdr_count].name[dec] = '\0';
-                } else {
-                    if ((size_t)name_len >= sizeof(headers[hdr_count].name)) return -1;
-                    memcpy(headers[hdr_count].name, data + consumed, (size_t)name_len);
-                    headers[hdr_count].name[(size_t)name_len] = '\0';
-                }
-                consumed += (size_t)name_len;
+            int name_huffman = (byte & 0x08) != 0;
+            uint64_t name_len;
+            size_t nli_consumed;
+            if (h3_qpack_decode_int(data + consumed, data_len - consumed, 3, &name_len, &nli_consumed) < 0) return -1;
+            consumed += nli_consumed;
+            if (consumed + (size_t)name_len > data_len) return -1;
+            if (name_huffman) {
+                int dec = h2_huffman_decode(data + consumed, (size_t)name_len,
+                                           headers[hdr_count].name, sizeof(headers[hdr_count].name) - 1);
+                if (dec < 0) return -1;
+                headers[hdr_count].name[dec] = '\0';
+            } else {
+                if ((size_t)name_len >= sizeof(headers[hdr_count].name)) return -1;
+                memcpy(headers[hdr_count].name, data + consumed, (size_t)name_len);
+                headers[hdr_count].name[(size_t)name_len] = '\0';
             }
+            consumed += (size_t)name_len;
 
             // Decode value: standard QPACK string (7-bit prefix)
             size_t val_consumed;
@@ -15848,13 +16062,34 @@ static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
                                         &val_consumed) < 0) return -1;
             consumed += val_consumed;
             hdr_count++;
-        } else {
+        } else if (byte & 0x10) {
             // Indexed Field Line With Post-Base Index (Section 4.5.3): 0001xxxx
-            // Phase 2: no dynamic table, reject
+            // NET7-10d: dynamic table post-base reference
+            // At this point bits 7,6,5 are all 0. Bit 4 (0x10) distinguishes
+            // post-base (1) from invalid (0).
+            if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
+            uint64_t post_base_index;
+            size_t idx_consumed;
+            if (h3_qpack_decode_int(data + consumed, data_len - consumed, 4, &post_base_index, &idx_consumed) < 0) return -1;
+            consumed += idx_consumed;
+
+            const H3DynamicTableEntry *entry = h3_dt_lookup_post_base(dynamic_table, post_base_index);
+            if (!entry) return -1;
+            snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
+            snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value), "%s", entry->value);
+            hdr_count++;
+        } else {
+            // Bits 7-4 are 0000 -- not a valid QPACK field line.
             return -1;
         }
     }
     return hdr_count;
+}
+
+/// Original decode_block signature (static-table-only for backward compat).
+static int h3_qpack_decode_block(const unsigned char *data, size_t data_len,
+                                  H3Header *headers, int max_headers) {
+    return h3_qpack_decode_block_with_dt(data, data_len, headers, max_headers, NULL);
 }
 
 // ── QPACK header block encode (RFC 9204 Section 4.5) ──────────────────────
@@ -16618,6 +16853,222 @@ static void taida_quiche_unload(void) {
     taida_quiche.loaded = 0;
 }
 
+// ── QPACK Encoder Instruction Stream (RFC 9204 Section 5.2) (NET7-10d) ───
+// Encoder instructions for dynamic table management.
+// Parity with Interpreter's encode_insert_with_name_ref, encode_insert_with_literal_name,
+// encode_duplicate, encode_set_capacity, decode_encoder_instruction, apply_encoder_instruction.
+
+typedef enum {
+    H3_INST_NAME_REF,       // Insert With Name Reference (static or dynamic)
+    H3_INST_LITERAL_NAME,   // Insert With Literal Name
+    H3_INST_DUPLICATE,      // Duplicate
+    H3_INST_SET_CAPACITY,   // Set Dynamic Table Capacity
+} H3InstructionKind;
+
+typedef struct {
+    H3InstructionKind kind;
+    int is_static;          // for NAME_REF
+    uint64_t name_index;    // for NAME_REF / DUPLICATE
+    uint64_t capacity;      // for SET_CAPACITY
+    char name[128];         // for LITERAL_NAME / NAME_REF resolved
+    char value[256];
+} H3EncoderInstruction;
+
+/// Encode Insert With Literal Name (RFC 9204 Section 5.2.2): 01xxxxxx
+/// Returns bytes written, or -1 on error.
+static int h3_qpack_encode_instruction_literal_name(unsigned char *buf, size_t buf_cap,
+    const char *name, const char *value) {
+    size_t pos = 0;
+    size_t nlen = strlen(name);
+    // Name length: 3-bit prefix, instruction byte 01 + N bits
+    size_t niw;
+    if (h3_qpack_encode_int(buf + pos, buf_cap - pos, 3, (uint64_t)nlen, 0x40, &niw) < 0) return -1;
+    pos += niw;
+    if (pos + nlen > buf_cap) return -1;
+    memcpy(buf + pos, name, nlen);
+    pos += nlen;
+    // Value: 7-bit prefix string literal
+    size_t vlen = strlen(value);
+    size_t int_w;
+    if (h3_qpack_encode_int(buf + pos, buf_cap - pos, 7, (uint64_t)vlen, 0x00, &int_w) < 0) return -1;
+    pos += int_w;
+    if (pos + vlen > buf_cap) return -1;
+    memcpy(buf + pos, value, vlen);
+    pos += vlen;
+    return (int)pos;
+}
+
+/// Encode Duplicate (RFC 9204 Section 5.2.3): 00xxxxxx
+static int h3_qpack_encode_instruction_duplicate(unsigned char *buf, size_t buf_cap, uint64_t index) {
+    size_t w;
+    if (h3_qpack_encode_int(buf, buf_cap, 6, index, 0x00, &w) < 0) return -1;
+    return (int)w;
+}
+
+/// Encode Insert With Name Reference (static or dynamic)
+static int h3_qpack_encode_instruction_name_ref(unsigned char *buf, size_t buf_cap,
+    int is_static, uint64_t name_index, const char *value) {
+    size_t pos = 0;
+    uint8_t prefix = is_static ? 0xC0 : 0x80;
+    size_t niw;
+    if (h3_qpack_encode_int(buf + pos, buf_cap - pos, 4, name_index, prefix, &niw) < 0) return -1;
+    pos += niw;
+    size_t vlen = strlen(value);
+    size_t int_w;
+    if (h3_qpack_encode_int(buf + pos, buf_cap - pos, 7, (uint64_t)vlen, 0x00, &int_w) < 0) return -1;
+    pos += int_w;
+    if (pos + vlen > buf_cap) return -1;
+    memcpy(buf + pos, value, vlen);
+    pos += vlen;
+    return (int)pos;
+}
+
+/// Encode Set Dynamic Table Capacity (RFC 9204 Section 5.2.4): 001xxxxx
+static int h3_qpack_encode_instruction_set_capacity(unsigned char *buf, size_t buf_cap, uint64_t capacity) {
+    size_t w;
+    if (h3_qpack_encode_int(buf, buf_cap, 5, capacity, 0x20, &w) < 0) return -1;
+    return (int)w;
+}
+
+/// Decode a single encoder instruction. Returns bytes consumed, or -1 on error.
+static int h3_decode_encoder_instruction(const unsigned char *data, size_t data_len,
+    H3EncoderInstruction *out) {
+    if (data_len == 0) return -1;
+    memset(out, 0, sizeof(*out));
+    uint8_t byte = data[0];
+
+    if (byte & 0x80) {
+        // Insert With Name Reference: 1Txxxxxx (Section 5.2.1)
+        out->is_static = (byte & 0x40) != 0;
+        size_t ni_consumed;
+        if (h3_qpack_decode_int(data, data_len, 4, &out->name_index, &ni_consumed) < 0) return -1;
+        size_t val_consumed;
+        if (h3_qpack_decode_string(data + ni_consumed, data_len - ni_consumed,
+                                    out->value, sizeof(out->value), &val_consumed) < 0) return -1;
+        out->kind = H3_INST_NAME_REF;
+        return (int)(ni_consumed + val_consumed);
+    } else if (byte & 0x40) {
+        // Insert With Literal Name: 01xxxxxx (Section 5.2.2)
+        uint64_t name_len;
+        size_t nli_consumed;
+        if (h3_qpack_decode_int(data, data_len, 3, &name_len, &nli_consumed) < 0) return -1;
+        size_t offset = nli_consumed;
+        if (offset + (size_t)name_len > data_len) return -1;
+        if ((size_t)name_len >= sizeof(out->name)) return -1;
+        memcpy(out->name, data + offset, (size_t)name_len);
+        out->name[(size_t)name_len] = '\0';
+        offset += (size_t)name_len;
+        size_t val_consumed;
+        if (h3_qpack_decode_string(data + offset, data_len - offset,
+                                    out->value, sizeof(out->value), &val_consumed) < 0) return -1;
+        out->kind = H3_INST_LITERAL_NAME;
+        return (int)(offset + val_consumed);
+    } else if (byte & 0x20) {
+        // Set Dynamic Table Capacity: 001xxxxx (Section 5.2.4)
+        size_t ci_consumed;
+        if (h3_qpack_decode_int(data, data_len, 5, &out->capacity, &ci_consumed) < 0) return -1;
+        out->kind = H3_INST_SET_CAPACITY;
+        return (int)ci_consumed;
+    } else {
+        // Duplicate: 00xxxxxx (Section 5.2.3)
+        size_t di_consumed;
+        if (h3_qpack_decode_int(data, data_len, 6, &out->name_index, &di_consumed) < 0) return -1;
+        out->kind = H3_INST_DUPLICATE;
+        return (int)di_consumed;
+    }
+}
+
+/// Apply an encoder instruction to a dynamic table.
+/// (NET7-10d parity with Interpreter's apply_encoder_instruction)
+static int h3_apply_encoder_instruction(H3DynamicTable *dt, const H3EncoderInstruction *inst) {
+    switch (inst->kind) {
+        case H3_INST_NAME_REF: {
+            if (inst->is_static) {
+                if (inst->name_index >= H3_QPACK_STATIC_TABLE_LEN) return 0;
+                return h3_dt_insert(dt, H3_QPACK_STATIC_TABLE[inst->name_index].name, inst->value);
+            } else {
+                const H3DynamicTableEntry *src = h3_dt_lookup_absolute(dt, inst->name_index);
+                if (!src) return 0;
+                return h3_dt_insert(dt, src->name, inst->value);
+            }
+        }
+        case H3_INST_LITERAL_NAME:
+            return h3_dt_insert(dt, inst->name, inst->value);
+        case H3_INST_DUPLICATE:
+            return h3_dt_duplicate(dt, inst->name_index);
+        case H3_INST_SET_CAPACITY:
+            h3_dt_set_capacity(dt, (size_t)inst->capacity);
+            return 1;
+    }
+    return 0;
+}
+
+// ── QPACK Decoder Instruction Stream (RFC 9204 Section 6.2) (NET7-10d) ───
+// Decoder instructions sent from decoder to encoder.
+// Parity with Interpreter's H3DecoderInstruction, decode_decoder_instruction, H3DecoderState.
+
+typedef enum {
+    H3_DEC_INST_SECTION_ACK,
+    H3_DEC_INST_STREAM_CANCEL,
+    H3_DEC_INST_INSERT_COUNT_INC,
+} H3DecoderInstKind;
+
+typedef struct {
+    H3DecoderInstKind kind;
+    uint64_t value; // insert_count (SECTION_ACK), stream_id (STREAM_CANCEL), increment (COUNT_INC)
+} H3DecoderInstruction;
+
+typedef struct {
+    uint64_t received_insert_count;
+    uint64_t acknowledged_insert_count;
+} H3DecoderState;
+
+static void h3_decoder_state_init(H3DecoderState *state) {
+    state->received_insert_count = 0;
+    state->acknowledged_insert_count = 0;
+}
+
+static int h3_decode_decoder_instruction(const unsigned char *data, size_t data_len,
+    H3DecoderInstruction *out) {
+    if (data_len == 0) return -1;
+    uint8_t byte = data[0];
+    if (byte & 0x80) {
+        // Section Ack: 1xxxxxxx (7-bit prefix)
+        size_t c;
+        if (h3_qpack_decode_int(data, data_len, 7, &out->value, &c) < 0) return -1;
+        out->kind = H3_DEC_INST_SECTION_ACK;
+        return (int)c;
+    } else if (byte & 0x20) {
+        // Stream Cancel: 001xxxxx (5-bit prefix)
+        size_t c;
+        if (h3_qpack_decode_int(data, data_len, 5, &out->value, &c) < 0) return -1;
+        out->kind = H3_DEC_INST_STREAM_CANCEL;
+        return (int)c;
+    } else {
+        // Insert Count Increment: 00xxxxxx (6-bit prefix)
+        size_t c;
+        if (h3_qpack_decode_int(data, data_len, 6, &out->value, &c) < 0) return -1;
+        out->kind = H3_DEC_INST_INSERT_COUNT_INC;
+        return (int)c;
+    }
+}
+
+static int h3_decoder_apply(H3DecoderState *state, const H3DecoderInstruction *inst) {
+    switch (inst->kind) {
+        case H3_DEC_INST_SECTION_ACK:
+            if (inst->value > state->acknowledged_insert_count)
+                state->acknowledged_insert_count = inst->value;
+            return 1;
+        case H3_DEC_INST_STREAM_CANCEL:
+            return 1; // no-op in simplified model
+        case H3_DEC_INST_INSERT_COUNT_INC:
+            if (inst->value == 0) return 0; // zero increment is illegal
+            state->received_insert_count = state->received_insert_count + inst->value;
+            return 1;
+    }
+    return 0;
+}
+
 // ── H3 self-tests (NB7-9, NB7-10) ────────────────────────────────────────
 // Embedded self-tests for QPACK round-trip and H3 request validation.
 // Called from taida_net_h3_serve() to ensure Phase 2 reference semantics
@@ -16789,6 +17240,176 @@ static int h3_selftest_request_validation(void) {
     return 0; // all tests passed
 }
 
+// NET7-10d: QPACK dynamic table self-test (parity with Interpreter H3DynamicTable).
+// Verifies insert, lookup (absolute/post-base), eviction, duplicate,
+// set_capacity, relative_to_absolute, and instruction encode/decode.
+static int h3_selftest_qpack_dynamic_table(void) {
+    // Test 1: Insert and lookup_absolute
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 4096);
+        if (h3_dt_len(&dt) != 0) return -1;
+        if (!h3_dt_insert(&dt, "content-type", "text/html")) return -2;
+        if (h3_dt_len(&dt) != 1) return -3;
+
+        const H3DynamicTableEntry *e = h3_dt_lookup_absolute(&dt, 0);
+        if (!e) return -4;
+        if (strcmp(e->name, "content-type") != 0) return -5;
+        if (strcmp(e->value, "text/html") != 0) return -6;
+    }
+
+    // Test 2: Eviction
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 100);
+        // Each entry: name(5) + value(7) + 32 = 44 bytes
+        if (!h3_dt_insert(&dt, "x-key", "value-1")) return -10;
+        // 6 + 7 + 32 = 45 bytes
+        if (!h3_dt_insert(&dt, "x-key2", "value-2")) return -11;
+        if (h3_dt_len(&dt) != 2) return -12;
+
+        // Third entry: 5 + 4 + 32 = 41 bytes. Total would be 44+45+41=130 > 100
+        if (!h3_dt_insert(&dt, "name3", "val3")) return -13;
+        if (h3_dt_len(&dt) > 2) return -14;
+        // First entry (index 0) should be evicted
+        if (h3_dt_lookup_absolute(&dt, 0) != NULL) return -15;
+    }
+
+    // Test 3: Insertion that alone exceeds capacity
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 50);
+        if (h3_dt_insert(&dt, "very-long-name-here", "very-long-value-here")) return -20;
+    }
+
+    // Test 4: Post-base lookup
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 4096);
+        h3_dt_insert(&dt, "a", "1");
+        h3_dt_insert(&dt, "b", "2");
+        h3_dt_insert(&dt, "c", "3");
+
+        // post-base 0 = most recent (c, index 2)
+        const H3DynamicTableEntry *e0 = h3_dt_lookup_post_base(&dt, 0);
+        if (!e0 || e0->index != 2) return -30;
+        // post-base 2 = oldest (a, index 0)
+        const H3DynamicTableEntry *e2 = h3_dt_lookup_post_base(&dt, 2);
+        if (!e2 || e2->index != 0) return -31;
+        // post-base 3 (beyond total_inserted=3) should return NULL
+        if (h3_dt_lookup_post_base(&dt, 3) != NULL) return -32;
+    }
+
+    // Test 5: Duplicate
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 4096);
+        h3_dt_insert(&dt, "original", "data"); // index 0
+        if (!h3_dt_duplicate(&dt, 0)) return -40;
+        if (h3_dt_len(&dt) != 2) return -41;
+        const H3DynamicTableEntry *dup = h3_dt_lookup_absolute(&dt, 1);
+        if (!dup) return -42;
+        if (strcmp(dup->name, "original") != 0) return -43;
+        if (strcmp(dup->value, "data") != 0) return -44;
+        // Duplicate non-existent should fail
+        if (h3_dt_duplicate(&dt, 99)) return -45;
+    }
+
+    // Test 6: Set capacity shrink with eviction
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 200);
+        h3_dt_insert(&dt, "name1", "val1"); // 5+4+32=41
+        h3_dt_insert(&dt, "name2", "val2"); // 41
+        h3_dt_insert(&dt, "name3", "val3"); // 41, total=123
+        if (h3_dt_len(&dt) != 3) return -50;
+
+        h3_dt_set_capacity(&dt, 80); // can hold only 1 entry
+        if (h3_dt_len(&dt) != 1) return -51;
+        if (h3_dt_capacity(&dt) != 80) return -52;
+        // Only newest (index 2) should remain
+        if (h3_dt_lookup_absolute(&dt, 2) == NULL) return -53;
+    }
+
+    // Test 7: Relative to absolute
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 4096);
+        h3_dt_insert(&dt, "a", "1");
+        h3_dt_insert(&dt, "b", "2");
+        h3_dt_insert(&dt, "c", "3");
+
+        uint64_t abs;
+        if (!h3_dt_relative_to_absolute(&dt, 0, &abs) || abs != 2) return -60;
+        if (!h3_dt_relative_to_absolute(&dt, 1, &abs) || abs != 1) return -61;
+        if (!h3_dt_relative_to_absolute(&dt, 2, &abs) || abs != 0) return -62;
+        if (h3_dt_relative_to_absolute(&dt, 3, &abs)) return -63;
+    }
+
+    // Test 8: Monotonic indices after eviction
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 68);
+        // Each entry: 7+2+32=41 bytes; two entries=82>68
+        h3_dt_insert(&dt, "name-01", "vv"); // index 0
+        if (h3_dt_len(&dt) != 1) return -70;
+        h3_dt_insert(&dt, "name-02", "vv"); // index 1, evicts 0
+        if (h3_dt_len(&dt) != 1) return -71;
+        if (h3_dt_lookup_absolute(&dt, 1) == NULL) return -72;
+        if (h3_dt_lookup_absolute(&dt, 0) != NULL) return -73;
+        if (h3_dt_total_inserted(&dt) != 2) return -74;
+        if (h3_dt_largest_ref(&dt) != 1) return -75;
+    }
+
+    // Test 9: Encoder instruction encode/decode round-trip
+    // Insert With Literal Name
+    {
+        unsigned char buf[64];
+        int w = h3_qpack_encode_instruction_literal_name(buf, sizeof(buf), "x-custom", "hello");
+        if (w < 0) return -80;
+        // Verify first byte is 01xxxxxx
+        if ((buf[0] >> 6) != 0b01) return -81;
+
+        H3EncoderInstruction inst;
+        int consumed = h3_decode_encoder_instruction(buf, (size_t)w, &inst);
+        if (consumed != w) return -82;
+        if (inst.kind != H3_INST_LITERAL_NAME) return -83;
+        if (strcmp(inst.name, "x-custom") != 0) return -84;
+        if (strcmp(inst.value, "hello") != 0) return -85;
+    }
+
+    // Test 10: Encoder instruction sequence + apply
+    {
+        H3DynamicTable dt;
+        h3_dynamic_table_init(&dt, 4096);
+
+        unsigned char buf[128];
+        int pos = 0;
+
+        // Insert With Literal Name
+        int w = h3_qpack_encode_instruction_literal_name(buf + pos, sizeof(buf) - (size_t)pos, "x-a", "1");
+        if (w < 0) return -90;
+        pos += w;
+
+        // Duplicate (index 0)
+        w = h3_qpack_encode_instruction_duplicate(buf + pos, sizeof(buf) - (size_t)pos, 0);
+        if (w < 0) return -91;
+        pos += w;
+
+        int offset = 0;
+        while (offset < pos) {
+            H3EncoderInstruction inst;
+            int c = h3_decode_encoder_instruction(buf + (size_t)offset, (size_t)(pos - offset), &inst);
+            if (c <= 0) return -(92 + offset);
+            if (!h3_apply_encoder_instruction(&dt, &inst)) return -95;
+            offset += c;
+        }
+        if (h3_dt_len(&dt) != 2) return -96;
+    }
+
+    return 0;
+}
+
 // Combined self-test runner. Returns 0 on success, or a diagnostic code.
 static int h3_run_selftests(void) {
     int rc;
@@ -16796,6 +17417,8 @@ static int h3_run_selftests(void) {
     if (rc != 0) return 1000 + (-rc); // 1001..1030 = QPACK failures
     rc = h3_selftest_request_validation();
     if (rc != 0) return 2000 + (-rc); // 2001..2013 = validation failures
+    rc = h3_selftest_qpack_dynamic_table();
+    if (rc != 0) return 3000 + (-rc); // 3001..3100 = dynamic table failures
     return 0;
 }
 

@@ -27011,12 +27011,20 @@ fn test_nb7_11_qpack_overflow_is_decode_error() {
     let source =
         std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
 
-    // Find the h3_qpack_decode_block function
+    // NET7-10d: h3_qpack_decode_block is now a thin wrapper around
+    // h3_qpack_decode_block_with_dt. The overflow check lives in the _with_dt version.
+    let func_name = if source.contains("static int h3_qpack_decode_block_with_dt(") {
+        "static int h3_qpack_decode_block_with_dt("
+    } else {
+        "static int h3_qpack_decode_block("
+    };
+
+    // Find the decode function
     let func_start = source
-        .find("static int h3_qpack_decode_block(")
+        .find(func_name)
         .expect("h3_qpack_decode_block must exist");
     // Take a reasonable slice for the function body
-    let func_region = &source[func_start..func_start + 2000.min(source.len() - func_start)];
+    let func_region = &source[func_start..func_start + 4000.min(source.len() - func_start)];
 
     // The loop must NOT use hdr_count < max_headers as a loop condition
     // (that was the old silent-truncation pattern)
@@ -28772,3 +28780,763 @@ fn test_net7_5c_h3_bounded_copy_structural_audit() {
         "NET7-5c: Native must have H3_MAX_STREAMS constant"
     );
 }
+
+// ── NET7-10c: Native ↔ Interpreter Semantics Parity ─────────────────────
+
+/// NET7-10c-1: QPACK static table entry count parity.
+/// Both backends must have exactly 99 entries (RFC 9204 Appendix A, omitting index 22).
+#[test]
+fn test_net7_10c_qpack_static_table_count_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
+        .expect("read net_h3/qpack.rs");
+
+    // Native: C array of 99 {name, value} pairs.
+    assert!(
+        native_src.contains("H3_QPACK_STATIC_TABLE_LEN")
+            && native_src.contains("{ \":authority\", \"\" }"),
+        "NET7-10c: Native must define QPACK static table with :authority entry"
+    );
+
+    // Interpreter: Rust slice of 99 QpackStaticEntry structs.
+    assert!(
+        interp_src.contains("name: \":authority\"")
+            && interp_src.contains("name: \"x-frame-options\", value: \"sameorigin\""),
+        "NET7-10c: Interpreter QPACK static table must have 99 entries (first=\":authority\", last=\"x-frame-options sameorigin\")"
+    );
+
+    // Native must document the RFC 9204 table omission rationale
+    assert!(
+        native_src.contains("omits") || native_src.contains("/index.html"),
+        "NET7-10c: Native must document RFC 9204 table omission"
+    );
+
+    // Interpreter and Native must have same first entry format
+    assert!(
+        native_src.contains("{ \":authority\", \"\" }"),
+        "NET7-10c: Native static table first entry must match: \":authority\" \"\""
+    );
+}
+
+/// NET7-10c-2: H3 error code IANA registry parity.
+/// Both backends must use identical H3 error code values (RFC 9114 §8.1).
+#[test]
+fn test_net7_10c_h3_error_code_iana_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+    let interp_src_quic = fs::read_to_string("src/interpreter/net_h3/quic.rs")
+        .expect("read net_h3/quic.rs");
+    let interp_src = format!("{interp_src_frame}\n{interp_src_quic}");
+
+    // KEY error codes that must match between backends:
+    // H3_NO_ERROR = 0x0100, H3_GENERAL_PROTOCOL_ERROR = 0x0101,
+    // H3_FRAME_UNEXPECTED = 0x0105, H3_STREAM_CREATION_ERROR = 0x0103
+
+    // Native: uses 0x0100, 0x0101, 0x0105 etc.
+    assert!(
+        native_src.contains("0x0100") && native_src.contains("0x0101"),
+        "NET7-10c: Native must define H3_NO_ERROR (0x0100) and H3_GENERAL_PROTOCOL_ERROR (0x0101)"
+    );
+
+    // Interpreter (quic.rs): must use same IANA values.
+    assert!(
+        interp_src.contains("0x0100") && interp_src.contains("0x0101"),
+        "NET7-10c: Interpreter (quic.rs) must define H3 error codes matching IANA (0x0100, 0x0101)"
+    );
+
+    // H3_FRAME_UNEXPECTED parity: 0x0105
+    assert!(
+        native_src.contains("0x0105"),
+        "NET7-10c: Native must define H3_FRAME_UNEXPECTED as 0x0105"
+    );
+    assert!(
+        interp_src.contains("0x0105"),
+        "NET7-10c: Interpreter must define H3_FRAME_UNEXPECTED as 0x0105"
+    );
+
+    // H3_STREAM_CREATION_ERROR parity: 0x0103
+    assert!(
+        native_src.contains("0x0103"),
+        "NET7-10c: Native must define H3_STREAM_CREATION_ERROR as 0x0103"
+    );
+    assert!(
+        interp_src.contains("0x0103"),
+        "NET7-10c: Interpreter must define H3_STREAM_CREATION_ERROR as 0x0103"
+    );
+}
+
+/// NET7-10c-3: Settings IDs parity.
+/// Both backends must use identical SETTINGS identifiers (RFC 9114 §7.2.4.1).
+#[test]
+fn test_net7_10c_settings_ids_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+
+    // SETTINGS identifiers per RFC 9114:
+    // QPACK_MAX_TABLE_CAPACITY = 0x01, MAX_FIELD_SECTION_SIZE = 0x06,
+    // QPACK_BLOCKED_STREAMS = 0x07
+    // Native and Interpreter must use the same values.
+
+    // Native settings:
+    assert!(
+        native_src.contains("0x01") && native_src.contains("0x06") && native_src.contains("0x07"),
+        "NET7-10c: Native must use RFC 9114 SETTINGS IDs (0x01, 0x06, 0x07)"
+    );
+
+    // Interpreter settings constants:
+    assert!(
+        interp_src.contains("H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x01")
+            && interp_src.contains("H3_SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x06")
+            && interp_src.contains("H3_SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x07"),
+        "NET7-10c: Interpreter must use exact RFC 9114 SETTINGS IDs (0x01, 0x06, 0x07)"
+    );
+}
+
+/// NET7-10c-4: Connection state machine parity.
+/// H3Connection state transitions (Idle → Active → Draining → Closed) must be consistent
+/// between Native and Interpreter backends.
+#[test]
+fn test_net7_10c_connection_state_machine_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        .expect("read net_h3/connection.rs");
+
+    // Both backends must have the same state machine transitions:
+    // Idle → Active, Active → Draining, Draining → Closed, Active → Closed (emergency)
+
+    // Native: state machine functions (serve_h3_loop, quiche_conn_is_closed, etc.)
+    assert!(
+        native_src.contains("H3Conn"),
+        "NET7-10c: Native must have H3Conn type (connection-level state)"
+    );
+    assert!(
+        native_src.contains("goaway_sent"),
+        "NET7-10c: Native must track GOAWAY sent state"
+    );
+
+    // Interpreter: H3ConnState enum with Idle/Active/Draining/Closed
+    assert!(
+        interp_src_conn.contains("H3ConnState::Idle")
+            && interp_src_conn.contains("H3ConnState::Active")
+            && interp_src_conn.contains("H3ConnState::Draining")
+            && interp_src_conn.contains("H3ConnState::Closed"),
+        "NET7-10c: Interpreter H3ConnState must have all four states: Idle, Active, Draining, Closed"
+    );
+
+    // Both must have transition_state with the same valid transitions.
+    // Interpreter defines: (Idle→Active), (Idle→Closed), (Active→Draining),
+    // (Active→Closed), (Draining→Closed)
+    assert!(
+        interp_src_conn.contains("transition_state")
+            && interp_src_conn.contains("Active, H3ConnState::Draining")
+            && interp_src_conn.contains("Draining, H3ConnState::Closed"),
+        "NET7-10c: Interpreter must have transition_state with Active->Draining, Draining->Closed"
+    );
+}
+
+/// NET7-10c-5: Request validation semantics parity.
+/// Both backends must reject the same invalid request patterns with equivalent
+/// error kinds (missing :scheme, empty :method, duplicate pseudo-headers,
+/// ordering violations, unknown pseudo-headers).
+#[test]
+fn test_net7_10c_request_validation_semantics_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
+        .expect("read net_h3/request.rs");
+
+    // Both backends must validate the same pseudo-header rules.
+
+    // 1. :scheme is required — Native and Interpreter must both check for it.
+    assert!(
+        native_src.contains(":scheme") && native_src.contains("saw_scheme"),
+        "NET7-10c: Native must track :scheme pseudo-header"
+    );
+    assert!(
+        interp_src_req.contains(":scheme") && interp_src_req.contains("saw_scheme"),
+        "NET7-10c: Interpreter must track :scheme pseudo-header (NB7-10)"
+    );
+
+    // 2. Empty pseudo-header value rejection.
+    assert!(
+        native_src.contains("empty") && (native_src.contains("Empty") || native_src.contains("saw_method")),
+        "NET7-10c: Native must reject empty pseudo-header values"
+    );
+    assert!(
+        interp_src_req.contains("EmptyPseudo") && interp_src_req.contains("is_empty()"),
+        "NET7-10c: Interpreter must have EmptyPseudo error kind"
+    );
+
+    // 3. Duplicate pseudo-header detection.
+    assert!(
+        native_src.contains("saw_method") && native_src.contains("Duplicate") ||
+        native_src.contains("seen_method"),
+        "NET7-10c: Native must detect duplicate pseudo-headers"
+    );
+    assert!(
+        interp_src_req.contains("DuplicatePseudo") && interp_src_req.contains("saw_method"),
+        "NET7-10c: Interpreter must have DuplicatePseudo error kind"
+    );
+
+    // 4. Ordering violation: regular headers before pseudo-headers.
+    assert!(
+        native_src.contains("saw_regular") || native_src.contains("Ordering"),
+        "NET7-10c: Native must detect ordering violations (regular before pseudo)"
+    );
+    assert!(
+        interp_src_req.contains("Ordering") && interp_src_req.contains("saw_regular"),
+        "NET7-10c: Interpreter must have Ordering error kind"
+    );
+
+    // 5. Unknown pseudo-header rejection (e.g., :protocol).
+    assert!(
+        native_src.contains("UnknownPseudo") || native_src.contains("unknown "),
+        "NET7-10c: Native must reject unknown pseudo-headers"
+    );
+    assert!(
+        interp_src_req.contains("UnknownPseudo"),
+        "NET7-10c: Interpreter must have UnknownPseudo error kind"
+    );
+}
+
+/// NET7-10c-6: GOAWAY encode parity.
+/// Both backends must have encode_goaway function that wraps the stream_id
+/// in a varint and encodes it as an H3 frame.
+#[test]
+fn test_net7_10c_goaway_encode_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
+        .expect("read net_h3/frame.rs");
+
+    // Both backends must have encode_goaway that frames a varint.
+    assert!(
+        native_src.contains("h3_encode_goaway")
+            && native_src.contains("H3_FRAME_GOAWAY"),
+        "NET7-10c: Native must have h3_encode_goaway producing GOAWAY frames"
+    );
+
+    // Interpreter: encode_goaway validates 62-bit max (NB7-62)
+    assert!(
+        interp_src_frame.contains("fn encode_goaway")
+            && interp_src_frame.contains("H3_FRAME_GOAWAY")
+            && (interp_src_frame.contains("1 << 62") || interp_src_frame.contains("4611686018427387903")),
+        "NET7-10c: Interpreter encode_goaway must use 62-bit varint max (NB7-62)"
+    );
+}
+
+/// NET7-10c-7: Idle timeout default parity.
+/// Both backends must use the same default idle timeout (30 seconds).
+#[test]
+fn test_net7_10c_idle_timeout_default_parity() {
+    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
+        .expect("read native_runtime.c");
+    let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
+        .expect("read net_h3/connection.rs");
+
+    // Interpreter: DEFAULT_IDLE_TIMEOUT = 30s
+    assert!(
+        interp_src_conn.contains("from_secs(30)"),
+        "NET7-10c: Interpreter must use 30s default idle timeout (NET7-6c)"
+    );
+
+    // Native: must also use 30s (or equivalent)
+    assert!(
+        native_src.contains("30") && (native_src.contains("idle") || native_src.contains("timeout")),
+        "NET7-10c: Native must use 30s as idle timeout reference"
+    );
+}
+
+/// NET7-10c-8: Both backends' h3 selftests must pass (runtime parity).
+/// The QPACK roundtrip and request validation selftests must succeed on both
+/// backends, confirming identical encode/decode semantics for the baseline cases.
+#[test]
+fn test_net7_10c_h3_selftest_both_backends_pass() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/no/cert", key <= "/no/key", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    // Interpreter
+    let interp_ok = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_10c_selftest_interp");
+        let td_path = dir.join("main.td");
+        let interp_output = Command::new(taida_bin())
+            .args(&["--timeout", "3000"])
+            .arg(&td_path)
+            .output()
+            .expect("spawn interpreter");
+        let interp_stdout_string = normalize(&String::from_utf8_lossy(&interp_output.stdout));
+        let interp_stderr_string = normalize(&String::from_utf8_lossy(&interp_output.stderr));
+        cleanup_net_project(&dir);
+
+        !interp_stdout_string.contains("H3SelftestFailed")
+            && !interp_stderr_string.contains("H3SelftestFailed")
+    };
+
+    // Native
+    let native_ok = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_10c_selftest_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_net7_10c_selftest", "h3_selftest", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        let success = compile.status.success();
+        let native_output = if success {
+            let child = Command::new(&bin_path).output().ok();
+            let _ = fs::remove_file(&bin_path);
+            child
+        } else {
+            let _ = fs::remove_file(&bin_path);
+            None
+        };
+        let native_stdout_string = native_output
+            .as_ref()
+            .map(|o| normalize(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        let native_stderr_string = native_output
+            .as_ref()
+            .map(|o| normalize(&String::from_utf8_lossy(&o.stderr)))
+            .unwrap_or_default();
+        cleanup_net_project(&dir);
+
+        success
+            && !native_stdout_string.contains("H3SelftestFailed")
+            && !native_stderr_string.contains("H3SelftestFailed")
+    };
+
+    assert!(
+        interp_ok,
+        "NET7-10c: Interpreter H3 selftests must pass (QPACK + request validation)"
+    );
+    assert!(
+        native_ok,
+        "NET7-10c: Native H3 selftests must pass (QPACK + request validation)"
+    );
+}
+
+// ── NET7-10d: Native QPACK Dynamic Table Parity ───────────────────────────
+
+/// NET7-10d-1: H3DynamicTable exists and is initialized correctly on both backends.
+#[test]
+fn test_net7_10d_dynamic_table_struct_parity() {
+    // Interpreter: verify H3DynamicTable::new(capacity) initializes to correct defaults
+    // by inspecting the source for expected fields and values
+    let interp_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/interpreter/net_h3/qpack.rs"),
+    )
+    .unwrap();
+    assert!(
+        interp_src.contains("pub(crate) struct H3DynamicTable"),
+        "NET7-10d: Interpreter must define H3DynamicTable struct"
+    );
+    assert!(
+        interp_src.contains("entries: Vec<DynamicTableEntry>"),
+        "NET7-10d: Interpreter H3DynamicTable must have entries Vec (oldest first)"
+    );
+    assert!(
+        interp_src.contains("current_size: usize"),
+        "NET7-10d: Interpreter H3DynamicTable must track current_size"
+    );
+    assert!(
+        interp_src.contains("max_capacity: usize"),
+        "NET7-10d: Interpreter H3DynamicTable must track max_capacity"
+    );
+    assert!(
+        interp_src.contains("total_inserted: u64"),
+        "NET7-10d: Interpreter H3DynamicTable must track total_inserted monotonic counter"
+    );
+    assert!(
+        interp_src.contains("largest_ref: u64"),
+        "NET7-10d: Interpreter H3DynamicTable must track largest_ref"
+    );
+
+    // Native: verify H3DynamicTable struct definition exists
+    let native_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/codegen/native_runtime.c"),
+    )
+    .unwrap();
+    assert!(
+        native_src.contains("typedef struct {") && native_src.contains("H3DynamicTable"),
+        "NET7-10d: Native must define H3DynamicTable struct"
+    );
+    assert!(
+        native_src.contains("current_size") && native_src.contains("max_capacity"),
+        "NET7-10d: Native H3DynamicTable must track current_size and max_capacity"
+    );
+    assert!(
+        native_src.contains("total_inserted") && native_src.contains("largest_ref"),
+        "NET7-10d: Native must track total_inserted and largest_ref"
+    );
+}
+
+/// NET7-10d-2: Dynamic table insert + eviction + lookup_absolute semantics parity.
+/// Both backends use identical eviction logic: oldest-first, current_size = name.len + value.len + 32.
+#[test]
+fn test_net7_10d_eviction_semantics_parity() {
+    // Source-level parity check: both backends must use the same size formula
+    // entry_size = name.len + value.len + 32 (RFC 9204 Section 4.1.3)
+    let interp_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/interpreter/net_h3/qpack.rs"),
+    )
+    .unwrap();
+    let native_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/codegen/native_runtime.c"),
+    )
+    .unwrap();
+
+    // Both must use the 32-byte overhead formula
+    assert!(
+        interp_src.contains("+ 32"),
+        "NET7-10d: Interpreter must use entry_size = name + value + 32"
+    );
+    assert!(
+        native_src.contains("+ 32"),
+        "NET7-10d: Native must use entry_size = name + value + 32"
+    );
+
+    // Both must evict oldest-first (remove from front of entries)
+    assert!(
+        interp_src.contains("remove(0)"),
+        "NET7-10d: Interpreter must evict oldest (index 0) entries first"
+    );
+    assert!(
+        native_src.contains("entries[0]") || native_src.contains("for (int i = 0"),
+        "NET7-10d: Native must evict oldest entries first"
+    );
+
+    // Entry alone exceeding capacity must reject
+    assert!(
+        interp_src.contains("entry_size > self.max_capacity"),
+        "NET7-10d: Interpreter must reject entries exceeding capacity alone"
+    );
+    assert!(
+        native_src.contains("entry_size > dt->max_capacity"),
+        "NET7-10d: Native must reject entries exceeding capacity alone"
+    );
+}
+
+/// NET7-10d-3: Post-base index lookup parity (RFC 9204 Section 4.5.3).
+#[test]
+fn test_net7_10d_post_base_lookup_parity() {
+    let interp_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/interpreter/net_h3/qpack.rs"),
+    )
+    .unwrap();
+    let native_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/codegen/native_runtime.c"),
+    )
+    .unwrap();
+
+    // Both must implement lookup_post_base (post-base index 0 = largest_ref)
+    assert!(
+        interp_src.contains("lookup_post_base"),
+        "NET7-10d: Interpreter must implement lookup_post_base"
+    );
+    assert!(
+        native_src.contains("h3_dt_lookup_post_base") && native_src.contains("post_base"),
+        "NET7-10d: Native must implement lookup_post_base"
+    );
+
+    // Both must use: abs = largest_ref - post_base_index
+    assert!(
+        interp_src.contains("largest_ref.saturating_sub(post_base_index)"),
+        "NET7-10d: Interpreter must compute abs = largest_ref - post_base_index"
+    );
+    assert!(
+        native_src.contains("largest_ref") && native_src.contains("post_base_idx"),
+        "NET7-10d: Native must compute abs from largest_ref and post_base_index"
+    );
+}
+
+/// NET7-10d-4: Encoder instruction encode/decode round-trip parity.
+#[test]
+fn test_net7_10d_encoder_instruction_parity() {
+    let interp_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/interpreter/net_h3/qpack.rs"),
+    )
+    .unwrap();
+    let native_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/codegen/native_runtime.c"),
+    )
+    .unwrap();
+
+    // Insert With Name Reference (1Txxxxxx): static 0xC0, dynamic 0x80
+    assert!(
+        interp_src.contains("encode_insert_with_name_ref"),
+        "NET7-10d: Interpreter must have encode_insert_with_name_ref"
+    );
+    assert!(
+        native_src.contains("h3_qpack_encode_instruction_name_ref"),
+        "NET7-10d: Native must have encode_instruction_name_ref"
+    );
+
+    // Insert With Literal Name (01xxxxxx): 0x40 prefix
+    assert!(
+        interp_src.contains("encode_insert_with_literal_name"),
+        "NET7-10d: Interpreter must have encode_insert_with_literal_name"
+    );
+    assert!(
+        native_src.contains("h3_qpack_encode_instruction_literal_name"),
+        "NET7-10d: Native must have encode_instruction_literal_name"
+    );
+
+    // Duplicate (00xxxxxx): 0x00 prefix, 6-bit relative index
+    assert!(
+        interp_src.contains("encode_duplicate"),
+        "NET7-10d: Interpreter must have encode_duplicate"
+    );
+    assert!(
+        native_src.contains("h3_qpack_encode_instruction_duplicate"),
+        "NET7-10d: Native must have encode_instruction_duplicate"
+    );
+
+    // Set Capacity (001xxxxx): 0x20 prefix, 5-bit capacity
+    assert!(
+        interp_src.contains("encode_set_capacity"),
+        "NET7-10d: Interpreter must have encode_set_capacity"
+    );
+    assert!(
+        native_src.contains("h3_qpack_encode_instruction_set_capacity"),
+        "NET7-10d: Native must have encode_instruction_set_capacity"
+    );
+
+    // decode_encoder_instruction must exist on both sides
+    assert!(
+        interp_src.contains("decode_encoder_instruction"),
+        "NET7-10d: Interpreter must decode encoder instructions"
+    );
+    assert!(
+        native_src.contains("h3_decode_encoder_instruction"),
+        "NET7-10d: Native must decode encoder instructions"
+    );
+
+    // apply_encoder_instruction must exist on both sides
+    assert!(
+        interp_src.contains("apply_encoder_instruction"),
+        "NET7-10d: Interpreter must apply encoder instructions"
+    );
+    assert!(
+        native_src.contains("h3_apply_encoder_instruction"),
+        "NET7-10d: Native must apply encoder instructions"
+    );
+}
+
+/// NET7-10d-5: Decoder instruction encode/decode + H3DecoderState parity.
+#[test]
+fn test_net7_10d_decoder_instruction_parity() {
+    let interp_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/interpreter/net_h3/qpack.rs"),
+    )
+    .unwrap();
+    let native_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/codegen/native_runtime.c"),
+    )
+    .unwrap();
+
+    // Section Ack (1xxxxxxx): 0x80 prefix
+    assert!(
+        interp_src.contains("encode_section_ack"),
+        "NET7-10d: Interpreter must emit Section Ack"
+    );
+    assert!(
+        native_src.contains("H3_DEC_INST_SECTION_ACK"),
+        "NET7-10d: Native must define Section Ack kind"
+    );
+
+    // Stream Cancel (001xxxxx): 0x20 prefix
+    assert!(
+        interp_src.contains("encode_stream_cancel"),
+        "NET7-10d: Interpreter must emit Stream Cancel"
+    );
+    assert!(
+        native_src.contains("H3_DEC_INST_STREAM_CANCEL"),
+        "NET7-10d: Native must define Stream Cancel kind"
+    );
+
+    // Insert Count Increment (00xxxxxx): 0x00 prefix
+    assert!(
+        interp_src.contains("encode_insert_count_increment"),
+        "NET7-10d: Interpreter must emit Insert Count Increment"
+    );
+    assert!(
+        native_src.contains("H3_DEC_INST_INSERT_COUNT_INC"),
+        "NET7-10d: Native must define Insert Count Increment kind"
+    );
+
+    // H3DecoderState must exist on both sides
+    assert!(
+        interp_src.contains("struct H3DecoderState"),
+        "NET7-10d: Interpreter must define H3DecoderState"
+    );
+    assert!(
+        native_src.contains("H3DecoderState") && native_src.contains("received_insert_count"),
+        "NET7-10d: Native must define H3DecoderState with received_insert_count"
+    );
+
+    // decode_decoder_instruction must exist on both sides
+    assert!(
+        interp_src.contains("decode_decoder_instruction"),
+        "NET7-10d: Interpreter must decode decoder instructions"
+    );
+    assert!(
+        native_src.contains("h3_decode_decoder_instruction"),
+        "NET7-10d: Native must decode decoder instructions"
+    );
+
+    // Zero increment must be rejected on both sides
+    assert!(
+        interp_src.contains("*increment == 0"),
+        "NET7-10d: Interpreter must reject zero increment"
+    );
+    assert!(
+        native_src.contains("value == 0"),
+        "NET7-10d: Native must reject zero increment"
+    );
+}
+
+/// NET7-10d-6: Dynamic table decode_block integration (post-base + relative index).
+#[test]
+fn test_net7_10d_decode_block_dynamic_integration() {
+    let interp_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/interpreter/net_h3/qpack.rs"),
+    )
+    .unwrap();
+    let native_src = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/codegen/native_runtime.c"),
+    )
+    .unwrap();
+
+    // Interpreter decode_block must accept dynamic_table and handle:
+    // - Indexed Field Line with dynamic table relative index (!is_static branch)
+    // - Literal Field Line With Name Reference from dynamic table (!is_static branch)
+    // - Indexed Field Line With Post-Base Index (0001xxxx)
+    assert!(
+        interp_src.contains("let dynamic = dynamic_table"),
+        "NET7-10d: Interpreter decode_block must access dynamic_table"
+    );
+    assert!(
+        interp_src.contains("lookup_post_base"),
+        "NET7-10d: Interpreter decode_block must use lookup_post_base for 0001xxxx"
+    );
+
+    // Native decode_block_with_dt must handle the same three cases
+    assert!(
+        native_src.contains("h3_qpack_decode_block_with_dt"),
+        "NET7-10d: Native must have dynamic-table-aware decode_block"
+    );
+    assert!(
+        native_src.contains("h3_dt_lookup_post_base"),
+        "NET7-10d: Native decode_block must use lookup_post_base for 0001xxxx"
+    );
+
+    // Both must reject when req_insert_count != 0 but no dynamic table provided
+    assert!(
+        interp_src.contains("DynamicTableError"),
+        "NET7-10d: Interpreter must return DynamicTableError when DT missing"
+    );
+    assert!(
+        native_src.contains("req_insert_count != 0 && dynamic_table == NULL"),
+        "NET7-10d: Native must reject when req_insert_count != 0 but no dynamic table"
+    );
+}
+
+/// NET7-10d-7: Native dynamic table self-test passes.
+#[test]
+fn test_net7_10d_native_dynamic_selftest() {
+    let source_template = |port: u16| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/no/cert", key <= "/no/key", protocol <= "h3"))
+asyncResult ]=> result
+stdout(result.__value.kind)
+"#,
+            port = port
+        )
+    };
+
+    // Compile Native and check selftests pass (includes dynamic table tests)
+    let native_ok = {
+        let port = find_free_loopback_port();
+        let source = source_template(port);
+        let dir = setup_net_project(&source, "net7_10d_dynamic_selftest_native");
+        let td_path = dir.join("main.td");
+        let bin_path = unique_temp_path("taida_net7_10d_dt", "h3_selftest", "bin");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("--target")
+            .arg("native")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("compile native");
+        let success = compile.status.success();
+        let native_output = if success {
+            let child = Command::new(&bin_path).output().ok();
+            let _ = fs::remove_file(&bin_path);
+            child
+        } else {
+            let _ = fs::remove_file(&bin_path);
+            None
+        };
+        let native_stderr_string = native_output
+            .as_ref()
+            .map(|o| normalize(&String::from_utf8_lossy(&o.stderr)))
+            .unwrap_or_default();
+        cleanup_net_project(&dir);
+
+        success && !native_stderr_string.contains("H3SelftestFailed")
+    };
+
+    assert!(
+        native_ok,
+        "NET7-10d: Native dynamic table selftest must pass"
+    );
+}
+

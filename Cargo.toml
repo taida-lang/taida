@@ -40,11 +40,18 @@ cranelift-module = { version = "0.129.1", optional = true }
 cranelift-object = { version = "0.129.1", optional = true }
 target-lexicon = { version = "0.13", optional = true }
 
+# QUIC transport for the Interpreter backend (NET7-9: Phase 9)
+# quinn: pure Rust QUIC stack (tokio-native)
+quinn = { version = "0.11", features = ["ring", "rustls-ring"] }
+# rcgen: runtime cert/key generation for QUIC TLS1.3
+rcgen = "0.13"
+
 [dev-dependencies]
+# h3 crate: HTTP/3 framing + QPACK semantics (hyperium/h3 reference)
+# NB7-90: h3/h3-quinn are in dev-deps only — src/ implements hand-rolled
+# HTTP/3 framing; these crates are kept for future integration and interop tests.
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
-quinn = { version = "0.11", features = ["ring", "rustls-ring"] }
-rcgen = "0.13"
 
 [profile.dev]
 codegen-units = 256  # Explicit: Rust default for dev is 256
