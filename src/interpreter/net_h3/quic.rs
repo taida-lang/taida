@@ -282,7 +282,11 @@ async fn process_stream(
                 headers_seen = true;
 
                 // Decode QPACK-encoded request headers.
-                let headers = match super::qpack_decode_block(payload, 8, None, None) {
+                // NB7-102: Pass the connection's dynamic_table when present so that
+                // dynamic table entries (from prior SETTINGS/encoder stream activity)
+                // can be resolved during QPACK decode.
+                let dyn_table = h3_conn.dynamic_table.as_ref();
+                let headers = match super::qpack_decode_block(payload, 8, None, dyn_table) {
                     Some(h) => h,
                     None => {
                         let _ = send_error_response(&mut send, 400, b"Bad Request").await;

@@ -8,7 +8,7 @@
 /// - QPACK dynamic table and decoder/encoder instruction processing
 
 use super::qpack::{
-    H3DecodeError, H3Header,
+    H3DecodeError, H3Header, H3DynamicTable,
 };
 use super::frame::{encode_goaway, H3_MAX_STREAMS, H3_DEFAULT_MAX_FIELD_SECTION_SIZE};
 
@@ -128,6 +128,10 @@ pub(crate) struct H3Connection {
     // or HalfClosedLocal state. Draining connections must wait for this to
     // reach zero before transitioning to Closed to avoid data loss.
     pub active_stream_count: usize,
+    // NB7-102: QPACK dynamic table for this connection.
+    // Used by process_stream to pass dynamic_table to qpack_decode_block
+    // when the peer uses dynamic table entries (settings capacity > 0).
+    pub dynamic_table: Option<H3DynamicTable>,
 }
 
 impl H3Connection {
@@ -150,6 +154,7 @@ impl H3Connection {
             state: H3ConnState::Idle,
             handler_ctx: H3HandlerContext::default(),
             active_stream_count: 0,
+            dynamic_table: None,
         }
     }
 

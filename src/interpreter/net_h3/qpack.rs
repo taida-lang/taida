@@ -426,12 +426,32 @@ pub(crate) fn qpack_decode_block(
         return None;
     }
 
-    // Sign bit + Delta Base (prefix int, 7-bit prefix)
+    // Sign bit + Delta Base (prefix int, 7-bit prefix) — RFC 9204 Section 4.5.1.
+    // The sign bit (MSB) affects index calculation for Before Base entries:
+    //   D_abs = D + 2^(N-1) when Sign=1, where N = Required Insert Count.
+    //   D_abs = D when Sign=0.
     if consumed >= data.len() {
         return None;
     }
-    let (delta_base, db_consumed) = qpack_decode_int(&data[consumed..], 7)?;
+    let (most_deltas_base, db_consumed) = qpack_decode_int(&data[consumed..], 7)?;
     consumed += db_consumed;
+
+    // NB7-109: RFC 9204 §4.5.1 — extract sign bit and compute D, D_abs.
+    let sign_bit = (most_deltas_base >> 6) != 0;
+    let delta_base = most_deltas_base & 0x3F; // 6-bit value after removing sign
+
+    // Compute D_abs per RFC 9204 Section 4.5.1:
+    //   D_abs = D when Sign=0
+    //   D_abs = D + 2^(N-1) when Sign=1 (N = Required Insert Count)
+    let d_abs = if sign_bit && req_insert_count > 0 {
+        req_insert_count
+            .checked_sub(1)
+            .and_then(|n| 1u64.checked_shl(n as u32))
+            .and_then(|pow| delta_base.checked_add(pow))
+            .unwrap_or(0)
+    } else {
+        delta_base
+    };
 
     let mut headers = Vec::new();
     while consumed < data.len() {
@@ -458,38 +478,22 @@ pub(crate) fn qpack_decode_block(
                     value: QPACK_STATIC_TABLE[index].value.to_string(),
                 });
             } else {
-                // Dynamic table indexed by relative index (Section 4.5.2)
-                // Base = req_insert_count - delta_base - 1 (for post-base entries)
-                // But this is the 1T=0 form, where index is relative to base in forward direction.
-                // Actually: T=0 means dynamic table, index is relative:
-                //   absolute = DeltaBase - index (negative relative = backward from base)
-                // Wait — re-reading RFC 9204 Section 4.5.2:
-                //   T=0: index is a relative index. absolute_index = DeltaBase - index - 1.
-                //   No — it's: absolute = req_insert_count - delta_base + index. Actually it depends
-                //   on whether the entry falls at or before delta_base. The decoder uses:
-                //   post_base_relative = DeltaBase - absolute - 1
-                //   For T=0 with index N: if N < largest_ref - delta_base, it's before base.
-                //
-                // Simplified approach: the encoder sends delta_base = 0 when only referencing
-                // static table or entries at/before base. When using post-base entries, the
-                // encoder uses Section 4.5.3 (0001xxxx) instead.
-                //
-                // For now, treat T=0 dynamic references as: lookup at offset from delta_base.
+                // Dynamic table indexed by relative index (Section 4.5.2): 10xxxxxx
+                // T=0 => Before Base (absolute_index = RIC - D_abs - 1 - index)
                 let dynamic = dynamic_table?;
                 if req_insert_count == 0 {
                     return None; // no dynamic table entries when insert_count is 0
                 }
-                // NB7-100 fix: RFC 9204 §4.5.2 — relative index must resolve to a valid
-                // absolute index. Use checked arithmetic to detect overflow and fail rather
-                // than silently saturating to 0 (which could return a wrong entry).
-                //
-                // absolute_index = largest_ref - delta_base - index
-                // We already verified: index < req_insert_count - delta_base (max_relative).
-                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| index < m)?;
-                let abs = dynamic
-                    .largest_ref
-                    .checked_sub(delta_base)
-                    .and_then(|v| v.checked_sub(index))?;
+                // NB7-109: RFC 9204 §4.5.1 — use D_abs with sign bit for correct resolution.
+                // Before Base formula: absolute_index = RIC - D_abs - 1 - index
+                let ric = req_insert_count;
+                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1))?;
+                // Verify index is within bounds: index < D_abs + 1
+                let max_relative = d_abs.checked_add(1).filter(|&m| index < m)?;
+                if index >= max_relative {
+                    return None;
+                }
+                let abs = base_val.checked_sub(index)?;
                 let entry = dynamic.lookup_absolute(abs)?;
                 headers.push(H3Header {
                     name: entry.name.clone(),
@@ -509,20 +513,19 @@ pub(crate) fn qpack_decode_block(
                 }
                 QPACK_STATIC_TABLE[idx].name.to_string()
             } else {
-                // Dynamic table name reference (T=0)
-                // NB7-100 fix: checked arithmetic (same pattern as indexed field line)
+                // Dynamic table name reference (T=0): Before Base
                 let dynamic = dynamic_table?;
                 if req_insert_count == 0 {
                     return None;
                 }
-                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| name_index < m)?;
+                // NB7-109: same D_abs-based Before Base formula
+                let ric = req_insert_count;
+                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1))?;
+                let max_relative = d_abs.checked_add(1).filter(|&m| name_index < m)?;
                 if name_index >= max_relative {
                     return None;
                 }
-                let abs = dynamic
-                    .largest_ref
-                    .checked_sub(delta_base)
-                    .and_then(|v| v.checked_sub(name_index))?;
+                let abs = base_val.checked_sub(name_index)?;
                 let entry = dynamic.lookup_absolute(abs)?;
                 entry.name.clone()
             };
@@ -558,7 +561,7 @@ pub(crate) fn qpack_decode_block(
             let (value, val_consumed) = qpack_decode_string(&data[consumed..])?;
             consumed += val_consumed;
             headers.push(H3Header { name, value });
-        } else {
+        } else if byte & 0x10 != 0 {
             // Indexed Field Line With Post-Base Index (Section 4.5.3): 0001xxxx
             let (post_base_index, idx_consumed) = qpack_decode_int(&data[consumed..], 4)?;
             consumed += idx_consumed;
@@ -569,6 +572,31 @@ pub(crate) fn qpack_decode_block(
                 name: entry.name.clone(),
                 value: entry.value.clone(),
             });
+        } else {
+            // NB7-110: Literal Field Line With Post-Base Name Reference (Section 4.5.5)
+            // Wire format: 000N xxxx where N = Never-Indexed bit.
+            let never_indexed = (byte & 0x08) != 0;
+            let (name_index, ni_consumed) = qpack_decode_int(&data[consumed..], 3)?;
+            consumed += ni_consumed;
+
+            let name = if never_indexed {
+                let idx = name_index as usize;
+                if idx >= QPACK_STATIC_TABLE.len() {
+                    return None;
+                }
+                QPACK_STATIC_TABLE[idx].name.to_string()
+            } else {
+                let dynamic = dynamic_table?;
+                if req_insert_count == 0 {
+                    return None;
+                }
+                dynamic.lookup_post_base(name_index)?;
+                dynamic.lookup_post_base(name_index).unwrap().name.clone()
+            };
+
+            let (value, val_consumed) = qpack_decode_string(&data[consumed..])?;
+            consumed += val_consumed;
+            headers.push(H3Header { name, value });
         }
     }
     Some(headers)
@@ -607,12 +635,25 @@ pub(crate) fn qpack_decode_block_r(
         return Err(H3DecodeError::DynamicTableError);
     }
 
-    // Sign bit + Delta Base (prefix int, 7-bit prefix)
+    // Sign bit + Delta Base (prefix int, 7-bit prefix) — RFC 9204 Section 4.5.1.
     if consumed >= data.len() {
         return Err(H3DecodeError::Truncated);
     }
-    let (delta_base, db_consumed) = qpack_decode_int_r(&data[consumed..], 7)?;
+    let (most_deltas_base, db_consumed) = qpack_decode_int_r(&data[consumed..], 7)?;
     consumed += db_consumed;
+
+    // NB7-109: Extract sign bit and compute D_abs per RFC 9204 §4.5.1.
+    let sign_bit = (most_deltas_base >> 6) != 0;
+    let delta_base = most_deltas_base & 0x3F;
+    let d_abs = if sign_bit && req_insert_count > 0 {
+        req_insert_count
+            .checked_sub(1)
+            .and_then(|n| 1u64.checked_shl(n as u32))
+            .and_then(|pow| delta_base.checked_add(pow))
+            .ok_or(H3DecodeError::QpackIntOverflow)?
+    } else {
+        delta_base
+    };
 
     let mut headers = Vec::new();
     while consumed < data.len() {
@@ -638,21 +679,18 @@ pub(crate) fn qpack_decode_block_r(
                     value: QPACK_STATIC_TABLE[index].value.to_string(),
                 });
             } else {
-                // Dynamic table indexed by relative index
+                // Dynamic: Before Base (T=0) — absolute_index = RIC - D_abs - 1 - index
                 let dynamic = dynamic_table.ok_or(H3DecodeError::DynamicTableError)?;
                 if req_insert_count == 0 {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                // NB7-100 fix: same checked arithmetic for qpack_decode_block_r
-                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| index < m).ok_or(H3DecodeError::DynamicTableError)?;
+                let ric = req_insert_count;
+                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1)).ok_or(H3DecodeError::DynamicTableError)?;
+                let max_relative = d_abs.checked_add(1).filter(|&m| index < m).ok_or(H3DecodeError::DynamicTableError)?;
                 if index >= max_relative {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let abs = dynamic
-                    .largest_ref
-                    .checked_sub(delta_base)
-                    .and_then(|v| v.checked_sub(index))
-                    .ok_or(H3DecodeError::DynamicTableError)?;
+                let abs = base_val.checked_sub(index).ok_or(H3DecodeError::DynamicTableError)?;
                 let entry = dynamic.lookup_absolute(abs)
                     .ok_or(H3DecodeError::DynamicTableError)?;
                 headers.push(H3Header {
@@ -673,16 +711,18 @@ pub(crate) fn qpack_decode_block_r(
                 }
                 QPACK_STATIC_TABLE[idx].name.to_string()
             } else {
-                // NB7-100 fix: dynamic table name reference also needs checked arithmetic
+                // Dynamic table name reference (T=0): Before Base
                 let dynamic = dynamic_table.ok_or(H3DecodeError::DynamicTableError)?;
                 if req_insert_count == 0 {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let max_relative = req_insert_count.checked_sub(delta_base).filter(|&m| name_index < m).ok_or(H3DecodeError::DynamicTableError)?;
+                let ric = req_insert_count;
+                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1)).ok_or(H3DecodeError::DynamicTableError)?;
+                let max_relative = d_abs.checked_add(1).filter(|&m| name_index < m).ok_or(H3DecodeError::DynamicTableError)?;
                 if name_index >= max_relative {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let abs = dynamic.largest_ref.saturating_sub(delta_base).saturating_sub(name_index);
+                let abs = base_val.checked_sub(name_index).ok_or(H3DecodeError::DynamicTableError)?;
                 let entry = dynamic.lookup_absolute(abs)
                     .ok_or(H3DecodeError::DynamicTableError)?;
                 entry.name.clone()
@@ -714,7 +754,7 @@ pub(crate) fn qpack_decode_block_r(
             let (value, val_consumed) = qpack_decode_string_r(&data[consumed..])?;
             consumed += val_consumed;
             headers.push(H3Header { name, value });
-        } else {
+        } else if byte & 0x10 != 0 {
             // Indexed Field Line With Post-Base Index (Section 4.5.3): 0001xxxx
             let (post_base_index, idx_consumed) = qpack_decode_int_r(&data[consumed..], 4)?;
             consumed += idx_consumed;
@@ -726,6 +766,38 @@ pub(crate) fn qpack_decode_block_r(
                 name: entry.name.clone(),
                 value: entry.value.clone(),
             });
+        } else {
+            // NB7-110: Literal Field Line With Post-Base Name Reference (Section 4.5.5)
+            // Wire format: 000N xxxx where N = Never-Indexed bit.
+            // Bit 4 (0x08) is the Never-Indexed flag.
+            // Bits 3-0 + continuation form a prefix integer for the name index.
+            //   N=1: name referenced by static table index
+            //   N=0: name referenced by dynamic table post-base index
+            let never_indexed = (byte & 0x08) != 0;
+            let (name_index, ni_consumed) = qpack_decode_int_r(&data[consumed..], 3)?;
+            consumed += ni_consumed;
+
+            let name = if never_indexed {
+                // Static table name reference (NB7-110)
+                let idx = name_index as usize;
+                if idx >= QPACK_STATIC_TABLE.len() {
+                    return Err(H3DecodeError::StaticTableIndex);
+                }
+                QPACK_STATIC_TABLE[idx].name.to_string()
+            } else {
+                // Dynamic table post-base name reference (NB7-110)
+                let dynamic = dynamic_table.ok_or(H3DecodeError::DynamicTableError)?;
+                if req_insert_count == 0 {
+                    return Err(H3DecodeError::DynamicTableError);
+                }
+                let entry = dynamic.lookup_post_base(name_index)
+                    .ok_or(H3DecodeError::DynamicTableError)?;
+                entry.name.clone()
+            };
+
+            let (value, val_consumed) = qpack_decode_string_r(&data[consumed..])?;
+            consumed += val_consumed;
+            headers.push(H3Header { name, value });
         }
     }
     Ok(headers)
@@ -1064,9 +1136,15 @@ pub(crate) fn encode_insert_count_increment(buf: &mut [u8], increment: u64) -> O
 // dynamic table state.
 
 /// Decoded encoder instruction.
+///
+/// NB7-111 fix: dynamic table indices are stored as **relative indices**
+/// (0 = most recently inserted entry, per RFC 9204 §5) because that is
+/// how they arrive on the wire. Static table indices remain as-is.
 #[derive(Clone, Debug)]
 pub(crate) enum H3EncoderInstruction {
-    /// Insert With Name Reference (Section 5.2.1): 1xxxxxxx
+    /// Insert With Name Reference (Section 5.2.1): 1Txxxxxx
+    /// `name_index` is a static table index when `is_static == true`,
+    /// or a **relative index** (0 = newest) when `is_static == false`.
     InsertWithNameRef {
         is_static: bool,
         name_index: u64,
@@ -1077,7 +1155,8 @@ pub(crate) enum H3EncoderInstruction {
         name: String,
         value: String,
     },
-    /// Duplicate (Section 5.2.3): 00xxxxxx
+    /// Duplicate (Section 5.2.3): 000xxxxx
+    /// `index` is a **relative index** (0 = newest entry).
     Duplicate {
         index: u64,
     },
@@ -1152,7 +1231,12 @@ pub(crate) fn decode_encoder_instruction(data: &[u8]) -> Option<(H3EncoderInstru
 
 /// Apply an encoder instruction to a dynamic table.
 ///
-/// Returns `true` on success, `false` on failure (e.g., duplicate of missing entry).
+/// NB7-111 fix: dynamic table indices (from `InsertWithNameRef` with
+/// `is_static == false` and `Duplicate`) are **relative indices**
+/// (0 = most recently inserted entry). They must be converted to absolute
+/// indices before lookup, per RFC 9204 §5.2.
+///
+/// Returns `true` on success, `false` on failure.
 pub(crate) fn apply_encoder_instruction(
     table: &mut H3DynamicTable,
     instruction: &H3EncoderInstruction,
@@ -1166,8 +1250,12 @@ pub(crate) fn apply_encoder_instruction(
                 }
                 QPACK_STATIC_TABLE[idx].name.to_string()
             } else {
-                match table.entries.iter().find(|e| e.index == *name_index) {
-                    Some(e) => e.name.clone(),
+                // NB7-111: name_index is a relative index (0 = newest)
+                match table.relative_to_absolute(*name_index) {
+                    Some(abs) => match table.lookup_absolute(abs) {
+                        Some(e) => e.name.clone(),
+                        None => return false,
+                    },
                     None => return false,
                 }
             };
@@ -1177,7 +1265,11 @@ pub(crate) fn apply_encoder_instruction(
             table.insert(name.clone(), value.clone())
         }
         H3EncoderInstruction::Duplicate { index } => {
-            table.duplicate(*index)
+            // NB7-111: index is a relative index (0 = newest)
+            match table.relative_to_absolute(*index) {
+                Some(abs) => table.duplicate(abs),
+                None => false,
+            }
         }
         H3EncoderInstruction::SetCapacity { capacity } => {
             table.set_capacity(*capacity as usize);

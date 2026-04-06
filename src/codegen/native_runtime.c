@@ -15969,12 +15969,22 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
     // If dynamic table is required but not provided, reject.
     if (req_insert_count != 0 && dynamic_table == NULL) return -1;
 
-    // Sign bit + Delta Base (prefix int, 7-bit prefix)
+    // Sign bit + Delta Base (prefix int, 7-bit prefix) — RFC 9204 Section 4.5.1.
+    // NB7-109 fix: extract sign bit and compute D_abs per RFC 9204 §4.5.1.
+    // MostDeltasBase: bit 6 is Sign, bits 5-0 are D (6-bit value).
     if (consumed >= data_len) return -1;
-    uint64_t delta_base;
+    uint64_t most_deltas_base;
     size_t db_consumed;
-    if (h3_qpack_decode_int(data + consumed, data_len - consumed, 7, &delta_base, &db_consumed) < 0) return -1;
+    if (h3_qpack_decode_int(data + consumed, data_len - consumed, 7, &most_deltas_base, &db_consumed) < 0) return -1;
     consumed += db_consumed;
+    int sign_bit = (most_deltas_base >> 6) != 0;
+    uint64_t delta_base = most_deltas_base & 0x3F;
+    /* D_abs = D when Sign=0, D + 2^(N-1) when Sign=1 */
+    uint64_t d_abs = delta_base;
+    if (sign_bit && req_insert_count > 0 && req_insert_count <= 63) {
+        uint64_t pow2 = (uint64_t)1 << (req_insert_count - 1);
+        d_abs = delta_base + pow2;
+    }
 
     int hdr_count = 0;
     while (consumed < data_len) {
@@ -15996,18 +16006,15 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
                 snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value),
                          "%s", H3_QPACK_STATIC_TABLE[index].value);
             } else {
-                /* Dynamic table indexed by relative index (NET7-10d)
-                 * NB7-100 fix: use checked arithmetic instead of saturating
-                 * silent collapse-to-zero which could return wrong entries. */
+                /* NB7-109 fix: Dynamic table indexed (Before Base, T=0)
+                 * absolute_index = RIC - D_abs - 1 - index
+                 * per RFC 9204 §4.5.1 + §4.5.2 */
                 if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
                 if (req_insert_count == 0) return -1;
-                if (req_insert_count <= delta_base) return -1;
-                uint64_t max_relative = req_insert_count - delta_base;
-                if (index >= max_relative) return -1;
-                uint64_t largest_ref = h3_dt_largest_ref(dynamic_table);
-                if (largest_ref <= delta_base) return -1;
-                uint64_t base_val = largest_ref - delta_base;
-                if (base_val <= index) return -1;
+                if (index >= d_abs + 1) return -1;
+                if (req_insert_count < d_abs + 1) return -1;
+                uint64_t base_val = req_insert_count - d_abs - 1;
+                if (base_val < index) return -1;
                 uint64_t abs = base_val - index;
                 const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, abs);
                 if (!entry) return -1;
@@ -16030,10 +16037,16 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
                 snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name),
                          "%s", H3_QPACK_STATIC_TABLE[name_index].name);
             } else {
-                // Dynamic table name reference (NET7-10d)
+                /* NB7-109 fix: Dynamic table name reference (Before Base, T=0)
+                 * absolute_index = RIC - D_abs - 1 - name_index
+                 * per RFC 9204 §4.5.1 + §4.5.4 */
                 if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
-                // Name index is absolute in dynamic table scope
-                const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, name_index);
+                if (name_index >= d_abs + 1) return -1;
+                if (req_insert_count < d_abs + 1) return -1;
+                uint64_t base_val = req_insert_count - d_abs - 1;
+                if (base_val < name_index) return -1;
+                uint64_t abs = base_val - name_index;
+                const H3DynamicTableEntry *entry = h3_dt_lookup_absolute(dynamic_table, abs);
                 if (!entry) return -1;
                 snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
             }
@@ -16076,7 +16089,7 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
             // Indexed Field Line With Post-Base Index (Section 4.5.3): 0001xxxx
             // NET7-10d: dynamic table post-base reference
             // At this point bits 7,6,5 are all 0. Bit 4 (0x10) distinguishes
-            // post-base (1) from invalid (0).
+            // post-base indexed (1) from post-base literal name reference (0).
             if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
             uint64_t post_base_index;
             size_t idx_consumed;
@@ -16089,8 +16102,38 @@ static int h3_qpack_decode_block_with_dt(const unsigned char *data, size_t data_
             snprintf(headers[hdr_count].value, sizeof(headers[hdr_count].value), "%s", entry->value);
             hdr_count++;
         } else {
-            // Bits 7-4 are 0000 -- not a valid QPACK field line.
-            return -1;
+            // NB7-110: Literal Field Line With Post-Base Name Reference (Section 4.5.5)
+            // Wire format: 000N xxxx where N = Never-Indexed bit (bit 3).
+            // Bits 3-0 + continuation form a prefix integer for the name index.
+            //   N=1: name from static table index
+            //   N=0: name from dynamic table post-base index
+            int never_indexed = (byte & 0x08) != 0;
+            uint64_t name_index;
+            size_t ni_consumed;
+            if (h3_qpack_decode_int(data + consumed, data_len - consumed, 3, &name_index, &ni_consumed) < 0) return -1;
+            consumed += ni_consumed;
+
+            if (never_indexed) {
+                // Static table name reference
+                if (name_index >= H3_QPACK_STATIC_TABLE_LEN) return -1;
+                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name),
+                         "%s", H3_QPACK_STATIC_TABLE[name_index].name);
+            } else {
+                // Dynamic table post-base name reference
+                if (!dynamic_table || h3_dt_is_empty(dynamic_table)) return -1;
+                if (req_insert_count == 0) return -1;
+                const H3DynamicTableEntry *entry = h3_dt_lookup_post_base(dynamic_table, name_index);
+                if (!entry) return -1;
+                snprintf(headers[hdr_count].name, sizeof(headers[hdr_count].name), "%s", entry->name);
+            }
+
+            // Value string
+            size_t val_consumed;
+            if (h3_qpack_decode_string(data + consumed, data_len - consumed,
+                                        headers[hdr_count].value, sizeof(headers[hdr_count].value),
+                                        &val_consumed) < 0) return -1;
+            consumed += val_consumed;
+            hdr_count++;
         }
     }
     return hdr_count;
@@ -16997,15 +17040,25 @@ static int h3_apply_encoder_instruction(H3DynamicTable *dt, const H3EncoderInstr
                 if (inst->name_index >= H3_QPACK_STATIC_TABLE_LEN) return 0;
                 return h3_dt_insert(dt, H3_QPACK_STATIC_TABLE[inst->name_index].name, inst->value);
             } else {
-                const H3DynamicTableEntry *src = h3_dt_lookup_absolute(dt, inst->name_index);
+                /* NB7-111 fix: name_index from the decoder is a relative index
+                 * (0 = most recently inserted entry). Convert to absolute before
+                 * lookup, matching RFC 9204 §5.2.1 semantics. */
+                uint64_t abs_idx;
+                if (!h3_dt_relative_to_absolute(dt, inst->name_index, &abs_idx)) return 0;
+                const H3DynamicTableEntry *src = h3_dt_lookup_absolute(dt, abs_idx);
                 if (!src) return 0;
                 return h3_dt_insert(dt, src->name, inst->value);
             }
         }
         case H3_INST_LITERAL_NAME:
             return h3_dt_insert(dt, inst->name, inst->value);
-        case H3_INST_DUPLICATE:
-            return h3_dt_duplicate(dt, inst->name_index);
+        case H3_INST_DUPLICATE: {
+            /* NB7-111 fix: index from the decoder is a relative index.
+             * Convert to absolute before duplication, per RFC 9204 §5.2.3. */
+            uint64_t abs_idx;
+            if (!h3_dt_relative_to_absolute(dt, inst->name_index, &abs_idx)) return 0;
+            return h3_dt_duplicate(dt, abs_idx);
+        }
         case H3_INST_SET_CAPACITY:
             h3_dt_set_capacity(dt, (size_t)inst->capacity);
             return 1;
