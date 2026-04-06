@@ -114,11 +114,14 @@ pub(crate) use connection::{
 
 // NET7-9b: QUIC transport substrate (quinn) — Phase 9
 // NET7-12a: serve_h3_loop exposed for net_eval.rs -> quic.rs connection
+// NET7-12b: H3RequestData/H3ResponseData for handler dispatch bridge
 #[allow(unused_imports)]
 pub(crate) use quic::{
     create_quic_endpoint,
     accept_connection,
     serve_h3_loop,
+    H3RequestData,
+    H3ResponseData,
     H3_ALPN,
     DEFAULT_H3_PORT,
 };

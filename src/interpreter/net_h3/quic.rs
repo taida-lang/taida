@@ -2,6 +2,7 @@
 ///
 /// **NET7-9b: Phase 9** -- UDP + QUIC accept implementation.
 /// **NET7-9c: Phase 9** -- H3 serve loop with QUIC streams.
+/// **NET7-12b: Phase 12** -- Handler dispatch with h1/h2-compatible request pack.
 ///
 /// This module provides the QUIC transport layer using quinn (pure Rust,
 /// tokio-native) as the substrate. It replaces the Phase 3 libquiche.so
@@ -14,8 +15,8 @@
 /// 2. **QUIC Endpoint**: Bind tokio::net::UdpSocket, wrap in quinn
 ///    ServerConfig, create listening Endpoint.
 /// 3. **Accept Loop**: Endpoint::accept() loop for incoming connections.
-/// 4. **Stream Dispatch (NET7-9c)**: accept_bi() -> H3 frame decode ->
-///    QPACK decode -> request extraction -> response encode -> write.
+/// 4. **Stream Dispatch (NET7-9c/12b)**: accept_bi() -> H3 frame decode ->
+///    QPACK decode -> request extraction -> handler dispatch -> response write.
 /// 5. **Idle timeout / GOAWAY / shutdown** integration via H3Connection.
 ///
 /// # Design Decisions
@@ -25,7 +26,11 @@
 /// - ALPN h3 exact match: only "h3" is accepted (no silent fallback to
 ///   h2/h1).
 /// - The serve loop runs on an internal tokio runtime, bridged to the
-///   synchronous interpreter via `Runtime::block_on()`.
+///   synchronous interpreter via per-step `Runtime::block_on()` calls.
+/// - NET7-12b: Handler dispatch is synchronous. The serve loop alternates
+///   between async I/O (request read, response write) and sync handler
+///   invocation, matching the h1/h2 serial model. No `tokio::spawn`
+///   is used, so the interpreter's `&mut self` is available for handler calls.
 ///
 /// # Dependencies
 ///
@@ -58,6 +63,34 @@ pub(crate) const H3_ALPN: &[u8] = b"h3";
 /// NB7-97: Present as documentation of the standard HTTP/3 port.
 /// serve_h3_loop requires an explicit port parameter (0 = OS picks).
 pub(crate) const DEFAULT_H3_PORT: u16 = 443;
+
+// ── NET7-12b: Handler dispatch data types ─────────────────────────────
+
+/// Decoded H3 request data extracted from QPACK HEADERS + DATA frames.
+///
+/// This is the transport-agnostic representation passed to the user handler
+/// callback. The caller (net_eval.rs) converts this into the same 14-field
+/// request pack used by h1/h2.
+///
+/// Body is bounded by `max_field_section_size` (Phase 0 bounded-copy discipline).
+pub(crate) struct H3RequestData {
+    pub method: String,
+    pub path: String,
+    pub authority: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub remote_addr: std::net::SocketAddr,
+}
+
+/// Response data returned by the user handler callback.
+///
+/// The caller (net_eval.rs) extracts these fields from the handler's
+/// return value using the same `extract_response_fields` as h1/h2.
+pub(crate) struct H3ResponseData {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
 
 /// A successfully accepted QUIC connection.
 pub(crate) struct AcceptedConnection {
@@ -186,12 +219,27 @@ pub(crate) async fn accept_connection(
     }
 }
 
-// ── NET7-9c: Accept bi stream processing ───────────────────────────────
+// ── NET7-9c/12b: Accept bi stream processing ─────────────────────────
 
-/// NET7-9c: Process a single bidirectional QUIC stream.
+/// Result of reading and decoding a single QUIC stream.
 ///
-/// Reads raw bytes, decodes H3 frames, extracts the request,
-/// and sends a response (HEADERS + DATA frames).
+/// NET7-12b: Separates request extraction from response sending so the
+/// caller can invoke the user handler synchronously between the two async
+/// phases.
+enum StreamReadResult {
+    /// A valid HEADERS frame was decoded; request data and send stream are ready.
+    Request(H3RequestData, quinn::SendStream),
+    /// Stream had an error or protocol violation; error response already sent.
+    Error,
+    /// No HEADERS frame on this stream (e.g., empty or control-frame-only).
+    NoRequest,
+}
+
+/// NET7-9c/12b: Read and decode a single bidirectional QUIC stream.
+///
+/// Reads raw bytes, decodes H3 frames, extracts the request fields.
+/// On success, returns the extracted `H3RequestData` and the `SendStream`
+/// for the caller to send the response after handler dispatch.
 ///
 /// # Bounded-copy discipline
 ///
@@ -200,16 +248,14 @@ pub(crate) async fn accept_connection(
 /// - SETTINGS on request streams is rejected (NB7-84, RFC 9114 §7.2.4.1).
 /// - GOAWAY on request streams is rejected (NB7-85, RFC 9114 §7.2.6).
 /// - Frame decode errors use H3_ERR_FRAME_UNEXPECTED (NB7-92).
-///
-/// Returns `Some(true)` if a valid HEADERS frame was processed and response sent
-/// (i.e., a "successful request" for NB7-98 counting).
-/// Returns `Some(false)` on error.
-/// Returns `None` for control-frame-only streams (no HEADERS).
-async fn process_stream(
+/// - Body data (DATA frames after HEADERS) is collected, bounded by
+///   `max_field_section_size`.
+async fn read_request_stream(
     h3_conn: &mut super::H3Connection,
     mut recv: quinn::RecvStream,
     mut send: quinn::SendStream,
-) -> Option<bool> {
+    remote_addr: std::net::SocketAddr,
+) -> StreamReadResult {
     // Accumulate request bytes, bounded by max_field_section_size.
     let max_size = h3_conn.max_field_section_size as usize;
     let mut buf = Vec::with_capacity(STREAM_READ_BUF);
@@ -220,27 +266,28 @@ async fn process_stream(
             Ok(Some(n)) => {
                 if buf.len() + n > max_size {
                     let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
-                    return Some(false);
+                    return StreamReadResult::Error;
                 }
                 buf.extend_from_slice(&chunk_buf[..n]);
             }
             Ok(None) => break, // FIN received
             Err(_) => {
                 let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
-                return Some(false);
+                return StreamReadResult::Error;
             }
         }
     }
 
     if buf.is_empty() {
         let _ = send.reset(H3_ERR_NO_ERROR.try_into().expect("H3 error code as VarInt"));
-        return None;
+        return StreamReadResult::NoRequest;
     }
 
     // Decode all H3 frames in the buffer. NB7-88: previously only the first
     // frame was decoded; now we iterate through all available frames.
     let mut pos = 0;
-    let mut headers_seen = false;
+    let mut request_data: Option<H3RequestData> = None;
+    let mut body_data: Vec<u8> = Vec::new();
 
     while pos < buf.len() {
         // Step 1: decode frame header to get type, length, and header size.
@@ -249,7 +296,7 @@ async fn process_stream(
                 Some((ft, fl, hs)) => (ft, fl, hs),
                 None => {
                     let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-                    return Some(false);
+                    return StreamReadResult::Error;
                 }
             };
 
@@ -257,7 +304,7 @@ async fn process_stream(
             Ok(n) => n,
             Err(_) => {
                 let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-                return Some(false);
+                return StreamReadResult::Error;
             }
         };
 
@@ -266,7 +313,7 @@ async fn process_stream(
             // Incomplete frame — we've received partial data for this frame.
             // Treat as malformed since FIN was received with incomplete frame.
             let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-            return Some(false);
+            return StreamReadResult::Error;
         }
 
         let payload = &buf[pos + header_size..pos + total_frame_size];
@@ -274,12 +321,11 @@ async fn process_stream(
 
         match frame_type {
             super::H3_FRAME_HEADERS => {
-                if headers_seen {
+                if request_data.is_some() {
                     // Duplicate HEADERS on same request stream — protocol error
                     let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-                    return Some(false);
+                    return StreamReadResult::Error;
                 }
-                headers_seen = true;
 
                 // Decode QPACK-encoded request headers.
                 // NB7-102: Pass the connection's dynamic_table when present so that
@@ -290,7 +336,7 @@ async fn process_stream(
                     Some(h) => h,
                     None => {
                         let _ = send_error_response(&mut send, 400, b"Bad Request").await;
-                        return Some(false);
+                        return StreamReadResult::Error;
                     }
                 };
 
@@ -299,55 +345,32 @@ async fn process_stream(
                     Ok(req) => req,
                     Err(_) => {
                         let _ = send_error_response(&mut send, 400, b"Bad Request").await;
-                        return Some(false);
+                        return StreamReadResult::Error;
                     }
                 };
 
                 // Touch idle timer on successful request activity.
                 h3_conn.reset_idle_timer();
 
-                // TODO(NB7-87): Replace echo with user handler dispatch.
-                // Current behavior: echo method+path+authority only (no user handler).
-                // Full handler integration (taida_val handler) will be added as
-                // serve_h3_loop parameter in a future Phase.
-                let body = format!(
-                    "HTTP/3 {} {}{}",
-                    request.method,
-                    request.path,
-                    if request.authority.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" @ {}", request.authority)
-                    }
-                );
+                // NET7-12b: Build H3RequestData for handler dispatch.
+                request_data = Some(H3RequestData {
+                    method: request.method,
+                    path: request.path,
+                    authority: request.authority,
+                    headers: request.regular_headers,
+                    body: Vec::new(), // will be filled from DATA frames below
+                    remote_addr,
+                });
+            }
 
-                let response_headers = vec![
-                    ("content-type".to_string(), "text/plain".to_string()),
-                    ("server".to_string(), "taida-lang/net v7".to_string()),
-                ];
-
-                // Send HEADERS frame.
-                let Some(hdrs_frame) = super::build_response_headers_frame(200, &response_headers) else {
-                    let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
-                    return Some(false);
-                };
-                if send.write_all(&hdrs_frame).await.is_err() {
-                    return Some(false);
+            super::H3_FRAME_DATA => {
+                if request_data.is_none() {
+                    // DATA without prior HEADERS — protocol error.
+                    let _ = send_error_response(&mut send, 400, b"Expected HEADERS before DATA").await;
+                    return StreamReadResult::Error;
                 }
-
-                // Send DATA frame.
-                let Some(data_frame) = super::build_data_frame(body.as_bytes()) else {
-                    let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
-                    return Some(false);
-                };
-                if send.write_all(&data_frame).await.is_err() {
-                    return Some(false);
-                }
-
-                // Send FIN.
-                if send.finish().is_err() {
-                    return Some(false);
-                }
+                // Collect body data from DATA frame, bounded by max_field_section_size.
+                body_data.extend_from_slice(payload);
             }
 
             super::H3_FRAME_SETTINGS => {
@@ -355,7 +378,7 @@ async fn process_stream(
                 // (unidirectional, type 0x02). On a bidirectional request
                 // stream this is H3_ERR_FRAME_UNEXPECTED (RFC 9114 §7.2.4.1).
                 let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-                return Some(false);
+                return StreamReadResult::Error;
             }
 
             super::H3_FRAME_GOAWAY => {
@@ -364,13 +387,7 @@ async fn process_stream(
                 // NB7-99: do NOT call h3_conn.receive_goaway() here;
                 // connection_handler is the sole authoritative caller.
                 let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-                return Some(false);
-            }
-
-            super::H3_FRAME_DATA => {
-                // DATA without prior HEADERS — protocol error.
-                let _ = send_error_response(&mut send, 400, b"Expected HEADERS before DATA").await;
-                return Some(false);
+                return StreamReadResult::Error;
             }
 
             _ => {
@@ -382,11 +399,64 @@ async fn process_stream(
         }
     }
 
-    if headers_seen {
-        Some(true)
-    } else {
-        None
+    match request_data {
+        Some(mut req) => {
+            // Attach collected body data.
+            req.body = body_data;
+            StreamReadResult::Request(req, send)
+        }
+        None => StreamReadResult::NoRequest,
     }
+}
+
+/// NET7-12b: Send an H3 response (HEADERS + DATA + FIN) on a QUIC send stream.
+///
+/// Converts `H3ResponseData` into QPACK-encoded HEADERS and DATA frames.
+/// Returns true on success, false on write error.
+async fn send_h3_response(
+    mut send: quinn::SendStream,
+    response: &H3ResponseData,
+) -> bool {
+    // Convert headers to the format expected by build_response_headers_frame.
+    let header_refs: Vec<(String, String)> = response.headers.clone();
+
+    // Send HEADERS frame.
+    let Some(hdrs_frame) = super::build_response_headers_frame(response.status, &header_refs) else {
+        let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
+        return false;
+    };
+    if send.write_all(&hdrs_frame).await.is_err() {
+        return false;
+    }
+
+    // Send DATA frame (only if body is non-empty, matching h2 bodyless status policy).
+    let no_body = (100..200).contains(&response.status)
+        || response.status == 204
+        || response.status == 205
+        || response.status == 304;
+
+    if !no_body && !response.body.is_empty() {
+        let Some(data_frame) = super::build_data_frame(&response.body) else {
+            let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
+            return false;
+        };
+        if send.write_all(&data_frame).await.is_err() {
+            return false;
+        }
+    }
+
+    // Send FIN.
+    send.finish().is_ok()
+}
+
+/// NET7-12b: Send a 500 Internal Server Error response on a QUIC send stream.
+async fn send_h3_error_500(send: quinn::SendStream) {
+    let error_response = H3ResponseData {
+        status: 500,
+        headers: vec![],
+        body: b"Internal Server Error".to_vec(),
+    };
+    let _ = send_h3_response(send, &error_response).await;
 }
 
 /// Send an error response on a QUIC stream (HEADERS + DATA + FIN).
@@ -405,114 +475,43 @@ async fn send_error_response(
     send.finish().map_err(|_| ())
 }
 
-// ── NET7-9c: Per-connection handler ────────────────────────────────────
+// ── NET7-9c/12b: Public serve loop ────────────────────────────────────
 
-/// Per-connection handler: accept bi-directional streams, process each
-/// as an H3 request/response exchange.
+/// NET7-12b: H3 serve loop — the main entry point for the Interpreter H3 server.
 ///
-/// Integrates idle timeout, GOAWAY handling, and graceful shutdown.
-/// Returns the number of requests served on this connection.
-async fn connection_handler(
-    conn: quinn::Connection,
-    mut h3_conn: super::H3Connection,
-    max_requests: i64,
-    request_counter: Arc<std::sync::Mutex<i64>>,
-) -> i64 {
-    let mut request_count: i64 = 0;
-
-    loop {
-        // Check idle timeout.
-        if h3_conn.check_timeout().is_some() {
-            let _ = h3_conn.begin_shutdown();
-            break;
-        }
-
-        // Check max_requests for this connection.
-        if max_requests > 0 && request_count >= max_requests {
-            let _ = h3_conn.begin_shutdown();
-            break;
-        }
-
-        // No new streams in draining/closed state.
-        if !h3_conn.accepts_new_streams() {
-            break;
-        }
-
-        // Wait for the next bidirectional stream.
-        let (send_stream, recv_stream) = match conn.accept_bi().await {
-            Ok(pair) => pair,
-            Err(quinn::ConnectionError::ApplicationClosed(_))
-            | Err(quinn::ConnectionError::ConnectionClosed(_)) => {
-                break;
-            }
-            Err(quinn::ConnectionError::TimedOut) => {
-                // QUIC-level idle timeout.
-                break;
-            }
-            Err(_) => {
-                let _ = h3_conn.begin_shutdown();
-                break;
-            }
-        };
-
-        let stream_id: u64 = recv_stream.id().into();
-        h3_conn.reset_idle_timer();
-
-        // Register stream with H3 connection.
-        if h3_conn.new_stream(stream_id).is_none() {
-            // Reject: stream limit exceeded or draining.
-            let mut s = send_stream;
-            let _ = s.reset(H3_ERR_STREAM_CREATION_ERROR.try_into().expect("H3 error code as VarInt"));
-            continue;
-        }
-
-        h3_conn.set_current_stream(stream_id);
-
-        // Process the stream (read frames, decode request, send response).
-        let request_ok = process_stream(&mut h3_conn, recv_stream, send_stream).await;
-
-        // NB7-98: Only count successful HEADERS decodes as requests.
-        // process_stream returns Some(true) = valid request served,
-        // Some(false) = error, None = no request (empty stream / no HEADERS).
-        if request_ok == Some(true) {
-            request_count += 1;
-            // Update global request counter.
-            {
-                let mut counter = request_counter.lock().unwrap();
-                *counter += 1;
-            }
-        }
-
-        h3_conn.last_peer_stream_id = stream_id;
-    }
-
-    // Graceful shutdown pipeline.
-    h3_conn.shutdown();
-
-    request_count
-}
-
-// ── NET7-9c: Public serve loop ─────────────────────────────────────────
-
-/// NET7-9c: H3 serve loop — the main entry point for the Interpreter H3 server.
+/// This runs synchronously via per-step `Runtime::block_on()` calls,
+/// alternating between async I/O and synchronous handler dispatch:
 ///
-/// This runs synchronously (via an internal tokio runtime) and:
 /// 1. Creates a QUIC endpoint (TLS + ALPN h3)
-/// 2. Accepts connections and spawns per-connection handlers
-/// 3. Each connection handler accepts bi-directional streams
+/// 2. Accepts connections sequentially (serial model, matching h1/h2)
+/// 3. For each connection, accepts bi-directional streams
 /// 4. Stream data is decoded as H3 frames (SETTINGS, HEADERS, DATA)
-/// 5. Request fields are extracted from QPACK-encoded HEADERS
-/// 6. Response is built and sent as HEADERS + DATA frames
-/// 7. Idle timeout and GOAWAY/shutdown are integrated
+/// 5. Request fields are extracted into `H3RequestData`
+/// 6. Handler callback is invoked synchronously (outside async context)
+/// 7. Response is sent as HEADERS + DATA frames
+/// 8. Idle timeout and GOAWAY/shutdown are integrated
 ///
-/// **TODO(NB7-87):** Current `process_stream` echoes method+path+authority only.
-/// No user dispatch (`taida_val handler`) is invoked. This is a known limitation
-/// — full handler integration will be added in a future Phase.
+/// # Handler Dispatch (NET7-12b)
+///
+/// The `handler` callback converts `H3RequestData` into the same 14-field
+/// request pack used by h1/h2, calls the user's Taida function, and extracts
+/// the response. This callback is invoked synchronously between async I/O
+/// steps, matching the Interpreter's single-threaded, serial model.
+///
+/// `request_count` is incremented only when:
+/// 1. A valid HEADERS frame is decoded (NB7-98)
+/// 2. The handler completes successfully (NET7-12b)
+///
+/// Error streams (protocol errors, QPACK failures) are NOT counted.
 ///
 /// # Arguments
 ///
+/// * `cert_path` - Path to TLS certificate PEM (empty = self-signed)
+/// * `key_path` - Path to TLS private key PEM (empty = self-signed)
 /// * `port` - UDP port to bind (matching h1/h2 policy: 0 = OS picks)
 /// * `max_requests` - Max total requests before shutdown (0 = unlimited)
+/// * `handler` - Synchronous callback: H3RequestData -> Option<H3ResponseData>.
+///   Returns None on handler error (500 will be sent).
 ///
 /// # Returns
 ///
@@ -522,6 +521,7 @@ pub(crate) fn serve_h3_loop(
     key_path: &str,
     port: u16,
     max_requests: i64,
+    handler: &mut dyn FnMut(H3RequestData) -> Option<H3ResponseData>,
 ) -> Result<i64, String> {
     // Create a single-threaded tokio runtime.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -529,109 +529,179 @@ pub(crate) fn serve_h3_loop(
         .build()
         .map_err(|e| format!("httpServe: HTTP/3 failed to create tokio runtime: {}", e))?;
 
-    rt.block_on(async {
-        // Step 1: Create QUIC endpoint with user-provided or self-signed cert/key.
-        let (endpoint, _cert_der, _key_der) = create_quic_endpoint(cert_path, key_path, port)?;
+    // Step 1: Create QUIC endpoint with user-provided or self-signed cert/key.
+    let endpoint = rt.block_on(async {
+        let (ep, _cert_der, _key_der) = create_quic_endpoint(cert_path, key_path, port)?;
+        Ok::<quinn::Endpoint, String>(ep)
+    })?;
 
-        let connection_count: Arc<std::sync::Mutex<Vec<quinn::Connection>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        let request_counter: Arc<std::sync::Mutex<i64>> =
-            Arc::new(std::sync::Mutex::new(0));
+    let mut total_request_count: i64 = 0;
+    let mut connections: Vec<quinn::Connection> = Vec::new();
 
+    // NET7-12b: Sequential accept loop — process one connection at a time
+    // (matching h1/h2 serial model). No tokio::spawn, so &mut self is
+    // available for handler calls.
+    'accept: loop {
+        // Check global max_requests limit.
+        if max_requests > 0 && total_request_count >= max_requests {
+            break;
+        }
+
+        // Accept the next incoming connection (async).
+        let accepted = rt.block_on(accept_connection(&endpoint));
+        let accepted = match accepted {
+            Some(Ok(a)) => a,
+            Some(Err(e)) => {
+                eprintln!("httpServe HTTP/3: accept error: {}", e);
+                continue;
+            }
+            None => {
+                // Endpoint shutting down.
+                break;
+            }
+        };
+
+        // Bound concurrent connections.
+        connections.retain(|c| c.close_reason().is_none());
+        if connections.len() >= MAX_CONCURRENT_CONNS {
+            if let Some(old) = connections.first() {
+                old.close(0u32.into(), b"too_many_connections");
+            }
+            connections.drain(..1);
+        }
+        connections.push(accepted.connection.clone());
+
+        // Create H3Connection with idle timeout tracking.
+        let mut h3_conn = super::H3Connection::new();
+        let conn_id = accepted.connection.stable_id().to_ne_bytes().to_vec();
+        h3_conn.set_quic_connection_id(conn_id);
+        h3_conn.state = super::H3ConnState::Active;
+
+        let conn = accepted.connection;
+        let remote_addr = accepted.remote_addr;
+
+        // Per-connection stream loop (sequential).
         loop {
-            // Check global max_requests limit.
-            let count = *request_counter.lock().unwrap();
-            if max_requests > 0 && count >= max_requests {
+            // Check idle timeout.
+            if h3_conn.check_timeout().is_some() {
+                let _ = h3_conn.begin_shutdown();
                 break;
             }
 
-            // Accept the next incoming connection.
-            let accepted = accept_connection(&endpoint).await;
-            let accepted = match accepted {
-                Some(Ok(a)) => a,
-                Some(Err(e)) => {
-                    eprintln!("httpServe HTTP/3: accept error: {}", e);
-                    continue;
+            // Check per-connection max_requests.
+            if max_requests > 0 && total_request_count >= max_requests {
+                let _ = h3_conn.begin_shutdown();
+                break;
+            }
+
+            // No new streams in draining/closed state.
+            if !h3_conn.accepts_new_streams() {
+                break;
+            }
+
+            // Wait for the next bidirectional stream (async).
+            let bi_result = rt.block_on(conn.accept_bi());
+            let (send_stream, recv_stream) = match bi_result {
+                Ok(pair) => pair,
+                Err(quinn::ConnectionError::ApplicationClosed(_))
+                | Err(quinn::ConnectionError::ConnectionClosed(_)) => {
+                    break;
                 }
-                None => {
-                    // Endpoint shutting down.
+                Err(quinn::ConnectionError::TimedOut) => {
+                    // QUIC-level idle timeout.
+                    break;
+                }
+                Err(_) => {
+                    let _ = h3_conn.begin_shutdown();
                     break;
                 }
             };
 
-            // Bound concurrent connections.
-            // NB7-93: retain + len + push are under the same Mutex lock, so the
-            // only possible race is a connection closing between retain and push
-            // (not between retain and len). This is benign because we only ever
-            // track *more* connections, which is a conservative bound.
-            let was_bounded = {
-                let mut conns = connection_count.lock().unwrap();
-                conns.retain(|c| c.close_reason().is_none());
-                if conns.len() >= MAX_CONCURRENT_CONNS {
-                    if let Some(old) = conns.first() {
-                        old.close(0u32.into(), b"too_many_connections");
+            let stream_id: u64 = recv_stream.id().into();
+            h3_conn.reset_idle_timer();
+
+            // Register stream with H3 connection.
+            if h3_conn.new_stream(stream_id).is_none() {
+                // Reject: stream limit exceeded or draining.
+                let mut s = send_stream;
+                let _ = s.reset(H3_ERR_STREAM_CREATION_ERROR.try_into().expect("H3 error code as VarInt"));
+                continue;
+            }
+
+            h3_conn.set_current_stream(stream_id);
+
+            // Phase 1: Read and decode the request (async).
+            let read_result = rt.block_on(
+                read_request_stream(&mut h3_conn, recv_stream, send_stream, remote_addr)
+            );
+
+            match read_result {
+                StreamReadResult::Request(request_data, send) => {
+                    // Phase 2: Call handler synchronously (outside async context).
+                    // NET7-12b: request_count incremented only on valid HEADERS
+                    // decode + handler completion.
+                    match handler(request_data) {
+                        Some(response) => {
+                            // Phase 3: Send the response (async).
+                            let ok = rt.block_on(send_h3_response(send, &response));
+                            if ok {
+                                total_request_count += 1;
+                            }
+                        }
+                        None => {
+                            // Handler error — send 500.
+                            rt.block_on(send_h3_error_500(send));
+                            // Do not increment request_count on handler error.
+                        }
                     }
-                    conns.drain(..1);
-                    true
-                } else {
-                    false
                 }
-            };
-            // Push outside the lock to narrow the critical section.
-            // NB7-93: If we just dropped an old connection, the new one replaces it.
-            if !was_bounded {
-                connection_count.lock().unwrap().push(accepted.connection.clone());
+                StreamReadResult::Error => {
+                    // Error already handled (error response sent in read_request_stream).
+                    // Do not count as a request.
+                }
+                StreamReadResult::NoRequest => {
+                    // No HEADERS on this stream — not a request.
+                }
             }
 
-            // Create H3Connection with idle timeout tracking.
-            let mut h3_conn = super::H3Connection::new();
-            let conn_id = accepted.connection.stable_id().to_ne_bytes().to_vec();
-            h3_conn.set_quic_connection_id(conn_id);
-            h3_conn.state = super::H3ConnState::Active;
+            h3_conn.last_peer_stream_id = stream_id;
 
-            let conn = accepted.connection;
-            let max_requests_left = if max_requests <= 0 {
-                i64::MAX
-            } else {
-                max_requests - count
-            };
-            let rc = Arc::clone(&request_counter);
-
-            // Spawn per-connection handler.
-            tokio::spawn(async move {
-                connection_handler(conn, h3_conn, max_requests_left, rc).await
-            });
-        }
-
-        // Drain all connections before returning.
-        {
-            let conns = connection_count.lock().unwrap();
-            for c in conns.iter() {
-                c.close(0u32.into(), b"shutdown");
-            }
-        }
-
-        // NB7-95: Poll for connection closure instead of magic sleep(50ms).
-        // Give connections time to drain, then return.
-        let drain_start = tokio::time::Instant::now();
-        let drain_timeout = std::time::Duration::from_secs(1);
-        loop {
-            let all_closed = {
-                let conns = connection_count.lock().unwrap();
-                conns.iter().all(|c| c.close_reason().is_some())
-            };
-            if all_closed {
+            // Check if we should stop accepting on this connection.
+            if max_requests > 0 && total_request_count >= max_requests {
+                let _ = h3_conn.begin_shutdown();
                 break;
             }
-            if drain_start.elapsed() > drain_timeout {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
 
-        let final_count = *request_counter.lock().unwrap();
-        Ok(final_count)
-    })
+        // Graceful shutdown pipeline for this connection.
+        h3_conn.shutdown();
+
+        // Check if global limit reached — exit accept loop.
+        if max_requests > 0 && total_request_count >= max_requests {
+            break 'accept;
+        }
+    }
+
+    // Drain all tracked connections before returning.
+    for c in &connections {
+        c.close(0u32.into(), b"shutdown");
+    }
+
+    // NB7-95: Poll for connection closure instead of magic sleep.
+    let drain_start = std::time::Instant::now();
+    let drain_timeout = std::time::Duration::from_secs(1);
+    loop {
+        let all_closed = connections.iter().all(|c| c.close_reason().is_some());
+        if all_closed {
+            break;
+        }
+        if drain_start.elapsed() > drain_timeout {
+            break;
+        }
+        rt.block_on(tokio::time::sleep(std::time::Duration::from_millis(5)));
+    }
+
+    Ok(total_request_count)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -750,38 +820,34 @@ mod tests {
 
     // ── NET7-9c: Serve loop tests ────────────────────────────────────
 
-    /// NB7-94: The previous version of this test created a separate endpoint
-    /// and attempts to close it, but serve_h3_loop creates its own endpoint.
-    /// This test verifies serve_h3_loop exits cleanly with max_requests=1
-    /// (no connections needed to verify start/stop behavior).
-    #[tokio::test]
-    async fn test_serve_loop_starts_and_stops_cleanly() {
-        // Pick an OS-selected port. serve_h3_loop binds to 127.0.0.1:port.
-        // With max_requests=1, it exits immediately on first accept_connection
-        // returning None (endpoint was cleanly created, but the loop breaks
-        // when no incoming connection arrives and the endpoint is dropped
-        // at the end of serve_h3_loop).
-        // In practice, with no incoming connections, the loop waits on
-        // endpoint.accept().await. Since we can't externally close the
-        // internal endpoint, we just verify the function doesn't panic
-        // and returns within a short timeout.
-        // The loop will block on accept_connection with nobody connecting.
-        // Use max_requests=0 (unlimited) and timeout to assert it's waiting.
-        let handle = tokio::spawn(async move {
-            // Pick a port unlikely to have real traffic during test.
-            serve_h3_loop("", "", 0, 0)
+    /// NB7-94/NET7-12b: Verify serve_h3_loop creates an endpoint and blocks
+    /// waiting for connections. Since serve_h3_loop now takes a handler
+    /// callback and uses per-step block_on() (synchronous), we test it in
+    /// a background OS thread and verify it's waiting (not panicking).
+    #[test]
+    fn test_serve_loop_starts_and_stops_cleanly() {
+        let handle = std::thread::spawn(move || {
+            // Echo handler for testing.
+            let mut echo_handler = |req: H3RequestData| -> Option<H3ResponseData> {
+                Some(H3ResponseData {
+                    status: 200,
+                    headers: vec![],
+                    body: format!("echo {}", req.method).into_bytes(),
+                })
+            };
+            serve_h3_loop("", "", 0, 0, &mut echo_handler)
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait briefly — the loop should be blocking on accept.
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Abort the handle since there's no incoming connection to trigger exit.
-        handle.abort();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            handle,
-        ).await;
+        // The thread is alive and waiting; we can't cleanly stop it from
+        // outside (the endpoint is internal), so just verify it hasn't
+        // panicked by checking the thread is still running.
+        assert!(!handle.is_finished(), "serve loop should still be waiting for connections");
 
-        assert!(result.is_ok(), "serve loop should be abortable");
+        // Drop the handle (thread will be detached). This is acceptable
+        // for a unit test -- the OS will clean up when the test process exits.
     }
 
     /// Test that H3Connection idle timeout integrates with the serve loop.
