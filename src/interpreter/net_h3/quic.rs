@@ -673,8 +673,27 @@ pub(crate) fn serve_h3_loop(
             }
         }
 
-        // Graceful shutdown pipeline for this connection.
-        h3_conn.shutdown();
+        // NET7-12d: Graceful shutdown pipeline for this connection.
+        // Step 1: GOAWAY — transition H3Connection to Draining, get GOAWAY frame bytes.
+        let (advanced, goaway_frames) = h3_conn.shutdown();
+        // Step 2: Send GOAWAY frame on a unidirectional control stream (if available).
+        // This notifies the peer that no new requests will be accepted.
+        if advanced {
+            if let Some(frames) = goaway_frames {
+                // Open a unidirectional stream for GOAWAY (server-initiated).
+                if let Ok(mut uni) = rt.block_on(conn.open_uni()) {
+                    for frame in &frames {
+                        let _ = rt.block_on(uni.write_all(frame));
+                    }
+                    let _ = uni.finish();
+                }
+            }
+        }
+        // Step 3: If still Draining (not yet Closed), complete the shutdown.
+        // This closes all remaining streams and transitions to Closed.
+        if h3_conn.is_draining() {
+            h3_conn.complete_shutdown();
+        }
 
         // Check if global limit reached — exit accept loop.
         if max_requests > 0 && total_request_count >= max_requests {
@@ -682,12 +701,18 @@ pub(crate) fn serve_h3_loop(
         }
     }
 
-    // Drain all tracked connections before returning.
+    // NET7-12d: Graceful shutdown for all tracked connections.
+    // Step 1: Send GOAWAY (QUIC-level close with H3_NO_ERROR = 0x0100).
     for c in &connections {
-        c.close(0u32.into(), b"shutdown");
+        c.close(
+            quinn::VarInt::from_u32(0x0100), // H3_NO_ERROR
+            b"shutdown",
+        );
     }
 
-    // NB7-95: Poll for connection closure instead of magic sleep.
+    // Step 2: Drain wait — poll for connection closure (bounded, 1 second max).
+    // NB7-95: Poll-based instead of magic sleep.
+    // NB7-67: This replaces the old immediate-close pattern.
     let drain_start = std::time::Instant::now();
     let drain_timeout = std::time::Duration::from_secs(1);
     loop {
@@ -974,5 +999,88 @@ mod tests {
         );
         assert!(local.port() > 0, "H3 endpoint must bind to a valid port");
         endpoint.close(0u32.into(), b"test");
+    }
+
+    /// NET7-12d: Test graceful shutdown with NO in-flight streams.
+    ///
+    /// When no streams are active, shutdown should:
+    /// 1. Send GOAWAY (transition Active -> Draining)
+    /// 2. Immediately complete (Draining -> Closed, since no streams to wait for)
+    ///
+    /// This validates the happy path where the server shuts down cleanly.
+    #[test]
+    fn test_shutdown_no_inflight_streams() {
+        let mut conn = super::super::H3Connection::new();
+        conn.state = super::super::H3ConnState::Active;
+
+        // No streams registered — should be empty.
+        assert!(!conn.has_active_streams());
+        assert_eq!(conn.active_stream_count(), 0);
+
+        // Step 1: shutdown() sends GOAWAY and transitions to Draining.
+        let (advanced, goaway_frames) = conn.shutdown();
+        assert!(advanced, "shutdown should advance from Active to Draining");
+        assert!(goaway_frames.is_some(), "shutdown should produce GOAWAY frames");
+        assert!(conn.is_draining(), "connection should be in Draining state");
+
+        // Step 2: No in-flight streams — drain wait is trivially satisfied.
+        assert!(!conn.has_active_streams(), "no active streams during drain");
+
+        // Step 3: complete_shutdown transitions Draining -> Closed.
+        let ok = conn.complete_shutdown();
+        assert!(ok, "complete_shutdown should succeed from Draining");
+        assert!(conn.is_closed(), "connection should be Closed");
+
+        // Verify GOAWAY frame contains valid data.
+        let frames = goaway_frames.unwrap();
+        assert!(!frames.is_empty(), "at least one GOAWAY frame should be produced");
+        // GOAWAY frame: type varint + length varint + payload (stream ID varint)
+        let frame = &frames[0];
+        assert!(frame.len() >= 3, "GOAWAY frame must be at least 3 bytes");
+    }
+
+    /// NET7-12d: Test graceful shutdown WITH in-flight streams.
+    ///
+    /// When streams are still active at shutdown time, the sequence should be:
+    /// 1. Send GOAWAY (transition Active -> Draining)
+    /// 2. Verify in-flight streams are still tracked
+    /// 3. Complete shutdown (close all streams, transition to Closed)
+    ///
+    /// This validates that the drain wait period can observe active streams.
+    #[test]
+    fn test_shutdown_with_inflight_streams() {
+        let mut conn = super::super::H3Connection::new();
+        conn.state = super::super::H3ConnState::Active;
+
+        // Open 3 streams to simulate in-flight requests.
+        conn.new_stream(0);
+        conn.new_stream(4);
+        conn.new_stream(8);
+        assert_eq!(conn.active_stream_count(), 3);
+        assert!(conn.has_active_streams());
+
+        // Step 1: shutdown() sends GOAWAY and transitions to Draining.
+        let (advanced, goaway_frames) = conn.shutdown();
+        assert!(advanced, "shutdown should advance from Active to Draining");
+        assert!(goaway_frames.is_some(), "GOAWAY frames should be produced");
+        assert!(conn.is_draining());
+
+        // Step 2: Streams are still active during drain wait.
+        assert!(conn.has_active_streams(), "streams should still be tracked during drain");
+        assert_eq!(conn.active_stream_count(), 3, "all 3 streams should remain active");
+
+        // New streams MUST be rejected in Draining state (RFC 9114).
+        assert!(conn.new_stream(12).is_none(), "new streams must be rejected during draining");
+
+        // Step 3: complete_shutdown closes all streams and transitions to Closed.
+        let ok = conn.complete_shutdown();
+        assert!(ok, "complete_shutdown should succeed from Draining");
+        assert!(conn.is_closed());
+        assert!(!conn.has_active_streams(), "all streams should be closed after shutdown");
+        assert_eq!(conn.active_stream_count(), 0);
+
+        // Verify final state is terminal — further shutdown attempts are no-ops.
+        let (advanced2, _) = conn.shutdown();
+        assert!(!advanced2, "shutdown on Closed connection should be a no-op");
     }
 }

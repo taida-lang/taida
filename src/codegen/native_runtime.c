@@ -16767,6 +16767,9 @@ static struct {
     int             (*quiche_conn_close)(quiche_conn *conn, int app, uint64_t err,
                                          const uint8_t *reason, size_t reason_len);
     bool            (*quiche_conn_is_in_early_data)(const quiche_conn *conn);
+    // NET7-12d: Timer functions for drain wait (optional — graceful shutdown).
+    uint64_t        (*quiche_conn_timeout_as_nanos)(const quiche_conn *conn);
+    void            (*quiche_conn_on_timeout)(quiche_conn *conn);
 
     // stream send/recv
     int64_t         (*quiche_conn_stream_recv)(quiche_conn *conn, uint64_t stream_id,
@@ -16924,6 +16927,12 @@ static int taida_quiche_load(void) {
     // conn_stream_priority — useful for stream prioritization (optional)
     *(void**)(&taida_quiche.quiche_conn_stream_priority) =
         dlsym(taida_quiche.libquiche_handle, "quiche_conn_stream_priority");
+
+    // NET7-12d: Timer functions for drain wait (optional).
+    *(void**)(&taida_quiche.quiche_conn_timeout_as_nanos) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_conn_timeout_as_nanos");
+    *(void**)(&taida_quiche.quiche_conn_on_timeout) =
+        dlsym(taida_quiche.libquiche_handle, "quiche_conn_on_timeout");
 
     taida_quiche.loaded = 1;
     return 1;
@@ -17549,6 +17558,9 @@ typedef struct {
     int              h3_initialized; // 0 = needs init, 1 = control stream sent
     int              ctrl_stream_created; // 0 = not yet, 1 = control stream open
     uint64_t         ctrl_stream_id; // server-initiated unidirectional control stream
+    // NET7-12d: Draining state for graceful shutdown.
+    // 0 = normal, 1 = GOAWAY sent, waiting for drain completion.
+    int              draining;
 } QuicConnSlot;
 
 typedef struct {
@@ -17589,6 +17601,7 @@ static void quic_pool_init(QuicConnPool *pool, int max_conn, taida_val handler,
         pool->slots[i].h3_initialized = 0;
         pool->slots[i].ctrl_stream_created = 0;
         pool->slots[i].ctrl_stream_id = 0;
+        pool->slots[i].draining = 0;
         h3_conn_init(&pool->slots[i].h3_conn);
     }
 }
@@ -17697,6 +17710,7 @@ static void quic_pool_close_slot(QuicConnPool *pool, int slot_idx) {
         pool->slots[slot_idx].established = 0;
         pool->slots[slot_idx].h3_initialized = 0;
         pool->slots[slot_idx].ctrl_stream_created = 0;
+        pool->slots[slot_idx].draining = 0;
         pool->count--;
     }
     pthread_mutex_unlock(&pool->mutex);
@@ -18351,9 +18365,129 @@ static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arit
     }
 
 shutdown_loop:
-    // ── Shutdown: close all connections ───────────────────────────────────
-    // NET7-12c: Capture request count before pool destroy zeros the state.
+    // ── NET7-12d: Graceful shutdown: GOAWAY -> drain wait -> close ────────
+    // Phase 7 contract: H3Connection shutdown is GOAWAY -> drain -> close.
+    // The old code did `break -> quic_pool_destroy()` (immediate release).
+    // Now we:
+    //   1. Send GOAWAY on each active connection's control stream
+    //   2. Call quiche_conn_close() for graceful QUIC-level close
+    //   3. Drain all outbound datagrams (so GOAWAY reaches peers)
+    //   4. Poll until all connections are closed or timeout (1 second)
+    //   5. Destroy the pool
     serve_result.requests = pool.request_count;
+
+    // Step 1 + 2 + 3: Send GOAWAY and close each active connection.
+    {
+        unsigned char goaway_buf[64];
+        for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+            if (!pool.slots[i].active || !pool.slots[i].conn) continue;
+
+            // Step 1: Send GOAWAY frame on the control stream (if initialized).
+            if (pool.slots[i].ctrl_stream_created && !pool.slots[i].h3_conn.goaway_sent) {
+                int goaway_len = h3_encode_goaway(goaway_buf, sizeof(goaway_buf),
+                                                   pool.slots[i].h3_conn.last_peer_stream_id);
+                if (goaway_len > 0) {
+                    taida_quiche.quiche_conn_stream_send(
+                        pool.slots[i].conn,
+                        pool.slots[i].ctrl_stream_id,
+                        goaway_buf, (size_t)goaway_len, false);
+                    pool.slots[i].h3_conn.goaway_sent = 1;
+                }
+            }
+            pool.slots[i].draining = 1;
+
+            // Step 2: Initiate QUIC-level graceful close (H3_NO_ERROR = 0x0100).
+            taida_quiche.quiche_conn_close(pool.slots[i].conn,
+                                            1, 0x0100,
+                                            (const uint8_t*)"shutdown", 8);
+
+            // Step 3: Drain outbound datagrams so GOAWAY + CONNECTION_CLOSE reach peer.
+            quic_drain_send(udp_fd, pool.slots[i].conn, send_buf, sizeof(send_buf));
+        }
+    }
+
+    // Step 4: Poll for all connections to close (bounded drain wait, 1 second max).
+    // NB7-67: This replaces the immediate quic_pool_destroy().
+    {
+        struct timespec drain_start;
+        clock_gettime(CLOCK_MONOTONIC, &drain_start);
+        const int64_t drain_timeout_ms = 1000; // 1 second max drain wait
+
+        for (;;) {
+            // Check if all connections are closed or draining.
+            int all_done = 1;
+            for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+                if (!pool.slots[i].active || !pool.slots[i].conn) continue;
+                if (!taida_quiche.quiche_conn_is_closed(pool.slots[i].conn) &&
+                    !taida_quiche.quiche_conn_is_draining(pool.slots[i].conn)) {
+                    all_done = 0;
+                    break;
+                }
+            }
+            if (all_done) break;
+
+            // Check drain timeout.
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t elapsed_ms = (now.tv_sec - drain_start.tv_sec) * 1000
+                               + (now.tv_nsec - drain_start.tv_nsec) / 1000000;
+            if (elapsed_ms >= drain_timeout_ms) break;
+
+            // Process any incoming packets during drain (peers may send ACKs).
+            peer_len = sizeof(peer_addr);
+            ssize_t drain_rlen = recvfrom(udp_fd, recv_buf, sizeof(recv_buf), 0,
+                                          (struct sockaddr*)&peer_addr, &peer_len);
+            if (drain_rlen > 0) {
+                // Route to the right connection using existing header parsing.
+                uint8_t dr_dcid[20];
+                size_t dr_dcid_len = 0;
+                uint32_t dr_ver = 0;
+                uint8_t dr_type = 0;
+                uint8_t dr_scid[20];
+                size_t dr_scid_len = 0;
+                uint8_t dr_token[20];
+                size_t dr_token_len = 0;
+
+                int hdr_rc = taida_quiche.quiche_header_info(
+                    recv_buf, (size_t)drain_rlen, 5,
+                    &dr_ver, &dr_type,
+                    dr_dcid, &dr_dcid_len,
+                    dr_scid, &dr_scid_len,
+                    dr_token, &dr_token_len);
+                if (hdr_rc >= 0) {
+                    uint64_t dcid_hash = _fnv1a_64(dr_dcid, dr_dcid_len);
+                    int slot_idx = quic_pool_find_by_dcid(&pool, dcid_hash);
+                    if (slot_idx >= 0 && pool.slots[slot_idx].conn) {
+                        taida_quiche.quiche_conn_recv(
+                            pool.slots[slot_idx].conn,
+                            recv_buf, (size_t)drain_rlen,
+                            (struct sockaddr*)&peer_addr, peer_len);
+                        // Fire timer if available.
+                        if (taida_quiche.quiche_conn_on_timeout) {
+                            taida_quiche.quiche_conn_on_timeout(pool.slots[slot_idx].conn);
+                        }
+                        // Drain any response datagrams (ACKs, CONNECTION_CLOSE retransmit).
+                        quic_drain_send(udp_fd, pool.slots[slot_idx].conn,
+                                        send_buf, sizeof(send_buf));
+                    }
+                }
+            } else {
+                // No packet received — fire timer on all draining connections.
+                if (taida_quiche.quiche_conn_on_timeout) {
+                    for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
+                        if (!pool.slots[i].active || !pool.slots[i].conn) continue;
+                        if (pool.slots[i].draining) {
+                            taida_quiche.quiche_conn_on_timeout(pool.slots[i].conn);
+                            quic_drain_send(udp_fd, pool.slots[i].conn,
+                                            send_buf, sizeof(send_buf));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 5: Destroy pool (all connections freed).
     quic_pool_destroy(&pool);
 
     taida_quiche.quiche_config_free(config);

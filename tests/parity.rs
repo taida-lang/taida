@@ -29650,3 +29650,156 @@ fn test_net7_12c_native_interpreter_h3_handler_contract_parity() {
     );
 }
 
+/// NET7-12d: Both Native and Interpreter implement GOAWAY -> drain wait -> close
+/// in their shutdown paths.
+///
+/// NB7-67: The old Native code did `break -> quic_pool_destroy()` (immediate
+/// release). Both backends must now:
+///   1. Send GOAWAY on active connections
+///   2. Wait for connections to drain (bounded timeout)
+///   3. Close/destroy connections
+///
+/// This source-level parity test validates the structural contract.
+#[test]
+fn test_net7_12d_graceful_shutdown_goaway_drain_close_parity() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let native_src = fs::read_to_string(manifest_dir.join("src/codegen/native_runtime.c"))
+        .expect("read native_runtime.c");
+    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
+        .expect("read quic.rs");
+    let interp_conn_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
+        .expect("read connection.rs");
+
+    // --- Native: GOAWAY -> drain wait -> close ---
+
+    // 1. Native sends GOAWAY on control stream during shutdown.
+    assert!(
+        native_src.contains("h3_encode_goaway(goaway_buf"),
+        "NET7-12d: Native must encode GOAWAY frame during shutdown"
+    );
+    assert!(
+        native_src.contains("goaway_sent = 1"),
+        "NET7-12d: Native must mark goaway_sent during shutdown"
+    );
+
+    // 2. Native calls quiche_conn_close for graceful QUIC-level close.
+    assert!(
+        native_src.contains("quiche_conn_close(pool.slots[i].conn"),
+        "NET7-12d: Native must call quiche_conn_close during shutdown"
+    );
+
+    // 3. Native has a drain wait loop with timeout.
+    assert!(
+        native_src.contains("drain_timeout_ms"),
+        "NET7-12d: Native must have a bounded drain timeout"
+    );
+    assert!(
+        native_src.contains("quiche_conn_is_closed") && native_src.contains("quiche_conn_is_draining"),
+        "NET7-12d: Native must poll connection closed/draining state during drain"
+    );
+
+    // 4. Native sets draining state on slots.
+    assert!(
+        native_src.contains(".draining = 1"),
+        "NET7-12d: Native must set draining flag on slots during shutdown"
+    );
+
+    // 5. Native pool destroy happens AFTER drain wait.
+    // The old immediate `quic_pool_destroy` right after `shutdown_loop:` is gone.
+    // Now it happens after the drain loop.
+    assert!(
+        !native_src.contains("shutdown_loop:\n    // ── Shutdown: close all connections"),
+        "NET7-12d: Old immediate shutdown comment must be removed"
+    );
+    assert!(
+        native_src.contains("NET7-12d: Graceful shutdown: GOAWAY -> drain wait -> close"),
+        "NET7-12d: New graceful shutdown comment must be present"
+    );
+
+    // --- Interpreter: GOAWAY -> drain wait -> close ---
+
+    // 1. Interpreter sends GOAWAY via H3Connection::shutdown().
+    assert!(
+        interp_conn_src.contains("fn shutdown(&mut self)"),
+        "NET7-12d: Interpreter H3Connection must have shutdown() method"
+    );
+    assert!(
+        interp_conn_src.contains("encode_goaway(last_id)"),
+        "NET7-12d: Interpreter must encode GOAWAY in shutdown pipeline"
+    );
+    assert!(
+        interp_quic_src.contains("h3_conn.shutdown()"),
+        "NET7-12d: Interpreter serve loop must call h3_conn.shutdown()"
+    );
+
+    // 2. Interpreter sends GOAWAY frames on the wire.
+    assert!(
+        interp_quic_src.contains("goaway_frames"),
+        "NET7-12d: Interpreter must handle GOAWAY frame bytes from shutdown()"
+    );
+
+    // 3. Interpreter closes connections with H3_NO_ERROR.
+    assert!(
+        interp_quic_src.contains("0x0100") || interp_quic_src.contains("H3_NO_ERROR"),
+        "NET7-12d: Interpreter must close connections with H3_NO_ERROR"
+    );
+
+    // 4. Interpreter has drain wait loop with timeout.
+    assert!(
+        interp_quic_src.contains("drain_timeout"),
+        "NET7-12d: Interpreter must have bounded drain timeout"
+    );
+    assert!(
+        interp_quic_src.contains("close_reason().is_some()"),
+        "NET7-12d: Interpreter must poll connection close state"
+    );
+
+    // 5. Interpreter completes shutdown on H3Connection.
+    assert!(
+        interp_quic_src.contains("complete_shutdown()"),
+        "NET7-12d: Interpreter must call complete_shutdown() to finalize"
+    );
+}
+
+/// NET7-12d: Both backends have shutdown tests covering the two required cases:
+///   - Shutdown with NO in-flight streams (happy path)
+///   - Shutdown WITH in-flight streams (drain wait path)
+///
+/// This ensures the drain wait contract is tested, not just the GOAWAY send.
+#[test]
+fn test_net7_12d_shutdown_test_coverage() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
+        .expect("read quic.rs");
+    let interp_conn_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
+        .expect("read connection.rs");
+
+    // Interpreter must have both test cases in quic.rs or connection.rs tests.
+    let combined = format!("{}{}", interp_quic_src, interp_conn_src);
+
+    assert!(
+        combined.contains("test_shutdown_no_inflight_streams"),
+        "NET7-12d: Must have test for shutdown with no in-flight streams"
+    );
+    assert!(
+        combined.contains("test_shutdown_with_inflight_streams"),
+        "NET7-12d: Must have test for shutdown with in-flight streams"
+    );
+
+    // Both tests must exercise the full GOAWAY -> Draining -> Closed pipeline.
+    assert!(
+        combined.contains("is_draining()"),
+        "NET7-12d: Shutdown tests must check draining state"
+    );
+    assert!(
+        combined.contains("is_closed()"),
+        "NET7-12d: Shutdown tests must check closed state"
+    );
+    assert!(
+        combined.contains("has_active_streams()"),
+        "NET7-12d: Shutdown tests must check active stream count"
+    );
+}
+
