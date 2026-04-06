@@ -16743,6 +16743,14 @@ static struct {
     void           (*quiche_config_grease)(quiche_config *config, bool value);
     void           (*quiche_config_set_max_idle_timeout)(quiche_config *config, uint64_t v);
 
+    // QUIC transport parameters (NET7-12c: required for stream data flow)
+    void           (*quiche_config_set_initial_max_data)(quiche_config *config, uint64_t v);
+    void           (*quiche_config_set_initial_max_stream_data_bidi_local)(quiche_config *config, uint64_t v);
+    void           (*quiche_config_set_initial_max_stream_data_bidi_remote)(quiche_config *config, uint64_t v);
+    void           (*quiche_config_set_initial_max_stream_data_uni)(quiche_config *config, uint64_t v);
+    void           (*quiche_config_set_initial_max_streams_bidi)(quiche_config *config, uint64_t v);
+    void           (*quiche_config_set_initial_max_streams_uni)(quiche_config *config, uint64_t v);
+
     // quiche_accept / connection lifecycle
     quiche_conn    *(*quiche_accept)(const uint8_t *dcid, size_t dcid_len,
                                      const uint8_t *odcid, size_t odcid_len,
@@ -16767,6 +16775,12 @@ static struct {
                                                const uint8_t *buf, size_t buf_len, bool fin);
     int             (*quiche_conn_stream_shutdown)(quiche_conn *conn, uint64_t stream_id,
                                                   int direction, uint16_t app_error_code);
+
+    // Stream iteration (NET7-12c: needed for H3 stream dispatch)
+    void*           (*quiche_conn_readable)(const quiche_conn *conn);
+    void*           (*quiche_conn_writable)(const quiche_conn *conn);
+    int             (*quiche_stream_iter_next)(void *iter, uint64_t *stream_id);
+    void            (*quiche_stream_iter_free)(void *iter);
 
     // version and accept helpers
     uint32_t        (*quiche_version)(void);
@@ -16839,6 +16853,14 @@ static int taida_quiche_load(void) {
     LOAD_QSYM(quiche_config_grease);
     LOAD_QSYM(quiche_config_set_max_idle_timeout);
 
+    // QUIC transport parameters (NET7-12c: required for stream data flow)
+    LOAD_QSYM(quiche_config_set_initial_max_data);
+    LOAD_QSYM(quiche_config_set_initial_max_stream_data_bidi_local);
+    LOAD_QSYM(quiche_config_set_initial_max_stream_data_bidi_remote);
+    LOAD_QSYM(quiche_config_set_initial_max_stream_data_uni);
+    LOAD_QSYM(quiche_config_set_initial_max_streams_bidi);
+    LOAD_QSYM(quiche_config_set_initial_max_streams_uni);
+
     // Connection lifecycle (critical)
     LOAD_QSYM(quiche_accept);
     LOAD_QSYM(quiche_accept_dcid_len);
@@ -16855,6 +16877,12 @@ static int taida_quiche_load(void) {
     LOAD_QSYM(quiche_conn_stream_recv);
     LOAD_QSYM(quiche_conn_stream_send);
     LOAD_QSYM(quiche_conn_stream_shutdown);
+
+    // Stream iteration (NET7-12c: critical for H3 dispatch)
+    LOAD_QSYM(quiche_conn_readable);
+    LOAD_QSYM(quiche_conn_writable);
+    LOAD_QSYM(quiche_stream_iter_next);
+    LOAD_QSYM(quiche_stream_iter_free);
 
     // Version info
     LOAD_QSYM(quiche_version);
@@ -17516,6 +17544,11 @@ typedef struct {
     int64_t          conn_id;        // unique connection id (0-based index)
     int              active;         // 0 = free slot, 1 = active
     int              established;    // 0 = handshake pending, 1 = established (ALPN OK)
+    // NET7-12c: Per-connection H3 protocol state
+    H3Conn           h3_conn;        // H3 frame/stream/QPACK state
+    int              h3_initialized; // 0 = needs init, 1 = control stream sent
+    int              ctrl_stream_created; // 0 = not yet, 1 = control stream open
+    uint64_t         ctrl_stream_id; // server-initiated unidirectional control stream
 } QuicConnSlot;
 
 typedef struct {
@@ -17553,6 +17586,10 @@ static void quic_pool_init(QuicConnPool *pool, int max_conn, taida_val handler,
         pool->slots[i].conn_id = -1;
         pool->slots[i].dcid_hash = 0;
         pool->slots[i].established = 0;
+        pool->slots[i].h3_initialized = 0;
+        pool->slots[i].ctrl_stream_created = 0;
+        pool->slots[i].ctrl_stream_id = 0;
+        h3_conn_init(&pool->slots[i].h3_conn);
     }
 }
 
@@ -17598,11 +17635,14 @@ static void h3_conn_maintenance(QuicConnPool *pool) {
         if (taida_quiche.quiche_conn_is_closed(pool->slots[i].conn) ||
             taida_quiche.quiche_conn_is_draining(pool->slots[i].conn)) {
             taida_quiche.quiche_conn_free(pool->slots[i].conn);
+            h3_conn_free(&pool->slots[i].h3_conn);
             pool->slots[i].conn = NULL;
             pool->slots[i].active = 0;
             pool->slots[i].conn_id = -1;
             pool->slots[i].dcid_hash = 0;
             pool->slots[i].established = 0;
+            pool->slots[i].h3_initialized = 0;
+            pool->slots[i].ctrl_stream_created = 0;
             pool->count--;
         }
     }
@@ -17649,21 +17689,27 @@ static void quic_pool_close_slot(QuicConnPool *pool, int slot_idx) {
         if (pool->slots[slot_idx].conn && taida_quiche.quiche_conn_free) {
             taida_quiche.quiche_conn_free(pool->slots[slot_idx].conn);
         }
+        h3_conn_free(&pool->slots[slot_idx].h3_conn);
         pool->slots[slot_idx].conn = NULL;
         pool->slots[slot_idx].active = 0;
         pool->slots[slot_idx].conn_id = -1;
         pool->slots[slot_idx].dcid_hash = 0;
         pool->slots[slot_idx].established = 0;
+        pool->slots[slot_idx].h3_initialized = 0;
+        pool->slots[slot_idx].ctrl_stream_created = 0;
         pool->count--;
     }
     pthread_mutex_unlock(&pool->mutex);
 }
 
 static void quic_pool_destroy(QuicConnPool *pool) {
-    // Close all remaining connections.
+    // Close all remaining connections and free per-connection H3 state.
     for (int i = 0; i < QUIC_MAX_CONNECTIONS; i++) {
-        if (pool->slots[i].active && pool->slots[i].conn) {
-            taida_quiche.quiche_conn_free(pool->slots[i].conn);
+        if (pool->slots[i].active) {
+            h3_conn_free(&pool->slots[i].h3_conn);
+            if (pool->slots[i].conn) {
+                taida_quiche.quiche_conn_free(pool->slots[i].conn);
+            }
         }
     }
     pthread_mutex_destroy(&pool->mutex);
@@ -17672,6 +17718,334 @@ static void quic_pool_destroy(QuicConnPool *pool) {
 // Check if connection count is exhausted (matching h1/h2 pattern).
 static int quic_pool_requests_exhausted(QuicConnPool *pool) {
     return (pool->max_requests > 0 && pool->request_count >= pool->max_requests) ? 1 : 0;
+}
+
+// ── NET7-12c: Drain all pending outbound QUIC datagrams for a connection. ──
+// quiche_conn_send() may produce multiple datagrams; we must drain them all.
+// Returns 0 on success, -1 on fatal send error.
+static int quic_drain_send(int udp_fd, quiche_conn *conn,
+                           unsigned char *send_buf, size_t send_buf_cap) {
+    for (;;) {
+        struct sockaddr_in send_addr;
+        socklen_t send_addr_len = sizeof(send_addr);
+        ssize_t send_rc = taida_quiche.quiche_conn_send(
+            conn, send_buf, send_buf_cap,
+            (struct sockaddr*)&send_addr, &send_addr_len
+        );
+        if (send_rc < 0) {
+            // QUICHE_ERR_DONE (-2) or other: no more data to send.
+            break;
+        }
+        if (send_rc == 0) break;
+        ssize_t n = sendto(udp_fd, send_buf, (size_t)send_rc, 0,
+                           (struct sockaddr*)&send_addr, send_addr_len);
+        if (n < 0) return -1;
+    }
+    return 0;
+}
+
+// ── NET7-12c: Initialize H3 control stream for a newly established connection. ──
+// Sends a server-initiated unidirectional control stream with SETTINGS frame
+// (RFC 9114 Section 3.2, Section 6.2.1).
+// Returns 0 on success, -1 on error.
+static int h3_init_control_stream(QuicConnSlot *slot) {
+    if (slot->h3_initialized) return 0;
+
+    // Server-initiated unidirectional stream IDs have form 4*N + 3 in QUIC.
+    // Stream ID 3 = first server-initiated unidirectional stream.
+    uint64_t ctrl_sid = 3;
+
+    // Send stream type byte (0x00 = control stream, RFC 9114 Section 6.2).
+    unsigned char stream_type = 0x00;
+    int64_t wrc = taida_quiche.quiche_conn_stream_send(
+        slot->conn, ctrl_sid, &stream_type, 1, 0 /*fin=false*/);
+    if (wrc < 0) return -1;
+
+    // Encode and send SETTINGS frame.
+    unsigned char settings_payload[64];
+    int settings_len = h3_encode_settings(settings_payload, sizeof(settings_payload));
+    if (settings_len < 0) return -1;
+
+    unsigned char settings_frame[128];
+    int frame_len = h3_encode_frame(settings_frame, sizeof(settings_frame),
+                                     H3_FRAME_SETTINGS, settings_payload, (size_t)settings_len);
+    if (frame_len < 0) return -1;
+
+    wrc = taida_quiche.quiche_conn_stream_send(
+        slot->conn, ctrl_sid, settings_frame, (size_t)frame_len, 0 /*fin=false*/);
+    if (wrc < 0) return -1;
+
+    slot->ctrl_stream_id = ctrl_sid;
+    slot->ctrl_stream_created = 1;
+    slot->h3_initialized = 1;
+    h3_conn_init(&slot->h3_conn);
+    return 0;
+}
+
+// ── NET7-12c: Process a single readable QUIC stream (H3 dispatch). ──
+//
+// Responsibilities:
+//   - Control stream (client-initiated unidirectional, stream_id & 0x03 == 0x02):
+//     Read and decode SETTINGS / GOAWAY frames.
+//   - Request stream (client-initiated bidirectional, stream_id & 0x03 == 0x00):
+//     Read H3 frames, QPACK decode HEADERS, build request pack,
+//     dispatch handler via taida_invoke_callback1(), encode response, send back.
+//
+// Returns: 1 = valid request served (increment pool.request_count)
+//          0 = no request (control stream, error, incomplete data)
+//         -1 = fatal connection error (caller should close slot)
+static int h3_process_stream(QuicConnSlot *slot, QuicConnPool *pool,
+                              uint64_t stream_id) {
+    // Determine stream type from 2 LSBs of stream ID (RFC 9000 Section 2.1).
+    // 0x0 = client-initiated bidirectional (request streams)
+    // 0x2 = client-initiated unidirectional (control/QPACK streams)
+    int stream_type = (int)(stream_id & 0x03);
+
+    // Read stream data into a bounded buffer.
+    // bounded-copy discipline: single materialization per stream read.
+    unsigned char stream_buf[65536]; // 64KB — bounded by max_field_section_size
+    size_t total_read = 0;
+    bool fin = false;
+
+    for (;;) {
+        bool chunk_fin = false;
+        int64_t rrc = taida_quiche.quiche_conn_stream_recv(
+            slot->conn, stream_id,
+            stream_buf + total_read, sizeof(stream_buf) - total_read,
+            &chunk_fin
+        );
+        if (rrc < 0) break; // QUICHE_ERR_DONE or error
+        total_read += (size_t)rrc;
+        if (chunk_fin) { fin = true; break; }
+        if (total_read >= sizeof(stream_buf)) break; // buffer full
+    }
+
+    if (total_read == 0 && !fin) return 0; // no data yet
+
+    // ── Client-initiated unidirectional stream (control/QPACK) ──
+    if (stream_type == 0x02) {
+        if (total_read < 1) return 0;
+        uint8_t uni_type = stream_buf[0];
+
+        if (uni_type == 0x00) {
+            // Control stream: decode frames (SETTINGS, GOAWAY).
+            size_t pos = 1;
+            while (pos < total_read) {
+                uint64_t frame_type, frame_length;
+                size_t header_size;
+                if (h3_decode_frame_header(stream_buf + pos, total_read - pos,
+                                            &frame_type, &frame_length, &header_size) < 0) {
+                    break;
+                }
+                const unsigned char *payload = stream_buf + pos + header_size;
+                size_t payload_len = (size_t)frame_length;
+                pos += header_size + payload_len;
+
+                if (frame_type == H3_FRAME_SETTINGS) {
+                    h3_decode_settings(&slot->h3_conn, payload, payload_len);
+                } else if (frame_type == H3_FRAME_GOAWAY) {
+                    slot->h3_conn.goaway_sent = 1;
+                }
+                // Unknown frame types on control stream: silently ignored (RFC 9114 Section 7.2.8).
+            }
+        }
+        // QPACK encoder/decoder streams (type 0x02, 0x03) are silently consumed.
+        return 0;
+    }
+
+    // ── Client-initiated bidirectional stream (request stream) ──
+    if (stream_type != 0x00) return 0; // skip server-initiated streams
+
+    if (total_read == 0) {
+        // Empty stream with FIN — reset with H3_NO_ERROR.
+        taida_quiche.quiche_conn_stream_shutdown(slot->conn, stream_id, 1, 0);
+        return 0;
+    }
+
+    // Decode H3 frames in the request stream.
+    size_t pos = 0;
+    int headers_seen = 0;
+    H3Header request_headers[64];
+    int request_header_count = 0;
+    const unsigned char *request_body = NULL;
+    size_t request_body_len = 0;
+
+    while (pos < total_read) {
+        uint64_t frame_type, frame_length;
+        size_t header_size;
+        if (h3_decode_frame_header(stream_buf + pos, total_read - pos,
+                                    &frame_type, &frame_length, &header_size) < 0) {
+            // Malformed frame — reset stream with H3_ERR_FRAME_ERROR (0x0106).
+            taida_quiche.quiche_conn_stream_shutdown(slot->conn, stream_id, 1, 0x0106);
+            return 0;
+        }
+
+        const unsigned char *payload = stream_buf + pos + header_size;
+        size_t payload_len = (size_t)frame_length;
+        pos += header_size + payload_len;
+
+        switch (frame_type) {
+            case H3_FRAME_HEADERS: {
+                if (headers_seen) {
+                    // Duplicate HEADERS on same request stream — protocol error.
+                    taida_quiche.quiche_conn_stream_shutdown(slot->conn, stream_id, 1, 0x0106);
+                    return 0;
+                }
+                headers_seen = 1;
+
+                // QPACK decode.
+                request_header_count = h3_qpack_decode_block(
+                    payload, payload_len, request_headers, 64);
+                if (request_header_count < 0) {
+                    // QPACK decode failure — 400 Bad Request.
+                    unsigned char err_frame[256];
+                    H3Header empty_hdrs[1];
+                    int elen = h3_build_response_headers_frame(err_frame, sizeof(err_frame), 400, empty_hdrs, 0);
+                    if (elen > 0) {
+                        taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+                            err_frame, (size_t)elen, 0);
+                    }
+                    unsigned char data_frame[256];
+                    const char *err_body = "Bad Request";
+                    int dlen = h3_build_data_frame(data_frame, sizeof(data_frame),
+                        (const unsigned char*)err_body, strlen(err_body));
+                    if (dlen > 0) {
+                        taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+                            data_frame, (size_t)dlen, 1 /*fin*/);
+                    }
+                    return 0;
+                }
+                break;
+            }
+
+            case H3_FRAME_DATA: {
+                // DATA frame body. bounded-copy: pointer into stream_buf, no extra alloc.
+                request_body = payload;
+                request_body_len = payload_len;
+                break;
+            }
+
+            case H3_FRAME_SETTINGS: {
+                // NB7-84: SETTINGS MUST only be on control stream (RFC 9114 Section 7.2.4.1).
+                taida_quiche.quiche_conn_stream_shutdown(slot->conn, stream_id, 1, 0x0105);
+                return 0;
+            }
+
+            case H3_FRAME_GOAWAY: {
+                // NB7-85: GOAWAY MUST only be on control stream (RFC 9114 Section 7.2.6).
+                taida_quiche.quiche_conn_stream_shutdown(slot->conn, stream_id, 1, 0x0105);
+                return 0;
+            }
+
+            default:
+                // Unknown frame types: silently skip (RFC 9114 Section 7.2.8).
+                break;
+        }
+    }
+
+    if (!headers_seen) return 0; // No HEADERS frame — skip.
+
+    // ── Extract request fields from QPACK-decoded headers ──
+    H3RequestFields req_fields;
+    h3_extract_request_fields(request_headers, request_header_count, &req_fields);
+    if (!req_fields.ok) {
+        // Invalid request (missing pseudo-headers, etc.) — 400 Bad Request.
+        unsigned char err_frame[256];
+        H3Header empty_hdrs[1];
+        int elen = h3_build_response_headers_frame(err_frame, sizeof(err_frame), 400, empty_hdrs, 0);
+        if (elen > 0) {
+            taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+                err_frame, (size_t)elen, 0);
+        }
+        const char *err_body = "Bad Request";
+        unsigned char data_frame[256];
+        int dlen = h3_build_data_frame(data_frame, sizeof(data_frame),
+            (const unsigned char*)err_body, strlen(err_body));
+        if (dlen > 0) {
+            taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+                data_frame, (size_t)dlen, 1);
+        }
+        if (req_fields.regular_headers) free(req_fields.regular_headers);
+        return 0;
+    }
+
+    // ── Build request pack and dispatch handler ──
+    char peer_host[64];
+    inet_ntop(AF_INET, &slot->peer_addr.sin_addr, peer_host, sizeof(peer_host));
+    int peer_port = ntohs(slot->peer_addr.sin_port);
+
+    taida_val request_pack = h3_build_request_pack(
+        &req_fields,
+        request_body ? request_body : (const unsigned char*)"",
+        request_body_len,
+        peer_host, peer_port
+    );
+    free(req_fields.regular_headers);
+    req_fields.regular_headers = NULL;
+
+    // Dispatch to the Taida handler (same contract as h1/h2).
+    H3ServeCtx ctx;
+    ctx.handler = pool->handler;
+    ctx.handler_arity = pool->handler_arity;
+    ctx.request_count = &pool->request_count;
+    ctx.max_requests = pool->max_requests;
+    snprintf(ctx.peer_host, sizeof(ctx.peer_host), "%s", peer_host);
+    ctx.peer_port = peer_port;
+
+    taida_val response = h3_dispatch_request(&ctx, request_pack);
+
+    // ── Extract response and encode H3 frames ──
+    // Reuse H2ResponseFields — same handler response contract.
+    H2ResponseFields resp;
+    h2_extract_response_fields(response, &resp);
+
+    int no_body = (resp.status >= 100 && resp.status < 200) ||
+                  resp.status == 204 || resp.status == 205 || resp.status == 304;
+    int has_body = resp.ok && resp.body && resp.body_len > 0 && !no_body;
+
+    // Build response headers from handler output.
+    H3Header resp_hdrs[32];
+    int resp_hdr_count = 0;
+    for (int i = 0; i < resp.header_count && resp_hdr_count < 32; i++) {
+        snprintf(resp_hdrs[resp_hdr_count].name, sizeof(resp_hdrs[0].name),
+                 "%s", resp.headers[i].name);
+        snprintf(resp_hdrs[resp_hdr_count].value, sizeof(resp_hdrs[0].value),
+                 "%s", resp.headers[i].value);
+        resp_hdr_count++;
+    }
+
+    // Send HEADERS frame via quiche_conn_stream_send.
+    unsigned char hdrs_frame[8192];
+    int hlen = h3_build_response_headers_frame(hdrs_frame, sizeof(hdrs_frame),
+                                                resp.status, resp_hdrs, resp_hdr_count);
+    if (hlen > 0) {
+        taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+            hdrs_frame, (size_t)hlen, !has_body ? 1 : 0 /*fin if no body*/);
+    }
+
+    // Send DATA frame if body exists.
+    if (has_body) {
+        unsigned char data_frame[65536];
+        int dlen = h3_build_data_frame(data_frame, sizeof(data_frame),
+                                        resp.body, resp.body_len);
+        if (dlen > 0) {
+            taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+                data_frame, (size_t)dlen, 1 /*fin=true*/);
+        } else {
+            // Body too large for buffer — send FIN without body.
+            taida_quiche.quiche_conn_stream_send(slot->conn, stream_id,
+                NULL, 0, 1 /*fin=true*/);
+        }
+    }
+
+    h2_response_fields_free(&resp);
+    taida_release(request_pack);
+    taida_release(response);
+
+    // Update last_peer_stream_id for GOAWAY tracking.
+    slot->h3_conn.last_peer_stream_id = stream_id;
+
+    return 1; // Successfully served a request.
 }
 
 // ── NET7-8b: serve_h3_loop — UDP socket + quiche_accept ──────────────────
@@ -17756,6 +18130,16 @@ static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arit
     // Idle timeout — bounded to prevent connection leaks.
     uint64_t idle_timeout = (timeout_ms > 0) ? (uint64_t)timeout_ms : 30000; // default 30s
     taida_quiche.quiche_config_set_max_idle_timeout(config, idle_timeout);
+
+    // NET7-12c: QUIC transport parameters — required for stream data flow.
+    // Without these, quiche defaults to 0 (no data allowed on any stream).
+    // Values match quiche server example defaults.
+    taida_quiche.quiche_config_set_initial_max_data(config, 10 * 1024 * 1024);          // 10MB connection-level
+    taida_quiche.quiche_config_set_initial_max_stream_data_bidi_local(config, 1024 * 1024);  // 1MB per local bidi stream
+    taida_quiche.quiche_config_set_initial_max_stream_data_bidi_remote(config, 1024 * 1024); // 1MB per remote bidi stream
+    taida_quiche.quiche_config_set_initial_max_stream_data_uni(config, 1024 * 1024);         // 1MB per uni stream
+    taida_quiche.quiche_config_set_initial_max_streams_bidi(config, 128);                    // max 128 concurrent bidi streams
+    taida_quiche.quiche_config_set_initial_max_streams_uni(config, 16);                      // max 16 concurrent uni streams
 
     // Initialize connection pool.
     int max_conn = (QUIC_MAX_CONNECTIONS < 256) ? QUIC_MAX_CONNECTIONS : 256;
@@ -17877,29 +18261,49 @@ static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arit
                 continue;
             }
 
-            // Connection established → verify ALPN h3.
+            // Connection established -> initialize H3 and process streams.
             if (taida_quiche.quiche_conn_is_established(slot->conn)) {
                 slot->established = 1;
 
-                // Phase 8c: Connection state validated.
-                // Phase 8d will add stream-level H3 dispatch here.
+                // NET7-12c: Initialize H3 control stream on first established packet.
+                if (!slot->h3_initialized) {
+                    if (h3_init_control_stream(slot) < 0) {
+                        quic_pool_close_slot(&pool, slot_idx);
+                        continue;
+                    }
+                }
+
+                // NET7-12c: Process all readable streams (H3 dispatch).
+                void *readable = taida_quiche.quiche_conn_readable(slot->conn);
+                if (readable) {
+                    uint64_t stream_id;
+                    while (taida_quiche.quiche_stream_iter_next(readable, &stream_id)) {
+                        int result = h3_process_stream(slot, &pool, stream_id);
+                        if (result == 1) {
+                            // Valid request served — increment request count (NB7-66).
+                            pthread_mutex_lock(&pool.mutex);
+                            pool.request_count++;
+                            int exhausted = quic_pool_requests_exhausted(&pool);
+                            pthread_mutex_unlock(&pool.mutex);
+                            if (exhausted) {
+                                taida_quiche.quiche_stream_iter_free(readable);
+                                goto shutdown_loop;
+                            }
+                        } else if (result == -1) {
+                            // Connection-level error — close slot.
+                            taida_quiche.quiche_stream_iter_free(readable);
+                            quic_pool_close_slot(&pool, slot_idx);
+                            goto next_packet;
+                        }
+                    }
+                    taida_quiche.quiche_stream_iter_free(readable);
+                }
             }
 
-            // Write any pending outbound datagrams.
-            ssize_t send_rc = taida_quiche.quiche_conn_send(
-                slot->conn,
-                send_buf, sizeof(send_buf),
-                (struct sockaddr*)&send_addr, &send_addr_len
-            );
-
-            if (send_rc > 0) {
-                ssize_t n = sendto(udp_fd, send_buf, (size_t)send_rc, 0,
-                                 (struct sockaddr*)&send_addr, send_addr_len);
-                if (n < 0) {
-                    // Send failed — connection may be unreachable.
-                    quic_pool_close_slot(&pool, slot_idx);
-                    continue;
-                }
+            // NET7-12c: Drain all pending outbound QUIC datagrams.
+            if (quic_drain_send(udp_fd, slot->conn, send_buf, sizeof(send_buf)) < 0) {
+                quic_pool_close_slot(&pool, slot_idx);
+                continue;
             }
         } else {
             // ── Unknown DCID: new connection attempt ────
@@ -17929,17 +18333,8 @@ static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arit
                 continue;
             }
 
-            // Send initial handshake response if quiche produced data.
-            ssize_t send_rc = taida_quiche.quiche_conn_send(
-                conn,
-                send_buf, sizeof(send_buf),
-                (struct sockaddr*)&send_addr, &send_addr_len
-            );
-
-            if (send_rc > 0) {
-                sendto(udp_fd, send_buf, (size_t)send_rc, 0,
-                       (struct sockaddr*)&send_addr, send_addr_len);
-            }
+            // NET7-12c: Drain all handshake response datagrams.
+            quic_drain_send(udp_fd, conn, send_buf, sizeof(send_buf));
 
             // Add to connection pool.
             int slot = quic_pool_find_or_create(&pool, conn, &peer_addr, dcid_hash);
@@ -17950,14 +18345,16 @@ static H3ServeResult serve_h3_loop(int port, taida_val handler, int handler_arit
             }
         }
 
+    next_packet:
         // Periodic maintenance (bounded-cost: scans 256 slots max).
         h3_conn_maintenance(&pool);
     }
 
+shutdown_loop:
     // ── Shutdown: close all connections ───────────────────────────────────
-    quic_pool_destroy(&pool);
-
+    // NET7-12c: Capture request count before pool destroy zeros the state.
     serve_result.requests = pool.request_count;
+    quic_pool_destroy(&pool);
 
     taida_quiche.quiche_config_free(config);
     close(udp_fd);
@@ -18040,10 +18437,10 @@ static H3ServeResult taida_net_h3_serve(int port, taida_val handler, int handler
         return fail_result;
     }
 
-    // NET7-8b/8c: Wire the QUIC transport I/O event loop.
+    // NET7-8b/8c/12c: Wire the QUIC transport I/O event loop.
     // 8b: UDP socket accept loop + quiche_accept (DONE)
     // 8c: QUIC connection I/O event loop (recv/send/established) (DONE)
-    // 8d: QUIC stream dispatch → H3 decode → handler → response encode — deferred
+    // 12c: QUIC stream dispatch -> H3 decode -> handler -> response encode (DONE)
     H3ServeResult loop_result = serve_h3_loop(port, handler, handler_arity,
                                                max_requests, timeout_ms,
                                                cert_path, key_path);

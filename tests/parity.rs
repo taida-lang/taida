@@ -29504,3 +29504,149 @@ fn test_net7_11b_hardening_bounded_copy_parity() {
     );
 }
 
+/// NET7-12c: Native serve_h3_loop H3 stream dispatch is implemented.
+///
+/// Verifies that:
+///   1. The Phase 8d placeholder comment has been removed
+///   2. h3_process_stream function exists (handler dispatch)
+///   3. h3_init_control_stream function exists (SETTINGS on control stream)
+///   4. quic_drain_send function exists (multi-datagram send)
+///   5. pool.request_count is incremented (NB7-66 fix)
+///   6. quiche_conn_readable is loaded (stream iteration FFI)
+///   7. QUIC transport parameters are configured (initial_max_data etc.)
+#[test]
+fn test_net7_12c_native_h3_stream_dispatch_implemented() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let native_src_path = manifest_dir.join("src/codegen/native_runtime.c");
+    let native_src = fs::read_to_string(&native_src_path)
+        .unwrap_or_else(|e| panic!("NET7-12c: cannot read {:?}: {}", native_src_path, e));
+
+    // 1. Phase 8d placeholder MUST be removed.
+    assert!(
+        !native_src.contains("Phase 8d will add stream-level H3 dispatch here"),
+        "NET7-12c: Phase 8d placeholder must be removed from serve_h3_loop"
+    );
+
+    // 2. h3_process_stream function must exist (stream dispatch logic).
+    assert!(
+        native_src.contains("h3_process_stream("),
+        "NET7-12c: h3_process_stream() must exist for H3 stream dispatch"
+    );
+
+    // 3. h3_init_control_stream function must exist (SETTINGS frame on control stream).
+    assert!(
+        native_src.contains("h3_init_control_stream("),
+        "NET7-12c: h3_init_control_stream() must exist for H3 control stream initialization"
+    );
+
+    // 4. quic_drain_send must exist (drain multiple QUIC datagrams).
+    assert!(
+        native_src.contains("quic_drain_send("),
+        "NET7-12c: quic_drain_send() must exist for multi-datagram send"
+    );
+
+    // 5. pool.request_count must be incremented (NB7-66 fix).
+    assert!(
+        native_src.contains("pool.request_count++"),
+        "NET7-12c: pool.request_count must be incremented in H3 dispatch (NB7-66)"
+    );
+
+    // 6. quiche_conn_readable must be loaded (stream iteration FFI).
+    assert!(
+        native_src.contains("quiche_conn_readable"),
+        "NET7-12c: quiche_conn_readable must be loaded for stream iteration"
+    );
+    assert!(
+        native_src.contains("quiche_stream_iter_next"),
+        "NET7-12c: quiche_stream_iter_next must be loaded for stream iteration"
+    );
+
+    // 7. QUIC transport parameters must be configured.
+    assert!(
+        native_src.contains("quiche_config_set_initial_max_data"),
+        "NET7-12c: initial_max_data must be configured for stream data flow"
+    );
+    assert!(
+        native_src.contains("quiche_config_set_initial_max_streams_bidi"),
+        "NET7-12c: initial_max_streams_bidi must be configured"
+    );
+
+    // 8. Handler dispatch via taida_invoke_callback1 must be wired.
+    assert!(
+        native_src.contains("h3_dispatch_request(&ctx, request_pack)"),
+        "NET7-12c: h3_dispatch_request must be called with handler context and request pack"
+    );
+
+    // 9. Response encoding uses h3_build_response_headers_frame.
+    assert!(
+        native_src.contains("h3_build_response_headers_frame(hdrs_frame"),
+        "NET7-12c: response HEADERS frame must be built in h3_process_stream"
+    );
+
+    // 10. NB7-84/85: SETTINGS/GOAWAY on request stream must be rejected.
+    // (These checks already existed but verify they survive the refactor.)
+    assert!(
+        native_src.contains("NB7-84"),
+        "NET7-12c: NB7-84 (SETTINGS on request stream) rejection must survive"
+    );
+    assert!(
+        native_src.contains("NB7-85"),
+        "NET7-12c: NB7-85 (GOAWAY on request stream) rejection must survive"
+    );
+}
+
+/// NET7-12c: Native and Interpreter H3 dispatch follow the same handler contract.
+///
+/// Both backends must:
+///   - Build 14-field request packs
+///   - Extract response fields (status, headers, body)
+///   - Track request_count
+///   - Send HEADERS + DATA frames
+#[test]
+fn test_net7_12c_native_interpreter_h3_handler_contract_parity() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let native_src = fs::read_to_string(manifest_dir.join("src/codegen/native_runtime.c"))
+        .expect("read native_runtime.c");
+    let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
+        .expect("read quic.rs");
+
+    // Both backends build request packs from decoded headers.
+    assert!(
+        native_src.contains("h3_build_request_pack("),
+        "NET7-12c: Native must build H3 request pack"
+    );
+    assert!(
+        interp_quic_src.contains("extract_request_fields("),
+        "NET7-12c: Interpreter must extract request fields"
+    );
+
+    // Both backends send HEADERS + DATA frames in response.
+    assert!(
+        native_src.contains("h3_build_response_headers_frame("),
+        "NET7-12c: Native must build H3 HEADERS response frame"
+    );
+    assert!(
+        native_src.contains("h3_build_data_frame("),
+        "NET7-12c: Native must build H3 DATA response frame"
+    );
+    assert!(
+        interp_quic_src.contains("build_response_headers_frame("),
+        "NET7-12c: Interpreter must build H3 HEADERS response frame"
+    );
+    assert!(
+        interp_quic_src.contains("build_data_frame("),
+        "NET7-12c: Interpreter must build H3 DATA response frame"
+    );
+
+    // Both backends track request count.
+    assert!(
+        native_src.contains("pool.request_count++"),
+        "NET7-12c: Native must increment pool.request_count"
+    );
+    assert!(
+        interp_quic_src.contains("request_count += 1") || interp_quic_src.contains("request_count +="),
+        "NET7-12c: Interpreter must increment request_count"
+    );
+}
+
