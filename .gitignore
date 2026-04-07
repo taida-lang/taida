@@ -8,6 +8,8 @@
 AGENTS.md
 CLAUDE.md
 .claude/
+.codex/
+.agents/
 
 # Local Taida project artifacts
 /.taida/*

@@ -3537,6 +3537,24 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
           null, 'fulfilled');
       }
     }
+    // NB7-6: Check h2/h3 unsupported BEFORE cert/key file load so that
+    // backend contract errors (H2Unsupported, H3Unsupported) are returned
+    // instead of TlsError when cert/key files are invalid or missing.
+    // JS is a permanent h1-only compatibility backend (v6/v7 design lock).
+    if (__requestedProtocol === 'h2') {
+      return new __TaidaAsync(
+        __taida_net_result_fail('H2Unsupported',
+          'httpServe: HTTP/2 (protocol: "h2") is not supported on the JS backend. ' +
+          'Use the interpreter or native backend for HTTP/2 support.'),
+        null, 'fulfilled');
+    }
+    if (__requestedProtocol === 'h3') {
+      return new __TaidaAsync(
+        __taida_net_result_fail('H3Unsupported',
+          'httpServe: HTTP/3 (protocol: "h3") is not supported on the JS backend. ' +
+          'Use the native or interpreter backend for HTTP/3 support.'),
+        null, 'fulfilled');
+    }
     const hasCert = 'cert' in tls;
     const hasKey = 'key' in tls;
     if (hasCert || hasKey) {
@@ -3598,23 +3616,17 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
     throw new __NativeError('httpServe: tls must be a BuchiPack @(cert: Str, key: Str) or @(), got ' + typeof tls);
   }
 
-  // v6 NET6-1b: Protocol validation.
-  // JS backend does NOT support HTTP/2 (design lock: JS = HTTP/1.1 compatibility backend).
-  // This is a permanent restriction, not a temporary limitation.
+  // v6 NET6-1b / v7 NET7-1c: Protocol validation (remaining checks).
+  // h2/h3 unsupported checks were hoisted above cert/key loading (NB7-6).
+  // This block handles h1.1 passthrough and unknown protocol rejection.
   if (__requestedProtocol !== null) {
     if (__requestedProtocol === 'h1.1' || __requestedProtocol === 'http/1.1') {
       // Explicit HTTP/1.1 — same as default, no action needed.
-    } else if (__requestedProtocol === 'h2') {
-      // v6 NET6-1b: JS backend permanently does not support HTTP/2.
-      return new __TaidaAsync(
-        __taida_net_result_fail('H2Unsupported',
-          'httpServe: HTTP/2 (protocol: "h2") is not supported on the JS backend. ' +
-          'Use the interpreter or native backend for HTTP/2 support.'),
-        null, 'fulfilled');
     } else {
+      // Unknown protocol (h2/h3 already handled above cert/key load).
       return new __TaidaAsync(
         __taida_net_result_fail('ProtocolError',
-          'httpServe: unknown protocol "' + __requestedProtocol + '". Supported values: "h1.1", "h2"'),
+          'httpServe: unknown protocol "' + __requestedProtocol + '". Supported values: "h1.1", "h2", "h3"'),
         null, 'fulfilled');
     }
   }
