@@ -48,11 +48,32 @@
 //! dependencies, and rejects every shape outside the v1 schema with a
 //! pinned error variant — exactly the property RC1 needs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
+
+// ── RC1.5: Prebuild distribution config ───────────────────────
+
+/// Parsed `[library.prebuild]` section from `native/addon.toml`.
+///
+/// This is **optional** — addons without a prebuild section simply fall
+/// back to the RC1 "developer-side `.so` manual placement" mode.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrebuildConfig {
+    /// URL template with `{version}`, `{target}`, `{ext}`, `{name}` variables.
+    pub url_template: Option<String>,
+    /// Target triple -> `sha256:<64-hex-string>` mapping.
+    pub targets: HashMap<String, String>,
+}
+
+impl PrebuildConfig {
+    /// Returns true if a prebuild URL template is configured.
+    pub fn has_prebuild(&self) -> bool {
+        self.url_template.is_some()
+    }
+}
 
 /// A parsed and validated `native/addon.toml` manifest.
 ///
@@ -74,6 +95,8 @@ pub struct AddonManifest {
     pub library: String,
     /// `[functions]` table: function name -> declared arity.
     pub functions: BTreeMap<String, u32>,
+    /// RC1.5: `[library.prebuild]` section. `None` if absent (RC1 addon).
+    pub prebuild: PrebuildConfig,
 }
 
 /// Errors produced when parsing or validating `native/addon.toml`.
@@ -124,6 +147,20 @@ pub enum AddonManifestError {
         key: String,
         expected: &'static str,
     },
+    /// RC1.5: `[library.prebuild]` url field is missing or empty.
+    PrebuildMissingUrl { path: PathBuf },
+    /// RC1.5: `sha256:` prefix validation failed (must be `sha256:` + 64 hex chars).
+    PrebuildInvalidSha256 {
+        path: PathBuf,
+        target: String,
+        value: String,
+    },
+    /// RC1.5: unknown URL template variable in `[library.prebuild].url`.
+    PrebuildUnknownUrlVariable { path: PathBuf, variable: String },
+    /// RC1.5: unbalanced brace in `[library.prebuild].url` template.
+    PrebuildUnbalancedBrace { path: PathBuf, detail: String },
+    /// RC1.5: duplicate `[library.prebuild.targets.<target>]` for the same target.
+    PrebuildDuplicateTarget { path: PathBuf, target: String },
 }
 
 impl fmt::Display for AddonManifestError {
@@ -210,6 +247,40 @@ impl fmt::Display for AddonManifestError {
                 key,
                 path.display(),
                 expected
+            ),
+            Self::PrebuildMissingUrl { path } => write!(
+                f,
+                "addon manifest error: '[library.prebuild].url' is required when [library.prebuild] is present in '{}'",
+                path.display()
+            ),
+            Self::PrebuildInvalidSha256 {
+                path,
+                target,
+                value,
+            } => write!(
+                f,
+                "addon manifest error: invalid sha256 for target '{}' in '{}': expected 'sha256:' prefix + 64 lowercase hex chars, got '{}'",
+                target,
+                path.display(),
+                value
+            ),
+            Self::PrebuildUnknownUrlVariable { path, variable } => write!(
+                f,
+                "addon manifest error: unknown url template variable '{{{}}}' in '[library.prebuild].url' of '{}'",
+                variable,
+                path.display()
+            ),
+            Self::PrebuildUnbalancedBrace { path, detail } => write!(
+                f,
+                "addon manifest error: unbalanced brace in '[library.prebuild].url' of '{}': {}",
+                path.display(),
+                detail
+            ),
+            Self::PrebuildDuplicateTarget { path, target } => write!(
+                f,
+                "addon manifest error: duplicate prebuild target '{}' in '{}'",
+                target,
+                path.display()
             ),
         }
     }
@@ -313,6 +384,89 @@ pub fn parse_addon_manifest_str(
         }
     }
 
+    // Validate and build prebuild config (RC1.5).
+    let prebuild = if raw.prebuild.is_empty() && raw.prebuild_targets.is_empty() {
+        PrebuildConfig::default()
+    } else {
+        // If either prebuild section exists, validate the URL template.
+        let url_template = match raw.prebuild.get("url") {
+            Some(RawValue::Str(s)) => {
+                if s.trim().is_empty() {
+                    return Err(AddonManifestError::PrebuildMissingUrl {
+                        path: path.to_path_buf(),
+                    });
+                }
+                // Validate URL template variables at parse time.
+                match crate::addon::url_template::validate_template(s) {
+                    Ok(()) => Some(s.clone()),
+                    Err(crate::addon::url_template::UrlTemplateError::UnknownVariable {
+                        variable,
+                    }) => {
+                        return Err(AddonManifestError::PrebuildUnknownUrlVariable {
+                            path: path.to_path_buf(),
+                            variable,
+                        });
+                    }
+                    Err(crate::addon::url_template::UrlTemplateError::UnbalancedBrace {
+                        detail,
+                    }) => {
+                        return Err(AddonManifestError::PrebuildUnbalancedBrace {
+                            path: path.to_path_buf(),
+                            detail,
+                        });
+                    }
+                }
+            }
+            Some(_) => {
+                return Err(AddonManifestError::TypeMismatch {
+                    path: path.to_path_buf(),
+                    key: "url".to_string(),
+                    expected: "string",
+                });
+            }
+            None => {
+                return Err(AddonManifestError::PrebuildMissingUrl {
+                    path: path.to_path_buf(),
+                });
+            }
+        };
+
+        // Validate [library.prebuild.targets] entries.
+        let mut targets: HashMap<String, String> = HashMap::new();
+        for (target_triple, sha_value) in raw.prebuild_targets {
+            match sha_value {
+                RawValue::Str(s) => {
+                    if !is_valid_sha256(&s) {
+                        return Err(AddonManifestError::PrebuildInvalidSha256 {
+                            path: path.to_path_buf(),
+                            target: target_triple,
+                            value: s.clone(),
+                        });
+                    }
+                    if targets.contains_key(&target_triple) {
+                        return Err(AddonManifestError::PrebuildDuplicateTarget {
+                            path: path.to_path_buf(),
+                            target: target_triple,
+                        });
+                    }
+                    targets.insert(target_triple, s);
+                }
+                _ => {
+                    return Err(AddonManifestError::TypeMismatch {
+                        path: path.to_path_buf(),
+                        key: format!("targets.{}", target_triple),
+                        expected: "string",
+                    });
+                }
+            }
+        }
+
+        PrebuildConfig {
+            url_template,
+            targets,
+        }
+    };
+
     Ok(AddonManifest {
         manifest_path: path.to_path_buf(),
         abi: abi as u32,
@@ -320,18 +474,24 @@ pub fn parse_addon_manifest_str(
         package,
         library,
         functions,
+        prebuild,
     })
 }
 
 // ── Minimal TOML subset parser ────────────────────────────────
 
 /// Internal representation of a parsed `addon.toml`. Holds top-level
-/// keys and the optional `[functions]` table. Anything else triggers
-/// a syntax error so the schema stays pinned.
+/// keys, the `[functions]` table, and optional `[library.prebuild]`
+/// with its child `[library.prebuild.targets]` table (RC1.5).
+/// Anything else triggers a syntax error so the schema stays pinned.
 #[derive(Debug, Default)]
 struct ParsedToml {
     top_level: BTreeMap<String, RawValue>,
     functions: Option<BTreeMap<String, RawValue>>,
+    // RC1.5: [library.prebuild] key-value pairs
+    prebuild: BTreeMap<String, RawValue>,
+    // RC1.5: [library.prebuild.targets] key-value pairs
+    prebuild_targets: BTreeMap<String, RawValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,25 +570,37 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                     message: "section header missing ']'".to_string(),
                 })?;
             let header = header.trim();
-            if header != "functions" {
-                return Err(AddonManifestError::Syntax {
-                    path: path.to_path_buf(),
-                    line: line_no,
-                    message: format!(
-                        "unknown section '[{}]' (only [functions] is allowed)",
-                        header
-                    ),
-                });
+            match header {
+                "functions" => {
+                    if parsed.functions.is_some() {
+                        return Err(AddonManifestError::Syntax {
+                            path: path.to_path_buf(),
+                            line: line_no,
+                            message: "[functions] section declared more than once".to_string(),
+                        });
+                    }
+                    parsed.functions = Some(BTreeMap::new());
+                    current_section = Some("functions".to_string());
+                }
+                "library.prebuild" => {
+                    // RC1.5: optional prebuild section
+                    current_section = Some("library.prebuild".to_string());
+                }
+                "library.prebuild.targets" => {
+                    // RC1.5: target -> sha256 mapping
+                    current_section = Some("library.prebuild.targets".to_string());
+                }
+                other => {
+                    return Err(AddonManifestError::Syntax {
+                        path: path.to_path_buf(),
+                        line: line_no,
+                        message: format!(
+                            "unknown section '[{}]' (only [functions], [library.prebuild], [library.prebuild.targets] are allowed)",
+                            other
+                        ),
+                    });
+                }
             }
-            if parsed.functions.is_some() {
-                return Err(AddonManifestError::Syntax {
-                    path: path.to_path_buf(),
-                    line: line_no,
-                    message: "[functions] section declared more than once".to_string(),
-                });
-            }
-            parsed.functions = Some(BTreeMap::new());
-            current_section = Some("functions".to_string());
             continue;
         }
 
@@ -468,6 +640,8 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                 .functions
                 .as_mut()
                 .expect("functions section must be initialised"),
+            Some(name) if name == "library.prebuild" => &mut parsed.prebuild,
+            Some(name) if name == "library.prebuild.targets" => &mut parsed.prebuild_targets,
             Some(other) => unreachable!("unexpected section state: {}", other),
         };
         if target.contains_key(key) {
@@ -547,6 +721,22 @@ fn is_valid_key(key: &str) -> bool {
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Validates `sha256:<64-lowercase-hex>` format.
+/// The prefix must be exactly `sha256:` followed by exactly 64 lowercase hex characters.
+fn is_valid_sha256(value: &str) -> bool {
+    let prefix = "sha256:";
+    if !value.starts_with(prefix) {
+        return false;
+    }
+    let hex_part = &value[prefix.len()..];
+    if hex_part.len() != 64 {
+        return false;
+    }
+    hex_part
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && c.to_ascii_lowercase() == c)
 }
 
 #[cfg(test)]
@@ -866,5 +1056,270 @@ bad name = 0
         let msg = err.to_string();
         assert!(msg.starts_with("addon manifest error:"));
         assert!(msg.contains("required key 'library'"));
+    }
+
+    // ── RC1.5: Prebuild manifest tests ────────────────────────
+
+    #[test]
+    fn prebuild_happy_path_with_url_and_targets() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "taida-lang/terminal"
+library = "terminal"
+
+[functions]
+termPrint = 1
+
+[library.prebuild]
+url = "https://example.com/v{version}/{name}-{target}.{ext}"
+
+[library.prebuild.targets]
+x86_64-unknown-linux-gnu = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+aarch64-apple-darwin = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"#;
+        let manifest = parse(src).expect("prebuild happy path must parse");
+        assert!(manifest.prebuild.has_prebuild());
+        assert_eq!(
+            manifest.prebuild.url_template.as_ref().unwrap(),
+            "https://example.com/v{version}/{name}-{target}.{ext}"
+        );
+        assert_eq!(manifest.prebuild.targets.len(), 2);
+        assert_eq!(
+            manifest
+                .prebuild
+                .targets
+                .get("x86_64-unknown-linux-gnu")
+                .unwrap(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn prebuild_without_targets_is_valid() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+"#;
+        let manifest = parse(src).expect("prebuild without targets must parse");
+        assert!(manifest.prebuild.has_prebuild());
+        assert!(manifest.prebuild.targets.is_empty());
+    }
+
+    #[test]
+    fn prebuild_missing_url_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+
+[library.prebuild.targets]
+x86_64-unknown-linux-gnu = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+        let err = parse(src).expect_err("prebuild without url must error");
+        assert!(matches!(err, AddonManifestError::PrebuildMissingUrl { .. }));
+    }
+
+    #[test]
+    fn prebuild_empty_url_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = ""
+"#;
+        let err = parse(src).expect_err("prebuild with empty url must error");
+        assert!(matches!(err, AddonManifestError::PrebuildMissingUrl { .. }));
+    }
+
+    #[test]
+    fn prebuild_url_type_mismatch_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = 123
+"#;
+        let err = parse(src).expect_err("prebuild url as int must error");
+        assert!(matches!(err, AddonManifestError::TypeMismatch { key, .. } if key == "url"));
+    }
+
+    #[test]
+    fn prebuild_invalid_sha256_prefix_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+x86_64-unknown-linux-gnu = "md5:aaaa"
+"#;
+        let err = parse(src).expect_err("invalid sha256 must error");
+        assert!(
+            matches!(err, AddonManifestError::PrebuildInvalidSha256 { target, .. } if target == "x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    fn prebuild_sha256_wrong_length_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+x86_64-unknown-linux-gnu = "sha256:aaaa"
+"#;
+        let err = parse(src).expect_err("short sha256 must error");
+        assert!(matches!(
+            err,
+            AddonManifestError::PrebuildInvalidSha256 { .. }
+        ));
+    }
+
+    #[test]
+    fn prebuild_sha256_uppercase_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+x86_64-unknown-linux-gnu = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+"#;
+        let err = parse(src).expect_err("uppercase sha256 must error");
+        assert!(matches!(
+            err,
+            AddonManifestError::PrebuildInvalidSha256 { .. }
+        ));
+    }
+
+    #[test]
+    fn prebuild_duplicate_target_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+
+[library.prebuild.targets]
+x86_64-unknown-linux-gnu = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+x86_64-unknown-linux-gnu = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"#;
+        let err = parse(src).expect_err("duplicate target must error");
+        assert!(
+            matches!(err, AddonManifestError::Syntax { message, .. } if message.contains("duplicate"))
+        );
+    }
+
+    #[test]
+    fn prebuild_url_unknown_variable_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{foo}"
+"#;
+        let err = parse(src).expect_err("unknown url variable must error");
+        assert!(
+            matches!(err, AddonManifestError::PrebuildUnknownUrlVariable { variable, .. } if variable == "foo")
+        );
+    }
+
+    #[test]
+    fn prebuild_url_unbalanced_brace_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{version"
+"#;
+        let err = parse(src).expect_err("unbalanced brace must error");
+        assert!(matches!(
+            err,
+            AddonManifestError::PrebuildUnbalancedBrace { .. }
+        ));
+    }
+
+    #[test]
+    fn addon_without_prebuild_section() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+"#;
+        let manifest = parse(src).expect("addon without prebuild must parse");
+        assert!(!manifest.prebuild.has_prebuild());
+        assert!(manifest.prebuild.url_template.is_none());
+        assert!(manifest.prebuild.targets.is_empty());
     }
 }

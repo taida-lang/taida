@@ -35,6 +35,11 @@
 pub mod backend_policy;
 pub mod manifest;
 
+// RC1.5: install-time pipeline
+pub mod host_target;
+pub mod prebuild_fetcher;
+pub mod url_template;
+
 #[cfg(feature = "native")]
 pub mod loader;
 

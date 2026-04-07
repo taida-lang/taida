@@ -11,6 +11,8 @@ pub mod auth;
 pub mod codegen;
 #[cfg(feature = "community")]
 pub mod community;
+/// SHA-256 digest (hand-written, no external crate).
+pub mod crypto;
 pub mod doc;
 pub mod graph;
 pub mod interpreter;
