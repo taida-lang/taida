@@ -132,6 +132,11 @@ pub(crate) struct H3Connection {
     // Used by process_stream to pass dynamic_table to qpack_decode_block
     // when the peer uses dynamic table entries (settings capacity > 0).
     pub dynamic_table: Option<H3DynamicTable>,
+    // NB7-115: Server-initiated unidirectional control stream ID.
+    // Initialized once per connection (type byte 0x00 + SETTINGS frame).
+    // GOAWAY frames MUST be sent on this stream, not on a new uni stream.
+    // None = control stream not yet initialized.
+    pub control_stream_id: Option<u64>,
 }
 
 impl H3Connection {
@@ -155,6 +160,7 @@ impl H3Connection {
             handler_ctx: H3HandlerContext::default(),
             active_stream_count: 0,
             dynamic_table: None,
+            control_stream_id: None,
         }
     }
 

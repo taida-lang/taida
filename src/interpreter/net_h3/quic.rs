@@ -580,6 +580,37 @@ pub(crate) fn serve_h3_loop(
         let conn = accepted.connection;
         let remote_addr = accepted.remote_addr;
 
+        // NB7-115: Initialize server-initiated unidirectional control stream.
+        // RFC 9114 Section 6.2.1: Each side MUST initiate a single control stream
+        // and send SETTINGS as the first frame. GOAWAY frames are also sent here.
+        // This mirrors Native's h3_init_control_stream() (native_runtime.c:17761-17797).
+        //
+        // The SendStream is kept alive for the duration of the connection so
+        // that GOAWAY can be written to it during shutdown (not on a new stream).
+        let mut ctrl_send: Option<quinn::SendStream> = None;
+        if let Ok(mut ctrl_uni) = rt.block_on(conn.open_uni()) {
+            // Step 1: Send stream type byte (0x00 = control stream per RFC 9114 Section 6.2).
+            let type_byte: [u8; 1] = [0x00];
+            let type_ok = rt.block_on(ctrl_uni.write_all(&type_byte)).is_ok();
+
+            if type_ok {
+                // Step 2: Encode and send SETTINGS frame.
+                if let Some(settings_payload) = super::encode_settings() {
+                    if let Some(settings_frame) = super::encode_frame(
+                        super::H3_FRAME_SETTINGS, &settings_payload
+                    ) {
+                        if rt.block_on(ctrl_uni.write_all(&settings_frame)).is_ok() {
+                            h3_conn.control_stream_id =
+                                Some(ctrl_uni.id().index() as u64);
+                            // Keep the SendStream alive — GOAWAY will be written here.
+                            ctrl_send = Some(ctrl_uni);
+                        }
+                    }
+                }
+            }
+            // Do NOT call ctrl_uni.finish() — the control stream stays open.
+        }
+
         // Per-connection stream loop (sequential).
         loop {
             // Check idle timeout.
@@ -676,16 +707,18 @@ pub(crate) fn serve_h3_loop(
         // NET7-12d: Graceful shutdown pipeline for this connection.
         // Step 1: GOAWAY — transition H3Connection to Draining, get GOAWAY frame bytes.
         let (advanced, goaway_frames) = h3_conn.shutdown();
-        // Step 2: Send GOAWAY frame on a unidirectional control stream (if available).
-        // This notifies the peer that no new requests will be accepted.
+        // Step 2: Send GOAWAY frame on the existing control stream (NB7-115).
+        // RFC 9114 Section 5.2: GOAWAY MUST be sent on the control stream.
+        // Previously this opened a new uni stream (wrong — no type byte, no SETTINGS).
+        // Now we use the control stream initialized at connection start.
         if advanced {
             if let Some(frames) = goaway_frames {
-                // Open a unidirectional stream for GOAWAY (server-initiated).
-                if let Ok(mut uni) = rt.block_on(conn.open_uni()) {
+                if let Some(ref mut ctrl) = ctrl_send {
                     for frame in &frames {
-                        let _ = rt.block_on(uni.write_all(frame));
+                        let _ = rt.block_on(ctrl.write_all(frame));
                     }
-                    let _ = uni.finish();
+                    // Do NOT finish the control stream here — the QUIC-level
+                    // close below will handle cleanup.
                 }
             }
         }
@@ -1082,5 +1115,98 @@ mod tests {
         // Verify final state is terminal — further shutdown attempts are no-ops.
         let (advanced2, _) = conn.shutdown();
         assert!(!advanced2, "shutdown on Closed connection should be a no-op");
+    }
+
+    // ── NB7-115: Control stream initialization tests ─────────────────
+
+    /// NB7-115: Verify that a control stream init payload contains:
+    /// 1. Stream type byte 0x00 (control stream, RFC 9114 Section 6.2)
+    /// 2. A valid SETTINGS frame (type 0x04)
+    ///
+    /// This validates the wire format that would be sent on the control stream,
+    /// without requiring a live QUIC connection. The same bytes are written
+    /// by serve_h3_loop at connection establishment.
+    #[test]
+    fn test_control_stream_payload_format() {
+        // Build the control stream payload as serve_h3_loop does.
+        let mut payload = Vec::new();
+
+        // Step 1: Stream type byte 0x00 (control stream).
+        payload.push(0x00);
+
+        // Step 2: SETTINGS frame.
+        let settings_payload = super::super::encode_settings()
+            .expect("encode_settings should succeed");
+        let settings_frame = super::super::encode_frame(
+            super::super::H3_FRAME_SETTINGS, &settings_payload
+        ).expect("encode_frame for SETTINGS should succeed");
+        payload.extend_from_slice(&settings_frame);
+
+        // Verify: first byte is stream type 0x00.
+        assert_eq!(payload[0], 0x00,
+            "Control stream must start with type byte 0x00");
+
+        // Verify: remaining bytes decode as a SETTINGS frame.
+        let (frame_type, frame_length, header_size) =
+            super::super::decode_frame_header(&payload[1..])
+                .expect("SETTINGS frame header should decode");
+        assert_eq!(frame_type, super::super::H3_FRAME_SETTINGS,
+            "First frame on control stream must be SETTINGS (type 0x04)");
+        assert!(frame_length > 0,
+            "SETTINGS frame must have non-empty payload");
+
+        // Verify the SETTINGS payload decodes correctly.
+        let settings_data = &payload[1 + header_size..1 + header_size + frame_length as usize];
+        let decoded = super::super::decode_settings(settings_data)
+            .expect("SETTINGS payload should decode");
+        // Default settings: max_field_section_size should be the default value.
+        assert_eq!(decoded.max_field_section_size,
+            super::super::H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+    }
+
+    /// NB7-115: Verify H3Connection tracks control_stream_id.
+    #[test]
+    fn test_h3_connection_control_stream_id_default_none() {
+        let conn = super::super::H3Connection::new();
+        assert!(conn.control_stream_id.is_none(),
+            "New H3Connection should have no control stream ID");
+    }
+
+    /// NB7-115: Verify H3Connection control_stream_id can be set.
+    #[test]
+    fn test_h3_connection_control_stream_id_set() {
+        let mut conn = super::super::H3Connection::new();
+        conn.control_stream_id = Some(3);
+        assert_eq!(conn.control_stream_id, Some(3),
+            "Control stream ID should be stored on H3Connection");
+    }
+
+    /// NB7-115: GOAWAY frame must be valid when sent on control stream.
+    /// Verifies that the shutdown pipeline produces a GOAWAY that can be
+    /// written to the control stream (same bytes as before, but the
+    /// transport path changed from open_uni to the existing control stream).
+    #[test]
+    fn test_goaway_frame_valid_for_control_stream() {
+        let mut conn = super::super::H3Connection::new();
+        conn.state = super::super::H3ConnState::Active;
+        conn.control_stream_id = Some(3); // Simulate initialized control stream
+        conn.last_peer_stream_id = 4;
+
+        let (advanced, goaway_frames) = conn.shutdown();
+        assert!(advanced, "shutdown should advance");
+        let frames = goaway_frames.expect("GOAWAY frames expected");
+        assert_eq!(frames.len(), 1, "exactly one GOAWAY frame");
+
+        // Decode the GOAWAY frame.
+        let (ft, fl, hs) = super::super::decode_frame_header(&frames[0])
+            .expect("GOAWAY frame header should decode");
+        assert_eq!(ft, super::super::H3_FRAME_GOAWAY,
+            "Frame type must be GOAWAY (0x07)");
+
+        // Decode the stream ID from the GOAWAY payload.
+        let (stream_id, _) = super::super::varint_decode(&frames[0][hs..hs + fl as usize])
+            .expect("GOAWAY payload should contain a varint stream ID");
+        assert_eq!(stream_id, 4,
+            "GOAWAY stream ID should match last_peer_stream_id");
     }
 }

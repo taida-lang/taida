@@ -30649,3 +30649,176 @@ fn static_table_lookup_for_bench(index: usize) -> (&'static str, &'static str) {
         _ => ("x-unknown", ""),
     }
 }
+
+// ── NB7-115/116: Control stream and multi-DATA parity tests ────────────
+
+/// NB7-116: Source-level verification that Native h3_process_stream concatenates
+/// multi-DATA frame bodies instead of overwriting.
+///
+/// Before the fix, the DATA case did `request_body = payload; request_body_len = payload_len;`
+/// which lost all previous DATA frames. After the fix, body_buf accumulates all DATA
+/// frames via memcpy, matching the Interpreter's `body_data.extend_from_slice(payload)`.
+#[test]
+fn test_nb7_116_native_multi_data_body_concatenation() {
+    let source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Find the H3_FRAME_DATA case in h3_process_stream.
+    let data_case_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("case H3_FRAME_DATA:"))
+        .take(25)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Must contain body_buf concatenation (memcpy + body_buf_len).
+    assert!(
+        data_case_section.contains("body_buf") && data_case_section.contains("memcpy"),
+        "NB7-116: Native H3_FRAME_DATA must concatenate into body_buf via memcpy, got:\n{}",
+        data_case_section,
+    );
+
+    // Must NOT contain the old overwrite pattern as the primary assignment.
+    // The old pattern was: `request_body = payload; request_body_len = payload_len;`
+    // without any body_buf logic. Now body_buf is used first, then assigned.
+    assert!(
+        data_case_section.contains("body_buf_len += payload_len"),
+        "NB7-116: Native must accumulate body_buf_len for multi-DATA, got:\n{}",
+        data_case_section,
+    );
+
+    // Verify body_buf declaration exists in h3_process_stream.
+    // The function is ~250 lines long; body_buf is declared ~70 lines in,
+    // near the frame decode loop variables.
+    let process_stream_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("static int h3_process_stream"))
+        .take(90)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        process_stream_section.contains("unsigned char body_buf["),
+        "NB7-116: body_buf must be declared in h3_process_stream, got:\n{}",
+        process_stream_section,
+    );
+    assert!(
+        process_stream_section.contains("body_buf_len = 0"),
+        "NB7-116: body_buf_len must be initialized to 0, got:\n{}",
+        process_stream_section,
+    );
+}
+
+/// NB7-115: Source-level verification that Interpreter quic.rs initializes a
+/// control stream with type byte 0x00 and SETTINGS frame at connection start.
+///
+/// RFC 9114 Section 6.2.1 requires each side to initiate a single control
+/// stream with SETTINGS as the first frame. GOAWAY is then sent on this stream.
+#[test]
+fn test_nb7_115_interpreter_control_stream_init() {
+    let source =
+        std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+
+    // The control stream initialization must exist in serve_h3_loop.
+    let serve_loop_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("pub(crate) fn serve_h3_loop"))
+        .take(120)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Must send stream type byte 0x00.
+    assert!(
+        serve_loop_section.contains("0x00")
+            && serve_loop_section.contains("type_byte")
+            && serve_loop_section.contains("write_all"),
+        "NB7-115: serve_h3_loop must send control stream type byte 0x00, got:\n{}",
+        &serve_loop_section[..serve_loop_section.len().min(500)],
+    );
+
+    // Must send SETTINGS frame on the control stream.
+    assert!(
+        serve_loop_section.contains("encode_settings")
+            && serve_loop_section.contains("H3_FRAME_SETTINGS"),
+        "NB7-115: serve_h3_loop must encode and send SETTINGS on control stream",
+    );
+
+    // Must store control stream for later GOAWAY.
+    assert!(
+        serve_loop_section.contains("ctrl_send"),
+        "NB7-115: serve_h3_loop must retain control stream SendStream for GOAWAY",
+    );
+}
+
+/// NB7-115: Source-level verification that Interpreter GOAWAY is sent on the
+/// existing control stream, not on a newly opened unidirectional stream.
+#[test]
+fn test_nb7_115_interpreter_goaway_uses_control_stream() {
+    let source =
+        std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+
+    // Find the GOAWAY shutdown section.
+    let shutdown_section: String = source
+        .lines()
+        .skip_while(|l| !l.contains("NET7-12d: Graceful shutdown pipeline"))
+        .take(20)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Must use ctrl_send (the existing control stream), not conn.open_uni().
+    assert!(
+        shutdown_section.contains("ctrl_send"),
+        "NB7-115: GOAWAY must be sent via ctrl_send (existing control stream), got:\n{}",
+        shutdown_section,
+    );
+
+    // Must NOT open a new uni stream for GOAWAY.
+    assert!(
+        !shutdown_section.contains("open_uni"),
+        "NB7-115: GOAWAY must NOT open a new uni stream (must use control stream), got:\n{}",
+        shutdown_section,
+    );
+}
+
+/// NB7-115/116: Parity verification — both backends handle multi-DATA and
+/// control stream semantics consistently.
+///
+/// Interpreter: body_data.extend_from_slice(payload) — Vec<u8> concatenation
+/// Native: memcpy(body_buf + body_buf_len, payload, ...) — bounded buffer concatenation
+///
+/// Both must concatenate (not overwrite) DATA frame bodies.
+#[test]
+fn test_nb7_115_116_multi_data_parity_interp_native() {
+    let interp_source =
+        std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+    let native_source =
+        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+
+    // Interpreter: body_data.extend_from_slice in read_request_stream
+    let interp_data_section: String = interp_source
+        .lines()
+        .skip_while(|l| !l.contains("H3_FRAME_DATA =>"))
+        .take(15)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        interp_data_section.contains("extend_from_slice"),
+        "Interpreter must concatenate DATA bodies via extend_from_slice:\n{}",
+        interp_data_section,
+    );
+
+    // Native: memcpy into body_buf in h3_process_stream
+    let native_data_section: String = native_source
+        .lines()
+        .skip_while(|l| !l.contains("case H3_FRAME_DATA:"))
+        .take(25)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        native_data_section.contains("memcpy") && native_data_section.contains("body_buf"),
+        "Native must concatenate DATA bodies via memcpy into body_buf:\n{}",
+        native_data_section,
+    );
+}

@@ -17883,6 +17883,11 @@ static int h3_process_stream(QuicConnSlot *slot, QuicConnPool *pool,
     int request_header_count = 0;
     const unsigned char *request_body = NULL;
     size_t request_body_len = 0;
+    // NB7-116: Concatenation buffer for multi-DATA frame bodies.
+    // Bounded by stream_buf size (64KB). Multiple DATA frames are appended here
+    // instead of overwriting request_body, matching Interpreter behavior.
+    unsigned char body_buf[65536];
+    size_t body_buf_len = 0;
 
     while (pos < total_read) {
         uint64_t frame_type, frame_length;
@@ -17933,9 +17938,23 @@ static int h3_process_stream(QuicConnSlot *slot, QuicConnPool *pool,
             }
 
             case H3_FRAME_DATA: {
-                // DATA frame body. bounded-copy: pointer into stream_buf, no extra alloc.
-                request_body = payload;
-                request_body_len = payload_len;
+                // NB7-116: DATA frame body — concatenate multi-DATA frames.
+                // HTTP/3 allows request body to be split across multiple DATA frames.
+                // Previously this overwrote request_body on each DATA frame, causing
+                // body truncation to only the last frame. Now we append into a
+                // dedicated buffer, matching Interpreter behavior (quic.rs:366-373).
+                // bounded-copy discipline: body_buf lives on the stack, bounded by
+                // stream_buf size (64KB).
+                if (payload_len > 0) {
+                    if (body_buf_len + payload_len <= sizeof(body_buf)) {
+                        memcpy(body_buf + body_buf_len, payload, payload_len);
+                        body_buf_len += payload_len;
+                    }
+                    // If body exceeds body_buf capacity, silently truncate
+                    // (bounded-copy discipline — same as stream_buf overflow).
+                }
+                request_body = body_buf;
+                request_body_len = body_buf_len;
                 break;
             }
 
