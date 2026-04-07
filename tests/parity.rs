@@ -28515,7 +28515,7 @@ main =
 => httpServe(6213, tls: @(cert: "/no/cert", key: "/no/key", protocol: "h3"), handler)
 "#;
 
-    let dir = setup_net_project(&source, "net7_5b_native_h3_selftest");
+    let dir = setup_net_project(source, "net7_5b_native_h3_selftest");
     let output = Command::new(taida_bin())
         .arg("run")
         .arg("--target")
@@ -28911,7 +28911,7 @@ stdout(result.__value.kind)
         let dir = setup_net_project(&source, "net7_10c_selftest_interp");
         let td_path = dir.join("main.td");
         let interp_output = Command::new(taida_bin())
-            .args(&["--timeout", "3000"])
+            .args(["--timeout", "3000"])
             .arg(&td_path)
             .output()
             .expect("spawn interpreter");
@@ -29394,7 +29394,7 @@ fn test_net7_11b_0rtt_default_off_no_surface() {
     ];
 
     for &path in &files {
-        let src = fs::read_to_string(path).expect(&path);
+        let src = fs::read_to_string(path).expect(path);
         for patt in &forbidden {
             assert!(
                 !src.contains(patt),
@@ -29432,7 +29432,7 @@ stdout(result.throw.kind)
         let dir = setup_net_project(&source, "net7_11b_fallback_interp");
         let td_path = dir.join("main.td");
         let output = Command::new(taida_bin())
-            .args(&["--timeout", "3000"])
+            .args(["--timeout", "3000"])
             .arg(&td_path)
             .output()
             .expect("spawn interpreter");
@@ -30622,8 +30622,8 @@ fn decode_quic_varint(data: &[u8]) -> (u64, usize) {
     let len = 1usize << prefix;
     assert!(data.len() >= len, "varint: truncated");
     let mut val = (data[0] & 0x3F) as u64;
-    for i in 1..len {
-        val = (val << 8) | data[i] as u64;
+    for &byte in &data[1..len] {
+        val = (val << 8) | byte as u64;
     }
     (val, len)
 }

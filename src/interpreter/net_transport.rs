@@ -1288,7 +1288,7 @@ mod tests {
         // ProtocolKind is Copy + Clone (used in immutable server config)
         let pk = ProtocolKind::H3;
         let pk2 = pk; // Copy
-        let pk3 = pk.clone(); // Clone
+        let pk3 = pk; // Copy (ProtocolKind is Copy)
         assert_eq!(pk, pk2);
         assert_eq!(pk, pk3);
     }

@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn test_decoder_instruction_sequence_roundtrip() {
         // Encode a sequence of decoder instructions, then decode them all
-        let mut buf = vec![0u8; 128];
+        let mut buf = [0u8; 128];
         let mut pos = 0;
 
         let w = encode_insert_count_increment(&mut buf[pos..], 2).unwrap();
@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_error_static_table_index_ooB() {
+    fn test_decode_error_static_table_index_oob() {
         // Block with req_insert_count=0, then static table index 99 (OOB).
         // Static table has 99 entries (0..98). Index 99 = out of range.
         // 6-bit prefix encoding of 99: first byte 0xFF (63), continuation: 99-63=36.
@@ -1398,7 +1398,7 @@ mod tests {
     #[test]
     fn test_settings_duplicate_rejection() {
         // RFC 9114 §7.2.4.2: duplicate setting ID is rejected.
-        let mut buf = vec![0u8; 32];
+        let mut buf = [0u8; 32];
         let mut pos = 0;
         pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
         pos += varint_encode(&mut buf[pos..], 0).unwrap();
@@ -1410,7 +1410,7 @@ mod tests {
         );
 
         // Duplicate QPACK_MAX_TABLE_CAPACITY
-        let dup_pos = pos;
+        let _dup_pos = pos;
         pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
         pos += varint_encode(&mut buf[pos..], 0).unwrap();
         assert!(
@@ -2245,8 +2245,7 @@ mod tests {
     fn test_varint_property_pseudo_random_roundtrip() {
         // Deterministic "random" values using a simple LCG
         let mut state: u64 = 42;
-        let mut count = 0;
-        for _ in 0..1000 {
+        for (count, _) in (0..1000).enumerate() {
             // LCG: s = s * 6364136223846793005 + 1442695040888963407
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -2264,7 +2263,6 @@ mod tests {
             } else {
                 panic!("encode failed at iteration {} for value {}", count, val);
             }
-            count += 1;
         }
     }
 
@@ -2546,7 +2544,6 @@ mod tests {
         };
         use qpack::{
             H3DecodeError, qpack_decode_block_r, qpack_decode_int_r, qpack_decode_string_r,
-            qpack_encode_block,
         };
         let _ = qpack_decode_string_r; // ensure path coverage
 
@@ -2765,8 +2762,8 @@ mod tests {
         buf[1] = 0x00;
         // Fill with indexed static entries (index 0 = 0xC0 with base form)
         // QPACK indexed static: 11xxxxxx → 0xC0 | index
-        for i in 2..300 {
-            buf[i] = 0xC0; // Indexed static entry index 0
+        for b in buf.iter_mut().take(300).skip(2) {
+            *b = 0xC0; // Indexed static entry index 0
         }
         // Decode with limit of 256 headers — should reject
         let result = qpack_decode_block_r(&buf[..300], 256, None, None);

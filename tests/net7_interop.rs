@@ -340,8 +340,8 @@ fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
         _ => unreachable!(),
     };
     let mut value = (buf[0] as u64) & mask;
-    for i in 1..len {
-        value = (value << 8) | buf[i] as u64;
+    for &byte in &buf[1..len] {
+        value = (value << 8) | byte as u64;
     }
     Some((value, len))
 }

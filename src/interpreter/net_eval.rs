@@ -4916,9 +4916,7 @@ impl Interpreter {
                     || e.contains("unsupported key type")
                     || e.contains("no valid certificates")
                     || e.contains("no PEM items")
-                {
-                    "ProtocolError"
-                } else if e.contains("failed to create QUIC endpoint")
+                    || e.contains("failed to create QUIC endpoint")
                     || e.contains("failed to parse bind address")
                 {
                     "ProtocolError"

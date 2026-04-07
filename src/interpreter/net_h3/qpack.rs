@@ -527,11 +527,11 @@ pub(crate) fn qpack_decode_int_r(data: &[u8], prefix_bits: u8) -> H3Result<(u64,
     // Multi-byte
     let mut val = val;
     let mut m = 0u32;
-    for i in 1..data.len() {
-        val += ((data[i] & 0x7F) as u64) << m;
+    for (i, &byte) in data[1..].iter().enumerate() {
+        val += ((byte & 0x7F) as u64) << m;
         m += 7;
-        if data[i] & 0x80 == 0 {
-            return Ok((val, i + 1));
+        if byte & 0x80 == 0 {
+            return Ok((val, i + 2));
         }
         if m > 62 {
             return Err(H3DecodeError::QpackIntOverflow); // overflow protection
@@ -589,8 +589,8 @@ pub(crate) fn varint_decode_r(data: &[u8]) -> H3Result<(u64, usize)> {
         return Err(H3DecodeError::Truncated);
     }
     let mut val = (data[0] & 0x3F) as u64;
-    for i in 1..len {
-        val = (val << 8) | data[i] as u64;
+    for &byte in &data[1..len] {
+        val = (val << 8) | byte as u64;
     }
     // NB7-16 / NET7-5a: canonical encoding check
     if !is_canonical_varint(val, prefix) {
@@ -731,10 +731,8 @@ pub(crate) fn qpack_decode_block_r(
     dynamic_table: Option<&H3DynamicTable>,
 ) -> H3Result<Vec<H3Header>> {
     // NB7-43: Reject oversized header blocks
-    if let Some(limit) = max_field_section_size {
-        if data.len() as u64 > limit {
-            return Err(H3DecodeError::FieldSectionTooLarge);
-        }
+    if let Some(limit) = max_field_section_size && data.len() as u64 > limit {
+        return Err(H3DecodeError::FieldSectionTooLarge);
     }
     if data.len() < 2 {
         return Err(H3DecodeError::Truncated);
@@ -946,7 +944,7 @@ pub(crate) fn decode_frame_header_r(data: &[u8]) -> H3Result<(u64, u64, usize)> 
 
 /// Decode a complete H3 frame — `Result` variant (NET7-6b).
 /// Returns `Ok((frame_type, payload_slice))` on success, `Err` on malformed input.
-pub(crate) fn decode_frame_r<'a>(data: &'a [u8]) -> H3Result<(u64, &'a [u8])> {
+pub(crate) fn decode_frame_r(data: &[u8]) -> H3Result<(u64, &[u8])> {
     let (frame_type, frame_length, header_size) = decode_frame_header_r(data)?;
     if frame_length > usize::MAX as u64 {
         return Err(H3DecodeError::FrameMalformed);
@@ -1238,10 +1236,9 @@ pub(crate) fn encode_set_capacity(buf: &mut [u8], capacity: u64) -> Option<usize
     qpack_encode_int(buf, 5, capacity, 0x20) // 001xxxxx
 }
 
-/// Insert Count Increment (Section 5.2.5): sent on decoder stream to inform encoder.
-/// Not encoded on the encoder stream itself; this is a decoder message.
-/// For the interpreter, we process it but don't produce wire bytes here.
-
+// Insert Count Increment (Section 5.2.5): sent on decoder stream to inform encoder.
+// Not encoded on the encoder stream itself; this is a decoder message.
+// For the interpreter, we process it but don't produce wire bytes here.
 // ── QPACK Decoder Instruction Stream (RFC 9204 Section 6.2) ──────────────
 // Phase 6+ (NET7-6a): decoder instructions sent from decoder to encoder.
 // These are on the decoder stream (unidirectional, type 0x3).
@@ -1512,8 +1509,7 @@ impl H3DecoderState {
                 }
                 self.received_insert_count = self
                     .received_insert_count
-                    .checked_add(*increment)
-                    .unwrap_or(u64::MAX);
+                    .saturating_add(*increment);
                 true
             }
         }
