@@ -731,7 +731,9 @@ pub(crate) fn qpack_decode_block_r(
     dynamic_table: Option<&H3DynamicTable>,
 ) -> H3Result<Vec<H3Header>> {
     // NB7-43: Reject oversized header blocks
-    if let Some(limit) = max_field_section_size && data.len() as u64 > limit {
+    if let Some(limit) = max_field_section_size
+        && data.len() as u64 > limit
+    {
         return Err(H3DecodeError::FieldSectionTooLarge);
     }
     if data.len() < 2 {
@@ -1507,9 +1509,7 @@ impl H3DecoderState {
                 if *increment == 0 {
                     return false; // zero increment is illegal
                 }
-                self.received_insert_count = self
-                    .received_insert_count
-                    .saturating_add(*increment);
+                self.received_insert_count = self.received_insert_count.saturating_add(*increment);
                 true
             }
         }
