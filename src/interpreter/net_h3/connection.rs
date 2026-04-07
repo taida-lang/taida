@@ -1,3 +1,4 @@
+use super::frame::{H3_DEFAULT_MAX_FIELD_SECTION_SIZE, H3_MAX_STREAMS, encode_goaway};
 /// H3 connection, stream state, idle timeout, graceful shutdown.
 ///
 /// This module contains:
@@ -6,15 +7,10 @@
 /// - H3HandlerContext — H3-specific handler context (NET7-7c)
 /// - H3Connection — protocol state with idle timeout, GOAWAY, shutdown
 /// - QPACK dynamic table and decoder/encoder instruction processing
-
-use super::qpack::{
-    H3DecodeError, H3Header, H3DynamicTable,
-};
-use super::frame::{encode_goaway, H3_MAX_STREAMS, H3_DEFAULT_MAX_FIELD_SECTION_SIZE};
+use super::qpack::{H3DecodeError, H3DynamicTable, H3Header};
 
 /// NB7-96: Pre-allocated capacity for per-connection stream tracking.
 const H3_STREAM_PREALLOC: usize = 8;
-
 
 // ── H3 Stream State Machine ──────────────────────────────────────────────
 
@@ -72,7 +68,7 @@ pub(crate) enum H3ConnState {
 /// This struct carries QUIC transport metadata that only applies to HTTP/3
 /// requests. Non-QUIC backends (h1, h2) leave these fields empty/default,
 /// preserving the 14-field handler contract.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct H3HandlerContext {
     /// QUIC Connection ID bytes (opaque, length depends on transport config).
     /// Empty for non-QUIC connections.
@@ -80,15 +76,6 @@ pub(crate) struct H3HandlerContext {
     /// QUIC stream ID used for multiplexed routing.
     /// Default 0 for non-QUIC connections.
     pub quic_stream_id: u64,
-}
-
-impl Default for H3HandlerContext {
-    fn default() -> Self {
-        H3HandlerContext {
-            quic_connection_id: Vec::new(),
-            quic_stream_id: 0,
-        }
-    }
 }
 
 /// HTTP/3 protocol state per connection.
@@ -205,7 +192,10 @@ impl H3Connection {
 
     #[allow(dead_code)]
     pub fn find_stream_mut(&mut self, stream_id: u64) -> Option<&mut H3Stream> {
-        self.streams.iter_mut().rev().find(|s| s.stream_id == stream_id)
+        self.streams
+            .iter_mut()
+            .rev()
+            .find(|s| s.stream_id == stream_id)
     }
 
     pub fn new_stream(&mut self, stream_id: u64) -> Option<&mut H3Stream> {
@@ -303,7 +293,10 @@ impl H3Connection {
     /// Return the count of streams that are not yet Closed.
     /// NB7-76: Used to verify drain wait before transitioning to Closed.
     pub fn active_stream_count(&self) -> usize {
-        self.streams.iter().filter(|s| s.state != H3StreamState::Closed).count()
+        self.streams
+            .iter()
+            .filter(|s| s.state != H3StreamState::Closed)
+            .count()
     }
 
     /// Check whether there are streams still in flight.
@@ -337,8 +330,7 @@ impl H3Connection {
         }
         self.remove_closed_streams();
         // Validate transition: Draining -> Closed or Active -> Closed (emergency close)
-        let ok = self.transition_state(H3ConnState::Closed);
-        ok
+        self.transition_state(H3ConnState::Closed)
     }
 
     /// Execute the full shutdown pipeline: GOAWAY -> drain -> close.
@@ -360,13 +352,17 @@ impl H3Connection {
                 if self.goaway_sent {
                     // GOAWAY sent but still Active — advance to Draining
                     let ok = self.transition_state(H3ConnState::Draining);
-                    if !ok { return (false, None); }
+                    if !ok {
+                        return (false, None);
+                    }
                     (true, None)
                 } else {
                     let last_id = self.last_peer_stream_id;
                     self.goaway_sent = true;
                     let ok = self.transition_state(H3ConnState::Draining);
-                    if !ok { return (false, None); }
+                    if !ok {
+                        return (false, None);
+                    }
                     let mut frames = Vec::new();
                     if let Some(frame) = encode_goaway(last_id) {
                         frames.push(frame);
@@ -384,9 +380,7 @@ impl H3Connection {
                 if ok { (true, None) } else { (false, None) }
             }
             // Step 3: Already closed
-            H3ConnState::Closed | H3ConnState::Idle => {
-                (false, None)
-            }
+            H3ConnState::Closed | H3ConnState::Idle => (false, None),
         }
     }
 

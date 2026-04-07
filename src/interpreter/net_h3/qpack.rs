@@ -1,3 +1,4 @@
+use super::frame::is_canonical_varint;
 /// QPACK static table, error types, integer/string coding, header block encode/decode.
 ///
 /// This module contains all QPACK-related types and functions:
@@ -7,9 +8,7 @@
 /// - QPACK header block encode/decode (RFC 9204 Section 4.5)
 /// - QPACK dynamic table (RFC 9204 Section 4.3)
 /// - QPACK encoder/decoder instruction streams (RFC 9204 Sections 5.2/6.2)
-
 use crate::interpreter::net_h2;
-use super::frame::is_canonical_varint;
 
 pub(crate) struct QpackStaticEntry {
     pub name: &'static str,
@@ -17,105 +16,402 @@ pub(crate) struct QpackStaticEntry {
 }
 
 pub(crate) const QPACK_STATIC_TABLE: &[QpackStaticEntry] = &[
-    QpackStaticEntry { name: ":authority", value: "" },                          // 0
-    QpackStaticEntry { name: ":path", value: "/" },                              // 1
-    QpackStaticEntry { name: "age", value: "0" },                                // 2
-    QpackStaticEntry { name: "content-disposition", value: "" },                  // 3
-    QpackStaticEntry { name: "content-length", value: "0" },                     // 4
-    QpackStaticEntry { name: "cookie", value: "" },                              // 5
-    QpackStaticEntry { name: "date", value: "" },                                // 6
-    QpackStaticEntry { name: "etag", value: "" },                                // 7
-    QpackStaticEntry { name: "if-modified-since", value: "" },                   // 8
-    QpackStaticEntry { name: "if-none-match", value: "" },                       // 9
-    QpackStaticEntry { name: "last-modified", value: "" },                       // 10
-    QpackStaticEntry { name: "link", value: "" },                                // 11
-    QpackStaticEntry { name: "location", value: "" },                            // 12
-    QpackStaticEntry { name: "referer", value: "" },                             // 13
-    QpackStaticEntry { name: "set-cookie", value: "" },                          // 14
-    QpackStaticEntry { name: ":method", value: "CONNECT" },                      // 15
-    QpackStaticEntry { name: ":method", value: "DELETE" },                       // 16
-    QpackStaticEntry { name: ":method", value: "GET" },                          // 17
-    QpackStaticEntry { name: ":method", value: "HEAD" },                         // 18
-    QpackStaticEntry { name: ":method", value: "OPTIONS" },                      // 19
-    QpackStaticEntry { name: ":method", value: "POST" },                         // 20
-    QpackStaticEntry { name: ":method", value: "PUT" },                          // 21
-    QpackStaticEntry { name: ":scheme", value: "http" },                         // 22
-    QpackStaticEntry { name: ":scheme", value: "https" },                        // 23
-    QpackStaticEntry { name: ":status", value: "103" },                          // 24
-    QpackStaticEntry { name: ":status", value: "200" },                          // 25
-    QpackStaticEntry { name: ":status", value: "304" },                          // 26
-    QpackStaticEntry { name: ":status", value: "404" },                          // 27
-    QpackStaticEntry { name: ":status", value: "503" },                          // 28
-    QpackStaticEntry { name: "accept", value: "*/*" },                           // 29
-    QpackStaticEntry { name: "accept", value: "application/dns-message" },       // 30
-    QpackStaticEntry { name: "accept-encoding", value: "gzip, deflate, br" },    // 31
-    QpackStaticEntry { name: "accept-ranges", value: "bytes" },                  // 32
-    QpackStaticEntry { name: "access-control-allow-headers", value: "cache-control" }, // 33
-    QpackStaticEntry { name: "access-control-allow-headers", value: "content-type" },  // 34
-    QpackStaticEntry { name: "access-control-allow-origin", value: "*" },        // 35
-    QpackStaticEntry { name: "cache-control", value: "max-age=0" },              // 36
-    QpackStaticEntry { name: "cache-control", value: "max-age=2592000" },        // 37
-    QpackStaticEntry { name: "cache-control", value: "max-age=604800" },         // 38
-    QpackStaticEntry { name: "cache-control", value: "no-cache" },               // 39
-    QpackStaticEntry { name: "cache-control", value: "no-store" },               // 40
-    QpackStaticEntry { name: "cache-control", value: "public, max-age=31536000" }, // 41
-    QpackStaticEntry { name: "content-encoding", value: "br" },                  // 42
-    QpackStaticEntry { name: "content-encoding", value: "gzip" },                // 43
-    QpackStaticEntry { name: "content-type", value: "application/dns-message" }, // 44
-    QpackStaticEntry { name: "content-type", value: "application/javascript" },  // 45
-    QpackStaticEntry { name: "content-type", value: "application/json" },        // 46
-    QpackStaticEntry { name: "content-type", value: "application/x-www-form-urlencoded" }, // 47
-    QpackStaticEntry { name: "content-type", value: "image/gif" },               // 48
-    QpackStaticEntry { name: "content-type", value: "image/jpeg" },              // 49
-    QpackStaticEntry { name: "content-type", value: "image/png" },               // 50
-    QpackStaticEntry { name: "content-type", value: "text/css" },                // 51
-    QpackStaticEntry { name: "content-type", value: "text/html; charset=utf-8" }, // 52
-    QpackStaticEntry { name: "content-type", value: "text/plain" },              // 53
-    QpackStaticEntry { name: "content-type", value: "text/plain;charset=utf-8" }, // 54
-    QpackStaticEntry { name: "range", value: "bytes=0-" },                       // 55
-    QpackStaticEntry { name: "strict-transport-security", value: "max-age=31536000" }, // 56
-    QpackStaticEntry { name: "strict-transport-security", value: "max-age=31536000; includesubdomains" }, // 57
-    QpackStaticEntry { name: "strict-transport-security", value: "max-age=31536000; includesubdomains; preload" }, // 58
-    QpackStaticEntry { name: "vary", value: "accept-encoding" },                 // 59
-    QpackStaticEntry { name: "vary", value: "origin" },                          // 60
-    QpackStaticEntry { name: "x-content-type-options", value: "nosniff" },       // 61
-    QpackStaticEntry { name: "x-xss-protection", value: "1; mode=block" },       // 62
-    QpackStaticEntry { name: ":status", value: "100" },                          // 63
-    QpackStaticEntry { name: ":status", value: "204" },                          // 64
-    QpackStaticEntry { name: ":status", value: "206" },                          // 65
-    QpackStaticEntry { name: ":status", value: "302" },                          // 66
-    QpackStaticEntry { name: ":status", value: "400" },                          // 67
-    QpackStaticEntry { name: ":status", value: "403" },                          // 68
-    QpackStaticEntry { name: ":status", value: "421" },                          // 69
-    QpackStaticEntry { name: ":status", value: "425" },                          // 70
-    QpackStaticEntry { name: ":status", value: "500" },                          // 71
-    QpackStaticEntry { name: "accept-language", value: "" },                     // 72
-    QpackStaticEntry { name: "access-control-allow-credentials", value: "FALSE" }, // 73
-    QpackStaticEntry { name: "access-control-allow-credentials", value: "TRUE" },  // 74
-    QpackStaticEntry { name: "access-control-allow-headers", value: "*" },       // 75
-    QpackStaticEntry { name: "access-control-allow-methods", value: "get" },     // 76
-    QpackStaticEntry { name: "access-control-allow-methods", value: "get, post, options" }, // 77
-    QpackStaticEntry { name: "access-control-allow-methods", value: "options" },  // 78
-    QpackStaticEntry { name: "access-control-expose-headers", value: "content-length" }, // 79
-    QpackStaticEntry { name: "access-control-request-headers", value: "content-type" },  // 80
-    QpackStaticEntry { name: "access-control-request-method", value: "get" },    // 81
-    QpackStaticEntry { name: "access-control-request-method", value: "post" },   // 82
-    QpackStaticEntry { name: "alt-svc", value: "clear" },                        // 83
-    QpackStaticEntry { name: "authorization", value: "" },                       // 84
-    QpackStaticEntry { name: "content-security-policy", value: "script-src 'none'; object-src 'none'; base-uri 'none'" }, // 85
-    QpackStaticEntry { name: "early-data", value: "1" },                         // 86
-    QpackStaticEntry { name: "expect-ct", value: "" },                           // 87
-    QpackStaticEntry { name: "forwarded", value: "" },                           // 88
-    QpackStaticEntry { name: "if-range", value: "" },                            // 89
-    QpackStaticEntry { name: "origin", value: "" },                              // 90
-    QpackStaticEntry { name: "purpose", value: "prefetch" },                     // 91
-    QpackStaticEntry { name: "server", value: "" },                              // 92
-    QpackStaticEntry { name: "timing-allow-origin", value: "*" },                // 93
-    QpackStaticEntry { name: "upgrade-insecure-requests", value: "1" },          // 94
-    QpackStaticEntry { name: "user-agent", value: "" },                          // 95
-    QpackStaticEntry { name: "x-forwarded-for", value: "" },                     // 96
-    QpackStaticEntry { name: "x-frame-options", value: "deny" },                 // 97
-    QpackStaticEntry { name: "x-frame-options", value: "sameorigin" },           // 98
+    QpackStaticEntry {
+        name: ":authority",
+        value: "",
+    }, // 0
+    QpackStaticEntry {
+        name: ":path",
+        value: "/",
+    }, // 1
+    QpackStaticEntry {
+        name: "age",
+        value: "0",
+    }, // 2
+    QpackStaticEntry {
+        name: "content-disposition",
+        value: "",
+    }, // 3
+    QpackStaticEntry {
+        name: "content-length",
+        value: "0",
+    }, // 4
+    QpackStaticEntry {
+        name: "cookie",
+        value: "",
+    }, // 5
+    QpackStaticEntry {
+        name: "date",
+        value: "",
+    }, // 6
+    QpackStaticEntry {
+        name: "etag",
+        value: "",
+    }, // 7
+    QpackStaticEntry {
+        name: "if-modified-since",
+        value: "",
+    }, // 8
+    QpackStaticEntry {
+        name: "if-none-match",
+        value: "",
+    }, // 9
+    QpackStaticEntry {
+        name: "last-modified",
+        value: "",
+    }, // 10
+    QpackStaticEntry {
+        name: "link",
+        value: "",
+    }, // 11
+    QpackStaticEntry {
+        name: "location",
+        value: "",
+    }, // 12
+    QpackStaticEntry {
+        name: "referer",
+        value: "",
+    }, // 13
+    QpackStaticEntry {
+        name: "set-cookie",
+        value: "",
+    }, // 14
+    QpackStaticEntry {
+        name: ":method",
+        value: "CONNECT",
+    }, // 15
+    QpackStaticEntry {
+        name: ":method",
+        value: "DELETE",
+    }, // 16
+    QpackStaticEntry {
+        name: ":method",
+        value: "GET",
+    }, // 17
+    QpackStaticEntry {
+        name: ":method",
+        value: "HEAD",
+    }, // 18
+    QpackStaticEntry {
+        name: ":method",
+        value: "OPTIONS",
+    }, // 19
+    QpackStaticEntry {
+        name: ":method",
+        value: "POST",
+    }, // 20
+    QpackStaticEntry {
+        name: ":method",
+        value: "PUT",
+    }, // 21
+    QpackStaticEntry {
+        name: ":scheme",
+        value: "http",
+    }, // 22
+    QpackStaticEntry {
+        name: ":scheme",
+        value: "https",
+    }, // 23
+    QpackStaticEntry {
+        name: ":status",
+        value: "103",
+    }, // 24
+    QpackStaticEntry {
+        name: ":status",
+        value: "200",
+    }, // 25
+    QpackStaticEntry {
+        name: ":status",
+        value: "304",
+    }, // 26
+    QpackStaticEntry {
+        name: ":status",
+        value: "404",
+    }, // 27
+    QpackStaticEntry {
+        name: ":status",
+        value: "503",
+    }, // 28
+    QpackStaticEntry {
+        name: "accept",
+        value: "*/*",
+    }, // 29
+    QpackStaticEntry {
+        name: "accept",
+        value: "application/dns-message",
+    }, // 30
+    QpackStaticEntry {
+        name: "accept-encoding",
+        value: "gzip, deflate, br",
+    }, // 31
+    QpackStaticEntry {
+        name: "accept-ranges",
+        value: "bytes",
+    }, // 32
+    QpackStaticEntry {
+        name: "access-control-allow-headers",
+        value: "cache-control",
+    }, // 33
+    QpackStaticEntry {
+        name: "access-control-allow-headers",
+        value: "content-type",
+    }, // 34
+    QpackStaticEntry {
+        name: "access-control-allow-origin",
+        value: "*",
+    }, // 35
+    QpackStaticEntry {
+        name: "cache-control",
+        value: "max-age=0",
+    }, // 36
+    QpackStaticEntry {
+        name: "cache-control",
+        value: "max-age=2592000",
+    }, // 37
+    QpackStaticEntry {
+        name: "cache-control",
+        value: "max-age=604800",
+    }, // 38
+    QpackStaticEntry {
+        name: "cache-control",
+        value: "no-cache",
+    }, // 39
+    QpackStaticEntry {
+        name: "cache-control",
+        value: "no-store",
+    }, // 40
+    QpackStaticEntry {
+        name: "cache-control",
+        value: "public, max-age=31536000",
+    }, // 41
+    QpackStaticEntry {
+        name: "content-encoding",
+        value: "br",
+    }, // 42
+    QpackStaticEntry {
+        name: "content-encoding",
+        value: "gzip",
+    }, // 43
+    QpackStaticEntry {
+        name: "content-type",
+        value: "application/dns-message",
+    }, // 44
+    QpackStaticEntry {
+        name: "content-type",
+        value: "application/javascript",
+    }, // 45
+    QpackStaticEntry {
+        name: "content-type",
+        value: "application/json",
+    }, // 46
+    QpackStaticEntry {
+        name: "content-type",
+        value: "application/x-www-form-urlencoded",
+    }, // 47
+    QpackStaticEntry {
+        name: "content-type",
+        value: "image/gif",
+    }, // 48
+    QpackStaticEntry {
+        name: "content-type",
+        value: "image/jpeg",
+    }, // 49
+    QpackStaticEntry {
+        name: "content-type",
+        value: "image/png",
+    }, // 50
+    QpackStaticEntry {
+        name: "content-type",
+        value: "text/css",
+    }, // 51
+    QpackStaticEntry {
+        name: "content-type",
+        value: "text/html; charset=utf-8",
+    }, // 52
+    QpackStaticEntry {
+        name: "content-type",
+        value: "text/plain",
+    }, // 53
+    QpackStaticEntry {
+        name: "content-type",
+        value: "text/plain;charset=utf-8",
+    }, // 54
+    QpackStaticEntry {
+        name: "range",
+        value: "bytes=0-",
+    }, // 55
+    QpackStaticEntry {
+        name: "strict-transport-security",
+        value: "max-age=31536000",
+    }, // 56
+    QpackStaticEntry {
+        name: "strict-transport-security",
+        value: "max-age=31536000; includesubdomains",
+    }, // 57
+    QpackStaticEntry {
+        name: "strict-transport-security",
+        value: "max-age=31536000; includesubdomains; preload",
+    }, // 58
+    QpackStaticEntry {
+        name: "vary",
+        value: "accept-encoding",
+    }, // 59
+    QpackStaticEntry {
+        name: "vary",
+        value: "origin",
+    }, // 60
+    QpackStaticEntry {
+        name: "x-content-type-options",
+        value: "nosniff",
+    }, // 61
+    QpackStaticEntry {
+        name: "x-xss-protection",
+        value: "1; mode=block",
+    }, // 62
+    QpackStaticEntry {
+        name: ":status",
+        value: "100",
+    }, // 63
+    QpackStaticEntry {
+        name: ":status",
+        value: "204",
+    }, // 64
+    QpackStaticEntry {
+        name: ":status",
+        value: "206",
+    }, // 65
+    QpackStaticEntry {
+        name: ":status",
+        value: "302",
+    }, // 66
+    QpackStaticEntry {
+        name: ":status",
+        value: "400",
+    }, // 67
+    QpackStaticEntry {
+        name: ":status",
+        value: "403",
+    }, // 68
+    QpackStaticEntry {
+        name: ":status",
+        value: "421",
+    }, // 69
+    QpackStaticEntry {
+        name: ":status",
+        value: "425",
+    }, // 70
+    QpackStaticEntry {
+        name: ":status",
+        value: "500",
+    }, // 71
+    QpackStaticEntry {
+        name: "accept-language",
+        value: "",
+    }, // 72
+    QpackStaticEntry {
+        name: "access-control-allow-credentials",
+        value: "FALSE",
+    }, // 73
+    QpackStaticEntry {
+        name: "access-control-allow-credentials",
+        value: "TRUE",
+    }, // 74
+    QpackStaticEntry {
+        name: "access-control-allow-headers",
+        value: "*",
+    }, // 75
+    QpackStaticEntry {
+        name: "access-control-allow-methods",
+        value: "get",
+    }, // 76
+    QpackStaticEntry {
+        name: "access-control-allow-methods",
+        value: "get, post, options",
+    }, // 77
+    QpackStaticEntry {
+        name: "access-control-allow-methods",
+        value: "options",
+    }, // 78
+    QpackStaticEntry {
+        name: "access-control-expose-headers",
+        value: "content-length",
+    }, // 79
+    QpackStaticEntry {
+        name: "access-control-request-headers",
+        value: "content-type",
+    }, // 80
+    QpackStaticEntry {
+        name: "access-control-request-method",
+        value: "get",
+    }, // 81
+    QpackStaticEntry {
+        name: "access-control-request-method",
+        value: "post",
+    }, // 82
+    QpackStaticEntry {
+        name: "alt-svc",
+        value: "clear",
+    }, // 83
+    QpackStaticEntry {
+        name: "authorization",
+        value: "",
+    }, // 84
+    QpackStaticEntry {
+        name: "content-security-policy",
+        value: "script-src 'none'; object-src 'none'; base-uri 'none'",
+    }, // 85
+    QpackStaticEntry {
+        name: "early-data",
+        value: "1",
+    }, // 86
+    QpackStaticEntry {
+        name: "expect-ct",
+        value: "",
+    }, // 87
+    QpackStaticEntry {
+        name: "forwarded",
+        value: "",
+    }, // 88
+    QpackStaticEntry {
+        name: "if-range",
+        value: "",
+    }, // 89
+    QpackStaticEntry {
+        name: "origin",
+        value: "",
+    }, // 90
+    QpackStaticEntry {
+        name: "purpose",
+        value: "prefetch",
+    }, // 91
+    QpackStaticEntry {
+        name: "server",
+        value: "",
+    }, // 92
+    QpackStaticEntry {
+        name: "timing-allow-origin",
+        value: "*",
+    }, // 93
+    QpackStaticEntry {
+        name: "upgrade-insecure-requests",
+        value: "1",
+    }, // 94
+    QpackStaticEntry {
+        name: "user-agent",
+        value: "",
+    }, // 95
+    QpackStaticEntry {
+        name: "x-forwarded-for",
+        value: "",
+    }, // 96
+    QpackStaticEntry {
+        name: "x-frame-options",
+        value: "deny",
+    }, // 97
+    QpackStaticEntry {
+        name: "x-frame-options",
+        value: "sameorigin",
+    }, // 98
 ];
 
 // ── QPACK Integer Coding (RFC 9204 Section 4.1.1) ──────────────────────
@@ -219,7 +515,11 @@ pub(crate) fn qpack_decode_int_r(data: &[u8], prefix_bits: u8) -> H3Result<(u64,
         return Err(H3DecodeError::Truncated);
     }
     // Compute mask avoiding overflow when prefix_bits == 8
-    let mask: u8 = if prefix_bits >= 8 { 0xFF } else { (1u8 << prefix_bits) - 1 };
+    let mask: u8 = if prefix_bits >= 8 {
+        0xFF
+    } else {
+        (1u8 << prefix_bits) - 1
+    };
     let val = (data[0] & mask) as u64;
     if val < mask as u64 {
         return Ok((val, 1));
@@ -312,7 +612,11 @@ pub(crate) fn qpack_encode_int(
         return None;
     }
     // Compute mask avoiding overflow when prefix_bits == 8
-    let mask: u8 = if prefix_bits >= 8 { 0xFF } else { (1u8 << prefix_bits) - 1 };
+    let mask: u8 = if prefix_bits >= 8 {
+        0xFF
+    } else {
+        (1u8 << prefix_bits) - 1
+    };
     if value < mask as u64 {
         buf[0] = prefix_byte | (value as u8);
         return Some(1);
@@ -494,13 +798,22 @@ pub(crate) fn qpack_decode_block_r(
                     return Err(H3DecodeError::DynamicTableError);
                 }
                 let ric = req_insert_count;
-                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1)).ok_or(H3DecodeError::DynamicTableError)?;
-                let max_relative = d_abs.checked_add(1).filter(|&m| index < m).ok_or(H3DecodeError::DynamicTableError)?;
+                let base_val = ric
+                    .checked_sub(d_abs)
+                    .and_then(|v| v.checked_sub(1))
+                    .ok_or(H3DecodeError::DynamicTableError)?;
+                let max_relative = d_abs
+                    .checked_add(1)
+                    .filter(|&m| index < m)
+                    .ok_or(H3DecodeError::DynamicTableError)?;
                 if index >= max_relative {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let abs = base_val.checked_sub(index).ok_or(H3DecodeError::DynamicTableError)?;
-                let entry = dynamic.lookup_absolute(abs)
+                let abs = base_val
+                    .checked_sub(index)
+                    .ok_or(H3DecodeError::DynamicTableError)?;
+                let entry = dynamic
+                    .lookup_absolute(abs)
                     .ok_or(H3DecodeError::DynamicTableError)?;
                 headers.push(H3Header {
                     name: entry.name.clone(),
@@ -526,13 +839,22 @@ pub(crate) fn qpack_decode_block_r(
                     return Err(H3DecodeError::DynamicTableError);
                 }
                 let ric = req_insert_count;
-                let base_val = ric.checked_sub(d_abs).and_then(|v| v.checked_sub(1)).ok_or(H3DecodeError::DynamicTableError)?;
-                let max_relative = d_abs.checked_add(1).filter(|&m| name_index < m).ok_or(H3DecodeError::DynamicTableError)?;
+                let base_val = ric
+                    .checked_sub(d_abs)
+                    .and_then(|v| v.checked_sub(1))
+                    .ok_or(H3DecodeError::DynamicTableError)?;
+                let max_relative = d_abs
+                    .checked_add(1)
+                    .filter(|&m| name_index < m)
+                    .ok_or(H3DecodeError::DynamicTableError)?;
                 if name_index >= max_relative {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let abs = base_val.checked_sub(name_index).ok_or(H3DecodeError::DynamicTableError)?;
-                let entry = dynamic.lookup_absolute(abs)
+                let abs = base_val
+                    .checked_sub(name_index)
+                    .ok_or(H3DecodeError::DynamicTableError)?;
+                let entry = dynamic
+                    .lookup_absolute(abs)
                     .ok_or(H3DecodeError::DynamicTableError)?;
                 entry.name.clone()
             };
@@ -551,8 +873,7 @@ pub(crate) fn qpack_decode_block_r(
             }
             let name_data = &data[consumed..consumed + name_len];
             let name = if name_huffman {
-                net_h2::huffman_decode(name_data)
-                    .ok_or(H3DecodeError::HuffmanDecode)?
+                net_h2::huffman_decode(name_data).ok_or(H3DecodeError::HuffmanDecode)?
             } else {
                 std::str::from_utf8(name_data)
                     .map_err(|_| H3DecodeError::InvalidUtf8)?
@@ -569,7 +890,8 @@ pub(crate) fn qpack_decode_block_r(
             consumed += idx_consumed;
 
             let dynamic = dynamic_table.ok_or(H3DecodeError::DynamicTableError)?;
-            let entry = dynamic.lookup_post_base(post_base_index)
+            let entry = dynamic
+                .lookup_post_base(post_base_index)
                 .ok_or(H3DecodeError::DynamicTableError)?;
             headers.push(H3Header {
                 name: entry.name.clone(),
@@ -599,7 +921,8 @@ pub(crate) fn qpack_decode_block_r(
                 if req_insert_count == 0 {
                     return Err(H3DecodeError::DynamicTableError);
                 }
-                let entry = dynamic.lookup_post_base(name_index)
+                let entry = dynamic
+                    .lookup_post_base(name_index)
                     .ok_or(H3DecodeError::DynamicTableError)?;
                 entry.name.clone()
             };
@@ -776,10 +1099,12 @@ impl H3DynamicTable {
     /// Duplicate an existing entry (same name+value) by re-inserting it.
     /// This is used by the encoder Duplicate instruction.
     pub fn duplicate(&mut self, source_index: u64) -> bool {
-        let entry = match self.entries
+        let entry = match self
+            .entries
             .iter()
             .find(|e| e.index == source_index)
-            .cloned() {
+            .cloned()
+        {
             Some(e) => e,
             None => return false,
         };
@@ -901,10 +1226,7 @@ pub(crate) fn encode_insert_with_literal_name(
 
 /// Duplicate instruction (Section 5.2.3): 00xxxxxx
 /// Copies an existing dynamic table entry to the end.
-pub(crate) fn encode_duplicate(
-    buf: &mut [u8],
-    index: u64,
-) -> Option<usize> {
+pub(crate) fn encode_duplicate(buf: &mut [u8], index: u64) -> Option<usize> {
     // Prefix: 00xxxxxx with 6-bit prefix relative index
     qpack_encode_int(buf, 6, index, 0x00)
 }
@@ -960,19 +1282,12 @@ pub(crate) enum H3EncoderInstruction {
         value: String,
     },
     /// Insert With Literal Name (Section 5.2.2): 01xxxxxx
-    InsertWithLiteralName {
-        name: String,
-        value: String,
-    },
+    InsertWithLiteralName { name: String, value: String },
     /// Duplicate (Section 5.2.3): 000xxxxx
     /// `index` is a **relative index** (0 = newest entry).
-    Duplicate {
-        index: u64,
-    },
+    Duplicate { index: u64 },
     /// Set Dynamic Table Capacity (Section 5.2.4): 001xxxxx
-    SetCapacity {
-        capacity: u64,
-    },
+    SetCapacity { capacity: u64 },
 }
 
 /// Decode a single encoder instruction from the encoder stream.
@@ -993,11 +1308,14 @@ pub(crate) fn decode_encoder_instruction(data: &[u8]) -> Option<(H3EncoderInstru
         let (name_index, ni_consumed) = qpack_decode_int(data, 4)?;
         let remaining = &data[ni_consumed..];
         let (value, val_consumed) = qpack_decode_string(remaining)?;
-        Some((H3EncoderInstruction::InsertWithNameRef {
-            is_static,
-            name_index,
-            value,
-        }, ni_consumed + val_consumed))
+        Some((
+            H3EncoderInstruction::InsertWithNameRef {
+                is_static,
+                name_index,
+                value,
+            },
+            ni_consumed + val_consumed,
+        ))
     } else if byte & 0x40 != 0 {
         // Insert With Literal Name: 01xxxxxx (Section 5.2.2)
         // The remaining 6 bits start a string encoding with 3-bit prefix for length
@@ -1007,11 +1325,15 @@ pub(crate) fn decode_encoder_instruction(data: &[u8]) -> Option<(H3EncoderInstru
         if offset + name_len > data.len() {
             return None;
         }
-        let name = std::str::from_utf8(&data[offset..offset + name_len]).ok()?.to_string();
+        let name = std::str::from_utf8(&data[offset..offset + name_len])
+            .ok()?
+            .to_string();
         offset += name_len;
         let (value, val_consumed) = qpack_decode_string(&data[offset..])?;
-        Some((H3EncoderInstruction::InsertWithLiteralName { name, value },
-             offset + val_consumed))
+        Some((
+            H3EncoderInstruction::InsertWithLiteralName { name, value },
+            offset + val_consumed,
+        ))
     } else if byte & 0x20 != 0 {
         // Set Dynamic Table Capacity: 001xxxxx (Section 5.2.4)
         // NB: This overlaps with Duplicate (00xxxxxx) — the 001 prefix is
@@ -1051,7 +1373,11 @@ pub(crate) fn apply_encoder_instruction(
     instruction: &H3EncoderInstruction,
 ) -> bool {
     match instruction {
-        H3EncoderInstruction::InsertWithNameRef { is_static, name_index, value } => {
+        H3EncoderInstruction::InsertWithNameRef {
+            is_static,
+            name_index,
+            value,
+        } => {
             let name = if *is_static {
                 let idx = *name_index as usize;
                 if idx >= QPACK_STATIC_TABLE.len() {
@@ -1124,7 +1450,10 @@ pub(crate) fn decode_decoder_instruction(data: &[u8]) -> Option<(H3DecoderInstru
     } else {
         // Insert Count Increment: 00xxxxxx (Section 6.2.3)
         let (increment, consumed) = qpack_decode_int(data, 6)?;
-        Some((H3DecoderInstruction::InsertCountIncrement { increment }, consumed))
+        Some((
+            H3DecoderInstruction::InsertCountIncrement { increment },
+            consumed,
+        ))
     }
 }
 
@@ -1170,7 +1499,9 @@ impl H3DecoderState {
                 }
                 true
             }
-            H3DecoderInstruction::StreamCancel { stream_id: _stream_id } => {
+            H3DecoderInstruction::StreamCancel {
+                stream_id: _stream_id,
+            } => {
                 // StreamCancel: in a simplified model, no-op on bounded state.
                 // In the full model, this would reclaim decoder references.
                 true
@@ -1179,7 +1510,8 @@ impl H3DecoderState {
                 if *increment == 0 {
                     return false; // zero increment is illegal
                 }
-                self.received_insert_count = self.received_insert_count
+                self.received_insert_count = self
+                    .received_insert_count
                     .checked_add(*increment)
                     .unwrap_or(u64::MAX);
                 true
@@ -1273,10 +1605,7 @@ pub(crate) fn qpack_encode_block_with_dynamic(
 
 /// Encode a QPACK header block for a response.
 /// Returns the encoded bytes, or `None` on error.
-pub(crate) fn qpack_encode_block(
-    status: u16,
-    headers: &[(String, String)],
-) -> Option<Vec<u8>> {
+pub(crate) fn qpack_encode_block(status: u16, headers: &[(String, String)]) -> Option<Vec<u8>> {
     // NB7-34: 8192 bytes covers 99% of header blocks under typical load.
     // MTU range is 1200-65535; 8192 is small enough for a single QUIC packet payload
     // (typical: ~4KB after MTU discovery) while accommodating typical header sizes (< 4KB).
@@ -1376,4 +1705,3 @@ pub(crate) fn qpack_encode_block(
 
     Some(buf[..pos].to_vec())
 }
-

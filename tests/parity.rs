@@ -26645,7 +26645,9 @@ stdout(result.throw.message)
     );
     // Should mention HTTP/3 protocol layer readiness
     assert!(
-        stdout.contains("QPACK") || stdout.contains("protocol layer") || stdout.contains("transport"),
+        stdout.contains("QPACK")
+            || stdout.contains("protocol layer")
+            || stdout.contains("transport"),
         "NET7-2b: h3 error should indicate protocol layer status, got: {:?}",
         stdout
     );
@@ -27205,9 +27207,7 @@ stdout(result.__value.kind)
             "NET7-3a native compile failed: {}",
             String::from_utf8_lossy(&compile.stderr)
         );
-        let run = Command::new(&bin_path)
-            .output()
-            .expect("run native");
+        let run = Command::new(&bin_path).output().expect("run native");
         let stdout = normalize(&String::from_utf8_lossy(&run.stdout));
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
@@ -27480,9 +27480,7 @@ stdout(result.__value.kind)
             "NET7-3b native compile failed: {}",
             String::from_utf8_lossy(&compile.stderr)
         );
-        let run = Command::new(&bin_path)
-            .output()
-            .expect("run native");
+        let run = Command::new(&bin_path).output().expect("run native");
         let stdout = normalize(&String::from_utf8_lossy(&run.stdout));
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
@@ -27559,9 +27557,7 @@ stdout(result.throw.message)
             "NET7-3b native compile failed: {}",
             String::from_utf8_lossy(&compile.stderr)
         );
-        let run = Command::new(&bin_path)
-            .output()
-            .expect("run native");
+        let run = Command::new(&bin_path).output().expect("run native");
         let stdout = normalize(&String::from_utf8_lossy(&run.stdout));
         let _ = fs::remove_file(&bin_path);
         cleanup_net_project(&dir);
@@ -27814,7 +27810,8 @@ stdout(r.requests)
         .spawn()
         .expect("spawn interpreter");
 
-    let resp_interp = send_h1_get_and_assert(port_interp, "NET7-4a-2 interp", "v7-explicit-h11", &[]);
+    let resp_interp =
+        send_h1_get_and_assert(port_interp, "NET7-4a-2 interp", "v7-explicit-h11", &[]);
 
     let output_interp = child_interp.wait_with_output().expect("wait for interp");
     assert!(
@@ -28001,19 +27998,23 @@ fn test_nb7_15_js_h3_unsupported_source_inspection() {
     //     'httpServe: HTTP/3 ...')
     // We locate "'H3Unsupported'" and then extract the next JS string literal.
     let marker = "'H3Unsupported'";
-    let marker_pos = js_src.find(marker)
-        .unwrap_or_else(|| panic!(
-            "NB7-15: could not find {:?} in {:?}", marker, js_runtime_path
-        ));
+    let marker_pos = js_src.find(marker).unwrap_or_else(|| {
+        panic!(
+            "NB7-15: could not find {:?} in {:?}",
+            marker, js_runtime_path
+        )
+    });
     let after_marker = &js_src[marker_pos + marker.len()..];
 
     // Find the opening quote of the message string (starts with 'httpServe:)
     let msg_prefix = "'httpServe:";
-    let msg_start = after_marker.find(msg_prefix)
-        .unwrap_or_else(|| panic!(
+    let msg_start = after_marker.find(msg_prefix).unwrap_or_else(|| {
+        panic!(
             "NB7-15: could not find message string starting with {:?} after H3Unsupported marker \
-             in {:?}", msg_prefix, js_runtime_path
-        ));
+             in {:?}",
+            msg_prefix, js_runtime_path
+        )
+    });
     let msg_region = &after_marker[msg_start..];
 
     // Parse the JS string: may span multiple lines with ' + \n' concatenation.
@@ -28025,8 +28026,12 @@ fn test_nb7_15_js_h3_unsupported_source_inspection() {
 
     loop {
         // Skip whitespace to find next quote
-        while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\n'
-            || bytes[pos] == b'\r' || bytes[pos] == b'\t' || bytes[pos] == b'+')
+        while pos < len
+            && (bytes[pos] == b' '
+                || bytes[pos] == b'\n'
+                || bytes[pos] == b'\r'
+                || bytes[pos] == b'\t'
+                || bytes[pos] == b'+')
         {
             pos += 1;
         }
@@ -28051,7 +28056,8 @@ fn test_nb7_15_js_h3_unsupported_source_inspection() {
 
     assert!(
         !result.is_empty(),
-        "NB7-15: extracted empty H3Unsupported message from {:?}", js_runtime_path
+        "NB7-15: extracted empty H3Unsupported message from {:?}",
+        js_runtime_path
     );
 
     // The contract-pinned expected message (must match test_net7_4b above)
@@ -28289,7 +28295,8 @@ stdout(result.__value.kind)
     // This divergence is expected: each backend has a different transport substrate.
     // JS should NOT contain any runtime-gated error kinds
     assert!(
-        !js_kind.contains("H3QuicUnavailable") && !js_kind.contains("H3TransportPending")
+        !js_kind.contains("H3QuicUnavailable")
+            && !js_kind.contains("H3TransportPending")
             && !js_kind.contains("ProtocolError"),
         "NET7-4b-3: JS must NOT return runtime-gated H3 errors (it's permanently unsupported), got: {:?}",
         js_kind
@@ -28370,12 +28377,12 @@ stdout(result.throw.message)
 /// confirms both backends have the canonical check (not just truncation checks).
 #[test]
 fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read net_h3/qpack.rs");
-    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src_qpack =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+    let interp_src_frame =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}");
 
     // Interpreter must have the is_canonical_varint helper function.
@@ -28412,17 +28419,18 @@ fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
 /// h3_decode_frame_header (C) must also be used with a boundary check.
 #[test]
 fn test_net7_5a_h3_frame_bounds_hardening_source() {
-    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read net_h3/qpack.rs");
-    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
+    let interp_src_qpack =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+    let interp_src_frame =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
-    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
-        .expect("read net_h3/request.rs");
-    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let interp_src_req =
+        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+    let interp_src =
+        format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
 
     // Interpreter decode_frame must exist and check total > data.len().
     assert!(
@@ -28453,17 +28461,18 @@ fn test_net7_5a_h3_frame_bounds_hardening_source() {
 /// — runtime interop is covered by QPACK selftests + native runtime gate.
 #[test]
 fn test_net7_5b_h3_frame_type_source_parity() {
-    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read net_h3/qpack.rs");
-    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
+    let interp_src_qpack =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+    let interp_src_frame =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
-    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
-        .expect("read net_h3/request.rs");
-    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let interp_src_req =
+        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+    let interp_src =
+        format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
 
     // Both must have DATA frame type = 0x00
     assert!(
@@ -28522,7 +28531,8 @@ main =
     assert!(
         !stdout.contains("H3SelftestFailed") && !stderr.contains("H3SelftestFailed"),
         "NET7-5b: Native H3 selftests must pass (QPACK roundtrip), got: {:?} / {:?}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 }
 
@@ -28531,17 +28541,18 @@ main =
 /// from untrusted input. All allocations use fixed-size pre-allocated buffers.
 #[test]
 fn test_net7_5c_h3_bounded_copy_structural_audit() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src_qpack = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read net_h3/qpack.rs");
-    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src_qpack =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
+    let interp_src_frame =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
-    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
-        .expect("read net_h3/request.rs");
-    let interp_src = format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
+    let interp_src_req =
+        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
+    let interp_src =
+        format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
 
     // Native: qpack_decode_block uses stack-allocated H3Header array (bounded by max_headers param).
     // The caller passes the max, and the function never exceeds it.
@@ -28603,10 +28614,10 @@ fn test_net7_5c_h3_bounded_copy_structural_audit() {
 /// Both backends must have exactly 99 entries (RFC 9204 Appendix A, omitting index 22).
 #[test]
 fn test_net7_10c_qpack_static_table_count_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read net_h3/qpack.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
 
     // Native: C array of 99 {name, value} pairs.
     assert!(
@@ -28618,7 +28629,8 @@ fn test_net7_10c_qpack_static_table_count_parity() {
     // Interpreter: Rust slice of 99 QpackStaticEntry structs.
     assert!(
         interp_src.contains("name: \":authority\"")
-            && interp_src.contains("name: \"x-frame-options\", value: \"sameorigin\""),
+            && interp_src.contains("name: \"x-frame-options\"")
+            && interp_src.contains("value: \"sameorigin\""),
         "NET7-10c: Interpreter QPACK static table must have 99 entries (first=\":authority\", last=\"x-frame-options sameorigin\")"
     );
 
@@ -28639,12 +28651,12 @@ fn test_net7_10c_qpack_static_table_count_parity() {
 /// Both backends must use identical H3 error code values (RFC 9114 §8.1).
 #[test]
 fn test_net7_10c_h3_error_code_iana_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
-    let interp_src_quic = fs::read_to_string("src/interpreter/net_h3/quic.rs")
-        .expect("read net_h3/quic.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src_frame =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
+    let interp_src_quic =
+        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read net_h3/quic.rs");
     let interp_src = format!("{interp_src_frame}\n{interp_src_quic}");
 
     // KEY error codes that must match between backends:
@@ -28688,10 +28700,10 @@ fn test_net7_10c_h3_error_code_iana_parity() {
 /// Both backends must use identical SETTINGS identifiers (RFC 9114 §7.2.4.1).
 #[test]
 fn test_net7_10c_settings_ids_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
 
     // SETTINGS identifiers per RFC 9114:
     // QPACK_MAX_TABLE_CAPACITY = 0x01, MAX_FIELD_SECTION_SIZE = 0x06,
@@ -28718,8 +28730,8 @@ fn test_net7_10c_settings_ids_parity() {
 /// between Native and Interpreter backends.
 #[test]
 fn test_net7_10c_connection_state_machine_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
@@ -28762,10 +28774,10 @@ fn test_net7_10c_connection_state_machine_parity() {
 /// ordering violations, unknown pseudo-headers).
 #[test]
 fn test_net7_10c_request_validation_semantics_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src_req = fs::read_to_string("src/interpreter/net_h3/request.rs")
-        .expect("read net_h3/request.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src_req =
+        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
 
     // Both backends must validate the same pseudo-header rules.
 
@@ -28781,7 +28793,8 @@ fn test_net7_10c_request_validation_semantics_parity() {
 
     // 2. Empty pseudo-header value rejection.
     assert!(
-        native_src.contains("empty") && (native_src.contains("Empty") || native_src.contains("saw_method")),
+        native_src.contains("empty")
+            && (native_src.contains("Empty") || native_src.contains("saw_method")),
         "NET7-10c: Native must reject empty pseudo-header values"
     );
     assert!(
@@ -28791,8 +28804,8 @@ fn test_net7_10c_request_validation_semantics_parity() {
 
     // 3. Duplicate pseudo-header detection.
     assert!(
-        native_src.contains("saw_method") && native_src.contains("Duplicate") ||
-        native_src.contains("seen_method"),
+        native_src.contains("saw_method") && native_src.contains("Duplicate")
+            || native_src.contains("seen_method"),
         "NET7-10c: Native must detect duplicate pseudo-headers"
     );
     assert!(
@@ -28826,15 +28839,14 @@ fn test_net7_10c_request_validation_semantics_parity() {
 /// in a varint and encodes it as an H3 frame.
 #[test]
 fn test_net7_10c_goaway_encode_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_src_frame = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read net_h3/frame.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_src_frame =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
 
     // Both backends must have encode_goaway that frames a varint.
     assert!(
-        native_src.contains("h3_encode_goaway")
-            && native_src.contains("H3_FRAME_GOAWAY"),
+        native_src.contains("h3_encode_goaway") && native_src.contains("H3_FRAME_GOAWAY"),
         "NET7-10c: Native must have h3_encode_goaway producing GOAWAY frames"
     );
 
@@ -28842,7 +28854,8 @@ fn test_net7_10c_goaway_encode_parity() {
     assert!(
         interp_src_frame.contains("fn encode_goaway")
             && interp_src_frame.contains("H3_FRAME_GOAWAY")
-            && (interp_src_frame.contains("1 << 62") || interp_src_frame.contains("4611686018427387903")),
+            && (interp_src_frame.contains("1 << 62")
+                || interp_src_frame.contains("4611686018427387903")),
         "NET7-10c: Interpreter encode_goaway must use 62-bit varint max (NB7-62)"
     );
 }
@@ -28851,8 +28864,8 @@ fn test_net7_10c_goaway_encode_parity() {
 /// Both backends must use the same default idle timeout (30 seconds).
 #[test]
 fn test_net7_10c_idle_timeout_default_parity() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
@@ -28864,7 +28877,8 @@ fn test_net7_10c_idle_timeout_default_parity() {
 
     // Native: must also use 30s (or equivalent)
     assert!(
-        native_src.contains("30") && (native_src.contains("idle") || native_src.contains("timeout")),
+        native_src.contains("30")
+            && (native_src.contains("idle") || native_src.contains("timeout")),
         "NET7-10c: Native must use 30s as idle timeout reference"
     );
 }
@@ -28967,8 +28981,7 @@ fn test_net7_10d_dynamic_table_struct_parity() {
     // Interpreter: verify H3DynamicTable::new(capacity) initializes to correct defaults
     // by inspecting the source for expected fields and values
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
     assert!(
@@ -28998,8 +29011,7 @@ fn test_net7_10d_dynamic_table_struct_parity() {
 
     // Native: verify H3DynamicTable struct definition exists
     let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/codegen/native_runtime.c"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
     )
     .unwrap();
     assert!(
@@ -29023,13 +29035,11 @@ fn test_net7_10d_eviction_semantics_parity() {
     // Source-level parity check: both backends must use the same size formula
     // entry_size = name.len + value.len + 32 (RFC 9204 Section 4.1.3)
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
     let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/codegen/native_runtime.c"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
     )
     .unwrap();
 
@@ -29068,13 +29078,11 @@ fn test_net7_10d_eviction_semantics_parity() {
 #[test]
 fn test_net7_10d_post_base_lookup_parity() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
     let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/codegen/native_runtime.c"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
     )
     .unwrap();
 
@@ -29103,13 +29111,11 @@ fn test_net7_10d_post_base_lookup_parity() {
 #[test]
 fn test_net7_10d_encoder_instruction_parity() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
     let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/codegen/native_runtime.c"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
     )
     .unwrap();
 
@@ -29178,13 +29184,11 @@ fn test_net7_10d_encoder_instruction_parity() {
 #[test]
 fn test_net7_10d_decoder_instruction_parity() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
     let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/codegen/native_runtime.c"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
     )
     .unwrap();
 
@@ -29253,13 +29257,11 @@ fn test_net7_10d_decoder_instruction_parity() {
 #[test]
 fn test_net7_10d_decode_block_dynamic_integration() {
     let interp_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/interpreter/net_h3/qpack.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
     let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/codegen/native_runtime.c"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
     )
     .unwrap();
 
@@ -29364,8 +29366,8 @@ stdout(result.__value.kind)
 fn test_net7_11b_runtime_malformed_reject_selftest_passes() {
     // The interpreter selftest (test_net7_11b_runtime_malformed_h3_reject)
     // is a lib test. This parity test confirms the runtime test exists.
-    let interp_src = fs::read_to_string("src/interpreter/net_h3/mod.rs")
-        .expect("read net_h3/mod.rs");
+    let interp_src =
+        fs::read_to_string("src/interpreter/net_h3/mod.rs").expect("read net_h3/mod.rs");
     assert!(
         interp_src.contains("test_net7_11b_runtime_malformed_h3_reject"),
         "NET7-11b: Interpreter must have runtime malformed H3 reject tests"
@@ -29397,7 +29399,8 @@ fn test_net7_11b_0rtt_default_off_no_surface() {
             assert!(
                 !src.contains(patt),
                 "NET7-11b: 0-RTT surface leak: '{}' found in {}",
-                patt, path
+                patt,
+                path
             );
         }
     }
@@ -29475,10 +29478,9 @@ stdout(result.throw.kind)
 /// NET7-11b-4: Bounded-copy structural audit (runtime constant parity).
 #[test]
 fn test_net7_11b_hardening_bounded_copy_parity() {
-    let nat_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let ip_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read frame.rs");
+    let nat_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let ip_src = fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
 
     // Both backends must define the same bounded limits
     assert!(
@@ -29486,14 +29488,12 @@ fn test_net7_11b_hardening_bounded_copy_parity() {
         "NET7-11b: H3_MAX_STREAMS must be defined in both backends"
     );
     assert!(
-        nat_src.contains("H3_MAX_SETTINGS_PAIRS")
-            && ip_src.contains("H3_MAX_SETTINGS_PAIRS"),
+        nat_src.contains("H3_MAX_SETTINGS_PAIRS") && ip_src.contains("H3_MAX_SETTINGS_PAIRS"),
         "NET7-11b: H3_MAX_SETTINGS_PAIRS must be defined in both backends"
     );
 
     // Interpreter has runtime hardening tests
-    let mod_src = fs::read_to_string("src/interpreter/net_h3/mod.rs")
-        .expect("read mod.rs");
+    let mod_src = fs::read_to_string("src/interpreter/net_h3/mod.rs").expect("read mod.rs");
     assert!(
         mod_src.contains("test_net7_11b_runtime_malformed_h3_reject"),
         "NET7-11b: malformed H3 reject unit test must exist"
@@ -29645,7 +29645,8 @@ fn test_net7_12c_native_interpreter_h3_handler_contract_parity() {
         "NET7-12c: Native must increment pool.request_count"
     );
     assert!(
-        interp_quic_src.contains("request_count += 1") || interp_quic_src.contains("request_count +="),
+        interp_quic_src.contains("request_count += 1")
+            || interp_quic_src.contains("request_count +="),
         "NET7-12c: Interpreter must increment request_count"
     );
 }
@@ -29668,8 +29669,9 @@ fn test_net7_12d_graceful_shutdown_goaway_drain_close_parity() {
         .expect("read native_runtime.c");
     let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
         .expect("read quic.rs");
-    let interp_conn_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
-        .expect("read connection.rs");
+    let interp_conn_src =
+        fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
+            .expect("read connection.rs");
 
     // --- Native: GOAWAY -> drain wait -> close ---
 
@@ -29695,7 +29697,8 @@ fn test_net7_12d_graceful_shutdown_goaway_drain_close_parity() {
         "NET7-12d: Native must have a bounded drain timeout"
     );
     assert!(
-        native_src.contains("quiche_conn_is_closed") && native_src.contains("quiche_conn_is_draining"),
+        native_src.contains("quiche_conn_is_closed")
+            && native_src.contains("quiche_conn_is_draining"),
         "NET7-12d: Native must poll connection closed/draining state during drain"
     );
 
@@ -29773,8 +29776,9 @@ fn test_net7_12d_shutdown_test_coverage() {
 
     let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
         .expect("read quic.rs");
-    let interp_conn_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
-        .expect("read connection.rs");
+    let interp_conn_src =
+        fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/connection.rs"))
+            .expect("read connection.rs");
 
     // Interpreter must have both test cases in quic.rs or connection.rs tests.
     let combined = format!("{}{}", interp_quic_src, interp_conn_src);
@@ -29837,10 +29841,9 @@ fn test_net7_12e_h3_e2e_headers_only_benchmark() {
     }
 
     // Read Interpreter source to count allocation observation points.
-    let frame_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read frame.rs");
-    let request_src = fs::read_to_string("src/interpreter/net_h3/request.rs")
-        .expect("read request.rs");
+    let frame_src = fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
+    let request_src =
+        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read request.rs");
 
     // Build a simulated H3 request: QPACK-encoded HEADERS frame.
     // Mirrors what a real H3 client would send on a request stream.
@@ -29856,9 +29859,8 @@ fn test_net7_12e_h3_e2e_headers_only_benchmark() {
     // Benchmark: decode request -> extract fields -> build response -> encode.
     const WARMUP: u64 = 100;
     const BENCH_DURATION_MS: u64 = 50;
-    let response_headers: Vec<(String, String)> = vec![
-        ("content-type".to_string(), "application/json".to_string()),
-    ];
+    let response_headers: Vec<(String, String)> =
+        vec![("content-type".to_string(), "application/json".to_string())];
 
     // Warmup
     for _ in 0..WARMUP {
@@ -29887,17 +29889,16 @@ fn test_net7_12e_h3_e2e_headers_only_benchmark() {
     let elapsed_ms = start.elapsed().as_millis() as u64;
     let cycles_per_ms = cycles / elapsed_ms.max(1);
 
-    let encode_frame_allocs = frame_src.matches("vec![0u8;").count()
-        + frame_src.matches("to_vec()").count();
-    let request_allocs = request_src.matches("Vec::new()").count()
-        + request_src.matches("Vec<(String").count();
+    let encode_frame_allocs =
+        frame_src.matches("vec![0u8;").count() + frame_src.matches("to_vec()").count();
+    let request_allocs =
+        request_src.matches("Vec::new()").count() + request_src.matches("Vec<(String").count();
 
     eprintln!(
         "NET7-12e-1 [h3 e2e headers-only] cycles={} elapsed={}ms cycles/ms={} \
          | interp encode_frame allocs={} request_path allocs={} \
          | H2 comparison: hpack+frame is similar codec depth",
-        cycles, elapsed_ms, cycles_per_ms,
-        encode_frame_allocs, request_allocs,
+        cycles, elapsed_ms, cycles_per_ms, encode_frame_allocs, request_allocs,
     );
 
     assert!(
@@ -29926,7 +29927,10 @@ fn test_net7_12e_h3_e2e_4kib_body_benchmark() {
 
     let body_4k: Vec<u8> = vec![b'X'; 4096];
     let response_headers: Vec<(String, String)> = vec![
-        ("content-type".to_string(), "application/octet-stream".to_string()),
+        (
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        ),
         ("content-length".to_string(), "4096".to_string()),
     ];
 
@@ -29995,7 +29999,10 @@ fn test_net7_12e_h3_e2e_64kib_body_benchmark() {
 
     let body_64k: Vec<u8> = vec![b'X'; 65536];
     let response_headers: Vec<(String, String)> = vec![
-        ("content-type".to_string(), "application/octet-stream".to_string()),
+        (
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        ),
         ("content-length".to_string(), "65536".to_string()),
     ];
 
@@ -30069,9 +30076,8 @@ fn test_net7_12e_h3_e2e_32_request_throughput_benchmark() {
     }
 
     let body_1k: Vec<u8> = vec![b'{'; 1024];
-    let response_headers: Vec<(String, String)> = vec![
-        ("content-type".to_string(), "application/json".to_string()),
-    ];
+    let response_headers: Vec<(String, String)> =
+        vec![("content-type".to_string(), "application/json".to_string())];
 
     // Warmup
     for frame in &request_frames {
@@ -30135,16 +30141,16 @@ fn test_net7_12e_h3_e2e_32_request_throughput_benchmark() {
 ///   - No aggregate buffer across frames
 #[test]
 fn test_net7_12e_h3_allocation_materialization_audit() {
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
-    let interp_frame_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read frame.rs");
-    let _interp_request_src = fs::read_to_string("src/interpreter/net_h3/request.rs")
-        .expect("read request.rs");
-    let interp_qpack_src = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read qpack.rs");
-    let interp_quic_src = fs::read_to_string("src/interpreter/net_h3/quic.rs")
-        .expect("read quic.rs");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let interp_frame_src =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
+    let _interp_request_src =
+        fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read request.rs");
+    let interp_qpack_src =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read qpack.rs");
+    let interp_quic_src =
+        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
 
     // ── Interpreter: encode_frame per-frame allocation audit ──
     let encode_frame_vec_allocs = interp_frame_src.matches("vec![0u8;").count();
@@ -30214,7 +30220,8 @@ fn test_net7_12e_h3_allocation_materialization_audit() {
 
     // ── Interpreter: Vec<u8> gather in request decode path ──
     assert!(
-        interp_qpack_src.contains("fn qpack_decode_block(") || interp_qpack_src.contains("fn qpack_decode_block_r("),
+        interp_qpack_src.contains("fn qpack_decode_block(")
+            || interp_qpack_src.contains("fn qpack_decode_block_r("),
         "NET7-12e: Interpreter must have qpack_decode_block for request decode"
     );
 
@@ -30237,8 +30244,7 @@ fn test_net7_12e_h3_allocation_materialization_audit() {
          | interp: encode_frame vec_allocs={} to_vec={} write_all={} \
          | native: stack buffers (hdrs[8192]+data[65536]) stream_send={} \
          | no aggregate buffer in either backend",
-        encode_frame_vec_allocs, encode_frame_to_vec,
-        quic_write_all_count, stream_send_count,
+        encode_frame_vec_allocs, encode_frame_to_vec, quic_write_all_count, stream_send_count,
     );
 }
 
@@ -30258,8 +30264,7 @@ fn test_net7_12e_h3_allocation_materialization_audit() {
 #[test]
 fn test_net7_12f_release_truth_blocker_closure_verified() {
     // ── NB7-114 FIXED: Interpreter public H3 path connected ──
-    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs")
-        .expect("read net_eval.rs");
+    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
     // The dlopen gate and H3TransportPending/H3QuicUnavailable paths must be gone
     assert!(
         !net_eval_src.contains("H3TransportPending"),
@@ -30276,8 +30281,8 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
     );
 
     // ── NB7-65 FIXED: Native stream dispatch implemented ──
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     // Phase 8d placeholder must be gone
     assert!(
         !native_src.contains("Phase 8d will add stream-level H3 dispatch here"),
@@ -30302,16 +30307,15 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
         "NET7-12f: NB7-67 requires quiche_conn_close in shutdown path"
     );
     // Interpreter: shutdown + drain
-    let interp_quic_src = fs::read_to_string("src/interpreter/net_h3/quic.rs")
-        .expect("read quic.rs");
+    let interp_quic_src =
+        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
     assert!(
         interp_quic_src.contains("shutdown") || interp_quic_src.contains("GOAWAY"),
         "NET7-12f: NB7-67 requires shutdown/GOAWAY in Interpreter H3 path"
     );
 
     // ── NB7-115 FIXED: end-to-end benchmarks exist ──
-    let parity_src = fs::read_to_string("tests/parity.rs")
-        .expect("read parity.rs");
+    let parity_src = fs::read_to_string("tests/parity.rs").expect("read parity.rs");
     assert!(
         parity_src.contains("test_net7_12e_h3_e2e_headers_only_benchmark"),
         "NET7-12f: NB7-115 requires e2e headers-only benchmark"
@@ -30342,16 +30346,15 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
 #[test]
 fn test_net7_12f_release_gate_all_criteria_met() {
     // Gate 1: h1/h2 existing contract — v1-v6 functions still present
-    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs")
-        .expect("read net_eval.rs");
+    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
     assert!(
         net_eval_src.contains("httpServe") && net_eval_src.contains("httpParseRequestHead"),
         "NET7-12f Gate 1: h1/h2 API surface must be intact in net_eval.rs"
     );
 
     // Gate 2: h3 runtime parity — both backends have h3 implementation
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     let interp_h3_exists = std::path::Path::new("src/interpreter/net_h3/mod.rs").exists();
     assert!(
         native_src.contains("serve_h3_loop"),
@@ -30363,26 +30366,27 @@ fn test_net7_12f_release_gate_all_criteria_met() {
     );
 
     // Gate 3: JS h3 explicit unsupported
-    let js_runtime_src = fs::read_to_string("src/js/runtime.rs")
-        .expect("read js/runtime.rs");
+    let js_runtime_src = fs::read_to_string("src/js/runtime.rs").expect("read js/runtime.rs");
     assert!(
         js_runtime_src.contains("H3Unsupported"),
         "NET7-12f Gate 3: JS must return H3Unsupported for h3 requests"
     );
 
     // Gate 4: WASM compile error for all net APIs
-    let wasm_emit_src = fs::read_to_string("src/codegen/emit_wasm_c.rs")
-        .expect("read emit_wasm_c.rs");
+    let wasm_emit_src =
+        fs::read_to_string("src/codegen/emit_wasm_c.rs").expect("read emit_wasm_c.rs");
     assert!(
-        wasm_emit_src.contains("taida_net_http_serve") && wasm_emit_src.contains("does not support"),
+        wasm_emit_src.contains("taida_net_http_serve")
+            && wasm_emit_src.contains("does not support"),
         "NET7-12f Gate 4: WASM must produce compile error for net HTTP APIs"
     );
 
     // Gate 5: interop — both backends have QPACK + H3 frame codec
-    let interp_qpack_src = fs::read_to_string("src/interpreter/net_h3/qpack.rs")
-        .expect("read qpack.rs");
+    let interp_qpack_src =
+        fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read qpack.rs");
     assert!(
-        interp_qpack_src.contains("qpack_encode_block") && interp_qpack_src.contains("qpack_decode_block"),
+        interp_qpack_src.contains("qpack_encode_block")
+            && interp_qpack_src.contains("qpack_decode_block"),
         "NET7-12f Gate 5: Interpreter must have qpack_encode/decode_block"
     );
     assert!(
@@ -30395,16 +30399,16 @@ fn test_net7_12f_release_gate_all_criteria_met() {
         !native_src.contains("memcpy(aggregate"),
         "NET7-12f Gate 6: Native must not have aggregate buffer copies"
     );
-    let interp_quic_src = fs::read_to_string("src/interpreter/net_h3/quic.rs")
-        .expect("read quic.rs");
+    let interp_quic_src =
+        fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
     assert!(
         !interp_quic_src.contains("extend_from_slice(&hdrs_frame"),
         "NET7-12f Gate 6: Interpreter must not aggregate HEADERS+DATA"
     );
 
     // Gate 7: hardening — malformed reject + 0-RTT default-off + no silent fallback
-    let interp_frame_src = fs::read_to_string("src/interpreter/net_h3/frame.rs")
-        .expect("read frame.rs");
+    let interp_frame_src =
+        fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
     // Frame type validation exists
     assert!(
         interp_frame_src.contains("SETTINGS") && interp_frame_src.contains("HEADERS"),
@@ -30439,8 +30443,7 @@ fn test_net7_12f_release_gate_all_criteria_met() {
 /// - Phase 12 tasks are all structurally addressed
 #[test]
 fn test_net7_12f_phase_completion_structural_audit() {
-    let parity_src = fs::read_to_string("tests/parity.rs")
-        .expect("read parity.rs");
+    let parity_src = fs::read_to_string("tests/parity.rs").expect("read parity.rs");
 
     // Count v7 parity tests — expect substantial coverage
     let v7_test_count = parity_src.matches("fn test_net7_").count();
@@ -30459,16 +30462,15 @@ fn test_net7_12f_phase_completion_structural_audit() {
     );
 
     // No residual Phase 8d placeholder in native source
-    let native_src = fs::read_to_string("src/codegen/native_runtime.c")
-        .expect("read native_runtime.c");
+    let native_src =
+        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
     assert!(
         !native_src.contains("Phase 8d will add"),
         "NET7-12f: Phase 8d placeholders must all be resolved"
     );
 
     // No TODO(NB7-87) in interpreter H3 source
-    let quic_src = fs::read_to_string("src/interpreter/net_h3/quic.rs")
-        .expect("read quic.rs");
+    let quic_src = fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
     assert!(
         !quic_src.contains("TODO(NB7-87)"),
         "NET7-12f: NB7-87 TODO must be resolved"
@@ -30518,16 +30520,24 @@ fn decode_qpack_for_bench(data: &[u8]) -> Vec<(String, String)> {
             headers.push((name.to_string(), value.to_string()));
         } else if byte & 0x20 == 0x20 {
             pos += 1;
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let name_len = data[pos] as usize;
             pos += 1;
-            if pos + name_len > data.len() { break; }
+            if pos + name_len > data.len() {
+                break;
+            }
             let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
             pos += name_len;
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let value_len = data[pos] as usize;
             pos += 1;
-            if pos + value_len > data.len() { break; }
+            if pos + value_len > data.len() {
+                break;
+            }
             let value = String::from_utf8_lossy(&data[pos..pos + value_len]).to_string();
             pos += value_len;
             headers.push((name, value));
@@ -30541,8 +30551,10 @@ fn decode_qpack_for_bench(data: &[u8]) -> Vec<(String, String)> {
 fn encode_qpack_response_for_bench(status: u16, headers: &[(String, String)]) -> Vec<u8> {
     let mut buf = vec![0u8; 8192];
     let mut pos = 0;
-    buf[pos] = 0x00; pos += 1;
-    buf[pos] = 0x00; pos += 1;
+    buf[pos] = 0x00;
+    pos += 1;
+    buf[pos] = 0x00;
+    pos += 1;
     let status_idx = match status {
         200 => Some(25u8),
         304 => Some(26),
@@ -30554,22 +30566,28 @@ fn encode_qpack_response_for_bench(status: u16, headers: &[(String, String)]) ->
         buf[pos] = 0xC0 | idx;
         pos += 1;
     } else {
-        buf[pos] = 0x20; pos += 1;
+        buf[pos] = 0x20;
+        pos += 1;
         let name = b":status";
-        buf[pos] = name.len() as u8; pos += 1;
+        buf[pos] = name.len() as u8;
+        pos += 1;
         buf[pos..pos + name.len()].copy_from_slice(name);
         pos += name.len();
         let val = status.to_string();
-        buf[pos] = val.len() as u8; pos += 1;
+        buf[pos] = val.len() as u8;
+        pos += 1;
         buf[pos..pos + val.len()].copy_from_slice(val.as_bytes());
         pos += val.len();
     }
     for (name, value) in headers {
-        buf[pos] = 0x20; pos += 1;
-        buf[pos] = name.len() as u8; pos += 1;
+        buf[pos] = 0x20;
+        pos += 1;
+        buf[pos] = name.len() as u8;
+        pos += 1;
         buf[pos..pos + name.len()].copy_from_slice(name.as_bytes());
         pos += name.len();
-        buf[pos] = value.len() as u8; pos += 1;
+        buf[pos] = value.len() as u8;
+        pos += 1;
         buf[pos..pos + value.len()].copy_from_slice(value.as_bytes());
         pos += value.len();
     }
@@ -30579,14 +30597,19 @@ fn encode_qpack_response_for_bench(status: u16, headers: &[(String, String)]) ->
 fn build_request_headers_frame_for_bench(headers: &[(String, String)]) -> Vec<u8> {
     let mut qpack_buf = vec![0u8; 8192];
     let mut pos = 0;
-    qpack_buf[pos] = 0x00; pos += 1;
-    qpack_buf[pos] = 0x00; pos += 1;
+    qpack_buf[pos] = 0x00;
+    pos += 1;
+    qpack_buf[pos] = 0x00;
+    pos += 1;
     for (name, value) in headers {
-        qpack_buf[pos] = 0x20; pos += 1;
-        qpack_buf[pos] = name.len() as u8; pos += 1;
+        qpack_buf[pos] = 0x20;
+        pos += 1;
+        qpack_buf[pos] = name.len() as u8;
+        pos += 1;
         qpack_buf[pos..pos + name.len()].copy_from_slice(name.as_bytes());
         pos += name.len();
-        qpack_buf[pos] = value.len() as u8; pos += 1;
+        qpack_buf[pos] = value.len() as u8;
+        pos += 1;
         qpack_buf[pos..pos + value.len()].copy_from_slice(value.as_bytes());
         pos += value.len();
     }
@@ -30716,8 +30739,7 @@ fn test_nb7_116_native_multi_data_body_concatenation() {
 /// stream with SETTINGS as the first frame. GOAWAY is then sent on this stream.
 #[test]
 fn test_nb7_115_interpreter_control_stream_init() {
-    let source =
-        std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
 
     // The control stream initialization must exist in serve_h3_loop.
     let serve_loop_section: String = source
@@ -30754,8 +30776,7 @@ fn test_nb7_115_interpreter_control_stream_init() {
 /// existing control stream, not on a newly opened unidirectional stream.
 #[test]
 fn test_nb7_115_interpreter_goaway_uses_control_stream() {
-    let source =
-        std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
+    let source = std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
 
     // Find the GOAWAY shutdown section.
     let shutdown_section: String = source

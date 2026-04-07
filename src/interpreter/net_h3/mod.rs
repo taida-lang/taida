@@ -1,3 +1,5 @@
+mod connection;
+mod frame;
 /// HTTP/3 parity implementation for `taida-lang/net` v7.
 ///
 /// **NB7-42: Phase 6+** — split into `qpack.rs` / `frame.rs` / `request.rs` / `connection.rs`.
@@ -43,11 +45,8 @@
 /// - Handler contract is the same 14-field request pack as h1/h2
 /// - Bounded-copy discipline: 1 packet = at most 1 materialization
 /// - 0-RTT: default-off, not exposed
-
 mod qpack;
-mod frame;
 mod request;
-mod connection;
 // NET7-9b: QUIC transport substrate (quinn) — Phase 9
 mod quic;
 
@@ -58,72 +57,75 @@ mod quic;
 // From qpack.rs
 #[allow(unused_imports)]
 pub(crate) use qpack::{
-    QpackStaticEntry, QPACK_STATIC_TABLE,
-    H3DecodeError, H3Result, H3Header,
-    qpack_decode_int, qpack_decode_int_r,
-    qpack_decode_string, qpack_decode_string_r,
-    qpack_decode_block, qpack_decode_block_r,
-    qpack_encode_int, qpack_encode_string,
-    qpack_encode_block, qpack_encode_block_with_dynamic,
-    H3DynamicTable, DynamicTableEntry,
-    H3EncoderInstruction, H3DecoderInstruction, H3DecoderState,
-    encode_insert_with_name_ref, encode_insert_with_literal_name,
-    encode_duplicate, encode_set_capacity,
-    encode_section_ack, encode_stream_cancel, encode_insert_count_increment,
-    decode_encoder_instruction, decode_decoder_instruction,
+    DynamicTableEntry,
+    H3DecodeError,
+    H3DecoderInstruction,
+    H3DecoderState,
+    H3DynamicTable,
+    H3EncoderInstruction,
+    H3Header,
+    H3Result,
+    QPACK_STATIC_TABLE,
+    QpackStaticEntry,
     apply_encoder_instruction,
+    decode_decoder_instruction,
+    decode_encoder_instruction,
+    decode_frame_header_r,
+    decode_frame_r,
+    encode_duplicate,
+    encode_insert_count_increment,
+    encode_insert_with_literal_name,
+    encode_insert_with_name_ref,
+    encode_section_ack,
+    encode_set_capacity,
+    encode_stream_cancel,
+    qpack_decode_block,
+    qpack_decode_block_r,
+    qpack_decode_int,
+    qpack_decode_int_r,
+    qpack_decode_string,
+    qpack_decode_string_r,
+    qpack_encode_block,
+    qpack_encode_block_with_dynamic,
+    qpack_encode_int,
+    qpack_encode_string,
     // These frame decode _r variants ended up in qpack due to original file layout:
-    varint_decode_r, decode_frame_header_r, decode_frame_r,
+    varint_decode_r,
 };
 
 // From frame.rs
 #[allow(unused_imports)]
 pub(crate) use frame::{
-    is_canonical_varint,
+    H3_DEFAULT_MAX_FIELD_SECTION_SIZE, H3_ERROR_FRAME_ERROR, H3_ERROR_FRAME_UNEXPECTED,
+    H3_ERROR_GENERAL_PROTOCOL_ERROR, H3_ERROR_INTERNAL_ERROR, H3_ERROR_NO_ERROR,
+    H3_ERROR_REQUEST_INCOMPLETE, H3_ERROR_STREAM_CREATION_ERROR, H3_FRAME_CANCEL_PUSH,
+    H3_FRAME_DATA, H3_FRAME_GOAWAY, H3_FRAME_HEADERS, H3_FRAME_MAX_PUSH_ID, H3_FRAME_PUSH_PROMISE,
+    H3_FRAME_SETTINGS, H3_MAX_HEADERS, H3_MAX_SETTINGS_PAIRS, H3_MAX_STREAMS,
+    H3_SETTINGS_MAX_FIELD_SECTION_SIZE, H3_SETTINGS_QPACK_BLOCKED_STREAMS,
+    H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, H3Settings, decode_frame, decode_frame_header,
+    decode_settings, encode_frame, encode_goaway, encode_settings, is_canonical_varint,
     varint_decode, varint_encode,
-    H3Settings, H3_MAX_SETTINGS_PAIRS,
-    encode_settings, decode_settings,
-    encode_goaway,
-    H3_DEFAULT_MAX_FIELD_SECTION_SIZE, H3_MAX_HEADERS, H3_MAX_STREAMS,
-    H3_FRAME_DATA, H3_FRAME_HEADERS, H3_FRAME_CANCEL_PUSH,
-    H3_FRAME_SETTINGS, H3_FRAME_PUSH_PROMISE, H3_FRAME_GOAWAY, H3_FRAME_MAX_PUSH_ID,
-    H3_ERROR_NO_ERROR, H3_ERROR_GENERAL_PROTOCOL_ERROR, H3_ERROR_INTERNAL_ERROR,
-    H3_ERROR_STREAM_CREATION_ERROR, H3_ERROR_FRAME_UNEXPECTED,
-    H3_ERROR_FRAME_ERROR, H3_ERROR_REQUEST_INCOMPLETE,
-    H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, H3_SETTINGS_MAX_FIELD_SECTION_SIZE,
-    H3_SETTINGS_QPACK_BLOCKED_STREAMS,
-    encode_frame, decode_frame_header, decode_frame,
 };
 
 // From request.rs
 #[allow(unused_imports)]
 pub(crate) use request::{
-    selftest_qpack_roundtrip, selftest_request_validation,
-    H3RequestError, H3RequestFields, extract_request_fields,
-    build_response_headers_frame, build_data_frame,
-    SelftestResult, run_selftests,
+    H3RequestError, H3RequestFields, SelftestResult, build_data_frame,
+    build_response_headers_frame, extract_request_fields, run_selftests, selftest_qpack_roundtrip,
+    selftest_request_validation,
 };
 
 // From connection.rs — NB7-73: intentional API surface for external callers
 #[allow(unused_imports)]
-pub(crate) use connection::{
-    H3StreamState, H3Stream,
-    H3ConnState, H3HandlerContext,
-    H3Connection,
-};
+pub(crate) use connection::{H3ConnState, H3Connection, H3HandlerContext, H3Stream, H3StreamState};
 
 // NET7-9b: QUIC transport substrate (quinn) — Phase 9
 // NET7-12a: serve_h3_loop exposed for net_eval.rs -> quic.rs connection
 // NET7-12b: H3RequestData/H3ResponseData for handler dispatch bridge
 #[allow(unused_imports)]
 pub(crate) use quic::{
-    create_quic_endpoint,
-    accept_connection,
-    serve_h3_loop,
-    H3RequestData,
-    H3ResponseData,
-    H3_ALPN,
-    DEFAULT_H3_PORT,
+    DEFAULT_H3_PORT, H3_ALPN, H3RequestData, H3ResponseData, accept_connection,
+    create_quic_endpoint, serve_h3_loop,
 };
 
 #[cfg(test)]
@@ -143,8 +145,8 @@ mod tests {
                 let mut buf = [0u8; 16];
                 let written = qpack_encode_int(&mut buf, prefix_bits, value, 0x00)
                     .expect("encode should succeed");
-                let (decoded, consumed) = qpack_decode_int(&buf[..written], prefix_bits)
-                    .expect("decode should succeed");
+                let (decoded, consumed) =
+                    qpack_decode_int(&buf[..written], prefix_bits).expect("decode should succeed");
                 assert_eq!(decoded, value, "prefix={}, value={}", prefix_bits, value);
                 assert_eq!(consumed, written);
             }
@@ -153,7 +155,12 @@ mod tests {
 
     #[test]
     fn test_qpack_string_roundtrip() {
-        for s in &["", "hello", "content-type", "x-custom-header-with-long-name"] {
+        for s in &[
+            "",
+            "hello",
+            "content-type",
+            "x-custom-header-with-long-name",
+        ] {
             let mut buf = [0u8; 256];
             let written = qpack_encode_string(&mut buf, s).expect("encode");
             let (decoded, consumed) = qpack_decode_string(&buf[..written]).expect("decode");
@@ -187,7 +194,10 @@ mod tests {
     fn test_h3_settings_encode_decode() {
         let settings_payload = encode_settings().expect("encode");
         let settings = decode_settings(&settings_payload).expect("decode");
-        assert_eq!(settings.max_field_section_size, H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+        assert_eq!(
+            settings.max_field_section_size,
+            H3_DEFAULT_MAX_FIELD_SECTION_SIZE
+        );
     }
 
     #[test]
@@ -233,11 +243,26 @@ mod tests {
     #[test]
     fn test_extract_request_fields_valid() {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/test?q=1".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
-            H3Header { name: ":authority".into(), value: "example.com".into() },
-            H3Header { name: "accept".into(), value: "*/*".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/test?q=1".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
+            H3Header {
+                name: ":authority".into(),
+                value: "example.com".into(),
+            },
+            H3Header {
+                name: "accept".into(),
+                value: "*/*".into(),
+            },
         ];
         let fields = extract_request_fields(&hdrs).expect("valid request");
         assert_eq!(fields.method, "GET");
@@ -250,8 +275,14 @@ mod tests {
     #[test]
     fn test_extract_request_fields_missing_scheme() {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
         ];
         assert!(matches!(
             extract_request_fields(&hdrs),
@@ -262,9 +293,18 @@ mod tests {
     #[test]
     fn test_extract_request_fields_empty_method() {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
         ];
         assert!(matches!(
             extract_request_fields(&hdrs),
@@ -275,8 +315,14 @@ mod tests {
     #[test]
     fn test_extract_request_fields_ordering() {
         let hdrs = vec![
-            H3Header { name: "host".into(), value: "localhost".into() },
-            H3Header { name: ":method".into(), value: "GET".into() },
+            H3Header {
+                name: "host".into(),
+                value: "localhost".into(),
+            },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
         ];
         assert!(matches!(
             extract_request_fields(&hdrs),
@@ -287,10 +333,22 @@ mod tests {
     #[test]
     fn test_extract_request_fields_duplicate_pseudo() {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
-            H3Header { name: ":method".into(), value: "POST".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
+            H3Header {
+                name: ":method".into(),
+                value: "POST".into(),
+            },
         ];
         assert!(matches!(
             extract_request_fields(&hdrs),
@@ -301,10 +359,22 @@ mod tests {
     #[test]
     fn test_extract_request_fields_unknown_pseudo() {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
-            H3Header { name: ":protocol".into(), value: "ws".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
+            H3Header {
+                name: ":protocol".into(),
+                value: "ws".into(),
+            },
         ];
         assert!(matches!(
             extract_request_fields(&hdrs),
@@ -314,9 +384,7 @@ mod tests {
 
     #[test]
     fn test_response_headers_frame() {
-        let headers = vec![
-            ("content-type".to_string(), "text/plain".to_string()),
-        ];
+        let headers = vec![("content-type".to_string(), "text/plain".to_string())];
         let frame = build_response_headers_frame(200, &headers).expect("build");
         let (ft, fl, hs) = decode_frame_header(&frame).expect("decode header");
         assert_eq!(ft, H3_FRAME_HEADERS);
@@ -365,8 +433,7 @@ mod tests {
         assert!(varint_decode(&[0x00]).is_some()); // 0 as 1-byte: OK
         assert!(varint_decode(&[0x40, 0x00]).is_none()); // 0 as 2-byte: rejected
         assert!(varint_decode(&[0x80, 0x00, 0x00, 0x00]).is_none()); // 0 as 4-byte: rejected
-        assert!(varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            .is_none()); // 0 as 8-byte: rejected
+        assert!(varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_none()); // 0 as 8-byte: rejected
         // Value 63 encoded as 2 bytes must be rejected (fits in 1 byte).
         assert!(varint_decode(&[0x40, 0x3F]).is_none()); // 63 as 2-byte: rejected
         // Value 16383 as 4 bytes must be rejected (fits in 2 bytes).
@@ -397,7 +464,7 @@ mod tests {
         // Frame declares 3 bytes payload and exactly 3 available → accept
         let payload = [
             0x00u8, // DATA frame
-            0x03, // length = 3 (1-byte varint)
+            0x03,   // length = 3 (1-byte varint)
             0xAA, 0xBB, 0xCC, // exactly 3 bytes
         ];
         let (ft, body) = decode_frame(&payload).expect("exact fit should succeed");
@@ -459,10 +526,10 @@ mod tests {
         // Verify round-trip with prefix_bits=62
         let mut buf = [0x00u8; 16];
         let test_val: u64 = 4_611_686_018_427_387_902; // 2^62 - 2
-        let written = qpack_encode_int(&mut buf, 62, test_val, 0x00)
-            .expect("m=62 encode should succeed");
-        let (decoded, consumed) = qpack_decode_int(&buf[..written], 62)
-            .expect("m=62 decode should succeed at boundary");
+        let written =
+            qpack_encode_int(&mut buf, 62, test_val, 0x00).expect("m=62 encode should succeed");
+        let (decoded, consumed) =
+            qpack_decode_int(&buf[..written], 62).expect("m=62 decode should succeed at boundary");
         assert_eq!(decoded, test_val);
         assert_eq!(consumed, written);
     }
@@ -474,8 +541,10 @@ mod tests {
         // m increments by 7 per continuation byte, and m > 62 should trigger.
         // After 9 continuation bytes: m = 63 > 62 → overflow
         let all_ff: [u8; 15] = [0xFF; 15];
-        assert!(qpack_decode_int(&all_ff, 8).is_none(),
-            "m > 62 should trigger overflow guard");
+        assert!(
+            qpack_decode_int(&all_ff, 8).is_none(),
+            "m > 62 should trigger overflow guard"
+        );
     }
 
     /// NB7-30: req_insert_count != 0 must be rejected (dynamic table not supported).
@@ -488,10 +557,12 @@ mod tests {
         let data = [
             0x01, // req_insert_count = 1 (non-zero → must reject, dynamic table not supported)
             0x00, // delta base = 0, sign = 0
-            // No headers follow — the rejection should happen at insert_count check
+                  // No headers follow — the rejection should happen at insert_count check
         ];
-        assert!(qpack_decode_block(&data, 10, None, None).is_none(),
-            "req_insert_count != 0 must be rejected (dynamic table not supported in Phase 2/3)");
+        assert!(
+            qpack_decode_block(&data, 10, None, None).is_none(),
+            "req_insert_count != 0 must be rejected (dynamic table not supported in Phase 2/3)"
+        );
     }
 
     /// NB7-38: Non-canonical QUIC varint forms must be rejected.
@@ -499,14 +570,20 @@ mod tests {
     #[test]
     fn test_quic_varint_non_canonical_forms() {
         // Value 0 in 2-byte form (canonical: 1-byte [0x00])
-        assert!(varint_decode(&[0x40, 0x00]).is_none(),
-            "value=0 in 2-byte form must be rejected");
+        assert!(
+            varint_decode(&[0x40, 0x00]).is_none(),
+            "value=0 in 2-byte form must be rejected"
+        );
         // Value 0 in 4-byte form
-        assert!(varint_decode(&[0x80, 0x00, 0x00, 0x00]).is_none(),
-            "value=0 in 4-byte form must be rejected");
+        assert!(
+            varint_decode(&[0x80, 0x00, 0x00, 0x00]).is_none(),
+            "value=0 in 4-byte form must be rejected"
+        );
         // Value 50 in 4-byte form (canonical would be 1-byte)
-        assert!(varint_decode(&[0x80, 0x00, 0x00, 0x32]).is_none(),
-            "value=50 in 4-byte form must be rejected");
+        assert!(
+            varint_decode(&[0x80, 0x00, 0x00, 0x32]).is_none(),
+            "value=50 in 4-byte form must be rejected"
+        );
     }
 
     /// NB7-39: QPACK static table index verification for selected indices.
@@ -517,7 +594,11 @@ mod tests {
         let test_indices = [0, 7, 12, 46, 67, 98];
         for &idx in &test_indices {
             let entry = &QPACK_STATIC_TABLE[idx];
-            assert!(!entry.name.is_empty() || idx == 22, "entry {} name should not be empty", idx);
+            assert!(
+                !entry.name.is_empty() || idx == 22,
+                "entry {} name should not be empty",
+                idx
+            );
             // Build a full encoded field section:
             // byte 0: Required Insert Count = 0 (0x00)
             // byte 1: Delta Base = 0, sign = 0 (0x00)
@@ -531,9 +612,22 @@ mod tests {
             // Decode back
             let decoded = qpack_decode_block(&buf, 10, None, None)
                 .expect("indexed field decode should succeed");
-            assert_eq!(decoded.len(), 1, "should have exactly 1 header for index {}", idx);
-            assert_eq!(decoded[0].name, entry.name, "name mismatch for index {}", idx);
-            assert_eq!(decoded[0].value, entry.value, "value mismatch for index {}", idx);
+            assert_eq!(
+                decoded.len(),
+                1,
+                "should have exactly 1 header for index {}",
+                idx
+            );
+            assert_eq!(
+                decoded[0].name, entry.name,
+                "name mismatch for index {}",
+                idx
+            );
+            assert_eq!(
+                decoded[0].value, entry.value,
+                "value mismatch for index {}",
+                idx
+            );
         }
     }
 
@@ -541,20 +635,23 @@ mod tests {
     #[test]
     fn test_qpack_decode_block_max_field_section_size() {
         // Encode a small header block
-        let headers = vec![
-            ("content-type".to_string(), "text/plain".to_string()),
-        ];
+        let headers = vec![("content-type".to_string(), "text/plain".to_string())];
         let encoded = qpack_encode_block(200, &headers).expect("encode");
         let block_size = encoded.len() as u64;
 
         // With limit >= block_size: should succeed
-        assert!(qpack_decode_block(&encoded, 10, Some(block_size), None).is_some(),
-            "decode should succeed when limit >= block size");
+        assert!(
+            qpack_decode_block(&encoded, 10, Some(block_size), None).is_some(),
+            "decode should succeed when limit >= block size"
+        );
 
         // With limit < block_size: should reject
         let small_limit = block_size - 1;
-        assert!(qpack_decode_block(&encoded, 10, Some(small_limit), None).is_none(),
-            "decode should be rejected when limit < block size ({})", block_size);
+        assert!(
+            qpack_decode_block(&encoded, 10, Some(small_limit), None).is_none(),
+            "decode should be rejected when limit < block size ({})",
+            block_size
+        );
     }
 
     /// NB7-24: Verify decode_frame rejects oversized frames on 32-bit systems.
@@ -565,10 +662,13 @@ mod tests {
         // frame_length encoded as 8-byte varint with max value
         let payload = [
             0x00u8, // DATA frame type
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F, // 8-byte varint for u64::MAX-ish
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x3F, // 8-byte varint for u64::MAX-ish
         ];
-        assert!(decode_frame(&payload).is_none(),
-            "oversized frame_length must be rejected (32-bit guard)");
+        assert!(
+            decode_frame(&payload).is_none(),
+            "oversized frame_length must be rejected (32-bit guard)"
+        );
     }
 
     // ── NET7-6a: QPACK Dynamic Table Tests ───────────────────────────────
@@ -707,9 +807,9 @@ mod tests {
         let mut table = H3DynamicTable::new(68);
         // Each entry: "name-XX"(7) + "vv"(2) + 32 = 41 bytes.
         // Two entries = 82 > 68, so first gets evicted when second is inserted.
-        table.insert("name-01".into(), "vv".into());  // index 0, 41 bytes
+        table.insert("name-01".into(), "vv".into()); // index 0, 41 bytes
         assert_eq!(table.len(), 1);
-        table.insert("name-02".into(), "vv".into());  // index 1, 41 bytes → triggers eviction
+        table.insert("name-02".into(), "vv".into()); // index 1, 41 bytes → triggers eviction
         assert_eq!(table.len(), 1);
 
         // After eviction, index 1 should still exist
@@ -732,7 +832,11 @@ mod tests {
         let (inst, consumed) = decode_encoder_instruction(&buf[..written]).expect("decode");
         assert_eq!(consumed, written);
         match inst {
-            H3EncoderInstruction::InsertWithNameRef { is_static, name_index, value } => {
+            H3EncoderInstruction::InsertWithNameRef {
+                is_static,
+                name_index,
+                value,
+            } => {
                 assert!(is_static);
                 assert_eq!(name_index, 17);
                 assert_eq!(value, "value");
@@ -748,12 +852,17 @@ mod tests {
         let name_idx = 0u64;
 
         let mut buf = [0u8; 64];
-        let written = encode_insert_with_name_ref(&mut buf, false, name_idx, "new-value").expect("encode");
+        let written =
+            encode_insert_with_name_ref(&mut buf, false, name_idx, "new-value").expect("encode");
 
         let (inst, consumed) = decode_encoder_instruction(&buf[..written]).expect("decode");
         assert_eq!(consumed, written);
         match inst {
-            H3EncoderInstruction::InsertWithNameRef { is_static, name_index, value } => {
+            H3EncoderInstruction::InsertWithNameRef {
+                is_static,
+                name_index,
+                value,
+            } => {
                 assert!(!is_static);
                 assert_eq!(name_index, name_idx);
                 assert_eq!(value, "new-value");
@@ -765,7 +874,8 @@ mod tests {
     #[test]
     fn test_encode_insert_with_literal_name() {
         let mut buf = [0u8; 64];
-        let written = encode_insert_with_literal_name(&mut buf, "x-custom", "hello-world").expect("encode");
+        let written =
+            encode_insert_with_literal_name(&mut buf, "x-custom", "hello-world").expect("encode");
         // First byte should match 01xxxxxx (Insert With Literal Name, RFC 9204 Section 5.2.2).
         // Bits 7-6 = 01 for this instruction type. With name len "x-custom"=8, prefix_bits=3,
         // buf[0] = 0x40 | 7 = 0x47, buf[1] = 1 (continuation: 8-7=1).
@@ -859,7 +969,8 @@ mod tests {
         let mut pos = 0;
 
         // Insert With Literal Name: x-frame-options = deny
-        let w = encode_insert_with_literal_name(&mut buf[pos..], "x-frame-options", "deny").unwrap();
+        let w =
+            encode_insert_with_literal_name(&mut buf[pos..], "x-frame-options", "deny").unwrap();
         pos += w;
 
         // Duplicate entry 0
@@ -874,10 +985,13 @@ mod tests {
         let mut table = H3DynamicTable::new(4096);
         let mut consumed_total = 0;
         while consumed_total < pos {
-            let (inst, consumed) = decode_encoder_instruction(&buf[consumed_total..pos])
-                .expect("instruction decode");
-            assert!(apply_encoder_instruction(&mut table, &inst),
-                "apply failed for {:?}", inst);
+            let (inst, consumed) =
+                decode_encoder_instruction(&buf[consumed_total..pos]).expect("instruction decode");
+            assert!(
+                apply_encoder_instruction(&mut table, &inst),
+                "apply failed for {:?}",
+                inst
+            );
             consumed_total += consumed;
         }
         assert_eq!(consumed_total, pos);
@@ -979,7 +1093,8 @@ mod tests {
         let mut state = H3DecoderState::new();
         let mut consumed_total = 0;
         while consumed_total < pos {
-            let (inst, consumed) = decode_decoder_instruction(&buf[consumed_total..pos]).expect("decode");
+            let (inst, consumed) =
+                decode_decoder_instruction(&buf[consumed_total..pos]).expect("decode");
             assert!(state.apply_decoder_instruction(&inst));
             consumed_total += consumed;
         }
@@ -1031,7 +1146,9 @@ mod tests {
         // 0x4C = 01001100: N=0, H=0, name_len prefix=4 (single byte, 4 < 7)
         // name = "test" (4 bytes)
         // value: 7-bit prefix string, 0x05 = len 5, "hello"
-        let buf = [0x4Cu8, b't', b'e', b's', b't', 0x05, b'h', b'e', b'l', b'l', b'o'];
+        let buf = [
+            0x4Cu8, b't', b'e', b's', b't', 0x05, b'h', b'e', b'l', b'l', b'o',
+        ];
         let (inst, consumed) = decode_encoder_instruction(&buf).expect("decode");
         assert_eq!(consumed, 11);
         match inst {
@@ -1053,20 +1170,29 @@ mod tests {
     #[test]
     fn test_decode_error_qpack_int_overflow() {
         let all_ff: [u8; 15] = [0xFF; 15];
-        assert_eq!(qpack_decode_int_r(&all_ff, 8), Err(H3DecodeError::QpackIntOverflow));
+        assert_eq!(
+            qpack_decode_int_r(&all_ff, 8),
+            Err(H3DecodeError::QpackIntOverflow)
+        );
     }
 
     #[test]
     fn test_decode_error_varint_truncated() {
         assert_eq!(varint_decode_r(&[]), Err(H3DecodeError::Truncated));
         // 4-byte form but only 2 bytes available
-        assert_eq!(varint_decode_r(&[0x80, 0x01]), Err(H3DecodeError::Truncated));
+        assert_eq!(
+            varint_decode_r(&[0x80, 0x01]),
+            Err(H3DecodeError::Truncated)
+        );
     }
 
     #[test]
     fn test_decode_error_varint_non_canonical() {
         // Value 0 encoded as 2 bytes = non-canonical
-        assert_eq!(varint_decode_r(&[0x40, 0x00]), Err(H3DecodeError::NonCanonical));
+        assert_eq!(
+            varint_decode_r(&[0x40, 0x00]),
+            Err(H3DecodeError::NonCanonical)
+        );
     }
 
     #[test]
@@ -1083,9 +1209,7 @@ mod tests {
 
     #[test]
     fn test_decode_error_field_section_too_large() {
-        let headers = vec![
-            ("content-type".to_string(), "text/plain".to_string()),
-        ];
+        let headers = vec![("content-type".to_string(), "text/plain".to_string())];
         let encoded = qpack_encode_block(200, &headers).expect("encode");
         let block_size = encoded.len() as u64;
         assert!(matches!(
@@ -1119,10 +1243,7 @@ mod tests {
         // Empty input
         assert_eq!(decode_frame_r(&[]), Err(H3DecodeError::Truncated));
         // Oversized frame
-        let payload = [
-            0x00u8,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F,
-        ];
+        let payload = [0x00u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F];
         assert_eq!(decode_frame_r(&payload), Err(H3DecodeError::FrameMalformed));
     }
 
@@ -1156,10 +1277,10 @@ mod tests {
         ];
         let encoded = qpack_encode_block(200, &headers).expect("encode");
 
-        let result_headers = qpack_decode_block_r(&encoded, 10, None, None)
-            .expect("Result decode should succeed");
-        let opt_headers = qpack_decode_block(&encoded, 10, None, None)
-            .expect("Option decode should succeed");
+        let result_headers =
+            qpack_decode_block_r(&encoded, 10, None, None).expect("Result decode should succeed");
+        let opt_headers =
+            qpack_decode_block(&encoded, 10, None, None).expect("Option decode should succeed");
 
         assert_eq!(result_headers.len(), opt_headers.len());
         for (r, o) in result_headers.iter().zip(opt_headers.iter()) {
@@ -1190,7 +1311,10 @@ mod tests {
         // Set timeout to 0 — should fire immediately
         conn.set_idle_timeout(std::time::Duration::from_secs(0));
         assert!(conn.check_timeout().is_some());
-        assert!(matches!(conn.check_timeout(), Some(H3DecodeError::IdleTimeout)));
+        assert!(matches!(
+            conn.check_timeout(),
+            Some(H3DecodeError::IdleTimeout)
+        ));
     }
 
     #[test]
@@ -1238,8 +1362,11 @@ mod tests {
             assert!(result.is_some(), "stream {} should be created", i);
         }
         // One more should fail
-        assert!(conn.new_stream(H3_MAX_STREAMS as u64).is_none(),
-            "stream {} should be rejected (MAX_STREAMS exceeded)", H3_MAX_STREAMS);
+        assert!(
+            conn.new_stream(H3_MAX_STREAMS as u64).is_none(),
+            "stream {} should be rejected (MAX_STREAMS exceeded)",
+            H3_MAX_STREAMS
+        );
     }
 
     #[test]
@@ -1254,14 +1381,18 @@ mod tests {
             pos += varint_encode(&mut buf[pos..], 1000 + i).unwrap();
             pos += varint_encode(&mut buf[pos..], 0).unwrap();
         }
-        assert!(decode_settings(&buf[..pos]).is_some(),
-            "64 unique pairs (H3_MAX_SETTINGS_PAIRS) should be valid");
+        assert!(
+            decode_settings(&buf[..pos]).is_some(),
+            "64 unique pairs (H3_MAX_SETTINGS_PAIRS) should be valid"
+        );
 
         // Add a 65th pair — should be rejected (DoS mitigation)
         pos += varint_encode(&mut buf[pos..], 2000u64).unwrap();
         pos += varint_encode(&mut buf[pos..], 0).unwrap();
-        assert!(decode_settings(&buf[..pos]).is_none(),
-            "65 pairs (> H3_MAX_SETTINGS_PAIRS) must be rejected");
+        assert!(
+            decode_settings(&buf[..pos]).is_none(),
+            "65 pairs (> H3_MAX_SETTINGS_PAIRS) must be rejected"
+        );
     }
 
     #[test]
@@ -1273,13 +1404,19 @@ mod tests {
         pos += varint_encode(&mut buf[pos..], 0).unwrap();
         pos += varint_encode(&mut buf[pos..], H3_SETTINGS_MAX_FIELD_SECTION_SIZE).unwrap();
         pos += varint_encode(&mut buf[pos..], 65536).unwrap();
-        assert!(decode_settings(&buf[..pos]).is_some(), "3 known unique settings valid");
+        assert!(
+            decode_settings(&buf[..pos]).is_some(),
+            "3 known unique settings valid"
+        );
 
         // Duplicate QPACK_MAX_TABLE_CAPACITY
         let dup_pos = pos;
         pos += varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY).unwrap();
         pos += varint_encode(&mut buf[pos..], 0).unwrap();
-        assert!(decode_settings(&buf[..pos]).is_none(), "duplicate QPACK_MAX_TABLE_CAPACITY rejected");
+        assert!(
+            decode_settings(&buf[..pos]).is_none(),
+            "duplicate QPACK_MAX_TABLE_CAPACITY rejected"
+        );
 
         // Reset, duplicate MAX_FIELD_SECTION_SIZE
         pos = 0;
@@ -1289,7 +1426,10 @@ mod tests {
         pos += varint_encode(&mut buf[pos..], 65536).unwrap();
         pos += varint_encode(&mut buf[pos..], H3_SETTINGS_MAX_FIELD_SECTION_SIZE).unwrap();
         pos += varint_encode(&mut buf[pos..], 32768).unwrap();
-        assert!(decode_settings(&buf[..pos]).is_none(), "duplicate MAX_FIELD_SECTION_SIZE rejected");
+        assert!(
+            decode_settings(&buf[..pos]).is_none(),
+            "duplicate MAX_FIELD_SECTION_SIZE rejected"
+        );
     }
 
     #[test]
@@ -1299,14 +1439,15 @@ mod tests {
         assert_eq!(H3_DEFAULT_MAX_FIELD_SECTION_SIZE, 64 * 1024);
 
         // Verify that a block at exactly the limit is accepted
-        let headers = vec![
-            ("x-large-header".to_string(), "x".repeat(1000)),
-        ];
+        let headers = vec![("x-large-header".to_string(), "x".repeat(1000))];
         let encoded = qpack_encode_block(200, &headers).expect("encode");
 
         // A block that fits within the limit should be accepted
-        assert!(qpack_decode_block(&encoded, 10, Some(H3_DEFAULT_MAX_FIELD_SECTION_SIZE), None).is_some(),
-            "block within limit should be accepted");
+        assert!(
+            qpack_decode_block(&encoded, 10, Some(H3_DEFAULT_MAX_FIELD_SECTION_SIZE), None)
+                .is_some(),
+            "block within limit should be accepted"
+        );
     }
 
     #[test]
@@ -1356,14 +1497,18 @@ mod tests {
         // (no re-chunking at the H3 layer). NB7-35: transport = raw byte delivery.
 
         // Small header block
-        let small = qpack_encode_block(200, &[("x".to_string(), "y".to_string())])
-            .expect("encode");
+        let small = qpack_encode_block(200, &[("x".to_string(), "y".to_string())]).expect("encode");
         // Header block should be small enough for a single QUIC packet
         assert!(small.len() < 1200, "small header should fit in typical MTU");
 
         // Larger header block
         let big_headers: Vec<_> = (0..20)
-            .map(|i| (format!("x-header-{}", i), "value-12345678901234567890".to_string()))
+            .map(|i| {
+                (
+                    format!("x-header-{}", i),
+                    "value-12345678901234567890".to_string(),
+                )
+            })
             .collect();
         let big = qpack_encode_block(200, &big_headers).expect("encode");
         assert!(big.len() > small.len(), "big header should be larger");
@@ -1446,7 +1591,8 @@ mod tests {
         // Verify the frame is a valid GOAWAY frame
         let (ft, fl, hs) = decode_frame_header(&frames[0]).expect("decode goaway header");
         assert_eq!(ft, H3_FRAME_GOAWAY);
-        let (sid, _) = varint_decode(&frames[0][hs..hs + fl as usize]).expect("decode goaway payload");
+        let (sid, _) =
+            varint_decode(&frames[0][hs..hs + fl as usize]).expect("decode goaway payload");
         assert_eq!(sid, 2);
 
         assert_eq!(conn.state, H3ConnState::Draining);
@@ -1555,7 +1701,7 @@ mod tests {
         // Measure QPACK encode/decode round-trips per millisecond using the
         // static table (no dynamic table allocation). Target: > 1000 rps.
         let headers = vec![
-            (":method".to_string(), "GET".to_string()),       // static table index
+            (":method".to_string(), "GET".to_string()), // static table index
             (":path".to_string(), "/api/v1/status".to_string()),
             ("content-type".to_string(), "application/json".to_string()),
         ];
@@ -1566,14 +1712,19 @@ mod tests {
 
         while start.elapsed() < target_duration {
             let encoded = qpack_encode_block(200, &headers).expect("encode must succeed");
-            let decoded = qpack_decode_block(&encoded, 10, None, None).expect("decode must succeed");
+            let decoded =
+                qpack_decode_block(&encoded, 10, None, None).expect("decode must succeed");
             assert_eq!(decoded.len(), 4); // :status + 3 headers
             cycles += 1;
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
         let rps = (cycles * 1000) / elapsed.max(1);
-        assert!(rps > 100, "QPACK static roundtrip should achieve >100 rps, got {}", rps);
+        assert!(
+            rps > 100,
+            "QPACK static roundtrip should achieve >100 rps, got {}",
+            rps
+        );
     }
 
     // Performance Gate Case 2: QPACK dynamic table insert + lookup throughput
@@ -1599,7 +1750,11 @@ mod tests {
 
         let elapsed = start.elapsed().as_millis() as u64;
         let inserts_per_ms = (cycles * 100) / elapsed.max(1);
-        assert!(inserts_per_ms > 10, "dynamic table should achieve >10 bulk-insert cycles/ms, got {}", inserts_per_ms);
+        assert!(
+            inserts_per_ms > 10,
+            "dynamic table should achieve >10 bulk-insert cycles/ms, got {}",
+            inserts_per_ms
+        );
     }
 
     // Performance Gate Case 3: H3 frame encode/decode throughput
@@ -1623,7 +1778,11 @@ mod tests {
 
         let elapsed = start.elapsed().as_millis() as u64;
         let frames_per_ms = cycles / elapsed.max(1);
-        assert!(frames_per_ms > 1000, "H3 frame should achieve >1000 enc/dec/ms, got {}", frames_per_ms);
+        assert!(
+            frames_per_ms > 1000,
+            "H3 frame should achieve >1000 enc/dec/ms, got {}",
+            frames_per_ms
+        );
     }
 
     // ── NB7-79: QPACK Static Table RFC 9204 Appendix A Verification ─────
@@ -1633,14 +1792,17 @@ mod tests {
     #[test]
     fn test_qpack_static_table_rfc9204_compliance() {
         // RFC 9204 Appendix A: The static table contains 99 entries (indices 0..98).
-        assert_eq!(QPACK_STATIC_TABLE.len(), 99,
-            "RFC 9204 §Appendix A defines exactly 99 static table entries");
+        assert_eq!(
+            QPACK_STATIC_TABLE.len(),
+            99,
+            "RFC 9204 §Appendix A defines exactly 99 static table entries"
+        );
 
         // Verify critical entries that are most likely to cause interop failures.
         // These are the entries used in real HTTP/3 request/response flows.
         let critical = [
-            (0, ":authority", ""),           // Pseudo-header
-            (1, ":path", "/"),               // Pseudo-header
+            (0, ":authority", ""), // Pseudo-header
+            (1, ":path", "/"),     // Pseudo-header
             (15, ":method", "CONNECT"),
             (16, ":method", "DELETE"),
             (17, ":method", "GET"),
@@ -1662,10 +1824,16 @@ mod tests {
 
         for (idx, name, value) in critical {
             let entry = &QPACK_STATIC_TABLE[idx];
-            assert_eq!(entry.name, name,
-                "Static table [{}] name mismatch: expected '{}', got '{}'", idx, name, entry.name);
-            assert_eq!(entry.value, value,
-                "Static table [{}] value mismatch: expected '{}', got '{}'", idx, value, entry.value);
+            assert_eq!(
+                entry.name, name,
+                "Static table [{}] name mismatch: expected '{}', got '{}'",
+                idx, name, entry.name
+            );
+            assert_eq!(
+                entry.value, value,
+                "Static table [{}] value mismatch: expected '{}', got '{}'",
+                idx, value, entry.value
+            );
         }
     }
 
@@ -1696,10 +1864,16 @@ mod tests {
             (":method", "OPTIONS"),
         ];
         for (i, (name, value)) in expected.iter().enumerate() {
-            assert_eq!(QPACK_STATIC_TABLE[i].name, *name,
-                "Entry {} name mismatch", i);
-            assert_eq!(QPACK_STATIC_TABLE[i].value, *value,
-                "Entry {} value mismatch", i);
+            assert_eq!(
+                QPACK_STATIC_TABLE[i].name, *name,
+                "Entry {} name mismatch",
+                i
+            );
+            assert_eq!(
+                QPACK_STATIC_TABLE[i].value, *value,
+                "Entry {} value mismatch",
+                i
+            );
         }
     }
 
@@ -1707,15 +1881,29 @@ mod tests {
     #[test]
     fn test_qpack_static_table_status_codes() {
         let status_entries = [
-            (24, "103"), (25, "200"), (26, "304"), (27, "404"), (28, "503"),
-            (63, "100"), (64, "204"), (65, "206"), (66, "302"), (67, "400"),
-            (68, "403"), (69, "421"), (70, "425"), (71, "500"),
+            (24, "103"),
+            (25, "200"),
+            (26, "304"),
+            (27, "404"),
+            (28, "503"),
+            (63, "100"),
+            (64, "204"),
+            (65, "206"),
+            (66, "302"),
+            (67, "400"),
+            (68, "403"),
+            (69, "421"),
+            (70, "425"),
+            (71, "500"),
         ];
         for (idx, expected_val) in status_entries {
             let entry = &QPACK_STATIC_TABLE[idx];
             assert_eq!(entry.name, ":status");
-            assert_eq!(entry.value, expected_val,
-                "Status code at [{}]: expected '{}', got '{}'", idx, expected_val, entry.value);
+            assert_eq!(
+                entry.value, expected_val,
+                "Status code at [{}]: expected '{}', got '{}'",
+                idx, expected_val, entry.value
+            );
         }
     }
 
@@ -1762,8 +1950,10 @@ mod tests {
         assert!(conn.goaway_received);
 
         // New stream should be rejected (Draining state)
-        assert!(conn.new_stream(4).is_none(),
-            "new_stream after GOAWAY should be rejected");
+        assert!(
+            conn.new_stream(4).is_none(),
+            "new_stream after GOAWAY should be rejected"
+        );
 
         // Existing stream can still be accessed
         assert!(conn.find_stream(0).is_some());
@@ -1782,7 +1972,10 @@ mod tests {
         let truncated = [0x00, 0x00]; // Insert Count=0, Delta Base=0
         // This is technically valid (empty header block) — should decode to empty
         let result = qpack_decode_block(&truncated, 10, None, None);
-        assert!(result.is_some(), "empty block should decode to empty headers");
+        assert!(
+            result.is_some(),
+            "empty block should decode to empty headers"
+        );
         assert_eq!(result.unwrap().len(), 0);
     }
 
@@ -1794,9 +1987,11 @@ mod tests {
         let mut buf = [0u8; 16];
         let mut pos = 0;
         // Required Insert Count = 0
-        buf[pos] = 0x00; pos += 1;
+        buf[pos] = 0x00;
+        pos += 1;
         // Delta Base = 0
-        buf[pos] = 0x00; pos += 1;
+        buf[pos] = 0x00;
+        pos += 1;
         // Indexed Field T=1, 6-bit prefix, index=99 (OOB)
         // 1Txxxxxx = 11xxxxxx, prefix value = 63, continuation for 99-63=36
         // Actually: prefix 6 bits, mask = 0x3F. If value >= 63, use continuation.
@@ -1805,8 +2000,10 @@ mod tests {
         let w = qpack_encode_int(&mut buf[pos..], 6, 99, 0xC0).unwrap();
         pos += w;
 
-        assert!(qpack_decode_block(&buf[..pos], 10, None, None).is_none(),
-            "OOB static table index should be rejected");
+        assert!(
+            qpack_decode_block(&buf[..pos], 10, None, None).is_none(),
+            "OOB static table index should be rejected"
+        );
     }
 
     /// Test 3: Frame boundary — zero-payload frame is accepted.
@@ -1824,8 +2021,10 @@ mod tests {
     fn test_h3_truncated_frame_rejected() {
         // A frame type varint that claims 2-byte encoding but only 1 byte present
         let truncated = [0x40]; // 01xxxxxx prefix = 2-byte form, but only 1 byte
-        assert!(decode_frame(&truncated).is_none(),
-            "Truncated varint in frame should be rejected");
+        assert!(
+            decode_frame(&truncated).is_none(),
+            "Truncated varint in frame should be rejected"
+        );
     }
 
     /// Test 4: Stream half-close lifecycle.
@@ -1906,11 +2105,17 @@ mod tests {
         // Post-base index 0 = newest entry (index 49)
         // Post-base index 49 = oldest entry (index 0)
         for post_idx in 0..50u64 {
-            let entry = table.lookup_post_base(post_idx)
+            let entry = table
+                .lookup_post_base(post_idx)
                 .unwrap_or_else(|| panic!("post_base({}) not found", post_idx));
             let expected_i = 49 - post_idx;
-            assert_eq!(entry.name, format!("x-header-{}", expected_i),
-                "post_index {} should map to x-header-{}", post_idx, expected_i);
+            assert_eq!(
+                entry.name,
+                format!("x-header-{}", expected_i),
+                "post_index {} should map to x-header-{}",
+                post_idx,
+                expected_i
+            );
             assert_eq!(entry.value, format!("value-{}", expected_i));
         }
 
@@ -1928,13 +2133,21 @@ mod tests {
         // 1-byte: 0..=63, 2-byte: 64..=16383, 4-byte: 16384..=1073741823,
         // 8-byte: 1073741824..=4611686018427387903
         let boundaries: &[u64] = &[
-            0, 1, 62, 63,                 // 1-byte boundary
-            64, 65,                       // 2-byte start
-            16382, 16383,                 // 2-byte boundary
-            16384, 16385,                 // 4-byte start
-            1_073_741_822, 1_073_741_823, // 4-byte boundary
-            1_073_741_824, 1_073_741_825, // 8-byte start
-            4_611_686_018_427_387_903,    // max QUIC varint (2^62-1)
+            0,
+            1,
+            62,
+            63, // 1-byte boundary
+            64,
+            65, // 2-byte start
+            16382,
+            16383, // 2-byte boundary
+            16384,
+            16385, // 4-byte start
+            1_073_741_822,
+            1_073_741_823, // 4-byte boundary
+            1_073_741_824,
+            1_073_741_825,             // 8-byte start
+            4_611_686_018_427_387_903, // max QUIC varint (2^62-1)
         ];
 
         for &value in boundaries {
@@ -1955,8 +2168,11 @@ mod tests {
         for value in 0..=63u64 {
             let mut buf = [0u8; 16];
             let written = varint_encode(&mut buf, value).unwrap();
-            assert_eq!(written, 1,
-                "value {} should encode to 1 byte, got {} bytes", value, written);
+            assert_eq!(
+                written, 1,
+                "value {} should encode to 1 byte, got {} bytes",
+                value, written
+            );
         }
         // 64 should be 2 bytes
         {
@@ -1985,29 +2201,43 @@ mod tests {
         // Value 5 encoded in 2-byte form (should be 1 byte)
         // 2-byte form: 01xxxxxx, value = 5 -> 0x40 | (5>>8) = 0x40, then 0x05
         let non_canonical_2 = [0x40, 0x05];
-        assert!(varint_decode(&non_canonical_2).is_none(),
-            "should reject 2-byte encoding of 5");
+        assert!(
+            varint_decode(&non_canonical_2).is_none(),
+            "should reject 2-byte encoding of 5"
+        );
 
         // Value 100 encoded in 4-byte form (should be 2 bytes)
         // 4-byte form: 10xxxxxx, value = 100 -> 0x80 | (100>>24), 0, 0, 100
         let non_canonical_4 = [0x80, 0x00, 0x00, 100];
-        assert!(varint_decode(&non_canonical_4).is_none(),
-            "should reject 4-byte encoding of 100");
+        assert!(
+            varint_decode(&non_canonical_4).is_none(),
+            "should reject 4-byte encoding of 100"
+        );
 
         // Value 42 encoded in 8-byte form
         let non_canonical_8 = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 42];
-        assert!(varint_decode(&non_canonical_8).is_none(),
-            "should reject 8-byte encoding of 42");
+        assert!(
+            varint_decode(&non_canonical_8).is_none(),
+            "should reject 8-byte encoding of 42"
+        );
     }
 
     /// Property: VarInt decode handles all malformed inputs gracefully.
     #[test]
     fn test_varint_malformed_inputs() {
         assert!(varint_decode(&[]).is_none(), "empty input");
-        assert!(varint_decode(&[0x40]).is_none(), "2-byte prefix with no data");
-        assert!(varint_decode(&[0x80, 0x00, 0x00]).is_none(), "4-byte prefix with 3 bytes");
-        assert!(varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_none(),
-            "8-byte prefix with 7 bytes");
+        assert!(
+            varint_decode(&[0x40]).is_none(),
+            "2-byte prefix with no data"
+        );
+        assert!(
+            varint_decode(&[0x80, 0x00, 0x00]).is_none(),
+            "4-byte prefix with 3 bytes"
+        );
+        assert!(
+            varint_decode(&[0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_none(),
+            "8-byte prefix with 7 bytes"
+        );
     }
 
     /// Property: VarInt roundtrip for random values (deterministic pseudo-random).
@@ -2018,7 +2248,8 @@ mod tests {
         let mut count = 0;
         for _ in 0..1000 {
             // LCG: s = s * 6364136223846793005 + 1442695040888963407
-            state = state.wrapping_mul(6_364_136_223_846_793_005)
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             // Mask to 62 bits (valid QUIC varint range)
             let val = state & 0x3FFF_FFFF_FFFF_FFFF;
@@ -2063,8 +2294,12 @@ mod tests {
         assert_eq!(conn.active_stream_count(), 2);
 
         // Close streams (simulating drain complete)
-        if let Some(s) = conn.find_stream_mut(0) { s.state = H3StreamState::Closed; }
-        if let Some(s) = conn.find_stream_mut(4) { s.state = H3StreamState::Closed; }
+        if let Some(s) = conn.find_stream_mut(0) {
+            s.state = H3StreamState::Closed;
+        }
+        if let Some(s) = conn.find_stream_mut(4) {
+            s.state = H3StreamState::Closed;
+        }
         assert!(!conn.has_active_streams());
         assert_eq!(conn.active_stream_count(), 0);
 
@@ -2108,8 +2343,7 @@ mod tests {
         //         value string: len=16, no huffman → 0x10, then "application/json"
         let wire: &[u8] = &[
             // Required Insert Count (8-bit prefix, value=0)
-            0x00,
-            // Delta Base (7-bit prefix, sign=0, value=0)
+            0x00, // Delta Base (7-bit prefix, sign=0, value=0)
             0x00,
             // :status=200 → Indexed Field 11xxxxxx, static index 25
             // 0xC0 | 25 = 0xD9
@@ -2120,9 +2354,8 @@ mod tests {
             0x5F, 0x1F,
             // Value string: length 16, non-Huffman → 7-bit prefix int with H=0
             // 16 → 0x10 (fits in 7-bit prefix)
-            0x10,
-            b'a', b'p', b'p', b'l', b'i', b'c', b'a', b't',
-            b'i', b'o', b'n', b'/', b'j', b's', b'o', b'n',
+            0x10, b'a', b'p', b'p', b'l', b'i', b'c', b'a', b't', b'i', b'o', b'n', b'/', b'j',
+            b's', b'o', b'n',
         ];
 
         let headers = qpack_decode_block(wire, 16, None, None)
@@ -2175,8 +2408,7 @@ mod tests {
             ("server".to_string(), "taida".to_string()),
         ];
 
-        let encoded = qpack_encode_block(status, &headers)
-            .expect("encode should succeed");
+        let encoded = qpack_encode_block(status, &headers).expect("encode should succeed");
 
         // The encoded result should start with Required Insert Count = 0, Delta Base = 0
         assert!(encoded.len() >= 2);
@@ -2184,8 +2416,8 @@ mod tests {
         assert_eq!(encoded[1], 0x00, "Delta Base should be 0");
 
         // Decode the encoded output
-        let decoded = qpack_decode_block(&encoded, 16, None, None)
-            .expect("roundtrip decode should succeed");
+        let decoded =
+            qpack_decode_block(&encoded, 16, None, None).expect("roundtrip decode should succeed");
 
         assert_eq!(decoded.len(), 3); // :status + 2 headers
         assert_eq!(decoded[0].name, ":status");
@@ -2202,8 +2434,7 @@ mod tests {
     fn test_nb7_101_encoder_instruction_wire_format_parity() {
         // Test 1: Insert With Literal Name — C uses 01 + 3-bit prefix for name length
         let mut buf = [0u8; 64];
-        let w = encode_insert_with_literal_name(&mut buf, "x-custom", "value")
-            .expect("encode");
+        let w = encode_insert_with_literal_name(&mut buf, "x-custom", "value").expect("encode");
 
         // Instruction byte: 01NT Hxxx → N=0, H=0, name length 8
         // 0100 0xxx with 3-bit prefix → 0x40 | upper 3 bits of 8
@@ -2212,8 +2443,8 @@ mod tests {
         assert!(w >= 3, "should have instruction + name + value");
 
         // Decode and verify
-        let (inst, consumed) = decode_encoder_instruction(&buf[..w])
-            .expect("decode should succeed");
+        let (inst, consumed) =
+            decode_encoder_instruction(&buf[..w]).expect("decode should succeed");
         assert_eq!(consumed, w);
         match inst {
             H3EncoderInstruction::InsertWithLiteralName { name, value } => {
@@ -2230,19 +2461,21 @@ mod tests {
         // Static table reference: 1Txxxxxx with 4-bit prefix
         // T=1 (static), index=17, value="hello"
         let mut buf = [0u8; 32];
-        let w = encode_insert_with_name_ref(&mut buf, true, 17, "hello")
-            .expect("encode");
+        let w = encode_insert_with_name_ref(&mut buf, true, 17, "hello").expect("encode");
 
         // Expected: 0xC0 | 17 = 0xD1 for the prefix (17 < 15? No, 17 >= 15)
         // 17 in 4-bit prefix: 0xC0 | 0x0F = 0xCF, continuation: 17-15=2 → 0x02
         assert!(w >= 3);
 
         // Decode
-        let (inst, consumed) = decode_encoder_instruction(&buf[..w])
-            .expect("decode");
+        let (inst, consumed) = decode_encoder_instruction(&buf[..w]).expect("decode");
         assert_eq!(consumed, w);
         match inst {
-            H3EncoderInstruction::InsertWithNameRef { is_static, name_index, value } => {
+            H3EncoderInstruction::InsertWithNameRef {
+                is_static,
+                name_index,
+                value,
+            } => {
                 assert!(is_static);
                 assert_eq!(name_index, 17);
                 assert_eq!(value, "hello");
@@ -2263,8 +2496,7 @@ mod tests {
         assert_eq!(buf[0], 0x05);
 
         // Decode
-        let (inst, consumed) = decode_encoder_instruction(&buf[..w])
-            .expect("decode");
+        let (inst, consumed) = decode_encoder_instruction(&buf[..w]).expect("decode");
         assert_eq!(consumed, w);
         match inst {
             H3EncoderInstruction::Duplicate { index } => {
@@ -2293,8 +2525,7 @@ mod tests {
         assert!(w >= 2);
 
         // Decode
-        let (inst, consumed) = decode_encoder_instruction(&buf[..w])
-            .expect("decode");
+        let (inst, consumed) = decode_encoder_instruction(&buf[..w]).expect("decode");
         assert_eq!(consumed, w);
         match inst {
             H3EncoderInstruction::SetCapacity { capacity } => {
@@ -2310,8 +2541,13 @@ mod tests {
     /// Phase 5 (NET7-5a) did source audits; NET7-11b verifies runtime behavior.
     #[test]
     fn test_net7_11b_runtime_malformed_h3_reject() {
-        use qpack::{H3DecodeError, qpack_decode_int_r, qpack_decode_string_r, qpack_decode_block_r, qpack_encode_block};
-        use frame::{varint_decode, varint_encode, decode_frame, decode_frame_header, decode_settings};
+        use frame::{
+            decode_frame, decode_frame_header, decode_settings, varint_decode, varint_encode,
+        };
+        use qpack::{
+            H3DecodeError, qpack_decode_block_r, qpack_decode_int_r, qpack_decode_string_r,
+            qpack_encode_block,
+        };
         let _ = qpack_decode_string_r; // ensure path coverage
 
         // ── QPACK integer rejection tests ──────────────────────────────
@@ -2323,8 +2559,10 @@ mod tests {
         let overflow_bytes: [u8; 16] = [0xFF; 16];
         let result = qpack_decode_int_r(&overflow_bytes, 8);
         assert!(
-            result == Err(H3DecodeError::QpackIntOverflow) || result == Err(H3DecodeError::Truncated),
-            "overflow must be rejected, got: {:?}", result
+            result == Err(H3DecodeError::QpackIntOverflow)
+                || result == Err(H3DecodeError::Truncated),
+            "overflow must be rejected, got: {:?}",
+            result
         );
 
         // ── QUIC varint rejection tests ────────────────────────────────
@@ -2357,11 +2595,17 @@ mod tests {
 
         // Empty settings → valid (no settings to parse, returns defaults)
         let settings = decode_settings(&[]).expect("empty settings valid");
-        assert_eq!(settings.max_field_section_size, H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+        assert_eq!(
+            settings.max_field_section_size,
+            H3_DEFAULT_MAX_FIELD_SECTION_SIZE
+        );
         // Decode with a full valid settings block
         let settings_payload = encode_settings().expect("settings encode");
         let settings2 = decode_settings(&settings_payload).expect("settings decode");
-        assert_eq!(settings2.max_field_section_size, H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+        assert_eq!(
+            settings2.max_field_section_size,
+            H3_DEFAULT_MAX_FIELD_SECTION_SIZE
+        );
 
         // Truncated settings (type without value) → None
         let truncated_settings: [u8; 1] = [0x01]; // SETTINGS id without value
@@ -2379,15 +2623,24 @@ mod tests {
             settings_payload.extend_from_slice(&tmp[..n]);
         }
         let result = decode_settings(&settings_payload);
-        assert!(result.is_none(), "settings exceeding H3_MAX_SETTINGS_PAIRS must be rejected");
+        assert!(
+            result.is_none(),
+            "settings exceeding H3_MAX_SETTINGS_PAIRS must be rejected"
+        );
 
         // ── QPACK block rejection tests ────────────────────────────────
 
         // Empty block → Truncated
-        assert!(matches!(qpack_decode_block_r(&[], 100, None, None), Err(H3DecodeError::Truncated)));
+        assert!(matches!(
+            qpack_decode_block_r(&[], 100, None, None),
+            Err(H3DecodeError::Truncated)
+        ));
 
         // Too small block (1 byte) → Truncated
-        assert!(matches!(qpack_decode_block_r(&[0x00], 100, None, None), Err(H3DecodeError::Truncated)));
+        assert!(matches!(
+            qpack_decode_block_r(&[0x00], 100, None, None),
+            Err(H3DecodeError::Truncated)
+        ));
 
         // Block requiring dynamic table when none provided → DynamicTableError
         let dt_required: [u8; 3] = [0x02, 0x00, 0x00]; // req_insert_count=2
@@ -2399,7 +2652,11 @@ mod tests {
         // Valid empty block (req_insert_count=0, sign+delta=0) → 0 headers
         let valid_empty: [u8; 2] = [0x00, 0x00];
         let result = qpack_decode_block_r(&valid_empty, 100, None, None);
-        assert!(result.is_ok(), "valid empty block should succeed, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "valid empty block should succeed, got: {:?}",
+            result
+        );
         assert_eq!(result.unwrap().len(), 0);
 
         // Oversized block with max_field_section_size → FieldSectionTooLarge
@@ -2443,7 +2700,8 @@ mod tests {
                 assert!(
                     !content.contains(pattern),
                     "NET7-11b: 0-RTT surface check: '{}' found in {} (0-RTT must not be exposed)",
-                    pattern, module_path
+                    pattern,
+                    module_path
                 );
             }
         }
@@ -2469,7 +2727,11 @@ mod tests {
         assert!(!encoded.is_empty());
 
         let decoded = qpack_decode_block_r(&encoded, 100, None, None);
-        assert!(decoded.is_ok(), "early-data header must decode normally, got: {:?}", decoded);
+        assert!(
+            decoded.is_ok(),
+            "early-data header must decode normally, got: {:?}",
+            decoded
+        );
         let headers_out = decoded.unwrap();
         assert_eq!(headers_out.len(), 2); // :status + early-data
         // :status is always first
@@ -2484,8 +2746,8 @@ mod tests {
     /// Ensures that decode functions do not allocate beyond bounded buffers.
     #[test]
     fn test_net7_11b_runtime_bounded_copy_guards() {
+        use frame::{H3_MAX_SETTINGS_PAIRS, H3_MAX_STREAMS};
         use qpack::qpack_decode_block_r;
-        use frame::{H3_MAX_STREAMS, H3_MAX_SETTINGS_PAIRS};
 
         // H3_MAX_STREAMS is bounded at 256
         assert_eq!(H3_MAX_STREAMS, 256);
@@ -2510,7 +2772,8 @@ mod tests {
         let result = qpack_decode_block_r(&buf[..300], 256, None, None);
         assert!(
             result.is_err(),
-            "decode with ~298 headers must exceed limit of 256, got: {:?}", result
+            "decode with ~298 headers must exceed limit of 256, got: {:?}",
+            result
         );
     }
 }

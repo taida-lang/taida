@@ -6,7 +6,6 @@
 /// 1. QUIC connection (TLS 1.3 + ALPN h3 negotiation)
 /// 2. Bidirectional stream I/O
 /// 3. H3-style frame encoding/decoding over QUIC streams
-
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -192,14 +191,10 @@ fn h3_data_frame(body: &[u8]) -> Vec<u8> {
 
 fn h3_request_headers() -> Vec<u8> {
     vec![
-        0x00, 7, b':', b'm', b'e', b't', b'h', b'o', b'd',
-        3, b'G', b'E', b'T',
-        0x00, 5, b':', b'p', b'a', b't', b'h',
-        5, b'/', b't', b'e', b's', b't',
-        0x00, 7, b':', b's', b'c', b'h', b'e', b'm', b'e',
-        5, b'h', b't', b't', b'p', b's',
-        0x00, 11, b':', b'a', b'u', b't', b'h', b'o', b'r', b'i', b't', b'y',
-        9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't',
+        0x00, 7, b':', b'm', b'e', b't', b'h', b'o', b'd', 3, b'G', b'E', b'T', 0x00, 5, b':',
+        b'p', b'a', b't', b'h', 5, b'/', b't', b'e', b's', b't', 0x00, 7, b':', b's', b'c', b'h',
+        b'e', b'm', b'e', 5, b'h', b't', b't', b'p', b's', 0x00, 11, b':', b'a', b'u', b't', b'h',
+        b'o', b'r', b'i', b't', b'y', 9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't',
     ]
 }
 
@@ -230,10 +225,7 @@ async fn test_h3_interop_quic_connect() {
             .await
             .expect("establish");
 
-        let (mut send, mut recv) = conn
-            .accept_bi()
-            .await
-            .expect("accept bi stream");
+        let (mut send, mut recv) = conn.accept_bi().await.expect("accept bi stream");
 
         // Read request
         let mut buf = [0u8; 4096];
@@ -286,10 +278,7 @@ async fn test_h3_interop_quic_connect() {
         .await
         .expect("establish");
 
-    let (mut send, mut recv) = conn
-        .open_bi()
-        .await
-        .expect("open bi stream");
+    let (mut send, mut recv) = conn.open_bi().await.expect("open bi stream");
 
     // Send SETTINGS + request
     send.write_all(&h3_settings_frame())
@@ -313,12 +302,10 @@ async fn test_h3_interop_quic_connect() {
     let (headers_type, consumed) = decode_varint(&response[pos..]).expect("response frame type");
     assert_eq!(headers_type, 0x01, "First frame should be HEADERS");
     pos += consumed;
-    let (headers_len, consumed) =
-        decode_varint(&response[pos..]).expect("response frame length");
+    let (headers_len, consumed) = decode_varint(&response[pos..]).expect("response frame length");
     pos += consumed + headers_len as usize;
 
-    let (data_type, consumed) =
-        decode_varint(&response[pos..]).expect("response data type");
+    let (data_type, consumed) = decode_varint(&response[pos..]).expect("response data type");
     assert_eq!(data_type, 0x00, "Second frame should be DATA");
     pos += consumed;
     let (data_len, _) = decode_varint(&response[pos..]).expect("response data length");

@@ -37,7 +37,6 @@
 /// - quinn 0.11: Pure Rust QUIC stack (tokio-native)
 /// - rustls 0.23: TLS 1.3 (already v5 dependency)
 /// - rcgen 0.13: Runtime cert/key generation for self-signed certs
-
 use quinn::crypto::rustls::QuicServerConfig;
 use std::{fs, net::SocketAddr, sync::Arc};
 
@@ -120,10 +119,18 @@ fn build_tls_config(
 
     let (cert_der, key_der) = if !cert_path.is_empty() && !key_path.is_empty() {
         // User-provided certificate and key paths.
-        let cert_pem = fs::read(cert_path)
-            .map_err(|e| format!("httpServe: HTTP/3 failed to read cert file '{}': {}", cert_path, e))?;
-        let key_pem = fs::read(key_path)
-            .map_err(|e| format!("httpServe: HTTP/3 failed to read key file '{}': {}", key_path, e))?;
+        let cert_pem = fs::read(cert_path).map_err(|e| {
+            format!(
+                "httpServe: HTTP/3 failed to read cert file '{}': {}",
+                cert_path, e
+            )
+        })?;
+        let key_pem = fs::read(key_path).map_err(|e| {
+            format!(
+                "httpServe: HTTP/3 failed to read key file '{}': {}",
+                key_path, e
+            )
+        })?;
 
         let mut cert_cursor = std::io::Cursor::new(&cert_pem);
         let certs_result: Result<Vec<rustls::pki_types::CertificateDer<'static>>, _> =
@@ -144,14 +151,24 @@ fn build_tls_config(
             rustls_pemfile::Item::Pkcs8Key(k) => k.secret_pkcs8_der().to_vec(),
             rustls_pemfile::Item::Pkcs1Key(k) => k.secret_pkcs1_der().to_vec(),
             rustls_pemfile::Item::Sec1Key(k) => k.secret_sec1_der().to_vec(),
-            other => return Err(format!("httpServe: HTTP/3 unsupported key type: {:?}", other)),
+            other => {
+                return Err(format!(
+                    "httpServe: HTTP/3 unsupported key type: {:?}",
+                    other
+                ));
+            }
         };
 
         (certs[0].to_vec(), key_der)
     } else {
         // Self-signed certificate (bootstrap / testing path).
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .map_err(|e| format!("httpServe: HTTP/3 failed to generate self-signed cert: {}", e))?;
+        let cert =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).map_err(|e| {
+                format!(
+                    "httpServe: HTTP/3 failed to generate self-signed cert: {}",
+                    e
+                )
+            })?;
 
         (cert.cert.der().to_vec(), cert.key_pair.serialize_der())
     };
@@ -191,7 +208,10 @@ pub(crate) fn create_quic_endpoint(
     ));
 
     let bind_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().map_err(|e| {
-        format!("httpServe: HTTP/3 failed to parse bind address 127.0.0.1:{}: {}", port, e)
+        format!(
+            "httpServe: HTTP/3 failed to parse bind address 127.0.0.1:{}: {}",
+            port, e
+        )
     })?;
 
     let endpoint = quinn::Endpoint::server(server_config, bind_addr)
@@ -265,14 +285,22 @@ async fn read_request_stream(
         match recv.read(&mut chunk_buf).await {
             Ok(Some(n)) => {
                 if buf.len() + n > max_size {
-                    let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
+                    let _ = send.reset(
+                        H3_ERR_GENERAL_PROTOCOL_ERROR
+                            .try_into()
+                            .expect("H3 error code as VarInt"),
+                    );
                     return StreamReadResult::Error;
                 }
                 buf.extend_from_slice(&chunk_buf[..n]);
             }
             Ok(None) => break, // FIN received
             Err(_) => {
-                let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
+                let _ = send.reset(
+                    H3_ERR_GENERAL_PROTOCOL_ERROR
+                        .try_into()
+                        .expect("H3 error code as VarInt"),
+                );
                 return StreamReadResult::Error;
             }
         }
@@ -291,19 +319,27 @@ async fn read_request_stream(
 
     while pos < buf.len() {
         // Step 1: decode frame header to get type, length, and header size.
-        let (frame_type, frame_length, header_size) =
-            match super::decode_frame_header(&buf[pos..]) {
-                Some((ft, fl, hs)) => (ft, fl, hs),
-                None => {
-                    let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
-                    return StreamReadResult::Error;
-                }
-            };
+        let (frame_type, frame_length, header_size) = match super::decode_frame_header(&buf[pos..])
+        {
+            Some((ft, fl, hs)) => (ft, fl, hs),
+            None => {
+                let _ = send.reset(
+                    H3_ERR_FRAME_UNEXPECTED
+                        .try_into()
+                        .expect("H3 error code as VarInt"),
+                );
+                return StreamReadResult::Error;
+            }
+        };
 
         let frame_len = match usize::try_from(frame_length) {
             Ok(n) => n,
             Err(_) => {
-                let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
+                let _ = send.reset(
+                    H3_ERR_FRAME_UNEXPECTED
+                        .try_into()
+                        .expect("H3 error code as VarInt"),
+                );
                 return StreamReadResult::Error;
             }
         };
@@ -312,7 +348,11 @@ async fn read_request_stream(
         if pos + total_frame_size > buf.len() {
             // Incomplete frame — we've received partial data for this frame.
             // Treat as malformed since FIN was received with incomplete frame.
-            let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
+            let _ = send.reset(
+                H3_ERR_FRAME_UNEXPECTED
+                    .try_into()
+                    .expect("H3 error code as VarInt"),
+            );
             return StreamReadResult::Error;
         }
 
@@ -323,7 +363,11 @@ async fn read_request_stream(
             super::H3_FRAME_HEADERS => {
                 if request_data.is_some() {
                     // Duplicate HEADERS on same request stream — protocol error
-                    let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
+                    let _ = send.reset(
+                        H3_ERR_FRAME_UNEXPECTED
+                            .try_into()
+                            .expect("H3 error code as VarInt"),
+                    );
                     return StreamReadResult::Error;
                 }
 
@@ -366,7 +410,8 @@ async fn read_request_stream(
             super::H3_FRAME_DATA => {
                 if request_data.is_none() {
                     // DATA without prior HEADERS — protocol error.
-                    let _ = send_error_response(&mut send, 400, b"Expected HEADERS before DATA").await;
+                    let _ =
+                        send_error_response(&mut send, 400, b"Expected HEADERS before DATA").await;
                     return StreamReadResult::Error;
                 }
                 // Collect body data from DATA frame, bounded by max_field_section_size.
@@ -377,7 +422,11 @@ async fn read_request_stream(
                 // NB7-84: SETTINGS MUST only be sent on the control stream
                 // (unidirectional, type 0x02). On a bidirectional request
                 // stream this is H3_ERR_FRAME_UNEXPECTED (RFC 9114 §7.2.4.1).
-                let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
+                let _ = send.reset(
+                    H3_ERR_FRAME_UNEXPECTED
+                        .try_into()
+                        .expect("H3 error code as VarInt"),
+                );
                 return StreamReadResult::Error;
             }
 
@@ -386,7 +435,11 @@ async fn read_request_stream(
                 // (RFC 9114 §7.2.6). On a request stream: reject.
                 // NB7-99: do NOT call h3_conn.receive_goaway() here;
                 // connection_handler is the sole authoritative caller.
-                let _ = send.reset(H3_ERR_FRAME_UNEXPECTED.try_into().expect("H3 error code as VarInt"));
+                let _ = send.reset(
+                    H3_ERR_FRAME_UNEXPECTED
+                        .try_into()
+                        .expect("H3 error code as VarInt"),
+                );
                 return StreamReadResult::Error;
             }
 
@@ -413,16 +466,18 @@ async fn read_request_stream(
 ///
 /// Converts `H3ResponseData` into QPACK-encoded HEADERS and DATA frames.
 /// Returns true on success, false on write error.
-async fn send_h3_response(
-    mut send: quinn::SendStream,
-    response: &H3ResponseData,
-) -> bool {
+async fn send_h3_response(mut send: quinn::SendStream, response: &H3ResponseData) -> bool {
     // Convert headers to the format expected by build_response_headers_frame.
     let header_refs: Vec<(String, String)> = response.headers.clone();
 
     // Send HEADERS frame.
-    let Some(hdrs_frame) = super::build_response_headers_frame(response.status, &header_refs) else {
-        let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
+    let Some(hdrs_frame) = super::build_response_headers_frame(response.status, &header_refs)
+    else {
+        let _ = send.reset(
+            H3_ERR_GENERAL_PROTOCOL_ERROR
+                .try_into()
+                .expect("H3 error code as VarInt"),
+        );
         return false;
     };
     if send.write_all(&hdrs_frame).await.is_err() {
@@ -437,7 +492,11 @@ async fn send_h3_response(
 
     if !no_body && !response.body.is_empty() {
         let Some(data_frame) = super::build_data_frame(&response.body) else {
-            let _ = send.reset(H3_ERR_GENERAL_PROTOCOL_ERROR.try_into().expect("H3 error code as VarInt"));
+            let _ = send.reset(
+                H3_ERR_GENERAL_PROTOCOL_ERROR
+                    .try_into()
+                    .expect("H3 error code as VarInt"),
+            );
             return false;
         };
         if send.write_all(&data_frame).await.is_err() {
@@ -593,20 +652,15 @@ pub(crate) fn serve_h3_loop(
             let type_byte: [u8; 1] = [0x00];
             let type_ok = rt.block_on(ctrl_uni.write_all(&type_byte)).is_ok();
 
-            if type_ok {
-                // Step 2: Encode and send SETTINGS frame.
-                if let Some(settings_payload) = super::encode_settings() {
-                    if let Some(settings_frame) = super::encode_frame(
-                        super::H3_FRAME_SETTINGS, &settings_payload
-                    ) {
-                        if rt.block_on(ctrl_uni.write_all(&settings_frame)).is_ok() {
-                            h3_conn.control_stream_id =
-                                Some(ctrl_uni.id().index() as u64);
-                            // Keep the SendStream alive — GOAWAY will be written here.
-                            ctrl_send = Some(ctrl_uni);
-                        }
-                    }
-                }
+            if type_ok
+                && let Some(settings_payload) = super::encode_settings()
+                && let Some(settings_frame) =
+                    super::encode_frame(super::H3_FRAME_SETTINGS, &settings_payload)
+                && rt.block_on(ctrl_uni.write_all(&settings_frame)).is_ok()
+            {
+                h3_conn.control_stream_id = Some(ctrl_uni.id().index());
+                // Keep the SendStream alive — GOAWAY will be written here.
+                ctrl_send = Some(ctrl_uni);
             }
             // Do NOT call ctrl_uni.finish() — the control stream stays open.
         }
@@ -655,16 +709,23 @@ pub(crate) fn serve_h3_loop(
             if h3_conn.new_stream(stream_id).is_none() {
                 // Reject: stream limit exceeded or draining.
                 let mut s = send_stream;
-                let _ = s.reset(H3_ERR_STREAM_CREATION_ERROR.try_into().expect("H3 error code as VarInt"));
+                let _ = s.reset(
+                    H3_ERR_STREAM_CREATION_ERROR
+                        .try_into()
+                        .expect("H3 error code as VarInt"),
+                );
                 continue;
             }
 
             h3_conn.set_current_stream(stream_id);
 
             // Phase 1: Read and decode the request (async).
-            let read_result = rt.block_on(
-                read_request_stream(&mut h3_conn, recv_stream, send_stream, remote_addr)
-            );
+            let read_result = rt.block_on(read_request_stream(
+                &mut h3_conn,
+                recv_stream,
+                send_stream,
+                remote_addr,
+            ));
 
             match read_result {
                 StreamReadResult::Request(request_data, send) => {
@@ -711,16 +772,15 @@ pub(crate) fn serve_h3_loop(
         // RFC 9114 Section 5.2: GOAWAY MUST be sent on the control stream.
         // Previously this opened a new uni stream (wrong — no type byte, no SETTINGS).
         // Now we use the control stream initialized at connection start.
-        if advanced {
-            if let Some(frames) = goaway_frames {
-                if let Some(ref mut ctrl) = ctrl_send {
-                    for frame in &frames {
-                        let _ = rt.block_on(ctrl.write_all(frame));
-                    }
-                    // Do NOT finish the control stream here — the QUIC-level
-                    // close below will handle cleanup.
-                }
+        if advanced
+            && let Some(frames) = goaway_frames
+            && let Some(ref mut ctrl) = ctrl_send
+        {
+            for frame in &frames {
+                let _ = rt.block_on(ctrl.write_all(frame));
             }
+            // Do NOT finish the control stream here — the QUIC-level
+            // close below will handle cleanup.
         }
         // Step 3: If still Draining (not yet Closed), complete the shutdown.
         // This closes all remaining streams and transitions to Closed.
@@ -902,7 +962,10 @@ mod tests {
         // The thread is alive and waiting; we can't cleanly stop it from
         // outside (the endpoint is internal), so just verify it hasn't
         // panicked by checking the thread is still running.
-        assert!(!handle.is_finished(), "serve loop should still be waiting for connections");
+        assert!(
+            !handle.is_finished(),
+            "serve loop should still be waiting for connections"
+        );
 
         // Drop the handle (thread will be detached). This is acceptable
         // for a unit test -- the OS will clean up when the test process exits.
@@ -918,7 +981,10 @@ mod tests {
         // Wait for timeout.
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        assert!(conn.check_timeout().is_some(), "Idle timeout should have fired");
+        assert!(
+            conn.check_timeout().is_some(),
+            "Idle timeout should have fired"
+        );
     }
 
     /// Test that goaway received triggers draining state.
@@ -929,8 +995,14 @@ mod tests {
 
         let ok = conn.receive_goaway(4);
         assert!(ok, "receive_goaway should succeed");
-        assert!(conn.is_draining(), "Connection should be draining after GOAWAY");
-        assert!(!conn.accepts_new_streams(), "Draining connection should not accept new streams");
+        assert!(
+            conn.is_draining(),
+            "Connection should be draining after GOAWAY"
+        );
+        assert!(
+            !conn.accepts_new_streams(),
+            "Draining connection should not accept new streams"
+        );
     }
 
     /// Test that process_stream correctly rejects empty data.
@@ -956,15 +1028,16 @@ mod tests {
         let hdrs = headers.unwrap();
         let (ft, pl) = super::super::decode_frame(&hdrs).expect("headers frame should decode");
         assert_eq!(ft, super::super::H3_FRAME_HEADERS);
-        assert!(!pl.is_empty(), "Decoded headers payload should not be empty");
+        assert!(
+            !pl.is_empty(),
+            "Decoded headers payload should not be empty"
+        );
     }
 
     /// Test H3 frame encoding: HEADERS followed by DATA is valid round-trip.
     #[tokio::test]
     async fn test_response_frame_roundtrip() {
-        let response_headers = vec![
-            ("content-type".to_string(), "text/plain".to_string()),
-        ];
+        let response_headers = vec![("content-type".to_string(), "text/plain".to_string())];
         let body = b"Hello, HTTP/3!";
 
         let headers_frame = super::super::build_response_headers_frame(200, &response_headers);
@@ -1053,7 +1126,10 @@ mod tests {
         // Step 1: shutdown() sends GOAWAY and transitions to Draining.
         let (advanced, goaway_frames) = conn.shutdown();
         assert!(advanced, "shutdown should advance from Active to Draining");
-        assert!(goaway_frames.is_some(), "shutdown should produce GOAWAY frames");
+        assert!(
+            goaway_frames.is_some(),
+            "shutdown should produce GOAWAY frames"
+        );
         assert!(conn.is_draining(), "connection should be in Draining state");
 
         // Step 2: No in-flight streams — drain wait is trivially satisfied.
@@ -1066,7 +1142,10 @@ mod tests {
 
         // Verify GOAWAY frame contains valid data.
         let frames = goaway_frames.unwrap();
-        assert!(!frames.is_empty(), "at least one GOAWAY frame should be produced");
+        assert!(
+            !frames.is_empty(),
+            "at least one GOAWAY frame should be produced"
+        );
         // GOAWAY frame: type varint + length varint + payload (stream ID varint)
         let frame = &frames[0];
         assert!(frame.len() >= 3, "GOAWAY frame must be at least 3 bytes");
@@ -1099,22 +1178,38 @@ mod tests {
         assert!(conn.is_draining());
 
         // Step 2: Streams are still active during drain wait.
-        assert!(conn.has_active_streams(), "streams should still be tracked during drain");
-        assert_eq!(conn.active_stream_count(), 3, "all 3 streams should remain active");
+        assert!(
+            conn.has_active_streams(),
+            "streams should still be tracked during drain"
+        );
+        assert_eq!(
+            conn.active_stream_count(),
+            3,
+            "all 3 streams should remain active"
+        );
 
         // New streams MUST be rejected in Draining state (RFC 9114).
-        assert!(conn.new_stream(12).is_none(), "new streams must be rejected during draining");
+        assert!(
+            conn.new_stream(12).is_none(),
+            "new streams must be rejected during draining"
+        );
 
         // Step 3: complete_shutdown closes all streams and transitions to Closed.
         let ok = conn.complete_shutdown();
         assert!(ok, "complete_shutdown should succeed from Draining");
         assert!(conn.is_closed());
-        assert!(!conn.has_active_streams(), "all streams should be closed after shutdown");
+        assert!(
+            !conn.has_active_streams(),
+            "all streams should be closed after shutdown"
+        );
         assert_eq!(conn.active_stream_count(), 0);
 
         // Verify final state is terminal — further shutdown attempts are no-ops.
         let (advanced2, _) = conn.shutdown();
-        assert!(!advanced2, "shutdown on Closed connection should be a no-op");
+        assert!(
+            !advanced2,
+            "shutdown on Closed connection should be a no-op"
+        );
     }
 
     // ── NB7-115: Control stream initialization tests ─────────────────
@@ -1135,41 +1230,52 @@ mod tests {
         payload.push(0x00);
 
         // Step 2: SETTINGS frame.
-        let settings_payload = super::super::encode_settings()
-            .expect("encode_settings should succeed");
-        let settings_frame = super::super::encode_frame(
-            super::super::H3_FRAME_SETTINGS, &settings_payload
-        ).expect("encode_frame for SETTINGS should succeed");
+        let settings_payload =
+            super::super::encode_settings().expect("encode_settings should succeed");
+        let settings_frame =
+            super::super::encode_frame(super::super::H3_FRAME_SETTINGS, &settings_payload)
+                .expect("encode_frame for SETTINGS should succeed");
         payload.extend_from_slice(&settings_frame);
 
         // Verify: first byte is stream type 0x00.
-        assert_eq!(payload[0], 0x00,
-            "Control stream must start with type byte 0x00");
+        assert_eq!(
+            payload[0], 0x00,
+            "Control stream must start with type byte 0x00"
+        );
 
         // Verify: remaining bytes decode as a SETTINGS frame.
         let (frame_type, frame_length, header_size) =
             super::super::decode_frame_header(&payload[1..])
                 .expect("SETTINGS frame header should decode");
-        assert_eq!(frame_type, super::super::H3_FRAME_SETTINGS,
-            "First frame on control stream must be SETTINGS (type 0x04)");
-        assert!(frame_length > 0,
-            "SETTINGS frame must have non-empty payload");
+        assert_eq!(
+            frame_type,
+            super::super::H3_FRAME_SETTINGS,
+            "First frame on control stream must be SETTINGS (type 0x04)"
+        );
+        assert!(
+            frame_length > 0,
+            "SETTINGS frame must have non-empty payload"
+        );
 
         // Verify the SETTINGS payload decodes correctly.
         let settings_data = &payload[1 + header_size..1 + header_size + frame_length as usize];
-        let decoded = super::super::decode_settings(settings_data)
-            .expect("SETTINGS payload should decode");
+        let decoded =
+            super::super::decode_settings(settings_data).expect("SETTINGS payload should decode");
         // Default settings: max_field_section_size should be the default value.
-        assert_eq!(decoded.max_field_section_size,
-            super::super::H3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+        assert_eq!(
+            decoded.max_field_section_size,
+            super::super::H3_DEFAULT_MAX_FIELD_SECTION_SIZE
+        );
     }
 
     /// NB7-115: Verify H3Connection tracks control_stream_id.
     #[test]
     fn test_h3_connection_control_stream_id_default_none() {
         let conn = super::super::H3Connection::new();
-        assert!(conn.control_stream_id.is_none(),
-            "New H3Connection should have no control stream ID");
+        assert!(
+            conn.control_stream_id.is_none(),
+            "New H3Connection should have no control stream ID"
+        );
     }
 
     /// NB7-115: Verify H3Connection control_stream_id can be set.
@@ -1177,8 +1283,11 @@ mod tests {
     fn test_h3_connection_control_stream_id_set() {
         let mut conn = super::super::H3Connection::new();
         conn.control_stream_id = Some(3);
-        assert_eq!(conn.control_stream_id, Some(3),
-            "Control stream ID should be stored on H3Connection");
+        assert_eq!(
+            conn.control_stream_id,
+            Some(3),
+            "Control stream ID should be stored on H3Connection"
+        );
     }
 
     /// NB7-115: GOAWAY frame must be valid when sent on control stream.
@@ -1200,13 +1309,18 @@ mod tests {
         // Decode the GOAWAY frame.
         let (ft, fl, hs) = super::super::decode_frame_header(&frames[0])
             .expect("GOAWAY frame header should decode");
-        assert_eq!(ft, super::super::H3_FRAME_GOAWAY,
-            "Frame type must be GOAWAY (0x07)");
+        assert_eq!(
+            ft,
+            super::super::H3_FRAME_GOAWAY,
+            "Frame type must be GOAWAY (0x07)"
+        );
 
         // Decode the stream ID from the GOAWAY payload.
         let (stream_id, _) = super::super::varint_decode(&frames[0][hs..hs + fl as usize])
             .expect("GOAWAY payload should contain a varint stream ID");
-        assert_eq!(stream_id, 4,
-            "GOAWAY stream ID should match last_peer_stream_id");
+        assert_eq!(
+            stream_id, 4,
+            "GOAWAY stream ID should match last_peer_stream_id"
+        );
     }
 }

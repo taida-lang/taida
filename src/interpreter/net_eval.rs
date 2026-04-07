@@ -4864,8 +4864,14 @@ impl Interpreter {
             request_fields.push(("bodyOffset".into(), Value::Int(0)));
             request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
             request_fields.push(("raw".into(), Value::Bytes(req.body)));
-            request_fields.push(("remoteHost".into(), Value::Str(req.remote_addr.ip().to_string())));
-            request_fields.push(("remotePort".into(), Value::Int(req.remote_addr.port() as i64)));
+            request_fields.push((
+                "remoteHost".into(),
+                Value::Str(req.remote_addr.ip().to_string()),
+            ));
+            request_fields.push((
+                "remotePort".into(),
+                Value::Int(req.remote_addr.port() as i64),
+            ));
             request_fields.push(("keepAlive".into(), Value::Bool(true)));
             request_fields.push(("chunked".into(), Value::Bool(false)));
             request_fields.push(("protocol".into(), Value::Str("h3".into())));
@@ -4879,13 +4885,11 @@ impl Interpreter {
                 Ok(response) => {
                     // Extract response fields using the same extractor as h1/h2.
                     match extract_response_fields(&response) {
-                        Ok((status, headers, body)) => {
-                            Some(net_h3::H3ResponseData {
-                                status: status as u16,
-                                headers,
-                                body,
-                            })
-                        }
+                        Ok((status, headers, body)) => Some(net_h3::H3ResponseData {
+                            status: status as u16,
+                            headers,
+                            body,
+                        }),
                         Err(_) => None, // Invalid response from handler.
                     }
                 }
@@ -4893,13 +4897,7 @@ impl Interpreter {
             }
         };
 
-        match net_h3::serve_h3_loop(
-            &cert_path,
-            &key_path,
-            port,
-            max_requests,
-            &mut h3_handler,
-        ) {
+        match net_h3::serve_h3_loop(&cert_path, &key_path, port, max_requests, &mut h3_handler) {
             Ok(request_count) => {
                 let result_inner = Value::BuchiPack(vec![
                     ("ok".into(), Value::Bool(true)),
@@ -4911,9 +4909,12 @@ impl Interpreter {
             Err(e) => {
                 // Classify the error: quinn/rustls initialization failures
                 // are ProtocolError; runtime transport failures are separate.
-                let kind = if e.contains("failed to read cert") || e.contains("failed to read key")
-                    || e.contains("failed to parse") || e.contains("TLS config failed")
-                    || e.contains("unsupported key type") || e.contains("no valid certificates")
+                let kind = if e.contains("failed to read cert")
+                    || e.contains("failed to read key")
+                    || e.contains("failed to parse")
+                    || e.contains("TLS config failed")
+                    || e.contains("unsupported key type")
+                    || e.contains("no valid certificates")
                     || e.contains("no PEM items")
                 {
                     "ProtocolError"

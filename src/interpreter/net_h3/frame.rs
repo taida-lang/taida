@@ -1,4 +1,4 @@
-/// H3 frame I/O with QUIC varint encoding (RFC 9000 §16) and frame type constants (RFC 9114).
+// H3 frame I/O with QUIC varint encoding (RFC 9000 §16) and frame type constants (RFC 9114).
 
 // ── QUIC Variable-Length Integer Coding (RFC 9000 Section 16) ────────────
 // **QUIC Variable-Length Integer encoding per RFC 9000 Section 16.**
@@ -11,11 +11,11 @@
 /// fit in fewer bytes but use a larger encoding form are malformed (NET7-5a).
 pub(crate) fn is_canonical_varint(value: u64, prefix: u8) -> bool {
     match prefix {
-        0 => true,  // 1 byte: 0..=63 always valid
-        1 => value > 63,                    // 2 bytes must encode > 63
-        2 => value > 16_383,                // 4 bytes must encode > 16383
-        3 => value > 1_073_741_823,          // 8 bytes must encode > 2^30-1
-        _ => false,                          // impossible prefix
+        0 => true,                  // 1 byte: 0..=63 always valid
+        1 => value > 63,            // 2 bytes must encode > 63
+        2 => value > 16_383,        // 4 bytes must encode > 16383
+        3 => value > 1_073_741_823, // 8 bytes must encode > 2^30-1
+        _ => false,                 // impossible prefix
     }
 }
 
@@ -33,8 +33,8 @@ pub(crate) fn varint_decode(data: &[u8]) -> Option<(u64, usize)> {
         return None;
     }
     let mut val = (data[0] & 0x3F) as u64;
-    for i in 1..len {
-        val = (val << 8) | data[i] as u64;
+    for item in data.iter().take(len).skip(1) {
+        val = (val << 8) | *item as u64;
     }
     // NET7-5a: Reject non-canonical encoding (RFC 9000 Section 16 — smallest encoding required).
     // A value that could have been represented in fewer bytes is malformed.
@@ -184,9 +184,8 @@ pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
     // NB7-27 / NB7-77: use try_into() instead of `as usize` to prevent silent truncation
     // on 32-bit platforms. A varint-decoded frame length > usize::MAX is an overflow error,
     // not a valid frame.
-    let frame_len = u64::try_from(frame_length)
+    let frame_len = usize::try_from(frame_length)
         .ok()
-        .and_then(|fl| usize::try_from(fl).ok())
         .filter(|&fl| fl <= data.len().saturating_sub(header_size))?;
     let total = header_size + frame_len;
     Some((frame_type, &data[header_size..total]))
@@ -197,7 +196,7 @@ pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
 /// Encode a SETTINGS frame payload.
 /// Phase 2/3: send QPACK_MAX_TABLE_CAPACITY=0, QPACK_BLOCKED_STREAMS=0.
 pub(crate) fn encode_settings() -> Option<Vec<u8>> {
-    let mut buf = vec![0u8; 32];
+    let mut buf = [0u8; 32];
     let mut pos = 0;
     // QPACK_MAX_TABLE_CAPACITY = 0
     let w = varint_encode(&mut buf[pos..], H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY)?;

@@ -1,3 +1,4 @@
+use super::frame::{H3_FRAME_DATA, H3_FRAME_HEADERS, encode_frame};
 /// H3 pseudo-header extraction, request validation, response builders.
 ///
 /// This module contains:
@@ -5,15 +6,7 @@
 /// - extract_request_fields() — pseudo-header validation matching H2 semantics
 /// - build_response_headers_frame() / build_data_frame()
 /// - Selftests mirroring Native reference
-
-use super::qpack::{
-    qpack_encode_block, qpack_decode_block, H3Header,
-};
-use super::frame::{
-    encode_frame,
-    H3_FRAME_HEADERS, H3_FRAME_DATA,
-};
-
+use super::qpack::{H3Header, qpack_decode_block, qpack_encode_block};
 
 // ── H3 Request Extraction ────────────────────────────────────────────────
 // Mirrors h3_extract_request_fields in native_runtime.c.
@@ -168,7 +161,10 @@ pub(crate) fn selftest_qpack_roundtrip() -> i32 {
     // Encode a response with 4 custom headers
     let headers = vec![
         ("content-type".to_string(), "text/plain".to_string()),
-        ("x-custom-header".to_string(), "custom-value-123".to_string()),
+        (
+            "x-custom-header".to_string(),
+            "custom-value-123".to_string(),
+        ),
         ("x-request-id".to_string(), "abc-def-ghi".to_string()),
         ("accept".to_string(), "application/json".to_string()),
     ];
@@ -222,10 +218,22 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 1: Valid request
     {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
-            H3Header { name: ":authority".into(), value: "localhost".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
+            H3Header {
+                name: ":authority".into(),
+                value: "localhost".into(),
+            },
         ];
         if extract_request_fields(&hdrs).is_err() {
             return -1;
@@ -235,8 +243,14 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 2: Missing :scheme should fail
     {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
         ];
         match extract_request_fields(&hdrs) {
             Err(H3RequestError::MissingPseudo) => {}
@@ -247,9 +261,18 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 3: Empty :scheme should fail
     {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "".into(),
+            },
         ];
         match extract_request_fields(&hdrs) {
             Err(H3RequestError::EmptyPseudo) => {}
@@ -260,9 +283,18 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 4: Empty :method should fail
     {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
         ];
         match extract_request_fields(&hdrs) {
             Err(H3RequestError::EmptyPseudo) => {}
@@ -273,10 +305,22 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 5: Duplicate :scheme should fail
     {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
-            H3Header { name: ":scheme".into(), value: "http".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "http".into(),
+            },
         ];
         match extract_request_fields(&hdrs) {
             Err(H3RequestError::DuplicatePseudo) => {}
@@ -287,9 +331,18 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 6: Ordering violation (regular before pseudo)
     {
         let hdrs = vec![
-            H3Header { name: "host".into(), value: "localhost".into() },
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
+            H3Header {
+                name: "host".into(),
+                value: "localhost".into(),
+            },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
         ];
         match extract_request_fields(&hdrs) {
             Err(H3RequestError::Ordering) => {}
@@ -300,10 +353,22 @@ pub(crate) fn selftest_request_validation() -> i32 {
     // Test 7: Unknown pseudo-header should fail
     {
         let hdrs = vec![
-            H3Header { name: ":method".into(), value: "GET".into() },
-            H3Header { name: ":path".into(), value: "/".into() },
-            H3Header { name: ":scheme".into(), value: "https".into() },
-            H3Header { name: ":protocol".into(), value: "websocket".into() },
+            H3Header {
+                name: ":method".into(),
+                value: "GET".into(),
+            },
+            H3Header {
+                name: ":path".into(),
+                value: "/".into(),
+            },
+            H3Header {
+                name: ":scheme".into(),
+                value: "https".into(),
+            },
+            H3Header {
+                name: ":protocol".into(),
+                value: "websocket".into(),
+            },
         ];
         match extract_request_fields(&hdrs) {
             Err(H3RequestError::UnknownPseudo) => {}
