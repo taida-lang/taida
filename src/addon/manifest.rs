@@ -658,9 +658,9 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
 }
 
 fn strip_inline_comment(value: &str) -> &str {
-    // Strip a `# comment` tail. We do not interpret `#` inside strings
-    // because the v1 schema only accepts simple `"..."` strings without
-    // embedded special characters.
+    // RC1 v1 schema: strip `# comment` tails. Only quoted `"..."` strings
+    // are expected (no embedded special characters). RC1.5+ URL-based
+    // schema does not use this parser.
     if let Some(idx) = value.find('#') {
         // Be conservative: if `#` is inside `"..."` keep the entire
         // value. The string parser will surface a syntax error if the
