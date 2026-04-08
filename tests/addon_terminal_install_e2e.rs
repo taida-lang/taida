@@ -93,22 +93,17 @@ fn cdylib_ext() -> &'static str {
 
 // ── Test work-dir framework ──────────────────────────────────
 
-/// Create a unique CWD-relative work directory for a single test.
-/// Each test gets its own directory so tests don't collide even when
-/// running in parallel. Returns both the (relative, absolute) paths.
-/// The caller should clean up the work dir at the end of the test.
+/// Create a unique work directory for a single test, rooted in temp_dir().
+/// Using temp_dir() (not current_dir()) avoids nesting under a CWD that
+/// another parallel test may already have changed or deleted.
 fn make_work_dir(test_id: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let rel = format!(
-        ".taida-test-temp-e2e/{}_{}_{}",
-        test_id,
-        std::process::id(),
-        nanos
-    );
-    let abs = std::env::current_dir().expect("CWD").join(&rel);
+    let abs = std::env::temp_dir().join(format!(
+        "taida-e2e/{}_{}_{}", test_id, std::process::id(), nanos
+    ));
     fs::create_dir_all(&abs).expect("create work dir");
     abs
 }
@@ -138,6 +133,10 @@ fn make_symlink_in(work_dir: &Path, src: &Path) -> (String, String) {
     (link_name, sha)
 }
 
+/// Process-wide mutex that serializes all CWD-changing fetch calls.
+/// `set_current_dir` is global state; parallel tests race without this.
+static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run fetch_prebuild with the work_dir as CWD.
 /// Uses unique pkg_id/version to avoid cache collision with other tests.
 #[allow(clippy::too_many_arguments)]
@@ -151,6 +150,7 @@ fn fetch_in_work(
     lib_name: &str,
     ext: &str,
 ) -> Result<PathBuf, taida::addon::prebuild_fetcher::FetchError> {
+    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let saved = std::env::current_dir().expect("get CWD");
     std::env::set_current_dir(work_dir).expect("set CWD to work dir");
     let result = taida::addon::prebuild_fetcher::fetch_prebuild(
