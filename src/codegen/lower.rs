@@ -138,6 +138,66 @@ pub struct Lowering {
     /// These are unreliable for callable_type_tag because the parameter might actually
     /// be a function/closure passed at runtime.
     return_type_inferred_params: std::collections::HashSet<String>,
+    /// RC2.5: addon function reference table.
+    /// Maps an imported symbol (alias or original name) to the addon dispatch
+    /// metadata needed by `lower_func_call` to emit a `taida_addon_call` IR
+    /// call. Populated in `lower_addon_import` during the `Statement::Import`
+    /// pass.
+    addon_func_refs: std::collections::HashMap<String, AddonFuncRef>,
+    /// RC2.5 Phase 2: facade-declared pure-Taida value bindings pulled in
+    /// through an addon-backed package import. Each entry is an assignment
+    /// of the form `Name <= <expr>` (e.g. `KeyKind <= @(Char <= 0, ...)`)
+    /// that the facade file exports. They are replayed at the top of
+    /// `_taida_main` so user code can reference them without the main
+    /// program ever parsing the facade file itself.
+    ///
+    /// Keyed by the local binding name. The order field controls
+    /// replay ordering so facade authors can express value dependencies.
+    addon_facade_pack_bindings: Vec<(String, Expr)>,
+    /// RC2.5: the addon backend this lowering run targets. Only `Native`
+    /// accepts addon imports; all WASM targets and JS/Interpreter path
+    /// through the backend-policy error with a deterministic message.
+    /// Defaults to `Native` so existing Cranelift callers do not need to
+    /// change.
+    addon_backend: crate::addon::AddonBackend,
+}
+
+/// RC2.5: metadata for a single addon function import.
+///
+/// `package_id` / `cdylib_path` / `function_name` become static strings
+/// emitted into `.rodata` via `IrInst::ConstStr`; `arity` is enforced at
+/// the IR call site and re-checked by the C-side dispatcher.
+#[derive(Debug, Clone)]
+struct AddonFuncRef {
+    package_id: String,
+    cdylib_path: String,
+    function_name: String,
+    arity: u32,
+}
+
+/// RC2.5 Phase 2: shallow summary of an addon facade file.
+///
+/// Facades are read only for their top-level bindings: alias
+/// assignments (`Name <= lowercaseFn`), pure-Taida pack assignments
+/// (`Name <= @(...)`), and a single `<<<` export clause. The full
+/// module loader is out of scope for RC2.5 v1; any construct we do
+/// not recognise trips a deterministic compile error in
+/// `load_addon_facade_for_lower`.
+#[derive(Debug, Default, Clone)]
+struct AddonFacadeSummary {
+    /// Map `FacadeName` -> lowercase addon function name, when the
+    /// facade writes `FacadeName <= lowercaseFn`. Aliases are
+    /// resolved back to the manifest `[functions]` table so the
+    /// arity comes from the ABI, not the facade.
+    aliases: std::collections::HashMap<String, String>,
+    /// Map `FacadeName` -> the buchi-pack expression, when the
+    /// facade writes `FacadeName <= @(...)`. Replayed verbatim at
+    /// the top of `_taida_main` during the 3rd pass.
+    pack_bindings: std::collections::HashMap<String, Expr>,
+    /// Set of names explicitly listed in the facade's `<<<`
+    /// export statement. When empty, every alias / pack binding is
+    /// implicitly exported.
+    exports: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -299,7 +359,18 @@ impl Lowering {
             var_aliases: std::collections::HashMap::new(),
             lambda_param_counts: std::collections::HashMap::new(),
             return_type_inferred_params: std::collections::HashSet::new(),
+            addon_func_refs: std::collections::HashMap::new(),
+            addon_facade_pack_bindings: Vec::new(),
+            addon_backend: crate::addon::AddonBackend::Native,
         }
+    }
+
+    /// RC2.5: set the addon backend for this lowering run. Called by the
+    /// driver immediately after `Lowering::new()` for non-native targets
+    /// so that `lower_addon_import` can surface the correct backend-policy
+    /// error. Native lowering can skip this call (defaults to Native).
+    pub fn set_addon_backend(&mut self, backend: crate::addon::AddonBackend) {
+        self.addon_backend = backend;
     }
 
     /// QF-16/17: ソースファイルのディレクトリを設定（インポートモジュール解決用）
@@ -389,6 +460,491 @@ impl Lowering {
             return None;
         }
         Some(resolution.pkg_dir)
+    }
+
+    /// RC2.5 Phase 1: lower an addon-backed package import.
+    ///
+    /// Reads `native/addon.toml`, resolves the cdylib absolute path at
+    /// build time (per `.dev/RC2_5_IMPL_SPEC.md` F-4), and registers each
+    /// imported symbol in `addon_func_refs` for later dispatch at the
+    /// call site via `taida_addon_call`.
+    ///
+    /// Failures surface as compile errors (manifest missing / symbol
+    /// not declared in `[functions]` / cdylib not yet built). Runtime
+    /// dispatch failures are out of scope here.
+    fn lower_addon_import(
+        &mut self,
+        pkg_dir: &std::path::Path,
+        import_path: &str,
+        import_stmt: &crate::parser::ImportStmt,
+    ) -> Result<(), LowerError> {
+        let manifest_path = pkg_dir.join("native").join("addon.toml");
+        let manifest =
+            crate::addon::manifest::parse_addon_manifest(&manifest_path).map_err(|e| {
+                LowerError {
+                    message: format!("addon manifest load failed for '{}': {}", import_path, e),
+                }
+            })?;
+
+        // Resolve cdylib absolute path at build time. The path is
+        // embedded in .rodata and consumed by `taida_addon_call` at
+        // runtime; post-build relocation is a known limitation
+        // (RC2.5B-004).
+        let cdylib_path = crate::addon::registry::resolve_cdylib_path(pkg_dir, &manifest.library)
+            .ok_or_else(|| LowerError {
+                message: format!(
+                    "addon-backed package '{}' cdylib not found: looked for lib{}.{{so,dylib,dll}} under '{}' (did you run 'taida install'?)",
+                    import_path,
+                    manifest.library,
+                    pkg_dir.display()
+                ),
+            })?;
+
+        let cdylib_abs = cdylib_path
+            .canonicalize()
+            .unwrap_or_else(|_| cdylib_path.clone());
+        let cdylib_str = cdylib_abs
+            .to_str()
+            .ok_or_else(|| LowerError {
+                message: format!(
+                    "addon-backed package '{}' cdylib path is not valid UTF-8: {}",
+                    import_path,
+                    cdylib_abs.display()
+                ),
+            })?
+            .to_string();
+
+        // RC2.5 Phase 2: optionally load the Taida-side facade at
+        // `<pkg_dir>/taida/<stem>.td` where `<stem>` is the final
+        // `/`-segment of the canonical package id (e.g. `terminal`
+        // for `taida-lang/terminal`). The facade provides the
+        // uppercase / pure-Taida user-facing surface; without it we
+        // fall back to the raw manifest `[functions]` table.
+        //
+        // Facade semantics mirror `module_eval::load_addon_facade`:
+        //   - `Name <= lowercase_addon_fn` → alias the addon sentinel
+        //     under the new name (facade alias).
+        //   - `Name <= <pack expr>` → pure-Taida facade value; we
+        //     replay the assignment at the top of `_taida_main`.
+        //   - `<<< @(...)` → collected as the facade export set; any
+        //     imported symbol that is not exported falls through to
+        //     the `[functions]` lookup.
+        //
+        // Anything more sophisticated (facade-defined function bodies,
+        // facade-level imports, etc.) is out of scope for RC2.5 v1 and
+        // triggers a deterministic compile error so the limitation is
+        // visible at build time rather than causing silent divergence
+        // between the interpreter and the native backend.
+        let facade = Self::load_addon_facade_for_lower(pkg_dir, &manifest, import_path)?;
+
+        for sym in &import_stmt.symbols {
+            let orig_name = sym.name.clone();
+            let alias = sym.alias.clone().unwrap_or_else(|| sym.name.clone());
+
+            // Lookup order (must match interpreter
+            // `module_eval::try_eval_addon_import`):
+            //   1. facade exports (uppercase / pure-Taida surface)
+            //   2. manifest `[functions]` entries (raw addon API)
+            if let Some(facade) = &facade
+                && facade.exports.contains(&orig_name)
+            {
+                if let Some(target_fn) = facade.aliases.get(&orig_name) {
+                    // Facade alias: look the function up in the
+                    // manifest to recover its arity, then register
+                    // the new alias under `addon_func_refs`.
+                    let arity = manifest
+                        .functions
+                        .get(target_fn)
+                        .ok_or_else(|| LowerError {
+                            message: format!(
+                                "addon facade for '{}' aliases '{}' to unknown function '{}'",
+                                import_path, orig_name, target_fn
+                            ),
+                        })?;
+                    self.addon_func_refs.insert(
+                        alias.clone(),
+                        AddonFuncRef {
+                            package_id: manifest.package.clone(),
+                            cdylib_path: cdylib_str.clone(),
+                            function_name: target_fn.clone(),
+                            arity: *arity,
+                        },
+                    );
+                    self.user_funcs.insert(alias.clone());
+                    // RC2.5 Phase 4 (RC2.5B-008): mirror the raw-import
+                    // return-type tracking. Facade aliases point at a
+                    // manifest function whose return type we consult via
+                    // `addon_known_return_tag`. See the non-facade path
+                    // below for the rationale.
+                    if let Some(return_tag) =
+                        Self::addon_known_return_tag(&manifest.package, target_fn)
+                    {
+                        match return_tag {
+                            "Bool" => {
+                                self.bool_returning_funcs.insert(alias.clone());
+                            }
+                            "Str" => {
+                                self.string_returning_funcs.insert(alias.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                if let Some(pack_expr) = facade.pack_bindings.get(&orig_name) {
+                    // Pure-Taida facade value. Record the binding so
+                    // the 3rd pass can replay it in `_taida_main`
+                    // before user statements execute.
+                    self.addon_facade_pack_bindings
+                        .push((alias.clone(), pack_expr.clone()));
+                    self.top_level_vars.insert(alias.clone());
+                    // Packs are tracked so field access / jsonEncode
+                    // resolution pick the pack path.
+                    self.pack_vars.insert(alias.clone());
+                    continue;
+                }
+                // Exported by the facade but neither an alias nor a
+                // pack binding: out of Phase 2 scope.
+                return Err(LowerError {
+                    message: format!(
+                        "addon facade for '{}' exports '{}' using an unsupported form \
+                         (only `Name <= lowercaseFn` aliases and `Name <= @(...)` packs \
+                         are supported in RC2.5 v1)",
+                        import_path, orig_name
+                    ),
+                });
+            }
+
+            let arity = manifest
+                .functions
+                .get(&orig_name)
+                .ok_or_else(|| LowerError {
+                    message: format!(
+                        "Symbol '{}' not found in addon-backed package '{}'",
+                        orig_name, import_path
+                    ),
+                })?;
+
+            self.addon_func_refs.insert(
+                alias.clone(),
+                AddonFuncRef {
+                    package_id: manifest.package.clone(),
+                    cdylib_path: cdylib_str.clone(),
+                    function_name: orig_name.clone(),
+                    arity: *arity,
+                },
+            );
+            // Also register the alias as a user function so that any
+            // downstream `name` lookup outside the dedicated addon
+            // dispatch branch finds it. The addon dispatch branch
+            // still runs first and short-circuits normal lowering.
+            self.user_funcs.insert(alias.clone());
+            // RC2.5 Phase 4 (RC2.5B-008): track the addon function's
+            // return type for the native backend's `convert_to_string`
+            // / `expr_is_bool` / `expr_is_string_full` hints. The ABI
+            // v1 manifest schema is frozen (RC1 F-1) and cannot carry
+            // return-type annotations, so we consult a v1-scoped lookup
+            // table keyed on `(package_id, function_name)`.
+            //
+            // Without this, `isTty <= termIsTty()` followed by
+            // `stdout(\`${isTty}\`)` would render as the raw i64 "0"
+            // on native (because the template lit's `convert_to_string`
+            // defaults to `taida_polymorphic_to_string`) while the
+            // interpreter renders it as "false" — a real
+            // backend-parity gap surfaced by RC2.5-4b.
+            if let Some(return_tag) = Self::addon_known_return_tag(&manifest.package, &orig_name) {
+                match return_tag {
+                    "Bool" => {
+                        self.bool_returning_funcs.insert(alias.clone());
+                    }
+                    "Str" => {
+                        self.string_returning_funcs.insert(alias.clone());
+                    }
+                    "Pack" => {
+                        // Pack return values flow through `PackGet`
+                        // lookup for field access; no stringification
+                        // hint needed here because users unpack the
+                        // fields before interpolating.
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// RC2.5 Phase 4 (RC2.5B-008): hardcoded return-type table for the
+    /// v1-scoped addon functions whose stringification must match the
+    /// interpreter byte-for-byte. The ABI v1 manifest (`addon.toml`)
+    /// only carries `name = arity`, so return types live here as a
+    /// per-package lookup table. RC3+ will consider a manifest schema
+    /// extension; for now the table only needs the `taida-lang/terminal`
+    /// sample surface.
+    ///
+    /// Returns the Taida type name (`"Bool"`, `"Str"`, `"Pack"`, ...)
+    /// or `None` if the function's return type is unknown.
+    fn addon_known_return_tag(package_id: &str, function_name: &str) -> Option<&'static str> {
+        match (package_id, function_name) {
+            // `taida-lang/terminal` sample addon (see
+            // `crates/addon-terminal-sample/src/lib.rs::TERMINAL_FUNCTIONS`).
+            ("taida-lang/terminal", "termIsTty") => Some("Bool"),
+            ("taida-lang/terminal", "termReadLine") => Some("Str"),
+            ("taida-lang/terminal", "termSize") => Some("Pack"),
+            // `termPrint` / `termPrintLn` return Unit; no hint needed
+            // because their results are discarded at the statement
+            // level in Taida source.
+            _ => None,
+        }
+    }
+
+    /// RC2.5 Phase 2: parse the optional Taida-side facade for an
+    /// addon-backed package, if one exists at `<pkg_dir>/taida/<stem>.td`.
+    ///
+    /// Returns `Ok(None)` if no facade file is present (lowercase-only
+    /// addons work without a facade). Returns a populated
+    /// [`AddonFacadeSummary`] when a facade exists; the summary is
+    /// intentionally shallow — only top-level assignments and a single
+    /// `<<< @(...)` export statement are supported in RC2.5 v1. Any
+    /// other construct (nested imports, function definitions, etc.)
+    /// triggers a deterministic compile error so unsupported facades
+    /// fail loudly rather than silently diverging between backends.
+    fn load_addon_facade_for_lower(
+        pkg_dir: &std::path::Path,
+        manifest: &crate::addon::manifest::AddonManifest,
+        import_path: &str,
+    ) -> Result<Option<AddonFacadeSummary>, LowerError> {
+        let stem = manifest
+            .package
+            .rsplit('/')
+            .next()
+            .unwrap_or(manifest.package.as_str());
+        let facade_path = pkg_dir.join("taida").join(format!("{}.td", stem));
+        if !facade_path.exists() {
+            return Ok(None);
+        }
+
+        let source = std::fs::read_to_string(&facade_path).map_err(|e| LowerError {
+            message: format!(
+                "cannot read addon facade '{}' for '{}': {}",
+                facade_path.display(),
+                import_path,
+                e
+            ),
+        })?;
+        let (program, parse_errors) = crate::parser::parse(&source);
+        if !parse_errors.is_empty() {
+            return Err(LowerError {
+                message: format!(
+                    "parse errors in addon facade '{}' for '{}': {}",
+                    facade_path.display(),
+                    import_path,
+                    parse_errors
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            });
+        }
+
+        let mut summary = AddonFacadeSummary::default();
+
+        for stmt in &program.statements {
+            match stmt {
+                Statement::Assignment(assign) => match &assign.value {
+                    // `Name <= Ident(B)` → alias if B is a known addon fn
+                    Expr::Ident(target_fn, _) => {
+                        if manifest.functions.contains_key(target_fn) {
+                            summary
+                                .aliases
+                                .insert(assign.target.clone(), target_fn.clone());
+                        } else {
+                            // Could still be a facade-internal name,
+                            // but RC2.5 v1 does not support chained
+                            // aliasing. Flag it explicitly.
+                            return Err(LowerError {
+                                message: format!(
+                                    "addon facade '{}' aliases '{}' to '{}' which is not listed \
+                                     in [functions] (chained facade aliasing is not supported in \
+                                     RC2.5 v1)",
+                                    facade_path.display(),
+                                    assign.target,
+                                    target_fn
+                                ),
+                            });
+                        }
+                    }
+                    // `Name <= @(...)` → pure-Taida pack binding
+                    Expr::BuchiPack(_, _) => {
+                        summary
+                            .pack_bindings
+                            .insert(assign.target.clone(), assign.value.clone());
+                    }
+                    // Anything else is out of scope for RC2.5 v1.
+                    _ => {
+                        return Err(LowerError {
+                            message: format!(
+                                "addon facade '{}' binds '{}' to an unsupported expression shape \
+                                 (RC2.5 v1 supports `Name <= lowercaseFn` aliases and \
+                                 `Name <= @(...)` pack literals only)",
+                                facade_path.display(),
+                                assign.target
+                            ),
+                        });
+                    }
+                },
+                Statement::Export(export_stmt) => {
+                    if export_stmt.path.is_some() {
+                        return Err(LowerError {
+                            message: format!(
+                                "addon facade '{}' uses re-export with path which is not supported",
+                                facade_path.display()
+                            ),
+                        });
+                    }
+                    for sym in &export_stmt.symbols {
+                        summary.exports.insert(sym.clone());
+                    }
+                }
+                // Comments are not Statement nodes; anything else
+                // is a parse construct we do not permit in a facade.
+                _ => {
+                    return Err(LowerError {
+                        message: format!(
+                            "addon facade '{}' contains an unsupported top-level construct \
+                             (RC2.5 v1 facades may only use assignments and `<<<` exports)",
+                            facade_path.display()
+                        ),
+                    });
+                }
+            }
+        }
+
+        // If no explicit export statement was found, fall back to
+        // exporting every top-level binding we understood. This
+        // matches the facade behaviour of "export everything that
+        // reached the top level".
+        if summary.exports.is_empty() {
+            for k in summary.aliases.keys() {
+                summary.exports.insert(k.clone());
+            }
+            for k in summary.pack_bindings.keys() {
+                summary.exports.insert(k.clone());
+            }
+        }
+
+        Ok(Some(summary))
+    }
+
+    /// RC2.5 Phase 2: emit the IR for a single addon function call.
+    ///
+    /// Used by both the regular `FuncCall` lowering path and the
+    /// `MoldInst` lowering path (`Foo[]()` desugars to a call on an
+    /// addon sentinel). The emitted IR is exactly the shape the
+    /// C-side dispatcher (`taida_addon_call` in `native_runtime.c`)
+    /// expects:
+    ///
+    /// ```text
+    ///   taida_addon_call(
+    ///     <const char*> package_id,    // .rodata
+    ///     <const char*> cdylib_path,   // .rodata (absolute path)
+    ///     <const char*> function_name, // .rodata
+    ///     <i64>         argc,
+    ///     <i64>         argv_pack)     // Taida Pack or 0 when argc == 0
+    /// ```
+    ///
+    /// The argv pack is allocated fresh per call so the dispatcher can
+    /// read positional arguments with their type tags (TAIDA_TAG_*).
+    /// For `argc == 0` we pass the integer constant 0 instead of an
+    /// empty pack, matching the C-side contract documented at the
+    /// `taida_addon_call` implementation.
+    fn emit_addon_call(
+        &mut self,
+        func: &mut IrFunction,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<IrVar, LowerError> {
+        let addon_ref = self
+            .addon_func_refs
+            .get(name)
+            .cloned()
+            .expect("emit_addon_call invoked for non-addon name");
+        if args.len() != addon_ref.arity as usize {
+            return Err(LowerError {
+                message: format!(
+                    "addon function '{}' expects {} argument(s), got {}",
+                    addon_ref.function_name,
+                    addon_ref.arity,
+                    args.len()
+                ),
+            });
+        }
+
+        // Lower argument expressions first so any inner error surfaces
+        // before we allocate stack slots / const strings.
+        //
+        // Tag inference is best-effort: Str / Bool / Int are what the
+        // RC2 v1 terminal surface actually exercises. Everything else
+        // falls through to TAIDA_TAG_INT (0) and is treated as a raw
+        // i64 payload by the C dispatcher.
+        let mut arg_vars: Vec<IrVar> = Vec::with_capacity(args.len());
+        let mut arg_tags: Vec<i64> = Vec::with_capacity(args.len());
+        for arg in args {
+            let v = self.lower_expr(func, arg)?;
+            let tag: i64 = if self.expr_is_string_full(arg) {
+                3 // TAIDA_TAG_STR
+            } else if self.expr_is_bool(arg) {
+                2 // TAIDA_TAG_BOOL
+            } else {
+                0 // TAIDA_TAG_INT
+            };
+            arg_vars.push(v);
+            arg_tags.push(tag);
+        }
+
+        // Emit the 3 static `.rodata` strings (package id, cdylib
+        // absolute path, function name). ConstStr auto-deduplicates at
+        // the emit layer through its global-data table.
+        let pkg_var = func.alloc_var();
+        func.push(IrInst::ConstStr(pkg_var, addon_ref.package_id.clone()));
+        let cdylib_var = func.alloc_var();
+        func.push(IrInst::ConstStr(cdylib_var, addon_ref.cdylib_path.clone()));
+        let fn_name_var = func.alloc_var();
+        func.push(IrInst::ConstStr(
+            fn_name_var,
+            addon_ref.function_name.clone(),
+        ));
+
+        // Build argv pack. For argc == 0 we pass 0 and short-circuit
+        // the per-call allocation entirely.
+        let argv_var = if arg_vars.is_empty() {
+            let z = func.alloc_var();
+            func.push(IrInst::ConstInt(z, 0));
+            z
+        } else {
+            let p = func.alloc_var();
+            func.push(IrInst::PackNew(p, arg_vars.len()));
+            for (i, (av, tag)) in arg_vars.iter().zip(arg_tags.iter()).enumerate() {
+                func.push(IrInst::PackSet(p, i, *av));
+                func.push(IrInst::PackSetTag(p, i, *tag));
+            }
+            p
+        };
+
+        let argc_var = func.alloc_var();
+        func.push(IrInst::ConstInt(argc_var, arg_vars.len() as i64));
+
+        let result = func.alloc_var();
+        func.push(IrInst::Call(
+            result,
+            "taida_addon_call".to_string(),
+            vec![pkg_var, cdylib_var, fn_name_var, argc_var, argv_var],
+        ));
+        // Track that this variable holds a pack-like value so
+        // downstream `.field` access uses the pack lookup path.
+        // (addon return values for terminal v1 are all Pack shapes.)
+        Ok(result)
     }
 
     fn resolve_import_path(
@@ -1298,40 +1854,37 @@ impl Lowering {
                     let path = &import_stmt.path;
                     let version = import_stmt.version.as_deref();
 
-                    // RC1 Phase 4: addon-backed package detection.
+                    // RC2.5 Phase 1: addon-backed package dispatch.
                     //
-                    // Cranelift native compile path does not own the
-                    // addon dispatch runtime in RC1 (the interpreter
-                    // is the reference implementation that ships the
-                    // dispatch path; Cranelift integration is out of
-                    // scope per `.dev/RC1_DESIGN.md` Phase 4 Lock).
-                    // Reject addon-backed packages here with the same
-                    // deterministic error string the policy table
-                    // produces for any other unsupported backend.
+                    // Cranelift native compile path now routes addon
+                    // imports through a C-side dispatcher
+                    // (`taida_addon_call` in native_runtime.c) that
+                    // lazily `dlopen`s the cdylib at first call.
                     //
-                    // The check uses the same package-directory
-                    // resolution as the interpreter and JS codegen so
-                    // resolution order cannot drift across backends.
+                    // Resolution order matches the interpreter:
+                    //   1. `ensure_addon_supported(backend, path)` —
+                    //      honours the backend policy table; wasm / js
+                    //      targets still reject with the deterministic
+                    //      "not supported on backend" message.
+                    //   2. `resolve_cdylib_path` — absolute path is
+                    //      embedded in `.rodata` at build time
+                    //      (RC2.5B-004 known limitation)
+                    //   3. manifest `[functions]` supplies arity
+                    //
+                    // If `try_locate_addon_pkg_dir` finds an addon
+                    // package, we skip the normal stdlib / user-
+                    // function classification below and jump straight
+                    // into `lower_addon_import`.
                     if let Some(addon_pkg_dir) = self.try_locate_addon_pkg_dir(path, version)
                         && addon_pkg_dir.join("native").join("addon.toml").exists()
                     {
-                        let policy_err = crate::addon::ensure_addon_supported(
-                            crate::addon::AddonBackend::Native,
-                            path,
-                        );
-                        // Native is allowed by the policy table, but
-                        // RC1 Phase 4 explicitly defers Cranelift
-                        // dispatch wiring. Surface the limitation in
-                        // a deterministic message that mentions the
-                        // package id.
-                        let msg = match policy_err {
-                            Ok(()) => format!(
-                                "addon-backed package '{}' cannot be compiled by the Cranelift native backend in RC1 (interpreter dispatch only). Run with the interpreter, or wait for a later RC that wires addon dispatch into the native compile path.",
-                                path
-                            ),
-                            Err(e) => e.to_string(),
-                        };
-                        return Err(LowerError { message: msg });
+                        crate::addon::ensure_addon_supported(self.addon_backend, path).map_err(
+                            |e| LowerError {
+                                message: e.to_string(),
+                            },
+                        )?;
+                        self.lower_addon_import(&addon_pkg_dir, path, import_stmt)?;
+                        continue;
                     }
 
                     let is_core_bundled_path = matches!(
@@ -1505,6 +2058,24 @@ impl Lowering {
 
             self.emit_imported_module_inits(&mut main_fn);
             self.bind_imported_values(&mut main_fn);
+
+            // RC2.5 Phase 2: replay addon facade pack bindings before
+            // any user statement runs. The bindings are synthetic
+            // `Name <= @(...)` assignments harvested from the addon's
+            // `taida/<stem>.td` facade during `lower_addon_import`; they
+            // are the native-backend equivalent of the
+            // `module_eval::load_addon_facade` path used by the
+            // interpreter (e.g. `KeyKind <= @(Char <= 0, ...)`).
+            let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
+            for (name, expr) in &facade_bindings {
+                let val = self.lower_expr(&mut main_fn, expr)?;
+                main_fn.push(IrInst::DefVar(name.clone(), val));
+            }
+            // Put the bindings back so repeat calls to lower_program
+            // (if any) would still see them. In practice lower_program
+            // is called once per build, but take()/put-back is safer
+            // than leaving the vec drained and silently losing data.
+            self.addon_facade_pack_bindings = facade_bindings;
 
             let top_level_stmts: Vec<&Statement> = program
                 .statements
@@ -2557,6 +3128,31 @@ impl Lowering {
                 Ok(result)
             }
             Expr::MoldInst(type_name, type_args, fields, _) => {
+                // RC2.5 Phase 2 (RC2.5-2a): addon sentinel dispatch.
+                // `Foo[]()` where `Foo` was imported from an addon-backed
+                // package resolves to the same `taida_addon_call` path
+                // as the plain `foo()` form. The user may spell the call
+                // either way (mold-instantiation form is the RC2 facade
+                // surface, `terminalSize()` is the lowercase fallback).
+                //
+                // `type_args` in mold syntax are positional call
+                // arguments (Upper[str]() -> `str` is type_args[0]), so
+                // we forward them to the shared `emit_addon_call`
+                // helper. Field-form arguments (`TerminalSize[](x <= 1)`)
+                // are not part of the v1 terminal contract — reject
+                // them explicitly so misuse is diagnosed at compile
+                // time rather than silently dropped.
+                if self.addon_func_refs.contains_key(type_name) {
+                    if !fields.is_empty() {
+                        return Err(LowerError {
+                            message: format!(
+                                "addon function '{}' does not accept buchi-field arguments",
+                                type_name
+                            ),
+                        });
+                    }
+                    return self.emit_addon_call(func, type_name, type_args);
+                }
                 self.lower_mold_inst(func, type_name, type_args, fields)
             }
             Expr::Unmold(expr, _) => {
@@ -3202,6 +3798,18 @@ impl Lowering {
                 let result = func.alloc_var();
                 func.push(IrInst::Call(result, rt_name.to_string(), vec![]));
                 return Ok(result);
+            }
+
+            // RC2.5: addon dispatch takes precedence over stdlib lookup.
+            // The call is emitted as a single `taida_addon_call` runtime
+            // invocation; argv is packed into a tiny per-call Taida Pack
+            // so the C dispatcher can read positional arguments with tags.
+            //
+            // The same helper is reused by the `Expr::MoldInst` lowering
+            // path (Phase 2 / RC2.5-2a), so any user-side spelling of
+            // `foo()` or `Foo[]()` routes through identical IR.
+            if self.addon_func_refs.contains_key(name) {
+                return self.emit_addon_call(func, name, args);
             }
 
             // stdlib ランタイム関数呼び出し（std/math, std/io etc.）

@@ -429,9 +429,17 @@ stdout(echo("x"))
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// RC2.5 Phase 1: Cranelift native compile path **accepts** addon-backed
+/// packages. The lowering layer routes the import through
+/// `lower_addon_import` which resolves the cdylib path at build time and
+/// emits `taida_addon_call` dispatch stubs at every call site.
+///
+/// The cdylib itself is created as a zero-byte placeholder so
+/// `resolve_cdylib_path` succeeds at build time; the dispatcher only
+/// opens the `.so` at runtime, which this test never exercises.
 #[test]
-fn cranelift_native_compile_rejects_addon_backed_package() {
-    let project = std::env::temp_dir().join("rc1_phase4_addon_cranelift_reject");
+fn cranelift_native_compile_accepts_addon_backed_package() {
+    let project = std::env::temp_dir().join("rc2_5_addon_cranelift_accept");
     let _ = std::fs::remove_dir_all(&project);
     std::fs::create_dir_all(&project).unwrap();
     let native_dir = project
@@ -454,8 +462,26 @@ echo = 1
 "#,
     )
     .unwrap();
+
+    // Placeholder cdylib so resolve_cdylib_path succeeds at build time.
+    let suffix = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(target_os = "windows") {
+        "dll"
+    } else {
+        "so"
+    };
+    std::fs::write(
+        native_dir.join(format!("libtaida_addon_sample.{}", suffix)),
+        b"",
+    )
+    .expect("write placeholder cdylib");
+
+    // Import-only program: the call `echo("x")` would exercise the
+    // runtime dispatcher (which needs a real cdylib), so Phase 1 only
+    // verifies that the import itself builds cleanly.
     let main_td = r#">>> taida-lang/addon-rs-sample => @(echo)
-stdout(echo("x"))
+stdout("rc2_5: addon-rs-sample import accepted on cranelift native")
 "#;
     std::fs::write(project.join("main.td"), main_td).unwrap();
 
@@ -471,16 +497,21 @@ stdout(echo("x"))
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !output.status.success(),
-        "Cranelift native compile must reject addon-backed package. stdout={}, stderr={}",
+        output.status.success(),
+        "RC2.5 contract: Cranelift native compile must accept addon-backed package. \
+         stdout={}, stderr={}",
         stdout,
         stderr
     );
     let combined = format!("{}{}", stderr, stdout);
     assert!(
-        combined.contains("Cranelift native backend in RC1")
-            || combined.contains("interpreter dispatch only"),
-        "diagnostic must classify the Cranelift rejection, got: {}",
+        !combined.contains("Cranelift native backend in RC1"),
+        "RC2.5 contract: the old reject message must not fire. got: {}",
+        combined
+    );
+    assert!(
+        project.join("main.bin").exists(),
+        "RC2.5 contract: native build must produce an executable. combined: {}",
         combined
     );
 

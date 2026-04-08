@@ -428,7 +428,12 @@ pub fn cdylib_search_paths(pkg_dir: &Path, library_stem: &str) -> Vec<PathBuf> {
 /// 1. `<pkg_dir>/native/lib<stem>.{so,dylib,dll}`
 /// 2. `${CARGO_TARGET_DIR}/debug/...`
 /// 3. `${CARGO_TARGET_DIR}/release/...`
-fn resolve_cdylib_path(pkg_dir: &Path, library_stem: &str) -> Option<PathBuf> {
+///
+/// RC2.5 Phase 1: visibility raised to `pub(crate)` so the Cranelift
+/// native lowering layer (`src/codegen/lower.rs`) can resolve the
+/// absolute path at build time and embed it in `.rodata`. The
+/// interpreter path is unchanged.
+pub(crate) fn resolve_cdylib_path(pkg_dir: &Path, library_stem: &str) -> Option<PathBuf> {
     cdylib_search_paths(pkg_dir, library_stem)
         .into_iter()
         .find(|p| p.exists())

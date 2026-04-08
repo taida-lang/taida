@@ -1638,6 +1638,15 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Val],
         },
 
+        // RC2.5: addon dispatch single entry (.dev/RC2_5_DESIGN.md §A).
+        // Called with (package_id: *const c_char, cdylib_path: *const c_char,
+        //              function_name: *const c_char, argc: i64, argv_pack: i64)
+        // Returns a taida_val carrying the addon's return value.
+        "taida_addon_call" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr, Val, Val],
+            returns: &[Val],
+        },
+
         // N-44: ABI table maintenance note
         // When adding a new runtime function in lower.rs, a corresponding entry
         // MUST be added here. The match is exhaustive by design — an unknown
