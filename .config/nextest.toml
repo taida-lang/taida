@@ -25,12 +25,3 @@ status-level = "pass"
 final-status-level = "all"
 # Warn on tests slower than 60s, terminate after 10 minutes
 slow-timeout = { period = "60s", terminate-after = 10 }
-
-# Serialize tests that share target/wasm-rt-cache/ to prevent TOCTOU races
-# between wasm build tests (test_rc8a) and cache clean tests (test_rc8d).
-[test-groups]
-wasm-cache-serial = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = 'test(#[cli_cache])'
-test-group = 'wasm-cache-serial'

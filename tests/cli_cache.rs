@@ -71,7 +71,12 @@ fn test_rc8a_wasm_cache_hit_on_second_build() {
 
 #[test]
 fn test_rc8d_cache_clean_removes_files() {
-    let cache_dir = PathBuf::from("target/wasm-rt-cache");
+    // Isolate from the shared `target/wasm-rt-cache/` directory used by other
+    // wasm build tests (e.g. test_rc8a, tests/wasm_*.rs) by running the
+    // subprocess in a unique temp dir so `target/wasm-rt-cache/` resolves
+    // to `{tmp}/target/wasm-rt-cache/` instead of the project root cache.
+    let tmp = unique_temp_dir("rc8d_cache_clean");
+    let cache_dir = tmp.join("target").join("wasm-rt-cache");
     let _ = fs::create_dir_all(&cache_dir);
 
     let fake_o = cache_dir.join("test_clean.deadbeef.o");
@@ -81,6 +86,7 @@ fn test_rc8d_cache_clean_removes_files() {
 
     let output = Command::new(taida_bin())
         .args(["cache", "clean"])
+        .current_dir(&tmp)
         .output()
         .expect("cache clean");
     assert!(
@@ -101,6 +107,8 @@ fn test_rc8d_cache_clean_removes_files() {
         !fake_tmp.exists(),
         "fake .tmp.o should be removed by cache clean"
     );
+
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 /// Regression: `taida cache clean` in a project with `.taida/` + `packages.tdm`
