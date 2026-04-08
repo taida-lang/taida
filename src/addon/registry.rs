@@ -64,6 +64,11 @@ pub enum AddonImportError {
     },
     /// `dlopen` / handshake failed.
     Loader(AddonLoadError),
+    /// The addon registry `Mutex` was found to be poisoned (a previous
+    /// holder panicked). This is a process-level failure, but we
+    /// surface it as a recoverable error rather than propagating the
+    /// panic to unrelated import paths.
+    RegistryPoisoned { package: String },
     /// Manifest declared a function that the loaded cdylib does not
     /// export. This is the over-export protection mandated by the
     /// design lock: the manifest is the source of truth and any drift
@@ -120,6 +125,11 @@ impl std::fmt::Display for AddonImportError {
                 Ok(())
             }
             Self::Loader(e) => write!(f, "{e}"),
+            Self::RegistryPoisoned { package } => write!(
+                f,
+                "addon import failed: registry mutex poisoned while loading package '{}'",
+                package
+            ),
             Self::FunctionNotInBinary {
                 package,
                 function,
@@ -257,7 +267,12 @@ impl AddonRegistry {
         let key: RegistryKey = (canonical_root.clone(), package_id.to_string());
 
         {
-            let map = self.inner.lock().expect("addon registry mutex poisoned");
+            let map = self
+                .inner
+                .lock()
+                .map_err(|_| AddonImportError::RegistryPoisoned {
+                    package: package_id.to_string(),
+                })?;
             if let Some(existing) = map.get(&key) {
                 return Ok(existing.clone());
             }
@@ -326,7 +341,12 @@ impl AddonRegistry {
             manifest,
         });
 
-        let mut map = self.inner.lock().expect("addon registry mutex poisoned");
+        let mut map = self
+            .inner
+            .lock()
+            .map_err(|_| AddonImportError::RegistryPoisoned {
+                package: package_id.to_string(),
+            })?;
         if let Some(existing) = map.get(&key) {
             // Another thread raced; prefer the older entry to keep
             // pointer identity stable. The `loaded` we just built will

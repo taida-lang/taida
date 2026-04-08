@@ -478,11 +478,11 @@ pub fn load_addon<P: AsRef<Path>>(path: P) -> Result<LoadedAddon, AddonLoadError
 
     // 7. Cache function entries.
     let mut functions = Vec::with_capacity(descriptor.function_count as usize);
-    for i in 0..descriptor.function_count as isize {
+    for i in 0..descriptor.function_count as usize {
         // SAFETY: bounds checked against `function_count` (validated
         // non-null above) and the addon contract requires this slice
         // to live for the library's lifetime.
-        let entry: &TaidaAddonFunctionV1 = unsafe { &*descriptor.functions.offset(i) };
+        let entry: &TaidaAddonFunctionV1 = unsafe { &*descriptor.functions.add(i) };
         if entry.name.is_null() {
             return Err(AddonLoadError::InvalidDescriptor {
                 path: owned_path,
@@ -694,8 +694,8 @@ mod tests {
             })?
             .to_string();
         let mut functions = Vec::new();
-        for i in 0..descriptor.function_count as isize {
-            let entry: &TaidaAddonFunctionV1 = unsafe { &*descriptor.functions.offset(i) };
+        for i in 0..descriptor.function_count as usize {
+            let entry: &TaidaAddonFunctionV1 = unsafe { &*descriptor.functions.add(i) };
             if entry.name.is_null() {
                 return Err(AddonLoadError::InvalidDescriptor {
                     path,
