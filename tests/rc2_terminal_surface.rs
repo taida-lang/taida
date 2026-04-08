@@ -123,11 +123,15 @@ fn install_terminal_fixture(project: &Path) -> bool {
     std::fs::create_dir_all(pkg.join("native")).expect("create native dir");
     std::fs::create_dir_all(pkg.join("taida")).expect("create taida dir");
 
-    std::fs::copy(repo.join("native").join("addon.toml"), pkg.join("native").join("addon.toml"))
-        .expect("copy addon.toml");
+    std::fs::copy(
+        repo.join("native").join("addon.toml"),
+        pkg.join("native").join("addon.toml"),
+    )
+    .expect("copy addon.toml");
     std::fs::copy(
         &cdylib,
-        pkg.join("native").join(cdylib.file_name().expect("cdylib file name")),
+        pkg.join("native")
+            .join(cdylib.file_name().expect("cdylib file name")),
     )
     .expect("copy cdylib");
     std::fs::copy(facade_src, pkg.join("taida").join("terminal.td")).expect("copy facade");

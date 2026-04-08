@@ -479,14 +479,12 @@ impl Lowering {
         import_stmt: &crate::parser::ImportStmt,
     ) -> Result<(), LowerError> {
         let manifest_path = pkg_dir.join("native").join("addon.toml");
-        let manifest = crate::addon::manifest::parse_addon_manifest(&manifest_path).map_err(
-            |e| LowerError {
-                message: format!(
-                    "addon manifest load failed for '{}': {}",
-                    import_path, e
-                ),
-            },
-        )?;
+        let manifest =
+            crate::addon::manifest::parse_addon_manifest(&manifest_path).map_err(|e| {
+                LowerError {
+                    message: format!("addon manifest load failed for '{}': {}", import_path, e),
+                }
+            })?;
 
         // Resolve cdylib absolute path at build time. The path is
         // embedded in .rodata and consumed by `taida_addon_call` at
@@ -554,14 +552,15 @@ impl Lowering {
                     // Facade alias: look the function up in the
                     // manifest to recover its arity, then register
                     // the new alias under `addon_func_refs`.
-                    let arity = manifest.functions.get(target_fn).ok_or_else(|| {
-                        LowerError {
+                    let arity = manifest
+                        .functions
+                        .get(target_fn)
+                        .ok_or_else(|| LowerError {
                             message: format!(
                                 "addon facade for '{}' aliases '{}' to unknown function '{}'",
                                 import_path, orig_name, target_fn
                             ),
-                        }
-                    })?;
+                        })?;
                     self.addon_func_refs.insert(
                         alias.clone(),
                         AddonFuncRef {
@@ -616,14 +615,15 @@ impl Lowering {
                 });
             }
 
-            let arity = manifest.functions.get(&orig_name).ok_or_else(|| {
-                LowerError {
+            let arity = manifest
+                .functions
+                .get(&orig_name)
+                .ok_or_else(|| LowerError {
                     message: format!(
                         "Symbol '{}' not found in addon-backed package '{}'",
                         orig_name, import_path
                     ),
-                }
-            })?;
+                })?;
 
             self.addon_func_refs.insert(
                 alias.clone(),
@@ -652,9 +652,7 @@ impl Lowering {
             // defaults to `taida_polymorphic_to_string`) while the
             // interpreter renders it as "false" — a real
             // backend-parity gap surfaced by RC2.5-4b.
-            if let Some(return_tag) =
-                Self::addon_known_return_tag(&manifest.package, &orig_name)
-            {
+            if let Some(return_tag) = Self::addon_known_return_tag(&manifest.package, &orig_name) {
                 match return_tag {
                     "Bool" => {
                         self.bool_returning_funcs.insert(alias.clone());

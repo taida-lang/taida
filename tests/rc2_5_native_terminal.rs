@@ -68,12 +68,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ))
+    std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
 }
 
 fn cdylib_ext() -> &'static str {
@@ -179,8 +174,7 @@ fn write_sample_fixture(project: &Path, pkg_dir_rel: &str) -> PathBuf {
         .expect("write addon.toml");
     // The facade stem must match the last path segment of the package
     // directory (`<pkg_dir>/taida/<stem>.td`).
-    std::fs::write(pkg.join("taida").join("terminal.td"), SAMPLE_FACADE_TD)
-        .expect("write facade");
+    std::fs::write(pkg.join("taida").join("terminal.td"), SAMPLE_FACADE_TD).expect("write facade");
     std::fs::write(
         pkg.join("packages.tdm"),
         "name <= \"taida-lang/terminal\"\nversion <= \"0.1.0\"\n",
@@ -237,10 +231,7 @@ fn run_native_with_null_stdin(bin: &Path, project: &Path) -> (Option<i32>, Strin
 
 /// Run `main.td` through the interpreter (`taida main.td`) with stdin
 /// redirected to /dev/null. Returns `(ok, stdout, stderr)`.
-fn run_interpreter_with_null_stdin(
-    project: &Path,
-    main_td: &str,
-) -> (bool, String, String) {
+fn run_interpreter_with_null_stdin(project: &Path, main_td: &str) -> (bool, String, String) {
     std::fs::write(project.join("main.td"), main_td).expect("write main.td");
     let output = Command::new(taida_bin())
         .arg(project.join("main.td"))
@@ -276,9 +267,9 @@ fn run_interpreter_with_null_stdin(
 fn abi_struct_layout_parity_matches_c_static_assert_sizes() {
     use std::mem::size_of;
     use taida_addon::{
-        TaidaAddonBytesPayload, TaidaAddonDescriptorV1, TaidaAddonErrorV1,
-        TaidaAddonFloatPayload, TaidaAddonFunctionV1, TaidaAddonIntPayload,
-        TaidaAddonPackEntryV1, TaidaAddonPackPayload, TaidaAddonValueV1, TaidaHostV1,
+        TaidaAddonBytesPayload, TaidaAddonDescriptorV1, TaidaAddonErrorV1, TaidaAddonFloatPayload,
+        TaidaAddonFunctionV1, TaidaAddonIntPayload, TaidaAddonPackEntryV1, TaidaAddonPackPayload,
+        TaidaAddonValueV1, TaidaHostV1,
     };
 
     // These numbers must match exactly the `_Static_assert(sizeof(...)
@@ -319,11 +310,7 @@ fn abi_struct_layout_parity_matches_c_static_assert_sizes() {
         40,
         "TaidaAddonDescriptorV1 layout drift"
     );
-    assert_eq!(
-        size_of::<TaidaHostV1>(),
-        96,
-        "TaidaHostV1 layout drift"
-    );
+    assert_eq!(size_of::<TaidaHostV1>(), 96, "TaidaHostV1 layout drift");
     assert_eq!(
         size_of::<TaidaAddonPackEntryV1>(),
         16,
@@ -399,7 +386,8 @@ stdout(`phase4: done`)
         Some(0),
         "RC2.5-4a: full-surface binary must exit cleanly. \
          stdout={} stderr={}",
-        run_stdout, run_stderr
+        run_stdout,
+        run_stderr
     );
 
     // Facade pack binding (Phase 2 replay) reached user code.
@@ -525,14 +513,14 @@ stdout(`parity: tail`)
     );
 
     // Run the native binary with the same stdin source.
-    let (native_code, native_stdout, native_stderr) =
-        run_native_with_null_stdin(&bin, &project);
+    let (native_code, native_stdout, native_stderr) = run_native_with_null_stdin(&bin, &project);
     assert_eq!(
         native_code,
         Some(0),
         "RC2.5-4b: native binary must exit cleanly for parity. \
          stdout={} stderr={}",
-        native_stdout, native_stderr
+        native_stdout,
+        native_stderr
     );
 
     // Strict byte equality. If you see a diff here, the backend
@@ -625,7 +613,8 @@ stdout(`should-not-print=${result}`)
         Some(1),
         "RC2.5B-004: missing cdylib must hard-fail with exit 1. \
          stdout={} stderr={}",
-        run_stdout, run_stderr
+        run_stdout,
+        run_stderr
     );
     // Phase 3 contract: the first line prefix is unchanged.
     assert!(

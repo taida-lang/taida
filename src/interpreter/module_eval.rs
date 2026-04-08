@@ -797,11 +797,7 @@ impl Interpreter {
         // `eval_import`: parse, swap env/current_file/exports state,
         // evaluate, then restore.
         let source = std::fs::read_to_string(&canonical).map_err(|e| RuntimeError {
-            message: format!(
-                "Cannot read addon facade '{}': {}",
-                canonical.display(),
-                e
-            ),
+            message: format!("Cannot read addon facade '{}': {}", canonical.display(), e),
         })?;
         let (program, parse_errors) = crate::parser::parse(&source);
         if !parse_errors.is_empty() {
@@ -845,10 +841,7 @@ impl Interpreter {
         // (`TerminalSize <= terminalSize`) or reference them to combine
         // addon calls with pure-Taida values (`KeyKind`, wrapper funcs).
         for fn_name in resolved.manifest.functions.keys() {
-            let sentinel = format!(
-                "__taida_addon_call::{}::{}",
-                resolved.package_id, fn_name
-            );
+            let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, fn_name);
             self.env.define_force(fn_name, Value::Str(sentinel));
         }
 
@@ -894,13 +887,11 @@ impl Interpreter {
         // facade ever introduces them. Today the terminal facade only
         // exports packs + aliases, but keeping the hook in place
         // avoids a future gotcha.
-        let exported_type_defs: std::collections::HashMap<
-            String,
-            Vec<crate::parser::FieldDef>,
-        > = module_type_defs
-            .into_iter()
-            .filter(|(k, _)| exports.contains_key(k))
-            .collect();
+        let exported_type_defs: std::collections::HashMap<String, Vec<crate::parser::FieldDef>> =
+            module_type_defs
+                .into_iter()
+                .filter(|(k, _)| exports.contains_key(k))
+                .collect();
         let exported_type_methods: std::collections::HashMap<
             String,
             std::collections::HashMap<String, crate::parser::FuncDef>,

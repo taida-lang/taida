@@ -70,12 +70,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ))
+    std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
 }
 
 fn cdylib_ext() -> &'static str {
@@ -172,8 +167,7 @@ fn write_sample_fixture(project: &Path, pkg_dir_rel: &str) -> PathBuf {
     // The facade stem must match the package directory name's last
     // segment so `lower_addon_import` finds it via
     // `<pkg_dir>/taida/<stem>.td`.
-    std::fs::write(pkg.join("taida").join("terminal.td"), SAMPLE_FACADE_TD)
-        .expect("write facade");
+    std::fs::write(pkg.join("taida").join("terminal.td"), SAMPLE_FACADE_TD).expect("write facade");
     std::fs::write(
         pkg.join("packages.tdm"),
         "name <= \"taida-lang/terminal\"\nversion <= \"0.1.0\"\n",
@@ -324,7 +318,8 @@ stdout(`rc2_5_phase3: after-call result=${result}`)
         Some(0),
         "RC2.5-3a: caught AddonError must allow normal exit. \
          stdout={} stderr={}",
-        run_stdout, run_stderr
+        run_stdout,
+        run_stderr
     );
     assert!(
         run_stdout.contains("rc2_5_phase3: before-call"),
@@ -402,7 +397,8 @@ stdout(`rc2_5_phase3: parent result=${result}`)
         Some(0),
         "RC2.5-3a parent: catch-all Error handler must intercept the throw. \
          stdout={} stderr={}",
-        run_stdout, run_stderr
+        run_stdout,
+        run_stderr
     );
     assert!(
         run_stdout.contains("rc2_5_phase3: parent-caught type=AddonError"),
@@ -454,8 +450,7 @@ stdout(`rc2_5_phase3: should-not-print=${result}`)
     // Now break the runtime resolution by deleting the cdylib.
     // The build-time-embedded absolute path will fail dlopen at
     // first-call time, which the dispatcher converts to a hard fail.
-    std::fs::remove_file(&cdylib_path)
-        .expect("delete cdylib so dlopen will fail");
+    std::fs::remove_file(&cdylib_path).expect("delete cdylib so dlopen will fail");
 
     let (code, run_stdout, run_stderr) = run_with_null_stdin(&bin);
     assert_ne!(
@@ -463,14 +458,16 @@ stdout(`rc2_5_phase3: should-not-print=${result}`)
         Some(0),
         "RC2.5-3b: dlopen failure must NOT exit cleanly. \
          stdout={} stderr={}",
-        run_stdout, run_stderr
+        run_stdout,
+        run_stderr
     );
     assert_eq!(
         code,
         Some(1),
         "RC2.5-3b: dlopen failure must exit with code 1 (hard fail). \
          stdout={} stderr={}",
-        run_stdout, run_stderr
+        run_stdout,
+        run_stderr
     );
     assert!(
         run_stderr.contains("taida: addon load failed:"),

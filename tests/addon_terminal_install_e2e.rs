@@ -102,7 +102,10 @@ fn make_work_dir(test_id: &str) -> PathBuf {
         .expect("clock")
         .as_nanos();
     let abs = std::env::temp_dir().join(format!(
-        "taida-e2e/{}_{}_{}", test_id, std::process::id(), nanos
+        "taida-e2e/{}_{}_{}",
+        test_id,
+        std::process::id(),
+        nanos
     ));
     fs::create_dir_all(&abs).expect("create work dir");
     abs

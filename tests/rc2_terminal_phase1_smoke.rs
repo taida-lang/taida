@@ -136,7 +136,10 @@ fn terminal_addon_manifest_parses_with_v1_locked_shape() {
         .as_deref()
         .expect("url_template");
     assert!(
-        url.contains("{version}") && url.contains("{name}") && url.contains("{target}") && url.contains("{ext}"),
+        url.contains("{version}")
+            && url.contains("{name}")
+            && url.contains("{target}")
+            && url.contains("{ext}"),
         "url template must use the four canonical placeholders, got: {}",
         url
     );
@@ -204,8 +207,11 @@ fn terminal_import_without_install_returns_module_not_found() {
     std::fs::create_dir_all(&project).unwrap();
 
     // Marker file so find_project_root anchors here.
-    std::fs::write(project.join("packages.tdm"), "name <= \"smoke\"\nversion <= \"0.1.0\"\n")
-        .unwrap();
+    std::fs::write(
+        project.join("packages.tdm"),
+        "name <= \"smoke\"\nversion <= \"0.1.0\"\n",
+    )
+    .unwrap();
 
     let main_td = r#">>> taida-lang/terminal => @(terminalSize, readKey)
 stdout("unreachable")

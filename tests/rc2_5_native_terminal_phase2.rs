@@ -139,7 +139,8 @@ fn write_terminal_fixture_with_facade(project: &Path) {
         "so"
     };
     std::fs::write(
-        pkg.join("native").join(format!("{}.{}", cdylib_stem, suffix)),
+        pkg.join("native")
+            .join(format!("{}.{}", cdylib_stem, suffix)),
         b"",
     )
     .expect("write placeholder cdylib");
