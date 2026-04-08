@@ -920,10 +920,11 @@ fn run_wasm_clang_object(
 /// RCB-43: ダイヤモンド依存時の IR キャッシュ — 同一モジュールが複数パスから
 /// 異なるシンボルセットで import された場合、2回目以降は初回の parse+lower 結果を
 /// キャッシュから再利用し、ファイル再読込・再パース・再 lower を回避する。
-fn inline_wasm_module_imports(
+fn inline_wasm_module_imports_with_backend(
     main_module: &mut super::ir::IrModule,
     base_dir: &Path,
     main_path: &Path,
+    addon_backend: crate::addon::AddonBackend,
 ) -> Result<(), CompileError> {
     use std::collections::{HashMap, HashSet};
 
@@ -1018,6 +1019,7 @@ fn inline_wasm_module_imports(
             dep_lowering.set_source_dir(parent.to_path_buf());
         }
         dep_lowering.set_module_key(Lowering::module_key_for_path(&dep_path));
+        dep_lowering.set_addon_backend(addon_backend);
         let dep_ir = dep_lowering
             .lower_program(&dep_program)
             .map_err(|e| CompileError {
@@ -1181,6 +1183,17 @@ fn wasm_frontend(
         lowering.set_source_dir(parent.to_path_buf());
     }
     lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    // RC2.5: tell the lowering layer which addon backend to enforce so
+    // addon-backed package imports get the correct policy-template
+    // error for wasm targets (instead of silently treating them like
+    // the native path).
+    let addon_backend = match profile {
+        emit_wasm_c::WasmProfile::Min => crate::addon::AddonBackend::WasmMin,
+        emit_wasm_c::WasmProfile::Wasi => crate::addon::AddonBackend::WasmWasi,
+        emit_wasm_c::WasmProfile::Edge => crate::addon::AddonBackend::WasmEdge,
+        emit_wasm_c::WasmProfile::Full => crate::addon::AddonBackend::WasmFull,
+    };
+    lowering.set_addon_backend(addon_backend);
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;
@@ -1188,7 +1201,12 @@ fn wasm_frontend(
     // モジュールインライン展開: 依存モジュールの IR 関数をメインモジュールに融合
     if !ir_module.imports.is_empty() {
         let base_dir = input_path.parent().unwrap_or(Path::new("."));
-        inline_wasm_module_imports(&mut ir_module, base_dir, input_path)?;
+        inline_wasm_module_imports_with_backend(
+            &mut ir_module,
+            base_dir,
+            input_path,
+            addon_backend,
+        )?;
     }
 
     // RC 最適化パス

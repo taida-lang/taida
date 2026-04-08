@@ -304,18 +304,48 @@ stdout("unreachable")
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// Cranelift native compile path also rejects the terminal addon —
-/// addon dispatch is interpreter-only in RC1. The diagnostic mentions
-/// the `Cranelift native backend in RC1` shape from `lower.rs`.
+/// RC2.5 Phase 1: Cranelift native compile path **accepts** addon
+/// package imports. The lowering layer now routes `taida-lang/terminal`
+/// through `lower_addon_import`, resolves the cdylib path at build time,
+/// and emits a `taida_addon_call` dispatch stub for each imported symbol.
+///
+/// This test does not require the real sibling `terminal` cdylib — a
+/// zero-byte placeholder is enough because the cdylib is only `dlopen`ed
+/// at **runtime** (and this test only exercises the build pipeline,
+/// not the run step).
 #[test]
-fn terminal_import_rejected_on_cranelift_native_at_compile_time() {
-    let project = unique_temp_dir("rc2_terminal_cranelift_reject");
+fn terminal_import_accepted_on_cranelift_native_at_compile_time() {
+    let project = unique_temp_dir("rc2_5_terminal_cranelift_accept");
     let _ = std::fs::remove_dir_all(&project);
     std::fs::create_dir_all(&project).unwrap();
     write_terminal_dep_skeleton(&project, TERMINAL_ADDON_TOML);
 
+    // Placeholder cdylib so `resolve_cdylib_path` succeeds at build time.
+    // The real dispatch logic only touches this file when the compiled
+    // binary actually runs an addon function; a simple import-only
+    // program (no call site) never reaches `dlopen`.
+    let cdylib_stem = "libtaida_lang_terminal";
+    let suffix = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(target_os = "windows") {
+        "dll"
+    } else {
+        "so"
+    };
+    let cdylib_path = project
+        .join(".taida")
+        .join("deps")
+        .join("taida-lang")
+        .join("terminal")
+        .join("native")
+        .join(format!("{}.{}", cdylib_stem, suffix));
+    std::fs::write(&cdylib_path, b"").expect("write placeholder cdylib");
+
+    // Import-only program. `terminalSize` is referenced in the import
+    // statement but never called, so Phase 1 lowering only needs to
+    // register the `addon_func_refs` entry and produce a valid binary.
     let main_td = r#">>> taida-lang/terminal => @(terminalSize)
-stdout("unreachable")
+stdout("rc2_5: terminal import accepted on cranelift native")
 "#;
     std::fs::write(project.join("main.td"), main_td).unwrap();
 
@@ -333,20 +363,20 @@ stdout("unreachable")
     let combined = format!("{}{}", stderr, stdout);
 
     assert!(
-        !output.status.success(),
-        "Cranelift native compile must reject taida-lang/terminal. stdout={}, stderr={}",
+        output.status.success(),
+        "RC2.5 contract: Cranelift native compile must accept taida-lang/terminal import. \
+         stdout={}, stderr={}",
         stdout,
         stderr
     );
     assert!(
-        combined.contains("taida-lang/terminal"),
-        "diagnostic must name the package, got: {}",
+        !combined.contains("Cranelift native backend in RC1"),
+        "RC2.5 contract: the old reject message must not fire. got: {}",
         combined
     );
     assert!(
-        combined.contains("Cranelift native backend in RC1")
-            || combined.contains("interpreter dispatch only"),
-        "diagnostic must use the lower.rs Cranelift template, got: {}",
+        project.join("main.bin").exists(),
+        "RC2.5 contract: native build must produce an executable. combined: {}",
         combined
     );
 

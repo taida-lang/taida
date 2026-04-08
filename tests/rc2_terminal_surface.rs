@@ -383,24 +383,21 @@ stdout(`cols=${size.cols} rows=${size.rows}`)
 
 // ── RC2B-208 lock: Cranelift --target native is still rejected ─
 
-/// The positive path for RC2B-208 is explicit: the interpreter run
-/// above (`terminal_size_dispatches_through_facade_to_addon`) is the
-/// **only** supported "Native backend" entry point in RC2. The
-/// Cranelift AOT path (`taida build --target native`) remains
-/// explicitly out of scope because addon dispatch is not wired into
-/// the Cranelift lowering pass. This test pins both halves so the
-/// design / README / impl do not drift again:
+/// RC2.5 Phase 1: the Cranelift AOT native backend **accepts**
+/// addon-backed package imports. Previously (RC2B-208, RC2 scope) the
+/// lowering layer rejected `taida build --target native` for any
+/// package with `native/addon.toml`; that reject has been removed now
+/// that `taida_addon_call` exists in the native runtime.
 ///
-/// 1. Interpreter run reaches the addon dispatch (confirmed by the
-///    other tests in this file via the wire-frozen error).
-/// 2. `taida build --target native` still rejects with the
-///    deterministic "Cranelift native backend in RC1" message — this
-///    matches `rc2_terminal_phase1_smoke.rs::terminal_import_rejected_on_cranelift_native_at_compile_time`
-///    but lives here as well because RC2B-208 reclassifies the
-///    rejection as "part of the v1 contract" rather than a blocker.
+/// This test pins the positive path: a minimal import-only program
+/// that mentions `taida-lang/terminal` must build cleanly through the
+/// Cranelift native pipeline. Actual call-site dispatch (invoking
+/// `TerminalSize[]()` and unpacking the result) is exercised by the
+/// Phase 2 integration tests; here we only verify that the lowering
+/// layer no longer rejects the import.
 #[test]
-fn cranelift_native_target_remains_rejected_as_documented_limitation() {
-    let project = unique_temp_dir("rc2b208_cranelift_reject_lock");
+fn cranelift_native_target_accepts_addon_backed_package_import() {
+    let project = unique_temp_dir("rc2_5_cranelift_accept");
     let _ = std::fs::remove_dir_all(&project);
     std::fs::create_dir_all(&project).unwrap();
     if !install_terminal_fixture(&project) {
@@ -408,9 +405,12 @@ fn cranelift_native_target_remains_rejected_as_documented_limitation() {
         return;
     }
 
-    let main_td = r#">>> taida-lang/terminal => @(TerminalSize)
-size <= TerminalSize[]()
-stdout(`cols=${size.cols}`)
+    // Import-only program. The addon function is referenced via
+    // the import statement so `lower_addon_import` runs, but no
+    // call site is emitted so we do not need the facade sentinel
+    // plumbing that Phase 2 introduces.
+    let main_td = r#">>> taida-lang/terminal => @(terminalSize)
+stdout("rc2_5: terminal import accepted by cranelift native backend")
 "#;
     std::fs::write(project.join("main.td"), main_td).unwrap();
 
@@ -429,19 +429,25 @@ stdout(`cols=${size.cols}`)
     let combined = format!("{}{}", stderr, stdout);
 
     assert!(
-        !output.status.success(),
-        "RC2B-208 contract: Cranelift --target native must stay rejected. got: {}",
+        output.status.success(),
+        "RC2.5 contract: Cranelift --target native must now accept \
+         addon-backed package imports. stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert!(
+        !combined.contains("Cranelift native backend in RC1"),
+        "RC2.5 contract: the RC1 reject message must no longer fire. got: {}",
         combined
     );
     assert!(
-        combined.contains("taida-lang/terminal"),
-        "diagnostic must name the package, got: {}",
+        !combined.contains("interpreter dispatch only"),
+        "RC2.5 contract: the 'interpreter dispatch only' message must no longer fire. got: {}",
         combined
     );
     assert!(
-        combined.contains("Cranelift native backend in RC1")
-            || combined.contains("interpreter dispatch only"),
-        "RC2B-208 contract: reject message must use the lower.rs template, got: {}",
+        project.join("main.bin").exists(),
+        "RC2.5 contract: native build must produce an executable binary. combined output: {}",
         combined
     );
 
