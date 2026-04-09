@@ -421,20 +421,83 @@ pub fn install_addon_prebuilds(
             continue;
         }
 
-        // Check if the host target is supported by this addon
+        // Check if the host target is supported by this addon.
+        //
+        // RC2.6B-019: addon.toml `[library.prebuild.targets]` may be empty
+        // in the RC2.6 publish model. In that case, fall back to fetching
+        // `addon.lock.toml` from the GitHub Release asset, which contains
+        // the per-host SHA-256 entries contributed by `taida publish`.
         let sha256_for_target = addon_manifest.prebuild.targets.get(host.as_triple());
-        let expected_sha256 = match sha256_for_target {
-            Some(s) => s,
+        let expected_sha256: String;
+        match sha256_for_target {
+            Some(s) => {
+                expected_sha256 = s.clone();
+            }
+            None if addon_manifest.prebuild.has_prebuild() => {
+                // RC2.6 addon.lock.toml fallback: targets not in addon.toml,
+                // download addon.lock.toml from the GitHub Release asset.
+                let lockfile_text =
+                    crate::addon::prebuild_fetcher::fetch_release_lockfile(
+                        &pkg.name,
+                        &pkg.version,
+                    )?;
+                let addon_lockfile = crate::addon::lockfile::parse_lockfile_str(
+                    std::path::Path::new("addon.lock.toml"),
+                    &lockfile_text,
+                )
+                .map_err(|e| {
+                    format!(
+                        "Failed to parse addon.lock.toml for '{}@{}': {}",
+                        pkg.name, pkg.version, e
+                    )
+                })?;
+                match addon_lockfile.targets.get(host.as_triple()) {
+                    Some(sha) => {
+                        expected_sha256 = sha.clone();
+                    }
+                    None => {
+                        let available: Vec<&str> =
+                            addon_lockfile.targets.keys().map(String::as_str).collect();
+                        return Err(format!(
+                            "addon '{}' prebuild is not available for your platform\n\
+                             \x20 host target:    {}\n\
+                             \x20 available targets in addon.lock.toml:\n\
+                             \x20   - {}\n\
+                             \x20 action: ask the addon author to upload a prebuild for {}",
+                            addon_manifest.package,
+                            host.as_triple(),
+                            if available.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                available.join("\n    - ")
+                            },
+                            host.as_triple(),
+                        ));
+                    }
+                }
+            }
             None => {
+                // Legacy: no prebuild configured at all (should not reach
+                // here because has_prebuild() was checked above, but kept
+                // as a safety net).
                 return Err(format!(
-                    "addon '{}' is not available for your platform\n  host target:    {}\n  supported targets:\n    - {}\n  action: ask the addon author to upload a prebuild for {}",
+                    "addon '{}' is not available for your platform\n\
+                     \x20 host target:    {}\n\
+                     \x20 action: ask the addon author to upload a prebuild for {}",
                     addon_manifest.package,
                     host.as_triple(),
-                    host_target::supported_targets().join("\n    - "),
                     host.as_triple(),
                 ));
             }
-        };
+        }
+
+        // Both addon.toml and addon.lock.toml store SHA-256 values in
+        // tagged form ("sha256:<64hex>"), but the prebuild fetcher compares
+        // against the raw hex output from the hasher. Strip the prefix.
+        let expected_sha256 = expected_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&expected_sha256)
+            .to_string();
 
         // Expand URL template
         let url = crate::addon::url_template::expand_url_template(
@@ -452,7 +515,7 @@ pub fn install_addon_prebuilds(
                 if locked.name == pkg.name
                     && let Some(ref locked_addon) = locked.addon
                     && locked_addon.target == host.as_triple()
-                    && locked_addon.sha256 != *expected_sha256
+                    && locked_addon.sha256 != expected_sha256
                 {
                     // RC1.5-3b-5: mismatch -> reject
                     return Err(format!(
@@ -501,7 +564,7 @@ pub fn install_addon_prebuilds(
                 &addon_manifest.library,
                 host.cdylib_ext(),
                 &url,
-                expected_sha256,
+                &expected_sha256,
                 &mut *reporter,
             )
             .map_err(|e| addon_fetch_error_as_string(&e))?
@@ -513,7 +576,7 @@ pub fn install_addon_prebuilds(
                 &addon_manifest.library,
                 host.cdylib_ext(),
                 &url,
-                expected_sha256,
+                &expected_sha256,
                 &mut *reporter,
             )
             .map_err(|e| addon_fetch_error_as_string(&e))?
