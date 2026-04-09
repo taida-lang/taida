@@ -33,6 +33,9 @@
 //! loader to the package import path.
 
 pub mod backend_policy;
+// RC2.7 Phase 1: shared addon build helper (publish + install fallback).
+#[cfg(feature = "native")]
+pub mod build;
 pub mod manifest;
 
 // RC1.5: install-time pipeline

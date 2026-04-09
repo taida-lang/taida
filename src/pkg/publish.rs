@@ -31,145 +31,24 @@ const DEFAULT_PROPOSALS_REPO: &str = "taida-community/proposals";
 //     on `addon::host_target::detect_host_target` which itself lives
 //     behind `#[cfg(feature = "native")]`.
 
-/// Result of invoking `cargo build --release --lib` for an addon package.
-///
-/// Returned by [`build_addon_artifacts`]. Carries exactly the information
-/// the downstream pipeline needs: (1) the absolute path to the freshly
-/// built `cdylib` so SHA-256 can be computed and the file can be attached
-/// to a GitHub Release asset, (2) the library stem so the asset can be
-/// renamed into the canonical `lib<stem>-<triple>.<ext>` form, and
-/// (3) the current host triple so `addon.lock.toml` can be keyed on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(feature = "native")]
-pub struct AddonBuildOutput {
-    /// Absolute path to the freshly built `cdylib` under
-    /// `<project>/target/release/`.
-    pub cdylib_path: PathBuf,
-    /// Library stem as declared in `native/addon.toml` (the string
-    /// between `lib` and the platform extension). Used for canonical
-    /// release asset naming.
-    pub library_stem: String,
-    /// Canonical host triple (e.g. `x86_64-unknown-linux-gnu`). Keyed
-    /// into `native/addon.lock.toml::[targets]`.
-    pub host_triple: String,
-}
+// RC2.7 Phase 1: AddonBuildOutput and build_addon_artifacts have been
+// extracted to `crate::addon::build`. The publish-side wrapper below
+// delegates with `external_target_dir = None` (publish always builds
+// into the project's own `target/`).
 
-/// Build the Rust addon cdylib for the current host and return the
-/// artifact location plus metadata.
+/// Re-export of [`crate::addon::build::AddonBuildOutput`] for backward
+/// compatibility with existing callers in `src/main.rs`.
+#[cfg(feature = "native")]
+pub use crate::addon::build::AddonBuildOutput;
+
+/// Build the Rust addon cdylib for the current host, writing build
+/// artifacts into the project's own `target/` directory.
 ///
-/// This is Phase 1 task **RC2.6-1a**. The function:
-///
-///   1. Parses `native/addon.toml` to discover the declared library
-///      stem (`[addon].library`).
-///   2. Detects the current host triple via
-///      [`crate::addon::host_target::detect_host_target`].
-///   3. Invokes `cargo build --release --lib` in `project_dir` and
-///      surfaces `cargo`'s full stderr on failure.
-///   4. Probes `target/release/lib<stem>.<ext>` for the cdylib (where
-///      `<ext>` is `so` / `dylib` / `dll` depending on the host).
-///
-/// The function returns an error string (never panics) so the
-/// orchestrator in `src/main.rs` can convert it into a CLI diagnostic.
-///
-/// ## Contract
-///
-/// * **Not pure.** Invokes `cargo` as a subprocess and touches
-///   `project_dir/target/`.
-/// * Does **not** modify `packages.tdm`, `addon.toml` or `addon.lock.toml`.
-///   Those writes are delegated to subsequent helpers (`1c`/`1e`).
-/// * Must be called **after** `prepare_publish` (so that
-///   `compute_publish_integrity` is re-evaluated afterwards; the
-///   orchestrator handles the ordering).
-/// * Only the currently running host is built. Cross-compile is a
-///   CI responsibility (RC2.6 non-negotiable 5).
+/// This is a thin wrapper around [`crate::addon::build::build_addon_artifacts`]
+/// with `external_target_dir = None`, preserving the publish-side contract.
 #[cfg(feature = "native")]
 pub fn build_addon_artifacts(project_dir: &Path) -> Result<AddonBuildOutput, String> {
-    use crate::addon::host_target::detect_host_target;
-    use crate::addon::manifest::parse_addon_manifest;
-
-    let addon_toml = project_dir.join("native").join("addon.toml");
-    if !addon_toml.exists() {
-        return Err(format!(
-            "build_addon_artifacts: '{}' not found. `taida publish --target rust-addon` requires a native/addon.toml manifest.",
-            addon_toml.display()
-        ));
-    }
-
-    let manifest = parse_addon_manifest(&addon_toml).map_err(|e| e.to_string())?;
-    let library_stem = manifest.library.clone();
-
-    let host = detect_host_target().map_err(|e| {
-        format!(
-            "build_addon_artifacts: {} (cannot build a host-specific cdylib on this platform).",
-            e
-        )
-    })?;
-    let host_triple = host.as_triple().to_string();
-    let cdylib_ext = host.cdylib_ext();
-
-    // Invoke cargo build --release --lib. The --manifest-path flag
-    // anchors the build at project_dir so the working directory the
-    // caller is in does not leak into the cargo invocation.
-    let cargo_toml = project_dir.join("Cargo.toml");
-    if !cargo_toml.exists() {
-        return Err(format!(
-            "build_addon_artifacts: '{}' not found. Addon publish requires a Cargo project alongside packages.tdm.",
-            cargo_toml.display()
-        ));
-    }
-
-    let output = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "--lib",
-            "--manifest-path",
-            cargo_toml
-                .to_str()
-                .ok_or_else(|| "Cargo.toml path contains non-UTF-8 bytes".to_string())?,
-        ])
-        .current_dir(project_dir)
-        .output()
-        .map_err(|e| {
-            format!(
-                "build_addon_artifacts: failed to invoke cargo build in '{}': {}",
-                project_dir.display(),
-                e
-            )
-        })?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "build_addon_artifacts: `cargo build --release --lib` failed in '{}':\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            project_dir.display(),
-            stdout.trim_end(),
-            stderr.trim_end()
-        ));
-    }
-
-    let cdylib_prefix = host.cdylib_prefix();
-    let cdylib_name = format!("{cdylib_prefix}{library_stem}.{cdylib_ext}");
-    let cdylib_path = project_dir
-        .join("target")
-        .join("release")
-        .join(&cdylib_name);
-    if !cdylib_path.exists() {
-        return Err(format!(
-            "build_addon_artifacts: expected cdylib '{}' not found after `cargo build --release --lib`. \
-             Check that Cargo.toml declares `crate-type = [\"rlib\", \"cdylib\"]` and that \
-             `[package].name` produces the stem '{}' configured in native/addon.toml.",
-            cdylib_path.display(),
-            library_stem
-        ));
-    }
-
-    Ok(AddonBuildOutput {
-        cdylib_path,
-        library_stem,
-        host_triple,
-    })
+    crate::addon::build::build_addon_artifacts(project_dir, None)
 }
 
 /// Compute the SHA-256 digest of a file and format it as the
@@ -974,27 +853,21 @@ impl PublishRollback {
 }
 
 // ─────────────────────────────────────────────────────────────
-// RC2.6 Phase 2: GitHub Release helpers
+// RC2.7 Phase 2: GitHub Release dispatcher (rest|gh)
 // ─────────────────────────────────────────────────────────────
 //
-// The helpers below drive `gh release create` as a subprocess.
-// No direct GitHub REST API calls — the `gh` CLI handles auth,
-// pagination, asset upload, and error display. If the user does
-// not have `gh` installed or authenticated, we give a clear
-// error with action hints rather than silently failing.
+// The `create_github_release` function now dispatches between:
+//   - `rest` (default) — uses the REST API module `github_release.rs`
+//   - `gh`  — legacy `gh release create` subprocess
 //
-// Design constraints (from RC2_6_DESIGN.md):
+// Driver selection:
+//   1. `TAIDA_PUBLISH_RELEASE_DRIVER=rest|gh` env var
+//   2. Default: `rest`
 //
-//   * `create_github_release` runs AFTER `git_commit_tag_push`, so
-//     it is a post-push side-effect. There is no rollback: if the
-//     release step fails, the commit and tag already exist on the
-//     remote and the user must fix things manually (or re-run with
-//     `gh release create` by hand).
-//   * The `GH_BIN` environment variable overrides the path to `gh`
-//     so integration tests can substitute a mock script.
-//   * `TAIDA_PUBLISH_SKIP_RELEASE=1` is checked by the orchestrator
-//     (not here) — this function is only called when the orchestrator
-//     decides a release should happen.
+// The `gh` path is retained for:
+//   - Builds without the `community` feature (no reqwest)
+//   - Emergency escape hatch
+//   - RC2.6 integration test compatibility (`GH_BIN` mock)
 
 /// A single asset to attach to a GitHub Release.
 ///
@@ -1014,29 +887,108 @@ pub struct GhReleaseAsset {
 
 /// Create a GitHub Release for `tag` and attach the given assets.
 ///
-/// This is Phase 2 task **RC2.6-2a**. The function:
+/// RC2.7 dispatcher: chooses between the REST driver (default) and the
+/// legacy `gh` CLI driver based on `TAIDA_PUBLISH_RELEASE_DRIVER`.
 ///
-///   1. Locates the `gh` binary (respects `GH_BIN` env var, otherwise
-///      `gh` on PATH).
-///   2. Runs `gh auth status` to verify the user is authenticated.
-///   3. Invokes `gh release create <tag> --title <title> --notes <notes>
-///      <asset1>#<name1> <asset2>#<name2> ...` from `project_dir`.
-///
-/// ## Error handling
-///
-/// All errors are returned as descriptive `String`s that the CLI
-/// orchestrator can print directly. Error messages include action
-/// hints (install `gh`, run `gh auth login`, check file paths).
+/// The `github_token` parameter is only used by the REST driver.
+/// Pass `None` when the token is unavailable (e.g. `gh`-only builds).
 ///
 /// ## Contract
 ///
-/// * **Not pure.** Invokes `gh` as a subprocess and creates a GitHub
-///   Release (irreversible network side-effect).
-/// * Must be called AFTER `git_commit_tag_push` succeeds so the tag
-///   exists on the remote.
-/// * Does NOT attempt rollback on failure — the caller prints the
-///   error and exits.
+/// * **Not pure.** Creates a GitHub Release (irreversible network side-effect).
+/// * Must be called AFTER `git_commit_tag_push` succeeds.
+/// * Does NOT attempt rollback on failure.
 pub fn create_github_release(
+    project_dir: &Path,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    assets: &[GhReleaseAsset],
+    github_token: Option<&str>,
+) -> Result<(), String> {
+    // RC2.7B-006: default driver depends on feature set.
+    // With `community` feature: default is "rest" (REST API via reqwest).
+    // Without `community` feature: default is "gh" (legacy CLI driver).
+    let _ = &github_token; // Suppress unused warning in non-community builds
+    let default_driver = if cfg!(feature = "community") {
+        "rest"
+    } else {
+        "gh"
+    };
+    let driver =
+        env::var("TAIDA_PUBLISH_RELEASE_DRIVER").unwrap_or_else(|_| default_driver.to_string());
+
+    match driver.as_str() {
+        #[cfg(feature = "community")]
+        "rest" => create_github_release_rest(project_dir, tag, title, notes, assets, github_token),
+        #[cfg(not(feature = "community"))]
+        "rest" => Err("REST release driver requires the 'community' feature. \
+             Build with `--features community` or use TAIDA_PUBLISH_RELEASE_DRIVER=gh."
+            .to_string()),
+        "gh" => create_github_release_gh(project_dir, tag, title, notes, assets),
+        other => Err(format!(
+            "Unknown release driver '{}'. Set TAIDA_PUBLISH_RELEASE_DRIVER to 'rest' or 'gh'.",
+            other
+        )),
+    }
+}
+
+/// REST driver: uses `src/pkg/github_release.rs` to create the release
+/// and upload assets via the GitHub REST API.
+#[cfg(feature = "community")]
+fn create_github_release_rest(
+    project_dir: &Path,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    assets: &[GhReleaseAsset],
+    github_token: Option<&str>,
+) -> Result<(), String> {
+    let token = github_token.ok_or_else(|| {
+        "REST release driver requires a GitHub token. Run `taida auth login` first.".to_string()
+    })?;
+
+    // Resolve owner/repo from git remote origin.
+    let origin = git_origin_url(project_dir).ok_or_else(|| {
+        "Cannot determine GitHub owner/repo: no git remote origin configured.".to_string()
+    })?;
+    let (owner, repo) = super::github_release::parse_github_remote(&origin).ok_or_else(|| {
+        format!(
+            "Cannot parse GitHub owner/repo from remote '{}'. \
+             The REST release driver requires a GitHub remote.",
+            origin
+        )
+    })?;
+
+    // Convert GhReleaseAsset -> github_release::ReleaseAsset
+    let rest_assets: Vec<super::github_release::ReleaseAsset> = assets
+        .iter()
+        .map(|a| super::github_release::ReleaseAsset {
+            local_path: a.local_path.clone(),
+            asset_name: a.asset_name.clone(),
+        })
+        .collect();
+
+    let _html_url = super::github_release::ensure_release_with_assets(
+        token,
+        &owner,
+        &repo,
+        tag,
+        title,
+        notes,
+        &rest_assets,
+    )?;
+
+    Ok(())
+}
+
+/// Legacy `gh` CLI driver: uses `gh release create` as a subprocess.
+///
+/// Retained for:
+/// - Builds without the `community` feature
+/// - `TAIDA_PUBLISH_RELEASE_DRIVER=gh` escape hatch
+/// - RC2.6 integration test compatibility (`GH_BIN` mock)
+fn create_github_release_gh(
     project_dir: &Path,
     tag: &str,
     title: &str,
@@ -1113,15 +1065,6 @@ pub fn create_github_release(
     }
 
     // Build the `gh release create` argument list.
-    //
-    // The `gh` `#` syntax (`path#name`) only sets a **display label**
-    // on the asset — the actual download URL uses the original
-    // filename. To ensure the asset's download URL matches the
-    // canonical name that `addon.toml`'s URL template expands to
-    // (e.g. `libtaida_lang_terminal-x86_64-unknown-linux-gnu.so`),
-    // we **copy** the file to a temp location with the canonical name
-    // before uploading. This mirrors the approach used in the CI
-    // release workflow template (Phase 4 hotfix 228267a).
     let mut cmd_args: Vec<String> = vec![
         "release".to_string(),
         "create".to_string(),
@@ -1149,7 +1092,6 @@ pub fn create_github_release(
             .and_then(|n| n.to_str())
             .unwrap_or("");
         if basename == asset.asset_name {
-            // Name already matches — upload directly.
             let path_str = asset.local_path.to_str().ok_or_else(|| {
                 format!(
                     "Asset path '{}' contains non-UTF-8 characters.",
@@ -1158,8 +1100,6 @@ pub fn create_github_release(
             })?;
             cmd_args.push(path_str.to_string());
         } else {
-            // Name differs — copy to temp dir with canonical name so
-            // the GitHub Release asset URL uses the canonical name.
             std::fs::create_dir_all(&rename_dir)
                 .map_err(|e| format!("Cannot create temp dir for asset rename: {}", e))?;
             let dest = rename_dir.join(&asset.asset_name);
@@ -2274,17 +2214,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // Point GH_BIN at a non-existent binary to force NotFound.
+        // Force gh driver so this test exercises the legacy path.
         // Safety: this is a single-threaded test scope; we restore the
         // original value immediately after the call under test.
-        let prev = std::env::var("GH_BIN").ok();
+        let prev_gh = std::env::var("GH_BIN").ok();
+        let prev_driver = std::env::var("TAIDA_PUBLISH_RELEASE_DRIVER").ok();
         unsafe { std::env::set_var("GH_BIN", "/nonexistent/gh-test-bin-rc26") };
+        unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", "gh") };
 
-        let err = create_github_release(&dir, "a.1", "test a.1", "notes", &[]).unwrap_err();
+        let err = create_github_release(&dir, "a.1", "test a.1", "notes", &[], None).unwrap_err();
 
         // Restore env.
-        match prev {
+        match prev_gh {
             Some(v) => unsafe { std::env::set_var("GH_BIN", v) },
             None => unsafe { std::env::remove_var("GH_BIN") },
+        }
+        match prev_driver {
+            Some(v) => unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", v) },
+            None => unsafe { std::env::remove_var("TAIDA_PUBLISH_RELEASE_DRIVER") },
         }
 
         assert!(
@@ -2333,19 +2280,26 @@ mod tests {
         }
 
         // Safety: single-threaded test scope, restored immediately.
-        let prev = std::env::var("GH_BIN").ok();
+        // Force gh driver to exercise the legacy path.
+        let prev_gh = std::env::var("GH_BIN").ok();
+        let prev_driver = std::env::var("TAIDA_PUBLISH_RELEASE_DRIVER").ok();
         unsafe { std::env::set_var("GH_BIN", mock_gh.to_str().unwrap()) };
+        unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", "gh") };
 
         let bogus_asset = GhReleaseAsset {
             local_path: dir.join("nonexistent-lib.so"),
             asset_name: "libfoo-x86_64-unknown-linux-gnu.so".to_string(),
         };
-        let err =
-            create_github_release(&dir, "a.1", "test a.1", "notes", &[bogus_asset]).unwrap_err();
+        let err = create_github_release(&dir, "a.1", "test a.1", "notes", &[bogus_asset], None)
+            .unwrap_err();
 
-        match prev {
+        match prev_gh {
             Some(v) => unsafe { std::env::set_var("GH_BIN", v) },
             None => unsafe { std::env::remove_var("GH_BIN") },
+        }
+        match prev_driver {
+            Some(v) => unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", v) },
+            None => unsafe { std::env::remove_var("TAIDA_PUBLISH_RELEASE_DRIVER") },
         }
 
         assert!(
@@ -2355,6 +2309,68 @@ mod tests {
         assert!(
             err.contains("nonexistent-lib.so"),
             "error should name the missing file: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── RC2.7: dispatcher tests ──
+
+    #[test]
+    fn test_create_github_release_unknown_driver_rejected() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_driver_unknown_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let prev = std::env::var("TAIDA_PUBLISH_RELEASE_DRIVER").ok();
+        unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", "bogus") };
+
+        let err = create_github_release(&dir, "a.1", "test", "notes", &[], None).unwrap_err();
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", v) },
+            None => unsafe { std::env::remove_var("TAIDA_PUBLISH_RELEASE_DRIVER") },
+        }
+
+        assert!(
+            err.contains("Unknown release driver 'bogus'"),
+            "error should reject unknown driver: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_create_github_release_rest_requires_token() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_rest_no_token_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let prev = std::env::var("TAIDA_PUBLISH_RELEASE_DRIVER").ok();
+        unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", "rest") };
+
+        let err = create_github_release(&dir, "a.1", "test", "notes", &[], None).unwrap_err();
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TAIDA_PUBLISH_RELEASE_DRIVER", v) },
+            None => unsafe { std::env::remove_var("TAIDA_PUBLISH_RELEASE_DRIVER") },
+        }
+
+        assert!(
+            err.contains("requires a GitHub token"),
+            "error should demand token: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -393,6 +393,7 @@ pub fn install_addon_prebuilds(
     result: &ResolveResult,
     force_refresh: bool,
     lockfile: Option<&Lockfile>,
+    allow_local_addon_build: bool,
 ) -> Result<BTreeMap<String, crate::pkg::lockfile::LockedAddon>, String> {
     let deps_dir = manifest.root_dir.join(".taida").join("deps");
     let mut addon_info: BTreeMap<String, crate::pkg::lockfile::LockedAddon> = BTreeMap::new();
@@ -421,200 +422,369 @@ pub fn install_addon_prebuilds(
             continue;
         }
 
-        // Check if the host target is supported by this addon.
-        //
-        // RC2.6B-019: addon.toml `[library.prebuild.targets]` may be empty
-        // in the RC2.6 publish model. In that case, fall back to fetching
-        // `addon.lock.toml` from the GitHub Release asset, which contains
-        // the per-host SHA-256 entries contributed by `taida publish`.
-        let sha256_for_target = addon_manifest.prebuild.targets.get(host.as_triple());
-        let expected_sha256: String;
-        match sha256_for_target {
-            Some(s) => {
-                expected_sha256 = s.clone();
-            }
-            None if addon_manifest.prebuild.has_prebuild() => {
-                // RC2.6 addon.lock.toml fallback: targets not in addon.toml,
-                // download addon.lock.toml from the GitHub Release asset.
-                let lockfile_text = crate::addon::prebuild_fetcher::fetch_release_lockfile(
+        // RC2.7: attempt prebuild fetch, then potentially fall back to
+        // local build if allowed. The "try prebuild" result is captured
+        // so fallback decisions can inspect the error variant.
+        let prebuild_result =
+            try_fetch_prebuild(pkg, &addon_manifest, &host, lockfile, force_refresh);
+
+        match prebuild_result {
+            Ok((fetched_path, expected_sha256)) => {
+                // RC2.7B-010: use shared helper for binary placement
+                place_addon_binary(
+                    &deps_dir,
                     &pkg.name,
-                    &pkg.version,
+                    &addon_manifest.library,
+                    host.cdylib_ext(),
+                    &fetched_path,
                 )?;
-                let addon_lockfile = crate::addon::lockfile::parse_lockfile_str(
-                    std::path::Path::new("addon.lock.toml"),
-                    &lockfile_text,
-                )
-                .map_err(|e| {
-                    format!(
-                        "Failed to parse addon.lock.toml for '{}@{}': {}",
-                        pkg.name, pkg.version, e
-                    )
-                })?;
-                match addon_lockfile.targets.get(host.as_triple()) {
-                    Some(sha) => {
-                        expected_sha256 = sha.clone();
-                    }
-                    None => {
-                        let available: Vec<&str> =
-                            addon_lockfile.targets.keys().map(String::as_str).collect();
-                        return Err(format!(
-                            "addon '{}' prebuild is not available for your platform\n\
-                             \x20 host target:    {}\n\
-                             \x20 available targets in addon.lock.toml:\n\
-                             \x20   - {}\n\
-                             \x20 action: ask the addon author to upload a prebuild for {}\n\
-                             \x20\n\
-                             \x20 If you are the addon author, run:\n\
-                             \x20   cd <addon-repo>\n\
-                             \x20   taida publish --target rust-addon\n\
-                             \x20\n\
-                             \x20 Or trigger the CI release workflow by pushing a version tag.",
-                            addon_manifest.package,
-                            host.as_triple(),
-                            if available.is_empty() {
-                                "(none)".to_string()
-                            } else {
-                                available.join("\n    - ")
-                            },
-                            host.as_triple(),
-                        ));
-                    }
-                }
+
+                // RC2.7B-004: record the actual SHA from the prebuild
+                addon_info.insert(
+                    pkg.name.clone(),
+                    crate::pkg::lockfile::LockedAddon {
+                        target: host.as_triple().to_string(),
+                        sha256: expected_sha256,
+                    },
+                );
             }
-            None => {
-                // Legacy: no prebuild configured at all (should not reach
-                // here because has_prebuild() was checked above, but kept
-                // as a safety net).
-                return Err(format!(
-                    "addon '{}' is not available for your platform\n\
-                     \x20 host target:    {}\n\
-                     \x20 action: ask the addon author to upload a prebuild for {}\n\
-                     \x20\n\
-                     \x20 If you are the addon author, run:\n\
-                     \x20   cd <addon-repo>\n\
-                     \x20   taida publish --target rust-addon",
-                    addon_manifest.package,
-                    host.as_triple(),
-                    host.as_triple(),
-                ));
+            Err(PrebuildFailure::IntegrityMismatch(msg)) => {
+                // RC2.7: integrity mismatch is ALWAYS a hard error.
+                // Never fall back to local build for security reasons.
+                return Err(msg);
             }
-        }
+            Err(PrebuildFailure::UnsupportedTarget(msg)) => {
+                // RC2.7B-009: unsupported target is ALWAYS a hard error.
+                // Never fall back to local build — the addon was not
+                // designed for this platform.
+                return Err(msg);
+            }
+            Err(PrebuildFailure::Unavailable(msg)) => {
+                // RC2.7-4b: prebuild missing/unavailable/transport failure.
+                if allow_local_addon_build {
+                    // Attempt local cargo build fallback.
+                    eprintln!(
+                        "[addon] prebuild unavailable; falling back to local cargo build for {}@{}",
+                        pkg.name, pkg.version
+                    );
+                    let built_path = try_local_addon_build(pkg, &addon_manifest, &host)?;
 
-        // Both addon.toml and addon.lock.toml store SHA-256 values in
-        // tagged form ("sha256:<64hex>"), but the prebuild fetcher compares
-        // against the raw hex output from the hasher. Strip the prefix.
-        let expected_sha256 = expected_sha256
-            .strip_prefix("sha256:")
-            .unwrap_or(&expected_sha256)
-            .to_string();
+                    // RC2.7B-010: use shared helper for binary placement
+                    place_addon_binary(
+                        &deps_dir,
+                        &pkg.name,
+                        &addon_manifest.library,
+                        host.cdylib_ext(),
+                        &built_path,
+                    )?;
 
-        // Expand URL template
-        let url = crate::addon::url_template::expand_url_template(
-            addon_manifest.prebuild.url_template.as_ref().unwrap(),
-            &pkg.version,
-            host.as_triple(),
-            host.cdylib_ext(),
-            &addon_manifest.library,
-        )
-        .map_err(|e| format!("addon URL template expansion failed: {}", e))?;
-
-        // RC1.5-3b-4: cross-check with lockfile if available
-        if let Some(lf) = lockfile {
-            for locked in &lf.packages {
-                if locked.name == pkg.name
-                    && let Some(ref locked_addon) = locked.addon
-                    && locked_addon.target == host.as_triple()
-                    && locked_addon.sha256 != expected_sha256
-                {
-                    // RC1.5-3b-5: mismatch -> reject
+                    // RC2.7 design: local build artifacts are NOT recorded in
+                    // taida.lock's addon stanza (provenance differs from prebuilds).
+                } else {
+                    // No fallback — emit helpful error suggesting the flag.
                     return Err(format!(
-                        "lockfile addon SHA-256 mismatch for package '{}' (expected {}, got {}). Re-run `taida install --force-refresh`.",
-                        pkg.name, expected_sha256, locked_addon.sha256
+                        "{}\n\
+                         action:\n\
+                         \x20 - ask the addon author to upload a prebuild for {}\n\
+                         \x20 - or retry with `taida install --allow-local-addon-build`",
+                        msg,
+                        host.as_triple()
                     ));
                 }
             }
         }
-
-        // Parse out org/name from package id
-        let (org, name) = pkg.name.split_once('/').ok_or_else(|| {
-            format!(
-                "cannot parse package '{}' as org/name for addon prebuild",
-                pkg.name
-            )
-        })?;
-
-        // Fetch prebuild binary (cache-aware by default).
-        //
-        // RC15B-002: attach a progress reporter that writes a single
-        // carriage-return line to stderr so long downloads stay
-        // visible. The reporter is silent for trivially small files
-        // (< 256 KiB) to avoid cluttering fast path tests and cache
-        // hits (cache hits skip the callback entirely anyway).
-        let mut reporter = make_progress_reporter(&pkg.name, host.as_triple());
-        let fetched_path = if force_refresh {
-            // Bypass cache: delete cached file first
-            let cache_root = std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".taida/addon-cache"));
-            if let Some(ref root) = cache_root {
-                let pkg_cache = root
-                    .join(org)
-                    .join(name)
-                    .join(&pkg.version)
-                    .join(host.as_triple());
-                if pkg_cache.exists() {
-                    let _ = std::fs::remove_dir_all(&pkg_cache);
-                }
-            }
-            fetch_prebuild_with_progress(
-                &pkg.name,
-                &pkg.version,
-                host.as_triple(),
-                &addon_manifest.library,
-                host.cdylib_ext(),
-                &url,
-                &expected_sha256,
-                &mut *reporter,
-            )
-            .map_err(|e| addon_fetch_error_as_string(&e))?
-        } else {
-            fetch_prebuild_with_progress(
-                &pkg.name,
-                &pkg.version,
-                host.as_triple(),
-                &addon_manifest.library,
-                host.cdylib_ext(),
-                &url,
-                &expected_sha256,
-                &mut *reporter,
-            )
-            .map_err(|e| addon_fetch_error_as_string(&e))?
-        };
-
-        // Place the .so at .taida/deps/<pkg>/native/lib<name>.<ext>
-        let native_dir = deps_dir.join(&pkg.name).join("native");
-        std::fs::create_dir_all(&native_dir)
-            .map_err(|e| format!("cannot create native dir for '{}': {}", pkg.name, e))?;
-
-        let dest = native_dir.join(format!(
-            "lib{}.{}",
-            addon_manifest.library,
-            host.cdylib_ext()
-        ));
-        std::fs::copy(&fetched_path, &dest)
-            .map_err(|e| format!("cannot copy addon binary to {}: {}", dest.display(), e))?;
-
-        // Record addon info for lockfile
-        addon_info.insert(
-            pkg.name.clone(),
-            crate::pkg::lockfile::LockedAddon {
-                target: host.as_triple().to_string(),
-                sha256: expected_sha256.clone(),
-            },
-        );
     }
 
     Ok(addon_info)
+}
+
+// ── RC2.7B-010: shared binary placement helper ──────────────
+
+/// Place an addon binary at `.taida/deps/<pkg>/native/lib<library>.<ext>`.
+///
+/// Creates the `native/` directory if needed and copies the binary from
+/// `source_path`. Extracted from the prebuild success and local build
+/// fallback arms to eliminate code duplication (RC2.7B-010).
+fn place_addon_binary(
+    deps_dir: &Path,
+    pkg_name: &str,
+    library: &str,
+    ext: &str,
+    source_path: &Path,
+) -> Result<PathBuf, String> {
+    let native_dir = deps_dir.join(pkg_name).join("native");
+    std::fs::create_dir_all(&native_dir)
+        .map_err(|e| format!("cannot create native dir for '{}': {}", pkg_name, e))?;
+
+    let dest = native_dir.join(format!("lib{}.{}", library, ext));
+    std::fs::copy(source_path, &dest)
+        .map_err(|e| format!("cannot copy addon binary to {}: {}", dest.display(), e))?;
+
+    Ok(dest)
+}
+
+// ── RC2.7: prebuild fetch result type ────────────────────────
+
+/// Prebuild fetch failure classification for fallback policy.
+enum PrebuildFailure {
+    /// Integrity mismatch — never eligible for fallback.
+    IntegrityMismatch(String),
+    /// Missing / unavailable / transport failure — eligible for local build fallback.
+    Unavailable(String),
+    /// RC2.7B-009: host target is not registered in addon.toml / addon.lock.toml.
+    /// Never eligible for fallback, regardless of `--allow-local-addon-build`.
+    /// Design: Section C "unsupported target では fallback しない".
+    UnsupportedTarget(String),
+}
+
+/// Attempt to fetch a prebuild for the given package.
+///
+/// Returns `Ok((path, expected_sha256))` with the cached binary path and the
+/// expected SHA-256 hex string on success, or a classified error for the
+/// fallback policy to decide on.
+///
+/// RC2.7B-004: the SHA is returned so the caller can record it in the lockfile.
+fn try_fetch_prebuild(
+    pkg: &ResolvedPackage,
+    addon_manifest: &crate::addon::manifest::AddonManifest,
+    host: &host_target::HostTarget,
+    lockfile: Option<&Lockfile>,
+    force_refresh: bool,
+) -> Result<(PathBuf, String), PrebuildFailure> {
+    // Check if the host target is supported by this addon.
+    let sha256_for_target = addon_manifest.prebuild.targets.get(host.as_triple());
+    let expected_sha256: String;
+    match sha256_for_target {
+        Some(s) => {
+            expected_sha256 = s.clone();
+        }
+        None if addon_manifest.prebuild.has_prebuild() => {
+            // RC2.6 addon.lock.toml fallback: targets not in addon.toml,
+            // download addon.lock.toml from the GitHub Release asset.
+            let lockfile_text = match crate::addon::prebuild_fetcher::fetch_release_lockfile(
+                &pkg.name,
+                &pkg.version,
+            ) {
+                Ok(text) => text,
+                Err(e) => {
+                    return Err(PrebuildFailure::Unavailable(format!(
+                        "addon '{}' prebuild lockfile fetch failed: {}",
+                        addon_manifest.package, e
+                    )));
+                }
+            };
+            let addon_lockfile = match crate::addon::lockfile::parse_lockfile_str(
+                std::path::Path::new("addon.lock.toml"),
+                &lockfile_text,
+            ) {
+                Ok(lf) => lf,
+                Err(e) => {
+                    return Err(PrebuildFailure::Unavailable(format!(
+                        "Failed to parse addon.lock.toml for '{}@{}': {}",
+                        pkg.name, pkg.version, e
+                    )));
+                }
+            };
+            match addon_lockfile.targets.get(host.as_triple()) {
+                Some(sha) => {
+                    expected_sha256 = sha.clone();
+                }
+                None => {
+                    // RC2.7B-009: target not registered in addon.lock.toml
+                    // -> UnsupportedTarget (never eligible for fallback)
+                    let available: Vec<&str> =
+                        addon_lockfile.targets.keys().map(String::as_str).collect();
+                    return Err(PrebuildFailure::UnsupportedTarget(format!(
+                        "addon '{}' prebuild is not available for your platform\n\
+                         \x20 host target:    {}\n\
+                         \x20 available targets in addon.lock.toml:\n\
+                         \x20   - {}",
+                        addon_manifest.package,
+                        host.as_triple(),
+                        if available.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            available.join("\n    - ")
+                        },
+                    )));
+                }
+            }
+        }
+        None => {
+            // RC2.7B-009: target not registered in addon.toml and no
+            // addon.lock.toml to consult -> UnsupportedTarget (hard error)
+            return Err(PrebuildFailure::UnsupportedTarget(format!(
+                "addon '{}' is not available for your platform\n\
+                 \x20 host target:    {}",
+                addon_manifest.package,
+                host.as_triple(),
+            )));
+        }
+    }
+
+    // Strip sha256: prefix
+    let expected_sha256 = expected_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(&expected_sha256)
+        .to_string();
+
+    // Expand URL template
+    let url = crate::addon::url_template::expand_url_template(
+        addon_manifest.prebuild.url_template.as_ref().unwrap(),
+        &pkg.version,
+        host.as_triple(),
+        host.cdylib_ext(),
+        &addon_manifest.library,
+    )
+    .map_err(|e| {
+        PrebuildFailure::Unavailable(format!("addon URL template expansion failed: {}", e))
+    })?;
+
+    // RC1.5-3b-4: cross-check with lockfile if available
+    if let Some(lf) = lockfile {
+        for locked in &lf.packages {
+            if locked.name == pkg.name
+                && let Some(ref locked_addon) = locked.addon
+                && locked_addon.target == host.as_triple()
+                && locked_addon.sha256 != expected_sha256
+            {
+                // RC1.5-3b-5: mismatch -> reject (integrity)
+                return Err(PrebuildFailure::IntegrityMismatch(format!(
+                    "lockfile addon SHA-256 mismatch for package '{}' (expected {}, got {}). Re-run `taida install --force-refresh`.",
+                    pkg.name, expected_sha256, locked_addon.sha256
+                )));
+            }
+        }
+    }
+
+    // Parse out org/name from package id
+    let (org, name) = pkg.name.split_once('/').ok_or_else(|| {
+        PrebuildFailure::Unavailable(format!(
+            "cannot parse package '{}' as org/name for addon prebuild",
+            pkg.name
+        ))
+    })?;
+
+    // Fetch prebuild binary
+    let mut reporter = make_progress_reporter(&pkg.name, host.as_triple());
+    let fetch_result = if force_refresh {
+        let cache_root = std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".taida/addon-cache"));
+        if let Some(ref root) = cache_root {
+            let pkg_cache = root
+                .join(org)
+                .join(name)
+                .join(&pkg.version)
+                .join(host.as_triple());
+            if pkg_cache.exists() {
+                let _ = std::fs::remove_dir_all(&pkg_cache);
+            }
+        }
+        fetch_prebuild_with_progress(
+            &pkg.name,
+            &pkg.version,
+            host.as_triple(),
+            &addon_manifest.library,
+            host.cdylib_ext(),
+            &url,
+            &expected_sha256,
+            &mut *reporter,
+        )
+    } else {
+        fetch_prebuild_with_progress(
+            &pkg.name,
+            &pkg.version,
+            host.as_triple(),
+            &addon_manifest.library,
+            host.cdylib_ext(),
+            &url,
+            &expected_sha256,
+            &mut *reporter,
+        )
+    };
+
+    match fetch_result {
+        Ok(path) => Ok((path, expected_sha256)),
+        Err(FetchError::IntegrityMismatch { expected, actual }) => {
+            Err(PrebuildFailure::IntegrityMismatch(format!(
+                "addon integrity check failed for '{}'\n\
+                 \x20 expected: {}\n\
+                 \x20 actual:   {}",
+                pkg.name, expected, actual
+            )))
+        }
+        Err(FetchError::UnsupportedTarget {
+            ref host,
+            ref supported,
+        }) => {
+            // RC2.7B-009: explicit match for UnsupportedTarget from fetch layer
+            Err(PrebuildFailure::UnsupportedTarget(format!(
+                "addon prebuild is not available for your platform\n\
+                 \x20 host target:    {}\n\
+                 \x20 supported targets:\n\
+                 \x20   - {}",
+                host,
+                if supported.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    supported.join("\n    - ")
+                },
+            )))
+        }
+        Err(e) => Err(PrebuildFailure::Unavailable(addon_fetch_error_as_string(
+            &e,
+        ))),
+    }
+}
+
+/// RC2.7-4b: attempt local cargo build when prebuild is unavailable.
+///
+/// Uses the shared build helper from `crate::addon::build` with
+/// `CARGO_TARGET_DIR` pointing at an external cache directory
+/// so the source tree in the package store is not polluted.
+#[cfg(feature = "native")]
+fn try_local_addon_build(
+    pkg: &ResolvedPackage,
+    _addon_manifest: &crate::addon::manifest::AddonManifest,
+    host: &host_target::HostTarget,
+) -> Result<PathBuf, String> {
+    // Build cache: ~/.taida/addon-build/{org}/{name}/{version}/{integrity}/{target}/
+    let home = std::env::var("HOME")
+        .map_err(|_| "cannot determine home directory ($HOME not set)".to_string())?;
+    let (org, name) = pkg.name.split_once('/').ok_or_else(|| {
+        format!(
+            "cannot parse package '{}' as org/name for local addon build",
+            pkg.name
+        )
+    })?;
+    let build_cache = PathBuf::from(&home)
+        .join(".taida")
+        .join("addon-build")
+        .join(org)
+        .join(name)
+        .join(&pkg.version)
+        .join(&pkg.integrity)
+        .join(host.as_triple());
+
+    std::fs::create_dir_all(&build_cache)
+        .map_err(|e| format!("cannot create addon build cache dir: {}", e))?;
+
+    let build_output = crate::addon::build::build_addon_artifacts(&pkg.path, Some(&build_cache))?;
+
+    Ok(build_output.cdylib_path)
+}
+
+#[cfg(not(feature = "native"))]
+fn try_local_addon_build(
+    pkg: &ResolvedPackage,
+    _addon_manifest: &crate::addon::manifest::AddonManifest,
+    _host: &host_target::HostTarget,
+) -> Result<PathBuf, String> {
+    Err(format!(
+        "local addon build for '{}' requires the `native` feature",
+        pkg.name,
+    ))
 }
 
 /// RC15B-002: builds a progress reporter closure that prints a one-line
