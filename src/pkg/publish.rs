@@ -488,13 +488,28 @@ pub fn prepare_publish(
 ///
 /// Performs operations in a safe order with rollback on failure:
 /// 1. Check if the tag already exists on remote (fail early)
-/// 2. Stage + commit + tag locally
-/// 3. Push commit + tag
-/// 4. On push failure, rollback local commit and tag
+/// 2. Stage `packages.tdm` plus any caller-supplied `extra_paths`
+///    (for the addon flow this typically adds `native/addon.lock.toml`)
+/// 3. Commit + tag locally
+/// 4. Push commit + tag
+/// 5. On push failure, rollback local commit and tag
+///
+/// ## `extra_paths` contract (RC2.6-1d)
+///
+/// Each entry is resolved **relative to `project_dir`** before being
+/// passed to `git add`. Absolute paths are rejected because the
+/// publish flow must never stage files outside the package tree.
+/// Paths that do not exist are also rejected so the caller catches
+/// typos early rather than silently producing a commit that is
+/// missing the addon lockfile.
+///
+/// Existing source-only callers pass `&[]` so their behaviour is
+/// byte-identical to pre-RC2.6 (non-negotiable condition 1).
 pub fn git_commit_tag_push(
     project_dir: &Path,
     version: &str,
     package_name: &str,
+    extra_paths: &[&Path],
 ) -> Result<(), String> {
     let tag = version.to_string();
     let tag_ref = format!("refs/tags/{tag}");
@@ -516,6 +531,37 @@ pub fn git_commit_tag_push(
 
     // Stage packages.tdm
     run_git(project_dir, &["add", "packages.tdm"])?;
+
+    // Stage any extra paths (addon flow: native/addon.lock.toml).
+    //
+    // Resolution rules:
+    //
+    //   * Absolute paths are rejected outright: the publish flow must
+    //     never stage files that live outside the package tree.
+    //   * Relative paths are resolved against `project_dir` and must
+    //     point at an existing file.
+    //   * `git add` receives the **relative** form so git records a
+    //     clean path that matches the rest of the commit.
+    for extra in extra_paths {
+        if extra.is_absolute() {
+            return Err(format!(
+                "git_commit_tag_push: extra_paths entry '{}' is absolute; only project-relative paths are allowed.",
+                extra.display()
+            ));
+        }
+        let abs = project_dir.join(extra);
+        if !abs.exists() {
+            return Err(format!(
+                "git_commit_tag_push: extra_paths entry '{}' does not exist under project dir '{}'.",
+                extra.display(),
+                project_dir.display()
+            ));
+        }
+        let rel_str = extra
+            .to_str()
+            .ok_or_else(|| "git_commit_tag_push: extra_paths entry is not valid UTF-8.".to_string())?;
+        run_git(project_dir, &["add", rel_str])?;
+    }
 
     // Commit
     let message = format!("publish: {package_name}@{version}");
@@ -549,6 +595,130 @@ pub fn git_commit_tag_push(
     }
 
     Ok(())
+}
+
+/// RC2.6-1e: multi-file rollback snapshot.
+///
+/// The addon publish flow mutates at least two files on disk
+/// (`packages.tdm` + `native/addon.lock.toml`) and may add more in the
+/// future. The pre-RC2.6 rollback in `src/main.rs::run_publish` only
+/// snapshotted `packages.tdm`, which silently left any other mutated
+/// file in its post-failure state. `PublishRollback` generalises the
+/// pattern so every touched file is captured once, and every
+/// error-path restores the worktree atomically.
+///
+/// # Semantics
+///
+/// * [`PublishRollback::snapshot`] reads the file's **current** bytes
+///   into memory. The snapshot is a pure in-memory copy — no temp
+///   file is written to disk.
+/// * If the target file does not exist yet (the lockfile on first
+///   publish, for example), `snapshot` records its absence so that
+///   [`PublishRollback::restore`] will delete the file on rollback
+///   instead of re-creating a garbage placeholder.
+/// * [`PublishRollback::restore`] is best-effort: it continues past
+///   individual failures so a partial disk error does not leave
+///   half the files stranded.
+/// * [`PublishRollback::snapshots_count`] is exposed for tests and
+///   for orchestrator diagnostics.
+#[derive(Debug, Default)]
+pub struct PublishRollback {
+    entries: Vec<PublishRollbackEntry>,
+}
+
+#[derive(Debug)]
+enum PublishRollbackEntry {
+    /// File existed at snapshot time.
+    Existing { path: PathBuf, original: Vec<u8> },
+    /// File did not exist at snapshot time; if it now exists on
+    /// restore we must delete it.
+    Missing { path: PathBuf },
+}
+
+impl PublishRollback {
+    /// Construct an empty rollback recorder.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Snapshot the current bytes of `path` into the rollback buffer.
+    ///
+    /// If `path` does not exist, a `Missing` entry is recorded so
+    /// that a subsequent `restore` will delete any file that the
+    /// orchestrator created during the failed publish attempt.
+    ///
+    /// Returns an I/O error string on read failure; the caller
+    /// decides whether to abort the publish flow. Callers typically
+    /// wrap this with `?` at the earliest safe point.
+    pub fn snapshot(&mut self, path: impl Into<PathBuf>) -> Result<(), String> {
+        let path = path.into();
+        if path.exists() {
+            let original = std::fs::read(&path).map_err(|e| {
+                format!(
+                    "PublishRollback::snapshot: cannot read '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            self.entries
+                .push(PublishRollbackEntry::Existing { path, original });
+        } else {
+            self.entries.push(PublishRollbackEntry::Missing { path });
+        }
+        Ok(())
+    }
+
+    /// Restore every recorded file to its pre-publish state.
+    ///
+    /// Best-effort: failures for individual entries are collected and
+    /// reported as a combined diagnostic string, but every entry is
+    /// visited even if an earlier one failed, so a partial disk
+    /// error cannot strand part of the worktree.
+    pub fn restore(&self) -> Result<(), String> {
+        let mut errors: Vec<String> = Vec::new();
+        // Reverse iteration: restore in LIFO order so files whose
+        // creation depended on earlier ones come back consistently.
+        for entry in self.entries.iter().rev() {
+            match entry {
+                PublishRollbackEntry::Existing { path, original } => {
+                    if let Err(e) = std::fs::write(path, original) {
+                        errors.push(format!(
+                            "failed to restore '{}': {}",
+                            path.display(),
+                            e
+                        ));
+                    }
+                }
+                PublishRollbackEntry::Missing { path } => {
+                    if path.exists()
+                        && let Err(e) = std::fs::remove_file(path)
+                    {
+                        errors.push(format!(
+                            "failed to remove synthesised file '{}': {}",
+                            path.display(),
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "PublishRollback::restore: {} error(s): {}",
+                errors.len(),
+                errors.join("; ")
+            ))
+        }
+    }
+
+    /// Number of files currently snapshotted.
+    pub fn snapshots_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -1223,6 +1393,223 @@ mod tests {
             err.contains("native/addon.toml"),
             "error should mention addon.toml: {err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── RC2.6-1e: PublishRollback ─────────────────────────
+
+    #[test]
+    fn test_publish_rollback_snapshots_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_rollback_existing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("packages.tdm");
+        std::fs::write(&p, b"original\n").unwrap();
+
+        let mut rb = PublishRollback::new();
+        rb.snapshot(&p).expect("snapshot");
+        assert_eq!(rb.snapshots_count(), 1);
+
+        // Simulate an in-place rewrite.
+        std::fs::write(&p, b"mutated\n").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"mutated\n");
+
+        rb.restore().expect("restore");
+        assert_eq!(std::fs::read(&p).unwrap(), b"original\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_publish_rollback_deletes_files_that_did_not_exist_at_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_rollback_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("addon.lock.toml");
+
+        let mut rb = PublishRollback::new();
+        rb.snapshot(&p).expect("snapshot missing file");
+        assert_eq!(rb.snapshots_count(), 1);
+
+        // Simulate the orchestrator creating the file.
+        std::fs::write(&p, b"[targets]\n").unwrap();
+        assert!(p.exists());
+
+        rb.restore().expect("restore");
+        assert!(!p.exists(), "file created after snapshot should be removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_publish_rollback_handles_multiple_files_in_lifo_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_rollback_multi_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tdm = dir.join("packages.tdm");
+        let lock = dir.join("addon.lock.toml");
+        std::fs::write(&tdm, b"<<<@a\n").unwrap();
+        // lock does NOT exist yet.
+
+        let mut rb = PublishRollback::new();
+        rb.snapshot(&tdm).unwrap();
+        rb.snapshot(&lock).unwrap();
+        assert_eq!(rb.snapshots_count(), 2);
+
+        // Orchestrator mutates both.
+        std::fs::write(&tdm, b"<<<@a.1\n").unwrap();
+        std::fs::write(&lock, b"[targets]\n").unwrap();
+
+        rb.restore().unwrap();
+
+        assert_eq!(std::fs::read(&tdm).unwrap(), b"<<<@a\n");
+        assert!(!lock.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_publish_rollback_restore_is_idempotent_for_unchanged_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_rollback_idem_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("packages.tdm");
+        std::fs::write(&p, b"unchanged\n").unwrap();
+
+        let mut rb = PublishRollback::new();
+        rb.snapshot(&p).unwrap();
+        // Don't mutate.
+        rb.restore().unwrap();
+        // Second restore must also succeed.
+        rb.restore().unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"unchanged\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── RC2.6-1d: git_commit_tag_push extra_paths validation ──
+    //
+    // We only test the validator arms that can fire without a real
+    // git repo. End-to-end `git commit + tag + push` coverage lives
+    // in tests/publish_cli.rs and tests/publish_rust_addon.rs.
+
+    #[test]
+    fn test_git_commit_tag_push_rejects_absolute_extra_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_extra_abs_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // We cannot reach the extra_paths validator without clearing
+        // the remote-tag precheck, so build a throwaway git repo.
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&dir)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        let _ = Command::new("git")
+            .args(["config", "user.email", "t@taida.dev"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(&dir)
+            .status();
+        std::fs::write(dir.join("packages.tdm"), "<<<@a\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "packages.tdm"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .status();
+
+        let abs = dir.join("native").join("addon.lock.toml");
+        let err = git_commit_tag_push(&dir, "a.1", "demo", &[&abs]).unwrap_err();
+        assert!(
+            err.contains("absolute"),
+            "expected absolute-path rejection: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_git_commit_tag_push_rejects_nonexistent_extra_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_extra_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&dir)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        let _ = Command::new("git")
+            .args(["config", "user.email", "t@taida.dev"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(&dir)
+            .status();
+        std::fs::write(dir.join("packages.tdm"), "<<<@a\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "packages.tdm"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .status();
+
+        let extra = Path::new("native/addon.lock.toml");
+        let err = git_commit_tag_push(&dir, "a.1", "demo", &[extra]).unwrap_err();
+        assert!(
+            err.contains("does not exist"),
+            "expected missing-file rejection: {err}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

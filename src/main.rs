@@ -4261,11 +4261,15 @@ fn run_publish(args: &[String]) {
         std::process::exit(1);
     }
 
-    // Git commit + tag + push (with rollback on failure)
+    // Git commit + tag + push (with rollback on failure).
+    // Phase 1 of RC2.6 preserves the source-only call-site by
+    // passing `&[]` for extra_paths; the addon flow (Phase 1-f)
+    // will plug `native/addon.lock.toml` into this slot.
     if let Err(e) = pkg::publish::git_commit_tag_push(
         &project_dir,
         &preparation.version,
         &preparation.package_name,
+        &[],
     ) {
         // Restore packages.tdm to its original state
         let _ = fs::write(&manifest_path, &original_manifest_source);
