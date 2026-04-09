@@ -6,6 +6,7 @@ Released: 2026-04-10
 
 ### Breaking Changes
 
+- **`taida build` default target is now `native`** -- `taida build file.td` now produces a native binary instead of `.mjs` output. If your CI or scripts relied on the default being JS, add `--target js` explicitly or use `taida transpile`.
 - **taida-lang/net: Remove legacy OS re-exports** — 16 socket/DNS symbols (`dnsResolve`, `tcpConnect`, `tcpListen`, `tcpAccept`, `socketSend`, `socketSendAll`, `socketRecv`, `socketSendBytes`, `socketRecvBytes`, `socketRecvExact`, `udpBind`, `udpSendTo`, `udpRecvFrom`, `socketClose`, `listenerClose`, `udpClose`) are no longer exported from `taida-lang/net`. Use `taida-lang/os` instead.
 - **httpServe protocol field** — Numeric literals for the `protocol` field (e.g. `@(protocol <= 42)`) are now rejected at compile time. Use `HttpProtocol` enum or `Str`.
 
@@ -50,10 +51,19 @@ Released: 2026-04-10
 - **RC2.6**: Publish workflow — `taida publish --target rust-addon`, 2-stage `--dry-run=plan|build`, `addon.lock.toml`, GitHub Release API integration, CI workflow template
 - **RC2.7**: Distribution hardening — 9 blocker fixes, CI template robustness
 
+#### CLI Surface Normalization (RC5)
+
+- **`taida build` default target changed to `native`** -- Previously defaulted to `--target js`. Now `taida build file.td` produces a native binary. Use `--target js` or `taida transpile` for JS output.
+- **`taida transpile`** remains as an alias for `build --target js` (unchanged behavior).
+- **`taida upgrade`** -- New self-update command. Downloads and installs the latest taida binary from GitHub Releases. Supports `--check`, `--gen`, `--label`, and `--version` flags.
+
 ### CLI Changes
 
 | Command | Change |
 |---------|--------|
+| `taida build` | **Breaking**: Default target changed from `js` to `native` |
+| `taida upgrade` | New: Self-update taida binary |
+| `taida upgrade --check` | New: Check for updates without installing |
 | `taida init --target rust-addon` | New: Scaffold Rust addon project |
 | `taida publish --target rust-addon` | New: Build and release addon |
 | `taida publish --dry-run=build` | New: Build-only dry run |
@@ -71,6 +81,7 @@ Released: 2026-04-10
 - `src/crypto.rs` hand-written SHA-256 (no external crate)
 - `src/pkg/resolver.rs` dependency resolution engine
 - `src/pkg/github_release.rs` GitHub Release API client
+- `src/upgrade.rs` self-update module with version resolution
 
 ### Documentation
 
