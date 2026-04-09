@@ -451,13 +451,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # taida-addon crate is resolved via [patch.crates-io] from
-      # ../taida/crates/addon-rs. Checkout the taida repo so the
-      # path dependency resolves on CI runners.
-      - uses: actions/checkout@v4
-        with:
-          repository: taida-lang/taida
-          path: ../taida
+      # taida-addon crate is resolved via [patch.crates-io] from a
+      # local taida checkout. Clone it into the workspace and rewrite
+      # the patch path so cargo can find it on CI runners.
+      # (actions/checkout@v4 rejects paths outside $GITHUB_WORKSPACE,
+      # so we use git clone directly.)
+      - name: Clone taida for taida-addon crate
+        shell: bash
+        run: git clone --depth 1 https://github.com/taida-lang/taida.git taida-deps
+
+      - name: Rewrite patch path for CI
+        shell: bash
+        run: |
+          sed -i.bak 's|path = "../taida/crates/addon-rs"|path = "taida-deps/crates/addon-rs"|' Cargo.toml
+          rm -f Cargo.toml.bak
 
       - uses: dtolnay/rust-toolchain@stable
         with:
