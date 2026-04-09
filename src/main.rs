@@ -225,7 +225,7 @@ fn print_install_help() {
     println!(
         "\
 Usage:
-  taida install [--force-refresh]
+  taida install [--force-refresh] [--allow-local-addon-build]
 
 Behavior:
   Install resolved dependencies and generate/update `.taida/taida.lock`.
@@ -240,11 +240,15 @@ Behavior:
   (RC15B-002).
 
 Options:
-  --force-refresh   Ignore the addon cache and re-download every prebuild.
+  --force-refresh              Ignore the addon cache and re-download every prebuild.
+  --allow-local-addon-build    When a prebuild is missing or unavailable, fall back
+                               to building the addon from source using `cargo build`.
+                               Integrity mismatches are never overridden by fallback.
 
 Example:
   taida install
-  taida install --force-refresh"
+  taida install --force-refresh
+  taida install --allow-local-addon-build"
     );
 }
 
@@ -252,13 +256,19 @@ fn print_update_help() {
     println!(
         "\
 Usage:
-  taida update
+  taida update [--allow-local-addon-build]
 
 Behavior:
   Resolve dependencies with remote-preferred generation lookup, then reinstall and update lockfile.
 
+Options:
+  --allow-local-addon-build    When a prebuild is missing or unavailable, fall back
+                               to building the addon from source using `cargo build`.
+                               Integrity mismatches are never overridden by fallback.
+
 Example:
-  taida update"
+  taida update
+  taida update --allow-local-addon-build"
     );
 }
 
@@ -3945,11 +3955,15 @@ fn run_deps(args: &[String]) {
 
 fn run_install(args: &[String]) {
     // RC1.5-3c: parse --force-refresh flag
+    // RC2.7-4a: parse --allow-local-addon-build flag
     let mut force_refresh = false;
+    let mut allow_local_addon_build = false;
     let mut filtered: Vec<&str> = Vec::new();
     for arg in args {
         if arg == "--force-refresh" {
             force_refresh = true;
+        } else if arg == "--allow-local-addon-build" {
+            allow_local_addon_build = true;
         } else if is_help_flag(arg.as_str()) {
             print_install_help();
             return;
@@ -4046,12 +4060,14 @@ fn run_install(args: &[String]) {
         }
 
         // RC1.5-3a: install addon prebuilds
+        // RC2.7-4b: pass allow_local_addon_build for fallback policy
         let existing_lock = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or(None);
         addon_map = match pkg::resolver::install_addon_prebuilds(
             &manifest,
             &result,
             force_refresh,
             existing_lock.as_ref(),
+            allow_local_addon_build,
         ) {
             Ok(map) => map,
             Err(e) => {
@@ -4083,13 +4099,15 @@ fn run_install(args: &[String]) {
 // ── Update subcommand ──────────────────────────────────
 
 fn run_update(args: &[String]) {
-    match args {
-        [] => {}
-        [arg] if is_help_flag(arg.as_str()) => {
+    // RC2.7-4a / RC2.7B-005: parse --allow-local-addon-build flag
+    let mut allow_local_addon_build = false;
+    for arg in args {
+        if arg == "--allow-local-addon-build" {
+            allow_local_addon_build = true;
+        } else if is_help_flag(arg.as_str()) {
             print_update_help();
             return;
-        }
-        _ => {
+        } else {
             eprintln!("Unexpected arguments.");
             eprintln!("Run `taida update --help` for usage.");
             std::process::exit(1);
@@ -4132,6 +4150,8 @@ fn run_update(args: &[String]) {
     }
 
     // Install resolved dependencies (recreate symlinks)
+    let mut addon_map: std::collections::BTreeMap<String, pkg::lockfile::LockedAddon> =
+        std::collections::BTreeMap::new();
     if !result.resolved.is_empty() {
         match pkg::resolver::install_deps(&manifest, &result) {
             Ok(()) => {
@@ -4155,10 +4175,36 @@ fn run_update(args: &[String]) {
                 std::process::exit(1);
             }
         }
+
+        // RC2.7B-011: install addon prebuilds after deps are recreated.
+        // Without this, `taida update` destroys addon binaries because
+        // `install_deps` recreates `.taida/deps` from scratch.
+        let lock_path = project_dir.join(".taida").join("taida.lock");
+        let existing_lock = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or(None);
+        addon_map = match pkg::resolver::install_addon_prebuilds(
+            &manifest,
+            &result,
+            false, // force_refresh: update fetches latest versions but does not bypass cache
+            existing_lock.as_ref(),
+            allow_local_addon_build,
+        ) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("Error installing addon prebuilds: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if !addon_map.is_empty() {
+            for (pkg_name, addon) in &addon_map {
+                println!("  Addon {} @ {} ({})", pkg_name, addon.target, addon.sha256);
+            }
+        }
     }
 
-    // Update lockfile
-    match pkg::resolver::write_lockfile(&manifest, &result) {
+    // RC2.7B-012: use write_lockfile_with_addons to preserve addon stanzas.
+    // The old write_lockfile call would discard all [[package.addon]] entries.
+    match pkg::resolver::write_lockfile_with_addons(&manifest, &result, &addon_map) {
         Ok(()) => println!("Updated taida.lock"),
         Err(e) => eprintln!("Warning: could not write lockfile: {}", e),
     }
@@ -4673,6 +4719,7 @@ fn run_publish(args: &[String]) {
                 &release_title,
                 &release_notes,
                 &assets,
+                token_opt.as_ref().map(|t| t.github_token.as_str()),
             ) {
                 // Release failure is non-fatal to the commit/push but
                 // is reported as a CLI error so the user knows.

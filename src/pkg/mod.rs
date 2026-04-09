@@ -1,3 +1,6 @@
+// RC2.7 Phase 2: GitHub Release REST API driver.
+#[cfg(feature = "community")]
+pub mod github_release;
 pub mod init;
 pub mod lockfile;
 /// Package management for Taida Lang.
