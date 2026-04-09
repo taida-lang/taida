@@ -98,7 +98,10 @@ fn test_subcommand_help_prints_usage_and_exits_zero() {
             &["inspect", "--help"][..],
             "taida inspect [--format text|json|sarif] <PATH>",
         ),
-        (&["init", "--help"][..], "taida init [--target rust-addon] [DIR]"),
+        (
+            &["init", "--help"][..],
+            "taida init [--target rust-addon] [DIR]",
+        ),
         (&["deps", "--help"][..], "taida deps"),
         (&["install", "--help"][..], "taida install"),
         (&["update", "--help"][..], "taida update"),
