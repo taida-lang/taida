@@ -231,12 +231,12 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 taida-addon = "2.0"
 
-# taida-addon is not yet published on crates.io. For local development,
-# uncomment the [patch.crates-io] section below and adjust the path to
-# point to your local taida checkout.
-#
-# [patch.crates-io]
-# taida-addon = {{ path = "../taida/crates/addon-rs" }}
+# taida-addon is not yet published on crates.io.
+# The [patch.crates-io] section below resolves it from a local taida
+# checkout. Adjust the path if your taida repo is in a different
+# location relative to this project.
+[patch.crates-io]
+taida-addon = {{ path = "../taida/crates/addon-rs" }}
 "#
     )
 }
@@ -451,6 +451,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # taida-addon crate is resolved via [patch.crates-io] from
+      # ../taida/crates/addon-rs. Checkout the taida repo so the
+      # path dependency resolves on CI runners.
+      - uses: actions/checkout@v4
+        with:
+          repository: taida-lang/taida
+          path: ../taida
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{{{ matrix.target }}}}
@@ -561,9 +569,10 @@ cargo build --release --lib
 taida publish --target rust-addon
 ```
 
-> **Note:** `taida-addon` is not yet published on crates.io. Before building,
-> uncomment the `[patch.crates-io]` section in `Cargo.toml` and point it to
-> your local taida checkout.
+> **Note:** `taida-addon` is not yet published on crates.io. The `Cargo.toml`
+> includes a `[patch.crates-io]` section that resolves `taida-addon` from a
+> local taida checkout at `../taida/crates/addon-rs`. Adjust the path if your
+> taida repository is in a different location.
 "#
     )
 }
