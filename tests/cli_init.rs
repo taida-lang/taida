@@ -54,6 +54,10 @@ fn test_init_rust_addon_creates_full_tree() {
     assert!(project_dir.join("taida/foo.td").exists(), "taida/foo.td missing");
     assert!(project_dir.join(".gitignore").exists(), ".gitignore missing");
     assert!(project_dir.join("README.md").exists(), "README.md missing");
+    assert!(
+        project_dir.join(".github/workflows/release.yml").exists(),
+        ".github/workflows/release.yml missing"
+    );
 
     // main.td must NOT exist for addon projects.
     assert!(!project_dir.join("main.td").exists(), "main.td must not exist for addon");
@@ -230,7 +234,91 @@ fn test_init_rust_addon_no_name_uses_cwd() {
     let _ = fs::remove_dir_all(&parent);
 }
 
-// ── Test 7: source-only init backward compat ────────────────────
+// ── Test 7: CI workflow template is generated for addon ─────────
+
+#[test]
+fn test_init_rust_addon_ci_workflow_exists() {
+    let root = unique_temp_dir("addon_ci");
+    let project_dir = root.join("ci-pkg");
+
+    let output = Command::new(taida_bin())
+        .args(["init", "--target", "rust-addon", "ci-pkg"])
+        .current_dir(&root)
+        .output()
+        .expect("taida init should succeed");
+
+    assert!(
+        output.status.success(),
+        "taida init failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workflow_path = project_dir.join(".github/workflows/release.yml");
+    assert!(workflow_path.exists(), ".github/workflows/release.yml missing");
+
+    let content = fs::read_to_string(&workflow_path).unwrap();
+
+    // Must be valid UTF-8 and non-empty.
+    assert!(!content.is_empty(), "release.yml must not be empty");
+
+    // Placeholders must be resolved (no raw {LIBRARY_STEM} or
+    // {PACKAGE_NAME} in the output).
+    assert!(
+        !content.contains("{LIBRARY_STEM}"),
+        "raw {{LIBRARY_STEM}} placeholder must be replaced"
+    );
+    assert!(
+        !content.contains("{PACKAGE_NAME}"),
+        "raw {{PACKAGE_NAME}} placeholder must be replaced"
+    );
+
+    // The resolved library stem (ci_pkg) must appear.
+    assert!(
+        content.contains("ci_pkg"),
+        "workflow must contain resolved library stem 'ci_pkg'"
+    );
+
+    // Must have the Taida tag triggers, not semver.
+    assert!(content.contains("'a.*'"), "missing a.* tag trigger");
+    assert!(content.contains("'b.*'"), "missing b.* tag trigger");
+
+    // Must have the four matrix targets.
+    assert!(content.contains("x86_64-unknown-linux-gnu"), "missing linux target");
+    assert!(content.contains("aarch64-apple-darwin"), "missing macOS ARM target");
+
+    // Must reference addon.lock.toml (lockfile job).
+    assert!(
+        content.contains("addon.lock.toml"),
+        "workflow must reference addon.lock.toml"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ── Test 8: source-only does NOT create .github/ ────────────────
+
+#[test]
+fn test_init_source_only_no_github_dir() {
+    let root = unique_temp_dir("src_no_ci");
+    let project_dir = root.join("no-ci-pkg");
+
+    let output = Command::new(taida_bin())
+        .args(["init", "no-ci-pkg"])
+        .current_dir(&root)
+        .output()
+        .expect("taida init should succeed");
+
+    assert!(output.status.success());
+    assert!(
+        !project_dir.join(".github").exists(),
+        "source-only projects must NOT have .github/"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+// ── Test 9: source-only init backward compat ────────────────────
 
 #[test]
 fn test_init_source_only_backward_compat() {
