@@ -229,8 +229,19 @@ ritchan <= NervStaff(name <= "Ritsuko")  // callSign = "", age = 0
 | # | ドキュメント | 内容 |
 |---|------------|------|
 | 00 | [概要](00_overview.md) | 本ドキュメント |
-| 01 | [型システム](01_types.md) | プリミティブ型、コレクション型、モールディング型、デフォルト値 |
+| 01 | [型システム](01_types.md) | プリミティブ型、Enum型、コレクション型、モールディング型、デフォルト値 |
 | 02 | [型のガチガチさ](02_strict_typing.md) | 暗黙変換禁止、Lax による安全な操作、JSON エアロック |
+| 03 | [JSON 溶鉄](03_json.md) | JSON の不透明プリミティブ化、スキーマ必須の型変換 |
+| 04 | [ぶちパック](04_buchi_pack.md) | ぶちパック構文 |
+| 05 | [モールディング](05_molding.md) | モールディング型（操作モールド全種） |
+| 06 | [リスト操作](06_lists.md) | リスト操作（モールド + 状態チェックメソッド） |
+| 07 | [制御フロー](07_control_flow.md) | 条件分岐、パターンマッチ |
+| 08 | [エラー処理](08_error_handling.md) | Lax + throw/\|== + ゴリラ天井 |
+| 09 | [関数](09_functions.md) | 関数定義、パイプライン、末尾再帰 |
+| 10 | [モジュール](10_modules.md) | モジュールシステム（プリリュード、インポート/エクスポート） |
+| 11 | [非同期処理](11_async.md) | Async[T]、]=> await |
+| 12 | [イントロスペクション](12_introspection.md) | 構造的イントロスペクション |
+| 13 | [アドオン作成](13_creating_addons.md) | Rust アドオンの作成とプレビルド配布 |
 
 ### リファレンス
 
@@ -244,6 +255,10 @@ ritchan <= NervStaff(name <= "Ritsuko")  // callSign = "", age = 0
 | [ドキュメントコメント](../reference/documentation_comments.md) | AI 協業タグ |
 | [末尾再帰最適化](../reference/tail_recursion.md) | TCO の判定ルール |
 | [スコープルール](../reference/scope_rules.md) | スコープベース自動管理 |
+| [アドオンマニフェスト](../reference/addon_manifest.md) | addon.toml の仕様 |
+| [診断コード](../reference/diagnostic_codes.md) | コンパイラ診断コード一覧 |
+| [標準ライブラリ](../reference/standard_library.md) | プリリュードとビルトイン型 |
+| [標準メソッド](../reference/standard_methods.md) | 状態チェック・モナディックメソッド |
 
 ### 設計ドキュメント
 

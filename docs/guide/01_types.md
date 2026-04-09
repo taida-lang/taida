@@ -38,6 +38,20 @@ template <= `Hello, ${name}!`
 
 **デフォルト値**: `""` (空文字列)
 
+エスケープシーケンス:
+
+| シーケンス | 文字 |
+|-----------|------|
+| `\n` | 改行 |
+| `\t` | タブ |
+| `\r` | 復帰 |
+| `\\` | バックスラッシュ |
+| `\'` | シングルクォート |
+| `\"` | ダブルクォート |
+| `\0` | null文字 |
+| `\xHH` | 16進エスケープ (2桁) |
+| `\u{HHHH}` | Unicodeエスケープ (1〜6桁) |
+
 操作はモールドで行います。メソッドは状態チェックと toString のみです:
 
 ```taida
@@ -515,6 +529,47 @@ name: PilotName <= "Asuka"
 
 ---
 
+## Enum 型
+
+列挙型です。有限個のバリアントから1つを選ぶ値を定義します。
+
+### 定義
+
+```taida
+Enum => Status = :Ok :Fail :Retry
+```
+
+`Enum =>` でenum定義を開始し、バリアントを `:名前` で列挙します。
+
+### 使用
+
+```taida
+Enum => Status = :Ok :Fail :Retry
+
+myStatus <= Status:Retry()
+stdout(myStatus)              // 2（ordinal値、0-indexed）
+stdout(myStatus == Status:Retry())  // true
+```
+
+enum値は ordinal（0始まりの Int）として評価されます。`Status:Ok()` は `0`、`Status:Fail()` は `1`、`Status:Retry()` は `2` です。
+
+### ビルトイン enum: HttpProtocol
+
+`taida-lang/net` パッケージは `HttpProtocol` enum をエクスポートします:
+
+```taida
+>>> taida-lang/net => @(httpServe, HttpProtocol)
+
+// HttpProtocol:H1() → 0 (wire: "h1.1")
+// HttpProtocol:H2() → 1 (wire: "h2")
+// HttpProtocol:H3() → 2 (wire: "h3")
+httpServe(8080, handler, 1, 1000, 128, @(protocol <= HttpProtocol:H1()))
+```
+
+**デフォルト値**: 最初のバリアント（ordinal 0）
+
+---
+
 ## まとめ
 
 | 分類 | 型 | デフォルト値 |
@@ -530,5 +585,6 @@ name: PilotName <= "Asuka"
 | モールディング | Result[T, P] | T のデフォルト値 |
 | モールディング | Lax[T] | T のデフォルト値 |
 | モールディング | Async[T] | T のデフォルト値 |
+| 列挙型 | Enum | 最初のバリアント (ordinal 0) |
 
 操作はモールドで行います。メソッドは状態チェック + toString + モナディック操作のみです。型変換もモールドで明示的に行います。null はありません。
