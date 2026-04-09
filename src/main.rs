@@ -4180,7 +4180,7 @@ fn run_update(args: &[String]) {
 /// source-only packages (non-negotiable condition 1) but now runs
 /// **through** the shared orchestration harness below so that:
 ///
-///   * `prepare_publish` remains a pure function (RC2.6B-015).
+///   * `prepare_publish` remains a non-mutating, read-only function (RC2.6B-015).
 ///   * Every file written during the run is captured by a
 ///     `PublishRollback` snapshot so a late failure restores the
 ///     worktree exactly as it was.
@@ -4201,11 +4201,11 @@ fn run_update(args: &[String]) {
 ///   5. Stages `packages.tdm` plus `native/addon.lock.toml` via the
 ///      extended `git_commit_tag_push(extra_paths=...)`.
 ///   6. Will call `create_github_release` here in Phase 2. For Phase
-///      1 the release step is a pure no-op (Phase 2 will wire it up),
+///      1 the release step is a no-op (Phase 2 will wire it up),
 ///      and the env var `TAIDA_PUBLISH_SKIP_RELEASE=1` is honoured
 ///      ahead of time so integration tests can bypass `gh` entirely.
 ///
-/// `--dry-run` in the addon flow still runs `prepare_publish` (pure)
+/// `--dry-run` in the addon flow still runs `prepare_publish` (non-mutating)
 /// and prints the computed plan, but explicitly SKIPS the cargo build
 /// to preserve B-015 invariant "dry-run must not touch target/".
 fn run_publish(args: &[String]) {
@@ -4349,7 +4349,7 @@ fn run_publish(args: &[String]) {
         std::process::exit(1);
     }
 
-    // ── Phase 1: pure preparation (prepare_publish is pure) ─
+    // ── Phase 1: non-mutating preparation (prepare_publish is read-only) ─
     let preparation = match pkg::publish::prepare_publish(
         &project_dir,
         &manifest,

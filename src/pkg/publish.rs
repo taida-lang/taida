@@ -13,15 +13,17 @@ const DEFAULT_PROPOSALS_REPO: &str = "taida-community/proposals";
 //
 // The helpers below are part of the addon publish flow described in
 // `.dev/RC2_6_DESIGN.md`. They are deliberately kept **side-effect
-// isolated** so that `prepare_publish` (which is a pure function) can
-// remain pure: all disk writes, subprocess calls and SHA computation
-// happen in these helpers and are stitched together by
-// `src/main.rs::run_publish` (the orchestrator).
+// isolated** so that `prepare_publish` (which is a non-mutating,
+// read-only function — it runs git subprocesses and fs walks but
+// never writes to disk) can stay non-mutating: all disk writes,
+// subprocess mutations and SHA computation happen in these helpers
+// and are stitched together by `src/main.rs::run_publish` (the
+// orchestrator).
 //
 // Non-negotiable invariants carried from RC2.6 v2 design:
 //
 //   * `prepare_publish` must not call any of the functions in this
-//     block (it would break its pure contract).
+//     block (it would break its non-mutating contract).
 //   * `compute_cdylib_sha256` is ungated so it can be unit-tested on
 //     any feature set. It operates on an arbitrary byte stream.
 //   * `build_addon_artifacts` is `native`-gated because it both relies
@@ -730,7 +732,7 @@ pub fn git_commit_tag_push(
 /// # Semantics
 ///
 /// * [`PublishRollback::snapshot`] reads the file's **current** bytes
-///   into memory. The snapshot is a pure in-memory copy — no temp
+///   into memory. The snapshot is an in-memory copy — no temp
 ///   file is written to disk.
 /// * If the target file does not exist yet (the lockfile on first
 ///   publish, for example), `snapshot` records its absence so that
@@ -796,6 +798,14 @@ impl PublishRollback {
     /// reported as a combined diagnostic string, but every entry is
     /// visited even if an earlier one failed, so a partial disk
     /// error cannot strand part of the worktree.
+    ///
+    /// After restoring file contents, also resets the git staging area
+    /// for every snapshotted path so that a failed publish that already
+    /// ran `git add` does not leave orphaned staged changes. Existing
+    /// files are unstaged with `git restore --staged`, and files that
+    /// were created (Missing marker) are removed from the index with
+    /// `git rm --cached --force`. Index restoration failures are
+    /// collected but do not block content restoration.
     pub fn restore(&self) -> Result<(), String> {
         let mut errors: Vec<String> = Vec::new();
         // Reverse iteration: restore in LIFO order so files whose
@@ -824,6 +834,51 @@ impl PublishRollback {
                 }
             }
         }
+
+        // Phase 2: best-effort git index reset.
+        //
+        // This handles the scenario where `git add` succeeded but a
+        // later step (cargo build, lockfile merge, gh release, ...)
+        // failed. Without this, `git status` would still show the
+        // file as staged even though its contents have been reverted.
+        //
+        // Git index restoration is strictly best-effort and never
+        // contributes to the error list — we may be running in a temp
+        // directory without a git repo (unit tests), or git may not
+        // be on PATH. The file-content restoration above is the
+        // critical path; the index cleanup is supplementary.
+        let work_dir: Option<&Path> = self
+            .entries
+            .first()
+            .and_then(|e| match e {
+                PublishRollbackEntry::Existing { path, .. }
+                | PublishRollbackEntry::Missing { path } => path.parent(),
+            });
+        if let Some(cwd) = work_dir {
+            for entry in &self.entries {
+                let (path, is_missing) = match entry {
+                    PublishRollbackEntry::Existing { path, .. } => (path, false),
+                    PublishRollbackEntry::Missing { path } => (path, true),
+                };
+                let path_str = match path.to_str() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                // Silently ignore all failures — see comment above.
+                let _ = if is_missing {
+                    Command::new("git")
+                        .args(["rm", "--cached", "--force", "--ignore-unmatch", path_str])
+                        .current_dir(cwd)
+                        .output()
+                } else {
+                    Command::new("git")
+                        .args(["restore", "--staged", path_str])
+                        .current_dir(cwd)
+                        .output()
+                };
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
