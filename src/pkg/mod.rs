@@ -1,3 +1,4 @@
+pub mod init;
 pub mod lockfile;
 /// Package management for Taida Lang.
 ///

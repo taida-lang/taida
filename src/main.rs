@@ -195,10 +195,15 @@ fn print_init_help() {
     println!(
         "\
 Usage:
-  taida init [DIR]
+  taida init [--target rust-addon] [DIR]
 
-Example:
-  taida init hello-taida"
+Options:
+  --target rust-addon  Scaffold a Rust addon project (Cargo.toml, src/lib.rs,
+                       native/addon.toml, taida/<name>.td, README.md)
+
+Examples:
+  taida init hello-taida
+  taida init --target rust-addon my-addon"
     );
 }
 
@@ -3753,24 +3758,62 @@ fn run_inspect(args: &[String]) {
 // ── Init subcommand ──────────────────────────────────────
 
 fn run_init(args: &[String]) {
-    let dir_name = match args {
-        [] => ".",
-        [arg] if is_help_flag(arg.as_str()) => {
-            print_init_help();
-            return;
+    // ── CLI parsing (RC2.6-3c) ──────────────────────────
+    //
+    // Accepted forms:
+    //   taida init                           → SourceOnly in "."
+    //   taida init <dir>                     → SourceOnly in <dir>
+    //   taida init --target rust-addon       → RustAddon in "."
+    //   taida init --target rust-addon <dir> → RustAddon in <dir>
+    //   taida init <dir> --target rust-addon → RustAddon in <dir>
+    //   taida init --help / -h               → help text
+    let mut target = pkg::init::InitTarget::SourceOnly;
+    let mut dir_arg: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_init_help();
+                return;
+            }
+            "--target" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Missing value for --target.");
+                    eprintln!("Run `taida init --help` for usage.");
+                    std::process::exit(1);
+                }
+                match args[i].as_str() {
+                    "rust-addon" => target = pkg::init::InitTarget::RustAddon,
+                    other => {
+                        eprintln!(
+                            "Unknown init target '{}'. Supported: rust-addon",
+                            other
+                        );
+                        eprintln!("Run `taida init --help` for usage.");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            raw if raw.starts_with('-') => {
+                eprintln!("Unknown option for init: {}", raw);
+                eprintln!("Run `taida init --help` for usage.");
+                std::process::exit(1);
+            }
+            positional => {
+                if dir_arg.is_some() {
+                    eprintln!("Too many arguments.");
+                    eprintln!("Run `taida init --help` for usage.");
+                    std::process::exit(1);
+                }
+                dir_arg = Some(positional.to_string());
+            }
         }
-        [arg] if !arg.starts_with('-') => arg.as_str(),
-        [arg] => {
-            eprintln!("Unknown option for init: {}", arg);
-            eprintln!("Run `taida init --help` for usage.");
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("Too many arguments.");
-            eprintln!("Run `taida init --help` for usage.");
-            std::process::exit(1);
-        }
-    };
+        i += 1;
+    }
+
+    let dir_name = dir_arg.as_deref().unwrap_or(".");
     let dir = Path::new(dir_name);
 
     // Determine project name from directory name
@@ -3794,68 +3837,28 @@ fn run_init(args: &[String]) {
         std::process::exit(1);
     }
 
-    // Check if packages.tdm already exists
-    let manifest_path = dir.join("packages.tdm");
-    if manifest_path.exists() {
-        eprintln!("packages.tdm already exists in '{}'", dir.display());
-        std::process::exit(1);
-    }
-
-    // Write packages.tdm
-    let manifest_content = pkg::manifest::Manifest::default_template(&project_name);
-    if let Err(e) = fs::write(&manifest_path, &manifest_content) {
-        eprintln!("Error writing packages.tdm: {}", e);
-        std::process::exit(1);
-    }
-
-    // Write main.td if it doesn't exist
-    let main_path = dir.join("main.td");
-    if !main_path.exists() {
-        let main_content = pkg::manifest::Manifest::default_main();
-        if let Err(e) = fs::write(&main_path, main_content) {
-            eprintln!("Error writing main.td: {}", e);
+    // Delegate to pkg::init::init_project (RC2.6-3a)
+    match pkg::init::init_project(dir, &project_name, target) {
+        Ok(created) => {
+            let target_label = match target {
+                pkg::init::InitTarget::RustAddon => " (rust-addon)",
+                pkg::init::InitTarget::SourceOnly => "",
+            };
+            println!(
+                "Initialized Taida project '{}'{} in {}",
+                project_name,
+                target_label,
+                dir.display()
+            );
+            for file in &created {
+                println!("  {}", file);
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     }
-
-    // Create .taida directory
-    // N-56: Report directory creation failure as a warning rather than
-    // silently ignoring. The .taida/ directory is not strictly required
-    // for project init to succeed — it will be created on first build.
-    let taida_dir = dir.join(".taida");
-    if let Err(e) = fs::create_dir_all(&taida_dir) {
-        eprintln!(
-            "Warning: could not create .taida directory '{}': {}",
-            taida_dir.display(),
-            e
-        );
-    }
-
-    // Write .gitignore if it doesn't exist
-    let gitignore_path = dir.join(".gitignore");
-    if !gitignore_path.exists() {
-        let gitignore_content = "\
-# Taida build artifacts (regeneratable)
-.taida/deps/
-.taida/build/
-.taida/graph/
-# .taida/taida.lock is tracked (not inside ignored dirs)
-";
-        if let Err(e) = fs::write(&gitignore_path, gitignore_content) {
-            eprintln!("Warning: could not write .gitignore: {}", e);
-        }
-    }
-
-    println!(
-        "Initialized Taida project '{}' in {}",
-        project_name,
-        dir.display()
-    );
-    println!("  packages.tdm  -- package definition");
-    if !main_path.exists() || dir_name != "." {
-        println!("  main.td      -- entry point");
-    }
-    println!("  .gitignore   -- git ignore rules");
 }
 
 // ── Deps subcommand ──────────────────────────────────────
