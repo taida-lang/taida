@@ -40,6 +40,13 @@ pub mod host_target;
 pub mod prebuild_fetcher;
 pub mod url_template;
 
+// RC2.6 Phase 1: addon publish lockfile (native/addon.lock.toml).
+// Pure data / hand-rolled TOML subset, no feature gate needed — the
+// module is consumed by both the `community` publish flow and (later)
+// the install resolver on every backend that needs to inspect per-host
+// SHA-256 digests.
+pub mod lockfile;
+
 #[cfg(feature = "native")]
 pub mod loader;
 
