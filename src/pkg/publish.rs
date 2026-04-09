@@ -475,26 +475,83 @@ fn format_version(generation: &str, number: u64, label: Option<&str>) -> String 
     }
 }
 
+/// Validate a Taida package name.
+///
+/// A package name is either:
+///
+///   * a **bare** name (e.g. `"my-pkg"`, `"http"`) that was accepted by
+///     pre-RC2.6 legacy single-slot projects, or
+///   * a **fully qualified** `<org>/<name>` pair (e.g. `"taida-lang/terminal"`,
+///     `"shijimic/terminal"`) which is the canonical form across
+///     `packages.tdm`, the registry resolver (`src/pkg/store.rs::fetch_and_cache`),
+///     and `.taida/deps/<org>/<name>/` layout.
+///
+/// Both sides of the slash follow the same character rules:
+/// `[a-z0-9-]+`, no leading or trailing hyphen, non-empty.
+///
+/// At most one `/` is allowed. Nested subpaths like `org/name/sub` are
+/// not a package name — they are module paths inside a package and are
+/// parsed separately by `src/pkg/resolver.rs::resolve_package_module`.
+///
+/// RC2.6B-012 closure (2026-04-09): the pre-RC2.6 implementation
+/// rejected any `/` and only accepted bare names. That prevented
+/// `taida publish` from ever validating an `org/name` manifest —
+/// which is exactly what `native/addon.toml` and `packages.tdm` use
+/// throughout the ecosystem. The fix lifts the constraint to the
+/// slash-qualified form while preserving the bare form for backward
+/// compatibility.
 fn validate_package_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Package name must not be empty.".to_string());
     }
-    if name.starts_with('-') || name.ends_with('-') {
+    // Split on '/'. At most one '/' is legal (org/name).
+    let mut parts = name.split('/');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next();
+    if parts.next().is_some() {
         return Err(format!(
-            "Invalid package name '{}'. Package names must not start or end with '-'.",
+            "Invalid package name '{}'. Expected either a bare name or a single 'org/name' pair.",
             name
         ));
     }
-    if !name
-        .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        return Err(format!(
-            "Invalid package name '{}'. Expected lowercase letters, digits, and hyphens only.",
-            name
-        ));
+
+    let validate_component = |component: &str, label: &str| -> Result<(), String> {
+        if component.is_empty() {
+            return Err(format!(
+                "Invalid package name '{}'. {} must not be empty.",
+                name, label
+            ));
+        }
+        if component.starts_with('-') || component.ends_with('-') {
+            return Err(format!(
+                "Invalid package name '{}'. {} must not start or end with '-'.",
+                name, label
+            ));
+        }
+        if !component
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        {
+            return Err(format!(
+                "Invalid package name '{}'. {} must contain only lowercase letters, digits, and hyphens.",
+                name, label
+            ));
+        }
+        Ok(())
+    };
+
+    match second {
+        None => {
+            // Bare form: `my-pkg`, `http`, ...
+            validate_component(first, "Package name")
+        }
+        Some(name_part) => {
+            // Qualified form: `org/name`
+            validate_component(first, "Org component")?;
+            validate_component(name_part, "Name component")?;
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn parse_github_repo(remote: &str) -> Option<(String, String)> {
@@ -643,10 +700,20 @@ mod tests {
     // ── Layer 1: validate_package_name ──
 
     #[test]
-    fn test_validate_package_name_valid() {
+    fn test_validate_package_name_valid_bare() {
+        // Bare form (backward compat with pre-RC2.6 single-slot projects)
         assert!(validate_package_name("my-package").is_ok());
         assert!(validate_package_name("http").is_ok());
         assert!(validate_package_name("a1b2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_package_name_valid_qualified() {
+        // RC2.6B-012: org/name form must be accepted now that addon
+        // packages and the registry resolver canonicalise on it.
+        assert!(validate_package_name("taida-lang/terminal").is_ok());
+        assert!(validate_package_name("shijimic/terminal").is_ok());
+        assert!(validate_package_name("org1/pkg-2").is_ok());
     }
 
     #[test]
@@ -658,18 +725,40 @@ mod tests {
     fn test_validate_package_name_leading_trailing_hyphen() {
         assert!(validate_package_name("-pkg").is_err());
         assert!(validate_package_name("pkg-").is_err());
+        // Hyphen rule applies to both sides of a qualified name too.
+        assert!(validate_package_name("-org/pkg").is_err());
+        assert!(validate_package_name("org-/pkg").is_err());
+        assert!(validate_package_name("org/-pkg").is_err());
+        assert!(validate_package_name("org/pkg-").is_err());
     }
 
     #[test]
     fn test_validate_package_name_uppercase_rejected() {
         assert!(validate_package_name("MyPkg").is_err());
+        assert!(validate_package_name("Org/pkg").is_err());
+        assert!(validate_package_name("org/Pkg").is_err());
     }
 
     #[test]
     fn test_validate_package_name_special_chars_rejected() {
         assert!(validate_package_name("my_pkg").is_err());
         assert!(validate_package_name("my.pkg").is_err());
-        assert!(validate_package_name("my/pkg").is_err());
+        assert!(validate_package_name("org/pkg_1").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_multiple_slashes_rejected() {
+        // At most one slash. Nested module paths belong to the
+        // resolver, not the package name validator.
+        assert!(validate_package_name("a/b/c").is_err());
+        assert!(validate_package_name("org/pkg/sub").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_empty_components_rejected() {
+        assert!(validate_package_name("/pkg").is_err());
+        assert!(validate_package_name("org/").is_err());
+        assert!(validate_package_name("/").is_err());
     }
 
     // ── Layer 1: validate_label ──
