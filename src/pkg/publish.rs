@@ -1043,9 +1043,14 @@ pub fn create_github_release(
 
     // Build the `gh release create` argument list.
     //
-    // The `gh` rename syntax is: `<path>#<display_name>`.
-    // If the display name matches the file's basename we omit the
-    // `#` suffix for cleanliness.
+    // The `gh` `#` syntax (`path#name`) only sets a **display label**
+    // on the asset — the actual download URL uses the original
+    // filename. To ensure the asset's download URL matches the
+    // canonical name that `addon.toml`'s URL template expands to
+    // (e.g. `libtaida_lang_terminal-x86_64-unknown-linux-gnu.so`),
+    // we **copy** the file to a temp location with the canonical name
+    // before uploading. This mirrors the approach used in the CI
+    // release workflow template (Phase 4 hotfix 228267a).
     let mut cmd_args: Vec<String> = vec![
         "release".to_string(),
         "create".to_string(),
@@ -1056,25 +1061,53 @@ pub fn create_github_release(
         notes.to_string(),
     ];
 
+    // Temp directory for renamed assets. Cleaned up after upload.
+    let rename_dir = std::env::temp_dir().join(format!(
+        "taida-publish-assets-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+
     for asset in assets {
-        let path_str = asset
-            .local_path
-            .to_str()
-            .ok_or_else(|| {
-                format!(
-                    "Asset path '{}' contains non-UTF-8 characters.",
-                    asset.local_path.display()
-                )
-            })?;
         let basename = asset
             .local_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
         if basename == asset.asset_name {
+            // Name already matches — upload directly.
+            let path_str = asset.local_path.to_str().ok_or_else(|| {
+                format!(
+                    "Asset path '{}' contains non-UTF-8 characters.",
+                    asset.local_path.display()
+                )
+            })?;
             cmd_args.push(path_str.to_string());
         } else {
-            cmd_args.push(format!("{}#{}", path_str, asset.asset_name));
+            // Name differs — copy to temp dir with canonical name so
+            // the GitHub Release asset URL uses the canonical name.
+            std::fs::create_dir_all(&rename_dir).map_err(|e| {
+                format!("Cannot create temp dir for asset rename: {}", e)
+            })?;
+            let dest = rename_dir.join(&asset.asset_name);
+            std::fs::copy(&asset.local_path, &dest).map_err(|e| {
+                format!(
+                    "Cannot copy '{}' to '{}' for canonical rename: {}",
+                    asset.local_path.display(),
+                    dest.display(),
+                    e
+                )
+            })?;
+            let dest_str = dest.to_str().ok_or_else(|| {
+                format!(
+                    "Renamed asset path '{}' contains non-UTF-8 characters.",
+                    dest.display()
+                )
+            })?;
+            cmd_args.push(dest_str.to_string());
         }
     }
 
@@ -1083,6 +1116,9 @@ pub fn create_github_release(
         .current_dir(project_dir)
         .output()
         .map_err(|e| format!("Failed to invoke `{} release create`: {}", gh_bin, e))?;
+
+    // Clean up renamed asset temp directory (best-effort).
+    let _ = std::fs::remove_dir_all(&rename_dir);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
