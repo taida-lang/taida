@@ -871,7 +871,7 @@ impl TypeChecker {
             && let Some(protocol_field) = fields.iter().find(|field| field.name == "protocol")
         {
             match &protocol_field.value {
-                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => return,
+                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => (),
                 Expr::EnumVariant(enum_name, variant_name, span)
                     if self.net_http_protocol_type_names.contains(enum_name) =>
                 {
@@ -885,7 +885,6 @@ impl TypeChecker {
                             span: span.clone(),
                         });
                     }
-                    return;
                 }
                 Expr::IntLit(_, span) | Expr::FloatLit(_, span) | Expr::BoolLit(_, span) => {
                     self.errors.push(TypeError {
@@ -894,9 +893,8 @@ impl TypeChecker {
                             .to_string(),
                         span: span.clone(),
                     });
-                    return;
                 }
-                _ => return,
+                _ => (),
             }
         }
     }
