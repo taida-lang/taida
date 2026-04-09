@@ -147,7 +147,8 @@ pub fn build_addon_artifacts(project_dir: &Path) -> Result<AddonBuildOutput, Str
         ));
     }
 
-    let cdylib_name = format!("lib{library_stem}.{cdylib_ext}");
+    let cdylib_prefix = host.cdylib_prefix();
+    let cdylib_name = format!("{cdylib_prefix}{library_stem}.{cdylib_ext}");
     let cdylib_path = project_dir.join("target").join("release").join(&cdylib_name);
     if !cdylib_path.exists() {
         return Err(format!(
@@ -480,7 +481,13 @@ pub fn check_dirty_allowlist(
     project_dir: &Path,
     allowlist: &[&Path],
 ) -> Result<(), String> {
-    let status = run_git(project_dir, &["status", "--porcelain"])?;
+    // Use `-u` (`--untracked-files=all`) so that untracked directories
+    // are expanded into individual file entries. Without this flag, git
+    // rolls up untracked directories (e.g. `?? native/`) and a prefix
+    // match against the allowlist would let stray files slip through.
+    // `-u` is safe for small projects like taida where `target/` is
+    // already in `.gitignore`.
+    let status = run_git(project_dir, &["status", "--porcelain", "-u"])?;
     if status.is_empty() {
         return Ok(());
     }
@@ -538,21 +545,10 @@ pub fn check_dirty_allowlist(
             continue;
         }
 
-        // Porcelain summarises untracked directories by reporting the
-        // directory itself with a trailing slash ("?? native/"). Match
-        // such rollups when EVERY allowlist entry rooted at that
-        // directory is the only thing that could be dirty. We take a
-        // permissive stance: if the directory prefix matches any
-        // allowlist entry, treat the rollup as acceptable — the outer
-        // orchestrator is responsible for ensuring only the files it
-        // wrote actually live under that path.
-        let is_dir_rollup = path_str.ends_with('/');
-        let allowlist_match = if is_dir_rollup {
-            let dir_prefix = path_str;
-            normalised.iter().any(|p| p.starts_with(dir_prefix))
-        } else {
-            normalised.iter().any(|p| p == path_str)
-        };
+        // With `-u` (`--untracked-files=all`), git expands untracked
+        // directories into individual file entries, so no directory
+        // rollup handling is needed — every entry is a concrete path.
+        let allowlist_match = normalised.iter().any(|p| p == path_str);
 
         if allowlist_match {
             continue;
@@ -1827,6 +1823,34 @@ mod tests {
         .unwrap();
         let allowed = [Path::new("native/addon.lock.toml")];
         check_dirty_allowlist(&dir, &allowed).expect("nested allowlist match");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_dirty_allowlist_rejects_stray_in_untracked_dir() {
+        // Regression: when `native/` is entirely untracked, `git status
+        // --porcelain` (without `-u`) reports `?? native/` as a single
+        // directory entry.  The old rollup logic would accept it if any
+        // allowlist entry started with `native/`, letting stray files
+        // like `native/extra.txt` slip through.  With `-u`, git expands
+        // the directory into individual entries and each is checked
+        // against the allowlist.
+        let dir = init_tmp_git_repo("dir_rollup");
+        std::fs::create_dir_all(dir.join("native")).unwrap();
+        // Allowlisted file.
+        std::fs::write(
+            dir.join("native").join("addon.lock.toml"),
+            "[targets]\n",
+        )
+        .unwrap();
+        // Stray file NOT in the allowlist.
+        std::fs::write(dir.join("native").join("extra.txt"), "oops\n").unwrap();
+        let allowed = [Path::new("native/addon.lock.toml")];
+        let err = check_dirty_allowlist(&dir, &allowed).unwrap_err();
+        assert!(
+            err.contains("native/extra.txt"),
+            "should reject stray file inside untracked dir: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
