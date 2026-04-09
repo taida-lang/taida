@@ -354,9 +354,10 @@ Echo <= echo
 /// Generate the `.github/workflows/release.yml` CI template (RC2.6-4a).
 ///
 /// This workflow is triggered by tag pushes matching Taida version
-/// patterns (`a.*`, `b.*`, etc.). It builds the addon cdylib on four
-/// platforms, computes SHA-256 for each, uploads them as release assets,
-/// then generates and uploads `addon.lock.toml`.
+/// patterns (`a.1`, `b.3`, `aa.5.rc`, etc.). It creates a GitHub
+/// Release, builds the addon cdylib on four platforms via cross-compile,
+/// computes SHA-256 for each, uploads them as release assets, then
+/// generates and uploads `addon.lock.toml`.
 ///
 /// Design note (B-005): `addon.lock.toml` is **release-asset only** --
 /// it is NOT committed back into the repo after the tag. This avoids
@@ -374,10 +375,12 @@ fn ci_release_workflow(library_stem: &str, _package_name: &str) -> String {
     // raw string so they render as `${{ ... }}` in the output.
     //
     // Architecture (B-005):
-    //   1. `build` matrix: 4 platforms build cdylib, compute SHA-256,
+    //   1. `create-release` job: creates the GitHub Release from the tag.
+    //   2. `build` matrix: 4 platforms build cdylib with `--target`,
+    //      compute SHA-256 (cross-platform), rename to canonical name,
     //      upload cdylib to release, and upload a sha256-<target>.txt
     //      artifact with the hash.
-    //   2. `lockfile` job: downloads all sha256 artifacts, assembles
+    //   3. `lockfile` job: downloads all sha256 artifacts, assembles
     //      `addon.lock.toml`, and uploads it as a release asset.
     //
     // We use artifacts (not matrix job outputs) to pass SHA-256 values
@@ -400,10 +403,29 @@ name: Release addon prebuild
 
 on:
   push:
-    tags: ['a.*', 'b.*']
+    # Taida version tags: a.1, b.3, aa.5, a.1.rc, etc.
+    # '*.*' matches any tag containing a dot, which covers all Taida
+    # generation-based versions. Semver v* tags are not used in Taida.
+    tags: ['*.*']
+
+permissions:
+  contents: write
+
+env:
+  LIBRARY_STEM: {library_stem}
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        run: gh release create "${{{{ github.ref_name }}}}" --generate-notes
+        env:
+          GH_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -425,9 +447,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{{{ matrix.target }}}}
 
       - name: Build cdylib
-        run: cargo build --release --lib
+        run: cargo build --release --lib --target ${{{{ matrix.target }}}}
 
       - name: Compute SHA-256
         id: sha
@@ -438,17 +462,28 @@ jobs:
           else
             CDYLIB="lib{library_stem}.${{{{ matrix.ext }}}}"
           fi
-          SHA=$(sha256sum "target/release/$CDYLIB" | awk '{{print $1}}')
+          FILE="target/${{{{ matrix.target }}}}/release/$CDYLIB"
+          if command -v sha256sum &>/dev/null; then
+            SHA=$(sha256sum "$FILE" | awk '{{print $1}}')
+          else
+            SHA=$(shasum -a 256 "$FILE" | awk '{{print $1}}')
+          fi
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "cdylib=$CDYLIB" >> "$GITHUB_OUTPUT"
           echo "$SHA" > "sha256-${{{{ matrix.target }}}}.txt"
 
-      - name: Upload cdylib to release
+      - name: Rename cdylib to canonical name
         shell: bash
         run: |
-          gh release upload "${{{{ github.ref_name }}}}" \
-            "target/release/${{{{ steps.sha.outputs.cdylib }}}}#lib{library_stem}-${{{{ matrix.target }}}}.${{{{ matrix.ext }}}}"
+          cp "target/${{{{ matrix.target }}}}/release/$CDYLIB" "$CANONICAL"
         env:
+          CDYLIB: ${{{{ steps.sha.outputs.cdylib }}}}
+          CANONICAL: lib${{{{ env.LIBRARY_STEM }}}}-${{{{ matrix.target }}}}.${{{{ matrix.ext }}}}
+
+      - name: Upload cdylib to release
+        run: gh release upload "${{{{ github.ref_name }}}}" "$CANONICAL" --clobber
+        env:
+          CANONICAL: lib${{{{ env.LIBRARY_STEM }}}}-${{{{ matrix.target }}}}.${{{{ matrix.ext }}}}
           GH_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
 
       - name: Upload SHA-256 artifact
@@ -487,9 +522,7 @@ jobs:
           done
 
       - name: Upload lockfile to release
-        shell: bash
-        run: |
-          gh release upload "${{{{ github.ref_name }}}}" native/addon.lock.toml
+        run: gh release upload "${{{{ github.ref_name }}}}" native/addon.lock.toml --clobber
         env:
           GH_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
 "##
@@ -892,9 +925,8 @@ mod tests {
             dir.join(".github/workflows/release.yml"),
         )
         .unwrap();
-        // Taida version tags (NOT semver)
-        assert!(content.contains("'a.*'"), "missing a.* tag trigger");
-        assert!(content.contains("'b.*'"), "missing b.* tag trigger");
+        // Taida version tags: '*.*' covers all generation-based versions
+        assert!(content.contains("'*.*'"), "missing '*.*' tag trigger");
         // Must NOT contain semver-style v* prefix
         assert!(
             !content.contains("'v*'"),
@@ -936,12 +968,103 @@ mod tests {
         .unwrap();
         assert!(
             content.contains("sha256sum"),
-            "workflow must compute SHA-256"
+            "workflow must compute SHA-256 (Linux)"
+        );
+        assert!(
+            content.contains("shasum -a 256"),
+            "workflow must have macOS fallback (shasum -a 256)"
         );
         assert!(
             content.contains("Compute SHA-256"),
             "workflow must have SHA computation step"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rust_addon_ci_workflow_has_create_release_job() {
+        let dir = temp_dir("addon_ci_rel");
+        init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
+        let content = std::fs::read_to_string(
+            dir.join(".github/workflows/release.yml"),
+        )
+        .unwrap();
+        assert!(
+            content.contains("create-release:"),
+            "workflow must have create-release job"
+        );
+        assert!(
+            content.contains("gh release create"),
+            "create-release job must run gh release create"
+        );
+        assert!(
+            content.contains("needs: create-release"),
+            "build job must depend on create-release"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rust_addon_ci_workflow_has_permissions() {
+        let dir = temp_dir("addon_ci_perm");
+        init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
+        let content = std::fs::read_to_string(
+            dir.join(".github/workflows/release.yml"),
+        )
+        .unwrap();
+        assert!(
+            content.contains("permissions:"),
+            "workflow must declare permissions"
+        );
+        assert!(
+            content.contains("contents: write"),
+            "workflow must have contents: write permission"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rust_addon_ci_workflow_cross_compile() {
+        let dir = temp_dir("addon_ci_cross");
+        init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
+        let content = std::fs::read_to_string(
+            dir.join(".github/workflows/release.yml"),
+        )
+        .unwrap();
+        assert!(
+            content.contains("--target ${{ matrix.target }}"),
+            "cargo build must use --target flag for cross-compile"
+        );
+        // Output path must use target-specific directory
+        assert!(
+            content.contains("target/${{ matrix.target }}/release/"),
+            "output path must include target-specific directory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rust_addon_ci_workflow_canonical_rename() {
+        let dir = temp_dir("addon_ci_rename");
+        init_project(&dir, "my-addon", InitTarget::RustAddon).unwrap();
+        let content = std::fs::read_to_string(
+            dir.join(".github/workflows/release.yml"),
+        )
+        .unwrap();
+        assert!(
+            content.contains("Rename cdylib to canonical name"),
+            "workflow must have rename step"
+        );
+        // The gh release upload line must NOT use '#' display-label syntax
+        // for asset renaming (that only sets the label, not the filename).
+        for line in content.lines() {
+            if line.contains("gh release upload") {
+                assert!(
+                    !line.contains('#'),
+                    "gh release upload must not use '#' display-label syntax: {line}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

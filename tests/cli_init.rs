@@ -279,9 +279,8 @@ fn test_init_rust_addon_ci_workflow_exists() {
         "workflow must contain resolved library stem 'ci_pkg'"
     );
 
-    // Must have the Taida tag triggers, not semver.
-    assert!(content.contains("'a.*'"), "missing a.* tag trigger");
-    assert!(content.contains("'b.*'"), "missing b.* tag trigger");
+    // Must have the Taida tag trigger, not semver.
+    assert!(content.contains("'*.*'"), "missing '*.*' tag trigger");
 
     // Must have the four matrix targets.
     assert!(content.contains("x86_64-unknown-linux-gnu"), "missing linux target");
