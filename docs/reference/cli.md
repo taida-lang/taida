@@ -1,6 +1,6 @@
 # Taida CLI リファレンス
 
-> 更新日: 2026-03-12  
+> 更新日: 2026-04-10  
 > 実装正本: `src/main.rs`
 
 このページは Taida CLI の単一リファレンスです。  
@@ -245,13 +245,18 @@ taida inspect [--format text|json|sarif] <PATH>
 ## `taida init`
 
 ```bash
-taida init [DIR]
+taida init [--target rust-addon] [DIR]
 ```
+
+| オプション | 短縮 | 説明 |
+|---|---|---|
+| `--target rust-addon` | - | Rust アドオンプロジェクトをスキャフォールドします |
 
 挙動:
 - `DIR` 省略時はカレントディレクトリに初期化します。
 - `packages.tdm` が既にある場合は失敗します。
-- `packages.tdm`, `main.td`（未存在時）, `.taida/` を作成します。
+- 通常モード: `packages.tdm`, `main.td`（未存在時）, `.taida/` を作成します。
+- `--target rust-addon`: `Cargo.toml`, `src/lib.rs`, `native/addon.toml`, `taida/<name>.td`, `README.md` を含む Rust アドオンプロジェクトをスキャフォールドします。
 
 ---
 
@@ -271,12 +276,19 @@ taida deps
 ## `taida install`
 
 ```bash
-taida install
+taida install [--force-refresh] [--allow-local-addon-build]
 ```
+
+| オプション | 短縮 | 説明 |
+|---|---|---|
+| `--force-refresh` | - | アドオンキャッシュを無視して再ダウンロードします |
+| `--allow-local-addon-build` | - | プレビルド不在時にローカルの `cargo build` にフォールバックします |
 
 挙動:
 - `packages.tdm` をカレントから親方向に探索します。
 - 解決できた依存を install し、`.taida/taida.lock` を生成/更新します。
+- アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256検証付きでプレビルドをダウンロードします。
+- ダウンロードは `~/.taida/addon-cache/` にキャッシュされます（`taida cache clean --addons` で削除）。
 - 一部依存が解決不能でも lockfile 生成は試行し、最後に終了コード1を返します。
 
 ---
@@ -284,8 +296,12 @@ taida install
 ## `taida update`
 
 ```bash
-taida update
+taida update [--allow-local-addon-build]
 ```
+
+| オプション | 短縮 | 説明 |
+|---|---|---|
+| `--allow-local-addon-build` | - | プレビルド不在時にローカルの `cargo build` にフォールバックします |
 
 挙動:
 - `install` と同様ですが、世代解決時にリモート優先モードで更新確認します。
@@ -296,13 +312,16 @@ taida update
 ## `taida publish`
 
 ```bash
-taida publish [--label LABEL] [--dry-run]
+taida publish [--label LABEL] [--dry-run[=MODE]] [--target rust-addon]
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
 | `--label <LABEL>` | - | publish version の末尾にラベルを付与します（例: `@a.4.rc`） |
-| `--dry-run` | - | 実際の変更を行わず、計画だけ表示します |
+| `--dry-run` | - | 実際の変更を行わず、計画だけ表示します（`--dry-run=plan` と同等） |
+| `--dry-run=plan` | - | 計画を表示して終了します |
+| `--dry-run=build` | - | cargo build + lockfile まで実行し、git/release はスキップします |
+| `--target rust-addon` | - | Rust cdylib アドオンとしてビルド・リリースします |
 
 挙動:
 - `taida auth login` 済みであることを要求します（author 名の解決に使用）。
@@ -311,6 +330,22 @@ taida publish [--label LABEL] [--dry-run]
 - `packages.tdm` の `<<<@...` を決定した exact version に更新します。
 - git commit + tag (`<version>`) + push origin を実行します。
 - 成功後、`taida-community/proposals` への登録用 URL を表示します。
+
+---
+
+## `taida cache`
+
+```bash
+taida cache clean [--addons]
+```
+
+| オプション | 短縮 | 説明 |
+|---|---|---|
+| `--addons` | - | アドオンプレビルドのキャッシュ (`~/.taida/addon-cache/`) を削除します |
+
+挙動:
+- `taida cache clean` はキャッシュを削除します。
+- `--addons` でアドオンキャッシュのみを対象にします。
 
 ---
 
