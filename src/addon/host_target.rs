@@ -100,6 +100,18 @@ impl HostTarget {
         }
     }
 
+    /// Returns the cdylib filename prefix for this target's OS.
+    ///
+    /// On Windows, cdylibs are named `foo.dll` (no prefix). On all
+    /// other platforms, cdylibs are named `libfoo.so` / `libfoo.dylib`
+    /// (prefixed with `lib`).
+    pub fn cdylib_prefix(&self) -> &'static str {
+        match self {
+            Self::X86_64Windows => "",
+            _ => "lib",
+        }
+    }
+
     /// Returns the OS name for error messages.
     pub fn os_name(&self) -> &'static str {
         match self {
@@ -282,6 +294,22 @@ mod tests {
         assert_eq!(HostTarget::I686LinuxGnu.cdylib_ext(), "so");
         assert_eq!(HostTarget::Riscv64LinuxGnu.cdylib_ext(), "so");
         assert_eq!(HostTarget::X86_64FreeBsd.cdylib_ext(), "so");
+    }
+
+    #[test]
+    fn host_target_cdylib_prefix() {
+        // Unix-family targets use "lib" prefix.
+        assert_eq!(HostTarget::X86_64LinuxGnu.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::Aarch64LinuxGnu.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::X86_64MacOs.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::Aarch64MacOs.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::X86_64LinuxMusl.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::Aarch64LinuxMusl.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::I686LinuxGnu.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::Riscv64LinuxGnu.cdylib_prefix(), "lib");
+        assert_eq!(HostTarget::X86_64FreeBsd.cdylib_prefix(), "lib");
+        // Windows has no "lib" prefix.
+        assert_eq!(HostTarget::X86_64Windows.cdylib_prefix(), "");
     }
 
     #[test]

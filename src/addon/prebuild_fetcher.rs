@@ -595,6 +595,82 @@ fn download_from_https(
     )))
 }
 
+// ── RC2.6B-019: addon.lock.toml release asset fetcher ─────────
+
+/// Download `addon.lock.toml` from a GitHub Release asset.
+///
+/// This is a lightweight text fetch (no SHA-256 streaming verification —
+/// the lockfile itself *is* the source of SHA-256 values, not a verified
+/// payload). Size-limited to 1 MB as a sanity check.
+///
+/// `package_name`: `"org/name"` form, e.g. `"shijimic/terminal"`
+/// `version`:      exact tag, e.g. `"a.1"` (NO `v` prefix — Taida tags
+///                 are `a.1`, not `va.1`)
+#[cfg(feature = "community")]
+pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<String, String> {
+    let (org, name) = package_name
+        .split_once('/')
+        .ok_or_else(|| format!("Cannot parse package name '{}' as org/name", package_name))?;
+
+    let base_url = crate::pkg::store::github_base_url();
+    let url = format!(
+        "{}/{}/{}/releases/download/{}/addon.lock.toml",
+        base_url.trim_end_matches('/'),
+        org,
+        name,
+        version,
+    );
+
+    let response = reqwest::blocking::Client::new()
+        .get(&url)
+        .header("User-Agent", "taida-install")
+        .send()
+        .map_err(|e| {
+            format!(
+                "Failed to download addon.lock.toml for '{}@{}' from {}: {}",
+                package_name, version, url, e
+            )
+        })?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "addon.lock.toml not found for '{}@{}' (HTTP {})\n\
+             \x20 url: {}\n\
+             \x20 hint: the addon author may not have published a prebuild yet.\n\
+             \x20       Run `taida publish --target rust-addon` in the addon repository.",
+            package_name,
+            version,
+            response.status(),
+            url
+        ));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| format!("Failed to read addon.lock.toml response body: {}", e))?;
+
+    // Sanity check: lockfile should be small text
+    if body.len() > 1_048_576 {
+        return Err(format!(
+            "addon.lock.toml for '{}@{}' is too large ({} bytes, limit 1 MB)",
+            package_name,
+            version,
+            body.len()
+        ));
+    }
+
+    Ok(body)
+}
+
+/// Stub for when `community` feature is not enabled.
+#[cfg(not(feature = "community"))]
+pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<String, String> {
+    Err(format!(
+        "HTTPS downloads require the 'community' feature (addon.lock.toml for '{}@{}')",
+        package_name, version
+    ))
+}
+
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]

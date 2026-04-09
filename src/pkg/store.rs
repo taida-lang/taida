@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 /// Base URL for GitHub archive downloads.
 /// Override with `TAIDA_GITHUB_BASE_URL` for testing (e.g. local mock server).
-fn github_base_url() -> String {
+pub(crate) fn github_base_url() -> String {
     std::env::var("TAIDA_GITHUB_BASE_URL").unwrap_or_else(|_| "https://github.com".to_string())
 }
 
