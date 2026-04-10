@@ -918,6 +918,7 @@ Notes:
   --gen and --label can be combined.
   --version is mutually exclusive with --gen/--label.
   By default, upgrades to the latest stable version.
+  Windows: only --check is supported (self-replace is not yet implemented).
 
 Examples:
   taida upgrade
