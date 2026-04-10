@@ -48,8 +48,8 @@ stdout(Status:Active() == Status:Active())   // true
 | Backend | Command | Output |
 |---------|---------|--------|
 | Interpreter | `taida file.td` | Direct execution |
+| Native | `taida build file.td` | Binary executable (default) |
 | JS | `taida build --target js file.td` | `.mjs` file |
-| Native | `taida build --target native file.td` | Binary executable |
 | WASM | `taida build --target wasm-wasi file.td` | `.wasm` file |
 
 All backends produce identical output for the same source code (3-way parity).

@@ -36,6 +36,10 @@ sha1 = "0.10"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 
+# Archive extraction for `taida upgrade` (RC5 Phase 3)
+flate2 = "1"
+tar = "0.4"
+
 # TLS support for taida-lang/net v5
 rustls = "0.23"
 rustls-pemfile = "2"
