@@ -5,9 +5,21 @@
 //! - Fetches release metadata from GitHub Releases API (unauthenticated).
 //! - Parses Taida version tags `@<gen>.<num>.<label?>`.
 //! - Resolves the best matching version based on CLI filters.
-//! - Downloads the platform-appropriate binary asset.
-//! - Verifies SHA-256 integrity.
+//! - Downloads the platform-appropriate **archive** asset
+//!   (`taida-<tag>-<target>.tar.gz` on Unix, `.zip` on Windows).
+//! - Verifies SHA-256 integrity against the shared `SHA256SUMS` file.
+//! - Extracts the `taida` binary from the archive.
 //! - Replaces the current executable via rename.
+//!
+//! ## Release artifact contract
+//!
+//! ```text
+//! scripts/release/package-unix.sh   → taida-<tag>-<target>.tar.gz
+//! scripts/release/package-windows.ps1 → taida-<tag>-<target>.zip
+//! .github/workflows/release.yml     → SHA256SUMS (shared, all archives)
+//! ```
+//!
+//! Archive layout: `<archive_base>/taida` (or `taida.exe` on Windows).
 //!
 //! ## Version scheme
 //!
@@ -347,16 +359,70 @@ pub fn download_and_verify(
     Ok(bytes)
 }
 
-/// Determine the expected asset name for the current platform.
+/// Determine the expected archive asset name for the current platform.
 ///
-/// Convention: `taida-<triple>` or `taida-<triple>.exe` on Windows.
-pub fn platform_asset_name(host: &HostTarget) -> String {
+/// Convention (matching `scripts/release/package-*.{sh,ps1}`):
+/// - Unix: `taida-<tag>-<target>.tar.gz`
+/// - Windows: `taida-<tag>-<target>.zip`
+pub fn platform_archive_name(tag: &str, host: &HostTarget) -> String {
     let triple = host.as_triple();
+    let base = format!("taida-{}-{}", tag, triple);
     if matches!(host, HostTarget::X86_64Windows) {
-        format!("taida-{}.exe", triple)
+        format!("{}.zip", base)
     } else {
-        format!("taida-{}", triple)
+        format!("{}.tar.gz", base)
     }
+}
+
+/// Extract the `taida` binary from a `.tar.gz` archive.
+///
+/// The archive is expected to contain `<base>/taida` where `<base>`
+/// matches the archive name without extension (e.g. `taida-@b.11-x86_64-unknown-linux-gnu`).
+pub fn extract_binary_from_tar_gz(archive_bytes: &[u8], archive_base: &str) -> Result<Vec<u8>, String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let decoder = GzDecoder::new(archive_bytes);
+    let mut archive = tar::Archive::new(decoder);
+
+    let binary_path = format!("{}/taida", archive_base);
+
+    for entry_result in archive.entries().map_err(|e| format!("failed to read tar entries: {}", e))? {
+        let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("failed to read entry path: {}", e))?
+            .to_string_lossy()
+            .to_string();
+
+        if path == binary_path {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)
+                .map_err(|e| format!("failed to read binary from archive: {}", e))?;
+            return Ok(buf);
+        }
+    }
+
+    Err(format!(
+        "'{}' not found in archive (expected '{}')",
+        "taida", binary_path
+    ))
+}
+
+/// Look up the SHA-256 hash for a specific file from a `SHA256SUMS` blob.
+///
+/// The format matches `sha256sum` output: `<hex>  <filename>` per line.
+pub fn lookup_sha256(sha256sums: &str, target_filename: &str) -> Option<String> {
+    for line in sha256sums.lines() {
+        // Format: "<hex>  <filename>" or "<hex> <filename>"
+        let mut parts = line.splitn(2, |c: char| c.is_whitespace());
+        let hex = parts.next()?;
+        let filename = parts.next().map(|s| s.trim());
+        if filename == Some(target_filename) {
+            return Some(hex.to_string());
+        }
+    }
+    None
 }
 
 /// Replace the current executable with the new binary.
@@ -454,48 +520,67 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
 
             #[cfg(feature = "native")]
             {
-                let asset_name = platform_asset_name(&host);
-                println!("Downloading {} ...", asset_name);
+                let archive_name = platform_archive_name(&version.tag, &host);
+                println!("Downloading {} ...", archive_name);
 
-                // Find asset download URL
+                // Find archive download URL
                 let download_url =
-                    find_asset_url(TAIDA_OWNER, TAIDA_REPO, &version.tag, &asset_name)?;
+                    find_asset_url(TAIDA_OWNER, TAIDA_REPO, &version.tag, &archive_name)?;
 
-                // Try to find SHA-256 checksum file
-                let sha_asset = format!("{}.sha256", asset_name);
+                // Fetch SHA256SUMS and look up our archive's hash
                 let expected_sha = match find_asset_url(
                     TAIDA_OWNER,
                     TAIDA_REPO,
                     &version.tag,
-                    &sha_asset,
+                    "SHA256SUMS",
                 ) {
                     Ok(sha_url) => {
                         let sha_bytes = download_and_verify(&sha_url, None)?;
                         let sha_text = String::from_utf8(sha_bytes)
-                            .map_err(|e| format!("invalid SHA-256 file encoding: {}", e))?;
-                        // SHA file format: "<hex>  <filename>" or just "<hex>"
-                        Some(
-                            sha_text
-                                .split_whitespace()
-                                .next()
-                                .unwrap_or("")
-                                .to_string(),
-                        )
+                            .map_err(|e| format!("invalid SHA256SUMS encoding: {}", e))?;
+                        match lookup_sha256(&sha_text, &archive_name) {
+                            Some(hash) => Some(hash),
+                            None => {
+                                eprintln!(
+                                    "Warning: {} not found in SHA256SUMS. Skipping verification.",
+                                    archive_name
+                                );
+                                None
+                            }
+                        }
                     }
                     Err(_) => {
                         eprintln!(
-                            "Warning: no SHA-256 checksum file found for {}. Skipping verification.",
-                            asset_name
+                            "Warning: SHA256SUMS not found for {}. Skipping verification.",
+                            version.tag
                         );
                         None
                     }
                 };
 
-                // Download binary
-                let binary = download_and_verify(
+                // Download archive with optional integrity check
+                let archive_bytes = download_and_verify(
                     &download_url,
                     expected_sha.as_deref(),
                 )?;
+
+                // Extract binary from archive
+                let archive_base = archive_name
+                    .strip_suffix(".tar.gz")
+                    .or_else(|| archive_name.strip_suffix(".zip"))
+                    .unwrap_or(&archive_name);
+
+                println!("Extracting taida from {} ...", archive_name);
+
+                let binary = if archive_name.ends_with(".tar.gz") {
+                    extract_binary_from_tar_gz(&archive_bytes, archive_base)?
+                } else {
+                    // Windows .zip support (RC5B-505: deferred)
+                    return Err(format!(
+                        ".zip archive extraction not yet supported ({})",
+                        archive_name
+                    ));
+                };
 
                 println!("Installing {} ...", version);
 
@@ -698,32 +783,126 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ── platform_asset_name ──
+    // ── platform_archive_name ──
 
     #[test]
-    fn asset_name_linux() {
-        let name = platform_asset_name(&HostTarget::X86_64LinuxGnu);
-        assert_eq!(name, "taida-x86_64-unknown-linux-gnu");
+    fn archive_name_linux() {
+        let name = platform_archive_name("@b.11", &HostTarget::X86_64LinuxGnu);
+        assert_eq!(name, "taida-@b.11-x86_64-unknown-linux-gnu.tar.gz");
     }
 
     #[test]
-    fn asset_name_macos() {
-        let name = platform_asset_name(&HostTarget::Aarch64MacOs);
-        assert_eq!(name, "taida-aarch64-apple-darwin");
+    fn archive_name_macos() {
+        let name = platform_archive_name("@b.11", &HostTarget::Aarch64MacOs);
+        assert_eq!(name, "taida-@b.11-aarch64-apple-darwin.tar.gz");
     }
 
     #[test]
-    fn asset_name_windows() {
-        let name = platform_asset_name(&HostTarget::X86_64Windows);
-        assert_eq!(name, "taida-x86_64-pc-windows-msvc.exe");
+    fn archive_name_windows() {
+        let name = platform_archive_name("@b.11", &HostTarget::X86_64Windows);
+        assert_eq!(name, "taida-@b.11-x86_64-pc-windows-msvc.zip");
+    }
+
+    #[test]
+    fn archive_name_includes_tag() {
+        let name = platform_archive_name("@b.10.rc2", &HostTarget::X86_64LinuxGnu);
+        assert_eq!(name, "taida-@b.10.rc2-x86_64-unknown-linux-gnu.tar.gz");
+    }
+
+    // ── lookup_sha256 ──
+
+    #[test]
+    fn lookup_sha256_finds_match() {
+        let sums = "\
+abc123  taida-@b.11-x86_64-unknown-linux-gnu.tar.gz\n\
+def456  taida-@b.11-aarch64-apple-darwin.tar.gz\n";
+        let result = lookup_sha256(sums, "taida-@b.11-x86_64-unknown-linux-gnu.tar.gz");
+        assert_eq!(result, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn lookup_sha256_not_found() {
+        let sums = "abc123  other-file.tar.gz\n";
+        let result = lookup_sha256(sums, "taida-@b.11-x86_64-unknown-linux-gnu.tar.gz");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn lookup_sha256_handles_double_space() {
+        // sha256sum output uses two spaces between hash and filename
+        let sums = "abc123  taida-@b.11-x86_64-unknown-linux-gnu.tar.gz\n";
+        let result = lookup_sha256(sums, "taida-@b.11-x86_64-unknown-linux-gnu.tar.gz");
+        assert_eq!(result, Some("abc123".to_string()));
+    }
+
+    // ── extract_binary_from_tar_gz ──
+
+    #[test]
+    fn extract_binary_from_tar_gz_works() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let binary_content = b"fake taida binary";
+        let archive_base = "taida-@b.11-x86_64-unknown-linux-gnu";
+
+        // Build a tar.gz in memory
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut tar_builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(binary_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar_builder
+                .append_data(
+                    &mut header,
+                    format!("{}/taida", archive_base),
+                    &binary_content[..],
+                )
+                .unwrap();
+            tar_builder.finish().unwrap();
+        }
+        let archive_bytes = encoder.finish().unwrap();
+
+        let extracted = extract_binary_from_tar_gz(&archive_bytes, archive_base).unwrap();
+        assert_eq!(extracted, binary_content);
+    }
+
+    #[test]
+    fn extract_binary_from_tar_gz_missing_binary() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let archive_base = "taida-@b.11-x86_64-unknown-linux-gnu";
+
+        // Build a tar.gz with only a README (no taida binary)
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut tar_builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar_builder
+                .append_data(
+                    &mut header,
+                    format!("{}/README.md", archive_base),
+                    b"hello" as &[u8],
+                )
+                .unwrap();
+            tar_builder.finish().unwrap();
+        }
+        let archive_bytes = encoder.finish().unwrap();
+
+        let result = extract_binary_from_tar_gz(&archive_bytes, archive_base);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found in archive"));
     }
 
     // ── download_and_verify (sha mismatch) ──
 
     #[test]
     fn verify_sha_mismatch_is_error() {
-        // This tests the verification logic without making a network call.
-        // We feed bytes directly and check the SHA logic.
         let data = b"hello world";
         let actual_sha = crypto::sha256_hex_bytes(data);
         let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
