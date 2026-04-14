@@ -262,7 +262,7 @@ impl JsCodegen {
         self.detect_async_funcs(&program.statements);
 
         // ランタイム埋め込み
-        result.push_str(RUNTIME_JS);
+        result.push_str(&RUNTIME_JS);
         result.push('\n');
 
         // プログラム本体 — ErrorCeiling aware

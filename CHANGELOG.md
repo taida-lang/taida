@@ -294,6 +294,36 @@ In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
 - 9 unit tests added covering the classifier, constructor from
   parsed headers, accessors, and `RequestBodyState` integration.
 
+#### JS Runtime File Split (FB-21 / Phase 9, partial)
+
+- Internal-only refactor: split `src/js/runtime.rs` (6,496 lines) into
+  `src/js/runtime/{core,os,net}.rs` + `mod.rs` so each chunk stays
+  under 3,500 lines and owns a single coherent concern.
+  - `core.rs` (2,015 lines) — helpers / types / arithmetic / Lax /
+    Result / BuchiPack / throw / Async / Regex / stream / stdout /
+    stderr / stdin / format / toString / HashMap / Set / equals /
+    typeof / spread.
+  - `os.rs` (1,142 lines) — `taida-lang/os` 13 API + `sha256` crypto.
+  - `net.rs` (3,254 lines) — `taida-lang/net` HTTP v1 (parser /
+    encoder / chunked / streaming writer / SSE / body reader /
+    WebSocket).
+- The embedded JS runtime bytes are **byte-identical** to the
+  pre-split version; a new
+  `test_runtime_js_chunk_concat_invariants` guards chunk boundaries.
+- `RUNTIME_JS` surface changed from `pub const &str` to
+  `pub static LazyLock<&'static str>` because `concat!()` only
+  accepts literals. The single consumer in `src/js/codegen.rs`
+  was updated (`push_str(RUNTIME_JS)` → `push_str(&RUNTIME_JS)`).
+  `tests/parity.rs` file-path reads also migrate to
+  `src/js/runtime/net.rs`.
+- Placement tables for the remaining three targets
+  (`src/codegen/lower.rs`, `src/interpreter/net_eval.rs`,
+  `src/codegen/native_runtime.c`) are locked in
+  `.dev/taida-logs/docs/design/file_boundaries.md`; the mechanical
+  moves are tracked as C12B-024 / C12B-025 / C12B-026 and will land
+  as independent follow-up PRs (per C12-9 policy: "split must not
+  share a PR with semantic changes").
+
 ## @b.11.rc3
 
 Released: 2026-04-14

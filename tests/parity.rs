@@ -25035,7 +25035,9 @@ fn test_net6_5b_native_scatter_gather_present() {
 #[test]
 fn test_net6_5b_js_scatter_gather_present() {
     // Verify that JS scatter-gather send is implemented.
-    let source = std::fs::read_to_string("src/js/runtime.rs").expect("read runtime.rs");
+    // C12-9 (FB-21): src/js/runtime.rs was split into runtime/{core,os,net}.rs;
+    // scatter-gather (HTTP response path) lives in net.rs.
+    let source = std::fs::read_to_string("src/js/runtime/net.rs").expect("read js/runtime/net.rs");
     assert!(
         source.contains("encodeResponseScatter") || source.contains("cork"),
         "NET6-5b audit: JS scatter-gather (cork/uncork or encodeResponseScatter) must be present"
@@ -28137,7 +28139,7 @@ stdout(result.throw.message)
     cleanup_net_project(&dir);
 
     // Pin the exact message content — full string equality, not substring match.
-    // Source of truth: src/js/runtime.rs H3Unsupported branch.
+    // Source of truth: src/js/runtime/net.rs H3Unsupported branch (C12-9 split).
     let expected_msg = "httpServe: HTTP/3 (protocol: \"h3\") is not supported on the JS backend. \
                         Use the native or interpreter backend for HTTP/3 support.";
     assert_eq!(
@@ -28153,8 +28155,10 @@ stdout(result.throw.message)
 /// This catches drift between the runtime and the test without running Node.
 #[test]
 fn test_nb7_15_js_h3_unsupported_source_inspection() {
+    // C12-9 (FB-21): src/js/runtime.rs was split; the H3Unsupported string
+    // now lives in the `net` chunk.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let js_runtime_path = manifest_dir.join("src/js/runtime.rs");
+    let js_runtime_path = manifest_dir.join("src/js/runtime/net.rs");
     let js_src = fs::read_to_string(&js_runtime_path)
         .unwrap_or_else(|e| panic!("NB7-15: cannot read {:?}: {}", js_runtime_path, e));
 
@@ -30531,7 +30535,9 @@ fn test_net7_12f_release_gate_all_criteria_met() {
     );
 
     // Gate 3: JS h3 explicit unsupported
-    let js_runtime_src = fs::read_to_string("src/js/runtime.rs").expect("read js/runtime.rs");
+    // C12-9 (FB-21): runtime split — H3Unsupported string moved to net.rs.
+    let js_runtime_src =
+        fs::read_to_string("src/js/runtime/net.rs").expect("read js/runtime/net.rs");
     assert!(
         js_runtime_src.contains("H3Unsupported"),
         "NET7-12f Gate 3: JS must return H3Unsupported for h3 requests"
