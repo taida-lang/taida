@@ -3880,6 +3880,46 @@ int64_t taida_str_replace_first(int64_t s_raw, int64_t from_raw, int64_t to_raw)
     return (int64_t)r;
 }
 
+/* C12-6c (FB-5) — wasm fallback stubs for the Str method Regex overloads.
+ *
+ * wasm profiles (min / wasi / full) do NOT link POSIX regex.h. To keep the
+ * lowering signature stable across backends (lowered code calls the
+ * `_poly` wrapper unconditionally), these stubs forward to the
+ * fixed-string equivalents by treating the second argument as a
+ * `const char*`. Passing an actual Regex pack here would read through
+ * a BuchiPack header as if it were a C string — behaviour is
+ * undefined. Parity tests for Regex overloads therefore run against
+ * Interpreter / JS / Native only (design lock §C12-6); wasm targets
+ * must stick to fixed-string usage.
+ */
+int64_t taida_str_split_poly(int64_t s_raw, int64_t sep_raw) {
+    return taida_str_split(s_raw, sep_raw);
+}
+int64_t taida_str_replace_first_poly(int64_t s_raw, int64_t target_raw, int64_t rep_raw) {
+    return taida_str_replace_first(s_raw, target_raw, rep_raw);
+}
+int64_t taida_str_replace_poly(int64_t s_raw, int64_t target_raw, int64_t rep_raw) {
+    return taida_str_replace(s_raw, target_raw, rep_raw);
+}
+int64_t taida_str_match_regex(int64_t s_raw, int64_t regex_raw) {
+    (void)s_raw; (void)regex_raw;
+    /* No regex support — return 0 (Int 0 / empty pointer-like). Taida
+     * programs on wasm should not rely on Regex methods. */
+    return 0;
+}
+int64_t taida_str_search_regex(int64_t s_raw, int64_t regex_raw) {
+    (void)s_raw; (void)regex_raw;
+    return -1;
+}
+int64_t taida_regex_new(int64_t pattern_raw, int64_t flags_raw) {
+    /* Build a minimal Regex "pack" that callers can inspect only if
+     * they go back through the Regex-aware code paths (which don't
+     * exist on wasm). Return the pattern pointer so that downstream
+     * stubs at least don't crash. */
+    (void)flags_raw;
+    return pattern_raw;
+}
+
 /// Slice[str](start, end) -- extract substring from start to end
 int64_t taida_str_slice(int64_t s_raw, int64_t start_raw, int64_t end_raw) {
     const char *s = (const char *)s_raw;

@@ -142,16 +142,25 @@ true.toString()           // "true"
 
 #### replace
 
-最初に一致した部分文字列を置換します。
+最初に一致した部分文字列を置換します。引数が `:Str` の場合は固定文字列
+マッチ、`:Regex` の場合は正規表現マッチになります。
 
 ```taida
 "hello world".replace("world", "taida")  // "hello taida"
 "aaa".replace("a", "b")  // "baa" (最初の一致のみ)
+
+// C12 Phase 6 (FB-5): Regex overload
+"hello".replace(Regex("[aeiou]"), "*")  // "h*llo"
 ```
 
-**シグネチャ**: `target: Str, replacement: Str => :Str`
+**シグネチャ**:
 
-空ターゲットの場合は元の文字列を返します（no-op）。
+- `target: Str, replacement: Str => :Str`
+- `pattern: Regex, replacement: Str => :Str`
+
+空ターゲット文字列の場合は元の文字列を返します（no-op）。Regex 置換で
+は JS の `$&` / `$1` 系メタ構文は無効化され、置換文字列はリテラルとして
+挿入されます。
 
 #### replaceAll
 
@@ -160,11 +169,18 @@ true.toString()           // "true"
 ```taida
 "hello world hello".replaceAll("hello", "hi")  // "hi world hi"
 "aaa".replaceAll("a", "b")  // "bbb"
+
+// C12 Phase 6 (FB-5): Regex overload
+"hello".replaceAll(Regex("[aeiou]"), "*")  // "h*ll*"
+"a1b2c3".replaceAll(Regex("\\d"), "#")     // "a#b#c#"
 ```
 
-**シグネチャ**: `target: Str, replacement: Str => :Str`
+**シグネチャ**:
 
-空ターゲットの場合は元の文字列を返します（no-op）。
+- `target: Str, replacement: Str => :Str`
+- `pattern: Regex, replacement: Str => :Str`
+
+空ターゲット文字列の場合は元の文字列を返します（no-op）。
 
 #### split
 
@@ -174,11 +190,84 @@ true.toString()           // "true"
 "a,b,c".split(",")  // @["a", "b", "c"]
 "hello".split(",")  // @["hello"] (一致なし → 単一要素)
 "abc".split("")     // @["a", "b", "c"] (文字ごとに分割)
+
+// C12 Phase 6 (FB-5): Regex overload
+"one,two;three.four".split(Regex("[,;.]"))  // @["one", "two", "three", "four"]
 ```
 
-**シグネチャ**: `separator: Str => :List[Str]`
+**シグネチャ**:
+
+- `separator: Str => :List[Str]`
+- `pattern: Regex => :List[Str]`
 
 空セパレータの場合は各文字に分割します（`Chars[]` モールドと同等）。
+
+#### match
+
+正規表現で最初の一致を取り出します。結果は `:RegexMatch` ぶちパックで、
+`hasValue`, `full`, `groups`, `start` フィールドを持ちます。
+
+```taida
+m <= "id: 12-34".match(Regex("(\\d+)-(\\d+)"))
+stdout(m.hasValue)  // true
+stdout(m.full)       // "12-34"
+stdout(m.groups)     // @["12", "34"]
+stdout(m.start)      // 4  (char index, not byte index)
+```
+
+**シグネチャ**: `pattern: Regex => :RegexMatch`
+
+一致なしの場合 `hasValue <= false`, `full <= ""`, `groups <= @[]`,
+`start <= -1` のぶちパックを返します（null / undefined は返さない —
+哲学 I）。
+
+#### search
+
+正規表現で最初の一致が見つかった位置（char index）を返します。一致が
+ない場合は `-1` を返します。
+
+```taida
+stdout("abc123".search(Regex("\\d+")))  // 3
+stdout("nothing".search(Regex("\\d+"))) // -1
+```
+
+**シグネチャ**: `pattern: Regex => :Int`
+
+文字列内での固定文字列検索には `.indexOf(...)` を使用してください。
+`search` は必ず `Regex` 引数を要求します。
+
+#### Regex コンストラクタ
+
+`Regex(pattern, flags?)` で正規表現オブジェクトを作成します（C12 Phase 6）。
+
+```taida
+r <= Regex("[aeiou]")          // flags なし
+ri <= Regex("hello", "i")      // case-insensitive
+```
+
+**シグネチャ**: `pattern: Str, flags: Str => :Regex`
+
+サポートされるフラグ:
+
+| フラグ | 意味 |
+|--------|------|
+| `i` | 大文字小文字を無視 |
+| `m` | 複数行モード（`^` / `$` が各行にマッチ） |
+| `s` | dotall — `.` が改行にマッチ（Interpreter / JS のみ。Native の POSIX ERE はサポート外）|
+
+サポートされるエスケープ:
+
+| エスケープ | 意味 |
+|-----------|------|
+| `\d` / `\D` | 数字 / 数字以外 |
+| `\w` / `\W` | 単語文字（英数字 + `_`）/ それ以外 |
+| `\s` / `\S` | 空白文字 / 空白以外 |
+| `\b` | 単語境界（Interpreter / JS のみ）|
+| `\\` | リテラルな `\` |
+
+不正なフラグや不正なパターンは構築時に `:Error`（`ValueError`）が投げられます。
+JavaScript の `$&` / `$1` 等の置換メタ構文は無効化されており、置換文字列は
+リテラルとして挿入されます。
 
 ### 操作はモールドでも可能
 

@@ -15,6 +15,9 @@ mod net_h3;
 mod net_transport;
 mod os_eval;
 mod prelude;
+// C12 Phase 6 (FB-5): Regex value helpers shared between prelude
+// constructor, Str method overloads, and checker-level type inference.
+pub(crate) mod regex_eval;
 #[cfg(test)]
 mod tests_eval;
 #[cfg(test)]

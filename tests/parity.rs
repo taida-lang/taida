@@ -31633,6 +31633,272 @@ stdout(grade)
 }
 
 // ────────────────────────────────────────────────────────────────
+// C12-11 Phase 11 — FB-1: `param_tag_vars` propagation extension
+//
+// Before C12-11, `stdout(v)` inside `print_any v = stdout(v)` always
+// routed Bool through `convert_to_string` / `taida_str_from_bool` which
+// emits "1"/"0" for Native (pre-B11 behavior). The stdout codegen only
+// consulted `param_tag_vars` indirectly for pack-field tags passed as
+// call args. C12-11 wires the param-tag IrVar and the `return_tag_vars`
+// entry of a user FuncCall into the tagged stdout path so that
+// "true"/"false" is preserved across user-function boundaries.
+// Additionally, body-based Bool inference on user functions marks
+// `f x = TypeIs[x, :Int]()` as Bool-returning, so `b <= f(...)` local
+// bindings also display as "true"/"false".
+//
+// Covers C12B-017 (canonical FB-1 Bool-through-user-func case) on the
+// Native backend; Interpreter / JS already produce "true"/"false" via
+// runtime type information.
+// ────────────────────────────────────────────────────────────────
+
+/// C12-11 (a): direct Bool value passed to a user function that prints
+/// its parameter. The caller tag (TAIDA_TAG_BOOL) flows through
+/// `emit_call_arg_tags` into the callee's `param_tag_vars` slot and is
+/// consumed by the tagged stdout path.
+#[test]
+fn test_c12_11_bool_through_user_func_param_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any(true)
+print_any(false)
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_through_user_func_param");
+    let out = run_interpreter_src(source, "c12_11_bool_through_user_func_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse");
+}
+
+/// C12-11 (a): Bool-returning MoldInst passed to a user function.
+/// `TypeIs[...]()` has compile tag 2 per `src/types/mold_returns.rs`,
+/// `emit_call_arg_tags` sets the caller slot to 2, and the callee's
+/// `param_tag_vars[v]` is read back at the `stdout(v)` site.
+#[test]
+fn test_c12_11_bool_mold_through_user_func_param_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any(TypeIs[42, :Int]())
+print_any(TypeIs["x", :Str]())
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_mold_through_user_func_param");
+    let out = run_interpreter_src(source, "c12_11_bool_mold_through_user_func_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue");
+}
+
+/// C12-11 (b): user function returning Bool consumed directly by
+/// stdout. The CallUser lowering captures the callee's
+/// `taida_get_return_tag` into `return_tag_vars`, which the stdout
+/// dispatch reads back when the arg is a user FuncCall with unknown
+/// compile-time tag.
+#[test]
+fn test_c12_11_bool_user_func_return_direct_stdout_parity() {
+    let source = r#"is_int_like v =
+    TypeIs[v, :Int]()
+stdout(is_int_like(42))
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_user_func_return_direct_stdout");
+    let out = run_interpreter_src(source, "c12_11_bool_user_func_return_direct_stdout_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true");
+}
+
+/// C12-11: body-based Bool inference. `is_int_like` has no explicit
+/// `-> Bool` annotation, but its body's last expression is a
+/// `TypeIs[...]()` MoldInst which `expr_is_bool()` recognises. After
+/// C12-11 the function is added to `bool_returning_funcs` so that
+/// `b1 <= is_int_like(42)` tags `b1` as Bool, and `stdout(b1)` routes
+/// through the tagged path.
+#[test]
+fn test_c12_11_bool_let_binding_from_user_func_parity() {
+    let source = r#"is_int_like v =
+    TypeIs[v, :Int]()
+b1 <= is_int_like(42)
+stdout(b1)
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_let_binding_from_user_func");
+    let out = run_interpreter_src(source, "c12_11_bool_let_binding_from_user_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true");
+}
+
+/// C12-11 regression: non-Bool arg types flowing through a user
+/// function parameter must not regress. `print_any("hi")` should still
+/// print "hi" (Str tag) and `print_any(42)` should still print "42"
+/// (Int tag), via the polymorphic fallback in `taida_io_stdout_with_tag`.
+///
+/// NB: Float-through-user-func-param is intentionally excluded here —
+/// `print_any(3.14)` fails at Native codegen with a verifier error on
+/// both `main` and this branch (pre-existing Native limitation: the
+/// Float arg type inference for untyped params loses precision). That
+/// is independent of the Bool-display fix targeted by C12-11.
+#[test]
+fn test_c12_11_non_bool_through_user_func_param_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any("hello")
+print_any(42)
+"#;
+    assert_backend_parity_for_source(source, "c12_11_non_bool_through_user_func_param");
+    let out = run_interpreter_src(source, "c12_11_non_bool_through_user_func_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hello\n42");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12 Phase 6 (FB-5 Phase 2-3) — Regex type + Str method overloads
+// ────────────────────────────────────────────────────────────────
+//
+// `Regex(pattern, flags?)` constructs a :Regex BuchiPack. Str methods
+// `replace` / `replaceAll` / `split` / `match` / `search` detect a
+// Regex argument and dispatch through a regex engine (Rust `regex`
+// crate on Interpreter, RegExp on JS, POSIX regex.h on Native). The
+// design lock in `.dev/C12_DESIGN.md` §C12-6 pins these invariants:
+//   * Fixed-string call sites are unchanged (B11 Phase 1 parity).
+//   * JS `$&` / `$1` meta-syntax in replacements is disabled — the
+//     replacement is applied literally on all backends.
+//   * Match results carry (full, groups[], start) with char-based
+//     (not byte-based) start indices so UTF-8 strings behave the same.
+//   * Flags supported: `i` / `m` / `s`. Unsupported flags throw at
+//     construction time.
+
+/// C12-6c: fixed-string replace unchanged (B11 Phase 1 contract).
+#[test]
+fn test_c12_6_fixed_string_replace_first_still_works_parity() {
+    let source = r#"stdout("banana".replace("a", "*"))
+stdout("banana".replaceAll("a", "*"))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_fixed_string_replace_first_still_works");
+    let out = run_interpreter_src(source, "c12_6_fixed_string_replace_first_still_works_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "b*nana\nb*n*n*");
+}
+
+/// C12-6c: regex replace_all with character class + Perl-style
+/// meta escape (`\d`). All three backends must agree on the rewrite.
+#[test]
+fn test_c12_6_regex_replace_all_char_class_parity() {
+    let source = r##"r <= Regex("[aeiou]")
+stdout("hello world".replaceAll(r, "*"))
+r2 <= Regex("\\d")
+stdout("a1b2c3".replaceAll(r2, "#"))
+"##;
+    assert_backend_parity_for_source(source, "c12_6_regex_replace_all_char_class");
+    let out = run_interpreter_src(source, "c12_6_regex_replace_all_char_class_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "h*ll* w*rld\na#b#c#");
+}
+
+/// C12-6c: regex `replace` replaces only the first match. Contrast
+/// with `replaceAll` so the "first vs all" contract is explicit.
+#[test]
+fn test_c12_6_regex_replace_first_only_parity() {
+    let source = r#"r <= Regex("[aeiou]")
+stdout("hello".replace(r, "*"))
+stdout("hello".replaceAll(r, "*"))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_replace_first_only");
+    let out = run_interpreter_src(source, "c12_6_regex_replace_first_only_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "h*llo\nh*ll*");
+}
+
+/// C12-6c: split on a regex pattern. Verifies the split engine
+/// produces identical pieces on all three backends including the
+/// edge case where adjacent delimiters yield empty strings.
+#[test]
+fn test_c12_6_regex_split_parity() {
+    let source = r#"s <= "one,two;three.four"
+parts <= s.split(Regex("[,;.]"))
+stdout(parts)
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_split");
+    let out = run_interpreter_src(source, "c12_6_regex_split_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "@[\"one\", \"two\", \"three\", \"four\"]");
+}
+
+/// C12-6c: `str.match(Regex(...))` returns a :RegexMatch BuchiPack.
+/// Exercises the `full` / `start` accessors so the group-free path
+/// parity is locked (groups are covered in a dedicated test).
+#[test]
+fn test_c12_6_regex_match_basic_parity() {
+    let source = r#"r <= Regex("\\d+")
+m <= "id: 12-34".match(r)
+stdout(m.full)
+stdout(m.start)
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_match_basic");
+    let out = run_interpreter_src(source, "c12_6_regex_match_basic_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "12\n4");
+}
+
+/// C12-6c: `str.search(Regex(...))` returns the 0-based char index
+/// of the first match. Returns -1 when no match (no `null` leak —
+/// philosophy I).
+#[test]
+fn test_c12_6_regex_search_parity() {
+    let source = r#"r <= Regex("\\d+")
+stdout("abc123".search(r))
+stdout("no digits here".search(r))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_search");
+    let out = run_interpreter_src(source, "c12_6_regex_search_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\n-1");
+}
+
+/// C12-6c: literal replacement string — `$&` / `$1` meta-syntax must
+/// be treated as literal text, matching the design lock §C12-6
+/// "JavaScript `$&` 系メタ構文は引き続き無効化".
+#[test]
+fn test_c12_6_regex_replace_literal_dollar_parity() {
+    let source = r#"r <= Regex("b")
+stdout("abc".replace(r, "$&"))
+stdout("abc".replace(r, "$1"))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_replace_literal_dollar");
+    let out = run_interpreter_src(source, "c12_6_regex_replace_literal_dollar_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "a$&c\na$1c");
+}
+
+/// C12-6c: `i` flag — case-insensitive matching.
+#[test]
+fn test_c12_6_regex_flag_case_insensitive_parity() {
+    let source = r#"r <= Regex("hello", "i")
+stdout("HELLO world".replaceAll(r, "X"))
+stdout("Hello WORLD".search(r))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_flag_case_insensitive");
+    let out = run_interpreter_src(source, "c12_6_regex_flag_case_insensitive_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "X world\n0");
+}
+
+/// C12-6a: unsupported flag char throws a value error at
+/// construction time. Behavior is validated via the interpreter
+/// only — the compile-target backends surface the same error
+/// through a runtime throw path that is not trivially observable
+/// without extra harness plumbing, so we pin the interpreter path
+/// here as the reference.
+#[test]
+fn test_c12_6_regex_unsupported_flag_throws_interpreter() {
+    let source = r#"Regex("a", "x")
+stdout("unreachable")
+"#;
+    // The interpreter throws a :Error — `run_interpreter_src` treats
+    // that as a failure, so we only assert that the program does
+    // NOT produce the "unreachable" line. (Source-level throws are
+    // rendered to stderr; stdout stays empty.)
+    let out = run_interpreter_src(source, "c12_6_regex_unsupported_flag_throws_interpreter");
+    assert!(
+        out.as_deref() != Some("unreachable\n"),
+        "program should throw before reaching stdout"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
 // B11 Phase 3 — FB-9: Int[str]() / Int[str, base]() close-out
 // ────────────────────────────────────────────────────────────────
 

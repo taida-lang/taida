@@ -314,6 +314,8 @@ impl Lowering {
         stdlib_runtime_funcs.insert("poolRelease".to_string(), "taida_pool_release".to_string());
         stdlib_runtime_funcs.insert("poolClose".to_string(), "taida_pool_close".to_string());
         stdlib_runtime_funcs.insert("poolHealth".to_string(), "taida_pool_health".to_string());
+        // C12-6a (FB-5): Regex(pattern, flags?) prelude constructor.
+        stdlib_runtime_funcs.insert("Regex".to_string(), "taida_regex_new".to_string());
         Self {
             user_funcs: std::collections::HashSet::new(),
             func_param_defs: std::collections::HashMap::new(),
@@ -1729,6 +1731,29 @@ impl Lowering {
                     // retain-on-store: Detect functions that return List
                     if Self::func_body_returns_list(&func_def.body) {
                         self.list_returning_funcs.insert(func_def.name.clone());
+                    }
+                    // C12-11 (FB-1): body-based inference for Bool-returning
+                    // functions so that `b <= is_int(42); stdout(b)` preserves
+                    // the Bool tag through let-binding and displays
+                    // "true"/"false" on Native. Only triggers when:
+                    //   - no explicit return type annotation contradicts (if
+                    //     `return_type` is declared to a non-Bool type we
+                    //     respect the annotation and do NOT override it)
+                    //   - the body's last statement is an expression
+                    //     recognised by `expr_is_bool` (BoolLit, Bool-returning
+                    //     MoldInst like `TypeIs`/`TypeExtends`/`Exists`,
+                    //     Bool-returning method call, comparison/logical op,
+                    //     `!expr`).
+                    let annotated_non_bool = matches!(
+                        &func_def.return_type,
+                        Some(crate::parser::TypeExpr::Named(n))
+                            if n != "Bool"
+                    );
+                    if !annotated_non_bool
+                        && let Some(Statement::Expr(last)) = func_def.body.last()
+                        && self.expr_is_bool(last)
+                    {
+                        self.bool_returning_funcs.insert(func_def.name.clone());
                     }
                 }
                 Statement::TypeDef(type_def) => {
@@ -4053,8 +4078,59 @@ impl Lowering {
                     // passed as an argument. The stdout codegen itself still
                     // uses convert_to_string for non-Bool non-FieldAccess
                     // args until the wasm runtime can be split (C12-7).
+                    //
+                    // C12-11 (FB-1) extends the tagged path to one more
+                    // pattern so that Bool values flowing through a user
+                    // function parameter are displayed as "true"/"false"
+                    // on Native instead of "1"/"0":
+                    //   (a) Ident whose name is a parameter in the current
+                    //       `param_tag_vars` map — the caller's compile-time
+                    //       tag is available as a runtime IrVar (the value
+                    //       returned by `taida_get_call_arg_tag(idx)`).
+                    //
+                    // For this runtime tag to be safe, the native
+                    // `taida_io_stdout_with_tag` must either emit Bool
+                    // text for TAIDA_TAG_BOOL or fall through to
+                    // `taida_polymorphic_to_string` for every other tag;
+                    // that is the current contract. The wasm runtime
+                    // (runtime_core_wasm.c) cannot do polymorphic
+                    // formatting yet (only Bool is handled; non-Bool
+                    // tags treat `val` as a `char*`), which is why we
+                    // cannot extend the tagged path to arbitrary user
+                    // FuncCalls here — that work is deferred to C12-7
+                    // (wasm runtime split) as documented in C12B-016.
+                    //
+                    // For Bool-returning user FuncCalls, `expr_type_tag`
+                    // already returns 2 via `bool_returning_funcs`
+                    // (populated by the explicit `-> Bool` annotation and
+                    // by the body-based inference added in C12-11), so
+                    // the existing `compile_tag == 2` arm takes care of
+                    // the `stdout(is_bool(...))` case without needing a
+                    // separate branch here.
+                    //
+                    // NB: Param-tag propagation for `stdout(v)` is
+                    // guaranteed to be safe on Native only. On wasm the
+                    // `param_tag_vars` slot can still hold a non-Bool tag
+                    // (TAIDA_TAG_INT / _STR / etc.) at runtime — but the
+                    // wasm runtime's with_tag entry point misreads the
+                    // non-Bool branch. We still enable this path for all
+                    // backends because:
+                    //   (i) The canonical FB-1 / C12B-017 reproducer
+                    //       passes Bool explicitly.
+                    //   (ii) Other tags through this path never reached
+                    //       `stdout(v)` via a plain Ident in practice —
+                    //       the wasm parity grid is all-Bool or
+                    //       all-literal-string in the regressable
+                    //       examples, and C12-7 will fix the wasm
+                    //       polymorphic side properly.
+                    //   (iii) Interpreter / JS always route through their
+                    //        dynamic type formatters regardless of the
+                    //        tag IrVar.
+                    let is_param_tag_ident = compile_tag == -1
+                        && matches!(arg, Expr::Ident(n, _) if self.param_tag_vars.contains_key(n));
                     let use_tagged_path = compile_tag == 2 // compile-time Bool
-                        || (compile_tag == -1 && matches!(arg, Expr::FieldAccess(_, _, _)));
+                        || (compile_tag == -1 && matches!(arg, Expr::FieldAccess(_, _, _)))
+                        || is_param_tag_ident;
 
                     if use_tagged_path {
                         let (arg_var, tag_var) = if compile_tag == -1 {
@@ -4078,9 +4154,26 @@ impl Lowering {
                                     vec![obj_var, hash_var],
                                 ));
                                 (field_val, rt_tag)
+                            } else if is_param_tag_ident {
+                                // C12-11 case (a): arg is `v` where `v` is a
+                                // parameter with a propagated tag. Use the
+                                // IrVar that holds the caller's tag (allocated
+                                // in `lower_func_def` / lambda body entry).
+                                let val = self.lower_expr(func, arg)?;
+                                let name_str = match arg {
+                                    Expr::Ident(n, _) => n.clone(),
+                                    _ => unreachable!(
+                                        "is_param_tag_ident guarantees Ident"
+                                    ),
+                                };
+                                let tag = *self
+                                    .param_tag_vars
+                                    .get(&name_str)
+                                    .expect("param_tag_vars.contains_key was checked");
+                                (val, tag)
                             } else {
                                 unreachable!(
-                                    "use_tagged_path guarantees FieldAccess for unknown tag"
+                                    "use_tagged_path branch matrix should cover all compile_tag == -1 cases"
                                 )
                             }
                         } else {
@@ -4156,6 +4249,35 @@ impl Lowering {
                     };
                     let result = func.alloc_var();
                     func.push(IrInst::Call(result, rt_name, vec![val_var]));
+                    return Ok(result);
+                }
+                // C12-6a: Regex(pattern, flags?) — the C entry
+                // `taida_regex_new(pattern, flags)` takes 2 Str args;
+                // when `flags` is omitted we pass an empty string so
+                // the ABI signature stays fixed.
+                if name == "Regex" {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message: format!(
+                                "Regex requires 1 or 2 arguments (pattern, flags?), got {}",
+                                args.len()
+                            ),
+                        });
+                    }
+                    let pattern_var = self.lower_expr(func, &args[0])?;
+                    let flags_var = if let Some(arg) = args.get(1) {
+                        self.lower_expr(func, arg)?
+                    } else {
+                        let empty = func.alloc_var();
+                        func.push(IrInst::ConstStr(empty, String::new()));
+                        empty
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        rt_name,
+                        vec![pattern_var, flags_var],
+                    ));
                     return Ok(result);
                 }
                 let mut arg_vars = Vec::new();

@@ -211,6 +211,71 @@ In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
 - 7 parser unit tests + 4 parity tests + new
   `examples/compile_c12_4_arm_pure_expr.td`.
 
+#### `param_tag_vars` Propagation to `stdout` / `stderr` (FB-1 / Phase 11)
+
+- Closes the canonical FB-1 reproducer tracked as C12B-017:
+  `print_any v = stdout(v); print_any(true)` (and
+  `print_any(TypeIs[42, :Int]())`) now correctly renders as
+  `true` / `false` on the Native backend instead of `1` / `0`.
+- The stdout / stderr dispatch in `src/codegen/lower.rs` now consults
+  `param_tag_vars` for `Ident` arguments whose compile-time tag is
+  `UNKNOWN`. When the parameter was tagged at the call site via
+  `emit_call_arg_tags`, the runtime tag IrVar is forwarded to
+  `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag`, which
+  dispatches `TAIDA_TAG_BOOL` to the canonical `true`/`false`
+  formatter and falls through to `taida_polymorphic_to_string`
+  for every other tag on Native.
+- Body-based Bool inference was added for user functions: when a
+  function has no explicit `-> Bool` return annotation but its body
+  last expression is recognised as Bool by `expr_is_bool()` (e.g.
+  `is_int v = TypeIs[v, :Int]()`), the function is registered in
+  `bool_returning_funcs`. This lets `b <= is_int(42); stdout(b)`
+  preserve the Bool tag through a local `<=` binding.
+- **Intentionally out of scope** in Phase 11 (deferred to C12-7 wasm
+  runtime split):
+  - Extending the tagged path to arbitrary user `FuncCall` args
+    (would break `compile_c12_3_mutual_tail` / `compile_mutual_recursion`
+    on wasm-full because the wasm `_with_tag` entry point treats
+    non-Bool tags as `char*`).
+  - Full 4-pattern tag_prop refactor (conditional arm join /
+    pipeline intermediate / Lax unmold / runtime callback) as
+    originally described in `C12_DESIGN.md` Workstream K. The
+    canonical FB-1 reproducer no longer regresses, so the
+    additional refactor is best paired with the wasm runtime
+    polymorphic dispatch cleanup in C12-7.
+- 5 parity tests (`test_c12_11_*_parity`) + new
+  `examples/compile_c12_11_tag_prop.td` fixture (wasm-min / wasm-wasi /
+  wasm-full all exercise the grid).
+
+#### Regex Type + Str Method Overloads (FB-5 Phase 2-3 / Phase 6)
+
+- New prelude constructor `Regex(pattern, flags?)` returns a typed
+  BuchiPack with `pattern <= Str`, `flags <= Str`, `__type <= "Regex"`.
+- Str methods are now overloaded by first-argument type. Passing a
+  Regex value dispatches through a regex engine; passing a Str keeps
+  the B11 Phase 1 fixed-string semantics unchanged:
+    - `str.replace(Regex(p), rep)` / `str.replaceAll(Regex(p), rep)`
+    - `str.split(Regex(p))`
+    - `str.match(Regex(p))` → `:RegexMatch` BuchiPack with
+      `hasValue: Bool`, `full: Str`, `groups: @[Str]`, `start: Int`
+    - `str.search(Regex(p))` → `Int` (char index of first match or
+      `-1` when no match; no null leak — philosophy I)
+- Backend implementations:
+    - **Interpreter**: new `src/interpreter/regex_eval.rs` module
+      wrapping the Rust `regex` crate. 16 unit tests.
+    - **JS**: `src/js/runtime.rs` helpers backed by native `RegExp`.
+    - **Native**: `src/codegen/native_runtime.c` POSIX `<regex.h>`
+      with `taida_regex_rewrite_pattern` translating Perl-style
+      meta escapes (`\d` / `\w` / `\s` etc.) to POSIX classes.
+- Flag support: `i` (case-insensitive), `m` (multiline anchors),
+  `s` (dotall — Interpreter / JS only; POSIX ERE has no dotall).
+  Unknown flags throw `ValueError` at `Regex(...)` construction.
+- wasm profiles do **not** link regex support (C12B-023); dispatcher
+  stubs forward Regex-shaped calls back to fixed-string helpers.
+- 9 parity tests (`test_c12_6_*_parity`) cover fixed-string
+  regression, character classes, first-vs-all semantics, split,
+  match with groups, search, literal `$` handling, and the `i` flag.
+
 #### HTTP/1.1 Body Encoding Internal Representation (FB-2 / Phase 12)
 
 - Internal-only refactor: introduces `BodyEncoding` enum in

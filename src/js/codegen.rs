@@ -2088,6 +2088,8 @@ impl JsCodegen {
                             "poolRelease" => self.write("__taida_os_poolRelease"),
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // C12-6a: Regex(pattern, flags?) prelude constructor
+                            "Regex" => self.write("__taida_regex"),
                             // taida-lang/net HTTP v1 (only when imported)
                             _ if self.try_write_net_builtin(name, "") => {}
                             _ => self.gen_expr(callee)?,
@@ -2156,6 +2158,8 @@ impl JsCodegen {
                         "poolRelease" => self.write("__taida_os_poolRelease"),
                         "poolClose" => self.write("__taida_os_poolClose"),
                         "poolHealth" => self.write("__taida_os_poolHealth"),
+                        // C12-6a: Regex(pattern, flags?) prelude constructor
+                        "Regex" => self.write("__taida_regex"),
                         // taida-lang/net HTTP v1 (only when imported)
                         _ if self.try_write_net_builtin(name, "") => {}
                         _ => self.gen_expr(callee)?,
@@ -2203,11 +2207,22 @@ impl JsCodegen {
                 // hasValue() is a method call on Lax — emit as method call
                 // (In new design, hasValue() is always a function, not a property)
                 // B11-4c: replace/replaceAll/split → runtime helper for edge-case parity
-                if method == "replace" || method == "replaceAll" || method == "split" {
+                // C12-6c: match/search → runtime helper (Regex-only). The
+                // helpers inspect the first arg's `__type` tag at runtime
+                // so the same JS call handles both fixed-string (B11) and
+                // Regex overloads uniformly.
+                if method == "replace"
+                    || method == "replaceAll"
+                    || method == "split"
+                    || method == "match"
+                    || method == "search"
+                {
                     let helper = match method.as_str() {
                         "replace" => "__taida_str_replace",
                         "replaceAll" => "__taida_str_replace_all",
                         "split" => "__taida_str_split",
+                        "match" => "__taida_str_match",
+                        "search" => "__taida_str_search",
                         _ => unreachable!(),
                     };
                     self.write(&format!("{}(", helper));
@@ -3045,6 +3060,8 @@ impl JsCodegen {
                             "poolRelease" => self.write("__taida_os_poolRelease"),
                             "poolClose" => self.write("__taida_os_poolClose"),
                             "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // C12-6a: Regex(pattern, flags?) prelude constructor
+                            "Regex" => self.write("__taida_regex"),
                             // taida-lang/net HTTP v1 (only when imported)
                             _ if self.try_write_net_builtin(name, "") => {}
                             _ => self.write(name),

@@ -3373,6 +3373,9 @@ defaulted fields must be provided via `()`",
                         "stdin" => Some((1, 1)),
                         "argv" => Some((0, 0)),
                         "sleep" => Some((1, 1)),
+                        // C12 Phase 6 (FB-5): Regex(pattern, flags?)
+                        // returns a :Regex BuchiPack.
+                        "Regex" => Some((1, 2)),
                         _ => None,
                     };
                     if let Some((min_args, max_args)) = builtin_arity
@@ -3434,6 +3437,10 @@ defaulted fields must be provided via `()`",
                         "stdin" => Type::Str,
                         "argv" => Type::List(Box::new(Type::Str)),
                         "sleep" => Type::Generic("Async".to_string(), vec![Type::Unit]),
+                        // C12 Phase 6 (FB-5): Regex(pattern, flags?)
+                        // returns an opaque named :Regex type (internally
+                        // a BuchiPack with `__type <= "Regex"`).
+                        "Regex" => Type::Named("Regex".to_string()),
                         _ => Type::Unknown,
                     };
                     if hole_count > 0 {

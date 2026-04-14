@@ -945,10 +945,11 @@ fn wasm_min_parity_all_examples() {
     // 66 = 65 + 1 (C12-3d: compile_c12_3_mutual_tail — tail-only mutual recursion)
     // 67 = 66 + 1 (C12-5: compile_c12_5_side_effect_returns — stdout Int return)
     // 68 = 67 + 1 (C12-4c: compile_c12_4_arm_pure_expr — `| |>` pure-expr boundary)
+    // 69 = 68 + 1 (C12-11: compile_c12_11_tag_prop — param_tag_vars Bool prop)
     assert_eq!(
         parity_ok.len(),
-        68,
-        "WC-7: Expected exactly 68 parity-OK examples, got {}. \
+        69,
+        "WC-7: Expected exactly 69 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok

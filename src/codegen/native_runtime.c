@@ -305,6 +305,13 @@ taida_val taida_typeof(taida_val val, taida_val tag);
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle);
+// C12-6c: Regex polymorphic dispatchers + constructor.
+taida_val taida_regex_new(const char *pattern_s, const char *flags_s);
+taida_val taida_str_split_poly(const char *s, taida_val sep);
+taida_val taida_str_replace_first_poly(const char *s, taida_val target, const char *rep);
+taida_val taida_str_replace_poly(const char *s, taida_val target, const char *rep);
+taida_val taida_str_match_regex(const char *s, taida_val regex_pack);
+taida_val taida_str_search_regex(const char *s, taida_val regex_pack);
 static taida_val taida_bytes_new_filled(taida_val len, unsigned char fill);
 static taida_val taida_bytes_from_raw(const unsigned char *data, taida_val len);
 static taida_val taida_bytes_clone(taida_val bytes_ptr);
@@ -2888,6 +2895,452 @@ taida_val taida_str_pad(const char* s, taida_val target_len, const char* pad_cha
         memcpy(r + pad_len, s, slen);
     }
     return (taida_val)r;
+}
+
+// ── C12-6 (FB-5): Regex support via POSIX regex.h ─────────
+//
+// Value representation: `Regex("pattern", "flags")` returns a
+// BuchiPack with 3 fields (pattern, flags, __type). The field hashes
+// used here are FNV-1a 64-bit of the field-name literals, matching
+// the Rust side of the interpreter (see `regex_eval::REGEX_TYPE_TAG`)
+// and the JS runtime (`__taida_is_regex`).
+//
+// Philosophy: construction validates the pattern eagerly; on failure
+// we fall back to an empty-match / no-op result (no null / undefined
+// escape path). wasm profiles link a fallback stub that treats
+// Regex args as empty strings — Regex overloads are documented as
+// Native/Interpreter/JS only (see design lock §C12-6).
+
+#include <regex.h>
+
+#define HASH_PATTERN      0x0b7a1e4bea695f89ULL
+#define HASH_FLAGS        0x17a3a1a985f75aecULL
+#define HASH_FULL         0x865b7478db00e67cULL
+#define HASH_GROUPS       0x6039b1239580514dULL
+#define HASH_START        0xee5d97ad45ad251fULL
+#define HASH_REGEX_MATCH_STR 0x3b377cd3b47dd849ULL /* FNV-1a("RegexMatch"), unused — for reference */
+
+// Detect whether `v` points to a :Regex BuchiPack. We check the pack
+// magic + scan for `__type <= "Regex"`. Returns 1 on match, 0
+// otherwise (or when the pointer is not a pack). Safe for NULL /
+// small integer values.
+static int taida_val_is_regex_pack(taida_val v) {
+    if (v <= 4096) return 0;
+    if (!taida_ptr_is_readable(v, sizeof(taida_val))) return 0;
+    taida_val hdr = ((taida_val*)v)[0];
+    if ((hdr & TAIDA_MAGIC_MASK) != TAIDA_PACK_MAGIC) return 0;
+    taida_val type_val = taida_pack_get((taida_ptr)v, (taida_val)HASH___TYPE);
+    if (type_val == 0) return 0;
+    size_t len = 0;
+    if (!taida_read_cstr_len_safe((const char*)type_val, 64, &len)) return 0;
+    if (len != 5) return 0;
+    return memcmp((const char*)type_val, "Regex", 5) == 0;
+}
+
+// Extract (pattern, flags) from a validated Regex pack. Returns
+// pointers into pack-owned Str payloads — caller must NOT free them.
+// Each output pointer falls back to "" when the field is missing.
+static void taida_regex_get_fields(taida_val regex_pack,
+                                    const char **pattern_out,
+                                    const char **flags_out) {
+    taida_val pat = taida_pack_get((taida_ptr)regex_pack, (taida_val)HASH_PATTERN);
+    taida_val flg = taida_pack_get((taida_ptr)regex_pack, (taida_val)HASH_FLAGS);
+    *pattern_out = pat > 4096 ? (const char*)pat : "";
+    *flags_out = flg > 4096 ? (const char*)flg : "";
+}
+
+// POSIX ERE doesn't understand Perl-style meta escapes (`\d` / `\w`
+// / `\s` + complements). Translate them into POSIX character classes
+// before passing the pattern to `regcomp`. This keeps the surface
+// semantics identical across Interpreter (Rust `regex` crate), JS
+// (RegExp), and Native (POSIX regex.h).
+//
+// Translation table:
+//   \d → [0-9]         \D → [^0-9]
+//   \w → [0-9A-Za-z_]  \W → [^0-9A-Za-z_]
+//   \s → [ \t\n\r\f\v] \S → [^ \t\n\r\f\v]
+//
+// `\\` escapes are preserved so users can match a literal backslash.
+// Other `\X` sequences are passed through untouched (POSIX will
+// interpret `\.` / `\(` / `\)` etc. as literals).
+//
+// Caller owns the returned buffer — free with `free()`.
+static char *taida_regex_rewrite_pattern(const char *pat) {
+    if (!pat) {
+        char *empty = (char*)TAIDA_MALLOC(1, "regex_pattern empty");
+        empty[0] = '\0';
+        return empty;
+    }
+    size_t cap = strlen(pat) * 2 + 16;
+    char *out = (char*)TAIDA_MALLOC(cap, "regex_pattern rewrite");
+    size_t len = 0;
+    #define APPEND(s, n) do { \
+        size_t _n = (n); \
+        while (len + _n + 1 > cap) { cap *= 2; TAIDA_REALLOC(out, cap, "regex_pattern grow"); } \
+        memcpy(out + len, (s), _n); len += _n; \
+    } while(0)
+    for (size_t i = 0; pat[i]; ) {
+        char c = pat[i];
+        if (c == '\\' && pat[i+1]) {
+            char n = pat[i+1];
+            if (n == 'd') { APPEND("[0-9]", 5); i += 2; continue; }
+            if (n == 'D') { APPEND("[^0-9]", 6); i += 2; continue; }
+            if (n == 'w') { APPEND("[0-9A-Za-z_]", 12); i += 2; continue; }
+            if (n == 'W') { APPEND("[^0-9A-Za-z_]", 13); i += 2; continue; }
+            if (n == 's') { APPEND("[ \t\n\r\f\v]", 8); i += 2; continue; }
+            if (n == 'S') { APPEND("[^ \t\n\r\f\v]", 9); i += 2; continue; }
+            // Any other backslash escape: keep as-is (including `\\`).
+            APPEND(pat + i, 2);
+            i += 2;
+            continue;
+        }
+        APPEND(pat + i, 1);
+        i += 1;
+    }
+    out[len] = '\0';
+    #undef APPEND
+    return out;
+}
+
+// Compile a POSIX regex from (pattern, flags). Flags: 'i' = icase,
+// 'm' = REG_NEWLINE (line anchors), 's' = POSIX doesn't support
+// dotall directly. We intentionally leave 's' unhandled at the C
+// level: `.` will not cross newline on Native. This is a documented
+// parity gap in the design lock; parity tests for `s` cover
+// Interpreter / JS only.
+//
+// Returns 0 on success, non-zero on failure.
+static int taida_regex_compile(const char *pattern, const char *flags, regex_t *out) {
+    int cflags = REG_EXTENDED;
+    for (const char *p = flags; p && *p; p++) {
+        if (*p == 'i') cflags |= REG_ICASE;
+        else if (*p == 'm') cflags |= REG_NEWLINE;
+        // 's' (dotall) — not supported by POSIX ERE; silently ignored.
+    }
+    char *rewritten = taida_regex_rewrite_pattern(pattern);
+    int rc = regcomp(out, rewritten, cflags);
+    free(rewritten);
+    return rc;
+}
+
+// Construct a Regex BuchiPack from (pattern_str, flags_str). Field
+// layout matches the interpreter / JS representation. Validation is
+// performed by attempting to compile once; on failure we return a
+// pack with the original fields anyway (matching the "no silent
+// undefined" guarantee at the value level — detection of a bad
+// pattern is done at Str-method dispatch time, which returns an
+// empty result).
+taida_val taida_regex_new(const char *pattern_s, const char *flags_s) {
+    if (!pattern_s) pattern_s = "";
+    if (!flags_s) flags_s = "";
+    taida_val pack = taida_pack_new(3);
+    taida_pack_set_hash((taida_ptr)pack, 0, (taida_val)HASH_PATTERN);
+    taida_pack_set_hash((taida_ptr)pack, 1, (taida_val)HASH_FLAGS);
+    taida_pack_set_hash((taida_ptr)pack, 2, (taida_val)HASH___TYPE);
+    taida_val pat_str = (taida_val)taida_str_new_copy(pattern_s);
+    taida_val flg_str = (taida_val)taida_str_new_copy(flags_s);
+    taida_val type_str = (taida_val)taida_str_new_copy("Regex");
+    taida_pack_set((taida_ptr)pack, 0, pat_str);
+    taida_pack_set_tag((taida_ptr)pack, 0, TAIDA_TAG_STR);
+    taida_pack_set((taida_ptr)pack, 1, flg_str);
+    taida_pack_set_tag((taida_ptr)pack, 1, TAIDA_TAG_STR);
+    taida_pack_set((taida_ptr)pack, 2, type_str);
+    taida_pack_set_tag((taida_ptr)pack, 2, TAIDA_TAG_STR);
+    return pack;
+}
+
+// Apply Regex replace_first: build the output by copying the prefix,
+// the literal replacement (no `$N` expansion), and the suffix from
+// the first regex match. Returns a freshly allocated taida_str.
+static taida_val taida_regex_replace_first_impl(const char *s,
+                                                 const char *pattern,
+                                                 const char *flags,
+                                                 const char *replacement) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    if (!replacement) replacement = "";
+    regex_t re;
+    if (taida_regex_compile(pattern, flags, &re) != 0) {
+        return (taida_val)taida_str_new_copy(s);
+    }
+    regmatch_t m;
+    if (regexec(&re, s, 1, &m, 0) != 0 || m.rm_so < 0) {
+        regfree(&re);
+        return (taida_val)taida_str_new_copy(s);
+    }
+    size_t prefix_len = (size_t)m.rm_so;
+    size_t match_len = (size_t)(m.rm_eo - m.rm_so);
+    size_t rep_len = strlen(replacement);
+    size_t suffix_len = strlen(s) - prefix_len - match_len;
+    size_t out_len = prefix_len + rep_len + suffix_len;
+    char *out = taida_str_alloc(out_len);
+    memcpy(out, s, prefix_len);
+    memcpy(out + prefix_len, replacement, rep_len);
+    memcpy(out + prefix_len + rep_len, s + prefix_len + match_len, suffix_len);
+    regfree(&re);
+    return (taida_val)out;
+}
+
+// Apply Regex replace_all: iterate regexec with REG_NOTBOL on
+// subsequent calls so `^` only anchors at the very start.
+static taida_val taida_regex_replace_all_impl(const char *s,
+                                               const char *pattern,
+                                               const char *flags,
+                                               const char *replacement) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    if (!replacement) replacement = "";
+    regex_t re;
+    if (taida_regex_compile(pattern, flags, &re) != 0) {
+        return (taida_val)taida_str_new_copy(s);
+    }
+    // Build output into a growing buffer.
+    size_t cap = 64;
+    size_t len = 0;
+    char *out = (char*)TAIDA_MALLOC(cap, "regex_replace_all");
+    size_t rep_len = strlen(replacement);
+    const char *cursor = s;
+    int eflags = 0;
+    // Safety bound: number of iterations cannot exceed input byte
+    // length + 1 (each zero-width match advances by one byte).
+    size_t max_iters = strlen(s) + 1;
+    for (size_t iter = 0; iter < max_iters; iter++) {
+        regmatch_t m;
+        if (regexec(&re, cursor, 1, &m, eflags) != 0 || m.rm_so < 0) {
+            // Copy remaining tail.
+            size_t tail = strlen(cursor);
+            while (len + tail + 1 > cap) { cap *= 2; TAIDA_REALLOC(out, cap, "regex_replace_all grow"); }
+            memcpy(out + len, cursor, tail);
+            len += tail;
+            break;
+        }
+        size_t prefix = (size_t)m.rm_so;
+        size_t match_len = (size_t)(m.rm_eo - m.rm_so);
+        // Append prefix.
+        while (len + prefix + 1 > cap) { cap *= 2; TAIDA_REALLOC(out, cap, "regex_replace_all grow"); }
+        memcpy(out + len, cursor, prefix);
+        len += prefix;
+        // Append replacement.
+        while (len + rep_len + 1 > cap) { cap *= 2; TAIDA_REALLOC(out, cap, "regex_replace_all grow"); }
+        memcpy(out + len, replacement, rep_len);
+        len += rep_len;
+        // Advance cursor. On zero-width matches, bump one byte to
+        // avoid an infinite loop.
+        if (match_len == 0) {
+            if (cursor[prefix] == '\0') break;
+            while (len + 1 + 1 > cap) { cap *= 2; TAIDA_REALLOC(out, cap, "regex_replace_all grow"); }
+            out[len++] = cursor[prefix];
+            cursor += prefix + 1;
+        } else {
+            cursor += prefix + match_len;
+        }
+        eflags = REG_NOTBOL;
+    }
+    regfree(&re);
+    // Copy into a taida-owned Str buffer.
+    char *taida_out = taida_str_alloc(len);
+    memcpy(taida_out, out, len);
+    free(out);
+    return (taida_val)taida_out;
+}
+
+// Apply Regex split: emit the text between successive matches.
+static taida_val taida_regex_split_impl(const char *s,
+                                         const char *pattern,
+                                         const char *flags) {
+    taida_val list = taida_list_new();
+    taida_list_set_elem_tag(list, TAIDA_TAG_STR);
+    if (!s) return list;
+    regex_t re;
+    if (taida_regex_compile(pattern, flags, &re) != 0) {
+        // Compile failed — return a single-element list with the
+        // original string (matches interpreter fallback via `split`
+        // on an unmatched pattern: whole-string list).
+        char *copy = (char*)taida_str_new_copy(s);
+        list = taida_list_push(list, (taida_val)copy);
+        return list;
+    }
+    const char *cursor = s;
+    int eflags = 0;
+    size_t max_iters = strlen(s) + 1;
+    for (size_t iter = 0; iter < max_iters; iter++) {
+        regmatch_t m;
+        if (regexec(&re, cursor, 1, &m, eflags) != 0 || m.rm_so < 0) {
+            // Tail.
+            size_t tail = strlen(cursor);
+            char *piece = taida_str_alloc(tail);
+            memcpy(piece, cursor, tail);
+            list = taida_list_push(list, (taida_val)piece);
+            break;
+        }
+        size_t prefix = (size_t)m.rm_so;
+        size_t match_len = (size_t)(m.rm_eo - m.rm_so);
+        char *piece = taida_str_alloc(prefix);
+        memcpy(piece, cursor, prefix);
+        list = taida_list_push(list, (taida_val)piece);
+        if (match_len == 0) {
+            if (cursor[prefix] == '\0') break;
+            cursor += prefix + 1;
+        } else {
+            cursor += prefix + match_len;
+        }
+        eflags = REG_NOTBOL;
+    }
+    regfree(&re);
+    return list;
+}
+
+// Convert a byte offset within `s` to a character (codepoint) offset.
+// UTF-8 aware; returns -1 if the input is malformed up to `byte_off`.
+static taida_val taida_bytes_to_chars_offset(const char *s, size_t byte_off) {
+    if (!s) return -1;
+    size_t offset = 0;
+    taida_val chars = 0;
+    const unsigned char *buf = (const unsigned char*)s;
+    while (offset < byte_off) {
+        size_t consumed = 0;
+        uint32_t cp = 0;
+        if (!taida_utf8_decode_one(buf + offset, byte_off - offset, &consumed, &cp) || consumed == 0) {
+            // Fallback: 1 byte = 1 "char" on malformed input.
+            offset += 1;
+        } else {
+            offset += consumed;
+        }
+        chars += 1;
+    }
+    return chars;
+}
+
+// Build a :RegexMatch BuchiPack (`hasValue`, `full`, `groups`,
+// `start`, `__type <= "RegexMatch"`). `start` is the char index of
+// the first match (not the byte index), matching the JS helper.
+static taida_val taida_regex_build_match_value(int matched,
+                                                const char *full,
+                                                taida_val start_chars,
+                                                taida_val groups_list) {
+    static uint64_t HASH_has_value_local = 0x9e9c6dc733414d60ULL; // HASH_HAS_VALUE
+    taida_val pack = taida_pack_new(5);
+    taida_pack_set_hash((taida_ptr)pack, 0, (taida_val)HASH_has_value_local);
+    taida_pack_set_hash((taida_ptr)pack, 1, (taida_val)HASH_FULL);
+    taida_pack_set_hash((taida_ptr)pack, 2, (taida_val)HASH_GROUPS);
+    taida_pack_set_hash((taida_ptr)pack, 3, (taida_val)HASH_START);
+    taida_pack_set_hash((taida_ptr)pack, 4, (taida_val)HASH___TYPE);
+    taida_pack_set((taida_ptr)pack, 0, (taida_val)(matched ? 1 : 0));
+    taida_pack_set_tag((taida_ptr)pack, 0, TAIDA_TAG_BOOL);
+    taida_val full_str = (taida_val)taida_str_new_copy(full ? full : "");
+    taida_pack_set((taida_ptr)pack, 1, full_str);
+    taida_pack_set_tag((taida_ptr)pack, 1, TAIDA_TAG_STR);
+    // groups list was already constructed by the caller via
+    // taida_list_new / taida_list_push; retain happens implicitly
+    // via our pack_set below.
+    taida_pack_set((taida_ptr)pack, 2, groups_list);
+    taida_pack_set_tag((taida_ptr)pack, 2, TAIDA_TAG_LIST);
+    taida_pack_set((taida_ptr)pack, 3, start_chars);
+    taida_pack_set_tag((taida_ptr)pack, 3, TAIDA_TAG_INT);
+    taida_val type_str = (taida_val)taida_str_new_copy("RegexMatch");
+    taida_pack_set((taida_ptr)pack, 4, type_str);
+    taida_pack_set_tag((taida_ptr)pack, 4, TAIDA_TAG_STR);
+    return pack;
+}
+
+// ── Polymorphic dispatchers — called by lowered Str methods ────
+// (C12-6c): the 2nd arg is either a Str pointer or a :Regex pack.
+
+taida_val taida_str_split_poly(const char *s, taida_val sep) {
+    if (taida_val_is_regex_pack(sep)) {
+        const char *pat, *flg;
+        taida_regex_get_fields(sep, &pat, &flg);
+        return taida_regex_split_impl(s ? s : "", pat, flg);
+    }
+    return taida_str_split(s, (const char*)sep);
+}
+
+taida_val taida_str_replace_first_poly(const char *s, taida_val target, const char *rep) {
+    if (taida_val_is_regex_pack(target)) {
+        const char *pat, *flg;
+        taida_regex_get_fields(target, &pat, &flg);
+        return taida_regex_replace_first_impl(s ? s : "", pat, flg, rep ? rep : "");
+    }
+    return taida_str_replace_first(s, (const char*)target, rep);
+}
+
+taida_val taida_str_replace_poly(const char *s, taida_val target, const char *rep) {
+    if (taida_val_is_regex_pack(target)) {
+        const char *pat, *flg;
+        taida_regex_get_fields(target, &pat, &flg);
+        return taida_regex_replace_all_impl(s ? s : "", pat, flg, rep ? rep : "");
+    }
+    return taida_str_replace(s, (const char*)target, rep);
+}
+
+taida_val taida_str_match_regex(const char *s, taida_val regex_pack) {
+    // Build default empty-match pack up front so both failure paths
+    // emit the same shape.
+    if (!s || !taida_val_is_regex_pack(regex_pack)) {
+        taida_val empty_list = taida_list_new();
+        taida_list_set_elem_tag(empty_list, TAIDA_TAG_STR);
+        return taida_regex_build_match_value(0, "", -1, empty_list);
+    }
+    const char *pat, *flg;
+    taida_regex_get_fields(regex_pack, &pat, &flg);
+    regex_t re;
+    if (taida_regex_compile(pat, flg, &re) != 0) {
+        taida_val empty_list = taida_list_new();
+        taida_list_set_elem_tag(empty_list, TAIDA_TAG_STR);
+        return taida_regex_build_match_value(0, "", -1, empty_list);
+    }
+    // Allow up to 16 capture groups (design lock says no PCRE
+    // look-around; 16 groups is ample for Phase 2-3 scope).
+    regmatch_t matches[16];
+    if (regexec(&re, s, 16, matches, 0) != 0 || matches[0].rm_so < 0) {
+        regfree(&re);
+        taida_val empty_list = taida_list_new();
+        taida_list_set_elem_tag(empty_list, TAIDA_TAG_STR);
+        return taida_regex_build_match_value(0, "", -1, empty_list);
+    }
+    size_t full_len = (size_t)(matches[0].rm_eo - matches[0].rm_so);
+    char *full_buf = (char*)TAIDA_MALLOC(full_len + 1, "regex_match full");
+    memcpy(full_buf, s + matches[0].rm_so, full_len);
+    full_buf[full_len] = '\0';
+    taida_val start_chars = taida_bytes_to_chars_offset(s, (size_t)matches[0].rm_so);
+    // Groups list.
+    taida_val groups_list = taida_list_new();
+    taida_list_set_elem_tag(groups_list, TAIDA_TAG_STR);
+    for (int i = 1; i < 16; i++) {
+        if (matches[i].rm_so < 0) {
+            // No more groups available — but we must keep pushing
+            // empty strings for missing groups only if there are
+            // *registered* groups at position i. POSIX re_nsub
+            // indicates number of sub-expressions. Stop at the first
+            // rm_so < 0 after re_nsub boundary.
+            if ((size_t)i > re.re_nsub) break;
+            char *empty = taida_str_alloc(0);
+            groups_list = taida_list_push(groups_list, (taida_val)empty);
+            continue;
+        }
+        size_t gl = (size_t)(matches[i].rm_eo - matches[i].rm_so);
+        char *g = taida_str_alloc(gl);
+        memcpy(g, s + matches[i].rm_so, gl);
+        groups_list = taida_list_push(groups_list, (taida_val)g);
+    }
+    regfree(&re);
+    taida_val out = taida_regex_build_match_value(1, full_buf, start_chars, groups_list);
+    free(full_buf);
+    return out;
+}
+
+taida_val taida_str_search_regex(const char *s, taida_val regex_pack) {
+    if (!s || !taida_val_is_regex_pack(regex_pack)) return -1;
+    const char *pat, *flg;
+    taida_regex_get_fields(regex_pack, &pat, &flg);
+    regex_t re;
+    if (taida_regex_compile(pat, flg, &re) != 0) return -1;
+    regmatch_t m;
+    if (regexec(&re, s, 1, &m, 0) != 0 || m.rm_so < 0) {
+        regfree(&re);
+        return -1;
+    }
+    taida_val chars = taida_bytes_to_chars_offset(s, (size_t)m.rm_so);
+    regfree(&re);
+    return chars;
 }
 
 // ── Template string (sprintf-based) ──────────────────────

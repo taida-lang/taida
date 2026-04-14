@@ -724,6 +724,23 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_replace" | "taida_str_replace_first" => {
             format!("int64_t {}(int64_t s, int64_t from, int64_t to);", name)
         }
+        // C12-6c: Regex polymorphic dispatchers (wasm stubs forward
+        // to fixed-string versions — see runtime_core_wasm.c).
+        "taida_str_split_poly" => {
+            "int64_t taida_str_split_poly(int64_t s, int64_t sep);".to_string()
+        }
+        "taida_str_replace_poly" | "taida_str_replace_first_poly" => {
+            format!("int64_t {}(int64_t s, int64_t target, int64_t rep);", name)
+        }
+        "taida_str_match_regex" => {
+            "int64_t taida_str_match_regex(int64_t s, int64_t regex);".to_string()
+        }
+        "taida_str_search_regex" => {
+            "int64_t taida_str_search_regex(int64_t s, int64_t regex);".to_string()
+        }
+        "taida_regex_new" => {
+            "int64_t taida_regex_new(int64_t pattern, int64_t flags);".to_string()
+        }
         "taida_str_pad" => "int64_t taida_str_pad(int64_t s, int64_t target_len, int64_t pad_char, int64_t pad_end);".to_string(),
         "taida_str_slice" => "int64_t taida_str_slice(int64_t s, int64_t start, int64_t end);".to_string(),
         "taida_str_char_at" | "taida_str_get" => {

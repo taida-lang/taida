@@ -152,9 +152,21 @@ impl Lowering {
             "toUpperCase" => "taida_str_to_upper",
             "toLowerCase" => "taida_str_to_lower",
             "trim" => "taida_str_trim",
-            "split" => "taida_str_split",
-            "replace" => "taida_str_replace_first",
-            "replaceAll" => "taida_str_replace",
+            // C12-6c: runtime-polymorphic dispatch — inspect whether
+            // the target arg is a Str or a :Regex BuchiPack and
+            // dispatch accordingly inside the C helper. Fixed-string
+            // callers pay one tag inspection; Regex callers use
+            // POSIX regex.h-backed implementations.
+            "split" => "taida_str_split_poly",
+            "replace" => "taida_str_replace_first_poly",
+            "replaceAll" => "taida_str_replace_poly",
+            // C12-6c: match / search — Regex-only. The C helper
+            // assumes the 2nd arg is a Regex pack; if not, it
+            // returns an empty match / -1 (mirroring a TypeError at
+            // runtime, but since the checker wasn't strict enough,
+            // we err on the side of a well-defined empty result).
+            "match" => "taida_str_match_regex",
+            "search" => "taida_str_search_regex",
             "slice" => "taida_str_slice",
             "charAt" => "taida_str_char_at",
             "repeat" => "taida_str_repeat",

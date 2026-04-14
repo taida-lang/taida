@@ -16,9 +16,17 @@ impl TypeChecker {
                 "contains" | "startsWith" | "endsWith" => Some((1, 1, vec![Type::Str])),
                 "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Str])),
                 "get" => Some((1, 1, vec![Type::Int])),
-                // B11-4e: replace / replaceAll / split
-                "replace" | "replaceAll" => Some((2, 2, vec![Type::Str, Type::Str])),
-                "split" => Some((1, 1, vec![Type::Str])),
+                // B11-4e: replace / replaceAll / split — fixed-string overload.
+                // C12-6c: first argument may also be a :Regex BuchiPack
+                // (the `Regex(...)` constructor return value). The type
+                // checker uses Type::Unknown here so both Str and Named("Regex")
+                // are accepted without bypassing the arity check, and the
+                // runtime dispatches by inspecting the value's `__type` tag.
+                "replace" | "replaceAll" => Some((2, 2, vec![Type::Unknown, Type::Str])),
+                "split" => Some((1, 1, vec![Type::Unknown])),
+                // C12-6c: match / search — Regex argument required; arity
+                // enforced, but the type constraint is accepted at runtime.
+                "match" | "search" => Some((1, 1, vec![Type::Unknown])),
                 _ => None,
             },
             Type::Int | Type::Float | Type::Num => match method {
@@ -189,9 +197,15 @@ impl TypeChecker {
                 "indexOf" | "lastIndexOf" => Type::Int,
                 "get" => Type::Generic("Lax".to_string(), vec![Type::Str]),
                 "toString" => Type::Str,
-                // B11-4e: replace / replaceAll / split
+                // B11-4e: replace / replaceAll / split (fixed-string + C12-6 Regex overload)
                 "replace" | "replaceAll" => Type::Str,
                 "split" => Type::List(Box::new(Type::Str)),
+                // C12-6c: match returns a :RegexMatch BuchiPack; search
+                // returns an Int (char index or -1). We type `match` as
+                // Named("RegexMatch") so later field access is dispatched
+                // through the BuchiPack path at runtime.
+                "match" => Type::Named("RegexMatch".to_string()),
+                "search" => Type::Int,
                 _ => Type::Unknown,
             },
             Type::Int | Type::Float | Type::Num => match method {

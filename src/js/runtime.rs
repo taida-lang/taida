@@ -982,8 +982,35 @@ function Replace(str, old, rep, opts) {
   return str.replace(old, rep);
 }
 // B11-4c: Str method helpers (edge-case parity with Interpreter/Native)
+// C12-6 (FB-5): Regex overload — when `target` / `sep` is a Regex pack
+// (plain object with `__type === "Regex"`), compile a JS RegExp and
+// delegate. Otherwise fall back to fixed-string semantics.
+function __taida_is_regex(v) {
+  return v !== null
+    && typeof v === 'object'
+    && v.__type === 'Regex'
+    && typeof v.pattern === 'string';
+}
+function __taida_compile_regex(rx, global) {
+  // Strip `g` from user flags (`g` is controlled by the API: replaceAll
+  // / replace / match / search); keep `i`, `m`, `s`. Unknown flag chars
+  // were already rejected at Regex(...) construction time.
+  const userFlags = typeof rx.flags === 'string' ? rx.flags.replace(/g/g, '') : '';
+  const finalFlags = global ? userFlags + 'g' : userFlags;
+  return new RegExp(rx.pattern, finalFlags);
+}
+// Escape literal `$` so that JS `String.prototype.replace` does not
+// interpret `$&`, `$$`, `$1`, etc. as meta-syntax. Design lock §C12-6.
+function __taida_escape_replacement(rep) {
+  return typeof rep === 'string' ? rep.replace(/\$/g, '$$$$') : '';
+}
 function __taida_str_replace(s, target, rep) {
   if (typeof s !== 'string') return '';
+  if (__taida_is_regex(target)) {
+    // Regex overload: first match only, literal replacement.
+    const re = __taida_compile_regex(target, false);
+    return s.replace(re, __taida_escape_replacement(rep));
+  }
   if (target === '') return s; // empty target → no-op (B11-4a)
   // Use indexOf+slice to avoid JS replacement meta-syntax ($&, $$, etc.)
   const idx = s.indexOf(target);
@@ -992,13 +1019,103 @@ function __taida_str_replace(s, target, rep) {
 }
 function __taida_str_replace_all(s, target, rep) {
   if (typeof s !== 'string') return '';
+  if (__taida_is_regex(target)) {
+    // Regex overload: global replace, literal replacement.
+    const re = __taida_compile_regex(target, true);
+    return s.replace(re, __taida_escape_replacement(rep));
+  }
   if (target === '') return s; // empty target → no-op (B11-4a)
   return s.split(target).join(rep);
 }
 function __taida_str_split(s, sep) {
   if (typeof s !== 'string') return Object.freeze([]);
+  if (__taida_is_regex(sep)) {
+    const re = __taida_compile_regex(sep, false);
+    return Object.freeze(s.split(re));
+  }
   if (sep === '') return Object.freeze(s.length === 0 ? [] : Array.from(s));
   return Object.freeze(s.split(sep));
+}
+// C12-6a: Regex(pattern, flags?) prelude constructor. Validates at
+// construction time so invalid patterns fail early (philosophy I).
+function __taida_regex(pattern, flags) {
+  const p = typeof pattern === 'string' ? pattern : '';
+  const f = typeof flags === 'string' ? flags : '';
+  // Validate flags (match the interpreter's `regex_eval::validate_flags`).
+  for (const c of f) {
+    if (c !== 'i' && c !== 'm' && c !== 's') {
+      const err = new Error(
+        "Regex: unsupported flag '" + c + "'. Supported flags: i (case-insensitive), m (multiline), s (dotall)"
+      );
+      err.__taida_error_type = 'ValueError';
+      throw err;
+    }
+  }
+  // Validate the pattern by compiling once. Drop `g` because user
+  // flags never control the global setting here (mirrors interpreter).
+  try {
+    new RegExp(p, f.replace(/g/g, ''));
+  } catch (e) {
+    const err = new Error("Regex: invalid pattern '" + p + "' — " + e.message);
+    err.__taida_error_type = 'ValueError';
+    throw err;
+  }
+  return Object.freeze({ pattern: p, flags: f, __type: 'Regex' });
+}
+// C12-6c: str.match(Regex(...)) returns a :RegexMatch BuchiPack.
+function __taida_str_match(s, rx) {
+  const empty = Object.freeze({
+    hasValue: false,
+    full: '',
+    groups: Object.freeze([]),
+    start: -1,
+    __type: 'RegexMatch',
+  });
+  if (typeof s !== 'string') return empty;
+  if (!__taida_is_regex(rx)) {
+    const err = new Error(
+      'str.match(...) requires a Regex argument. Use Regex("pattern") to construct one.'
+    );
+    err.__taida_error_type = 'TypeError';
+    throw err;
+  }
+  const re = __taida_compile_regex(rx, false);
+  const m = s.match(re);
+  if (!m) return empty;
+  // Count chars (not UTF-16 code units) from string start to match
+  // index so the returned `start` matches the interpreter / native
+  // surface (char-based indices, see design lock §C12-6 and `indexOf`).
+  const prefix = s.slice(0, m.index);
+  const charStart = Array.from(prefix).length;
+  const groups = [];
+  for (let i = 1; i < m.length; i++) {
+    groups.push(typeof m[i] === 'string' ? m[i] : '');
+  }
+  return Object.freeze({
+    hasValue: true,
+    full: m[0],
+    groups: Object.freeze(groups),
+    start: charStart,
+    __type: 'RegexMatch',
+  });
+}
+// C12-6c: str.search(Regex(...)) returns the char index of the first
+// match, or -1 if none. The second arg must be a Regex — string
+// search should use `.indexOf(...)`.
+function __taida_str_search(s, rx) {
+  if (typeof s !== 'string') return -1;
+  if (!__taida_is_regex(rx)) {
+    const err = new Error(
+      'str.search(...) requires a Regex argument. Use Regex("pattern") to construct one.'
+    );
+    err.__taida_error_type = 'TypeError';
+    throw err;
+  }
+  const re = __taida_compile_regex(rx, false);
+  const m = s.match(re);
+  if (!m) return -1;
+  const prefix = s.slice(0, m.index);
+  return Array.from(prefix).length;
 }
 function Slice(val, opts) {
   const start = (opts && __taida_isIntNumber(opts.start)) ? opts.start : 0;

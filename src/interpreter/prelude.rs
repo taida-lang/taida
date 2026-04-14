@@ -385,6 +385,61 @@ impl Interpreter {
                 })
             }
 
+            // ── Regex(pattern, flags?): C12 Phase 6 (FB-5 Phase 2-3) ──
+            // Build a :Regex BuchiPack. Validated eagerly so invalid
+            // patterns / flags fail at construction time rather than
+            // during first method dispatch. Philosophy I — no silent
+            // undefined Regex values; construction either yields a
+            // typed pack or throws a `ValueError`.
+            "Regex" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Regex requires 1 or 2 arguments (pattern, flags?), got {}",
+                            args.len()
+                        ),
+                    });
+                }
+                let pattern = match self.eval_expr(&args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Regex: pattern must be Str, got {}",
+                                Self::type_name_of(&v)
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let flags = if let Some(arg) = args.get(1) {
+                    match self.eval_expr(arg)? {
+                        Signal::Value(Value::Str(s)) => s,
+                        Signal::Value(v) => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "Regex: flags must be Str, got {}",
+                                    Self::type_name_of(&v)
+                                ),
+                            });
+                        }
+                        other => return Ok(Some(other)),
+                    }
+                } else {
+                    String::new()
+                };
+                match super::regex_eval::build_regex_value(&pattern, &flags) {
+                    Ok(v) => Ok(Some(Signal::Value(v))),
+                    Err(msg) => Ok(Some(Signal::Throw(Value::Error(
+                        super::value::ErrorValue {
+                            error_type: "ValueError".to_string(),
+                            message: msg,
+                            fields: Vec::new(),
+                        },
+                    )))),
+                }
+            }
+
             // ── Ok() — ABOLISHED ──
             "Ok" => {
                 Err(RuntimeError {
