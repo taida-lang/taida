@@ -31132,6 +31132,62 @@ stderr(makePack().value)
 }
 
 // ────────────────────────────────────────────────────────────────
+// B11-2f regression tests — stdout convert_to_string path
+// ────────────────────────────────────────────────────────────────
+// These guard against the Phase 2 regression where polymorphic-dispatched
+// stdout mis-identified strings as lists/packs in wasm-* backends.
+// See .dev/FUTURE_BLOCKERS.md FB-27 for the underlying expr_type_tag issue.
+
+/// B11-2f: stdout("") empty string — 3-way parity.
+/// Guards against Phase 2 regression where empty strings were rendered as
+/// the pointer int (e.g. "1218").
+#[test]
+fn test_b11_stdout_empty_string_parity() {
+    let source = r#"stdout("")
+stdout("before")
+stdout("")
+stdout("after")
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_empty_string");
+    let out = run_interpreter_src(source, "b11_stdout_empty_string_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "\nbefore\n\nafter");
+}
+
+/// B11-2f: stdout(Join[...]()) Str-returning mold — 3-way parity.
+/// Guards against Phase 2 regression where Str-returning molds were tagged
+/// as PACK and rendered as "@[]" in wasm-* backends.
+#[test]
+fn test_b11_stdout_str_returning_mold_parity() {
+    let source = r#"lst <= @[1, 2, 3]
+stdout(Join[lst, ","]())
+stdout(Join[@[5], " "]())
+stdout(Join[@[], " "]())
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_str_mold");
+    let out = run_interpreter_src(source, "b11_stdout_str_mold_expected")
+        .expect("interpreter output should exist");
+    // Join[@[], " "]() returns "" → stdout("") emits "\n"; run_interpreter_src
+    // trims trailing whitespace, so only the inner blank line survives.
+    assert_eq!(out, "1,2,3\n5");
+}
+
+/// B11-2f: stdout(Str-returning mold chain) — 3-way parity.
+/// Covers multiple Str-returning molds back-to-back without variable binding.
+#[test]
+fn test_b11_stdout_str_mold_chain_parity() {
+    let source = r#"stdout(Upper["hi"]())
+stdout(Lower["HELLO"]())
+stdout(Trim["  pad  "]())
+stdout(Repeat["ab", 3]())
+"#;
+    assert_backend_parity_for_source(source, "b11_stdout_str_mold_chain");
+    let out = run_interpreter_src(source, "b11_stdout_str_mold_chain_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HI\nhello\npad\nababab");
+}
+
+// ────────────────────────────────────────────────────────────────
 // B11 Phase 3 — FB-9: Int[str]() / Int[str, base]() close-out
 // ────────────────────────────────────────────────────────────────
 
