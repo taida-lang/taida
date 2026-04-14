@@ -324,6 +324,66 @@ In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
   as independent follow-up PRs (per C12-9 policy: "split must not
   share a PR with semantic changes").
 
+#### WASM Core Runtime Split + wasm-edge Size Budget Restoration (FB-26 / Phase 7)
+
+- **wasm-edge `stdout("Hello from edge!")` is now 351 bytes** (previously
+  ~10.5KB when the tagged runtime chain linked `taida_polymorphic_to_string`
+  and its entire display helper fan-out). The B11-2f fix that isolated
+  `taida_io_stdout_with_tag`'s non-Bool branch to a plain `char*` path —
+  combined with `wasm-ld --gc-sections` — now yields a hello-world wasm
+  binary that links only `_start` + `taida_io_stdout` + `write_stdout` +
+  `wasm_strlen` + the WASI `fd_write` import. Closes FB-26.
+- `tests/wasm_edge.rs::wasm_edge_size_check` threshold restored from 16KB
+  back to **4KB** (the original WE-3c gate, raised transiently to 16KB in
+  commit `7af9684` / FB-25 during B11). The new ~351B budget leaves ~11×
+  headroom.
+- New regression test `wasm_edge_hello_no_polymorphic_regression` (1KB
+  upper bound) specifically guards against a future regression that would
+  pull `taida_polymorphic_to_string` back onto the static-string stdout
+  reference chain.
+- Internal-only refactor: split `src/codegen/runtime_core_wasm.c`
+  (6,463 lines) into `src/codegen/runtime_core_wasm/{01_core,
+  02_containers, 03_typeof_list, 04_json_async}.inc.c` + `mod.rs` so each
+  fragment owns a single functional concern and stays well under 3,000
+  lines.
+  - `01_core.inc.c` (2,698 lines) — libc stubs, bump allocator, strlen
+    helpers, stdout/stderr/debug I/O, integer/bool arithmetic, float
+    arithmetic + Rust-Display-compatible formatter, polymorphic
+    display, BuchiPack / List / HashMap / Set runtimes, WC-6
+    extensions.
+  - `02_containers.inc.c` (1,555 lines) — Closure runtime, error
+    ceiling (error-flag based, no setjmp/longjmp), Lax[T], Result[T,P]
+    + Gorillax, Cage, Molten/Stub/Todo stubs, type conversion molds
+    (returning Lax), float div/mod molds, string template helpers,
+    error object helpers, digit/char helpers.
+  - `03_typeof_list.inc.c` (887 lines) — RC no-ops (wasm has no heap
+    refcount), typeof (compile-time tag + runtime heuristic), List
+    HOF / operations / queries, element retain/release no-ops.
+  - `04_json_async.inc.c` (1,323 lines) — JSON runtime (manual
+    strtol/strtod/itoa/ftoa/FNV-1a), type detection for JSON
+    serializer, public field lookup wrappers, schema helpers, schema
+    descriptor application, Async runtime (synchronous blocking for
+    wasm-min), `_taida_main` extern declaration, `_start` WASI entry.
+- The embedded wasm runtime bytes are **byte-identical** to the
+  pre-split version; a new `test_runtime_core_wasm_fragment_concat_preserves_bytes`
+  pins the total C source length (235,855 bytes) and anchors the
+  assembled source's first / last bytes.
+- Same assembly pattern as the JS runtime split (C12-9d):
+  `LazyLock<&'static str>` + `Box::leak` produces a `&'static str`
+  without adding a crate dependency (`concat!()` would require literal
+  arguments). All five `include_str!("runtime_core_wasm.c")` call sites
+  in `src/codegen/driver.rs` now point to
+  `&crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM`.
+- The lightweight `stdout_with_tag` proposal (C12-7b) and `wasm-opt -Oz`
+  post-link step (C12-7c) were **deliberately not adopted**: the current
+  codegen already hits 351B for the static-string path, and swapping the
+  tagged runtime in would risk breaking the wasm-min 512B size gate
+  (`wasm_min_size_gate`) via the same `taida_polymorphic_to_string`
+  reference chain the B11-2f fix removed. `wasm-opt` is also not
+  installed in the standard toolchain. C12B-016 remains OPEN as a
+  follow-up for when the wasm-min runtime grows further and makes the
+  tagged unification cost-effective again.
+
 ## @b.11.rc3
 
 Released: 2026-04-14

@@ -9,3 +9,4 @@ mod lower_molds;
 pub mod rc_opt;
 pub mod resolve;
 pub mod runtime;
+pub mod runtime_core_wasm;

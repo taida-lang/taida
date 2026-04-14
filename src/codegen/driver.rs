@@ -235,8 +235,14 @@ impl WasmRuntimeCache {
     }
 
     /// Get or compile the core runtime .o
+    ///
+    /// C12-7 (FB-26): the core wasm runtime was split into four fragments
+    /// under `runtime_core_wasm/`. The assembled source is byte-identical
+    /// to the pre-split monolithic file (see
+    /// `runtime_core_wasm::RUNTIME_CORE_WASM`), so the cache key remains
+    /// stable across the refactor.
     pub fn rt_core(&self) -> Result<PathBuf, CompileError> {
-        let source = include_str!("runtime_core_wasm.c");
+        let source: &str = &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM;
         self.get_or_compile("rt_core", source)
     }
 
@@ -1436,7 +1442,7 @@ pub fn compile_file_wasm_cached(
     wasm_compile_and_link_uncached(
         &generated_c,
         &wasm_path,
-        &[("rt", include_str!("runtime_core_wasm.c"))],
+        &[("rt", &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM)],
         "_wasm_tmp",
     )?;
 
@@ -1486,7 +1492,10 @@ pub fn compile_file_wasm_wasi_cached(
         &generated_c,
         &wasm_path,
         &[
-            ("rt_core", include_str!("runtime_core_wasm.c")),
+            (
+                "rt_core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
             ("rt_wasi", include_str!("runtime_wasi_io.c")),
         ],
         "_wasm_wasi_tmp",
@@ -1540,7 +1549,10 @@ pub fn compile_file_wasm_edge_cached(
         &generated_c,
         &wasm_path,
         &[
-            ("rt_core", include_str!("runtime_core_wasm.c")),
+            (
+                "rt_core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
             ("rt_edge", include_str!("runtime_edge_host.c")),
         ],
         "_wasm_edge_tmp",
@@ -1601,7 +1613,10 @@ pub fn compile_file_wasm_full_cached(
         &generated_c,
         &wasm_path,
         &[
-            ("rt_core", include_str!("runtime_core_wasm.c")),
+            (
+                "rt_core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
             ("rt_wasi", include_str!("runtime_wasi_io.c")),
             ("rt_full", include_str!("runtime_full_wasm.c")),
         ],
