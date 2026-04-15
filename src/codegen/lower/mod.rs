@@ -1,4 +1,8 @@
 // C12B-024: `src/codegen/lower.rs` split into submodules (FB-21 / C12-9 Step 2).
+// C13-2: Further mechanical split carried over from C12B-024 — the
+// `taida-lang/net` surface moved to `lower/net.rs`, the `taida-lang/os`
+// + `taida-lang/pool` surfaces moved to `lower/os.rs`. `stdlib.rs`
+// now retains only the stdlib IO / crypto / field-tag registry helpers.
 //
 // This `mod.rs` keeps the module-level types (`Lowering`, `LowerError`,
 // `AddonFuncRef`, `AddonFacadeSummary`, `ImportedSymbolKind`,
@@ -12,8 +16,9 @@
 //!
 //! Module-level declarations (struct `Lowering`, error types, addon
 //! facade types, free helpers). The `impl Lowering` method set lives in
-//! the submodules `core` / `imports` / `stdlib` / `molds` / `stmt` /
-//! `expr` / `infer` per placement table §2.
+//! the submodules `core` / `imports` / `stdlib` / `net` / `os` /
+//! `molds` / `stmt` / `expr` / `infer` / `tag_prop` per placement
+//! table §2 (extended by C13-2).
 
 use super::ir::*;
 use crate::parser::*;
@@ -263,6 +268,8 @@ mod expr;
 mod imports;
 mod infer;
 mod molds;
+mod net;
+mod os;
 mod stdlib;
 mod stmt;
 mod tag_prop;
