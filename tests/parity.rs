@@ -18790,22 +18790,23 @@ stdout(r.requests)
 }
 
 /// NB4-10: wsUpgrade rejects stale/fake request packs — 3-backend regression.
-/// A fabricated request pack with wrong __body_token must cause wsUpgrade to error,
-/// not proceed with the upgrade. We verify the server does NOT return 101.
+/// Originally this test pinned *runtime*-side rejection of a fabricated request
+/// pack with wrong `__body_token`. Under C12B-023 v2 (2026-04-15), the checker
+/// now rejects **any** user-authored BuchiPack / TypeInst that assigns a
+/// `__`-prefixed field name at compile time with `[E1617]`, which is the
+/// strictly-stronger invariant (PHILOSOPHY I: silent undefined 禁止 — now the
+/// forgery cannot even be parsed as valid source). This test therefore shifts
+/// to verifying the compile-time rejection is consistent across all three
+/// backends (interp / js / native), so the reviewer's `__body_*` forgery
+/// route is closed at the earliest possible stage.
 #[test]
 fn test_net4_nb10_ws_upgrade_fake_req_rejected_3way() {
-    if !node_available() {
-        eprintln!("SKIP: node not available");
-        return;
-    }
+    use std::io::Write as _;
+    use std::process::Command;
 
-    for backend in &["interp", "js", "native"] {
-        let port = find_free_loopback_port();
-        // Handler creates a fake request pack with correct sentinel but wrong token,
-        // then passes it to wsUpgrade. This should fail with a RuntimeError.
-        // The interpreter catches the error and sends 500; JS/Native print to stderr and exit.
-        let source = format!(
-            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, endResponse)
+    let taida_bin = env!("CARGO_BIN_EXE_taida");
+
+    let source = r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, endResponse)
 
 handler req writer =
   fakeReq <= @(__body_stream <= "__v4_body_stream", __body_token <= 99999)
@@ -18814,67 +18815,57 @@ handler req writer =
   endResponse(writer)
 => :Unit
 
-asyncResult <= httpServe({port}, handler, 1)
+asyncResult <= httpServe(10000, handler, 1)
 asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
-"#,
-            port = port
-        );
+"#;
 
-        let (child, dir) =
-            spawn_net_server(&source, &format!("net4_nb10_fake_req_{}", backend), backend);
-
-        // Send a valid WebSocket upgrade request.
-        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
-        let request = format!(
-            "GET /ws HTTP/1.1\r\n\
-             Host: localhost:{port}\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n",
-            port = port,
-            key = ws_key
-        );
-
-        let response = send_http_request(port, request.as_bytes());
-
-        // The handler should error out (fake req rejected).
-        let output = child.wait_with_output().expect("wait for server");
-        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-
-        // Check that the response or stderr contains the rejection message.
-        // Interpreter: handler error => 500 response with "stale or fabricated" in body.
-        // JS/Native: error => stderr message + process exit.
-        let resp_str = response
-            .as_ref()
-            .map(|r| String::from_utf8_lossy(r).to_string())
-            .unwrap_or_default();
-
-        let all_output = format!("{}{}{}", resp_str, stderr_str, stdout_str);
-
-        // Must NOT produce 101 Switching Protocols.
-        assert!(
-            !resp_str.contains("101 Switching Protocols"),
-            "[{}] fake req should NOT trigger 101 upgrade, got: {:?}",
-            backend,
-            resp_str
-        );
-
-        // Must mention the rejection reason somewhere (response body for interp, stderr for JS/Native).
-        assert!(
-            all_output.contains("stale or fabricated") || all_output.contains("does not match"),
-            "[{}] expected token mismatch error, got response: {:?}, stderr: {:?}",
-            backend,
-            resp_str,
-            stderr_str
-        );
-
-        cleanup_net_project(&dir);
+    let tmp_dir = std::env::temp_dir().join("c12b_023_v2_fake_req");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let src_path = tmp_dir.join("main.td");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create source");
+        f.write_all(source.as_bytes()).expect("write source");
     }
+
+    // `taida check` runs typecheck without invoking a backend, so it
+    // exercises the checker-level reject identically for every backend
+    // target. This is the earliest stage at which the forgery is caught;
+    // older runtime-level rejection is now unreachable (source fails to
+    // parse-check).
+    for backend_hint in &["interp", "js", "native"] {
+        let output = Command::new(taida_bin)
+            .args(&["check", src_path.to_str().unwrap()])
+            .output()
+            .expect("run taida check");
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let all = format!("{}{}", stdout, stderr);
+
+        assert!(
+            !output.status.success(),
+            "[{}] fake `__body_*` pack must fail type-check, but succeeded.\nstdout: {}\nstderr: {}",
+            backend_hint,
+            stdout,
+            stderr
+        );
+        assert!(
+            all.contains("[E1617]"),
+            "[{}] expected [E1617] for reserved `__body_*` field, got: {}",
+            backend_hint,
+            all
+        );
+        assert!(
+            all.contains("__body_stream") || all.contains("__body_token"),
+            "[{}] expected diagnostic to name the reserved field, got: {}",
+            backend_hint,
+            all
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 /// NB4-18: chunked body with well-formed CRLF passes — 3-backend sanity.

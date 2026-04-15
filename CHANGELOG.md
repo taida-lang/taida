@@ -205,6 +205,35 @@ creep were resolved in the same session:
   `test_c12b_022_typeis_bool_param_parity`) pin the runtime
   semantics across all backends.
 
+- **C12B-023 (v2 bypass closure)** — Root fix for the Regex silent-UB
+  forgery vector. The initial C12B-023 fix (needed_funcs-based
+  wasm validator) was bypassed by hand-constructing
+  `@(__type <= "Regex", pattern <= "a", flags <= "")` and feeding
+  the pack to `_poly` dispatchers (v1). The v1 typechecker follow-up
+  (literal-string match on `__type <= "Regex"`) was in turn bypassed
+  by variable binding (`tag <= "Regex"; @(__type <= tag, ...)`),
+  function-arg routing (`inner t = @(__type <= t, ...)`),
+  conditional (`if(c, "Regex", "X")`) and string concatenation
+  (`"Re" + "gex"`). The root fix (v2): user-authored
+  `Expr::BuchiPack` / `Expr::TypeInst` literals may no longer assign
+  **any** `__`-prefixed field name, regardless of the value
+  expression. `__`-prefix is reserved for compiler-internal tags
+  (`__type`, `__value`, `__default`, `__error`, `__tag`,
+  `__items`, `__transforms`, `__status`, `__body_stream`,
+  `__body_token`, ...). Field **reads** (`.`-access) remain allowed
+  for introspection. `[E1617]` now fires at the checker level and
+  blocks compilation on all 7 profiles (interp / js / native /
+  wasm-min / wasm-wasi / wasm-edge / wasm-full). BREAKING for any
+  user code that wrote `__`-prefixed fields in packs (none detected
+  in `examples/`, `docs/`, `tests/` under `cargo test`
+  `test_all_examples_pass_typecheck`). 16 new tests:
+  `typecheck_examples.rs` gains 8 bypass-route reject tests +
+  `test_c12b_023_typeinst_reserved_field_rejected`; each wasm
+  profile gains 2–3 variable-bound / concat bypass reject tests;
+  `parity.rs::test_net4_nb10_ws_upgrade_fake_req_rejected_3way`
+  now pins compile-time rejection of forged `__body_*` packs
+  across all 3 backends (shift-left from runtime rejection).
+
 ### Improvements
 
 #### `expr_type_tag` Mold-Return Single Source of Truth (FB-27 / Phase 1)

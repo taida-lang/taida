@@ -23,6 +23,37 @@ use crate::parser::*;
 /// errors where types are fully known.
 use std::collections::{HashMap, HashSet};
 
+/// C12B-023 bypass closure (2026-04-15, root fix): field names reserved
+/// for compiler-internal use. A user-authored `Expr::BuchiPack` /
+/// `Expr::TypeInst` literal that assigns any of these is rejected at
+/// type-check time with `[E1617]`.
+///
+/// Rationale: compiler-generated packs set `__type`, `__value`,
+/// `__default`, `__error`, `__tag`, `__items`, `__transforms`,
+/// `__status` as *internal* tags to carry nominal-type identity and
+/// invariants (e.g., `Regex` packs carry a validated `pattern` /
+/// `flags` pair, `Lax` packs carry `hasValue` + default, `Async` packs
+/// carry a state tag). Allowing user code to set these fields lets
+/// callers fabricate fake nominal packs that bypass the official
+/// constructors' validation. The earlier narrower fix (literal
+/// `__type <= "Regex"` only) was bypassed by variable binding
+/// (`tag <= "Regex"; @(__type <= tag, ...)`) and by expression
+/// composition (`"Re" + "gex"`, `if(c, "Regex", "X")`). The root
+/// remedy is to reject **all** user assignments to `__`-prefixed
+/// field names, regardless of the value expression.
+///
+/// This is consistent with the Taida naming convention: `__`-prefix
+/// denotes compiler-internal symbols. Compiler-generated packs are
+/// built via Rust-level `Value::BuchiPack(...)` construction (in
+/// `src/interpreter/*`, `src/js/runtime/*`, `src/codegen/lower/*`)
+/// and IR ops — never through the AST `Expr::BuchiPack` /
+/// `Expr::TypeInst` paths this check guards.
+///
+/// NOTE: field **reads** (`value.__type`) remain allowed for
+/// introspection (see `examples/quality/rc6a_error_inheritance.td`);
+/// only write-side assignments in pack literals are rejected.
+const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
+
 #[derive(Debug, Clone)]
 struct MoldHeaderSpec {
     header_args: Vec<MoldHeaderArg>,
@@ -60,6 +91,12 @@ struct MoldBindingDef<'a> {
 /// - `E1611` -- JS backend capability rejection
 /// - `E1612` -- WASM backend capability rejection
 /// - `E1613` -- TypeExtends does not accept enum variant literals
+/// - `E1617` -- Regex invariant rejection. Two emitters share this code (both C12B-023):
+///              (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
+///                  `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
+///              (2) Manual `__type <= "Regex"` BuchiPack construction rejection
+///                  (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
+///                  by its official constructor to enforce eager pattern validation.
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -1726,8 +1763,24 @@ impl TypeChecker {
     /// Non-method fields must have either a type annotation (`field: Type`)
     /// or a default value (`field <= value`).
     fn validate_class_like_fields(&mut self, kind: &str, def_name: &str, fields: &[FieldDef]) {
-        for field in fields.iter().filter(|f| !f.is_method) {
-            if field.type_annotation.is_none() && field.default_value.is_none() {
+        for field in fields.iter() {
+            // C12B-023 bypass closure (3rd layer, 2026-04-15): reject any
+            // `__`-prefixed field name in TypeDef / MoldDef / InheritanceDef
+            // bodies. This is the definition-site twin of the expression-site
+            // reject in `check_mold_errors_in_expr`. Without this check, a
+            // user can forge nominal packs indirectly by declaring
+            // `Fake = @(__type <= "Regex", ...)` and then instantiating
+            // `Fake(...)`, which materialises a pack whose `__type` field
+            // is literally `"Regex"` (see `codegen/lower/molds.rs` and
+            // `interpreter/eval.rs` — both copy default field values into
+            // the pack verbatim). Reject on the `FieldDef` itself,
+            // regardless of `is_method`, so that the rule is uniform
+            // across fields and methods.
+            self.validate_reserved_internal_field_name(kind, def_name, field);
+            if !field.is_method
+                && field.type_annotation.is_none()
+                && field.default_value.is_none()
+            {
                 self.errors.push(TypeError {
                     message: Self::binding_diag(
                         "E1400",
@@ -1741,6 +1794,53 @@ impl TypeChecker {
                 });
             }
         }
+    }
+
+    /// C12B-023 bypass closure (3rd layer): reject `FieldDef` whose name
+    /// starts with the reserved internal-field prefix (`__`). Shared by
+    /// TypeDef / MoldDef / InheritanceDef. Emits `[E1617]` — the same
+    /// diagnostic code used for (1) the AST-level `Expr::BuchiPack`/
+    /// `Expr::TypeInst` literal reject in `check_mold_errors_in_expr`
+    /// and (2) the wasm backend Regex rejection in
+    /// `emit_wasm_c::validate_regex_api_for_wasm`. The three
+    /// checks form a 3-layer defence (definition / expression /
+    /// backend) — any user-authored code path that tries to fabricate
+    /// a nominal pack now fails at `taida check`.
+    ///
+    /// Rationale: `__`-prefix is the language-wide convention for
+    /// compiler-internal tags (`__type`, `__value`, `__default`,
+    /// `__body_stream`, etc.). These fields are materialised by
+    /// runtime-side `Value::BuchiPack(...)` construction (Rust) and
+    /// IR ops — never through parser-produced `FieldDef` nodes in
+    /// well-formed code. The parser does not synthesise any
+    /// `__`-prefixed `FieldDef` (see `parser.rs:1373/1473/1511/1524/
+    /// 1571/1590` — all field names come from user source or the
+    /// literal `"unmold"`). So this check can unconditionally reject
+    /// `__`-prefixed `FieldDef.name` without a built-in exception
+    /// escape hatch.
+    fn validate_reserved_internal_field_name(
+        &mut self,
+        kind: &str,
+        def_name: &str,
+        field: &FieldDef,
+    ) {
+        if !field.name.starts_with(RESERVED_INTERNAL_FIELD_PREFIX) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1617] {} '{}' declares field `{}`, whose `__`-prefix is reserved for \
+                 compiler-internal use. User definitions must not declare `__`-prefixed \
+                 fields: they would materialise as compiler-internal tags (e.g., `__type`, \
+                 `__value`) on the runtime pack and fabricate fake nominal-type identity \
+                 without the invariants that official constructors guarantee. \
+                 Hint: rename the field to a non-`__`-prefixed name, or use the official \
+                 constructor (e.g., `Regex(pat, flags?)`, `Lax(...)`, `Async(...)`) \
+                 instead of forging the pack by hand.",
+                kind, def_name, field.name
+            ),
+            span: field.span.clone(),
+        });
     }
 
     fn resolve_mold_header_type(&self, ty: &TypeExpr, bound_types: &HashMap<String, Type>) -> Type {
@@ -2384,7 +2484,50 @@ defaulted fields must be provided via `()`",
                     }
                 }
             }
-            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            Expr::BuchiPack(fields, span) | Expr::TypeInst(_, fields, span) => {
+                // C12B-023 bypass closure root fix (2026-04-15 v2): reject
+                // any user-authored BuchiPack / TypeInst literal that
+                // assigns a `__`-prefixed field name, regardless of the
+                // value expression. `__`-prefix field names are reserved
+                // for compiler-internal tags (e.g., `__type`, `__value`,
+                // `__default`, `__error`). Hand-rolled packs that set
+                // these tags fabricate nominal-type identity without the
+                // invariants that the official constructors guarantee
+                // (e.g., `Regex(pattern, flags?)` validates the pattern;
+                // `Lax` / `Async` / `Result` wrap values with specific
+                // state discipline).
+                //
+                // Prior narrower fix (literal `__type <= "Regex"` only)
+                // was bypassed via variable binding
+                // (`tag <= "Regex"; @(__type <= tag, ...)`) and
+                // expression composition. Rejecting at the field-name
+                // level closes every indirect route (variable, arg,
+                // if-expr, string concatenation) because the value
+                // expression is no longer consulted. `[E1617]` is shared
+                // with `emit_wasm_c::validate_regex_api_for_wasm` as the
+                // runtime-side backstop.
+                for f in fields {
+                    if f.name.starts_with(RESERVED_INTERNAL_FIELD_PREFIX) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1617] Field name `{}` is reserved for compiler-internal use \
+                                 and may not be assigned in a user-authored pack. \
+                                 The `__`-prefix marks tags that nominal-type constructors \
+                                 (e.g., `Regex(pattern, flags?)`, `Lax(...)`, `Async(...)`) \
+                                 populate to carry validated invariants. Hand-rolled packs \
+                                 that set these fields fabricate fake nominal values, \
+                                 bypass backend invariants (wasm: no regex runtime; \
+                                 Interpreter/JS/Native: unvalidated payload), and produce \
+                                 silent undefined behaviour (PHILOSOPHY I). \
+                                 Hint: Use the official constructor (e.g., `Regex(pat, flags?)`) \
+                                 or pick a non-`__`-prefixed field name for your own tag.",
+                                f.name
+                            ),
+                            span: f.span.clone(),
+                        });
+                    }
+                }
+                let _ = span;
                 for f in fields {
                     self.check_mold_errors_in_expr(&f.value);
                 }

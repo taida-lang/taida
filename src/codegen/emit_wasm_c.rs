@@ -126,6 +126,60 @@ fn validate_net_http_api_for_wasm(
     Ok(())
 }
 
+/// C12B-023: early-out validation for the Regex type / builtins on WASM profiles.
+///
+/// The wasm runtime (`runtime_core_wasm/02_containers.inc.c`) only ships
+/// *stubs* for `taida_regex_new` / `taida_str_match_regex` /
+/// `taida_str_search_regex` — the real POSIX `regex.h` is not linked in any
+/// wasm profile (min / wasi / edge / full). Historically these stubs returned
+/// `0` / `-1` / forwarded the pattern pointer silently, which produced
+/// **undefined behaviour** when a `Regex(...)` pack flowed back through the
+/// polymorphic dispatchers. PHILOSOPHY I forbids silent-undefined paths, so
+/// we reject the Regex surface at compile time instead.
+///
+/// Detected by the presence of any of the three Regex-specific runtime
+/// helpers in the collected `needed_funcs` set:
+///
+/// - `taida_regex_new` — emitted for `Regex(pattern, flags?)`
+/// - `taida_str_match_regex` — emitted for `str.match(re)`
+/// - `taida_str_search_regex` — emitted for `str.search(re)`
+///
+/// `str.replace(Regex(...), ...)` / `str.replaceAll(Regex(...), ...)` go
+/// through the `_poly` dispatchers which are safe for plain-Str callers; the
+/// `Regex(...)` construction on the arg side already emits `taida_regex_new`,
+/// so those cases are caught transitively.
+fn validate_regex_api_for_wasm(
+    needed_funcs: &HashSet<String>,
+    profile: WasmProfile,
+) -> Result<(), WasmCEmitError> {
+    const REGEX_FUNCS: &[(&str, &str)] = &[
+        ("taida_regex_new", "Regex"),
+        ("taida_str_match_regex", "Str.match"),
+        ("taida_str_search_regex", "Str.search"),
+    ];
+
+    for &(runtime_name, api_name) in REGEX_FUNCS {
+        if needed_funcs.contains(runtime_name) {
+            let profile_name = match profile {
+                WasmProfile::Min => "wasm-min",
+                WasmProfile::Wasi => "wasm-wasi",
+                WasmProfile::Edge => "wasm-edge",
+                WasmProfile::Full => "wasm-full",
+            };
+            return Err(WasmCEmitError {
+                message: format!(
+                    "[E1617] {} does not support `{}` (Regex is unavailable on the wasm profile). \
+                     Hint: Use the interpreter, JS, or native backend for Regex-based code, \
+                     or switch to the fixed-string overloads (`split`, `replace`, `replaceAll` with Str args) on wasm.",
+                    profile_name, api_name
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn collect_unsupported_insts(insts: &[IrInst], _out: &mut Vec<String>) {
     for inst in insts {
         match inst {
@@ -315,6 +369,12 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     // Arguments like Bytes[...] may hit a generic unsupported error first,
     // masking the net-specific diagnostic. Early-out ensures the intended message.
     validate_net_http_api_for_wasm(&needed_funcs, profile)?;
+
+    // C12B-023: reject Regex construction / matching on wasm profiles.
+    // The wasm runtime only ships silent-stub implementations for these
+    // helpers (returning 0 / -1 / UB) which violates PHILOSOPHY I
+    // "silent undefined 禁止". Fail at compile time instead.
+    validate_regex_api_for_wasm(&needed_funcs, profile)?;
 
     for name in &needed_funcs {
         writeln!(c, "{}", runtime_func_prototype(name, profile)?).unwrap();

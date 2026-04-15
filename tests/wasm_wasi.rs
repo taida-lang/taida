@@ -930,3 +930,115 @@ fn wasm_wasi_size_check() {
         ratio
     );
 }
+
+// ── C12B-023: Regex on wasm-wasi must produce compile error ──────────
+//
+// PHILOSOPHY I (silent-undefined 禁止): even wasm-wasi shares the
+// runtime_core_wasm Regex stubs; construction + match/search must be
+// rejected at compile time with `[E1617]`.
+
+fn assert_wasi_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
+    let td_path = std::env::temp_dir().join(format!("taida_c12b_023_wasi_{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("taida_c12b_023_wasi_{}.wasm", stem));
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-wasi")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "C12B-023: wasm-wasi should reject Regex usage, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("[E1617]"),
+        "C12B-023: wasm-wasi Regex rejection must emit [E1617], got: {}",
+        stderr
+    );
+    assert!(
+        candidates.iter().any(|l| stderr.contains(l)),
+        "C12B-023: wasm-wasi [E1617] message should mention one of {:?}, got: {}",
+        candidates, stderr
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_regex_ctor() {
+    assert_wasi_regex_rejected(
+        "ctor",
+        "re <= Regex(\"\\\\d+\", \"\")\nstdout(\"built\")\n",
+        &["Regex"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_str_match() {
+    assert_wasi_regex_rejected(
+        "match",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\nresult <= s.match(re)\nstdout(result)\n",
+        &["Regex", "Str.match"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_str_search() {
+    assert_wasi_regex_rejected(
+        "search",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\ni <= s.search(re)\nstdout(i)\n",
+        &["Regex", "Str.search"],
+    );
+}
+
+// ── C12B-023 bypass closure (2026-04-15 external review fix) ─────────
+//
+// Reviewer reproduction code + adjacent `_poly` entrypoints; pin that
+// wasm-wasi rejects the manual-pack path at type-check time too.
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_manual_pack_replaceall() {
+    assert_wasi_regex_rejected(
+        "bypass_replaceall",
+        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_manual_pack_match() {
+    assert_wasi_regex_rejected(
+        "bypass_match",
+        "re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\nstdout(\"abc\".match(re))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+// C12B-023 root fix (2026-04-15 v2): indirect bypass routes.
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_variable_bound_tag() {
+    assert_wasi_regex_rejected(
+        "bypass_var_tag",
+        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_concat_tag() {
+    assert_wasi_regex_rejected(
+        "bypass_concat",
+        "re <= @(__type <= \"Re\" + \"gex\", pattern <= \"a\", flags <= \"\")\nstdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
