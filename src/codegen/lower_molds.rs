@@ -2046,73 +2046,110 @@ impl Lowering {
                     }
                     // Primitive type check: use compile-time type analysis
                     Expr::TypeLiteral(type_name, None, _) => {
-                        let is_match = match type_name.as_str() {
-                            "Int" => {
-                                // Int: expression produces an int AND is not a bool
-                                match &type_args[0] {
-                                    Expr::IntLit(_, _) => Some(true),
-                                    Expr::FloatLit(_, _) => Some(false),
-                                    Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
-                                    Expr::BoolLit(_, _) => Some(false),
-                                    Expr::EnumVariant(_, _, _) => Some(false),
-                                    _ if self.expr_is_bool(&type_args[0]) => Some(false),
-                                    _ => {
-                                        // Check if the expression is a known string type
-                                        if self.expr_is_string_full(&type_args[0]) {
+                        // C12B-022: If the operand is a function parameter whose
+                        // runtime tag is threaded through `param_tag_vars`
+                        // (caller-propagated type tag), prefer a runtime tag
+                        // comparison over compile-time inference. The existing
+                        // compile-time branches assume Ident resolves to a known
+                        // static type, which is false for generic `is_foo v =
+                        // TypeIs[v, :T]()` patterns where `v` can be any type.
+                        //
+                        // `taida_get_param_tag_primitive_match(tag, expected)`
+                        // handles the compound `Num` case (tag == INT || tag == FLOAT)
+                        // and returns 0 (false) for UNKNOWN(-1) tags so the
+                        // behaviour on older call sites that do not propagate
+                        // tags is preserved (and matches pre-C12B-022 output on
+                        // literal paths, because the compile-time branches
+                        // above still fire when the arg is a literal).
+                        let param_tag = self.get_param_tag_var(&type_args[0]);
+                        let primitive_tag: Option<i64> = match type_name.as_str() {
+                            "Int" => Some(0),
+                            "Float" => Some(1),
+                            "Bool" => Some(2),
+                            "Str" => Some(3),
+                            "Num" => Some(-10), // sentinel: handled by runtime as INT|FLOAT
+                            _ => None,
+                        };
+
+                        if let (Some(tag_var), Some(expected_tag)) = (param_tag, primitive_tag) {
+                            let expected_var = func.alloc_var();
+                            func.push(IrInst::ConstInt(expected_var, expected_tag));
+                            func.push(IrInst::Call(
+                                result,
+                                "taida_primitive_tag_match".to_string(),
+                                vec![tag_var, expected_var],
+                            ));
+                        } else {
+                            let is_match = match type_name.as_str() {
+                                "Int" => {
+                                    // Int: expression produces an int AND is not a bool
+                                    match &type_args[0] {
+                                        Expr::IntLit(_, _) => Some(true),
+                                        Expr::FloatLit(_, _) => Some(false),
+                                        Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => {
                                             Some(false)
-                                        } else {
-                                            // Assume Int for non-bool, non-string unboxed values
-                                            Some(true)
+                                        }
+                                        Expr::BoolLit(_, _) => Some(false),
+                                        Expr::EnumVariant(_, _, _) => Some(false),
+                                        _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                        _ => {
+                                            // Check if the expression is a known string type
+                                            if self.expr_is_string_full(&type_args[0]) {
+                                                Some(false)
+                                            } else {
+                                                // Assume Int for non-bool, non-string unboxed values
+                                                Some(true)
+                                            }
                                         }
                                     }
                                 }
+                                "Float" => match &type_args[0] {
+                                    Expr::FloatLit(_, _) => Some(true),
+                                    _ => Some(false),
+                                },
+                                "Num" => match &type_args[0] {
+                                    Expr::IntLit(_, _) | Expr::FloatLit(_, _) => Some(true),
+                                    Expr::BoolLit(_, _) => Some(false),
+                                    Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
+                                    _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                    _ if self.expr_is_string_full(&type_args[0]) => Some(false),
+                                    _ => Some(true),
+                                },
+                                "Str" => match &type_args[0] {
+                                    Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(true),
+                                    _ if self.expr_is_string_full(&type_args[0]) => Some(true),
+                                    Expr::IntLit(_, _)
+                                    | Expr::FloatLit(_, _)
+                                    | Expr::BoolLit(_, _) => Some(false),
+                                    _ => Some(false),
+                                },
+                                "Bool" => match &type_args[0] {
+                                    Expr::BoolLit(_, _) => Some(true),
+                                    _ if self.expr_is_bool(&type_args[0]) => Some(true),
+                                    Expr::IntLit(_, _)
+                                    | Expr::FloatLit(_, _)
+                                    | Expr::StringLit(_, _)
+                                    | Expr::TemplateLit(_, _) => Some(false),
+                                    _ => Some(false),
+                                },
+                                "Bytes" => Some(false), // Bytes is rare, default false
+                                // B11B-015: Error and named types need runtime check
+                                "Error" => None,
+                                _ => None,
+                            };
+                            if let Some(b) = is_match {
+                                func.push(IrInst::ConstBool(result, b));
+                            } else {
+                                // Runtime check via taida_typeis_named
+                                let val_var = self.lower_expr(func, &type_args[0])?;
+                                let type_str = func.alloc_var();
+                                func.push(IrInst::ConstStr(type_str, type_name.to_string()));
+                                func.push(IrInst::Call(
+                                    result,
+                                    "taida_typeis_named".to_string(),
+                                    vec![val_var, type_str],
+                                ));
                             }
-                            "Float" => match &type_args[0] {
-                                Expr::FloatLit(_, _) => Some(true),
-                                _ => Some(false),
-                            },
-                            "Num" => match &type_args[0] {
-                                Expr::IntLit(_, _) | Expr::FloatLit(_, _) => Some(true),
-                                Expr::BoolLit(_, _) => Some(false),
-                                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
-                                _ if self.expr_is_bool(&type_args[0]) => Some(false),
-                                _ if self.expr_is_string_full(&type_args[0]) => Some(false),
-                                _ => Some(true),
-                            },
-                            "Str" => match &type_args[0] {
-                                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(true),
-                                _ if self.expr_is_string_full(&type_args[0]) => Some(true),
-                                Expr::IntLit(_, _)
-                                | Expr::FloatLit(_, _)
-                                | Expr::BoolLit(_, _) => Some(false),
-                                _ => Some(false),
-                            },
-                            "Bool" => match &type_args[0] {
-                                Expr::BoolLit(_, _) => Some(true),
-                                _ if self.expr_is_bool(&type_args[0]) => Some(true),
-                                Expr::IntLit(_, _)
-                                | Expr::FloatLit(_, _)
-                                | Expr::StringLit(_, _)
-                                | Expr::TemplateLit(_, _) => Some(false),
-                                _ => Some(false),
-                            },
-                            "Bytes" => Some(false), // Bytes is rare, default false
-                            // B11B-015: Error and named types need runtime check
-                            "Error" => None,
-                            _ => None,
-                        };
-                        if let Some(b) = is_match {
-                            func.push(IrInst::ConstBool(result, b));
-                        } else {
-                            // Runtime check via taida_typeis_named
-                            let val_var = self.lower_expr(func, &type_args[0])?;
-                            let type_str = func.alloc_var();
-                            func.push(IrInst::ConstStr(type_str, type_name.to_string()));
-                            func.push(IrInst::Call(
-                                result,
-                                "taida_typeis_named".to_string(),
-                                vec![val_var, type_str],
-                            ));
                         }
                     }
                     _ => {

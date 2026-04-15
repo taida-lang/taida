@@ -130,9 +130,20 @@ function __taida_os_stat(path) {
   }
 }
 
+// C12B-021: Exists now returns Result[Bool] instead of bare Bool.
+// The Result envelope distinguishes "probe succeeded, path not
+// present" from "probe failed (e.g. fs module unavailable)". This
+// matches the Interpreter / Native contract.
 function __taida_os_exists(path) {
-  if (!__os_fs) return false;
-  return __os_fs.existsSync(path);
+  if (!__os_fs) {
+    return __taida_os_result_fail(new __NativeError('fs module not available'));
+  }
+  try {
+    const b = __os_fs.existsSync(path);
+    return __taida_os_result_ok(b === true);
+  } catch (e) {
+    return __taida_os_result_fail(e);
+  }
 }
 
 function __taida_os_envvar(name) {
@@ -143,10 +154,23 @@ function __taida_os_envvar(name) {
 
 // ── Side-effect functions (writeFile, appendFile, remove, createDir, rename) ──
 
+// C12B-021: the five write/remove/create APIs now return
+// Result[Int]. Inner value is the byte count (writeFile /
+// writeBytes / appendFile), the number of entries removed
+// (remove), or 1/0 for "newly created"/"already existed"
+// (createDir). Rationale and parity matrix: see
+// .dev/C12_DESIGN.md §C12B-021.
 function __taida_os_writeFile(path, content) {
   try {
+    // Compute the byte count from the same encoding Node will use
+    // when writing a string (utf-8). This lets the returned Int
+    // match the Interpreter's `content.len() as i64` on ASCII/UTF-8
+    // inputs byte-for-byte.
+    const buf = typeof Buffer !== 'undefined'
+      ? Buffer.byteLength(content, 'utf8')
+      : (typeof content === 'string' ? content.length : 0);
     __os_fs.writeFileSync(path, content);
-    return __taida_os_result_ok(__taida_os_ok_inner());
+    return __taida_os_result_ok(buf);
   } catch (e) {
     return __taida_os_result_fail(e);
   }
@@ -156,7 +180,8 @@ function __taida_os_writeBytes(path, content) {
   try {
     const payload = __taida_to_bytes_payload(content);
     __os_fs.writeFileSync(path, payload);
-    return __taida_os_result_ok(__taida_os_ok_inner());
+    const n = (payload && typeof payload.length === 'number') ? payload.length : 0;
+    return __taida_os_result_ok(n);
   } catch (e) {
     return __taida_os_result_fail(e);
   }
@@ -164,8 +189,11 @@ function __taida_os_writeBytes(path, content) {
 
 function __taida_os_appendFile(path, content) {
   try {
+    const buf = typeof Buffer !== 'undefined'
+      ? Buffer.byteLength(content, 'utf8')
+      : (typeof content === 'string' ? content.length : 0);
     __os_fs.appendFileSync(path, content);
-    return __taida_os_result_ok(__taida_os_ok_inner());
+    return __taida_os_result_ok(buf);
   } catch (e) {
     return __taida_os_result_fail(e);
   }
@@ -173,8 +201,24 @@ function __taida_os_appendFile(path, content) {
 
 function __taida_os_remove(path) {
   try {
+    // Count the entries BEFORE removal so the returned number is
+    // deterministic even when the tree traversal itself partially
+    // succeeds (rare with rmSync + recursive, but well-defined).
+    let count = 0;
+    const walk = (p) => {
+      count += 1;
+      try {
+        const st = __os_fs.lstatSync(p);
+        if (st.isDirectory()) {
+          for (const name of __os_fs.readdirSync(p)) {
+            walk(p + '/' + name);
+          }
+        }
+      } catch (_) { /* swallow — stat can race with rm */ }
+    };
+    try { walk(path); } catch (_) { count = count || 1; }
     __os_fs.rmSync(path, { recursive: true, force: false });
-    return __taida_os_result_ok(__taida_os_ok_inner());
+    return __taida_os_result_ok(count);
   } catch (e) {
     return __taida_os_result_fail(e);
   }
@@ -182,8 +226,15 @@ function __taida_os_remove(path) {
 
 function __taida_os_createDir(path) {
   try {
+    let already = false;
+    try {
+      const st = __os_fs.lstatSync(path);
+      already = st.isDirectory();
+    } catch (_) {
+      already = false;
+    }
     __os_fs.mkdirSync(path, { recursive: true });
-    return __taida_os_result_ok(__taida_os_ok_inner());
+    return __taida_os_result_ok(already ? 0 : 1);
   } catch (e) {
     return __taida_os_result_fail(e);
   }

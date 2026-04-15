@@ -655,7 +655,12 @@ fn link_objects_inner(
     // 別途コンパイルしてリンク。
 
     // C エントリポイントを生成
-    let c_wrapper = include_str!("native_runtime.c");
+    // C12B-026 (C12-9 Phase 9 Step 2): `native_runtime.c` は 20,866 行 /
+    // 886,457 bytes の巨大 translation unit。`src/codegen/native_runtime/`
+    // 配下の 7 fragment (`01_core.inc.c` .. `07_net_h3_main.inc.c`) に
+    // 機械分割し、`LazyLock<&'static str>` で初回アクセス時に連結する。
+    // Rust-level 連結のため clang 視点では依然 1 TU で byte-identical。
+    let c_wrapper: &str = &crate::codegen::native_runtime::NATIVE_RUNTIME_C;
 
     let c_path = obj_path.with_extension("_entry.c");
     fs::write(&c_path, c_wrapper).map_err(|e| CompileError {
@@ -2326,8 +2331,16 @@ mod tests {
 
     // ── NET3 regression tests for native_runtime.c ──────────────────────
 
-    /// The C runtime source used by include_str!("native_runtime.c").
-    const NATIVE_C: &str = include_str!("native_runtime.c");
+    /// The C runtime source used by the native compilation path.
+    /// C12B-026 (C12-9 Phase 9 Step 2): previously
+    /// `const NATIVE_C: &str = include_str!("native_runtime.c")` — now
+    /// we resolve through the assembled `LazyLock<&'static str>` since
+    /// the source lives in 7 fragment files under
+    /// `src/codegen/native_runtime/`. The concatenation is byte-identical
+    /// so every `NATIVE_C.contains(...)` regression match below keeps
+    /// working unchanged.
+    static NATIVE_C: std::sync::LazyLock<&'static str> =
+        std::sync::LazyLock::new(|| *crate::codegen::native_runtime::NATIVE_RUNTIME_C);
 
     /// Regression: commit_head must use length-checked snprintf writes.
     /// The old code blindly accumulated `offset += snprintf(...)` without

@@ -1689,6 +1689,18 @@ int64_t taida_get_call_arg_tag(int64_t index) {
     return -1; // UNKNOWN
 }
 
+/* C12B-022: WASM mirror of taida_primitive_tag_match (native_runtime.c).
+ * Returns 0 for UNKNOWN(-1) tags so the lowerer does not inadvertently
+ * match on wasm profiles when param-tag propagation was not set up.
+ * -10 sentinel = Num (INT||FLOAT) match, otherwise tag == expected. */
+int64_t taida_primitive_tag_match(int64_t tag, int64_t expected) {
+    if (tag == -1) return 0;
+    if (expected == -10) {
+        return (tag == WASM_TAG_INT || tag == WASM_TAG_FLOAT) ? 1 : 0;
+    }
+    return (tag == expected) ? 1 : 0;
+}
+
 // NB-14: Return type tag propagation (WASM mirror of native_runtime.c).
 static int64_t __wasm_return_tag = -1; // UNKNOWN
 

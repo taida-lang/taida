@@ -5,6 +5,84 @@
 In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
 全 12 本消化）. See `.dev/C12_PROGRESS.md` for the live progress tracker.
 
+### Breaking Changes Summary (C12B-037)
+
+@c.12.rc3 bundles **four independent breaking changes** that land in the
+same release. A single user codebase upgrading from @b.11.rc3 to
+@c.12.rc3 may see multiple compile-time errors at once; this section
+collects them in the recommended migration order so you know what to
+fix first.
+
+**Impact ranking (most-to-least likely to hit code)**:
+
+1. **Phase 2 — `.toString(radix)` removed** (`[E1508]`)
+   - Scope: any call site that uses the JS-style radix argument such as
+     `n.toString(16)` or `n.toString(2)`.
+   - Migration: replace with `ToRadix[n, base]().getOrDefault("")`.
+     See `docs/reference/mold_types.md §ToRadix`.
+   - Detection: `taida check` reports `[E1508] .toString() takes no
+     arguments`. Fix first — it's purely mechanical.
+
+2. **Phase 5 — `stdout` / `stderr` return `Int` instead of `Value::Unit`**
+   - Scope: any `s <= stdout(...)` binding whose downstream code
+     assumed `s` was `Unit` or a `Result`. Most real code used
+     `stdout(...)` as a statement and is unaffected.
+   - Migration: existing `stdout(x) => _` patterns still work (they
+     discard the `Int` byte count). If you bound the result, you can
+     now perform arithmetic on it: `bytes <= stdout("hi"); stdout(bytes + 1)`.
+   - Detection: no compile error for the common discard pattern; only
+     code that asserted on the type of the return may need updating.
+
+3. **Phase 4 — `| cond |>` arm bodies must end in a pure expression**
+     (`[E1616]`)
+   - Scope: arm bodies that contained a discarded side-effect statement
+     (e.g. `writeFile(...) => _wr`), a bare function-call statement, or
+     a trailing let-binding with no result expression.
+   - Migration:
+     - Discarded side-effect statement → wrap in an `If[cond, then,
+       else]()` mold or hoist the side effect out of the arm.
+     - Trailing let binding → add a final expression line (the bound
+       name itself works).
+     - Let-bindings in non-terminal positions (`doubled <= double(n);
+       addOne(doubled)`) are still allowed — the discipline only
+       targets side-effect statements.
+   - Detection: parser `[E1616]` points to the offending statement with
+     its span. See `docs/guide/07_control_flow.md` for the full table
+     of accepted / rejected elements.
+
+4. **Phase 3 — non-tail mutual recursion is a compile error** (`[E1614]`)
+   - Scope: any function pair (or larger cycle) where at least one edge
+     of the call graph cycle is *not* in tail position. Tail-only
+     mutual recursion (`isEven` / `isOdd`) continues to work.
+   - Migration: refactor the non-tail call to a tail call (often by
+     threading an accumulator), or replace the recursion with an
+     explicit loop via `Fold` / `Filter` / `Map` molds.
+   - Detection: `taida check` / `taida verify` report `[E1614]`
+     identifying the offending edge. Formerly this failure surfaced at
+     runtime as `Maximum call depth (256) exceeded`.
+
+**Recommended fix order**: 1 → 2 → 3 → 4. `.toString(radix)` and the
+`stdout` / `stderr` return-type change are the mechanical ones and can
+be resolved without touching control flow. Phases 4 and 3 may surface
+in the same function, so landing the pure-expression discipline first
+often clarifies the call-graph before the tail-position analysis runs.
+
+**Per-package dry-run (internal official-package-repos)**:
+
+| Package | Phase 2 hits | Phase 3 hits | Phase 4 hits | Phase 5 hits |
+|---------|--------------|--------------|--------------|--------------|
+| `terminal` | 0 | 0 | 0 | 0 |
+
+(dry-run run 2026-04-15 against `.dev/official-package-repos/`; only
+the `terminal` package is tracked in the internal repo tree and it was
+authored after all four breaking changes were designed, so no
+migration is required for it. `taida-lang/net` / `taida-lang/os`
+prelude code lives inside the compiler and is updated in-tree as part
+of this release).
+
+External packages should expect <10 compile errors per 1,000 LoC of
+Taida code based on RC-era metrics.
+
 ### Post-Gate Blocker Fixes (2026-04-15)
 
 Gate review surfaced 8 Must Fix blockers (`C12B-029/030/031/032/033/034/035/040`).
@@ -57,6 +135,75 @@ All resolved in this session:
   `ToRadix[n, base]().getOrDefault("")` (returns `Lax[Str]`), not
   the previously-listed `Str[Int[s, 16]()..]()` which performs the
   opposite direction (hex-string → decimal-string).
+
+### Post-Gate Should Fix Completion (2026-04-15 follow-up)
+
+Two Should Fix blockers originally carried over as OPEN/HOLD were
+completed in a follow-up session after the user rejected the
+"C13 postpone" plan and requested in-scope completion:
+
+- **C12B-021** — FB-18 scope completion (Result type completeness).
+  `writeFile` / `writeBytes` / `appendFile` / `remove` / `createDir`
+  now return `Result[Int]` (inner value = byte count / removed-entry
+  count / newly-created flag) instead of `Result[@(ok, code, message)]`.
+  `Exists[path]()` now returns `Result[Bool]` instead of a bare
+  `Bool`, distinguishing permission-denied from "path absent". All
+  three backends (Interpreter / JS / Native) + the wasm-wasi runtime
+  (`runtime_wasi_io.c`) were updated in lockstep. 3 new parity tests
+  (`test_c12b_021_writefile_result_int_parity`,
+  `test_c12b_021_writefile_failure_is_error_parity`,
+  `test_c12b_021_exists_result_bool_parity`) lock the cross-backend
+  contract; the pre-existing `test_file_bytes_read_write_three_way_parity`
+  was migrated to the new `.isSuccess()` idiom. BREAKING: callers
+  that read `.__value.ok` / `.__value.code` / `.__value.message`
+  must switch to `.isSuccess()` / `.isError()` and read the new
+  `.__value` Int directly; the error envelope is unchanged.
+
+- **C12B-036** — Regex compile cache across all three backends.
+  The Interpreter gains a thread-local FIFO cache (`REGEX_CACHE`,
+  capacity 64) in `src/interpreter/regex_eval.rs`; the Native
+  runtime gains a process-wide FIFO cache (`g_regex_cache`,
+  capacity 16) in `src/codegen/native_runtime.c`; the JS runtime
+  already had an equivalent `__taida_regex_cache` (capacity 64)
+  from the C12B-040 work, preserved as-is. Hot-loop
+  `str.replaceAll(Regex(...), ...)` now skips `regcomp` /
+  `RegexBuilder::new` / `new RegExp` after the first call, while
+  keeping the PHILOSOPHY I "no silent undefined" invariant
+  (invalid patterns are still rejected at construction time).
+  4 new parity tests (`test_c12b_036_regex_replace_all_hot_loop_parity`,
+  `test_c12b_036_regex_cache_distinguishes_flags_parity`,
+  `test_c12b_036_regex_search_stateless_parity`,
+  `test_c12b_036_regex_match_stateless_parity`) plus 4 interpreter
+  unit tests pin the cache behaviour.
+
+### Post-Gate Nice to Have Fixes (2026-04-15)
+
+Two Nice to Have / pre-existing blockers tractable without scope
+creep were resolved in the same session:
+
+- **C12B-020** — `expr => _` pipeline discard is now accepted on
+  Native (`Lowering error: unsupported pipeline step` resolved) and
+  JS (prior codegen emitted `__p = _;` which was a ReferenceError).
+  Both backends now treat `Placeholder` as a no-op pipeline step,
+  matching the Interpreter. 2 new parity tests
+  (`test_c12b_020_stdout_discard_pipeline_parity`,
+  `test_c12b_020_pipeline_discard_followed_by_stmt_parity`) lock
+  the 3-backend contract.
+- **C12B-022** — Native `TypeIs[v, :Int/:Str/:Bool/:Num]()` on a
+  function parameter no longer returns a stale compile-time
+  assumption (the Int branch previously always answered `true` for
+  untyped Idents). The lowerer now emits
+  `taida_primitive_tag_match(tag, expected)` whenever the operand
+  is in `param_tag_vars`, and the caller-side
+  `emit_call_arg_tags_full` additionally propagates the `Int=0`
+  default tag for callees detected (via
+  `param_type_check_funcs` / `body_uses_typeis_on_ident`) to use
+  `TypeIs` on their parameters. WASM runtime gains the mirror
+  helper; `EXPECTED_TOTAL_LEN` advances to 237,823. 3 new parity
+  tests (`test_c12b_022_typeis_int_param_parity`,
+  `test_c12b_022_typeis_str_param_parity`,
+  `test_c12b_022_typeis_bool_param_parity`) pin the runtime
+  semantics across all backends.
 
 ### Improvements
 

@@ -245,6 +245,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Val],
         },
+        // C12B-022: Runtime primitive-type check for TypeIs on param-tag idents
+        "taida_primitive_tag_match" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
         "taida_set_return_tag" => RuntimeAbi {
             params: &[Val],
             returns: &[Val],

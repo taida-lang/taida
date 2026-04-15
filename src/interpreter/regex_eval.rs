@@ -29,10 +29,69 @@
 
 use super::value::Value;
 use regex::{Regex, RegexBuilder};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 
 /// Internal tag marker stored in `Value::BuchiPack` `__type` for
 /// Regex values.
 pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
+
+/// C12B-036: per-thread FIFO cache for compiled regex objects.
+///
+/// Each Str-method overload (`replace`, `replaceAll`, `split`, `match`,
+/// `search`) and `build_regex_value` used to call [`compile`] — which
+/// allocates a new `Regex` from scratch every time. In a hot loop
+/// (`values => map(v => v.replace(Regex("..."), "..."))`) this means
+/// the same pattern is re-parsed on every iteration. The cache below
+/// stashes the most recently used `(pattern, flags)` pairs so that
+/// subsequent calls return the shared `Regex` in O(n) (n = capacity,
+/// here 64) without any re-parsing.
+///
+/// Notes:
+/// * Thread-local: `Regex` is `Sync + Send` but we keep the cache
+///   private per thread to avoid locking on the hot path. The worst
+///   case is a small per-thread memory footprint.
+/// * FIFO (not LRU): preserves insertion order via `VecDeque`.
+///   We did not adopt full LRU because the expected working set for
+///   Regex keys in a program is small (usually < capacity) and FIFO
+///   is simpler + branch-free for the common "cache hit on first
+///   entry" path.
+/// * Capacity 64 mirrors the JS runtime's `__TAIDA_REGEX_CACHE_CAPACITY`
+///   so the three backends behave similarly under memory pressure.
+/// * Invalid patterns are never cached: [`compile`] returns `Err`
+///   before reaching [`cached_compile`].
+const REGEX_CACHE_CAPACITY: usize = 64;
+
+thread_local! {
+    static REGEX_CACHE: RefCell<VecDeque<((String, String), Regex)>> =
+        RefCell::new(VecDeque::with_capacity(REGEX_CACHE_CAPACITY));
+}
+
+/// Return a compiled `Regex` for `(pattern, flags)` from the thread-local
+/// cache, inserting it on a miss. Cloning a `Regex` is cheap — internally
+/// it is an `Arc`-shared pointer to the NFA, so the returned value is a
+/// true share rather than a fresh compile.
+fn cached_compile(pattern: &str, flags: &str) -> Result<Regex, String> {
+    let key = (pattern.to_string(), flags.to_string());
+    let hit = REGEX_CACHE.with(|cell| {
+        cell.borrow()
+            .iter()
+            .find(|((p, f), _)| p == &key.0 && f == &key.1)
+            .map(|(_, re)| re.clone())
+    });
+    if let Some(re) = hit {
+        return Ok(re);
+    }
+    let re = compile(pattern, flags)?;
+    REGEX_CACHE.with(|cell| {
+        let mut q = cell.borrow_mut();
+        if q.len() >= REGEX_CACHE_CAPACITY {
+            q.pop_front();
+        }
+        q.push_back((key, re.clone()));
+    });
+    Ok(re)
+}
 
 /// Detect whether a [`Value`] is a Regex BuchiPack. Returns the
 /// `(pattern, flags)` tuple when so.
@@ -71,12 +130,14 @@ pub(crate) fn as_regex(val: &Value) -> Option<(String, String)> {
 /// `:Error`.
 pub(crate) fn build_regex_value(pattern: &str, flags: &str) -> Result<Value, String> {
     validate_flags(flags)?;
-    // Compile once to surface pattern errors at construction time rather
-    // than at first use. The compiled object is dropped — every
-    // Str-method overload recompiles, matching JS's `new RegExp(...)`
-    // semantics where sharing is via the pattern string. This keeps the
-    // Value fully cloneable / serializable and avoids interior mutability.
-    compile(pattern, flags)?;
+    // Compile once at construction time to surface pattern errors eagerly
+    // (no silent undefined state, per PHILOSOPHY I). The pre-compiled
+    // `Regex` is also kept in the thread-local cache (`cached_compile`)
+    // so subsequent Str-method calls on this pattern hit the cache on
+    // the first use — a small but predictable warm-up, matching the JS
+    // runtime where `new RegExp(...)` at construction primes the
+    // `__taida_regex_cache` on the first method call.
+    cached_compile(pattern, flags)?;
     Ok(Value::BuchiPack(vec![
         ("pattern".into(), Value::Str(pattern.to_string())),
         ("flags".into(), Value::Str(flags.to_string())),
@@ -118,7 +179,7 @@ pub(crate) fn replace_first(
     flags: &str,
     replacement: &str,
 ) -> Result<String, String> {
-    let re = compile(pattern, flags)?;
+    let re = cached_compile(pattern, flags)?;
     // `regex::replacen` expands `$N` by default. Use `NoExpand` to
     // apply the replacement as a literal, matching the B11 Phase 1
     // fixed-string contract and JS's documented `$&` lock-down.
@@ -135,7 +196,7 @@ pub(crate) fn replace_all(
     flags: &str,
     replacement: &str,
 ) -> Result<String, String> {
-    let re = compile(pattern, flags)?;
+    let re = cached_compile(pattern, flags)?;
     Ok(re.replace_all(s, regex::NoExpand(replacement)).into_owned())
 }
 
@@ -143,7 +204,7 @@ pub(crate) fn replace_all(
 /// (philosophy: no silent fallback — the user must explicitly call
 /// `.split("")` for codepoint-split, which is the fixed-string overload).
 pub(crate) fn split(s: &str, pattern: &str, flags: &str) -> Result<Vec<String>, String> {
-    let re = compile(pattern, flags)?;
+    let re = cached_compile(pattern, flags)?;
     Ok(re.split(s).map(|part| part.to_string()).collect())
 }
 
@@ -163,7 +224,7 @@ pub(crate) fn match_first(
     pattern: &str,
     flags: &str,
 ) -> Result<Option<MatchResult>, String> {
-    let re = compile(pattern, flags)?;
+    let re = cached_compile(pattern, flags)?;
     let Some(caps) = re.captures(s) else {
         return Ok(None);
     };
@@ -351,5 +412,65 @@ mod tests {
         } else {
             panic!("expected BuchiPack");
         }
+    }
+
+    // C12B-036: regex cache correctness. The FIFO cache must return
+    // *semantically identical* Regex objects on repeated calls and must
+    // not mask invalid-pattern failures.
+
+    #[test]
+    fn test_c12b_036_cached_compile_hits_return_same_regex() {
+        // Two successive calls with the same (pattern, flags) should
+        // both succeed and behave identically. We exercise the cache
+        // by compiling twice and asserting the same match result.
+        let re1 = cached_compile("\\d+", "").expect("first compile");
+        let re2 = cached_compile("\\d+", "").expect("second compile (cache hit)");
+        // Both share the underlying NFA via Arc; their `.as_str()` must
+        // match and both must find the same match on the same input.
+        assert_eq!(re1.as_str(), re2.as_str());
+        assert_eq!(re1.find("abc123").map(|m| m.as_str()),
+                   re2.find("abc123").map(|m| m.as_str()));
+    }
+
+    #[test]
+    fn test_c12b_036_cached_compile_distinguishes_flags() {
+        // `a` with and without `i` must produce different case-sensitivity;
+        // the cache key includes flags so they do not collide.
+        let plain = cached_compile("a", "").expect("plain");
+        let ci = cached_compile("a", "i").expect("ci");
+        assert!(plain.is_match("a"));
+        assert!(!plain.is_match("A"));
+        assert!(ci.is_match("A"));
+    }
+
+    #[test]
+    fn test_c12b_036_cached_compile_rejects_invalid_pattern() {
+        // Invalid patterns must *not* be cached — every call surfaces
+        // the error. The cache lookup is keyed by `(pattern, flags)`
+        // so an invalid entry would remain unhit on subsequent calls,
+        // but we still guarantee the error is returned both times.
+        let err1 = cached_compile("(unclosed", "").unwrap_err();
+        let err2 = cached_compile("(unclosed", "").unwrap_err();
+        assert!(err1.contains("invalid pattern"));
+        assert!(err2.contains("invalid pattern"));
+    }
+
+    #[test]
+    fn test_c12b_036_cache_capacity_evicts_fifo() {
+        // Fill the cache beyond capacity with distinct keys, then verify
+        // the very first key is still retrievable as a compile (it was
+        // evicted but re-compile works because the pattern is valid).
+        // This is a behavioural test — we cannot directly inspect cache
+        // contents without exposing it, so we rely on the invariant that
+        // both cached and uncached paths produce identical Regex semantics.
+        for i in 0..(REGEX_CACHE_CAPACITY + 10) {
+            let p = format!("^{}$", i);
+            let re = cached_compile(&p, "").expect("distinct pattern compiles");
+            assert!(re.is_match(&i.to_string()));
+        }
+        // The first key (`^0$`) is no longer in the cache but must
+        // still compile correctly.
+        let re = cached_compile("^0$", "").expect("recompiles after eviction");
+        assert!(re.is_match("0"));
     }
 }

@@ -8,5 +8,7 @@ mod lower_methods;
 mod lower_molds;
 pub mod rc_opt;
 pub mod resolve;
+pub mod native_runtime;
 pub mod runtime;
 pub mod runtime_core_wasm;
+pub(crate) mod tag_prop;

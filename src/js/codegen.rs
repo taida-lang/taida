@@ -3277,6 +3277,13 @@ impl JsCodegen {
                     _ if self.try_write_net_builtin(name, "(__p)") => {}
                     _ => self.write(&format!("{}(__p)", name)),
                 },
+                // C12B-020: `expr => _` is a no-op transform that discards
+                // the pipeline value while keeping the preceding expression's
+                // side effect. Keep `__p` unchanged instead of emitting
+                // `__p = _;` which is a ReferenceError.
+                Expr::Placeholder(_) => {
+                    self.write("__p");
+                }
                 _ => {
                     self.gen_expr(expr)?;
                 }

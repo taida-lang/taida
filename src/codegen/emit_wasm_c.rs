@@ -513,6 +513,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_get_call_arg_tag" => {
             "int64_t taida_get_call_arg_tag(int64_t index);".to_string()
         }
+        // C12B-022: Runtime primitive-type check for TypeIs on param-tag idents
+        "taida_primitive_tag_match" => {
+            "int64_t taida_primitive_tag_match(int64_t tag, int64_t expected);".to_string()
+        }
         "taida_set_return_tag" => {
             "int64_t taida_set_return_tag(int64_t tag);".to_string()
         }

@@ -84,7 +84,7 @@ mod tests {
     /// the same commit.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 237_295;
+        const EXPECTED_TOTAL_LEN: usize = 237_823;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
