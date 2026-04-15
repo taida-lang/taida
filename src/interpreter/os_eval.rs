@@ -675,7 +675,18 @@ impl Interpreter {
                 }
             }
 
-            // ── Exists[path]() → Bool ────────────────────────
+            // ── Exists[path]() → Result[Bool] ────────────────
+            //
+            // C12B-021: Exists now returns `Result[Bool]` instead of
+            // bare `Bool`. The Result envelope lets the caller
+            // distinguish the three cases that `std::path::Path::exists()`
+            // silently conflates (exists=true, exists=false,
+            // permission-denied / IO error). The inner Bool is obtained
+            // via `.value` or the `]=>` unmold. Programs that only cared
+            // about the "reachable-and-present" bit continue to work by
+            // writing `Exists[p]().ok` (true if the check itself
+            // succeeded AND the path exists — which matches the old
+            // contract's positive case exactly).
             "Exists" => {
                 if type_args.is_empty() {
                     return Err(RuntimeError {
@@ -692,8 +703,14 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
 
-                let exists = std::path::Path::new(&path).exists();
-                Ok(Some(Signal::Value(Value::Bool(exists))))
+                // `try_exists` is stable and returns an explicit Result
+                // so permission-denied ceases to be silently false.
+                match std::path::Path::new(&path).try_exists() {
+                    Ok(exists) => Ok(Some(Signal::Value(make_result_success(Value::Bool(
+                        exists,
+                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
+                }
             }
 
             // ── EnvVar[name]() → Lax[Str] ───────────────────
@@ -937,29 +954,39 @@ impl Interpreter {
                 }
             }
 
-            // ── writeFile(path, content) → Result ────────────
+            // ── writeFile(path, content) → Result[Int] ───────
+            //
+            // C12B-021: on success the inner value is the number of
+            // bytes written (not a status pack). Callers pipe
+            // `writeFile(...).value` into arithmetic / stdout naturally.
+            // On failure the Result carries the `:IoError` envelope
+            // (code / message / kind preserved).
             "writeFile" => {
                 let path = self.eval_os_str_arg(args, 0, "writeFile", "path")?;
                 let content = self.eval_os_str_arg(args, 1, "writeFile", "content")?;
 
                 match std::fs::write(&path, &content) {
-                    Ok(_) => Ok(Some(Signal::Value(make_result_success(ok_inner())))),
+                    Ok(_) => Ok(Some(Signal::Value(make_result_success(Value::Int(
+                        content.len() as i64,
+                    ))))),
                     Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
                 }
             }
 
-            // ── writeBytes(path, content) → Result ───────────
+            // ── writeBytes(path, content) → Result[Int] ──────
             "writeBytes" => {
                 let path = self.eval_os_str_arg(args, 0, "writeBytes", "path")?;
                 let content = self.eval_os_bytes_arg(args, 1, "writeBytes", "content")?;
 
                 match std::fs::write(&path, &content) {
-                    Ok(_) => Ok(Some(Signal::Value(make_result_success(ok_inner())))),
+                    Ok(_) => Ok(Some(Signal::Value(make_result_success(Value::Int(
+                        content.len() as i64,
+                    ))))),
                     Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
                 }
             }
 
-            // ── appendFile(path, content) → Result ───────────
+            // ── appendFile(path, content) → Result[Int] ──────
             "appendFile" => {
                 let path = self.eval_os_str_arg(args, 0, "appendFile", "path")?;
                 let content = self.eval_os_str_arg(args, 1, "appendFile", "content")?;
@@ -972,33 +999,75 @@ impl Interpreter {
                     .and_then(|mut f| f.write_all(content.as_bytes()));
 
                 match result {
-                    Ok(_) => Ok(Some(Signal::Value(make_result_success(ok_inner())))),
+                    Ok(_) => Ok(Some(Signal::Value(make_result_success(Value::Int(
+                        content.len() as i64,
+                    ))))),
                     Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
                 }
             }
 
-            // ── remove(path) → Result ────────────────────────
+            // ── remove(path) → Result[Int] ───────────────────
+            //
+            // C12B-021: inner value is the number of file-system
+            // entries removed (1 for a file, or `1 + recursive
+            // descendants` for a directory tree). The count is
+            // computed BEFORE deletion to keep the reporting
+            // deterministic even when the removal partially fails
+            // (unlikely with remove_dir_all but well-defined).
             "remove" => {
                 let path = self.eval_os_str_arg(args, 0, "remove", "path")?;
 
-                let result = if std::path::Path::new(&path).is_dir() {
+                let is_dir = std::path::Path::new(&path).is_dir();
+                let precount: i64 = if is_dir {
+                    // Count the directory itself + every entry reachable
+                    // via WalkDir-style recursion. We use a simple
+                    // iterative traversal with no external crate.
+                    fn count_recursive(p: &std::path::Path) -> i64 {
+                        let mut n: i64 = 1; // include self
+                        if let Ok(rd) = std::fs::read_dir(p) {
+                            for entry in rd.flatten() {
+                                let sub = entry.path();
+                                if sub.is_dir() {
+                                    n += count_recursive(&sub);
+                                } else {
+                                    n += 1;
+                                }
+                            }
+                        }
+                        n
+                    }
+                    count_recursive(std::path::Path::new(&path))
+                } else {
+                    1
+                };
+                let result = if is_dir {
                     std::fs::remove_dir_all(&path)
                 } else {
                     std::fs::remove_file(&path)
                 };
 
                 match result {
-                    Ok(_) => Ok(Some(Signal::Value(make_result_success(ok_inner())))),
+                    Ok(_) => Ok(Some(Signal::Value(make_result_success(Value::Int(
+                        precount,
+                    ))))),
                     Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
                 }
             }
 
-            // ── createDir(path) → Result ─────────────────────
+            // ── createDir(path) → Result[Int] ────────────────
+            //
+            // C12B-021: inner value is 1 when a new directory is
+            // created, 0 when the path already existed. This makes
+            // `createDir(p).value == 1` the clean "I actually created
+            // it" test without a separate Exists call.
             "createDir" => {
                 let path = self.eval_os_str_arg(args, 0, "createDir", "path")?;
 
+                let already = std::path::Path::new(&path).is_dir();
                 match std::fs::create_dir_all(&path) {
-                    Ok(_) => Ok(Some(Signal::Value(make_result_success(ok_inner())))),
+                    Ok(_) => Ok(Some(Signal::Value(make_result_success(Value::Int(
+                        if already { 0 } else { 1 },
+                    ))))),
                     Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
                 }
             }
@@ -2711,6 +2780,11 @@ stdout(result.hasValue)"#;
 
     // ── Exists tests ──
 
+    // C12B-021 migration: `Exists[path]()` now returns `Result[Bool]`
+    // instead of a bare Bool. `.isSuccess()` is true only when the
+    // probe itself succeeded; `.__value` carries the Bool answer. This
+    // matches the `writeFile` / `remove` shape and surfaces
+    // permission-denied as a Result failure rather than a silent false.
     #[test]
     fn test_exists_true() {
         let dir = std::path::PathBuf::from("/tmp/taida_test_os_exists");
@@ -2719,18 +2793,26 @@ stdout(result.hasValue)"#;
         std::fs::write(dir.join("yes.txt"), "").unwrap();
 
         let path = dir.join("yes.txt").to_string_lossy().to_string();
-        let code = format!(r#"stdout(Exists["{}"]())"#, path);
+        let code = format!(
+            r#"r <= Exists["{}"]()
+stdout(r.isSuccess())
+stdout(r.__value)"#,
+            path
+        );
         let output = run_code(&code);
-        assert_eq!(output, vec!["true"]);
+        assert_eq!(output, vec!["true", "true"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_exists_false() {
-        let code = r#"stdout(Exists["/tmp/taida_nonexistent_xyz"]())"#;
+        let code = r#"r <= Exists["/tmp/taida_nonexistent_xyz"]()
+stdout(r.isSuccess())
+stdout(r.__value)"#;
         let output = run_code(code);
-        assert_eq!(output, vec!["false"]);
+        // The probe succeeded (isSuccess=true) and found no such path (__value=false).
+        assert_eq!(output, vec!["true", "false"]);
     }
 
     // ── EnvVar tests ──
@@ -2754,6 +2836,14 @@ stdout(result.hasValue)"#;
 
     // ── writeFile tests ──
 
+    // C12B-021 migration: `writeFile` / `writeBytes` / `appendFile` /
+    // `remove` / `createDir` now return `Result[Int]`. The inner value
+    // is the number of bytes written (writeFile / writeBytes /
+    // appendFile), the count of removed entries (remove), or
+    // `1`/`0` for newly-created / already-existed directories
+    // (createDir). `.isSuccess()` is the replacement for the old
+    // `.__value.ok` check, which used to read a status BuchiPack and
+    // is no longer valid since `.__value` is now a plain Int.
     #[test]
     fn test_writefile() {
         let dir = std::path::PathBuf::from("/tmp/taida_test_os_writefile");
@@ -2763,11 +2853,13 @@ stdout(result.hasValue)"#;
         let path = dir.join("out.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= writeFile("{}", "Hello!")
-stdout(result.__value.ok)"#,
+stdout(result.isSuccess())
+stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output, vec!["true"]);
+        // "Hello!" = 6 bytes — returned Int.
+        assert_eq!(output, vec!["true", "6"]);
 
         let content = std::fs::read_to_string(dir.join("out.txt")).unwrap();
         assert_eq!(content, "Hello!");
@@ -2786,7 +2878,7 @@ stdout(result.__value.ok)"#,
             r#"payloadLax <= Bytes["hello"]()
 payloadLax ]=> payload
 writeRes <= writeBytes("{}", payload)
-stdout(writeRes.__value.ok)
+stdout(writeRes.isSuccess())
 readRes <= readBytes("{}")
 stdout(readRes.hasValue)
 decoded <= Utf8Decode[readRes.__value]()
@@ -2815,11 +2907,13 @@ stdout(txt)"#,
         let path = dir.join("log.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= appendFile("{}", "Line2\n")
-stdout(result.__value.ok)"#,
+stdout(result.isSuccess())
+stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output, vec!["true"]);
+        // "Line2\n" = 6 bytes appended.
+        assert_eq!(output, vec!["true", "6"]);
 
         let content = std::fs::read_to_string(dir.join("log.txt")).unwrap();
         assert!(content.contains("Line1"));
@@ -2840,11 +2934,13 @@ stdout(result.__value.ok)"#,
         let path = dir.join("del.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= remove("{}")
-stdout(result.__value.ok)"#,
+stdout(result.isSuccess())
+stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output, vec!["true"]);
+        // Removing a single file reports 1 removed entry.
+        assert_eq!(output, vec!["true", "1"]);
         assert!(!dir.join("del.txt").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2861,11 +2957,13 @@ stdout(result.__value.ok)"#,
         let path = sub.to_string_lossy().to_string();
         let code = format!(
             r#"result <= remove("{}")
-stdout(result.__value.ok)"#,
+stdout(result.isSuccess())
+stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output, vec!["true"]);
+        // subdir (1) + file.txt (1) = 2 entries removed.
+        assert_eq!(output, vec!["true", "2"]);
         assert!(!sub.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2881,11 +2979,13 @@ stdout(result.__value.ok)"#,
         let path = dir.to_string_lossy().to_string();
         let code = format!(
             r#"result <= createDir("{}")
-stdout(result.__value.ok)"#,
+stdout(result.isSuccess())
+stdout(result.__value)"#,
             path
         );
         let output = run_code(&code);
-        assert_eq!(output, vec!["true"]);
+        // Freshly created → 1 new dir reported.
+        assert_eq!(output, vec!["true", "1"]);
         assert!(dir.exists());
 
         let _ = std::fs::remove_dir_all("/tmp/taida_test_os_createdir");
@@ -3332,14 +3432,22 @@ stdout(result.hasValue)"#;
         );
     }
 
+    // C12B-021 migration: `Exists[path]()` returns `Result[Bool]`.
+    // The probe on a missing path still succeeds (isSuccess=true)
+    // because we were able to answer the question; the inner Bool
+    // (`.__value`) is false. This preserves the BT-11 assertion
+    // semantically — "nonexistent paths do not throw" — while
+    // moving the Bool into the Result envelope.
     #[test]
     fn test_bt11_exists_nonexistent() {
-        let code = r#"stdout(Exists["/tmp/taida_bt11_nonexistent_xyz"]())"#;
+        let code = r#"r <= Exists["/tmp/taida_bt11_nonexistent_xyz"]()
+stdout(r.isSuccess())
+stdout(r.__value)"#;
         let output = run_code(code);
         assert_eq!(
             output,
-            vec!["false"],
-            "Exists nonexistent should return false"
+            vec!["true", "false"],
+            "Exists nonexistent should return Result[Bool](isSuccess=true, __value=false)"
         );
     }
 

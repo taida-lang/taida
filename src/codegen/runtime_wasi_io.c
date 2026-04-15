@@ -504,9 +504,32 @@ static int64_t wasi_os_ok_inner(void) {
     return inner;
 }
 
-/* Build os Result success — matches Native taida_os_result_success */
+/* Build os Result success — matches Native taida_os_result_success.
+ * Kept for compatibility; C12B-021 callers should prefer
+ * wasi_os_result_success_value to embed a meaningful Int inner. */
 static int64_t wasi_os_result_success(void) {
     return taida_result_create(wasi_os_ok_inner(), 0, 0);
+}
+
+/* C12B-021: Result[Int] success with an explicit integer inner value
+ * (byte count for writeFile, entry count for remove, etc). The cast
+ * preserves sign/width across i64 but keeps the shape identical to
+ * Native's `taida_os_result_success(value)`. */
+static int64_t wasi_os_result_success_value(int64_t value) {
+    return taida_result_create(value, 0, 0);
+}
+
+/* C12B-021: Result[Bool] success — wraps a Bool inner value and
+ * sets the proper runtime tag so `.toString()` / tag-dispatched
+ * printing ("true" / "false") matches the Interpreter / Native
+ * contract byte-for-byte. Used by Exists on wasi. */
+#define WASM_TAG_BOOL 2
+static int64_t wasi_os_result_success_bool(int64_t bool_val) {
+    int64_t r = taida_result_create(bool_val ? 1 : 0, 0, 0);
+    /* Result layout: index 0 = __value. Mark it Bool so downstream
+     * polymorphic display prints "true"/"false" rather than "1"/"0". */
+    taida_pack_set_tag(r, 0, WASM_TAG_BOOL);
+    return r;
 }
 
 /* Build os Result failure — matches Native taida_os_result_failure shape */
@@ -587,17 +610,24 @@ int64_t taida_os_write_file(int64_t path_ptr, int64_t content_ptr) {
     }
 
     __wasi_fd_close(file_fd);
-    return wasi_os_result_success();
+    /* C12B-021: writeFile returns Result[Int] where the inner Int is
+     * the byte count that was written. Match Native / Interpreter /
+     * JS parity exactly. */
+    return wasi_os_result_success_value((int64_t)content_len);
 }
 
-/* ── Exists[path]() → Bool ── */
+/* ── Exists[path]() → Result[Bool] ── */
+/* C12B-021: wrap the raw existence bit in a Result envelope so that
+ * permission denials and IO errors are distinguishable from a
+ * "probe succeeded, path absent" result. The inner value is the
+ * raw Bool (0/1). */
 
 int64_t taida_os_exists(int64_t path_ptr) {
     const char *path = (const char *)(intptr_t)path_ptr;
-    if (!path) return 0;
+    if (!path) return wasi_os_result_failure("Exists: invalid arguments");
 
     int32_t path_len = wasi_strlen(path);
-    if (path_len == 0) return 0;
+    if (path_len == 0) return wasi_os_result_failure("Exists: empty path");
 
     wasi_resolved_path rp = resolve_preopened_path(path, path_len);
 
@@ -614,8 +644,17 @@ int64_t taida_os_exists(int64_t path_ptr) {
         0,
         &file_fd
     );
-    if (err != 0) return 0;
+    if (err != 0) {
+        /* WASI errno 44 = ENOENT, 54 = ENOTDIR — these signal "does not
+         * exist" rather than "probe failure", so we still answer
+         * Result[success, false]. Any other errno is surfaced as a
+         * Result[failure, ...] so callers can tell the difference. */
+        if (err == 44 /* ENOENT */ || err == 54 /* ENOTDIR */) {
+            return wasi_os_result_success_bool(0);
+        }
+        return wasi_os_result_failure_code(err, "Exists: probe failed");
+    }
 
     __wasi_fd_close(file_fd);
-    return 1;
+    return wasi_os_result_success_bool(1);
 }

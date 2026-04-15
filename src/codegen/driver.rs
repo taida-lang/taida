@@ -234,9 +234,15 @@ impl WasmRuntimeCache {
         Ok(cached_obj)
     }
 
-    /// Get or compile the core runtime .o
+    /// Get or compile the core runtime .o (wasm-wasi / wasm-edge / wasm-full).
+    ///
+    /// C12-7 (FB-26): the core wasm runtime was split into four fragments
+    /// under `runtime_core_wasm/`. The assembled source is byte-identical
+    /// to the pre-split monolithic file (see
+    /// `runtime_core_wasm::RUNTIME_CORE_WASM`), so the cache key remains
+    /// stable across the refactor.
     pub fn rt_core(&self) -> Result<PathBuf, CompileError> {
-        let source = include_str!("runtime_core_wasm.c");
+        let source: &str = &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM;
         self.get_or_compile("rt_core", source)
     }
 
@@ -649,7 +655,12 @@ fn link_objects_inner(
     // 別途コンパイルしてリンク。
 
     // C エントリポイントを生成
-    let c_wrapper = include_str!("native_runtime.c");
+    // C12B-026 (C12-9 Phase 9 Step 2): `native_runtime.c` は 20,866 行 /
+    // 886,457 bytes の巨大 translation unit。`src/codegen/native_runtime/`
+    // 配下の 7 fragment (`01_core.inc.c` .. `07_net_h3_main.inc.c`) に
+    // 機械分割し、`LazyLock<&'static str>` で初回アクセス時に連結する。
+    // Rust-level 連結のため clang 視点では依然 1 TU で byte-identical。
+    let c_wrapper: &str = &crate::codegen::native_runtime::NATIVE_RUNTIME_C;
 
     let c_path = obj_path.with_extension("_entry.c");
     fs::write(&c_path, c_wrapper).map_err(|e| CompileError {
@@ -1436,7 +1447,7 @@ pub fn compile_file_wasm_cached(
     wasm_compile_and_link_uncached(
         &generated_c,
         &wasm_path,
-        &[("rt", include_str!("runtime_core_wasm.c"))],
+        &[("rt", &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM)],
         "_wasm_tmp",
     )?;
 
@@ -1486,7 +1497,10 @@ pub fn compile_file_wasm_wasi_cached(
         &generated_c,
         &wasm_path,
         &[
-            ("rt_core", include_str!("runtime_core_wasm.c")),
+            (
+                "rt_core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
             ("rt_wasi", include_str!("runtime_wasi_io.c")),
         ],
         "_wasm_wasi_tmp",
@@ -1540,7 +1554,10 @@ pub fn compile_file_wasm_edge_cached(
         &generated_c,
         &wasm_path,
         &[
-            ("rt_core", include_str!("runtime_core_wasm.c")),
+            (
+                "rt_core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
             ("rt_edge", include_str!("runtime_edge_host.c")),
         ],
         "_wasm_edge_tmp",
@@ -1601,7 +1618,10 @@ pub fn compile_file_wasm_full_cached(
         &generated_c,
         &wasm_path,
         &[
-            ("rt_core", include_str!("runtime_core_wasm.c")),
+            (
+                "rt_core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
             ("rt_wasi", include_str!("runtime_wasi_io.c")),
             ("rt_full", include_str!("runtime_full_wasm.c")),
         ],
@@ -2311,8 +2331,16 @@ mod tests {
 
     // ── NET3 regression tests for native_runtime.c ──────────────────────
 
-    /// The C runtime source used by include_str!("native_runtime.c").
-    const NATIVE_C: &str = include_str!("native_runtime.c");
+    /// The C runtime source used by the native compilation path.
+    /// C12B-026 (C12-9 Phase 9 Step 2): previously
+    /// `const NATIVE_C: &str = include_str!("native_runtime.c")` — now
+    /// we resolve through the assembled `LazyLock<&'static str>` since
+    /// the source lives in 7 fragment files under
+    /// `src/codegen/native_runtime/`. The concatenation is byte-identical
+    /// so every `NATIVE_C.contains(...)` regression match below keeps
+    /// working unchanged.
+    static NATIVE_C: std::sync::LazyLock<&'static str> =
+        std::sync::LazyLock::new(|| *crate::codegen::native_runtime::NATIVE_RUNTIME_C);
 
     /// Regression: commit_head must use length-checked snprintf writes.
     /// The old code blindly accumulated `offset += snprintf(...)` without

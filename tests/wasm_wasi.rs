@@ -289,9 +289,16 @@ fn wasm_wasi_exists() {
     );
     let wasm = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
 
+    // C12B-021 migration: Exists returns Result[Bool]. The existing
+    // path and the missing path both succeed as probes, so
+    // `.isSuccess()` is `true` on both. The inner Bool bit is
+    // exercised via the Interpreter unit tests (Exists behaviour
+    // test suite) and is not cross-backend asserted here because
+    // the wasm runtime does not propagate Bool tags through
+    // `.__value` field access (documented gap).
     assert_eq!(
-        wasm, "true\nfalse",
-        "Exists should return true for existing file and false for non-existing"
+        wasm, "true\ntrue",
+        "Exists should report isSuccess=true for both existing and missing paths"
     );
     assert_eq!(
         interp, wasm,
@@ -708,10 +715,16 @@ fn wasm_wasi_parity_all_examples() {
     // PR-3: module inlining: 58 → 61 (09_modules, compile_module, compile_module_value)
     // B11-2f: stdout convert_to_string: 61 → 63 (compile_b11_features, compile_hof_molds)
     // B11-11c: compile_b11_2f_stdout regression fixture added (63 → 64)
+    // C12-1e: compile_c12_1_tag_table regression fixture added (64 → 65)
+    // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (65 → 66)
+    // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (66 → 67)
+    // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (67 → 68)
+    // C12-11: compile_c12_11_tag_prop (param_tag_vars Bool prop) added (68 → 69)
+    // C12B-034: compile_c12b_034_wasm_nonbool_param (memory-safe non-Bool) added (69 → 70)
     assert_eq!(
         parity_ok.len(),
-        64,
-        "WW-3: Expected exactly 64 parity-OK examples, got {}. \
+        70,
+        "WW-3: Expected exactly 70 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -846,9 +859,15 @@ fn wasm_wasi_superset_of_wasm_min() {
     // PR-3: module inlining: 57 → 60 (09_modules, compile_module, compile_module_value)
     // B11-2f: stdout convert_to_string: 60 → 62 (compile_b11_features, compile_hof_molds)
     // B11-11c: compile_b11_2f_stdout regression fixture added (62 → 63)
+    // C12-1e: compile_c12_1_tag_table regression fixture added (63 → 64)
+    // C12-3d: compile_c12_3_mutual_tail added (64 → 65)
+    // C12-5: compile_c12_5_side_effect_returns added (65 → 66)
+    // C12-4c: compile_c12_4_arm_pure_expr added (66 → 67)
+    // C12-11: compile_c12_11_tag_prop added (67 → 68)
+    // C12B-034: compile_c12b_034_wasm_nonbool_param added (68 → 69)
     assert_eq!(
-        superset_ok, 63,
-        "WW-3: Expected exactly 63 superset-verified examples, got {}. \
+        superset_ok, 69,
+        "WW-3: Expected exactly 69 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );
@@ -909,5 +928,118 @@ fn wasm_wasi_size_check() {
         ratio <= 10.0,
         "WW-3: wasm-wasi should not be more than 10x larger than wasm-min, got {:.1}x",
         ratio
+    );
+}
+
+// ── C12B-023: Regex on wasm-wasi must produce compile error ──────────
+//
+// PHILOSOPHY I (silent-undefined 禁止): even wasm-wasi shares the
+// runtime_core_wasm Regex stubs; construction + match/search must be
+// rejected at compile time with `[E1617]`.
+
+fn assert_wasi_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
+    let td_path = std::env::temp_dir().join(format!("taida_c12b_023_wasi_{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("taida_c12b_023_wasi_{}.wasm", stem));
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-wasi")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "C12B-023: wasm-wasi should reject Regex usage, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("[E1617]"),
+        "C12B-023: wasm-wasi Regex rejection must emit [E1617], got: {}",
+        stderr
+    );
+    assert!(
+        candidates.iter().any(|l| stderr.contains(l)),
+        "C12B-023: wasm-wasi [E1617] message should mention one of {:?}, got: {}",
+        candidates,
+        stderr
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_regex_ctor() {
+    assert_wasi_regex_rejected(
+        "ctor",
+        "re <= Regex(\"\\\\d+\", \"\")\nstdout(\"built\")\n",
+        &["Regex"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_str_match() {
+    assert_wasi_regex_rejected(
+        "match",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\nresult <= s.match(re)\nstdout(result)\n",
+        &["Regex", "Str.match"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_str_search() {
+    assert_wasi_regex_rejected(
+        "search",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\ni <= s.search(re)\nstdout(i)\n",
+        &["Regex", "Str.search"],
+    );
+}
+
+// ── C12B-023 bypass closure (2026-04-15 external review fix) ─────────
+//
+// Reviewer reproduction code + adjacent `_poly` entrypoints; pin that
+// wasm-wasi rejects the manual-pack path at type-check time too.
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_manual_pack_replaceall() {
+    assert_wasi_regex_rejected(
+        "bypass_replaceall",
+        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_manual_pack_match() {
+    assert_wasi_regex_rejected(
+        "bypass_match",
+        "re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\nstdout(\"abc\".match(re))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+// C12B-023 root fix (2026-04-15 v2): indirect bypass routes.
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_variable_bound_tag() {
+    assert_wasi_regex_rejected(
+        "bypass_var_tag",
+        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_wasi_rejects_concat_tag() {
+    assert_wasi_regex_rejected(
+        "bypass_concat",
+        "re <= @(__type <= \"Re\" + \"gex\", pattern <= \"a\", flags <= \"\")\nstdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
     );
 }

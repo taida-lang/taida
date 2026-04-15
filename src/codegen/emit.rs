@@ -245,6 +245,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Val],
         },
+        // C12B-022: Runtime primitive-type check for TypeIs on param-tag idents
+        "taida_primitive_tag_match" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
         "taida_set_return_tag" => RuntimeAbi {
             params: &[Val],
             returns: &[Val],
@@ -438,6 +443,34 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_str_replace_first" => RuntimeAbi {
             params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        // C12-6c: Regex polymorphic dispatchers — 2nd arg is either
+        // a Str pointer or a :Regex BuchiPack pointer; the C helper
+        // inspects the value's magic header + `__type` field to
+        // decide whether to use POSIX regex.h or fixed-string code.
+        "taida_str_split_poly" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_replace_poly" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_replace_first_poly" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_match_regex" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_str_search_regex" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_regex_new" => RuntimeAbi {
+            params: &[Ptr, Ptr],
             returns: &[Ptr],
         },
         "taida_str_pad" => RuntimeAbi {

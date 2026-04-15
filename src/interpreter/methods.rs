@@ -108,6 +108,12 @@ impl Interpreter {
                             return self.call_function_with_values(&func, &arg_values)
                                 .map(Signal::Value);
                         }
+                        // C12-2b: .toString() universal fallback for BuchiPacks.
+                        // All types get `.toString()` as a display helper, equivalent
+                        // to the Rust side's `to_display_string()`.
+                        if method == "toString" {
+                            return Ok(Signal::Value(Value::Str(obj.to_display_string())));
+                        }
                         Err(RuntimeError {
                             message: format!("Unknown method '{}' on {}", method, obj.to_error_display(200)),
                         })
@@ -127,13 +133,20 @@ impl Interpreter {
                     })
                 }
             }
-            _ => Err(RuntimeError {
-                message: format!(
-                    "Cannot call method '{}' on {}",
-                    method,
-                    obj.to_error_display(200)
-                ),
-            }),
+            _ => {
+                // C12-2b: .toString() universal fallback for values that do not
+                // belong to any specialised dispatch table (Function, Gorilla, etc.).
+                if method == "toString" {
+                    return Ok(Signal::Value(Value::Str(obj.to_display_string())));
+                }
+                Err(RuntimeError {
+                    message: format!(
+                        "Cannot call method '{}' on {}",
+                        method,
+                        obj.to_error_display(200)
+                    ),
+                })
+            }
         }
     }
 
@@ -1092,7 +1105,20 @@ impl Interpreter {
             // Display
             "toString" => Ok(Signal::Value(Value::Str(s.to_string()))),
             // B11-4b: replace / replaceAll / split methods
+            // C12-6c: Regex overload — if the first arg is a Regex
+            // BuchiPack, dispatch to the regex engine; otherwise fall
+            // back to the B11-4a fixed-string semantics.
             "replace" => {
+                if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
+                    let replacement = args
+                        .get(1)
+                        .map(|v| v.to_display_string())
+                        .unwrap_or_default();
+                    match super::regex_eval::replace_first(s, &pat, &flags, &replacement) {
+                        Ok(out) => return Ok(Signal::Value(Value::Str(out))),
+                        Err(msg) => return Err(RuntimeError { message: msg }),
+                    }
+                }
                 let target = args
                     .first()
                     .map(|v| v.to_display_string())
@@ -1112,6 +1138,16 @@ impl Interpreter {
                 ))))
             }
             "replaceAll" => {
+                if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
+                    let replacement = args
+                        .get(1)
+                        .map(|v| v.to_display_string())
+                        .unwrap_or_default();
+                    match super::regex_eval::replace_all(s, &pat, &flags, &replacement) {
+                        Ok(out) => return Ok(Signal::Value(Value::Str(out))),
+                        Err(msg) => return Err(RuntimeError { message: msg }),
+                    }
+                }
                 let target = args
                     .first()
                     .map(|v| v.to_display_string())
@@ -1127,6 +1163,16 @@ impl Interpreter {
                 Ok(Signal::Value(Value::Str(s.replace(&target, &replacement))))
             }
             "split" => {
+                if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
+                    match super::regex_eval::split(s, &pat, &flags) {
+                        Ok(parts) => {
+                            return Ok(Signal::Value(Value::List(
+                                parts.into_iter().map(Value::Str).collect(),
+                            )));
+                        }
+                        Err(msg) => return Err(RuntimeError { message: msg }),
+                    }
+                }
                 let separator = args
                     .first()
                     .map(|v| v.to_display_string())
@@ -1146,9 +1192,36 @@ impl Interpreter {
                 };
                 Ok(Signal::Value(Value::List(parts)))
             }
+            // C12-6c: match / search methods — Regex arg required.
+            // Surface a RuntimeError if the first arg isn't a Regex
+            // BuchiPack (philosophy: explicit, no silent coercion).
+            "match" => {
+                let (pat, flags) = args
+                    .first()
+                    .and_then(super::regex_eval::as_regex)
+                    .ok_or_else(|| RuntimeError {
+                        message: "str.match(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
+                    })?;
+                match super::regex_eval::match_first(s, &pat, &flags) {
+                    Ok(m) => Ok(Signal::Value(super::regex_eval::build_match_value(m))),
+                    Err(msg) => Err(RuntimeError { message: msg }),
+                }
+            }
+            "search" => {
+                let (pat, flags) = args
+                    .first()
+                    .and_then(super::regex_eval::as_regex)
+                    .ok_or_else(|| RuntimeError {
+                        message: "str.search(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
+                    })?;
+                match super::regex_eval::search_first(s, &pat, &flags) {
+                    Ok(idx) => Ok(Signal::Value(Value::Int(idx))),
+                    Err(msg) => Err(RuntimeError { message: msg }),
+                }
+            }
             _ => Err(RuntimeError {
                 message: format!(
-                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, lastIndexOf, get, replace, replaceAll, split, toString",
+                    "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, lastIndexOf, get, replace, replaceAll, split, match, search, toString",
                     method
                 ),
             }),
@@ -1395,6 +1468,10 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::Bool(true)))
             }
+            // Display (C12-2b: universal .toString() adoption)
+            "toString" => Ok(Signal::Value(Value::Str(
+                Value::List(items.to_vec()).to_display_string(),
+            ))),
             _ => Err(RuntimeError {
                 message: format!(
                     "Unknown list method: '{}'. Operations moved to molds: Reverse[], Concat[], Append[], Prepend[], Join[], Sum[], Sort[], Unique[], Flatten[], Find[], FindIndex[], Count[]",

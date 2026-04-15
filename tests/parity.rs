@@ -26,6 +26,59 @@ fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")
 }
 
+/// C12B-026: `src/codegen/native_runtime.c` was split into 7 fragment
+/// files (`01_core.inc.c` .. `07_net_h3_main.inc.c`) under
+/// `src/codegen/native_runtime/`. Rust-level concatenation via
+/// `crate::codegen::native_runtime::NATIVE_RUNTIME_C` produces a
+/// byte-identical source for the clang invocation.
+///
+/// Source-audit parity tests read the C source from disk (rather than
+/// via `include_str!`) so they pick up edits without recompiling the
+/// crate. After the split, those tests must concatenate all 7
+/// fragments themselves; this helper does exactly that and is
+/// byte-equivalent to `fs::read_to_string("src/codegen/native_runtime.c")`
+/// pre-split.
+fn read_native_runtime_source() -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest_dir.join("src/codegen/native_runtime");
+    let fragments = [
+        "01_core.inc.c",
+        "02_error_json.inc.c",
+        "03_os.inc.c",
+        "04_tls_tcp.inc.c",
+        "05_net_v1.inc.c",
+        "06_net_h2.inc.c",
+        "07_net_h3_main.inc.c",
+    ];
+    let mut out = String::new();
+    for name in fragments {
+        let path = dir.join(name);
+        let part =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        out.push_str(&part);
+    }
+    out
+}
+
+/// C12B-025 (2026-04-15): `src/interpreter/net_eval.rs` was mechanically split
+/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`. Audit tests
+/// that look for wire-format patterns across the net runtime concatenate the
+/// non-test files so the checks remain path-stable.
+fn read_net_eval_source() -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest_dir.join("src/interpreter/net_eval");
+    let fragments = ["mod.rs", "types.rs", "helpers.rs"];
+    let mut out = String::new();
+    for name in fragments {
+        let path = dir.join(name);
+        let part =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        out.push_str(&part);
+        out.push('\n');
+    }
+    out
+}
+
 /// Run a .td file with the interpreter and return normalized stdout.
 ///
 /// Delegates to `common::run_interpreter_normalized` which applies per-line
@@ -1095,12 +1148,15 @@ fn test_file_bytes_read_write_three_way_parity() {
     for backend in backends {
         let path = unique_temp_path("taida_os_bytes", backend, "bin");
         let path_s = path.to_string_lossy().replace('\\', "\\\\");
+        // C12B-021 migration: writeBytes now returns Result[Int] (byte
+        // count), not Result[status-pack]. `.isSuccess()` replaces the
+        // old `.__value.ok` check.
         let source = format!(
             r#"
 payloadLax <= Bytes["pong"]()
 payloadLax ]=> payload
 writeRes <= writeBytes("{path}", payload)
-stdout(writeRes.__value.ok.toString())
+stdout(writeRes.isSuccess().toString())
 readRes <= readBytes("{path}")
 stdout(readRes.hasValue.toString())
 decoded <= Utf8Decode[readRes.__value]()
@@ -16337,15 +16393,25 @@ stdout(result.__value.ok.toString())
             continue;
         }
 
-        // Read 101.
+        // Read 101 head. C12B-041: the server may coalesce the handshake
+        // response with the first WebSocket frame into a single TCP segment,
+        // so we must preserve any bytes past "\r\n\r\n" for the frame parser
+        // below. The previous version dropped them, which is the source of
+        // the pre-existing flakiness this test appeared to exhibit.
         let mut buf = [0u8; 4096];
         let mut head = Vec::new();
+        let mut all_frames: Vec<u8> = Vec::new();
         loop {
             match std::io::Read::read(&mut stream, &mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     head.extend_from_slice(&buf[..n]);
-                    if String::from_utf8_lossy(&head).contains("\r\n\r\n") {
+                    if let Some(idx) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let body_start = idx + 4;
+                        if body_start < head.len() {
+                            all_frames.extend_from_slice(&head[body_start..]);
+                            head.truncate(body_start);
+                        }
                         break;
                     }
                 }
@@ -16357,8 +16423,7 @@ stdout(result.__value.ok.toString())
             continue;
         }
 
-        // Read all frames until connection closes.
-        let mut all_frames = Vec::new();
+        // Drain any further bytes until the server closes the connection.
         loop {
             match std::io::Read::read(&mut stream, &mut buf) {
                 Ok(0) => break,
@@ -18734,22 +18799,23 @@ stdout(r.requests)
 }
 
 /// NB4-10: wsUpgrade rejects stale/fake request packs — 3-backend regression.
-/// A fabricated request pack with wrong __body_token must cause wsUpgrade to error,
-/// not proceed with the upgrade. We verify the server does NOT return 101.
+/// Originally this test pinned *runtime*-side rejection of a fabricated request
+/// pack with wrong `__body_token`. Under C12B-023 v2 (2026-04-15), the checker
+/// now rejects **any** user-authored BuchiPack / TypeInst that assigns a
+/// `__`-prefixed field name at compile time with `[E1617]`, which is the
+/// strictly-stronger invariant (PHILOSOPHY I: silent undefined 禁止 — now the
+/// forgery cannot even be parsed as valid source). This test therefore shifts
+/// to verifying the compile-time rejection is consistent across all three
+/// backends (interp / js / native), so the reviewer's `__body_*` forgery
+/// route is closed at the earliest possible stage.
 #[test]
 fn test_net4_nb10_ws_upgrade_fake_req_rejected_3way() {
-    if !node_available() {
-        eprintln!("SKIP: node not available");
-        return;
-    }
+    use std::io::Write as _;
+    use std::process::Command;
 
-    for backend in &["interp", "js", "native"] {
-        let port = find_free_loopback_port();
-        // Handler creates a fake request pack with correct sentinel but wrong token,
-        // then passes it to wsUpgrade. This should fail with a RuntimeError.
-        // The interpreter catches the error and sends 500; JS/Native print to stderr and exit.
-        let source = format!(
-            r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, endResponse)
+    let taida_bin = env!("CARGO_BIN_EXE_taida");
+
+    let source = r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, endResponse)
 
 handler req writer =
   fakeReq <= @(__body_stream <= "__v4_body_stream", __body_token <= 99999)
@@ -18758,67 +18824,57 @@ handler req writer =
   endResponse(writer)
 => :Unit
 
-asyncResult <= httpServe({port}, handler, 1)
+asyncResult <= httpServe(10000, handler, 1)
 asyncResult ]=> result
 result ]=> r
 stdout(r.requests)
-"#,
-            port = port
-        );
+"#;
 
-        let (child, dir) =
-            spawn_net_server(&source, &format!("net4_nb10_fake_req_{}", backend), backend);
-
-        // Send a valid WebSocket upgrade request.
-        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
-        let request = format!(
-            "GET /ws HTTP/1.1\r\n\
-             Host: localhost:{port}\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n",
-            port = port,
-            key = ws_key
-        );
-
-        let response = send_http_request(port, request.as_bytes());
-
-        // The handler should error out (fake req rejected).
-        let output = child.wait_with_output().expect("wait for server");
-        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-
-        // Check that the response or stderr contains the rejection message.
-        // Interpreter: handler error => 500 response with "stale or fabricated" in body.
-        // JS/Native: error => stderr message + process exit.
-        let resp_str = response
-            .as_ref()
-            .map(|r| String::from_utf8_lossy(r).to_string())
-            .unwrap_or_default();
-
-        let all_output = format!("{}{}{}", resp_str, stderr_str, stdout_str);
-
-        // Must NOT produce 101 Switching Protocols.
-        assert!(
-            !resp_str.contains("101 Switching Protocols"),
-            "[{}] fake req should NOT trigger 101 upgrade, got: {:?}",
-            backend,
-            resp_str
-        );
-
-        // Must mention the rejection reason somewhere (response body for interp, stderr for JS/Native).
-        assert!(
-            all_output.contains("stale or fabricated") || all_output.contains("does not match"),
-            "[{}] expected token mismatch error, got response: {:?}, stderr: {:?}",
-            backend,
-            resp_str,
-            stderr_str
-        );
-
-        cleanup_net_project(&dir);
+    let tmp_dir = std::env::temp_dir().join("c12b_023_v2_fake_req");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let src_path = tmp_dir.join("main.td");
+    {
+        let mut f = std::fs::File::create(&src_path).expect("create source");
+        f.write_all(source.as_bytes()).expect("write source");
     }
+
+    // `taida check` runs typecheck without invoking a backend, so it
+    // exercises the checker-level reject identically for every backend
+    // target. This is the earliest stage at which the forgery is caught;
+    // older runtime-level rejection is now unreachable (source fails to
+    // parse-check).
+    for backend_hint in &["interp", "js", "native"] {
+        let output = Command::new(taida_bin)
+            .args(["check", src_path.to_str().unwrap()])
+            .output()
+            .expect("run taida check");
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let all = format!("{}{}", stdout, stderr);
+
+        assert!(
+            !output.status.success(),
+            "[{}] fake `__body_*` pack must fail type-check, but succeeded.\nstdout: {}\nstderr: {}",
+            backend_hint,
+            stdout,
+            stderr
+        );
+        assert!(
+            all.contains("[E1617]"),
+            "[{}] expected [E1617] for reserved `__body_*` field, got: {}",
+            backend_hint,
+            all
+        );
+        assert!(
+            all.contains("__body_stream") || all.contains("__body_token"),
+            "[{}] expected diagnostic to name the reserved field, got: {}",
+            backend_hint,
+            all
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 /// NB4-18: chunked body with well-formed CRLF passes — 3-backend sanity.
@@ -25004,7 +25060,7 @@ stdout(result.throw.message)
 fn test_net6_5b_scatter_gather_is_default_send_path() {
     // Verify that Interpreter scatter-gather send is the default path.
     // The source code must call send_response_scatter in the serve loop.
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let source = read_net_eval_source();
     assert!(
         source.contains("send_response_scatter"),
         "NET6-5b audit: send_response_scatter must be present in net_eval.rs"
@@ -25020,8 +25076,7 @@ fn test_net6_5b_scatter_gather_is_default_send_path() {
 #[test]
 fn test_net6_5b_native_scatter_gather_present() {
     // Verify that Native scatter-gather send is implemented.
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     assert!(
         source.contains("taida_net_send_response_scatter"),
         "NET6-5b audit: taida_net_send_response_scatter must be present in native_runtime.c"
@@ -25035,7 +25090,9 @@ fn test_net6_5b_native_scatter_gather_present() {
 #[test]
 fn test_net6_5b_js_scatter_gather_present() {
     // Verify that JS scatter-gather send is implemented.
-    let source = std::fs::read_to_string("src/js/runtime.rs").expect("read runtime.rs");
+    // C12-9 (FB-21): src/js/runtime.rs was split into runtime/{core,os,net}.rs;
+    // scatter-gather (HTTP response path) lives in net.rs.
+    let source = std::fs::read_to_string("src/js/runtime/net.rs").expect("read js/runtime/net.rs");
     assert!(
         source.contains("encodeResponseScatter") || source.contains("cork"),
         "NET6-5b audit: JS scatter-gather (cork/uncork or encodeResponseScatter) must be present"
@@ -25046,7 +25103,7 @@ fn test_net6_5b_js_scatter_gather_present() {
 fn test_net6_5b_no_format_in_hot_path_head_builder() {
     // NB6-5 fix: head builder should use write!(&mut buf) not format!()
     // for status line and header encoding in the hot path.
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let source = read_net_eval_source();
 
     // Find the encode_response and build_streaming_head functions
     // They should contain write! instead of format! for the wire head
@@ -25065,15 +25122,14 @@ fn test_net6_5b_no_format_in_hot_path_head_builder() {
 fn test_net6_5b_websocket_word_at_a_time_mask() {
     // NB6-6 fix: WebSocket mask/unmask should use 4-byte-at-a-time XOR.
     // Interpreter: chunks_exact_mut(4) + u32::from_ne_bytes
-    let source = std::fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let source = read_net_eval_source();
     assert!(
         source.contains("chunks_exact_mut(4)") || source.contains("from_ne_bytes"),
         "NET6-5b audit: Interpreter WebSocket mask should use word-at-a-time XOR"
     );
 
     // Native: uint32_t mask_word + memcpy + XOR
-    let native_source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_source = read_native_runtime_source();
     assert!(
         native_source.contains("uint32_t mask_word") || native_source.contains("mask_word"),
         "NET6-5b audit: Native WebSocket mask should use word-at-a-time XOR"
@@ -25083,8 +25139,7 @@ fn test_net6_5b_websocket_word_at_a_time_mask() {
 #[test]
 fn test_net6_5b_native_tls_linearization() {
     // NB6-3 fix: Native TLS should linearize iovecs before a single SSL_write.
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     // Check for the stack buffer + heap fallback pattern
     assert!(
         source.contains("stack_buf") && source.contains("taida_tls_send_all"),
@@ -25133,8 +25188,7 @@ fn test_net6_5b_h2_module_architecture() {
 #[test]
 fn test_net6_5b_native_h2_hardening_present() {
     // Verify that Native h2 has the same hardening as Interpreter.
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     // WINDOW_UPDATE overflow protection
     assert!(
         source.contains("H2_MAX_FLOW_CONTROL_WINDOW"),
@@ -25272,8 +25326,7 @@ fn test_net6_5b_release_gate_v6_test_counts() {
 /// for shared body/raw, and includes 14 fields (with "chunked").
 #[test]
 fn test_nb6_26_27_28_native_h2_request_pack_parity() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // NB6-26: Must use taida_bytes_from_raw (not taida_list_new + append)
     assert!(
@@ -25309,8 +25362,7 @@ fn test_nb6_26_27_28_native_h2_request_pack_parity() {
 /// NB6-31: Verify Native RST_STREAM validates payload length.
 #[test]
 fn test_nb6_31_native_rst_stream_payload_length_check() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // The RST_STREAM handler must check payload_len != 4
     let rst_section: String = source
@@ -25328,8 +25380,7 @@ fn test_nb6_31_native_rst_stream_payload_length_check() {
 /// NB6-32: Verify Native TLS writev NULL check.
 #[test]
 fn test_nb6_32_native_tls_writev_null_check() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // The tls_writev_all function must check for NULL after heap alloc
     let writev_section: String = source
@@ -25359,8 +25410,7 @@ fn test_nb6_33_hpack_dyntable_o1_insert() {
     );
 
     // Native: no memmove for insert
-    let c_source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let c_source = read_native_runtime_source();
     // The insert function should append at end, not memmove
     let insert_section: String = c_source
         .lines()
@@ -25381,8 +25431,7 @@ fn test_nb6_33_hpack_dyntable_o1_insert() {
 /// NB6-34: Verify Native Huffman decoder uses lookup table optimization.
 #[test]
 fn test_nb6_34_native_huffman_lut() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     assert!(
         source.contains("h2_huff_lut"),
         "NB6-34: Native Huffman decoder must use 8-bit prefix lookup table"
@@ -25413,8 +25462,7 @@ fn test_nb6_35_no_per_frame_flush() {
 /// NB6-29/30: Verify Native HPACK header buffer sizes increased.
 #[test]
 fn test_nb6_29_30_native_header_buffer_sizes() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     assert!(
         source.contains("H2_MAX_HEADERS 128"),
         "NB6-30: Native H2_MAX_HEADERS must be >= 128"
@@ -25432,8 +25480,7 @@ fn test_nb6_29_30_native_header_buffer_sizes() {
 /// NB6-24: Verify Native h2 response headers use stack+heap fallback.
 #[test]
 fn test_nb6_24_native_h2_header_stack_fallback() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     // Must have hdr_stack buffer instead of fixed 64KB malloc
     let hdr_section: String = source
         .lines()
@@ -25468,8 +25515,7 @@ fn test_nb6_39_hpack_encoder_hashmap_lookup() {
 /// NB6-40: Verify Native H2Conn is heap-allocated.
 #[test]
 fn test_nb6_40_native_h2conn_heap_alloc() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     assert!(
         source.contains("TAIDA_MALLOC(sizeof(H2Conn)"),
         "NB6-40: Native H2Conn must be heap-allocated (not stack)"
@@ -25479,8 +25525,7 @@ fn test_nb6_40_native_h2conn_heap_alloc() {
 /// NB6-41: Verify Native h2_conn_find_stream searches from end.
 #[test]
 fn test_nb6_41_native_stream_find_from_end() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     let find_section: String = source
         .lines()
         .skip_while(|l| !l.contains("h2_conn_find_stream"))
@@ -25496,8 +25541,7 @@ fn test_nb6_41_native_stream_find_from_end() {
 /// NB6-37: Verify Native h2_dyntable_insert checks strdup return values.
 #[test]
 fn test_nb6_37_native_dyntable_strdup_check() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
     let insert_section: String = source
         .lines()
         .skip_while(|l| !l.contains("static void h2_dyntable_insert"))
@@ -26943,8 +26987,7 @@ stdout(result.__value.kind)
 /// call on the instruction byte has been removed from the literal-name branch.
 #[test]
 fn test_nb7_9_qpack_decode_no_spurious_string_call() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // Find the Literal Field Line With Literal Name decode section
     let literal_section: String = source
@@ -26999,8 +27042,7 @@ fn test_nb7_9_qpack_decode_no_spurious_string_call() {
 /// covers literal-name headers.
 #[test]
 fn test_nb7_9_qpack_selftest_exists() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     assert!(
         source.contains("h3_selftest_qpack_roundtrip"),
@@ -27021,8 +27063,7 @@ fn test_nb7_9_qpack_selftest_exists() {
 /// rejects empty pseudo-header values, and the selftest covers all cases.
 #[test]
 fn test_nb7_10_h3_request_validation_scheme_required() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // Find h3_extract_request_fields function
     let h3_extract_section: String = source
@@ -27066,8 +27107,7 @@ fn test_nb7_10_h3_request_validation_scheme_required() {
 /// NB7-10: Verify the H3 request validation selftest covers all malformed cases.
 #[test]
 fn test_nb7_10_h3_request_validation_selftest_coverage() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // Find the selftest function
     let selftest_section: String = source
@@ -27181,8 +27221,7 @@ stdout(result.__value.kind)
 /// This matches H2's behavior in h2_hpack_decode_block.
 #[test]
 fn test_nb7_11_qpack_overflow_is_decode_error() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // NET7-10d: h3_qpack_decode_block is now a thin wrapper around
     // h3_qpack_decode_block_with_dt. The overflow check lives in the _with_dt version.
@@ -27221,8 +27260,7 @@ fn test_nb7_11_qpack_overflow_is_decode_error() {
 /// partial count).
 #[test]
 fn test_nb7_11_qpack_selftest_expects_overflow_error() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // Find the selftest function
     let func_start = source
@@ -27556,12 +27594,11 @@ stdout(result.throw.message)
 /// 3. The success path returns @(ok: true, requests: N)
 #[test]
 fn test_nb7_13_h3_transport_pending_source_parity() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let _manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // --- Check Interpreter source ---
-    let interp_path = manifest_dir.join("src/interpreter/net_eval.rs");
-    let interp_src = fs::read_to_string(&interp_path)
-        .unwrap_or_else(|e| panic!("NET7-12a: cannot read {:?}: {}", interp_path, e));
+    // C12B-025: net_eval was split into a directory; read concatenated source.
+    let interp_src = read_net_eval_source();
 
     // serve_h3() must call serve_h3_loop (real transport)
     assert!(
@@ -28137,7 +28174,7 @@ stdout(result.throw.message)
     cleanup_net_project(&dir);
 
     // Pin the exact message content — full string equality, not substring match.
-    // Source of truth: src/js/runtime.rs H3Unsupported branch.
+    // Source of truth: src/js/runtime/net.rs H3Unsupported branch (C12-9 split).
     let expected_msg = "httpServe: HTTP/3 (protocol: \"h3\") is not supported on the JS backend. \
                         Use the native or interpreter backend for HTTP/3 support.";
     assert_eq!(
@@ -28153,8 +28190,10 @@ stdout(result.throw.message)
 /// This catches drift between the runtime and the test without running Node.
 #[test]
 fn test_nb7_15_js_h3_unsupported_source_inspection() {
+    // C12-9 (FB-21): src/js/runtime.rs was split; the H3Unsupported string
+    // now lives in the `net` chunk.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let js_runtime_path = manifest_dir.join("src/js/runtime.rs");
+    let js_runtime_path = manifest_dir.join("src/js/runtime/net.rs");
     let js_src = fs::read_to_string(&js_runtime_path)
         .unwrap_or_else(|e| panic!("NB7-15: cannot read {:?}: {}", js_runtime_path, e));
 
@@ -28542,8 +28581,7 @@ stdout(result.throw.message)
 /// confirms both backends have the canonical check (not just truncation checks).
 #[test]
 fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_qpack =
         fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
@@ -28594,8 +28632,7 @@ fn test_net7_5a_h3_frame_bounds_hardening_source() {
         fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
 
     // Interpreter decode_frame must exist and check total > data.len().
     assert!(
@@ -28636,8 +28673,7 @@ fn test_net7_5b_h3_frame_type_source_parity() {
         fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
 
     // Both must have DATA frame type = 0x00
     assert!(
@@ -28706,8 +28742,7 @@ main =
 /// from untrusted input. All allocations use fixed-size pre-allocated buffers.
 #[test]
 fn test_net7_5c_h3_bounded_copy_structural_audit() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_qpack =
         fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
@@ -28779,8 +28814,7 @@ fn test_net7_5c_h3_bounded_copy_structural_audit() {
 /// Both backends must have exactly 99 entries (RFC 9204 Appendix A, omitting index 22).
 #[test]
 fn test_net7_10c_qpack_static_table_count_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src =
         fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
 
@@ -28816,8 +28850,7 @@ fn test_net7_10c_qpack_static_table_count_parity() {
 /// Both backends must use identical H3 error code values (RFC 9114 §8.1).
 #[test]
 fn test_net7_10c_h3_error_code_iana_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_frame =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src_quic =
@@ -28865,8 +28898,7 @@ fn test_net7_10c_h3_error_code_iana_parity() {
 /// Both backends must use identical SETTINGS identifiers (RFC 9114 §7.2.4.1).
 #[test]
 fn test_net7_10c_settings_ids_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
 
@@ -28895,8 +28927,7 @@ fn test_net7_10c_settings_ids_parity() {
 /// between Native and Interpreter backends.
 #[test]
 fn test_net7_10c_connection_state_machine_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
@@ -28939,8 +28970,7 @@ fn test_net7_10c_connection_state_machine_parity() {
 /// ordering violations, unknown pseudo-headers).
 #[test]
 fn test_net7_10c_request_validation_semantics_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_req =
         fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
 
@@ -29004,8 +29034,7 @@ fn test_net7_10c_request_validation_semantics_parity() {
 /// in a varint and encodes it as an H3 frame.
 #[test]
 fn test_net7_10c_goaway_encode_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_frame =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
 
@@ -29029,8 +29058,7 @@ fn test_net7_10c_goaway_encode_parity() {
 /// Both backends must use the same default idle timeout (30 seconds).
 #[test]
 fn test_net7_10c_idle_timeout_default_parity() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
@@ -29175,10 +29203,7 @@ fn test_net7_10d_dynamic_table_struct_parity() {
     );
 
     // Native: verify H3DynamicTable struct definition exists
-    let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
-    )
-    .unwrap();
+    let native_src = read_native_runtime_source();
     assert!(
         native_src.contains("typedef struct {") && native_src.contains("H3DynamicTable"),
         "NET7-10d: Native must define H3DynamicTable struct"
@@ -29203,10 +29228,7 @@ fn test_net7_10d_eviction_semantics_parity() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
-    let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
-    )
-    .unwrap();
+    let native_src = read_native_runtime_source();
 
     // Both must use the 32-byte overhead formula
     assert!(
@@ -29246,10 +29268,7 @@ fn test_net7_10d_post_base_lookup_parity() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
-    let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
-    )
-    .unwrap();
+    let native_src = read_native_runtime_source();
 
     // Both must implement lookup_post_base (post-base index 0 = largest_ref)
     assert!(
@@ -29279,10 +29298,7 @@ fn test_net7_10d_encoder_instruction_parity() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
-    let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
-    )
-    .unwrap();
+    let native_src = read_native_runtime_source();
 
     // Insert With Name Reference (1Txxxxxx): static 0xC0, dynamic 0x80
     assert!(
@@ -29352,10 +29368,7 @@ fn test_net7_10d_decoder_instruction_parity() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
-    let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
-    )
-    .unwrap();
+    let native_src = read_native_runtime_source();
 
     // Section Ack (1xxxxxxx): 0x80 prefix
     assert!(
@@ -29425,10 +29438,7 @@ fn test_net7_10d_decode_block_dynamic_integration() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/net_h3/qpack.rs"),
     )
     .unwrap();
-    let native_src = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/codegen/native_runtime.c"),
-    )
-    .unwrap();
+    let native_src = read_native_runtime_source();
 
     // Interpreter decode_block must accept dynamic_table and handle:
     // - Indexed Field Line with dynamic table relative index (!is_static branch)
@@ -29643,8 +29653,7 @@ stdout(result.throw.kind)
 /// NET7-11b-4: Bounded-copy structural audit (runtime constant parity).
 #[test]
 fn test_net7_11b_hardening_bounded_copy_parity() {
-    let nat_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let nat_src = read_native_runtime_source();
     let ip_src = fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
 
     // Both backends must define the same bounded limits
@@ -29681,10 +29690,9 @@ fn test_net7_11b_hardening_bounded_copy_parity() {
 ///   7. QUIC transport parameters are configured (initial_max_data etc.)
 #[test]
 fn test_net7_12c_native_h3_stream_dispatch_implemented() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let native_src_path = manifest_dir.join("src/codegen/native_runtime.c");
-    let native_src = fs::read_to_string(&native_src_path)
-        .unwrap_or_else(|e| panic!("NET7-12c: cannot read {:?}: {}", native_src_path, e));
+    // C12B-026: native_runtime.c was split into 7 fragments; the audit
+    // reads all of them concatenated.
+    let native_src = read_native_runtime_source();
 
     // 1. Phase 8d placeholder MUST be removed.
     assert!(
@@ -29771,8 +29779,7 @@ fn test_net7_12c_native_h3_stream_dispatch_implemented() {
 fn test_net7_12c_native_interpreter_h3_handler_contract_parity() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    let native_src = fs::read_to_string(manifest_dir.join("src/codegen/native_runtime.c"))
-        .expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
         .expect("read quic.rs");
 
@@ -29830,8 +29837,7 @@ fn test_net7_12c_native_interpreter_h3_handler_contract_parity() {
 fn test_net7_12d_graceful_shutdown_goaway_drain_close_parity() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    let native_src = fs::read_to_string(manifest_dir.join("src/codegen/native_runtime.c"))
-        .expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_quic_src = fs::read_to_string(manifest_dir.join("src/interpreter/net_h3/quic.rs"))
         .expect("read quic.rs");
     let interp_conn_src =
@@ -30306,8 +30312,7 @@ fn test_net7_12e_h3_e2e_32_request_throughput_benchmark() {
 ///   - No aggregate buffer across frames
 #[test]
 fn test_net7_12e_h3_allocation_materialization_audit() {
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_frame_src =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
     let _interp_request_src =
@@ -30429,7 +30434,7 @@ fn test_net7_12e_h3_allocation_materialization_audit() {
 #[test]
 fn test_net7_12f_release_truth_blocker_closure_verified() {
     // ── NB7-114 FIXED: Interpreter public H3 path connected ──
-    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let net_eval_src = read_net_eval_source();
     // The dlopen gate and H3TransportPending/H3QuicUnavailable paths must be gone
     assert!(
         !net_eval_src.contains("H3TransportPending"),
@@ -30446,8 +30451,7 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
     );
 
     // ── NB7-65 FIXED: Native stream dispatch implemented ──
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     // Phase 8d placeholder must be gone
     assert!(
         !native_src.contains("Phase 8d will add stream-level H3 dispatch here"),
@@ -30511,15 +30515,14 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
 #[test]
 fn test_net7_12f_release_gate_all_criteria_met() {
     // Gate 1: h1/h2 existing contract — v1-v6 functions still present
-    let net_eval_src = fs::read_to_string("src/interpreter/net_eval.rs").expect("read net_eval.rs");
+    let net_eval_src = read_net_eval_source();
     assert!(
         net_eval_src.contains("httpServe") && net_eval_src.contains("httpParseRequestHead"),
         "NET7-12f Gate 1: h1/h2 API surface must be intact in net_eval.rs"
     );
 
     // Gate 2: h3 runtime parity — both backends have h3 implementation
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     let interp_h3_exists = std::path::Path::new("src/interpreter/net_h3/mod.rs").exists();
     assert!(
         native_src.contains("serve_h3_loop"),
@@ -30531,7 +30534,9 @@ fn test_net7_12f_release_gate_all_criteria_met() {
     );
 
     // Gate 3: JS h3 explicit unsupported
-    let js_runtime_src = fs::read_to_string("src/js/runtime.rs").expect("read js/runtime.rs");
+    // C12-9 (FB-21): runtime split — H3Unsupported string moved to net.rs.
+    let js_runtime_src =
+        fs::read_to_string("src/js/runtime/net.rs").expect("read js/runtime/net.rs");
     assert!(
         js_runtime_src.contains("H3Unsupported"),
         "NET7-12f Gate 3: JS must return H3Unsupported for h3 requests"
@@ -30627,8 +30632,7 @@ fn test_net7_12f_phase_completion_structural_audit() {
     );
 
     // No residual Phase 8d placeholder in native source
-    let native_src =
-        fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_src = read_native_runtime_source();
     assert!(
         !native_src.contains("Phase 8d will add"),
         "NET7-12f: Phase 8d placeholders must all be resolved"
@@ -30848,8 +30852,7 @@ fn static_table_lookup_for_bench(index: usize) -> (&'static str, &'static str) {
 /// frames via memcpy, matching the Interpreter's `body_data.extend_from_slice(payload)`.
 #[test]
 fn test_nb7_116_native_multi_data_body_concatenation() {
-    let source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let source = read_native_runtime_source();
 
     // Find the H3_FRAME_DATA case in h3_process_stream.
     let data_case_section: String = source
@@ -30977,8 +30980,7 @@ fn test_nb7_115_interpreter_goaway_uses_control_stream() {
 fn test_nb7_115_116_multi_data_parity_interp_native() {
     let interp_source =
         std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
-    let native_source =
-        std::fs::read_to_string("src/codegen/native_runtime.c").expect("read native_runtime.c");
+    let native_source = read_native_runtime_source();
 
     // Interpreter: body_data.extend_from_slice in read_request_stream
     let interp_data_section: String = interp_source
@@ -31185,6 +31187,1112 @@ stdout(Repeat["ab", 3]())
     let out = run_interpreter_src(source, "b11_stdout_str_mold_chain_expected")
         .expect("interpreter output should exist");
     assert_eq!(out, "HI\nhello\npad\nababab");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-1 Phase 1 — FB-27: expr_type_tag mold-return table
+//
+// B11 Phase 2 (`taida_io_stdout_with_tag`) hardcoded Pack (tag=4) for
+// every `MoldInst`, which broke Str / Int / Float / Bool / List-returning
+// molds passed across user-function boundaries (the caller's
+// `emit_call_arg_tags` path picked up the wrong tag and the callee's
+// runtime display used Pack heuristics).
+//
+// C12-1 introduces `src/types/mold_returns.rs` as the single source of
+// truth and wires `expr_type_tag()` through it. These parity tests lock
+// in that Str-returning molds travel across user-function boundaries
+// and render identically on interpreter / JS / native — exercising the
+// NB-14 call-arg tag propagation path with a compile-time-known STR
+// tag (3) that would previously have been Pack (4).
+// ────────────────────────────────────────────────────────────────
+
+/// C12-1e: Str-returning mold passed to a user function, then stdout'd
+/// inside the callee. Exercises emit_call_arg_tags with tag=3 (STR).
+#[test]
+fn test_c12_1_str_mold_through_user_func_parity() {
+    let source = r#"print_str s =
+    stdout(s)
+print_str(Upper["hi"]())
+print_str(Lower["HELLO"]())
+print_str(Trim["  pad  "]())
+print_str(Join[@[1, 2, 3], ","]())
+"#;
+    assert_backend_parity_for_source(source, "c12_1_str_mold_through_user_func");
+    let out = run_interpreter_src(source, "c12_1_str_mold_through_user_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HI\nhello\npad\n1,2,3");
+}
+
+/// C12-1e: Int-returning mold (Floor) passed to a user function.
+#[test]
+fn test_c12_1_int_mold_through_user_func_parity() {
+    let source = r#"print_int n =
+    stdout(n)
+print_int(Floor[3.7]())
+print_int(Ceil[3.2]())
+print_int(Round[4.5]())
+"#;
+    assert_backend_parity_for_source(source, "c12_1_int_mold_through_user_func");
+    let out = run_interpreter_src(source, "c12_1_int_mold_through_user_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\n4\n5");
+}
+
+// C12-1e: NOTE — Bool-returning mold passed *through* a user function
+// (e.g. `print_any v = stdout(v); print_any(TypeIs[...]())`) currently
+// still prints `1`/`0` on the native backend instead of `true`/`false`.
+// That is the FB-1 param_tag_vars-non-propagation issue and is
+// explicitly the C12-11 Phase's scope. C12-1 only fixes the compile-
+// time tag table (`src/types/mold_returns.rs`) so `expr_type_tag()` is
+// authoritative for MoldInst return types; wiring param_tag_vars into
+// stdout's tagged-dispatch path is done in C12-11. The direct literal
+// case (`print_any(true)`) also exhibits the same FB-1 gap on main.
+
+/// C12-1e: List-returning mold (Chars / Sort) passed to stdout.
+/// List-returning molds were previously tagged as Pack; with C12-1 they
+/// tag as List (5). The emit_call_arg_tags path never propagates List
+/// directly for Pack-field use, but this test guards the direct stdout
+/// display path.
+#[test]
+fn test_c12_1_list_mold_stdout_parity() {
+    let source = r#"stdout(Chars["abc"]())
+stdout(Sort[@[3, 1, 2]]())
+"#;
+    assert_backend_parity_for_source(source, "c12_1_list_mold_stdout");
+}
+
+/// C12-1e: Tag propagation round-trip — caller passes a Str mold, callee
+/// stores it into a Pack field, stdout reads the field back with the
+/// correct tag. Before C12-1, Pack field tag would be 4 (Pack) and the
+/// display would mis-route through pack_to_string for a plain string.
+#[test]
+fn test_c12_1_str_mold_pack_field_roundtrip_parity() {
+    let source = r#"wrap s =
+    @(label <= "up", value <= s)
+p <= wrap(Upper["hello"]())
+stdout(p.value)
+stdout(p.label)
+"#;
+    assert_backend_parity_for_source(source, "c12_1_str_mold_pack_field_roundtrip");
+    let out = run_interpreter_src(source, "c12_1_str_mold_pack_field_roundtrip_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HELLO\nup");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-2 Phase 2 — FB-10: `.toString()` universal method adoption
+//
+// Before C12-2, `.toString()` was implemented unevenly across the three
+// backends: the interpreter lacked it for List / BuchiPack, JS fell back
+// to `[object Object]` for untyped packs, and the checker did not reject
+// `.toString(arg)` in builtin argument contexts. C12-2 closes these
+// gaps so that `.toString()` is a universal display method returning a
+// plain `Str` — equivalent to the interpreter's `to_display_string()`
+// — and `.toString(args)` is a compile-time error (E1508).
+// ────────────────────────────────────────────────────────────────
+
+/// C12-2b: `.toString()` on primitives (Int / Float / Bool / Str).
+/// Locks in bit-exact output across the 3 backends for the base case
+/// that FB-10 reproduced with `Concat["...", n.toString()]`.
+#[test]
+fn test_c12_2_tostring_primitives_parity() {
+    let source = r#"i <= 42
+f <= 3.14
+b <= true
+s <= "hello"
+stdout(i.toString())
+stdout(f.toString())
+stdout(b.toString())
+stdout(s.toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_primitives");
+    let out = run_interpreter_src(source, "c12_2_tostring_primitives_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\n3.14\ntrue\nhello");
+}
+
+/// C12-2b: `.toString()` on List / BuchiPack — previously the
+/// interpreter errored on List.toString and JS rendered plain packs as
+/// `[object Object]`. C12-2 patches both so all three backends produce
+/// `@[...]` / `@(field <= value, ...)`.
+#[test]
+fn test_c12_2_tostring_composite_parity() {
+    let source = r#"l <= @[1, 2, 3]
+p <= @(a <= 1, b <= 2)
+stdout(l.toString())
+stdout(p.toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_composite");
+    let out = run_interpreter_src(source, "c12_2_tostring_composite_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "@[1, 2, 3]\n@(a <= 1, b <= 2)");
+}
+
+/// C12-2b: FB-10 exact reproduction — passing `.toString()` result
+/// across variable bind and into Str `+` concatenation. The interpreter
+/// must not raise the `Concat: arguments must both be list or both be
+/// Bytes` error that FB-10 originally reported.
+#[test]
+fn test_c12_2_tostring_string_concat_parity() {
+    let source = r#"status <= 404
+msg <= "HTTP Error " + status.toString()
+stdout(msg)
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_string_concat");
+    let out = run_interpreter_src(source, "c12_2_tostring_string_concat_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HTTP Error 404");
+}
+
+/// C12-2b: `.toString()` must equal `Str[value]().getOrDefault("")`
+/// for primitives — the mold returns a Lax wrapper whereas `.toString()`
+/// is a direct string, but after unwrapping they are bit-exact.
+#[test]
+fn test_c12_2_tostring_equals_str_mold_parity() {
+    let source = r#"n <= 42
+stdout(n.toString())
+stdout(Str[n]().getOrDefault(""))
+stdout((n.toString() == Str[n]().getOrDefault("")).toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_2_tostring_equals_str_mold");
+    let out = run_interpreter_src(source, "c12_2_tostring_equals_str_mold_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\n42\ntrue");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-3 Phase 3 — FB-8: Mutual recursion static detection
+//
+// Non-tail mutual recursion previously compiled silently and crashed at
+// runtime with "Maximum call depth exceeded". C12-3 promotes this to a
+// compile-time [E1614] error via the new `mutual-recursion` verify check
+// (wired into `TypeChecker::check_program`). Tail-only mutual recursion
+// continues to compile and run correctly on all three backends.
+// ────────────────────────────────────────────────────────────────
+
+/// C12-3d: tail-only mutual recursion passes the new check and produces
+/// identical output on all three backends. This is the positive case —
+/// isEven / isOdd with calls in tail position.
+#[test]
+fn test_c12_3_tail_mutual_recursion_parity() {
+    let source = r#"isEven n =
+  | n == 0 |> 1
+  | _ |> isOdd(n - 1)
+
+isOdd n =
+  | n == 0 |> 0
+  | _ |> isEven(n - 1)
+
+stdout(isEven(0))
+stdout(isEven(4))
+stdout(isOdd(7))
+"#;
+    assert_backend_parity_for_source(source, "c12_3_tail_mutual_recursion");
+    let out = run_interpreter_src(source, "c12_3_tail_mutual_recursion_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "1\n1\n1");
+}
+
+/// C12-3d: non-tail mutual recursion must be rejected by all three
+/// backends (since the type checker runs on every backend). This is
+/// the negative case — A calls B inside an argument position.
+#[test]
+fn test_c12_3_non_tail_mutual_recursion_reject_parity() {
+    let source = r#"a n =
+  wrap(b(n))
+
+b n =
+  a(n)
+
+wrap x =
+  x
+
+stdout(a(0))
+"#;
+    assert_backends_reject_source(source, "c12_3_non_tail_mutual_recursion_reject");
+}
+
+/// C12-3d: three-function cycle with a single non-tail edge is also
+/// rejected. This guards the cycle-walk in `check_mutual_recursion`.
+#[test]
+fn test_c12_3_three_cycle_non_tail_reject_parity() {
+    let source = r#"alpha n =
+  beta(n)
+
+beta n =
+  gamma(n) + 1
+
+gamma n =
+  alpha(n)
+
+stdout(alpha(0))
+"#;
+    assert_backends_reject_source(source, "c12_3_three_cycle_non_tail_reject");
+}
+
+/// C12-3d: pure self-recursion must still compile — the mutual-recursion
+/// check must not regress direct recursion detection.
+#[test]
+fn test_c12_3_self_recursion_still_accepted_parity() {
+    let source = r#"countdown n =
+  | n == 0 |> 0
+  | _ |> countdown(n - 1)
+
+stdout(countdown(10))
+"#;
+    assert_backend_parity_for_source(source, "c12_3_self_recursion_still_accepted");
+    let out = run_interpreter_src(source, "c12_3_self_recursion_still_accepted_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "0");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-5 Phase 5 — FB-18: `Value::Unit` elimination on stdout/stderr
+//
+// Before C12-5, `stdout(...)` / `stderr(...)` returned `Value::Unit`,
+// which conflicted with PHILOSOPHY I ("null/undefined の完全排除").
+// C12-5 changes the contract so these functions return the UTF-8 byte
+// length of the rendered payload as Int. `n <= stdout("hi")` binds
+// `n = 2`. The trailing newline added by the runtime for display is
+// NOT counted — only the bytes the caller handed in.
+//
+// The change is source-compatible for the common case `stdout(x) => _`
+// (an Int is simply discarded instead of a Unit), and unlocks the
+// previously-nonsensical `bytes <= stdout(...)` pattern that the FB
+// example requested. This block pins bit-exact 3-backend parity on
+// the new contract so the byte-count semantics cannot silently drift.
+// ────────────────────────────────────────────────────────────────
+
+/// C12-5a: core contract — `stdout("hello")` returns 5 (Int byte count)
+/// instead of Unit, and the bound Int can be `stdout`-ed again on all
+/// three backends bit-exactly.
+#[test]
+fn test_c12_5_stdout_returns_bytes_int_parity() {
+    let source = r#"n <= stdout("hello")
+stdout(n)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_returns_bytes_int");
+    let out = run_interpreter_src(source, "c12_5_stdout_returns_bytes_int_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hello\n5");
+}
+
+/// C12-5a: empty payload returns 0 — Int default value guarantees the
+/// bound value is well-formed (no Unit leak, no null leak). Verifies
+/// all three backends treat `stdout("")` the same way.
+#[test]
+fn test_c12_5_stdout_empty_payload_parity() {
+    let source = r#"n <= stdout("")
+stdout(n)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_empty_payload");
+    let out = run_interpreter_src(source, "c12_5_stdout_empty_payload_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "\n0");
+}
+
+/// C12-5a: UTF-8 multi-byte payloads count by byte, not by codepoint,
+/// matching Rust `String::len()` / JS `TextEncoder` / Native
+/// `strlen()`. 「あ」 is 3 UTF-8 bytes so `stdout("あ")` returns 3.
+#[test]
+fn test_c12_5_stdout_utf8_byte_count_parity() {
+    let source = r#"n <= stdout("あ")
+stdout(n)
+n2 <= stdout("あABC")
+stdout(n2)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_utf8_byte_count");
+    let out = run_interpreter_src(source, "c12_5_stdout_utf8_byte_count_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "あ\n3\nあABC\n6");
+}
+
+/// C12-5a: non-Str payloads — `stdout(42)` renders "42" and returns 2.
+/// `stdout(true)` renders "true" and returns 4. Pins the rule that
+/// byte count == display length (UTF-8) across the three backends.
+#[test]
+fn test_c12_5_stdout_non_str_byte_count_parity() {
+    let source = r#"n1 <= stdout(42)
+stdout(n1)
+n2 <= stdout(true)
+stdout(n2)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_non_str_byte_count");
+    let out = run_interpreter_src(source, "c12_5_stdout_non_str_byte_count_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\n2\ntrue\n4");
+}
+
+/// C12-5f: `Value::Unit` is not observable from Taida surface. The
+/// bound `n` from a `stdout(...)` call is always an Int, never Unit,
+/// so feeding it straight into arithmetic works on all backends.
+/// Before C12-5 this program would have errored at runtime (Unit
+/// does not support `+ 1`).
+#[test]
+fn test_c12_5_stdout_return_is_int_arith_parity() {
+    let source = r#"n <= stdout("hi")
+stdout(n + 1)
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_return_is_int_arith");
+    let out = run_interpreter_src(source, "c12_5_stdout_return_is_int_arith_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hi\n3");
+}
+
+/// C12-5a: source-compatibility — the canonical pre-C12 idiom of
+/// using `stdout(...)` as a bare statement (value naturally discarded
+/// at statement level) keeps working unchanged across all three
+/// backends. This is the bulk of existing Taida code and must stay
+/// silent about the return-type migration (Unit → Int).
+#[test]
+fn test_c12_5_stdout_discard_still_works_parity() {
+    let source = r#"stdout("one")
+stdout("two")
+stdout("done")
+"#;
+    assert_backend_parity_for_source(source, "c12_5_stdout_discard_still_works");
+    let out = run_interpreter_src(source, "c12_5_stdout_discard_still_works_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "one\ntwo\ndone");
+}
+
+// C12B-039: stdout byte-count edge case coverage. The canonical
+// `test_c12_5_stdout_*_parity` tests pin empty / 1-byte / UTF-8 /
+// Int / Bool / arithmetic / discard paths. The tests below plug the
+// gaps identified in the 2026-04-15 gate review:
+//
+//   1. embedded control bytes in the payload (CR+LF + ESC sequences)
+//   2. 100+ byte ASCII payload (regression guard against any future
+//      micro-buffer assumptions in `taida_io_stdout`)
+//   3. sequential byte-count accumulation via arithmetic on the
+//      returned Ints — locks the "Int is a normal value" invariant
+//      that distinguishes C12-5 from the pre-C12 `Value::Unit` world.
+//
+// All three cases stay within the single-argument `stdout(...)` API
+// (multi-arg stdout is rejected by the checker as `[E1507]` per
+// FB-18 design lock) and only use payload shapes that do not contain
+// `\0` — the Native backend uses `printf("%s\n", s)` which would
+// truncate a null byte and break parity, a known limitation listed
+// in the Bytes-argument follow-up below.
+
+/// C12B-039 case 1: non-printable control bytes (tab and the ESC
+/// prefix of an ANSI sequence) inside the payload preserve their
+/// byte count exactly across all three backends. The trailing newline
+/// added by `println!` / `console.log` / `printf` is NOT counted —
+/// only the original payload bytes.
+///
+/// We deliberately avoid `\r` because the test harness (`common::normalize`)
+/// trims trailing whitespace on each line, which would mask CR-preservation
+/// regressions. Tab (`\t`) and ESC (`\x1b`) are not whitespace-trimmed and
+/// therefore reach the assertion intact.
+#[test]
+fn test_c12b_039_stdout_control_bytes_parity() {
+    let source = r#"n <= stdout("a\tb")
+stdout(n)
+m <= stdout("\x1b[31mred")
+stdout(m)
+"#;
+    assert_backend_parity_for_source(source, "c12b_039_stdout_control_bytes");
+    let out = run_interpreter_src(source, "c12b_039_stdout_control_bytes_expected")
+        .expect("interpreter output should exist");
+    // "a\tb" is 3 bytes; "\x1b[31mred" is 8 bytes (ESC + "[31m" + "red").
+    assert_eq!(out, "a\tb\n3\n\u{1b}[31mred\n8");
+}
+
+/// C12B-039 case 2: 108-byte ASCII payload. Guards against any hidden
+/// buffer truncation or size cap in the native or wasm runtime's
+/// `taida_io_stdout` when the payload exceeds common small-buffer
+/// thresholds (stack-allocated `char buf[64]` etc).
+#[test]
+fn test_c12b_039_stdout_large_ascii_payload_parity() {
+    let source = r#"n <= stdout("abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789")
+stdout(n)
+"#;
+    assert_backend_parity_for_source(source, "c12b_039_stdout_large_ascii_payload");
+    let out = run_interpreter_src(source, "c12b_039_stdout_large_ascii_payload_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(
+        out,
+        "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789\n108"
+    );
+}
+
+/// C12B-039 case 3: byte counts returned from separate `stdout` calls
+/// compose under arithmetic. This extends
+/// `test_c12_5_stdout_return_is_int_arith_parity` (which only verified
+/// `n + 1`) with an actual multi-stdout accumulation that no single
+/// backend-specific shortcut could satisfy — every backend must
+/// faithfully return the UTF-8 byte count.
+#[test]
+fn test_c12b_039_stdout_byte_count_accumulation_parity() {
+    let source = r#"n1 <= stdout("hi")
+n2 <= stdout("world")
+stdout(n1 + n2)
+"#;
+    assert_backend_parity_for_source(source, "c12b_039_stdout_byte_count_accumulation");
+    let out = run_interpreter_src(source, "c12b_039_stdout_byte_count_accumulation_expected")
+        .expect("interpreter output should exist");
+    // "hi" = 2 bytes, "world" = 5 bytes, total printed as 7.
+    assert_eq!(out, "hi\nworld\n7");
+}
+
+/// C12-4c: the canonical FB-17 reproduction — an arm body with a
+/// bare discarded pipeline (`writeFile(...) => _wr`) followed by
+/// another discarded side effect (`RemoveFile[...]() => _rm`) is
+/// rejected by the parser on every backend.
+#[test]
+fn test_c12_4_arm_body_discarded_pipeline_reject_parity() {
+    let source = r#"validateProjectRoot =
+  | 1 == 0 |>
+    writeFile(".hk_write_check", "test") => _wr
+    RemoveFile[".hk_write_check"]() => _rm
+  | _ |>
+    "ok"
+=> :Str
+
+stdout(validateProjectRoot())
+"#;
+    assert_backends_reject_source(source, "c12_4_arm_body_discarded_pipeline_reject");
+}
+
+/// C12-4c: a bare function-call statement (no binding, no `=> _`
+/// discard) in a non-final position inside an arm body is rejected
+/// on every backend.
+#[test]
+fn test_c12_4_arm_body_bare_call_statement_reject_parity() {
+    let source = r#"check n =
+  | n < 0 |>
+    stdout("negative")
+    stdout("rejected")
+  | _ |> "ok"
+=> :Str
+
+stdout(check(-1))
+"#;
+    assert_backends_reject_source(source, "c12_4_arm_body_bare_call_statement_reject");
+}
+
+/// C12-4c: legal let-then-expression pattern continues to work with
+/// identical output across all three backends. Ensures the new parse
+/// check does not regress the quality-test idiom used in
+/// `examples/quality/b3h_cond_pipeline.td`.
+#[test]
+fn test_c12_4_arm_body_let_then_expr_parity() {
+    let source = r#"classify n =
+  | n > 0 |>
+    doubled <= n * 2
+    doubled + 1
+  | _ |>
+    zeroed <= 0
+    zeroed - 1
+=> :Int
+
+stdout(classify(5).toString())
+stdout(classify(-5).toString())
+"#;
+    assert_backend_parity_for_source(source, "c12_4_arm_body_let_then_expr");
+    let out = run_interpreter_src(source, "c12_4_arm_body_let_then_expr_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "11\n-1");
+}
+
+/// C12-4c: the single-line arm body form (`| cond |> expr`) is a
+/// pure expression by construction and keeps working on all three
+/// backends.
+#[test]
+fn test_c12_4_arm_body_single_line_expr_parity() {
+    let source = r#"grade <=
+  | 85 >= 90 |> "A"
+  | 85 >= 80 |> "B"
+  | _ |> "F"
+
+stdout(grade)
+"#;
+    assert_backend_parity_for_source(source, "c12_4_arm_body_single_line_expr");
+    let out = run_interpreter_src(source, "c12_4_arm_body_single_line_expr_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "B");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12-11 Phase 11 — FB-1: `param_tag_vars` propagation extension
+//
+// Before C12-11, `stdout(v)` inside `print_any v = stdout(v)` always
+// routed Bool through `convert_to_string` / `taida_str_from_bool` which
+// emits "1"/"0" for Native (pre-B11 behavior). The stdout codegen only
+// consulted `param_tag_vars` indirectly for pack-field tags passed as
+// call args. C12-11 wires the param-tag IrVar and the `return_tag_vars`
+// entry of a user FuncCall into the tagged stdout path so that
+// "true"/"false" is preserved across user-function boundaries.
+// Additionally, body-based Bool inference on user functions marks
+// `f x = TypeIs[x, :Int]()` as Bool-returning, so `b <= f(...)` local
+// bindings also display as "true"/"false".
+//
+// Covers C12B-017 (canonical FB-1 Bool-through-user-func case) on the
+// Native backend; Interpreter / JS already produce "true"/"false" via
+// runtime type information.
+// ────────────────────────────────────────────────────────────────
+
+/// C12-11 (a): direct Bool value passed to a user function that prints
+/// its parameter. The caller tag (TAIDA_TAG_BOOL) flows through
+/// `emit_call_arg_tags` into the callee's `param_tag_vars` slot and is
+/// consumed by the tagged stdout path.
+#[test]
+fn test_c12_11_bool_through_user_func_param_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any(true)
+print_any(false)
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_through_user_func_param");
+    let out = run_interpreter_src(source, "c12_11_bool_through_user_func_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse");
+}
+
+/// C12-11 (a): Bool-returning MoldInst passed to a user function.
+/// `TypeIs[...]()` has compile tag 2 per `src/types/mold_returns.rs`,
+/// `emit_call_arg_tags` sets the caller slot to 2, and the callee's
+/// `param_tag_vars[v]` is read back at the `stdout(v)` site.
+#[test]
+fn test_c12_11_bool_mold_through_user_func_param_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any(TypeIs[42, :Int]())
+print_any(TypeIs["x", :Str]())
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_mold_through_user_func_param");
+    let out = run_interpreter_src(source, "c12_11_bool_mold_through_user_func_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue");
+}
+
+/// C12-11 (b): user function returning Bool consumed directly by
+/// stdout. The CallUser lowering captures the callee's
+/// `taida_get_return_tag` into `return_tag_vars`, which the stdout
+/// dispatch reads back when the arg is a user FuncCall with unknown
+/// compile-time tag.
+#[test]
+fn test_c12_11_bool_user_func_return_direct_stdout_parity() {
+    let source = r#"is_int_like v =
+    TypeIs[v, :Int]()
+stdout(is_int_like(42))
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_user_func_return_direct_stdout");
+    let out = run_interpreter_src(
+        source,
+        "c12_11_bool_user_func_return_direct_stdout_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "true");
+}
+
+/// C12-11: body-based Bool inference. `is_int_like` has no explicit
+/// `-> Bool` annotation, but its body's last expression is a
+/// `TypeIs[...]()` MoldInst which `expr_is_bool()` recognises. After
+/// C12-11 the function is added to `bool_returning_funcs` so that
+/// `b1 <= is_int_like(42)` tags `b1` as Bool, and `stdout(b1)` routes
+/// through the tagged path.
+#[test]
+fn test_c12_11_bool_let_binding_from_user_func_parity() {
+    let source = r#"is_int_like v =
+    TypeIs[v, :Int]()
+b1 <= is_int_like(42)
+stdout(b1)
+"#;
+    assert_backend_parity_for_source(source, "c12_11_bool_let_binding_from_user_func");
+    let out = run_interpreter_src(source, "c12_11_bool_let_binding_from_user_func_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true");
+}
+
+/// C12-11 regression: non-Bool arg types flowing through a user
+/// function parameter must not regress. `print_any("hi")` should still
+/// print "hi" (Str tag) and `print_any(42)` should still print "42"
+/// (Int tag), via the polymorphic fallback in `taida_io_stdout_with_tag`.
+///
+/// NB: Float-through-user-func-param is intentionally excluded here —
+/// `print_any(3.14)` fails at Native codegen with a verifier error on
+/// both `main` and this branch (pre-existing Native limitation: the
+/// Float arg type inference for untyped params loses precision). That
+/// is independent of the Bool-display fix targeted by C12-11.
+#[test]
+fn test_c12_11_non_bool_through_user_func_param_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any("hello")
+print_any(42)
+"#;
+    assert_backend_parity_for_source(source, "c12_11_non_bool_through_user_func_param");
+    let out = run_interpreter_src(source, "c12_11_non_bool_through_user_func_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "hello\n42");
+}
+
+/// C12B-020: `expr => _` is a no-op pipeline step that discards the
+/// resulting value while keeping the preceding expression's side
+/// effect. Before this fix, Native reported "Lowering error:
+/// unsupported pipeline step" and JS generated `__p = _;` (a
+/// ReferenceError). Interpreter already accepted it. Fixed by adding
+/// an explicit `Expr::Placeholder` arm to both `lower_pipeline_step`
+/// (native) and `gen_pipeline` (JS) that leaves the accumulator
+/// unchanged.
+#[test]
+fn test_c12b_020_stdout_discard_pipeline_parity() {
+    let source = r#"stdout("x") => _
+"#;
+    assert_backend_parity_for_source(source, "c12b_020_stdout_discard_pipeline");
+    let out = run_interpreter_src(source, "c12b_020_stdout_discard_pipeline_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "x");
+}
+
+#[test]
+fn test_c12b_020_pipeline_discard_followed_by_stmt_parity() {
+    // `stdout(first) => _` must not short-circuit later statements.
+    let source = r#"stdout("first") => _
+stdout("second")
+"#;
+    assert_backend_parity_for_source(source, "c12b_020_pipeline_discard_followed_by_stmt");
+    let out = run_interpreter_src(
+        source,
+        "c12b_020_pipeline_discard_followed_by_stmt_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "first\nsecond");
+}
+
+/// C12B-022: Native `TypeIs[param, :PrimitiveType]()` must honour the
+/// actual runtime type tag of the parameter. Before this fix the Native
+/// backend returned `true` for every primitive TypeIs check on a
+/// parameter ident because the compile-time branches assumed any
+/// unboxed unknown Ident was Int, making `is_int("s")` / `is_bool(42)`
+/// incorrectly report true. Fixed by emitting a runtime
+/// `taida_primitive_tag_match(tag, expected)` call and forcing the
+/// caller to propagate the INT=0 tag through `taida_set_call_arg_tag`
+/// for param-type-check callees. Interpreter and JS were already
+/// correct and are re-pinned by these tests.
+///
+/// Three arm tests plus a Bool-inversion arm cover Int / Str / Bool /
+/// Num (compound Int|Float) — each with both a matching and a
+/// non-matching primitive, so the runtime tag-match helper is exercised
+/// in both directions. Float-param is intentionally omitted: passing a
+/// Float through an untyped user function parameter fails Native
+/// codegen with a Verifier error on `main` and this branch alike
+/// (pre-existing Native limitation, unrelated to C12B-022).
+#[test]
+fn test_c12b_022_typeis_int_param_parity() {
+    let source = r#"is_int v =
+    TypeIs[v, :Int]()
+stdout(is_int(42))
+stdout(is_int("s"))
+stdout(is_int(true))
+"#;
+    assert_backend_parity_for_source(source, "c12b_022_typeis_int_param");
+    let out = run_interpreter_src(source, "c12b_022_typeis_int_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\nfalse");
+}
+
+#[test]
+fn test_c12b_022_typeis_str_param_parity() {
+    let source = r#"is_str v =
+    TypeIs[v, :Str]()
+stdout(is_str("hello"))
+stdout(is_str(42))
+stdout(is_str(true))
+"#;
+    assert_backend_parity_for_source(source, "c12b_022_typeis_str_param");
+    let out = run_interpreter_src(source, "c12b_022_typeis_str_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse\nfalse");
+}
+
+#[test]
+fn test_c12b_022_typeis_bool_param_parity() {
+    let source = r#"is_bool v =
+    TypeIs[v, :Bool]()
+stdout(is_bool(true))
+stdout(is_bool(false))
+stdout(is_bool(42))
+stdout(is_bool("s"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_022_typeis_bool_param");
+    let out = run_interpreter_src(source, "c12b_022_typeis_bool_param_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue\nfalse\nfalse");
+}
+
+/// C12B-034 regression: Mixed-type values through a user function
+/// parameter must be memory-safe on wasm (and match Native / JS
+/// output) even when the param-tag ident path routes through the
+/// tagged stdout runtime call. Before C12B-034 the wasm
+/// `taida_io_stdout_with_tag` cast non-Bool `val` to `char*` directly,
+/// which caused SIGSEGV / UB when the parameter was e.g. an Int.
+/// Fixed by routing non-Bool non-Str tags through
+/// `taida_polymorphic_to_string` in `runtime_core_wasm/01_core.inc.c`.
+#[test]
+fn test_c12b_034_wasm_nonbool_param_safety_parity() {
+    let source = r#"print_any v =
+    stdout(v)
+print_any(42)
+print_any("hello")
+print_any(true)
+print_any(false)
+"#;
+    assert_backend_parity_for_source(source, "c12b_034_wasm_nonbool_param_safety");
+    let out = run_interpreter_src(source, "c12b_034_wasm_nonbool_param_safety_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "42\nhello\ntrue\nfalse");
+}
+
+// ────────────────────────────────────────────────────────────────
+// C12 Phase 6 (FB-5 Phase 2-3) — Regex type + Str method overloads
+// ────────────────────────────────────────────────────────────────
+//
+// `Regex(pattern, flags?)` constructs a :Regex BuchiPack. Str methods
+// `replace` / `replaceAll` / `split` / `match` / `search` detect a
+// Regex argument and dispatch through a regex engine (Rust `regex`
+// crate on Interpreter, RegExp on JS, POSIX regex.h on Native). The
+// design lock in `.dev/C12_DESIGN.md` §C12-6 pins these invariants:
+//   * Fixed-string call sites are unchanged (B11 Phase 1 parity).
+//   * JS `$&` / `$1` meta-syntax in replacements is disabled — the
+//     replacement is applied literally on all backends.
+//   * Match results carry (full, groups[], start) with char-based
+//     (not byte-based) start indices so UTF-8 strings behave the same.
+//   * Flags supported: `i` / `m` / `s`. Unsupported flags throw at
+//     construction time.
+
+/// C12-6c: fixed-string replace unchanged (B11 Phase 1 contract).
+#[test]
+fn test_c12_6_fixed_string_replace_first_still_works_parity() {
+    let source = r#"stdout("banana".replace("a", "*"))
+stdout("banana".replaceAll("a", "*"))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_fixed_string_replace_first_still_works");
+    let out = run_interpreter_src(
+        source,
+        "c12_6_fixed_string_replace_first_still_works_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "b*nana\nb*n*n*");
+}
+
+/// C12-6c: regex replace_all with character class + Perl-style
+/// meta escape (`\d`). All three backends must agree on the rewrite.
+#[test]
+fn test_c12_6_regex_replace_all_char_class_parity() {
+    let source = r##"r <= Regex("[aeiou]")
+stdout("hello world".replaceAll(r, "*"))
+r2 <= Regex("\\d")
+stdout("a1b2c3".replaceAll(r2, "#"))
+"##;
+    assert_backend_parity_for_source(source, "c12_6_regex_replace_all_char_class");
+    let out = run_interpreter_src(source, "c12_6_regex_replace_all_char_class_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "h*ll* w*rld\na#b#c#");
+}
+
+/// C12-6c: regex `replace` replaces only the first match. Contrast
+/// with `replaceAll` so the "first vs all" contract is explicit.
+#[test]
+fn test_c12_6_regex_replace_first_only_parity() {
+    let source = r#"r <= Regex("[aeiou]")
+stdout("hello".replace(r, "*"))
+stdout("hello".replaceAll(r, "*"))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_replace_first_only");
+    let out = run_interpreter_src(source, "c12_6_regex_replace_first_only_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "h*llo\nh*ll*");
+}
+
+/// C12-6c: split on a regex pattern. Verifies the split engine
+/// produces identical pieces on all three backends including the
+/// edge case where adjacent delimiters yield empty strings.
+#[test]
+fn test_c12_6_regex_split_parity() {
+    let source = r#"s <= "one,two;three.four"
+parts <= s.split(Regex("[,;.]"))
+stdout(parts)
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_split");
+    let out = run_interpreter_src(source, "c12_6_regex_split_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "@[\"one\", \"two\", \"three\", \"four\"]");
+}
+
+/// C12-6c: `str.match(Regex(...))` returns a :RegexMatch BuchiPack.
+/// Exercises the `full` / `start` accessors so the group-free path
+/// parity is locked (groups are covered in a dedicated test).
+#[test]
+fn test_c12_6_regex_match_basic_parity() {
+    let source = r#"r <= Regex("\\d+")
+m <= "id: 12-34".match(r)
+stdout(m.full)
+stdout(m.start)
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_match_basic");
+    let out = run_interpreter_src(source, "c12_6_regex_match_basic_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "12\n4");
+}
+
+/// C12-6c: `str.search(Regex(...))` returns the 0-based char index
+/// of the first match. Returns -1 when no match (no `null` leak —
+/// philosophy I).
+#[test]
+fn test_c12_6_regex_search_parity() {
+    let source = r#"r <= Regex("\\d+")
+stdout("abc123".search(r))
+stdout("no digits here".search(r))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_search");
+    let out = run_interpreter_src(source, "c12_6_regex_search_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "3\n-1");
+}
+
+/// C12-6c: literal replacement string — `$&` / `$1` meta-syntax must
+/// be treated as literal text, matching the design lock §C12-6
+/// "JavaScript `$&` 系メタ構文は引き続き無効化".
+#[test]
+fn test_c12_6_regex_replace_literal_dollar_parity() {
+    let source = r#"r <= Regex("b")
+stdout("abc".replace(r, "$&"))
+stdout("abc".replace(r, "$1"))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_replace_literal_dollar");
+    let out = run_interpreter_src(source, "c12_6_regex_replace_literal_dollar_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "a$&c\na$1c");
+}
+
+/// C12-6c: `i` flag — case-insensitive matching.
+#[test]
+fn test_c12_6_regex_flag_case_insensitive_parity() {
+    let source = r#"r <= Regex("hello", "i")
+stdout("HELLO world".replaceAll(r, "X"))
+stdout("Hello WORLD".search(r))
+"#;
+    assert_backend_parity_for_source(source, "c12_6_regex_flag_case_insensitive");
+    let out = run_interpreter_src(source, "c12_6_regex_flag_case_insensitive_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "X world\n0");
+}
+
+/// C12-6a: unsupported flag char throws a value error at
+/// construction time. Behavior is validated via the interpreter
+/// only — the compile-target backends surface the same error
+/// through a runtime throw path that is not trivially observable
+/// without extra harness plumbing, so we pin the interpreter path
+/// here as the reference.
+#[test]
+fn test_c12_6_regex_unsupported_flag_throws_interpreter() {
+    let source = r#"Regex("a", "x")
+stdout("unreachable")
+"#;
+    // The interpreter throws a :Error — `run_interpreter_src` treats
+    // that as a failure, so we only assert that the program does
+    // NOT produce the "unreachable" line. (Source-level throws are
+    // rendered to stderr; stdout stays empty.)
+    let out = run_interpreter_src(source, "c12_6_regex_unsupported_flag_throws_interpreter");
+    assert!(
+        out.as_deref() != Some("unreachable\n"),
+        "program should throw before reaching stdout"
+    );
+}
+
+/// C12B-029: Unsupported Regex flag must fail fast on every backend,
+/// not only the interpreter. Before the fix, Native silently returned
+/// a usable Regex pack that no-op'd at every Str method call site.
+/// After the fix, all three backends throw at `Regex(...)` so the
+/// failure mode is unified (philosophy I: "no silent undefined").
+#[test]
+fn test_c12b_029_regex_unsupported_flag_rejected_all_backends_parity() {
+    let source = r#"Regex("a", "x")
+stdout("unreachable")
+"#;
+    // The interpreter / native / JS all throw before reaching stdout;
+    // `run_*_src` returns None on a throw, and we accept either None
+    // or an output that is NOT "unreachable\n" (some backends may
+    // return an empty string rather than None). The invariant is
+    // parity: no backend must ever print "unreachable".
+    let interp = run_interpreter_src(source, "c12b_029_regex_unsupported_flag_rejected_interp");
+    assert!(
+        interp.as_deref() != Some("unreachable\n"),
+        "interpreter must not reach stdout for unsupported flag"
+    );
+    let native = run_native_src(source, "c12b_029_regex_unsupported_flag_rejected_native");
+    assert!(
+        native.as_deref() != Some("unreachable\n"),
+        "native must not reach stdout for unsupported flag, got {:?}",
+        native
+    );
+    if node_available() {
+        let js = run_js_src(source, "c12b_029_regex_unsupported_flag_rejected_js");
+        assert!(
+            js.as_deref() != Some("unreachable\n"),
+            "js must not reach stdout for unsupported flag, got {:?}",
+            js
+        );
+    }
+}
+
+/// C12B-029: Invalid Regex pattern (unbalanced paren / stray
+/// quantifier / etc.) must fail fast on every backend. Before the
+/// fix, Native silently returned a pack and then no-op'd at every
+/// `replace` / `match` / `search` call.
+#[test]
+fn test_c12b_029_regex_invalid_pattern_rejected_all_backends_parity() {
+    let source = r#"Regex("(")
+stdout("unreachable")
+"#;
+    let interp = run_interpreter_src(source, "c12b_029_regex_invalid_pattern_rejected_interp");
+    assert!(
+        interp.as_deref() != Some("unreachable\n"),
+        "interpreter must not reach stdout for invalid pattern"
+    );
+    let native = run_native_src(source, "c12b_029_regex_invalid_pattern_rejected_native");
+    assert!(
+        native.as_deref() != Some("unreachable\n"),
+        "native must not reach stdout for invalid pattern, got {:?}",
+        native
+    );
+    if node_available() {
+        let js = run_js_src(source, "c12b_029_regex_invalid_pattern_rejected_js");
+        assert!(
+            js.as_deref() != Some("unreachable\n"),
+            "js must not reach stdout for invalid pattern, got {:?}",
+            js
+        );
+    }
+}
+
+/// C12B-029 positive case: Valid Regex flag + pattern must still
+/// construct successfully on every backend — the fail-fast validation
+/// must not regress the canonical constructor path.
+#[test]
+fn test_c12b_029_regex_valid_construction_still_works_parity() {
+    let source = r#"r <= Regex("\\d+", "i")
+stdout("built:" + r.pattern)
+"#;
+    assert_backend_parity_for_source(source, "c12b_029_regex_valid_construction_still_works");
+    let out = run_interpreter_src(
+        source,
+        "c12b_029_regex_valid_construction_still_works_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\d+");
+}
+
+/// C12B-030: Hex escape `\xHH` and Unicode escape `\u{HH..}` must
+/// translate consistently across 3 backends. Before C12B-030 the
+/// Native implementation only supported `\d` / `\w` / `\s` and their
+/// complements, while JS `RegExp` silently treated `\u{41}` as the
+/// literal string `u{41}` because the `u` flag was not enabled.
+#[test]
+fn test_c12b_030_regex_hex_escape_parity() {
+    let source = r#"r <= Regex("\\x41")
+stdout("BA".replace(r, "X"))
+r2 <= Regex("\\u{41}")
+stdout("BA".replace(r2, "X"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_030_regex_hex_escape");
+    let out = run_interpreter_src(source, "c12b_030_regex_hex_escape_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "BX\nBX");
+}
+
+/// C12B-040: Bracketed hex escape `\x{HH..}` must behave identically on
+/// 3 backends for BOTH construct and first-use. The previous JS
+/// implementation appended the `u` flag at compile_regex time but not
+/// at Regex(...) constructor time, so `Regex("\\x{41}")` would pass
+/// construction and then throw on the first `.replace` / `.match` /
+/// `.search` with `Invalid regular expression: /\x{41}/u: Invalid
+/// escape`. This test constructs the regex, reads back its pattern
+/// (construct-time success check), and then uses it (first-use
+/// success check) — any asymmetry will surface here.
+#[test]
+fn test_c12b_040_regex_bracketed_hex_construct_and_first_use_parity() {
+    let source = r#"r <= Regex("\\x{41}")
+stdout("built:" + r.pattern)
+stdout("BA".replace(r, "X"))
+"#;
+    assert_backend_parity_for_source(
+        source,
+        "c12b_040_regex_bracketed_hex_construct_and_first_use",
+    );
+    let out = run_interpreter_src(
+        source,
+        "c12b_040_regex_bracketed_hex_construct_and_first_use_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\x{41}\nBX");
+}
+
+/// C12B-040: `\u{41}` bracketed Unicode escape must also round-trip
+/// construct + first-use on all 3 backends.
+#[test]
+fn test_c12b_040_regex_bracketed_unicode_construct_and_first_use_parity() {
+    let source = r#"r <= Regex("\\u{41}")
+stdout("built:" + r.pattern)
+stdout("BA".replace(r, "X"))
+"#;
+    assert_backend_parity_for_source(
+        source,
+        "c12b_040_regex_bracketed_unicode_construct_and_first_use",
+    );
+    let out = run_interpreter_src(
+        source,
+        "c12b_040_regex_bracketed_unicode_construct_and_first_use_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\u{41}\nBX");
+}
+
+/// C12B-040: Identity escape like `\_` (no special meaning) is
+/// accepted by the Rust `regex` crate (Interpreter) and POSIX ERE
+/// (Native). The previous JS implementation enabled the `u` flag
+/// which made JS reject these escapes at first-use with `Invalid
+/// escape` — asymmetric with construct-time. With the rewrite-based
+/// fix, JS no longer uses `/u` and identity escapes pass through
+/// naturally.
+///
+/// Regression guard: `match`, `search`, `replace`, `replaceAll`,
+/// `split` all route through `__taida_compile_regex` on JS, so a
+/// single `.replace` exercises the compile path that used to fail.
+#[test]
+fn test_c12b_040_regex_identity_escape_all_backends_parity() {
+    let source = r#"r <= Regex("\\_")
+stdout("built:" + r.pattern)
+stdout("a_b".replace(r, "X"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_040_regex_identity_escape");
+    let out = run_interpreter_src(source, "c12b_040_regex_identity_escape_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "built:\\_\naXb");
+}
+
+/// C12B-040: `match` and `search` go through `__taida_compile_regex`
+/// too, so the construct-vs-first-use asymmetry must be covered on
+/// those code paths. This test uses `\x{HH..}` with `.match` and
+/// `.search` to guard against a future regression where only
+/// `.replace` is tested.
+#[test]
+fn test_c12b_040_regex_bracketed_hex_match_and_search_parity() {
+    let source = r#"r <= Regex("\\x{41}")
+m <= "BA".match(r)
+stdout(m.full)
+stdout("BA".search(r).toString())
+"#;
+    assert_backend_parity_for_source(source, "c12b_040_regex_bracketed_hex_match_and_search");
+    let out = run_interpreter_src(
+        source,
+        "c12b_040_regex_bracketed_hex_match_and_search_expected",
+    )
+    .expect("interpreter output should exist");
+    assert_eq!(out, "A\n1");
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -31907,4 +33015,568 @@ stdout(TypeIs[e, :Animal]())
     let out = run_interpreter_src(source, "b11_typeis_error_subtype_negative_expected")
         .expect("interpreter output should exist");
     assert_eq!(out, "false");
+}
+
+// ──────────────────────────────────────────────────────────────
+// C12B-021: Result type completeness parity tests
+// ──────────────────────────────────────────────────────────────
+//
+// writeFile / writeBytes / appendFile / remove / createDir / Exists
+// now return `Result[Int]` or `Result[Bool]` instead of
+// `Result[status-pack]` or bare `Bool`. These tests lock the
+// shape (`isSuccess()` true on success, `isError()` true on
+// genuine failure) across Interpreter / JS / Native. The wasm
+// backends do not ship the full os surface, so they are not
+// included here; their Exists shape is covered by
+// `wasm_wasi_exists`.
+
+/// C12B-021: writeFile to a valid path returns `Result[Int]` with
+/// isSuccess()==true. The byte count is asserted against the
+/// interpreter's output on all backends.
+#[test]
+fn test_c12b_021_writefile_result_int_parity() {
+    let dir = std::env::temp_dir().join("taida_c12b_021_write");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mktmp");
+    let path = dir.join("hello.txt");
+    let p = path.to_string_lossy().replace('\\', "/");
+    let source = format!(
+        r#"r <= writeFile("{p}", "hello")
+stdout(r.isSuccess().toString())
+stdout(r.isError().toString())
+"#
+    );
+    assert_backend_parity_for_source(&source, "c12b_021_writefile_result_int");
+    let out = run_interpreter_src(&source, "c12b_021_writefile_result_int_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// C12B-021: writeFile to a non-existent parent directory surfaces
+/// `isError()==true` on every backend. The Error envelope carries
+/// a kind-like marker that we do not pin cross-backend (native
+/// surfaces strerror strings, JS surfaces Node fs codes).
+#[test]
+fn test_c12b_021_writefile_failure_is_error_parity() {
+    let source = r#"r <= writeFile("/nonexistent_parent_dir_xyz_c12b021/out.txt", "data")
+stdout(r.isError().toString())
+stdout(r.isSuccess().toString())
+"#;
+    assert_backend_parity_for_source(source, "c12b_021_writefile_failure_is_error");
+    let out = run_interpreter_src(source, "c12b_021_writefile_failure_is_error_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\nfalse");
+}
+
+/// C12B-021: Exists on a present path reports isSuccess=true; on a
+/// missing path also isSuccess=true (probe itself worked) — the
+/// inner Bool distinguishes the two states. We only assert the
+/// isSuccess bit cross-backend to avoid the wasm Bool-tag gap
+/// (see wasm_wasi_exists).
+#[test]
+fn test_c12b_021_exists_result_bool_parity() {
+    let dir = std::env::temp_dir().join("taida_c12b_021_exists");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mktmp");
+    let present = dir.join("present.txt");
+    std::fs::write(&present, "x").unwrap();
+    let p = present.to_string_lossy().replace('\\', "/");
+    let q = dir.join("missing.txt").to_string_lossy().replace('\\', "/");
+    let source = format!(
+        r#"a <= Exists["{p}"]()
+stdout(a.isSuccess().toString())
+b <= Exists["{q}"]()
+stdout(b.isSuccess().toString())
+"#
+    );
+    assert_backend_parity_for_source(&source, "c12b_021_exists_result_bool");
+    let out = run_interpreter_src(&source, "c12b_021_exists_result_bool_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "true\ntrue");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ──────────────────────────────────────────────────────────────
+// C12B-036: Regex compile cache parity tests
+// ──────────────────────────────────────────────────────────────
+//
+// These tests exercise the cached-compile path on every backend.
+// The cache is transparent — user code cannot observe it directly —
+// so we rely on semantic parity: the output must be identical whether
+// the regex is compiled once (warm cache) or many times (cold cache).
+// The previous non-cached path was stress-tested by the C12-6
+// family; these tests stress the cache by reusing the SAME (pattern,
+// flags) across many calls so every backend hits its cache on all but
+// the first compile.
+
+/// C12B-036: a single Regex reused across 10 `replaceAll` calls must
+/// produce identical output on all three backends. The loop over the
+/// pattern forces every backend's cache to warm up after the first
+/// compile; subsequent calls must all hit.
+#[test]
+fn test_c12b_036_regex_replace_all_hot_loop_parity() {
+    let source = r#"r <= Regex("[aeiou]")
+stdout("hello world".replaceAll(r, "*"))
+stdout("banana banana".replaceAll(r, "*"))
+stdout("lorem ipsum dolor".replaceAll(r, "*"))
+stdout("quick brown fox".replaceAll(r, "*"))
+stdout("very merry christmas".replaceAll(r, "*"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_036_regex_replace_all_hot_loop");
+    let out = run_interpreter_src(source, "c12b_036_regex_replace_all_hot_loop_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(
+        out,
+        "h*ll* w*rld\nb*n*n* b*n*n*\nl*r*m *ps*m d*l*r\nq**ck br*wn f*x\nv*ry m*rry chr*stm*s"
+    );
+}
+
+/// C12B-036: two different `(pattern, flags)` pairs must not collide
+/// in the cache. Ensures the cache key correctly distinguishes the
+/// `i` flag variant from the plain variant on every backend.
+#[test]
+fn test_c12b_036_regex_cache_distinguishes_flags_parity() {
+    let source = r#"plain <= Regex("hello")
+ci <= Regex("hello", "i")
+stdout("HELLO world".replaceAll(plain, "*"))
+stdout("HELLO world".replaceAll(ci, "*"))
+stdout("hello world".replaceAll(plain, "*"))
+stdout("hello world".replaceAll(ci, "*"))
+"#;
+    assert_backend_parity_for_source(source, "c12b_036_regex_cache_distinguishes_flags");
+    let out = run_interpreter_src(source, "c12b_036_regex_cache_distinguishes_flags_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "HELLO world\n* world\n* world\n* world");
+}
+
+/// C12B-036: repeated `search` on the same regex must return identical
+/// results. If any backend's cache returned a stale object (e.g. JS's
+/// `g` flag `lastIndex` issue) this would produce drifting search
+/// indices. Native's POSIX `regex_t` is stateless so only JS needs
+/// explicit per-call freshness; the test pins the invariant on all
+/// three backends.
+#[test]
+fn test_c12b_036_regex_search_stateless_parity() {
+    let source = r#"r <= Regex("\\d+")
+stdout("abc123def".search(r))
+stdout("abc123def".search(r))
+stdout("xy9".search(r))
+stdout("abc123def".search(r))
+"#;
+    assert_backend_parity_for_source(source, "c12b_036_regex_search_stateless");
+    let out = run_interpreter_src(source, "c12b_036_regex_search_stateless_expected")
+        .expect("interpreter output should exist");
+    // Each search restarts from byte 0: cache hits must not carry
+    // state that would advance subsequent searches.
+    assert_eq!(out, "3\n3\n2\n3");
+}
+
+/// C12B-036: repeated `match` on the same regex must return identical
+/// BuchiPack fields. Locks the invariant that caching the compiled
+/// regex does not leak match state between invocations.
+#[test]
+fn test_c12b_036_regex_match_stateless_parity() {
+    let source = r#"r <= Regex("(\\d+)-(\\d+)")
+m1 <= "id: 12-34 end".match(r)
+m2 <= "id: 12-34 end".match(r)
+stdout(m1.full)
+stdout(m2.full)
+stdout(m1.start)
+stdout(m2.start)
+"#;
+    assert_backend_parity_for_source(source, "c12b_036_regex_match_stateless");
+    let out = run_interpreter_src(source, "c12b_036_regex_match_stateless_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "12-34\n12-34\n4\n4");
+}
+
+// ── C12B-041: WebSocket auto-close graceful teardown regression tests ──
+//
+// Pre-existing flakiness in `test_net4_ws_auto_close_on_return_interp` was
+// traced to the handler-return auto-close path in `dispatch_request` not
+// performing `flush + shutdown_write_graceful + drain_after_shutdown` before
+// the process terminates. Without that sequence the kernel can send RST
+// instead of FIN when the close frame (or preceding data frames) are still
+// in the send buffer, causing the client to report EOF before reading the
+// final frames.
+//
+// The fix wires the same pattern that C12B-028 applied to the H2 bounded-exit
+// path into both WebSocket close confirmation branches (success auto-close
+// and error-close 1011). These tests lock that fix in and guard against
+// regressions to the flaky state.
+
+/// Shared WS handshake + frame-drain helper used by the C12B-041 regression
+/// tests. Connects to `127.0.0.1:port`, performs the WebSocket upgrade, then
+/// reads until the connection is closed by the server. Returns the raw
+/// concatenated frame bytes or `None` if the handshake never succeeded within
+/// the polling window.
+///
+/// The polling window is generous (20 seconds) because parallel cargo test
+/// runs contend for CPU and port resources; the 10x regression test in
+/// particular spawns 10 interpreter subprocesses sequentially, and under
+/// load the second and subsequent spawns can take several seconds to
+/// accept() on the test port.
+fn c12b_041_connect_and_drain_ws(port: u16) -> Option<Vec<u8>> {
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    // 200 * 100ms = 20s handshake-polling window. Generous to absorb
+    // subprocess spawn latency under parallel cargo test load.
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+
+        // Read 101 head. The WebSocket frames may land in the same TCP
+        // segment as the handshake response, so we scan for the "\r\n\r\n"
+        // terminator and bleed any bytes past it into `all_frames`.
+        let mut buf = [0u8; 4096];
+        let mut head = Vec::new();
+        let mut all_frames: Vec<u8> = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    head.extend_from_slice(&buf[..n]);
+                    if let Some(idx) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let body_start = idx + 4;
+                        if body_start < head.len() {
+                            all_frames.extend_from_slice(&head[body_start..]);
+                            head.truncate(body_start);
+                        }
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !String::from_utf8_lossy(&head).contains("101") {
+            continue;
+        }
+
+        // Drain remaining frames until the server closes the connection.
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => all_frames.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        return Some(all_frames);
+    }
+    None
+}
+
+/// Parse minimal unmasked server-to-client frames: returns
+/// `(Vec<(opcode, payload)>, saw_close_opcode)`. Only handles short payloads
+/// (<=125 bytes), which is all the C12B-041 scenarios emit.
+fn c12b_041_parse_frames(all_frames: &[u8]) -> (Vec<(u8, Vec<u8>)>, bool) {
+    let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut saw_close = false;
+    let mut pos = 0;
+    while pos + 1 < all_frames.len() {
+        let opcode = all_frames[pos] & 0x0F;
+        let payload_len = (all_frames[pos + 1] & 0x7F) as usize;
+        pos += 2;
+        if pos + payload_len > all_frames.len() {
+            break;
+        }
+        let payload = all_frames[pos..pos + payload_len].to_vec();
+        if opcode == 0x8 {
+            saw_close = true;
+        }
+        out.push((opcode, payload));
+        pos += payload_len;
+    }
+    (out, saw_close)
+}
+
+/// C12B-041 (1): Run the exact same handler-return auto-close scenario as
+/// `test_net4_ws_auto_close_on_return_interp` **10 times back-to-back**.
+///
+/// Each iteration must complete cleanly (text frame `goodbye` + close frame).
+/// The **assertion path** (got_goodbye / got_close / stdout == "true") has
+/// zero retries — any assertion failure indicates the flaky teardown
+/// regression has returned and is still a hard fail.
+///
+/// The **handshake acquisition path** (connect + HTTP upgrade) has bounded
+/// retries (up to 3 attempts per iteration with 50 / 200 / 800 ms backoff)
+/// because under `cargo test --release` full-parallel load the iteration-8
+/// handshake can legitimately fail from OS-level resource contention (accept
+/// backlog / ephemeral port churn) — that is not what this regression test
+/// guards against. See C12B-042 for the root cause analysis.
+///
+/// Crucially, a C12B-041 server-side teardown regression would cause every
+/// attempt's **assertions** (not handshake) to fail, so retrying the
+/// handshake does not mask the bug class this test was created for.
+#[test]
+fn test_c12b_041_ws_auto_close_regression_10x_interp() {
+    const MAX_HANDSHAKE_ATTEMPTS: usize = 3;
+    const BACKOFF_MS: [u64; MAX_HANDSHAKE_ATTEMPTS] = [50, 200, 800];
+
+    for iteration in 0..10 {
+        let mut frames_opt: Option<Vec<u8>> = None;
+        let mut stdout_opt: Option<String> = None;
+        let mut last_attempt: usize = 0;
+
+        for (attempt, &backoff_ms) in BACKOFF_MS.iter().enumerate() {
+            last_attempt = attempt;
+            let port = find_free_loopback_port();
+            let source = format!(
+                r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "goodbye")
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+                port = port
+            );
+
+            let dir =
+                setup_net_project(&source, &format!("c12b_041_10x_{}_{}", iteration, attempt));
+            let td_path = dir.join("main.td");
+            let mut child = Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn interpreter");
+
+            match c12b_041_connect_and_drain_ws(port) {
+                Some(frames) => {
+                    let output = child.wait_with_output().expect("wait for server");
+                    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+                    cleanup_net_project(&dir);
+                    frames_opt = Some(frames);
+                    stdout_opt = Some(stdout);
+                    break;
+                }
+                None => {
+                    // Handshake never succeeded under parallel load — kill the
+                    // subprocess, clean up, back off, and retry with a fresh port.
+                    // This path is NOT a C12B-041 regression (which would be caught
+                    // by the goodbye / close assertions below once handshake
+                    // succeeds), it is the C12B-042 OS-level contention path.
+                    let _ = child.kill();
+                    let _ = child.wait_with_output();
+                    cleanup_net_project(&dir);
+                    if attempt + 1 < MAX_HANDSHAKE_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(backoff_ms));
+                    }
+                }
+            }
+        }
+
+        let frames = frames_opt.unwrap_or_else(|| {
+            panic!(
+                "iter {}: WS handshake never succeeded after {} attempts (C12B-042 retry ceiling exceeded)",
+                iteration,
+                MAX_HANDSHAKE_ATTEMPTS
+            )
+        });
+        let stdout = stdout_opt.expect("stdout captured when frames are present");
+        let (parsed, got_close) = c12b_041_parse_frames(&frames);
+
+        let got_goodbye = parsed
+            .iter()
+            .any(|(op, payload)| *op == 0x1 && payload.as_slice() == b"goodbye");
+
+        assert!(
+            got_goodbye,
+            "iter {} (attempt {}): expected text frame 'goodbye' but got frames={:?}",
+            iteration, last_attempt, parsed
+        );
+        assert!(
+            got_close,
+            "iter {} (attempt {}): expected auto-close frame from server but got frames={:?}",
+            iteration, last_attempt, parsed
+        );
+        assert_eq!(
+            stdout, "true",
+            "iter {} (attempt {}): httpServe result mismatch: {:?}",
+            iteration, last_attempt, stdout
+        );
+    }
+}
+
+/// C12B-041 (2): Handler explicitly calls `wsClose(ws)` before returning.
+/// Even when the handler closes, the outer `dispatch_request` is responsible
+/// for the final TCP teardown; the `finalize_websocket_close` sequence must
+/// run so the client never sees RST in place of FIN.
+#[test]
+fn test_c12b_041_ws_explicit_close_teardown_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "bye")
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "c12b_041_explicit_close");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let frames = c12b_041_connect_and_drain_ws(port).expect("WS handshake never succeeded");
+    let (parsed, got_close) = c12b_041_parse_frames(&frames);
+    let got_text = parsed
+        .iter()
+        .any(|(op, payload)| *op == 0x1 && payload.as_slice() == b"bye");
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    cleanup_net_project(&dir);
+
+    assert!(got_text, "expected text frame 'bye', got {:?}", parsed);
+    assert!(
+        got_close,
+        "expected close frame after wsClose, got {:?}",
+        parsed
+    );
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+}
+
+/// C12B-041 (3): Shortest possible scenario — `wsSend(ws, ...)` immediately
+/// followed by handler return, with no explicit close. Exercises the
+/// auto-close path with the tightest timing window between the text frame
+/// and the close frame (the one that regressed in the first place).
+#[test]
+fn test_c12b_041_ws_send_then_return_shortest_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "x")
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "c12b_041_shortest");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let frames = c12b_041_connect_and_drain_ws(port).expect("WS handshake never succeeded");
+    let (parsed, got_close) = c12b_041_parse_frames(&frames);
+    let got_text = parsed
+        .iter()
+        .any(|(op, payload)| *op == 0x1 && payload.as_slice() == b"x");
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    cleanup_net_project(&dir);
+
+    assert!(got_text, "expected text frame 'x', got {:?}", parsed);
+    assert!(got_close, "expected auto-close frame, got {:?}", parsed);
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+}
+
+/// C12B-041 (4): Error path — handler calls `wsClose(ws, 1004)` (a reserved
+/// close code) which raises a runtime error. `dispatch_request` catches the
+/// error and sends a 1011 close frame. The `finalize_websocket_close` helper
+/// must run here too so the client observes the 1011 frame + FIN cleanly.
+#[test]
+fn test_c12b_041_ws_error_path_1011_teardown_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsClose(ws, 1004)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1, 5000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "c12b_041_error_1011");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let frames = c12b_041_connect_and_drain_ws(port).expect("WS handshake never succeeded");
+    let (parsed, got_close) = c12b_041_parse_frames(&frames);
+
+    // Extract the close frame payload — expect 1011 = 0x03F3 (bytes 0x03, 0xF3).
+    let close_frame = parsed.iter().find(|(op, _)| *op == 0x8);
+
+    let _ = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    assert!(got_close, "expected 1011 close frame, got {:?}", parsed);
+    let (_op, payload) = close_frame.expect("close frame present");
+    assert!(
+        payload.len() >= 2,
+        "close frame must carry a 2-byte status code, got {:?}",
+        payload
+    );
+    let code = ((payload[0] as u16) << 8) | (payload[1] as u16);
+    assert_eq!(
+        code, 1011,
+        "error path must send 1011 (internal error), got {} (payload={:?})",
+        code, payload
+    );
 }

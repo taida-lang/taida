@@ -477,12 +477,168 @@ fn wasm_edge_size_check() {
 
     eprintln!("WE-3: wasm-edge hello size = {} bytes", size);
 
-    // wasm-edge hello: runtime_core_wasm.c grew with B11 (stdout_with_tag, TypeIs
-    // runtime, etc.) and clang's wasm LTO does not fully eliminate unused functions.
-    // Baseline as of @b.11.rc3: ~10.5 KB (23 functions after DCE).
+    // C12-7 (FB-26): Restored from 16KB -> 4KB. With the B11-2f fix that
+    // removed `taida_polymorphic_to_string` from the `taida_io_stdout_with_tag`
+    // reference chain, the codegen lightweight path for `stdout("literal")`
+    // links only `taida_io_stdout` + `_start` + `write_stdout` + `wasm_strlen`,
+    // producing ~351B. The 4KB budget keeps plenty of headroom for static
+    // ASCII payload growth while ensuring the hello-world never regresses
+    // back into the polymorphic display chain.
     assert!(
-        size <= 16384,
-        "wasm-edge hello should be <= 16KB, got {} bytes",
+        size <= 4096,
+        "wasm-edge hello should be <= 4KB, got {} bytes",
         size
+    );
+}
+
+/// C12-7 (FB-26): wasm-edge hello world must remain in the stdout("literal")
+/// lightweight path (no `taida_io_stdout_with_tag` / no polymorphic_to_string
+/// DCE chain). We anchor the observed size to a tight 1KB upper bound: the
+/// current output is ~351B and any regression into the tagged runtime path
+/// would blow past 1KB. Keep this separate from `wasm_edge_size_check` so
+/// the 4KB hard gate remains comfortable for future ASCII payload growth
+/// while this regression gate catches unintended runtime-link expansion.
+#[test]
+fn wasm_edge_hello_no_polymorphic_regression() {
+    let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_edge_hello.td");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_edge_c12_7_no_poly_regression.wasm");
+
+    let compile = Command::new(taida_bin())
+        .args(["build", "--target", "wasm-edge"])
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("compile should run");
+    assert!(
+        compile.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let size = std::fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    eprintln!(
+        "C12-7: wasm-edge hello (lightweight stdout path) = {} bytes",
+        size
+    );
+
+    assert!(
+        size <= 1024,
+        "C12-7 regression: wasm-edge hello (stdout(\"literal\")) linked a heavy \
+         path. Expected <= 1KB for the DCE-eliminated tagged runtime chain, \
+         got {} bytes. If `taida_io_stdout_with_tag` is now on the reference \
+         chain for a static-string stdout call, the B11-2f fix has regressed.",
+        size
+    );
+}
+
+// ── C12B-023: Regex on wasm-edge must produce compile error ──────────
+//
+// PHILOSOPHY I (silent-undefined 禁止): wasm-edge shares the
+// runtime_core_wasm Regex stubs with min / wasi / full, so the same
+// compile-time reject path must fire.
+
+fn assert_edge_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
+    let td_path = std::env::temp_dir().join(format!("taida_c12b_023_edge_{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("taida_c12b_023_edge_{}.wasm", stem));
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-edge")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "C12B-023: wasm-edge should reject Regex usage, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("[E1617]"),
+        "C12B-023: wasm-edge Regex rejection must emit [E1617], got: {}",
+        stderr
+    );
+    assert!(
+        candidates.iter().any(|l| stderr.contains(l)),
+        "C12B-023: wasm-edge [E1617] message should mention one of {:?}, got: {}",
+        candidates,
+        stderr
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_edge_rejects_regex_ctor() {
+    assert_edge_regex_rejected(
+        "ctor",
+        "re <= Regex(\"\\\\d+\", \"\")\nstdout(\"built\")\n",
+        &["Regex"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_edge_rejects_str_match() {
+    assert_edge_regex_rejected(
+        "match",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\nresult <= s.match(re)\nstdout(result)\n",
+        &["Regex", "Str.match"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_edge_rejects_str_search() {
+    assert_edge_regex_rejected(
+        "search",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\ni <= s.search(re)\nstdout(i)\n",
+        &["Regex", "Str.search"],
+    );
+}
+
+// ── C12B-023 bypass closure (2026-04-15 external review fix) ─────────
+#[test]
+fn test_c12b_023_wasm_edge_rejects_manual_pack_replaceall() {
+    assert_edge_regex_rejected(
+        "bypass_replaceall",
+        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_edge_rejects_manual_pack_match() {
+    assert_edge_regex_rejected(
+        "bypass_match",
+        "re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\nstdout(\"abc\".match(re))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+// C12B-023 root fix (2026-04-15 v2): indirect bypass routes.
+
+#[test]
+fn test_c12b_023_wasm_edge_rejects_variable_bound_tag() {
+    assert_edge_regex_rejected(
+        "bypass_var_tag",
+        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_edge_rejects_concat_tag() {
+    assert_edge_regex_rejected(
+        "bypass_concat",
+        "re <= @(__type <= \"Re\" + \"gex\", pattern <= \"a\", flags <= \"\")\nstdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
     );
 }

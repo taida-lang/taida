@@ -109,6 +109,11 @@ impl Interpreter {
 
         match name {
             // ── stdout(...args): write to output buffer (prelude) ──
+            // C12-5 (FB-18): returns the byte count (Int) of the written
+            // content so that `n <= stdout("hi")` binds `n = 2`. `Value::Unit`
+            // must not escape to Taida surface (null/undefined complete
+            // elimination, PHILOSOPHY I). Byte count excludes the implicit
+            // trailing newline so it matches the payload the user supplied.
             "stdout" => {
                 let mut parts = Vec::new();
                 for arg in args {
@@ -118,11 +123,14 @@ impl Interpreter {
                     };
                     parts.push(val.to_display_string());
                 }
-                self.output.push(parts.join(""));
-                Ok(Some(Signal::Value(Value::Unit)))
+                let joined = parts.join("");
+                let bytes = joined.len() as i64;
+                self.output.push(joined);
+                Ok(Some(Signal::Value(Value::Int(bytes))))
             }
 
             // ── stderr(...args): write to stderr (prelude) ──
+            // C12-5 (FB-18): mirrors `stdout` — returns bytes written as Int.
             "stderr" => {
                 let mut parts = Vec::new();
                 for arg in args {
@@ -132,8 +140,10 @@ impl Interpreter {
                     };
                     parts.push(val.to_display_string());
                 }
-                eprintln!("{}", parts.join(""));
-                Ok(Some(Signal::Value(Value::Unit)))
+                let joined = parts.join("");
+                let bytes = joined.len() as i64;
+                eprintln!("{}", joined);
+                Ok(Some(Signal::Value(Value::Int(bytes))))
             }
 
             // ── stdin(prompt?): read line from stdin (prelude) ──
@@ -373,6 +383,61 @@ impl Interpreter {
                 Err(RuntimeError {
                     message: "JSON requires a schema type argument: JSON[raw, Schema](). Raw JSON cannot be used without a schema.".to_string(),
                 })
+            }
+
+            // ── Regex(pattern, flags?): C12 Phase 6 (FB-5 Phase 2-3) ──
+            // Build a :Regex BuchiPack. Validated eagerly so invalid
+            // patterns / flags fail at construction time rather than
+            // during first method dispatch. Philosophy I — no silent
+            // undefined Regex values; construction either yields a
+            // typed pack or throws a `ValueError`.
+            "Regex" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Regex requires 1 or 2 arguments (pattern, flags?), got {}",
+                            args.len()
+                        ),
+                    });
+                }
+                let pattern = match self.eval_expr(&args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Regex: pattern must be Str, got {}",
+                                Self::type_name_of(&v)
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let flags = if let Some(arg) = args.get(1) {
+                    match self.eval_expr(arg)? {
+                        Signal::Value(Value::Str(s)) => s,
+                        Signal::Value(v) => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "Regex: flags must be Str, got {}",
+                                    Self::type_name_of(&v)
+                                ),
+                            });
+                        }
+                        other => return Ok(Some(other)),
+                    }
+                } else {
+                    String::new()
+                };
+                match super::regex_eval::build_regex_value(&pattern, &flags) {
+                    Ok(v) => Ok(Some(Signal::Value(v))),
+                    Err(msg) => Ok(Some(Signal::Throw(Value::Error(
+                        super::value::ErrorValue {
+                            error_type: "ValueError".to_string(),
+                            message: msg,
+                            fields: Vec::new(),
+                        },
+                    )))),
+                }
             }
 
             // ── Ok() — ABOLISHED ──

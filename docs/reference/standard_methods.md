@@ -18,6 +18,32 @@
 
 ---
 
+## `.toString()` — 全型共通の表示メソッド
+
+全ての値は `.toString()` を呼び出せます。戻り値は常に `:Str` で、
+インタプリタ / JS / Native の 3 バックエンドで同一の文字列が得られます。
+
+```taida
+42.toString()             // "42"
+3.14.toString()           // "3.14"
+true.toString()           // "true"
+"hello".toString()        // "hello"
+@[1, 2, 3].toString()     // "@[1, 2, 3]"
+@(a <= 1, b <= 2).toString()  // "@(a <= 1, b <= 2)"
+```
+
+- 引数なしで呼び出すこと。`n.toString(16)` のように base や precision を
+  渡そうとすると、チェッカーが `[E1508] Method 'toString' takes 0 argument(s)`
+  で拒否します（哲学 I: 暗黙の型変換なし）。
+- 基数指定で整数を文字列化したい場合は `ToRadix[n, base]()` モールド
+  （`reference/mold_types.md §ToRadix`）を使います。戻り値は `Lax[Str]`
+  なので `.getOrDefault("")` で unwrap します。
+- 数値を Lax にラップして扱いたい場合は `Str[value]()` モールドを使います。
+  `.toString()` は直接 `Str` を返すため、`+` 演算子で文字列連結する場合に
+  便利です。
+
+---
+
 ## Str — 文字列メソッド
 
 ### 状態チェック
@@ -119,16 +145,25 @@
 
 #### replace
 
-最初に一致した部分文字列を置換します。
+最初に一致した部分文字列を置換します。引数が `:Str` の場合は固定文字列
+マッチ、`:Regex` の場合は正規表現マッチになります。
 
 ```taida
 "hello world".replace("world", "taida")  // "hello taida"
 "aaa".replace("a", "b")  // "baa" (最初の一致のみ)
+
+// C12 Phase 6 (FB-5): Regex overload
+"hello".replace(Regex("[aeiou]"), "*")  // "h*llo"
 ```
 
-**シグネチャ**: `target: Str, replacement: Str => :Str`
+**シグネチャ**:
 
-空ターゲットの場合は元の文字列を返します（no-op）。
+- `target: Str, replacement: Str => :Str`
+- `pattern: Regex, replacement: Str => :Str`
+
+空ターゲット文字列の場合は元の文字列を返します（no-op）。Regex 置換で
+は JS の `$&` / `$1` 系メタ構文は無効化され、置換文字列はリテラルとして
+挿入されます。
 
 #### replaceAll
 
@@ -137,11 +172,18 @@
 ```taida
 "hello world hello".replaceAll("hello", "hi")  // "hi world hi"
 "aaa".replaceAll("a", "b")  // "bbb"
+
+// C12 Phase 6 (FB-5): Regex overload
+"hello".replaceAll(Regex("[aeiou]"), "*")  // "h*ll*"
+"a1b2c3".replaceAll(Regex("\\d"), "#")     // "a#b#c#"
 ```
 
-**シグネチャ**: `target: Str, replacement: Str => :Str`
+**シグネチャ**:
 
-空ターゲットの場合は元の文字列を返します（no-op）。
+- `target: Str, replacement: Str => :Str`
+- `pattern: Regex, replacement: Str => :Str`
+
+空ターゲット文字列の場合は元の文字列を返します（no-op）。
 
 #### split
 
@@ -151,11 +193,104 @@
 "a,b,c".split(",")  // @["a", "b", "c"]
 "hello".split(",")  // @["hello"] (一致なし → 単一要素)
 "abc".split("")     // @["a", "b", "c"] (文字ごとに分割)
+
+// C12 Phase 6 (FB-5): Regex overload
+"one,two;three.four".split(Regex("[,;.]"))  // @["one", "two", "three", "four"]
 ```
 
-**シグネチャ**: `separator: Str => :List[Str]`
+**シグネチャ**:
+
+- `separator: Str => :List[Str]`
+- `pattern: Regex => :List[Str]`
 
 空セパレータの場合は各文字に分割します（`Chars[]` モールドと同等）。
+
+#### match
+
+正規表現で最初の一致を取り出します。結果は `:RegexMatch` ぶちパックで、
+`hasValue`, `full`, `groups`, `start` フィールドを持ちます。
+
+```taida
+m <= "id: 12-34".match(Regex("(\\d+)-(\\d+)"))
+stdout(m.hasValue)  // true
+stdout(m.full)       // "12-34"
+stdout(m.groups)     // @["12", "34"]
+stdout(m.start)      // 4  (char index, not byte index)
+```
+
+**シグネチャ**: `pattern: Regex => :RegexMatch`
+
+一致なしの場合 `hasValue <= false`, `full <= ""`, `groups <= @[]`,
+`start <= -1` のぶちパックを返します（null / undefined は返さない —
+哲学 I）。
+
+#### search
+
+正規表現で最初の一致が見つかった位置（char index）を返します。一致が
+ない場合は `-1` を返します。
+
+```taida
+stdout("abc123".search(Regex("\\d+")))  // 3
+stdout("nothing".search(Regex("\\d+"))) // -1
+```
+
+**シグネチャ**: `pattern: Regex => :Int`
+
+文字列内での固定文字列検索には `.indexOf(...)` を使用してください。
+`search` は必ず `Regex` 引数を要求します。
+
+#### Regex コンストラクタ
+
+`Regex(pattern, flags?)` で正規表現オブジェクトを作成します（C12 Phase 6）。
+
+```taida
+r <= Regex("[aeiou]")          // flags なし
+ri <= Regex("hello", "i")      // case-insensitive
+```
+
+**シグネチャ**: `pattern: Str, flags: Str => :Regex`
+
+サポートされるフラグ:
+
+| フラグ | 意味 |
+|--------|------|
+| `i` | 大文字小文字を無視 |
+| `m` | 複数行モード（`^` / `$` が各行にマッチ） |
+| `s` | dotall — `.` が改行にマッチ（Interpreter / JS のみ。Native の POSIX ERE はサポート外）|
+
+サポートされるエスケープ:
+
+| エスケープ | 意味 | 3 backend 対応 |
+|-----------|------|----------------|
+| `\d` / `\D` | 数字 / 数字以外 | 全 backend |
+| `\w` / `\W` | 単語文字（英数字 + `_`）/ それ以外 | 全 backend |
+| `\s` / `\S` | 空白文字 / 空白以外 | 全 backend |
+| `\xHH` / `\x{HH…}` | 16 進コードポイント（1 バイト）| 全 backend |
+| `\uHHHH` / `\u{HH…}` | Unicode コードポイント（UTF-8 エンコード）| 全 backend |
+| `\\` | リテラルな `\` | 全 backend |
+| `\b` / `\B` | 単語境界 / 単語境界以外 | Interpreter / JS のみ |
+
+Native POSIX ERE は `\b` / `\B` に対応する概念を持ちません。単語境界が
+必要な場合は Interpreter / JS ターゲットに限定するか、
+`(^|[^A-Za-z0-9_])` などで明示的に囲むパターンに書き換えてください。
+
+上記の表にない `\_` / `\/` のような意味を持たない「identity escape」は、
+Interpreter（Rust `regex`）と Native（POSIX ERE）が lenient に受け付ける
+ため、JS backend でも同じ挙動になるようコンパイル時に JS の `/u` 厳格
+モードを無効化しています（C12B-040）。
+
+`\x{HH…}` / `\u{HH…}` の bracket 形式は JS の `/u` モードでしか native に
+解釈されませんが、同じ理由で `/u` を使えないため、JS ランタイムは
+bracket 形式を `\uHHHH` あるいは UTF-16 サロゲートペアへ事前 rewrite
+してから `RegExp` へ渡します。結果として **construct 時の検証と
+first-use 時の実行が同じ文法**で動作し、`Regex("\x{41}")` のような
+パターンが構築だけ成功して初回使用時に throw するといった asymmetric
+な失敗モードは発生しません（C12B-040）。
+
+不正なフラグや不正なパターンは **3 backend 全て** で構築時に
+`:Error`（`ValueError`）が投げられます（C12B-029）。JavaScript の
+`$&` / `$1` 等の置換メタ構文は無効化されており、置換文字列はリテラルと
+して挿入されます。
 
 ### 操作はモールドでも可能
 

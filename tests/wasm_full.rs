@@ -887,10 +887,16 @@ fn wasm_full_parity_all_examples() {
     // B11-2f: stdout restored convert_to_string path — compile_b11_features,
     // compile_hof_molds now pass (60 -> 62)
     // B11-11c: compile_b11_2f_stdout regression fixture added (62 -> 63)
+    // C12-1e: compile_c12_1_tag_table regression fixture added (63 -> 64)
+    // C12-3d: compile_c12_3_mutual_tail (tail-only mutual recursion) added (64 -> 65)
+    // C12-5: compile_c12_5_side_effect_returns (stdout Int return) added (65 -> 66)
+    // C12-4c: compile_c12_4_arm_pure_expr (`| |>` pure-expr boundary) added (66 -> 67)
+    // C12-11: compile_c12_11_tag_prop (param_tag_vars Bool prop) added (67 -> 68)
+    // C12B-034: compile_c12b_034_wasm_nonbool_param (memory-safe non-Bool) added (68 -> 69)
     assert_eq!(
         parity_ok.len(),
-        63,
-        "WF-5: Expected exactly 63 parity-OK examples, got {}. \
+        69,
+        "WF-5: Expected exactly 69 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -1056,5 +1062,114 @@ fn wasm_full_does_not_break_wasm_wasi() {
         compile.status.success(),
         "wasm-wasi should still compile after wasm-full additions: {}",
         String::from_utf8_lossy(&compile.stderr)
+    );
+}
+
+// ── C12B-023: Regex on wasm-full must produce compile error ──────────
+//
+// PHILOSOPHY I (silent-undefined 禁止): wasm-full still uses the shared
+// runtime_core_wasm Regex stubs (it does not link real POSIX regex.h),
+// so Regex construction + match/search must be rejected at compile time.
+
+fn assert_full_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
+    let td_path = std::env::temp_dir().join(format!("taida_c12b_023_full_{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("taida_c12b_023_full_{}.wasm", stem));
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("wasm-full")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "C12B-023: wasm-full should reject Regex usage, but compile succeeded.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("[E1617]"),
+        "C12B-023: wasm-full Regex rejection must emit [E1617], got: {}",
+        stderr
+    );
+    assert!(
+        candidates.iter().any(|l| stderr.contains(l)),
+        "C12B-023: wasm-full [E1617] message should mention one of {:?}, got: {}",
+        candidates,
+        stderr
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_full_rejects_regex_ctor() {
+    assert_full_regex_rejected(
+        "ctor",
+        "re <= Regex(\"\\\\d+\", \"\")\nstdout(\"built\")\n",
+        &["Regex"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_full_rejects_str_match() {
+    assert_full_regex_rejected(
+        "match",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\nresult <= s.match(re)\nstdout(result)\n",
+        &["Regex", "Str.match"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_full_rejects_str_search() {
+    assert_full_regex_rejected(
+        "search",
+        "re <= Regex(\"\\\\d+\", \"\")\ns <= \"abc 123\"\ni <= s.search(re)\nstdout(i)\n",
+        &["Regex", "Str.search"],
+    );
+}
+
+// ── C12B-023 bypass closure (2026-04-15 external review fix) ─────────
+#[test]
+fn test_c12b_023_wasm_full_rejects_manual_pack_replaceall() {
+    assert_full_regex_rejected(
+        "bypass_replaceall",
+        "main =\n  re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_full_rejects_manual_pack_match() {
+    assert_full_regex_rejected(
+        "bypass_match",
+        "re <= @(__type <= \"Regex\", pattern <= \"a\", flags <= \"\")\nstdout(\"abc\".match(re))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+// C12B-023 root fix (2026-04-15 v2): indirect bypass routes.
+
+#[test]
+fn test_c12b_023_wasm_full_rejects_variable_bound_tag() {
+    assert_full_regex_rejected(
+        "bypass_var_tag",
+        "main =\n  tag <= \"Regex\"\n  re <= @(__type <= tag, pattern <= \"a\", flags <= \"\")\n  stdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_full_rejects_concat_tag() {
+    assert_full_regex_rejected(
+        "bypass_concat",
+        "re <= @(__type <= \"Re\" + \"gex\", pattern <= \"a\", flags <= \"\")\nstdout(\"aba\".replaceAll(re, \"x\"))\n",
+        &["reserved for compiler-internal use"],
     );
 }

@@ -941,10 +941,16 @@ fn wasm_min_parity_all_examples() {
     // 61 = 58 (prev) + 3 (PR-3: module inlining: 09_modules, compile_module, compile_module_value)
     // 63 = 61 + 2 (B11-2f: stdout convert_to_string path — compile_b11_features, compile_hof_molds)
     // 64 = 63 + 1 (B11-11c: compile_b11_2f_stdout regression fixture)
+    // 65 = 64 + 1 (C12-1e: compile_c12_1_tag_table regression fixture)
+    // 66 = 65 + 1 (C12-3d: compile_c12_3_mutual_tail — tail-only mutual recursion)
+    // 67 = 66 + 1 (C12-5: compile_c12_5_side_effect_returns — stdout Int return)
+    // 68 = 67 + 1 (C12-4c: compile_c12_4_arm_pure_expr — `| |>` pure-expr boundary)
+    // 69 = 68 + 1 (C12-11: compile_c12_11_tag_prop — param_tag_vars Bool prop)
+    // 70 = 69 + 1 (C12B-034: compile_c12b_034_wasm_nonbool_param — memory-safe non-Bool through param)
     assert_eq!(
         parity_ok.len(),
-        64,
-        "WC-7: Expected exactly 64 parity-OK examples, got {}. \
+        70,
+        "WC-7: Expected exactly 69 parity-OK examples, got {}. \
          If parity improved, update the expected count. List: {:?}",
         parity_ok.len(),
         parity_ok
@@ -1507,5 +1513,297 @@ stdout(result.__value.kind)
         stderr.contains("httpEncodeResponse") || stderr.contains("net"),
         "NB-30: compile error should mention httpEncodeResponse or net.\nstderr: {}",
         stderr
+    );
+}
+
+// ── C12B-023: Regex on wasm profiles must produce compile error ──────
+//
+// PHILOSOPHY I (silent-undefined 禁止): wasm profiles only ship stubs for
+// Regex-related runtime helpers. `Regex(...)` construction / `str.match`
+// / `str.search` / `str.replace(Regex(...), ...)` all need to be rejected
+// at compile time with `[E1617]`.
+
+/// Helper: attempt to build a .td source for a given wasm profile and
+/// return the combined stderr + status. Cleans up both .td and .wasm.
+fn try_build_wasm(source: &str, stem: &str, target: &str) -> (bool, String) {
+    let td_path = std::env::temp_dir().join(format!("taida_c12b_023_{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("taida_c12b_023_{}.wasm", stem));
+    std::fs::write(&td_path, source).expect("write test .td");
+
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg(target)
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run taida build");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// Assert that the given source is rejected at compile time with `[E1617]`
+/// on the given wasm profile. `expected_api_candidates` lists acceptable
+/// labels that the diagnostic may mention — in practice `Regex(...)`
+/// construction always fires first (since `str.match(re)` / `str.search(re)`
+/// require constructing `re` in the first place), so the Regex-ctor message
+/// is the normal outcome even for match/search scenarios.
+fn assert_regex_rejected(stem: &str, target: &str, source: &str, expected_api_candidates: &[&str]) {
+    let (ok, stderr) = try_build_wasm(source, stem, target);
+    assert!(
+        !ok,
+        "C12B-023: {} should reject Regex usage, but compile succeeded.\nstderr: {}",
+        target, stderr
+    );
+    assert!(
+        stderr.contains("[E1617]"),
+        "C12B-023: {} Regex rejection must emit [E1617], got: {}",
+        target,
+        stderr
+    );
+    assert!(
+        expected_api_candidates
+            .iter()
+            .any(|label| stderr.contains(label)),
+        "C12B-023: {} [E1617] message should mention one of {:?}, got: {}",
+        target,
+        expected_api_candidates,
+        stderr
+    );
+}
+
+const C12B_023_SRC_REGEX_CTOR: &str = r#"re <= Regex("\\d+", "")
+stdout("built")
+"#;
+
+const C12B_023_SRC_MATCH: &str = r#"re <= Regex("\\d+", "")
+s <= "abc 123"
+result <= s.match(re)
+stdout(result)
+"#;
+
+const C12B_023_SRC_SEARCH: &str = r#"re <= Regex("\\d+", "")
+s <= "abc 123"
+i <= s.search(re)
+stdout(i)
+"#;
+
+const C12B_023_SRC_REPLACE_ALL: &str = r#"re <= Regex("\\d+", "")
+s <= "a1 b2 c3"
+out <= s.replaceAll(re, "X")
+stdout(out)
+"#;
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_regex_ctor() {
+    assert_regex_rejected("min_ctor", "wasm-min", C12B_023_SRC_REGEX_CTOR, &["Regex"]);
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_str_match() {
+    // `s.match(re)` requires constructing `re = Regex(...)` first, so the
+    // diagnostic may cite either `Regex` or `Str.match`. Either is correct
+    // — both come from the same `[E1617]` path.
+    assert_regex_rejected(
+        "min_match",
+        "wasm-min",
+        C12B_023_SRC_MATCH,
+        &["Regex", "Str.match"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_str_search() {
+    assert_regex_rejected(
+        "min_search",
+        "wasm-min",
+        C12B_023_SRC_SEARCH,
+        &["Regex", "Str.search"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_str_replace_all_with_regex() {
+    // replaceAll with a Regex argument constructs the Regex first; the
+    // Regex(...) ctor itself is the hook that fires [E1617].
+    assert_regex_rejected(
+        "min_replaceall",
+        "wasm-min",
+        C12B_023_SRC_REPLACE_ALL,
+        &["Regex"],
+    );
+}
+
+// ── C12B-023 bypass closure (2026-04-15 external review fix) ─────────
+//
+// External reviewer found that hand-constructing
+// `@(__type <= "Regex", pattern <= "a", flags <= "")` and feeding the
+// pack to `_poly` dispatchers (replaceAll / replace / split) bypassed
+// `validate_regex_api_for_wasm` (since `taida_regex_new` was never
+// emitted) and produced a wasm binary with silent UB at runtime. The
+// fix rejects manual `__type <= "Regex"` pack literals at type-check
+// time with `[E1617]`, closing the vector on *all* backends. Below we
+// pin the reviewer's exact repro + the adjacent `_poly` entrypoints.
+
+const C12B_023_BYPASS_REPLACE_ALL: &str = r#"main =
+  re <= @(__type <= "Regex", pattern <= "a", flags <= "")
+  stdout("aba".replaceAll(re, "x"))
+"#;
+
+const C12B_023_BYPASS_REPLACE_FIRST: &str = r#"re <= @(__type <= "Regex", pattern <= "a", flags <= "")
+stdout("aba".replace(re, "x"))
+"#;
+
+const C12B_023_BYPASS_SPLIT: &str = r#"re <= @(__type <= "Regex", pattern <= " ", flags <= "")
+stdout("a b c".split(re))
+"#;
+
+const C12B_023_BYPASS_MATCH: &str = r#"re <= @(__type <= "Regex", pattern <= "a", flags <= "")
+stdout("abc".match(re))
+"#;
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_manual_pack_replaceall() {
+    assert_regex_rejected(
+        "min_bypass_replaceall",
+        "wasm-min",
+        C12B_023_BYPASS_REPLACE_ALL,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_manual_pack_replace() {
+    assert_regex_rejected(
+        "min_bypass_replace",
+        "wasm-min",
+        C12B_023_BYPASS_REPLACE_FIRST,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_manual_pack_split() {
+    assert_regex_rejected(
+        "min_bypass_split",
+        "wasm-min",
+        C12B_023_BYPASS_SPLIT,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_manual_pack_match() {
+    assert_regex_rejected(
+        "min_bypass_match",
+        "wasm-min",
+        C12B_023_BYPASS_MATCH,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+// C12B-023 root fix (2026-04-15 v2): indirect bypass routes must be
+// rejected by the field-name-based checker. Pin per-profile to ensure
+// every wasm target stops these at type-check.
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_variable_bound_tag() {
+    let src = r#"main =
+  tag <= "Regex"
+  re <= @(__type <= tag, pattern <= "a", flags <= "")
+  stdout("aba".replaceAll(re, "x"))
+"#;
+    assert_regex_rejected(
+        "min_bypass_var_tag",
+        "wasm-min",
+        src,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_funcarg_bound_tag() {
+    let src = r#"inner t = @(__type <= t, pattern <= "a", flags <= "")
+main =
+  re <= inner("Regex")
+  stdout("aba".replaceAll(re, "x"))
+"#;
+    assert_regex_rejected(
+        "min_bypass_funcarg",
+        "wasm-min",
+        src,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_concat_tag() {
+    let src = r#"re <= @(__type <= "Re" + "gex", pattern <= "a", flags <= "")
+stdout("aba".replaceAll(re, "x"))
+"#;
+    assert_regex_rejected(
+        "min_bypass_concat",
+        "wasm-min",
+        src,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+// C12B-023 bypass closure (3rd layer, 2026-04-15): definition-site
+// rejection. A user-authored `TypeDef` / `MoldDef` / `InheritanceDef`
+// whose field name starts with `__` must be rejected before any
+// instance is built. Without this, `Fake = @(__type <= "Regex", ...)`
+// then `Fake(...)` materialises a pack with `__type == "Regex"` that
+// slips past the 2nd-layer expression-site check (the TypeInst itself
+// assigns only user-named fields like `payload <= "x"`, not `__type`).
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_typedef_forged_regex_pack() {
+    let src = r#"Fake = @(__type <= "Regex", pattern <= "a", flags <= "", payload: Str)
+main =
+  re <= Fake(payload <= "x")
+  stdout("aba".replaceAll(re, "x"))
+"#;
+    assert_regex_rejected(
+        "min_bypass_typedef_forged",
+        "wasm-min",
+        src,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_typedef_forged_body_stream() {
+    let src = r#"FakeReq = @(__body_stream <= "__v4_body_stream", __body_token <= 99999, x: Int)
+main =
+  req <= FakeReq(x <= 1)
+  stdout("ok")
+"#;
+    assert_regex_rejected(
+        "min_bypass_typedef_body_stream",
+        "wasm-min",
+        src,
+        &["reserved for compiler-internal use"],
+    );
+}
+
+#[test]
+fn test_c12b_023_wasm_min_rejects_inheritance_forged_regex_pack() {
+    let src = r#"Error => CustomError = @(__type <= "Regex", info: Str)
+main =
+  stdout("ok")
+"#;
+    assert_regex_rejected(
+        "min_bypass_inheritance_forged",
+        "wasm-min",
+        src,
+        &["reserved for compiler-internal use"],
     );
 }
