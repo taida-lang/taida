@@ -59,13 +59,16 @@ fn read_native_runtime_source() -> String {
 }
 
 /// C12B-025 (2026-04-15): `src/interpreter/net_eval.rs` was mechanically split
-/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`. Audit tests
+/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`.
+/// C13-3 (2026-04-16): further split into `h1/h2/h3/stream/ws`. Audit tests
 /// that look for wire-format patterns across the net runtime concatenate the
 /// non-test files so the checks remain path-stable.
 fn read_net_eval_source() -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = manifest_dir.join("src/interpreter/net_eval");
-    let fragments = ["mod.rs", "types.rs", "helpers.rs"];
+    let fragments = [
+        "mod.rs", "types.rs", "helpers.rs", "h1.rs", "h2.rs", "h3.rs", "stream.rs", "ws.rs",
+    ];
     let mut out = String::new();
     for name in fragments {
         let path = dir.join(name);
