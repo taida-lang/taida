@@ -16393,15 +16393,25 @@ stdout(result.__value.ok.toString())
             continue;
         }
 
-        // Read 101.
+        // Read 101 head. C12B-041: the server may coalesce the handshake
+        // response with the first WebSocket frame into a single TCP segment,
+        // so we must preserve any bytes past "\r\n\r\n" for the frame parser
+        // below. The previous version dropped them, which is the source of
+        // the pre-existing flakiness this test appeared to exhibit.
         let mut buf = [0u8; 4096];
         let mut head = Vec::new();
+        let mut all_frames: Vec<u8> = Vec::new();
         loop {
             match std::io::Read::read(&mut stream, &mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     head.extend_from_slice(&buf[..n]);
-                    if String::from_utf8_lossy(&head).contains("\r\n\r\n") {
+                    if let Some(idx) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let body_start = idx + 4;
+                        if body_start < head.len() {
+                            all_frames.extend_from_slice(&head[body_start..]);
+                            head.truncate(body_start);
+                        }
                         break;
                     }
                 }
@@ -16413,8 +16423,7 @@ stdout(result.__value.ok.toString())
             continue;
         }
 
-        // Read all frames until connection closes.
-        let mut all_frames = Vec::new();
+        // Drain any further bytes until the server closes the connection.
         loop {
             match std::io::Read::read(&mut stream, &mut buf) {
                 Ok(0) => break,
@@ -33206,4 +33215,340 @@ stdout(m2.start)
     let out = run_interpreter_src(source, "c12b_036_regex_match_stateless_expected")
         .expect("interpreter output should exist");
     assert_eq!(out, "12-34\n12-34\n4\n4");
+}
+
+// ── C12B-041: WebSocket auto-close graceful teardown regression tests ──
+//
+// Pre-existing flakiness in `test_net4_ws_auto_close_on_return_interp` was
+// traced to the handler-return auto-close path in `dispatch_request` not
+// performing `flush + shutdown_write_graceful + drain_after_shutdown` before
+// the process terminates. Without that sequence the kernel can send RST
+// instead of FIN when the close frame (or preceding data frames) are still
+// in the send buffer, causing the client to report EOF before reading the
+// final frames.
+//
+// The fix wires the same pattern that C12B-028 applied to the H2 bounded-exit
+// path into both WebSocket close confirmation branches (success auto-close
+// and error-close 1011). These tests lock that fix in and guard against
+// regressions to the flaky state.
+
+/// Shared WS handshake + frame-drain helper used by the C12B-041 regression
+/// tests. Connects to `127.0.0.1:port`, performs the WebSocket upgrade, then
+/// reads until the connection is closed by the server. Returns the raw
+/// concatenated frame bytes or `None` if the handshake never succeeded within
+/// the polling window.
+///
+/// The polling window is generous (20 seconds) because parallel cargo test
+/// runs contend for CPU and port resources; the 10x regression test in
+/// particular spawns 10 interpreter subprocesses sequentially, and under
+/// load the second and subsequent spawns can take several seconds to
+/// accept() on the test port.
+fn c12b_041_connect_and_drain_ws(port: u16) -> Option<Vec<u8>> {
+    let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        port = port,
+        key = ws_key
+    );
+
+    // 200 * 100ms = 20s handshake-polling window. Generous to absorb
+    // subprocess spawn latency under parallel cargo test load.
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+
+        if std::io::Write::write_all(&mut stream, request.as_bytes()).is_err() {
+            continue;
+        }
+
+        // Read 101 head. The WebSocket frames may land in the same TCP
+        // segment as the handshake response, so we scan for the "\r\n\r\n"
+        // terminator and bleed any bytes past it into `all_frames`.
+        let mut buf = [0u8; 4096];
+        let mut head = Vec::new();
+        let mut all_frames: Vec<u8> = Vec::new();
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    head.extend_from_slice(&buf[..n]);
+                    if let Some(idx) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let body_start = idx + 4;
+                        if body_start < head.len() {
+                            all_frames.extend_from_slice(&head[body_start..]);
+                            head.truncate(body_start);
+                        }
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if !String::from_utf8_lossy(&head).contains("101") {
+            continue;
+        }
+
+        // Drain remaining frames until the server closes the connection.
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => all_frames.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        return Some(all_frames);
+    }
+    None
+}
+
+/// Parse minimal unmasked server-to-client frames: returns
+/// `(Vec<(opcode, payload)>, saw_close_opcode)`. Only handles short payloads
+/// (<=125 bytes), which is all the C12B-041 scenarios emit.
+fn c12b_041_parse_frames(all_frames: &[u8]) -> (Vec<(u8, Vec<u8>)>, bool) {
+    let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut saw_close = false;
+    let mut pos = 0;
+    while pos + 1 < all_frames.len() {
+        let opcode = all_frames[pos] & 0x0F;
+        let payload_len = (all_frames[pos + 1] & 0x7F) as usize;
+        pos += 2;
+        if pos + payload_len > all_frames.len() {
+            break;
+        }
+        let payload = all_frames[pos..pos + payload_len].to_vec();
+        if opcode == 0x8 {
+            saw_close = true;
+        }
+        out.push((opcode, payload));
+        pos += payload_len;
+    }
+    (out, saw_close)
+}
+
+/// C12B-041 (1): Run the exact same handler-return auto-close scenario as
+/// `test_net4_ws_auto_close_on_return_interp` **10 times back-to-back** with
+/// no retries. Each iteration must complete cleanly (text frame `goodbye` +
+/// close frame). Any single iteration failing indicates the flaky teardown
+/// regression has returned.
+#[test]
+fn test_c12b_041_ws_auto_close_regression_10x_interp() {
+    for iteration in 0..10 {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "goodbye")
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+            port = port
+        );
+
+        let dir = setup_net_project(&source, &format!("c12b_041_10x_{}", iteration));
+        let td_path = dir.join("main.td");
+        let child = Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn interpreter");
+
+        let frames = c12b_041_connect_and_drain_ws(port)
+            .unwrap_or_else(|| panic!("iter {}: WS handshake never succeeded", iteration));
+        let (parsed, got_close) = c12b_041_parse_frames(&frames);
+
+        let got_goodbye = parsed
+            .iter()
+            .any(|(op, payload)| *op == 0x1 && payload.as_slice() == b"goodbye");
+
+        let output = child.wait_with_output().expect("wait for server");
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        cleanup_net_project(&dir);
+
+        assert!(
+            got_goodbye,
+            "iter {}: expected text frame 'goodbye' but got frames={:?}",
+            iteration, parsed
+        );
+        assert!(
+            got_close,
+            "iter {}: expected auto-close frame from server but got frames={:?}",
+            iteration, parsed
+        );
+        assert_eq!(
+            stdout, "true",
+            "iter {}: httpServe result mismatch: {:?}",
+            iteration, stdout
+        );
+    }
+}
+
+/// C12B-041 (2): Handler explicitly calls `wsClose(ws)` before returning.
+/// Even when the handler closes, the outer `dispatch_request` is responsible
+/// for the final TCP teardown; the `finalize_websocket_close` sequence must
+/// run so the client never sees RST in place of FIN.
+#[test]
+fn test_c12b_041_ws_explicit_close_teardown_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "bye")
+  wsClose(ws)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "c12b_041_explicit_close");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let frames = c12b_041_connect_and_drain_ws(port).expect("WS handshake never succeeded");
+    let (parsed, got_close) = c12b_041_parse_frames(&frames);
+    let got_text = parsed
+        .iter()
+        .any(|(op, payload)| *op == 0x1 && payload.as_slice() == b"bye");
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    cleanup_net_project(&dir);
+
+    assert!(got_text, "expected text frame 'bye', got {:?}", parsed);
+    assert!(got_close, "expected close frame after wsClose, got {:?}", parsed);
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+}
+
+/// C12B-041 (3): Shortest possible scenario — `wsSend(ws, ...)` immediately
+/// followed by handler return, with no explicit close. Exercises the
+/// auto-close path with the tightest timing window between the text frame
+/// and the close frame (the one that regressed in the first place).
+#[test]
+fn test_c12b_041_ws_send_then_return_shortest_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsSend(ws, "x")
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "c12b_041_shortest");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let frames = c12b_041_connect_and_drain_ws(port).expect("WS handshake never succeeded");
+    let (parsed, got_close) = c12b_041_parse_frames(&frames);
+    let got_text = parsed
+        .iter()
+        .any(|(op, payload)| *op == 0x1 && payload.as_slice() == b"x");
+
+    let output = child.wait_with_output().expect("wait for server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    cleanup_net_project(&dir);
+
+    assert!(got_text, "expected text frame 'x', got {:?}", parsed);
+    assert!(got_close, "expected auto-close frame, got {:?}", parsed);
+    assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
+}
+
+/// C12B-041 (4): Error path — handler calls `wsClose(ws, 1004)` (a reserved
+/// close code) which raises a runtime error. `dispatch_request` catches the
+/// error and sends a 1011 close frame. The `finalize_websocket_close` helper
+/// must run here too so the client observes the 1011 frame + FIN cleanly.
+#[test]
+fn test_c12b_041_ws_error_path_1011_teardown_interp() {
+    let port = find_free_loopback_port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
+
+handler req writer =
+  upgrade <= wsUpgrade(req, writer)
+  ws <= upgrade.__value.ws
+  wsClose(ws, 1004)
+=> :Unit
+
+asyncResult <= httpServe({port}, handler, 1, 5000)
+asyncResult ]=> result
+stdout(result.__value.ok.toString())
+"#,
+        port = port
+    );
+
+    let dir = setup_net_project(&source, "c12b_041_error_1011");
+    let td_path = dir.join("main.td");
+    let child = Command::new(taida_bin())
+        .arg(&td_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interpreter");
+
+    let frames = c12b_041_connect_and_drain_ws(port).expect("WS handshake never succeeded");
+    let (parsed, got_close) = c12b_041_parse_frames(&frames);
+
+    // Extract the close frame payload — expect 1011 = 0x03F3 (bytes 0x03, 0xF3).
+    let close_frame = parsed.iter().find(|(op, _)| *op == 0x8);
+
+    let _ = child.wait_with_output().expect("wait for server");
+    cleanup_net_project(&dir);
+
+    assert!(got_close, "expected 1011 close frame, got {:?}", parsed);
+    let (_op, payload) = close_frame.expect("close frame present");
+    assert!(
+        payload.len() >= 2,
+        "close frame must carry a 2-byte status code, got {:?}",
+        payload
+    );
+    let code = ((payload[0] as u16) << 8) | (payload[1] as u16);
+    assert_eq!(
+        code, 1011,
+        "error path must send 1011 (internal error), got {} (payload={:?})",
+        code, payload
+    );
 }

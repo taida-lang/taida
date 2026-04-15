@@ -3664,6 +3664,36 @@ impl Interpreter {
         }
     }
 
+    /// C12B-041: Finalize a WebSocket close by flushing and gracefully shutting
+    /// down the TCP write half so the client observes the close frame + FIN
+    /// before the process terminates.
+    ///
+    /// Applied at the two WS close confirmation points inside `dispatch_request`:
+    ///   1. Success auto-close (handler returned normally from a WS handler)
+    ///   2. Error-close 1011 (handler raised, WS still in WebSocket state)
+    ///
+    /// This mirrors the C12B-028 pattern applied to the H2 bounded-exit path.
+    /// Without this sequence the kernel can send RST instead of FIN when the
+    /// process exits with pending close-frame bytes still in the send buffer,
+    /// causing `test_net4_ws_auto_close_on_return_interp` and similar WS
+    /// regression tests to fail flakily.
+    ///
+    /// Note: we intentionally do NOT flush inside `write_ws_frame` itself.
+    /// That would add a per-frame syscall on the hot path; doing it once at
+    /// the close confirmation point has no such cost.
+    fn finalize_websocket_close(stream: &mut ConnStream) {
+        // 1. Drain any buffered bytes (the close frame + preceding data frames)
+        //    into the kernel send buffer so `shutdown_write` sees them first.
+        let _ = std::io::Write::flush(stream);
+        // 2. Half-close the write side so the peer observes FIN (or
+        //    TLS close_notify + FIN) cleanly.
+        let _ = stream.shutdown_write_graceful();
+        // 3. Best-effort short drain so we absorb any peer bytes that arrive
+        //    during the linger window and give the peer time to observe our
+        //    FIN before the process terminates.
+        stream.drain_after_shutdown(16 * 1024);
+    }
+
     /// Dispatch a single request on a connection: read body, call handler, write response.
     /// Returns whether to keep the connection alive or close it.
     #[allow(clippy::too_many_arguments)]
@@ -3806,6 +3836,9 @@ impl Interpreter {
                             let close_payload = [0x03, 0xF3u8]; // 1011
                             let _ = Self::write_ws_frame(&mut conn.stream, 0x8, &close_payload);
                         }
+                        // C12B-041: flush + graceful half-close + short drain so
+                        // the client observes the 1011 frame + FIN cleanly.
+                        Self::finalize_websocket_close(&mut conn.stream);
                         *request_count += 1;
                         return ConnAction::Close;
                     }
@@ -3839,6 +3872,11 @@ impl Interpreter {
                     let close_payload = [0x03, 0xE8u8]; // 1000 normal closure
                     let _ = Self::write_ws_frame(&mut conn.stream, 0x8, &close_payload);
                 }
+                // C12B-041: flush + graceful half-close + short drain so the
+                // client observes the data frames + close frame + FIN cleanly
+                // before the process exits (fixes flaky
+                // test_net4_ws_auto_close_on_return_interp).
+                Self::finalize_websocket_close(&mut conn.stream);
                 *request_count += 1;
                 conn.conn_requests += 1;
                 conn.total_read = 0;
