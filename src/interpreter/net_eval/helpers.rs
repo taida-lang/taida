@@ -9,11 +9,9 @@
 ///   - Keep-alive determination
 ///   - HTTP response encoder
 ///   - Request body helpers (is_body_stream_request, extract_body_token, eval_read_body)
-
 use super::super::eval::RuntimeError;
 use super::super::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
 use super::types::{ConnStream, ResponseFields, StreamingWriter};
-
 
 /// Build the HTTP response head bytes for a streaming response.
 ///
@@ -603,7 +601,10 @@ pub(crate) enum ChunkedBodyError {
 /// Walks the chunk framing without modifying the buffer.
 /// Returns `Ok(wire_consumed)` if the terminator chunk was found,
 /// or `Err(ChunkedBodyError)` if the data is incomplete or malformed.
-pub(crate) fn chunked_body_complete(buf: &[u8], body_offset: usize) -> Result<usize, ChunkedBodyError> {
+pub(crate) fn chunked_body_complete(
+    buf: &[u8],
+    body_offset: usize,
+) -> Result<usize, ChunkedBodyError> {
     let data_len = buf.len() - body_offset;
     let mut read_pos: usize = 0;
 
@@ -825,7 +826,10 @@ pub(crate) fn encode_response(response: &Value) -> Value {
 /// NB6-1: Scatter-gather send for internal one-shot response path.
 /// Builds head and body as separate buffers and sends them via vectored I/O,
 /// avoiding the aggregate buffer concatenation of encode_response().
-pub(crate) fn send_response_scatter(stream: &mut ConnStream, response: &Value) -> Result<(), String> {
+pub(crate) fn send_response_scatter(
+    stream: &mut ConnStream,
+    response: &Value,
+) -> Result<(), String> {
     use std::io::Write as _;
 
     let (status, headers, body_bytes) = extract_response_fields(response)?;
@@ -1099,4 +1103,3 @@ pub(crate) fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
         Ok(Value::Bytes(raw[start..end].to_vec()))
     }
 }
-

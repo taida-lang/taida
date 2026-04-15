@@ -258,12 +258,11 @@ impl Default for Lowering {
     }
 }
 
-
 mod core;
-mod imports;
-mod stdlib;
-mod molds;
-mod stmt;
 mod expr;
+mod imports;
 mod infer;
+mod molds;
+mod stdlib;
+mod stmt;
 mod tag_prop;

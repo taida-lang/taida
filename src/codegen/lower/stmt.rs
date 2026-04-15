@@ -7,11 +7,10 @@
 
 use super::{ImportedSymbolKind, LowerError, Lowering, simple_hash};
 use crate::codegen::ir::*;
-use crate::net_surface::{NET_HTTP_PROTOCOL_SYMBOL};
+use crate::net_surface::NET_HTTP_PROTOCOL_SYMBOL;
 use crate::parser::*;
 
 impl Lowering {
-
     pub fn lower_program(&mut self, program: &Program) -> Result<IrModule, LowerError> {
         let mut module = IrModule::new();
         module.module_key = Some(self.current_module_key().to_string());
@@ -1717,7 +1716,11 @@ impl Lowering {
 
     /// ネスト関数が参照可能な親スコープ変数を収集する。
     /// base_vars に加え、同一ボディで束縛されるローカル代入とローカル関数名を含める。
-    pub(super) fn collect_nested_scope_vars<I>(&self, base_vars: I, body: &[Statement]) -> Vec<String>
+    pub(super) fn collect_nested_scope_vars<I>(
+        &self,
+        base_vars: I,
+        body: &[Statement],
+    ) -> Vec<String>
     where
         I: IntoIterator<Item = String>,
     {
@@ -1870,7 +1873,11 @@ impl Lowering {
     /// 関数本体（Statement列）から参照される自由変数を収集する。
     /// パラメータと関数内で定義される変数は除外し、
     /// トップレベル変数または import 値のみ残す。
-    pub(super) fn collect_free_vars_in_body(&self, body: &[Statement], param_names: &[String]) -> Vec<String> {
+    pub(super) fn collect_free_vars_in_body(
+        &self,
+        body: &[Statement],
+        param_names: &[String],
+    ) -> Vec<String> {
         let mut free = Vec::new();
         let mut seen = std::collections::HashSet::new();
         // 関数内で定義される変数名も bound に含める

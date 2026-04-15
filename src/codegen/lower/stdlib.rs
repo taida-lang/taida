@@ -5,12 +5,11 @@
 // `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
-use super::{Lowering};
+use super::Lowering;
 use crate::net_surface::{NET_HTTP_PROTOCOL_VARIANTS, http_protocol_variant_to_wire};
 use crate::parser::*;
 
 impl Lowering {
-
     /// stdout/stderr/stdin → C ランタイム関数名にマッピング (prelude builtins)
     pub(super) fn stdlib_io_mapping(sym: &str) -> Option<&'static str> {
         match sym {

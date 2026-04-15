@@ -5,12 +5,14 @@
 // `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
-use super::{AddonFacadeSummary, AddonFuncRef, ImportedSymbolKind, InheritanceChainFields, LowerError, Lowering, simple_hash};
+use super::{
+    AddonFacadeSummary, AddonFuncRef, ImportedSymbolKind, InheritanceChainFields, LowerError,
+    Lowering, simple_hash,
+};
 use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
-
     /// RC1 Phase 4 helper: resolve only the **package directory** for
     /// an import path, without producing a `.td` source path. Used by
     /// the addon-policy guard in `Statement::Import` so the Cranelift
@@ -281,7 +283,10 @@ impl Lowering {
     ///
     /// Returns the Taida type name (`"Bool"`, `"Str"`, `"Pack"`, ...)
     /// or `None` if the function's return type is unknown.
-    pub(super) fn addon_known_return_tag(package_id: &str, function_name: &str) -> Option<&'static str> {
+    pub(super) fn addon_known_return_tag(
+        package_id: &str,
+        function_name: &str,
+    ) -> Option<&'static str> {
         match (package_id, function_name) {
             // Production `taida-lang/terminal` external package v1
             // surface (`../terminal/src/{size,key}.rs`). Both functions

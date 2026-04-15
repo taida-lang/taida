@@ -2,11 +2,10 @@
 //!
 //! Extracted verbatim from net_eval.rs lines 5714..12591.
 
-use super::*;
 use super::helpers::*;
 use super::types::*;
+use super::*;
 use crate::interpreter::value::AsyncStatus;
-
 
 #[test]
 fn test_net_symbols_count() {
@@ -456,8 +455,7 @@ fn test_parse_content_length_i64_overflow() {
 fn test_parse_content_length_max_safe_integer_boundary() {
     // Exactly Number.MAX_SAFE_INTEGER = 9007199254740991 (2^53 - 1) — should succeed.
     // This is the cross-backend upper limit (JS Number precision boundary).
-    let raw =
-        b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740991\r\nHost: localhost\r\n\r\n";
+    let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740991\r\nHost: localhost\r\n\r\n";
     let result = parse_request_head(raw);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
@@ -468,8 +466,7 @@ fn test_parse_content_length_max_safe_integer_boundary() {
 fn test_parse_content_length_max_safe_integer_plus_one() {
     // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — must be rejected.
     // Beyond this value, JS Number loses precision, breaking cross-backend parity.
-    let raw =
-        b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740992\r\nHost: localhost\r\n\r\n";
+    let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9007199254740992\r\nHost: localhost\r\n\r\n";
     let result = parse_request_head(raw);
     assert!(is_result_failure(&result));
     assert!(get_failure_message(&result).contains("invalid Content-Length"));
@@ -478,7 +475,8 @@ fn test_parse_content_length_max_safe_integer_plus_one() {
 #[test]
 fn test_parse_content_length_i64_max_rejected() {
     // i64::MAX = 9223372036854775807 — exceeds MAX_SAFE_INTEGER, must be rejected.
-    let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775807\r\nHost: localhost\r\n\r\n";
+    let raw =
+        b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775807\r\nHost: localhost\r\n\r\n";
     let result = parse_request_head(raw);
     assert!(is_result_failure(&result));
     assert!(get_failure_message(&result).contains("invalid Content-Length"));
@@ -487,7 +485,8 @@ fn test_parse_content_length_i64_max_rejected() {
 #[test]
 fn test_parse_content_length_i64_max_plus_one() {
     // i64::MAX + 1 = 9223372036854775808 — must be rejected.
-    let raw = b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775808\r\nHost: localhost\r\n\r\n";
+    let raw =
+        b"POST /data HTTP/1.1\r\nContent-Length: 9223372036854775808\r\nHost: localhost\r\n\r\n";
     let result = parse_request_head(raw);
     assert!(is_result_failure(&result));
     assert!(get_failure_message(&result).contains("invalid Content-Length"));
@@ -1386,8 +1385,7 @@ fn test_http_serve_max_requests_1_self_terminates() {
 
     // Send an HTTP request
     let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-    std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .unwrap();
+    std::io::Write::write_all(&mut client, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
 
     // Read response
     let mut response = Vec::new();
@@ -2668,9 +2666,7 @@ fn read_responses(stream: &mut std::net::TcpStream, expected: usize) -> Vec<Stri
                                 if let Some(cl_end) = text[cl_start..].find("\r\n") {
                                     let cl: usize =
                                         text[cl_start..cl_start + cl_end].parse().unwrap_or(0);
-                                    if let Some(body_start) =
-                                        text[resp_start..].find("\r\n\r\n")
-                                    {
+                                    if let Some(body_start) = text[resp_start..].find("\r\n\r\n") {
                                         let body_offset = resp_start + body_start + 4;
                                         if body_offset + cl > all_data.len() {
                                             complete = false;
@@ -2962,8 +2958,7 @@ fn test_keep_alive_http10_default_close() {
 
     // HTTP/1.0 without Connection header → default close
     let mut client = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-    std::io::Write::write_all(&mut client, b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-        .unwrap();
+    std::io::Write::write_all(&mut client, b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
 
     let mut response = Vec::new();
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
@@ -4456,8 +4451,7 @@ fn test_slow_split_request_within_timeout_succeeds() {
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
     // Send first half of the request head
-    std::io::Write::write_all(&mut client, b"GET /split HTTP/1.1\r\nHost: localhost\r\n")
-        .unwrap();
+    std::io::Write::write_all(&mut client, b"GET /split HTTP/1.1\r\nHost: localhost\r\n").unwrap();
 
     // Wait 200ms — under the 500ms timeout, but long enough to trigger
     // a timeout if last_activity were not updated on byte reception.
@@ -6851,20 +6845,19 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
             // The inner value should be a Result with TlsError.
             match &*async_val.value {
                 Value::BuchiPack(fields) => {
-                    let kind =
-                        fields
-                            .iter()
-                            .find(|(k, _)| k == "__value")
-                            .and_then(|(_, v)| {
-                                if let Value::BuchiPack(inner) = v {
-                                    inner
-                                        .iter()
-                                        .find(|(k, _)| k == "kind")
-                                        .map(|(_, v)| v.clone())
-                                } else {
-                                    None
-                                }
-                            });
+                    let kind = fields
+                        .iter()
+                        .find(|(k, _)| k == "__value")
+                        .and_then(|(_, v)| {
+                            if let Value::BuchiPack(inner) = v {
+                                inner
+                                    .iter()
+                                    .find(|(k, _)| k == "kind")
+                                    .map(|(_, v)| v.clone())
+                            } else {
+                                None
+                            }
+                        });
                     assert_eq!(
                         kind,
                         Some(Value::Str("TlsError".into())),

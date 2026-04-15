@@ -106,7 +106,10 @@ mod tests {
     #[test]
     fn named_primitives_map_to_expected_tags() {
         assert_eq!(type_expr_to_tag(&TypeExpr::Named("Int".into())), TAG_INT);
-        assert_eq!(type_expr_to_tag(&TypeExpr::Named("Float".into())), TAG_FLOAT);
+        assert_eq!(
+            type_expr_to_tag(&TypeExpr::Named("Float".into())),
+            TAG_FLOAT
+        );
         assert_eq!(type_expr_to_tag(&TypeExpr::Named("Bool".into())), TAG_BOOL);
         assert_eq!(type_expr_to_tag(&TypeExpr::Named("Str".into())), TAG_STR);
     }
@@ -132,18 +135,9 @@ mod tests {
 
     #[test]
     fn pack_envelopes_map_to_pack() {
-        let lax = TypeExpr::Generic(
-            "Lax".into(),
-            vec![TypeExpr::Named("Str".into())],
-        );
-        let result = TypeExpr::Generic(
-            "Result".into(),
-            vec![TypeExpr::Named("Int".into())],
-        );
-        let async_ = TypeExpr::Generic(
-            "Async".into(),
-            vec![TypeExpr::Named("Int".into())],
-        );
+        let lax = TypeExpr::Generic("Lax".into(), vec![TypeExpr::Named("Str".into())]);
+        let result = TypeExpr::Generic("Result".into(), vec![TypeExpr::Named("Int".into())]);
+        let async_ = TypeExpr::Generic("Async".into(), vec![TypeExpr::Named("Int".into())]);
         let hashmap = TypeExpr::Generic(
             "HashMap".into(),
             vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
@@ -158,10 +152,7 @@ mod tests {
 
     #[test]
     fn unknown_generic_falls_back_to_int() {
-        let unknown = TypeExpr::Generic(
-            "Foo".into(),
-            vec![TypeExpr::Named("Int".into())],
-        );
+        let unknown = TypeExpr::Generic("Foo".into(), vec![TypeExpr::Named("Int".into())]);
         // Pre-C12 behaviour preserved: fallback is `TAG_INT` (0), not
         // `TAG_UNKNOWN`. A future refactor may tighten this.
         assert_eq!(type_expr_to_tag(&unknown), TAG_INT);
@@ -194,6 +185,6 @@ mod tests {
         // that any future refactor consolidating the dispatch table
         // keeps the encoding stable.
         assert_eq!(TAG_UNKNOWN, -1);
-        assert!(TAG_UNKNOWN < TAG_INT);
+        const _: () = assert!(TAG_UNKNOWN < TAG_INT);
     }
 }

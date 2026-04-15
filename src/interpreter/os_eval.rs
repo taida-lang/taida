@@ -706,7 +706,9 @@ impl Interpreter {
                 // `try_exists` is stable and returns an explicit Result
                 // so permission-denied ceases to be silently false.
                 match std::path::Path::new(&path).try_exists() {
-                    Ok(exists) => Ok(Some(Signal::Value(make_result_success(Value::Bool(exists))))),
+                    Ok(exists) => Ok(Some(Signal::Value(make_result_success(Value::Bool(
+                        exists,
+                    ))))),
                     Err(e) => Ok(Some(Signal::Value(make_result_failure(&e)))),
                 }
             }

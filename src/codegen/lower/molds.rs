@@ -10,7 +10,6 @@ use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
-
     pub(super) fn mold_solidify_helper_name(mold_name: &str) -> String {
         format!("__taida_mold_solidify_{}", mold_name)
     }

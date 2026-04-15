@@ -1103,7 +1103,8 @@ fn assert_full_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
     assert!(
         candidates.iter().any(|l| stderr.contains(l)),
         "C12B-023: wasm-full [E1617] message should mention one of {:?}, got: {}",
-        candidates, stderr
+        candidates,
+        stderr
     );
 }
 

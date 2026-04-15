@@ -144,7 +144,8 @@ mod tests {
         // Anchor the tail of the assembled source to the closing brace of
         // main() — catches accidental truncation of the tail fragment.
         assert!(
-            asm.trim_end().ends_with("(void)_taida_main();\n    return 0;\n}"),
+            asm.trim_end()
+                .ends_with("(void)_taida_main();\n    return 0;\n}"),
             "tail of assembled source must end with main() body + closing brace"
         );
     }
@@ -181,7 +182,10 @@ mod tests {
     /// small (would indicate a boundary mis-calculation).
     #[test]
     fn test_native_runtime_fragments_nonempty() {
-        assert!(CORE_SECTION.len() > 100_000, "core fragment suspiciously small");
+        assert!(
+            CORE_SECTION.len() > 100_000,
+            "core fragment suspiciously small"
+        );
         assert!(
             ERROR_JSON_SECTION.len() > 50_000,
             "error_json fragment suspiciously small"

@@ -241,19 +241,19 @@ impl Lowering {
                     // Slice[str] → Str, Slice[bytes] → Bytes (tag as Str at wasm
                     // level since bytes share the hidden-header str layout).
                     "Slice" => {
-                        if let Some(arg) = type_args.first() {
-                            if self.expr_is_string_full(arg) {
-                                return 3;
-                            }
+                        if let Some(arg) = type_args.first()
+                            && self.expr_is_string_full(arg)
+                        {
+                            return 3;
                         }
                         3 // default: Slice returns Str (checker agrees)
                     }
                     // Concat[list, ...] → List, Concat[bytes, ...] → Bytes (Str tag).
                     "Concat" => {
-                        if let Some(arg) = type_args.first() {
-                            if self.expr_is_list(arg) {
-                                return 5;
-                            }
+                        if let Some(arg) = type_args.first()
+                            && self.expr_is_list(arg)
+                        {
+                            return 5;
                         }
                         5 // default: list
                     }
@@ -288,7 +288,7 @@ impl Lowering {
                     _ => 4,
                 }
             }
-            Expr::Unmold(_, _) => -1,        // TAIDA_TAG_UNKNOWN: could be anything
+            Expr::Unmold(_, _) => -1, // TAIDA_TAG_UNKNOWN: could be anything
             _ if self.expr_is_bool(expr) => 2,
             _ => -1, // TAIDA_TAG_UNKNOWN
         }
@@ -301,10 +301,7 @@ impl Lowering {
         body: &[Statement],
         param_names: &std::collections::HashSet<String>,
     ) -> bool {
-        fn expr_hits(
-            e: &Expr,
-            params: &std::collections::HashSet<String>,
-        ) -> bool {
+        fn expr_hits(e: &Expr, params: &std::collections::HashSet<String>) -> bool {
             match e {
                 Expr::MoldInst(name, type_args, args, _) => {
                     if name == "TypeIs"
@@ -318,29 +315,21 @@ impl Lowering {
                         || args.iter().any(|f| expr_hits(&f.value, params))
                 }
                 Expr::FuncCall(callee, args, _) => {
-                    expr_hits(callee, params)
-                        || args.iter().any(|a| expr_hits(a, params))
+                    expr_hits(callee, params) || args.iter().any(|a| expr_hits(a, params))
                 }
                 Expr::MethodCall(obj, _, args, _) => {
-                    expr_hits(obj, params)
-                        || args.iter().any(|a| expr_hits(a, params))
+                    expr_hits(obj, params) || args.iter().any(|a| expr_hits(a, params))
                 }
-                Expr::BinaryOp(l, _, r, _) => {
-                    expr_hits(l, params) || expr_hits(r, params)
-                }
+                Expr::BinaryOp(l, _, r, _) => expr_hits(l, params) || expr_hits(r, params),
                 Expr::UnaryOp(_, inner, _) => expr_hits(inner, params),
                 Expr::Pipeline(steps, _) => steps.iter().any(|s| expr_hits(s, params)),
                 Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                    arm.condition.as_ref().map_or(false, |c| expr_hits(c, params))
+                    arm.condition.as_ref().is_some_and(|c| expr_hits(c, params))
                         || arm.body.iter().any(|s| stmt_hits(s, params))
                 }),
                 Expr::FieldAccess(obj, _, _) => expr_hits(obj, params),
-                Expr::BuchiPack(fields, _) => {
-                    fields.iter().any(|f| expr_hits(&f.value, params))
-                }
-                Expr::TypeInst(_, fields, _) => {
-                    fields.iter().any(|f| expr_hits(&f.value, params))
-                }
+                Expr::BuchiPack(fields, _) => fields.iter().any(|f| expr_hits(&f.value, params)),
+                Expr::TypeInst(_, fields, _) => fields.iter().any(|f| expr_hits(&f.value, params)),
                 Expr::ListLit(elems, _) => elems.iter().any(|e| expr_hits(e, params)),
                 Expr::Lambda(_, body, _) => expr_hits(body, params),
                 Expr::Unmold(inner, _) => expr_hits(inner, params),
@@ -348,10 +337,7 @@ impl Lowering {
                 _ => false,
             }
         }
-        fn stmt_hits(
-            s: &Statement,
-            params: &std::collections::HashSet<String>,
-        ) -> bool {
+        fn stmt_hits(s: &Statement, params: &std::collections::HashSet<String>) -> bool {
             match s {
                 Statement::Expr(e) => expr_hits(e, params),
                 Statement::Assignment(a) => expr_hits(&a.value, params),

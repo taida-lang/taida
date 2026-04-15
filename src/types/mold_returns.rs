@@ -116,20 +116,20 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
             Pack
         }
         "Molten" | "Cage" => Pack,
-        "Find" => Pack, // Lax[T]
+        "Find" => Pack,                          // Lax[T]
         "ShiftL" | "ShiftR" | "ShiftRU" => Pack, // Lax[Int]
-        "ByteSet" => Pack, // Lax[Bytes]
+        "ByteSet" => Pack,                       // Lax[Bytes]
 
         // ── Dynamic (argument-dependent) ────────────────────────────
         // These molds' return kinds depend on argument types at the
         // call site; callers should fall back to their own inference.
         "Map" | "Filter" => Dynamic, // list or stream of transformed elems
-        "Reverse" => Dynamic,         // Str or List
-        "Concat" => Dynamic,          // Bytes / List / List[Unknown]
-        "Slice" => Dynamic,           // Str or Bytes
-        "Abs" | "Clamp" => Dynamic,   // Int / Float / Num
+        "Reverse" => Dynamic,        // Str or List
+        "Concat" => Dynamic,         // Bytes / List / List[Unknown]
+        "Slice" => Dynamic,          // Str or Bytes
+        "Abs" | "Clamp" => Dynamic,  // Int / Float / Num
         "Sum" | "Min" | "Max" => Dynamic, // Int or Float depending on list elem
-        "If" => Dynamic,              // type of then branch
+        "If" => Dynamic,             // type of then branch
         "Fold" | "Foldr" | "Reduce" => Dynamic, // accumulator type
 
         // Unknown (user-defined) — caller decides.
@@ -154,8 +154,19 @@ mod tests {
     #[test]
     fn str_returning_molds_map_to_str_tag() {
         for name in [
-            "Str", "Upper", "Lower", "Trim", "Replace", "ReplaceAll", "Repeat", "Pad", "PadLeft",
-            "PadRight", "Join", "ToFixed", "ToRadix",
+            "Str",
+            "Upper",
+            "Lower",
+            "Trim",
+            "Replace",
+            "ReplaceAll",
+            "Repeat",
+            "Pad",
+            "PadLeft",
+            "PadRight",
+            "Join",
+            "ToFixed",
+            "ToRadix",
         ] {
             assert_eq!(mold_return_tag(name), Some(3), "{name} should be Str (3)");
         }
@@ -218,11 +229,7 @@ mod tests {
             "Map", "Filter", "Reverse", "Concat", "Slice", "Abs", "Clamp", "Sum", "Min", "Max",
             "If", "Fold", "Foldr", "Reduce",
         ] {
-            assert_eq!(
-                mold_return_tag(name),
-                None,
-                "{name} is argument-dependent"
-            );
+            assert_eq!(mold_return_tag(name), None, "{name} is argument-dependent");
         }
     }
 
@@ -235,8 +242,19 @@ mod tests {
     #[test]
     fn pack_returning_molds_map_to_pack_tag() {
         for name in [
-            "Lax", "Result", "Async", "Gorillax", "Stream", "StreamFrom", "Molten", "Cage",
-            "Find", "CharAt", "ShiftL", "ShiftR", "ByteSet",
+            "Lax",
+            "Result",
+            "Async",
+            "Gorillax",
+            "Stream",
+            "StreamFrom",
+            "Molten",
+            "Cage",
+            "Find",
+            "CharAt",
+            "ShiftL",
+            "ShiftR",
+            "ByteSet",
         ] {
             assert_eq!(mold_return_tag(name), Some(4), "{name} should be Pack (4)");
         }

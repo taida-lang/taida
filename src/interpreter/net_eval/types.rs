@@ -7,7 +7,6 @@
 ///   - Connection stream types (ConnStream, HttpConnection, ConnReadResult, ConnAction)
 ///   - Internal helper types (ChunkedCompactResult, ChunkedBodyError, ResponseFields)
 ///   - Global atomic counters (NEXT_REQUEST_TOKEN, NEXT_WS_TOKEN)
-
 use super::super::value::Value;
 use crate::net_surface::NET_RUNTIME_BUILTIN_NAMES;
 
@@ -17,7 +16,6 @@ pub(super) type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 /// All symbols exported by the net package.
 /// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 15 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &NET_RUNTIME_BUILTIN_NAMES;
-
 
 //
 // State transitions (see NET_DESIGN.md):
@@ -178,9 +176,7 @@ pub(crate) enum BodyEncoding {
     /// omitted Content-Length entirely (false). The two cases produce
     /// the same read-loop behaviour but differ in RFC 7230 § 3.3.3
     /// framing semantics (trailers / body-less response encoding).
-    Empty {
-        had_content_length_header: bool,
-    },
+    Empty { had_content_length_header: bool },
     /// Fixed-length body. The inner value is the non-zero byte count
     /// declared in the Content-Length header and bounds the read loop.
     ContentLength(u64),
@@ -313,10 +309,12 @@ pub(crate) struct RequestBodyState {
 }
 
 /// Global monotonic counter for generating unique request tokens (NB4-7).
-pub(crate) static NEXT_REQUEST_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub(crate) static NEXT_REQUEST_TOKEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 /// NB4-10: Global monotonic counter for generating unique WebSocket connection tokens.
-pub(crate) static NEXT_WS_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub(crate) static NEXT_WS_TOKEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 // ── v4 WebSocket frame types ───────────────────────────────
 
@@ -378,11 +376,8 @@ impl RequestBodyState {
         // from the parser directly so the Empty variant preserves the
         // presence bit per RFC 7230 § 3.3.3. `fully_read` is derived
         // from `body_encoding` so the two stay in lock-step.
-        let body_encoding = BodyEncoding::classify(
-            is_chunked,
-            had_content_length_header,
-            content_length,
-        );
+        let body_encoding =
+            BodyEncoding::classify(is_chunked, had_content_length_header, content_length);
         let fully_read = body_encoding.is_empty();
         RequestBodyState {
             body_encoding,
@@ -467,7 +462,9 @@ impl std::io::Write for ConnStream {
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
             ConnStream::Plain(s) => std::io::Write::write_all(s, buf),
-            ConnStream::Tls(t) => super::super::net_transport::Transport::write_all(t.as_mut(), buf),
+            ConnStream::Tls(t) => {
+                super::super::net_transport::Transport::write_all(t.as_mut(), buf)
+            }
         }
     }
 }
@@ -557,4 +554,3 @@ pub(crate) enum ConnAction {
     /// Close the connection
     Close,
 }
-

@@ -53,8 +53,8 @@ fn read_native_runtime_source() -> String {
     let mut out = String::new();
     for name in fragments {
         let path = dir.join(name);
-        let part = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        let part =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
         out.push_str(&part);
     }
     out
@@ -71,8 +71,8 @@ fn read_net_eval_source() -> String {
     let mut out = String::new();
     for name in fragments {
         let path = dir.join(name);
-        let part = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        let part =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
         out.push_str(&part);
         out.push('\n');
     }
@@ -18845,7 +18845,7 @@ stdout(r.requests)
     // parse-check).
     for backend_hint in &["interp", "js", "native"] {
         let output = Command::new(taida_bin)
-            .args(&["check", src_path.to_str().unwrap()])
+            .args(["check", src_path.to_str().unwrap()])
             .output()
             .expect("run taida check");
 
@@ -25076,8 +25076,7 @@ fn test_net6_5b_scatter_gather_is_default_send_path() {
 #[test]
 fn test_net6_5b_native_scatter_gather_present() {
     // Verify that Native scatter-gather send is implemented.
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     assert!(
         source.contains("taida_net_send_response_scatter"),
         "NET6-5b audit: taida_net_send_response_scatter must be present in native_runtime.c"
@@ -25130,8 +25129,7 @@ fn test_net6_5b_websocket_word_at_a_time_mask() {
     );
 
     // Native: uint32_t mask_word + memcpy + XOR
-    let native_source =
-        read_native_runtime_source();
+    let native_source = read_native_runtime_source();
     assert!(
         native_source.contains("uint32_t mask_word") || native_source.contains("mask_word"),
         "NET6-5b audit: Native WebSocket mask should use word-at-a-time XOR"
@@ -25141,8 +25139,7 @@ fn test_net6_5b_websocket_word_at_a_time_mask() {
 #[test]
 fn test_net6_5b_native_tls_linearization() {
     // NB6-3 fix: Native TLS should linearize iovecs before a single SSL_write.
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     // Check for the stack buffer + heap fallback pattern
     assert!(
         source.contains("stack_buf") && source.contains("taida_tls_send_all"),
@@ -25191,8 +25188,7 @@ fn test_net6_5b_h2_module_architecture() {
 #[test]
 fn test_net6_5b_native_h2_hardening_present() {
     // Verify that Native h2 has the same hardening as Interpreter.
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     // WINDOW_UPDATE overflow protection
     assert!(
         source.contains("H2_MAX_FLOW_CONTROL_WINDOW"),
@@ -25330,8 +25326,7 @@ fn test_net6_5b_release_gate_v6_test_counts() {
 /// for shared body/raw, and includes 14 fields (with "chunked").
 #[test]
 fn test_nb6_26_27_28_native_h2_request_pack_parity() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // NB6-26: Must use taida_bytes_from_raw (not taida_list_new + append)
     assert!(
@@ -25367,8 +25362,7 @@ fn test_nb6_26_27_28_native_h2_request_pack_parity() {
 /// NB6-31: Verify Native RST_STREAM validates payload length.
 #[test]
 fn test_nb6_31_native_rst_stream_payload_length_check() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // The RST_STREAM handler must check payload_len != 4
     let rst_section: String = source
@@ -25386,8 +25380,7 @@ fn test_nb6_31_native_rst_stream_payload_length_check() {
 /// NB6-32: Verify Native TLS writev NULL check.
 #[test]
 fn test_nb6_32_native_tls_writev_null_check() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // The tls_writev_all function must check for NULL after heap alloc
     let writev_section: String = source
@@ -25417,8 +25410,7 @@ fn test_nb6_33_hpack_dyntable_o1_insert() {
     );
 
     // Native: no memmove for insert
-    let c_source =
-        read_native_runtime_source();
+    let c_source = read_native_runtime_source();
     // The insert function should append at end, not memmove
     let insert_section: String = c_source
         .lines()
@@ -25439,8 +25431,7 @@ fn test_nb6_33_hpack_dyntable_o1_insert() {
 /// NB6-34: Verify Native Huffman decoder uses lookup table optimization.
 #[test]
 fn test_nb6_34_native_huffman_lut() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     assert!(
         source.contains("h2_huff_lut"),
         "NB6-34: Native Huffman decoder must use 8-bit prefix lookup table"
@@ -25471,8 +25462,7 @@ fn test_nb6_35_no_per_frame_flush() {
 /// NB6-29/30: Verify Native HPACK header buffer sizes increased.
 #[test]
 fn test_nb6_29_30_native_header_buffer_sizes() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     assert!(
         source.contains("H2_MAX_HEADERS 128"),
         "NB6-30: Native H2_MAX_HEADERS must be >= 128"
@@ -25490,8 +25480,7 @@ fn test_nb6_29_30_native_header_buffer_sizes() {
 /// NB6-24: Verify Native h2 response headers use stack+heap fallback.
 #[test]
 fn test_nb6_24_native_h2_header_stack_fallback() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     // Must have hdr_stack buffer instead of fixed 64KB malloc
     let hdr_section: String = source
         .lines()
@@ -25526,8 +25515,7 @@ fn test_nb6_39_hpack_encoder_hashmap_lookup() {
 /// NB6-40: Verify Native H2Conn is heap-allocated.
 #[test]
 fn test_nb6_40_native_h2conn_heap_alloc() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     assert!(
         source.contains("TAIDA_MALLOC(sizeof(H2Conn)"),
         "NB6-40: Native H2Conn must be heap-allocated (not stack)"
@@ -25537,8 +25525,7 @@ fn test_nb6_40_native_h2conn_heap_alloc() {
 /// NB6-41: Verify Native h2_conn_find_stream searches from end.
 #[test]
 fn test_nb6_41_native_stream_find_from_end() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     let find_section: String = source
         .lines()
         .skip_while(|l| !l.contains("h2_conn_find_stream"))
@@ -25554,8 +25541,7 @@ fn test_nb6_41_native_stream_find_from_end() {
 /// NB6-37: Verify Native h2_dyntable_insert checks strdup return values.
 #[test]
 fn test_nb6_37_native_dyntable_strdup_check() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
     let insert_section: String = source
         .lines()
         .skip_while(|l| !l.contains("static void h2_dyntable_insert"))
@@ -27001,8 +26987,7 @@ stdout(result.__value.kind)
 /// call on the instruction byte has been removed from the literal-name branch.
 #[test]
 fn test_nb7_9_qpack_decode_no_spurious_string_call() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // Find the Literal Field Line With Literal Name decode section
     let literal_section: String = source
@@ -27057,8 +27042,7 @@ fn test_nb7_9_qpack_decode_no_spurious_string_call() {
 /// covers literal-name headers.
 #[test]
 fn test_nb7_9_qpack_selftest_exists() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     assert!(
         source.contains("h3_selftest_qpack_roundtrip"),
@@ -27079,8 +27063,7 @@ fn test_nb7_9_qpack_selftest_exists() {
 /// rejects empty pseudo-header values, and the selftest covers all cases.
 #[test]
 fn test_nb7_10_h3_request_validation_scheme_required() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // Find h3_extract_request_fields function
     let h3_extract_section: String = source
@@ -27124,8 +27107,7 @@ fn test_nb7_10_h3_request_validation_scheme_required() {
 /// NB7-10: Verify the H3 request validation selftest covers all malformed cases.
 #[test]
 fn test_nb7_10_h3_request_validation_selftest_coverage() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // Find the selftest function
     let selftest_section: String = source
@@ -27239,8 +27221,7 @@ stdout(result.__value.kind)
 /// This matches H2's behavior in h2_hpack_decode_block.
 #[test]
 fn test_nb7_11_qpack_overflow_is_decode_error() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // NET7-10d: h3_qpack_decode_block is now a thin wrapper around
     // h3_qpack_decode_block_with_dt. The overflow check lives in the _with_dt version.
@@ -27279,8 +27260,7 @@ fn test_nb7_11_qpack_overflow_is_decode_error() {
 /// partial count).
 #[test]
 fn test_nb7_11_qpack_selftest_expects_overflow_error() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // Find the selftest function
     let func_start = source
@@ -28601,8 +28581,7 @@ stdout(result.throw.message)
 /// confirms both backends have the canonical check (not just truncation checks).
 #[test]
 fn test_net7_5a_h3_non_canonical_varint_hardening_source_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_qpack =
         fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
@@ -28653,8 +28632,7 @@ fn test_net7_5a_h3_frame_bounds_hardening_source() {
         fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
 
     // Interpreter decode_frame must exist and check total > data.len().
     assert!(
@@ -28695,8 +28673,7 @@ fn test_net7_5b_h3_frame_type_source_parity() {
         fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
     let interp_src =
         format!("{interp_src_qpack}\n{interp_src_frame}\n{interp_src_conn}\n{interp_src_req}");
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
 
     // Both must have DATA frame type = 0x00
     assert!(
@@ -28765,8 +28742,7 @@ main =
 /// from untrusted input. All allocations use fixed-size pre-allocated buffers.
 #[test]
 fn test_net7_5c_h3_bounded_copy_structural_audit() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_qpack =
         fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
     let interp_src_frame =
@@ -28838,8 +28814,7 @@ fn test_net7_5c_h3_bounded_copy_structural_audit() {
 /// Both backends must have exactly 99 entries (RFC 9204 Appendix A, omitting index 22).
 #[test]
 fn test_net7_10c_qpack_static_table_count_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src =
         fs::read_to_string("src/interpreter/net_h3/qpack.rs").expect("read net_h3/qpack.rs");
 
@@ -28875,8 +28850,7 @@ fn test_net7_10c_qpack_static_table_count_parity() {
 /// Both backends must use identical H3 error code values (RFC 9114 §8.1).
 #[test]
 fn test_net7_10c_h3_error_code_iana_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_frame =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
     let interp_src_quic =
@@ -28924,8 +28898,7 @@ fn test_net7_10c_h3_error_code_iana_parity() {
 /// Both backends must use identical SETTINGS identifiers (RFC 9114 §7.2.4.1).
 #[test]
 fn test_net7_10c_settings_ids_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
 
@@ -28954,8 +28927,7 @@ fn test_net7_10c_settings_ids_parity() {
 /// between Native and Interpreter backends.
 #[test]
 fn test_net7_10c_connection_state_machine_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
@@ -28998,8 +28970,7 @@ fn test_net7_10c_connection_state_machine_parity() {
 /// ordering violations, unknown pseudo-headers).
 #[test]
 fn test_net7_10c_request_validation_semantics_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_req =
         fs::read_to_string("src/interpreter/net_h3/request.rs").expect("read net_h3/request.rs");
 
@@ -29063,8 +29034,7 @@ fn test_net7_10c_request_validation_semantics_parity() {
 /// in a varint and encodes it as an H3 frame.
 #[test]
 fn test_net7_10c_goaway_encode_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_frame =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read net_h3/frame.rs");
 
@@ -29088,8 +29058,7 @@ fn test_net7_10c_goaway_encode_parity() {
 /// Both backends must use the same default idle timeout (30 seconds).
 #[test]
 fn test_net7_10c_idle_timeout_default_parity() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_src_conn = fs::read_to_string("src/interpreter/net_h3/connection.rs")
         .expect("read net_h3/connection.rs");
 
@@ -29684,8 +29653,7 @@ stdout(result.throw.kind)
 /// NET7-11b-4: Bounded-copy structural audit (runtime constant parity).
 #[test]
 fn test_net7_11b_hardening_bounded_copy_parity() {
-    let nat_src =
-        read_native_runtime_source();
+    let nat_src = read_native_runtime_source();
     let ip_src = fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
 
     // Both backends must define the same bounded limits
@@ -30344,8 +30312,7 @@ fn test_net7_12e_h3_e2e_32_request_throughput_benchmark() {
 ///   - No aggregate buffer across frames
 #[test]
 fn test_net7_12e_h3_allocation_materialization_audit() {
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_frame_src =
         fs::read_to_string("src/interpreter/net_h3/frame.rs").expect("read frame.rs");
     let _interp_request_src =
@@ -30484,8 +30451,7 @@ fn test_net7_12f_release_truth_blocker_closure_verified() {
     );
 
     // ── NB7-65 FIXED: Native stream dispatch implemented ──
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     // Phase 8d placeholder must be gone
     assert!(
         !native_src.contains("Phase 8d will add stream-level H3 dispatch here"),
@@ -30556,8 +30522,7 @@ fn test_net7_12f_release_gate_all_criteria_met() {
     );
 
     // Gate 2: h3 runtime parity — both backends have h3 implementation
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     let interp_h3_exists = std::path::Path::new("src/interpreter/net_h3/mod.rs").exists();
     assert!(
         native_src.contains("serve_h3_loop"),
@@ -30667,8 +30632,7 @@ fn test_net7_12f_phase_completion_structural_audit() {
     );
 
     // No residual Phase 8d placeholder in native source
-    let native_src =
-        read_native_runtime_source();
+    let native_src = read_native_runtime_source();
     assert!(
         !native_src.contains("Phase 8d will add"),
         "NET7-12f: Phase 8d placeholders must all be resolved"
@@ -30888,8 +30852,7 @@ fn static_table_lookup_for_bench(index: usize) -> (&'static str, &'static str) {
 /// frames via memcpy, matching the Interpreter's `body_data.extend_from_slice(payload)`.
 #[test]
 fn test_nb7_116_native_multi_data_body_concatenation() {
-    let source =
-        read_native_runtime_source();
+    let source = read_native_runtime_source();
 
     // Find the H3_FRAME_DATA case in h3_process_stream.
     let data_case_section: String = source
@@ -31017,8 +30980,7 @@ fn test_nb7_115_interpreter_goaway_uses_control_stream() {
 fn test_nb7_115_116_multi_data_parity_interp_native() {
     let interp_source =
         std::fs::read_to_string("src/interpreter/net_h3/quic.rs").expect("read quic.rs");
-    let native_source =
-        read_native_runtime_source();
+    let native_source = read_native_runtime_source();
 
     // Interpreter: body_data.extend_from_slice in read_request_stream
     let interp_data_section: String = interp_source
@@ -31817,8 +31779,11 @@ fn test_c12_11_bool_user_func_return_direct_stdout_parity() {
 stdout(is_int_like(42))
 "#;
     assert_backend_parity_for_source(source, "c12_11_bool_user_func_return_direct_stdout");
-    let out = run_interpreter_src(source, "c12_11_bool_user_func_return_direct_stdout_expected")
-        .expect("interpreter output should exist");
+    let out = run_interpreter_src(
+        source,
+        "c12_11_bool_user_func_return_direct_stdout_expected",
+    )
+    .expect("interpreter output should exist");
     assert_eq!(out, "true");
 }
 
@@ -31888,10 +31853,7 @@ fn test_c12b_020_pipeline_discard_followed_by_stmt_parity() {
     let source = r#"stdout("first") => _
 stdout("second")
 "#;
-    assert_backend_parity_for_source(
-        source,
-        "c12b_020_pipeline_discard_followed_by_stmt",
-    );
+    assert_backend_parity_for_source(source, "c12b_020_pipeline_discard_followed_by_stmt");
     let out = run_interpreter_src(
         source,
         "c12b_020_pipeline_discard_followed_by_stmt_expected",
@@ -32008,8 +31970,11 @@ fn test_c12_6_fixed_string_replace_first_still_works_parity() {
 stdout("banana".replaceAll("a", "*"))
 "#;
     assert_backend_parity_for_source(source, "c12_6_fixed_string_replace_first_still_works");
-    let out = run_interpreter_src(source, "c12_6_fixed_string_replace_first_still_works_expected")
-        .expect("interpreter output should exist");
+    let out = run_interpreter_src(
+        source,
+        "c12_6_fixed_string_replace_first_still_works_expected",
+    )
+    .expect("interpreter output should exist");
     assert_eq!(out, "b*nana\nb*n*n*");
 }
 
@@ -32213,8 +32178,11 @@ fn test_c12b_029_regex_valid_construction_still_works_parity() {
 stdout("built:" + r.pattern)
 "#;
     assert_backend_parity_for_source(source, "c12b_029_regex_valid_construction_still_works");
-    let out = run_interpreter_src(source, "c12b_029_regex_valid_construction_still_works_expected")
-        .expect("interpreter output should exist");
+    let out = run_interpreter_src(
+        source,
+        "c12b_029_regex_valid_construction_still_works_expected",
+    )
+    .expect("interpreter output should exist");
     assert_eq!(out, "built:\\d+");
 }
 
@@ -32251,7 +32219,10 @@ fn test_c12b_040_regex_bracketed_hex_construct_and_first_use_parity() {
 stdout("built:" + r.pattern)
 stdout("BA".replace(r, "X"))
 "#;
-    assert_backend_parity_for_source(source, "c12b_040_regex_bracketed_hex_construct_and_first_use");
+    assert_backend_parity_for_source(
+        source,
+        "c12b_040_regex_bracketed_hex_construct_and_first_use",
+    );
     let out = run_interpreter_src(
         source,
         "c12b_040_regex_bracketed_hex_construct_and_first_use_expected",
@@ -32268,7 +32239,10 @@ fn test_c12b_040_regex_bracketed_unicode_construct_and_first_use_parity() {
 stdout("built:" + r.pattern)
 stdout("BA".replace(r, "X"))
 "#;
-    assert_backend_parity_for_source(source, "c12b_040_regex_bracketed_unicode_construct_and_first_use");
+    assert_backend_parity_for_source(
+        source,
+        "c12b_040_regex_bracketed_unicode_construct_and_first_use",
+    );
     let out = run_interpreter_src(
         source,
         "c12b_040_regex_bracketed_unicode_construct_and_first_use_expected",
@@ -33366,7 +33340,7 @@ fn test_c12b_041_ws_auto_close_regression_10x_interp() {
         let mut stdout_opt: Option<String> = None;
         let mut last_attempt: usize = 0;
 
-        for attempt in 0..MAX_HANDSHAKE_ATTEMPTS {
+        for (attempt, &backoff_ms) in BACKOFF_MS.iter().enumerate() {
             last_attempt = attempt;
             let port = find_free_loopback_port();
             let source = format!(
@@ -33385,10 +33359,8 @@ stdout(result.__value.ok.toString())
                 port = port
             );
 
-            let dir = setup_net_project(
-                &source,
-                &format!("c12b_041_10x_{}_{}", iteration, attempt),
-            );
+            let dir =
+                setup_net_project(&source, &format!("c12b_041_10x_{}_{}", iteration, attempt));
             let td_path = dir.join("main.td");
             let mut child = Command::new(taida_bin())
                 .arg(&td_path)
@@ -33416,7 +33388,7 @@ stdout(result.__value.ok.toString())
                     let _ = child.wait_with_output();
                     cleanup_net_project(&dir);
                     if attempt + 1 < MAX_HANDSHAKE_ATTEMPTS {
-                        thread::sleep(Duration::from_millis(BACKOFF_MS[attempt]));
+                        thread::sleep(Duration::from_millis(backoff_ms));
                     }
                 }
             }
@@ -33498,7 +33470,11 @@ stdout(result.__value.ok.toString())
     cleanup_net_project(&dir);
 
     assert!(got_text, "expected text frame 'bye', got {:?}", parsed);
-    assert!(got_close, "expected close frame after wsClose, got {:?}", parsed);
+    assert!(
+        got_close,
+        "expected close frame after wsClose, got {:?}",
+        parsed
+    );
     assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
 }
 

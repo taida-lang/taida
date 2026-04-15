@@ -92,11 +92,11 @@ struct MoldBindingDef<'a> {
 /// - `E1612` -- WASM backend capability rejection
 /// - `E1613` -- TypeExtends does not accept enum variant literals
 /// - `E1617` -- Regex invariant rejection. Two emitters share this code (both C12B-023):
-///              (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
-///                  `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
-///              (2) Manual `__type <= "Regex"` BuchiPack construction rejection
-///                  (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
-///                  by its official constructor to enforce eager pattern validation.
+///   (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
+///   `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
+///   (2) Manual `__type <= "Regex"` BuchiPack construction rejection
+///   (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
+///   by its official constructor to enforce eager pattern validation.
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -1777,9 +1777,7 @@ impl TypeChecker {
             // regardless of `is_method`, so that the rule is uniform
             // across fields and methods.
             self.validate_reserved_internal_field_name(kind, def_name, field);
-            if !field.is_method
-                && field.type_annotation.is_none()
-                && field.default_value.is_none()
+            if !field.is_method && field.type_annotation.is_none() && field.default_value.is_none()
             {
                 self.errors.push(TypeError {
                     message: Self::binding_diag(

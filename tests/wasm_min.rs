@@ -1555,12 +1555,7 @@ fn try_build_wasm(source: &str, stem: &str, target: &str) -> (bool, String) {
 /// construction always fires first (since `str.match(re)` / `str.search(re)`
 /// require constructing `re` in the first place), so the Regex-ctor message
 /// is the normal outcome even for match/search scenarios.
-fn assert_regex_rejected(
-    stem: &str,
-    target: &str,
-    source: &str,
-    expected_api_candidates: &[&str],
-) {
+fn assert_regex_rejected(stem: &str, target: &str, source: &str, expected_api_candidates: &[&str]) {
     let (ok, stderr) = try_build_wasm(source, stem, target);
     assert!(
         !ok,
@@ -1570,14 +1565,17 @@ fn assert_regex_rejected(
     assert!(
         stderr.contains("[E1617]"),
         "C12B-023: {} Regex rejection must emit [E1617], got: {}",
-        target, stderr
+        target,
+        stderr
     );
     assert!(
         expected_api_candidates
             .iter()
             .any(|label| stderr.contains(label)),
         "C12B-023: {} [E1617] message should mention one of {:?}, got: {}",
-        target, expected_api_candidates, stderr
+        target,
+        expected_api_candidates,
+        stderr
     );
 }
 
@@ -1605,12 +1603,7 @@ stdout(out)
 
 #[test]
 fn test_c12b_023_wasm_min_rejects_regex_ctor() {
-    assert_regex_rejected(
-        "min_ctor",
-        "wasm-min",
-        C12B_023_SRC_REGEX_CTOR,
-        &["Regex"],
-    );
+    assert_regex_rejected("min_ctor", "wasm-min", C12B_023_SRC_REGEX_CTOR, &["Regex"]);
 }
 
 #[test]

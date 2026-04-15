@@ -10,7 +10,6 @@ use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
-
     pub(crate) fn lower_expr(
         &mut self,
         func: &mut IrFunction,
@@ -162,7 +161,11 @@ impl Lowering {
 
     /// 末尾位置の式を lowering する（TCO対応）
     /// 自己再帰呼び出しを IrInst::TailCall に変換する
-    pub(super) fn lower_expr_tail(&mut self, func: &mut IrFunction, expr: &Expr) -> Result<IrVar, LowerError> {
+    pub(super) fn lower_expr_tail(
+        &mut self,
+        func: &mut IrFunction,
+        expr: &Expr,
+    ) -> Result<IrVar, LowerError> {
         match expr {
             // 自己再帰呼び出しの検出
             Expr::FuncCall(callee, args, _) => {
@@ -869,11 +872,7 @@ impl Lowering {
                         empty
                     };
                     let result = func.alloc_var();
-                    func.push(IrInst::Call(
-                        result,
-                        rt_name,
-                        vec![pattern_var, flags_var],
-                    ));
+                    func.push(IrInst::Call(result, rt_name, vec![pattern_var, flags_var]));
                     return Ok(result);
                 }
                 let mut arg_vars = Vec::new();

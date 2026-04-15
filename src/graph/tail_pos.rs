@@ -137,9 +137,7 @@ fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Vec<CallSite>) {
                 // direct FuncCall shape. A bare Ident stage is treated as
                 // non-tail because it reads more like a function reference
                 // than a direct tail call site for this check.
-                let stage_tail = is_tail
-                    && last
-                    && matches!(stage, Expr::FuncCall(_, _, _));
+                let stage_tail = is_tail && last && matches!(stage, Expr::FuncCall(_, _, _));
                 visit_expr(stage, stage_tail, out);
             }
         }

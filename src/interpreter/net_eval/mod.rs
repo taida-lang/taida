@@ -21,7 +21,6 @@
 ///   - `pub(crate) const NET_SYMBOLS`           (re-exported from types.rs)
 ///   - `pub(crate) struct ActiveStreamingWriter` (re-exported from types.rs)
 ///   - `pub(crate) fn try_net_func`              (defined in this file)
-
 pub(crate) mod helpers;
 pub(crate) mod types;
 
@@ -38,17 +37,16 @@ use crate::net_surface::http_protocol_ordinal_to_wire;
 use crate::parser::Expr;
 
 use helpers::{
-    build_streaming_head, chunked_body_complete, chunked_in_place_compact, determine_keep_alive,
-    encode_response, eval_read_body, extract_body_token, extract_response_fields,
-    extract_result_value, extract_result_value_owned, get_field_bool, get_field_int,
-    get_field_str, get_field_value, is_body_stream_request,
-    make_fulfilled_async, make_result_failure_msg, make_result_success, make_span,
-    parse_request_head, send_response_scatter, write_all_retry,
-    write_vectored_all, ChunkedBodyError,
+    ChunkedBodyError, build_streaming_head, chunked_body_complete, chunked_in_place_compact,
+    determine_keep_alive, encode_response, eval_read_body, extract_body_token,
+    extract_response_fields, extract_result_value, extract_result_value_owned, get_field_bool,
+    get_field_int, get_field_str, get_field_value, is_body_stream_request, make_fulfilled_async,
+    make_result_failure_msg, make_result_success, make_span, parse_request_head,
+    send_response_scatter, write_all_retry, write_vectored_all,
 };
 use types::{
     BodyEncoding, ChunkedDecoderState, ConnAction, ConnReadResult, ConnStream, HttpConnection,
-    RequestBodyState, StreamingWriter, WriterState, WsFrame, NEXT_WS_TOKEN,
+    NEXT_WS_TOKEN, RequestBodyState, StreamingWriter, WriterState, WsFrame,
 };
 
 // ── Dispatch ────────────────────────────────────────────────
@@ -3595,7 +3593,11 @@ impl Interpreter {
                 match extract_result_value_owned(parse_result) {
                     Some(fields) => {
                         return ConnReadResult::Ready(
-                            fields, consumed, cl, is_chunked, had_cl_header,
+                            fields,
+                            consumed,
+                            cl,
+                            is_chunked,
+                            had_cl_header,
                         );
                     }
                     None => return ConnReadResult::Malformed,
@@ -3625,8 +3627,8 @@ impl Interpreter {
                             let consumed = get_field_int(inner, "consumed").unwrap_or(0) as usize;
                             let cl = get_field_int(inner, "contentLength").unwrap_or(0);
                             let is_chunked = get_field_bool(inner, "chunked").unwrap_or(false);
-                            let had_cl_header = get_field_bool(inner, "__hasContentLengthHeader")
-                                .unwrap_or(false);
+                            let had_cl_header =
+                                get_field_bool(inner, "__hasContentLengthHeader").unwrap_or(false);
                             Some((consumed, cl, is_chunked, had_cl_header))
                         } else {
                             None
@@ -4204,4 +4206,3 @@ impl Interpreter {
         }
     }
 }
-

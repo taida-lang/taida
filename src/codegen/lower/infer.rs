@@ -10,7 +10,6 @@ use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
-
     // lower_index_access removed in v0.5.0 — IndexAccess no longer exists in AST
 
     /// ヒープオブジェクトを生成する式かどうかを判定

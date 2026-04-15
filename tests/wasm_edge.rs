@@ -501,8 +501,7 @@ fn wasm_edge_size_check() {
 #[test]
 fn wasm_edge_hello_no_polymorphic_regression() {
     let td_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wasm_edge_hello.td");
-    let wasm_path =
-        std::env::temp_dir().join("taida_wasm_edge_c12_7_no_poly_regression.wasm");
+    let wasm_path = std::env::temp_dir().join("taida_wasm_edge_c12_7_no_poly_regression.wasm");
 
     let compile = Command::new(taida_bin())
         .args(["build", "--target", "wasm-edge"])
@@ -573,7 +572,8 @@ fn assert_edge_regex_rejected(stem: &str, source: &str, candidates: &[&str]) {
     assert!(
         candidates.iter().any(|l| stderr.contains(l)),
         "C12B-023: wasm-edge [E1617] message should mention one of {:?}, got: {}",
-        candidates, stderr
+        candidates,
+        stderr
     );
 }
 

@@ -628,8 +628,7 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
     let mut findings = Vec::new();
     // Deduplicate: the same cycle may be reported multiple times by
     // find_cycles for undirected-looking paths. Normalise by rotation.
-    let mut seen_cycles: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut seen_cycles: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for cycle in &cycles {
         // `query::find_cycles` returns node *labels* along the cycle path.
@@ -685,12 +684,7 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
                 let line = first_non_tail_line
                     .get(&(caller.clone(), callee.clone()))
                     .copied()
-                    .unwrap_or_else(|| {
-                        func_defs
-                            .get(&caller)
-                            .map(|fd| fd.span.line)
-                            .unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| func_defs.get(&caller).map(|fd| fd.span.line).unwrap_or(0));
                 unsafe_edge = Some((caller, callee, line));
                 break;
             }
@@ -699,8 +693,7 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
         if let Some((caller, callee, line)) = unsafe_edge {
             // Render the cycle path as "A -> B -> ... -> A" for the
             // diagnostic message.
-            let mut path_display: Vec<String> =
-                user_cycle.iter().map(|s| (*s).clone()).collect();
+            let mut path_display: Vec<String> = user_cycle.iter().map(|s| (*s).clone()).collect();
             if let Some(first) = path_display.first().cloned() {
                 path_display.push(first);
             }

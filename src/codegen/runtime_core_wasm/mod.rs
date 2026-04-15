@@ -144,7 +144,10 @@ mod tests {
     /// boundary mis-calculation).
     #[test]
     fn test_runtime_core_wasm_fragments_nonempty() {
-        assert!(CORE_SECTION.len() > 10_000, "core fragment suspiciously small");
+        assert!(
+            CORE_SECTION.len() > 10_000,
+            "core fragment suspiciously small"
+        );
         assert!(
             CONTAINERS_SECTION.len() > 10_000,
             "containers fragment suspiciously small"

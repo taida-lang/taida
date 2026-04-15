@@ -211,8 +211,7 @@ stdout("aba".replaceAll(re, "x"))
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("reserved for compiler-internal use")
-                && e.contains("`__type`")),
+            .any(|e| e.contains("reserved for compiler-internal use") && e.contains("`__type`")),
         "Expected diagnostic to mention reserved `__type` field, got: {:?}",
         errors
     );
@@ -362,8 +361,9 @@ fn test_c12b_023_bypass_rejects_variable_bound_tag() {
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.contains("[E1617]")
-            && e.contains("`__type`")),
+        errors
+            .iter()
+            .any(|e| e.contains("[E1617]") && e.contains("`__type`")),
         "Expected [E1617] for variable-bound `__type`, got: {:?}",
         errors
     );
@@ -380,8 +380,9 @@ main =
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.contains("[E1617]")
-            && e.contains("`__type`")),
+        errors
+            .iter()
+            .any(|e| e.contains("[E1617]") && e.contains("`__type`")),
         "Expected [E1617] for function-arg-routed `__type`, got: {:?}",
         errors
     );
@@ -398,8 +399,9 @@ fn test_c12b_023_bypass_rejects_if_expr_tag() {
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.contains("[E1617]")
-            && e.contains("`__type`")),
+        errors
+            .iter()
+            .any(|e| e.contains("[E1617]") && e.contains("`__type`")),
         "Expected [E1617] for if-expr `__type`, got: {:?}",
         errors
     );
@@ -414,8 +416,9 @@ stdout("aba".replaceAll(re, "x"))
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.contains("[E1617]")
-            && e.contains("`__type`")),
+        errors
+            .iter()
+            .any(|e| e.contains("[E1617]") && e.contains("`__type`")),
         "Expected [E1617] for concat `__type`, got: {:?}",
         errors
     );
@@ -427,8 +430,16 @@ fn test_c12b_023_rejects_other_reserved_prefix_fields() {
     // like `__value`, `__default`, `__error`, `__tag`, `__items`, etc.
     // are all reserved because compiler-generated nominal packs use
     // them.
-    for field in &["__value", "__default", "__error", "__tag", "__items",
-                    "__transforms", "__status", "__custom_internal"] {
+    for field in &[
+        "__value",
+        "__default",
+        "__error",
+        "__tag",
+        "__items",
+        "__transforms",
+        "__status",
+        "__custom_internal",
+    ] {
         let src = format!(
             r#"p <= @({} <= "x", data <= 1)
 stdout("ok")
@@ -437,8 +448,9 @@ stdout("ok")
         );
         let errors = check_source(&src);
         assert!(
-            errors.iter().any(|e| e.contains("[E1617]")
-                && e.contains(&format!("`{}`", field))),
+            errors
+                .iter()
+                .any(|e| e.contains("[E1617]") && e.contains(&format!("`{}`", field))),
             "Expected [E1617] for reserved prefix field `{}`, got: {:?}",
             field,
             errors
@@ -457,8 +469,9 @@ stdout("ok")
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.contains("[E1617]")
-            && e.contains("`__type`")),
+        errors
+            .iter()
+            .any(|e| e.contains("[E1617]") && e.contains("`__type`")),
         "Expected [E1617] on TypeInst `__type` assignment, got: {:?}",
         errors
     );

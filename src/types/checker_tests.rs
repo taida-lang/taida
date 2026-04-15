@@ -3419,13 +3419,12 @@ fn test_c12_1_mold_returns_matches_checker() {
     ];
 
     for (mold_name, src) in cases {
-        let expected_tag =
-            mold_returns::mold_return_tag(mold_name).unwrap_or_else(|| {
-                panic!(
-                    "mold_returns::mold_return_tag({}) returned None but case declares a static tag",
-                    mold_name
-                )
-            });
+        let expected_tag = mold_returns::mold_return_tag(mold_name).unwrap_or_else(|| {
+            panic!(
+                "mold_returns::mold_return_tag({}) returned None but case declares a static tag",
+                mold_name
+            )
+        });
 
         // Build a program `v <= <expr>` so the checker visits the MoldInst.
         let source = format!("v <= {src}\n");
@@ -3857,8 +3856,9 @@ stdout(res.full)
 "#;
     let (_, errors) = check(source);
     assert!(
-        !errors.iter().any(|e| e.message.contains("[E1508]")
-            && e.message.contains("'match'")),
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1508]") && e.message.contains("'match'")),
         "match with Regex arg should not produce [E1508], got errors: {:?}",
         errors
     );
@@ -3873,8 +3873,9 @@ stdout(idx.toString())
 "#;
     let (_, errors) = check(source);
     assert!(
-        !errors.iter().any(|e| e.message.contains("[E1508]")
-            && e.message.contains("'search'")),
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1508]") && e.message.contains("'search'")),
         "search with Regex arg should not produce [E1508], got errors: {:?}",
         errors
     );

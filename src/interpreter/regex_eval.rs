@@ -183,9 +183,7 @@ pub(crate) fn replace_first(
     // `regex::replacen` expands `$N` by default. Use `NoExpand` to
     // apply the replacement as a literal, matching the B11 Phase 1
     // fixed-string contract and JS's documented `$&` lock-down.
-    Ok(re
-        .replacen(s, 1, regex::NoExpand(replacement))
-        .into_owned())
+    Ok(re.replacen(s, 1, regex::NoExpand(replacement)).into_owned())
 }
 
 /// Apply `replaceAll` using the Regex semantics. Literal replacement —
@@ -235,7 +233,11 @@ pub(crate) fn match_first(
     let start_char = s[..start_byte].chars().count() as i64;
     let full = full_match.as_str().to_string();
     let groups: Vec<String> = (1..caps.len())
-        .map(|i| caps.get(i).map(|m| m.as_str().to_string()).unwrap_or_default())
+        .map(|i| {
+            caps.get(i)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+        })
         .collect();
     Ok(Some(MatchResult {
         start: start_char,
@@ -325,8 +327,9 @@ mod tests {
 
     #[test]
     fn test_match_first_extracts_groups() {
-        let m =
-            match_first("id: 12-34 other", "(\\d+)-(\\d+)", "").expect("match ok").expect("matched");
+        let m = match_first("id: 12-34 other", "(\\d+)-(\\d+)", "")
+            .expect("match ok")
+            .expect("matched");
         assert_eq!(m.full, "12-34");
         assert_eq!(m.groups, vec!["12".to_string(), "34".to_string()]);
         assert_eq!(m.start, 4);
@@ -368,10 +371,13 @@ mod tests {
 
     #[test]
     fn test_flag_s_dotall() {
-        let m = match_first("a\nb", ".", "s").expect("match").expect("matched");
+        let m = match_first("a\nb", ".", "s")
+            .expect("match")
+            .expect("matched");
         assert_eq!(m.full, "a"); // first char is still first
-        let m2 =
-            match_first("\nb", ".", "s").expect("match").expect("matched");
+        let m2 = match_first("\nb", ".", "s")
+            .expect("match")
+            .expect("matched");
         assert_eq!(m2.full, "\n"); // `.` now crosses newline
     }
 
@@ -392,10 +398,16 @@ mod tests {
             groups: vec!["x".into(), "y".into()],
         }));
         if let Value::BuchiPack(fields) = v {
-            assert!(fields.iter().any(|(k, v)| k == "hasValue"
-                && matches!(v, Value::Bool(true))));
-            assert!(fields.iter().any(|(k, v)| k == "__type"
-                && matches!(v, Value::Str(s) if s == "RegexMatch")));
+            assert!(
+                fields
+                    .iter()
+                    .any(|(k, v)| k == "hasValue" && matches!(v, Value::Bool(true)))
+            );
+            assert!(
+                fields
+                    .iter()
+                    .any(|(k, v)| k == "__type" && matches!(v, Value::Str(s) if s == "RegexMatch"))
+            );
         } else {
             panic!("expected BuchiPack");
         }
@@ -405,10 +417,16 @@ mod tests {
     fn test_build_match_value_none() {
         let v = build_match_value(None);
         if let Value::BuchiPack(fields) = v {
-            assert!(fields.iter().any(|(k, v)| k == "hasValue"
-                && matches!(v, Value::Bool(false))));
-            assert!(fields.iter().any(|(k, v)| k == "start"
-                && matches!(v, Value::Int(-1))));
+            assert!(
+                fields
+                    .iter()
+                    .any(|(k, v)| k == "hasValue" && matches!(v, Value::Bool(false)))
+            );
+            assert!(
+                fields
+                    .iter()
+                    .any(|(k, v)| k == "start" && matches!(v, Value::Int(-1)))
+            );
         } else {
             panic!("expected BuchiPack");
         }
@@ -428,8 +446,10 @@ mod tests {
         // Both share the underlying NFA via Arc; their `.as_str()` must
         // match and both must find the same match on the same input.
         assert_eq!(re1.as_str(), re2.as_str());
-        assert_eq!(re1.find("abc123").map(|m| m.as_str()),
-                   re2.find("abc123").map(|m| m.as_str()));
+        assert_eq!(
+            re1.find("abc123").map(|m| m.as_str()),
+            re2.find("abc123").map(|m| m.as_str())
+        );
     }
 
     #[test]
