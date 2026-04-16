@@ -1137,13 +1137,13 @@ fn collect_func_refs(insts: &[super::ir::IrInst]) -> Vec<String> {
     for inst in insts {
         match inst {
             IrInst::CallUser(_, name, _) => refs.push(name.clone()),
-            IrInst::Call(_, name, _) => {
-                // ランタイム関数は除外: _taida_ / __taida_ プレフィックスで始まる
-                // ユーザー定義関数のみを追跡する（ブラックリスト方式）。
-                // これにより将来のプレフィックス追加（_taida_lambda_ 等）でも漏れない。
-                if name.starts_with("_taida_") || name.starts_with("__taida_") {
-                    refs.push(name.clone());
-                }
+            // ランタイム関数は除外: _taida_ / __taida_ プレフィックスで始まる
+            // ユーザー定義関数のみを追跡する（ブラックリスト方式）。
+            // これにより将来のプレフィックス追加（_taida_lambda_ 等）でも漏れない。
+            IrInst::Call(_, name, _)
+                if name.starts_with("_taida_") || name.starts_with("__taida_") =>
+            {
+                refs.push(name.clone());
             }
             IrInst::MakeClosure(_, name, _) => refs.push(name.clone()),
             IrInst::FuncAddr(_, name) => refs.push(name.clone()),

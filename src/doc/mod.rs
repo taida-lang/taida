@@ -335,37 +335,31 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
 
     for stmt in &program.statements {
         match stmt {
-            Statement::TypeDef(td) => {
-                if !td.doc_comments.is_empty() || !td.fields.is_empty() {
-                    doc.types.push(extract_type_doc(td));
-                }
+            Statement::TypeDef(td) if !td.doc_comments.is_empty() || !td.fields.is_empty() => {
+                doc.types.push(extract_type_doc(td));
             }
-            Statement::FuncDef(fd) => {
+            Statement::FuncDef(fd)
                 if !fd.doc_comments.is_empty()
                     || !fd.params.is_empty()
-                    || !fd.type_params.is_empty()
-                {
-                    doc.functions.push(extract_func_doc(fd));
-                }
+                    || !fd.type_params.is_empty() =>
+            {
+                doc.functions.push(extract_func_doc(fd));
             }
-            Statement::MoldDef(md) => {
+            Statement::MoldDef(md)
                 if !md.doc_comments.is_empty()
                     || !md.fields.is_empty()
                     || !md.mold_args.is_empty()
-                    || md.name_args.as_ref().is_some_and(|args| !args.is_empty())
-                {
-                    doc.molds.push(extract_mold_doc(md));
-                }
+                    || md.name_args.as_ref().is_some_and(|args| !args.is_empty()) =>
+            {
+                doc.molds.push(extract_mold_doc(md));
             }
-            Statement::InheritanceDef(id) => {
-                if !id.doc_comments.is_empty() || !id.fields.is_empty() {
-                    doc.inheritances.push(extract_inherit_doc(id));
-                }
+            Statement::InheritanceDef(id)
+                if !id.doc_comments.is_empty() || !id.fields.is_empty() =>
+            {
+                doc.inheritances.push(extract_inherit_doc(id));
             }
-            Statement::Assignment(a) => {
-                if !a.doc_comments.is_empty() {
-                    doc.assignments.push(extract_assignment_doc(a));
-                }
+            Statement::Assignment(a) if !a.doc_comments.is_empty() => {
+                doc.assignments.push(extract_assignment_doc(a));
             }
             Statement::Export(es) => {
                 doc.exports.extend(extract_export_symbols(es));

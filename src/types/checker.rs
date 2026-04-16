@@ -912,18 +912,18 @@ impl TypeChecker {
             match &protocol_field.value {
                 Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => (),
                 Expr::EnumVariant(enum_name, variant_name, span)
-                    if self.net_http_protocol_type_names.contains(enum_name) =>
+                    if self.net_http_protocol_type_names.contains(enum_name)
+                        && self.compile_target.is_js()
+                        && matches!(variant_name.as_str(), "H2" | "H3") =>
                 {
-                    if self.compile_target.is_js() && matches!(variant_name.as_str(), "H2" | "H3") {
-                        self.errors.push(TypeError {
-                            message: format!(
-                                "[E1611] `httpServe(..., tls <= @(..., protocol <= {}:{}()))` is not supported on the JS backend. \
-                                 Hint: JS supports only `{}:H1()`; use the interpreter or native backend for HTTP/2 and HTTP/3.",
-                                enum_name, variant_name, enum_name
-                            ),
-                            span: span.clone(),
-                        });
-                    }
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1611] `httpServe(..., tls <= @(..., protocol <= {}:{}()))` is not supported on the JS backend. \
+                             Hint: JS supports only `{}:H1()`; use the interpreter or native backend for HTTP/2 and HTTP/3.",
+                            enum_name, variant_name, enum_name
+                        ),
+                        span: span.clone(),
+                    });
                 }
                 Expr::IntLit(_, span) | Expr::FloatLit(_, span) | Expr::BoolLit(_, span) => {
                     self.errors.push(TypeError {

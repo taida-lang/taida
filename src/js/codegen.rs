@@ -3872,33 +3872,29 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 
     for stmt in stmts {
         match stmt {
-            Statement::UnmoldForward(unmold) => {
-                if is_os_async_unmold_source(&unmold.source, &os_async_vars) {
-                    return true;
-                }
+            Statement::UnmoldForward(unmold)
+                if is_os_async_unmold_source(&unmold.source, &os_async_vars) =>
+            {
+                return true;
             }
-            Statement::UnmoldBackward(unmold) => {
-                if is_os_async_unmold_source(&unmold.source, &os_async_vars) {
-                    return true;
-                }
+            Statement::UnmoldBackward(unmold)
+                if is_os_async_unmold_source(&unmold.source, &os_async_vars) =>
+            {
+                return true;
             }
             Statement::FuncDef(_) => {
                 // Don't recurse into nested function defs — they get their own async detection
             }
-            Statement::ErrorCeiling(ec) => {
-                if stmts_contain_async_unmold(&ec.handler_body) {
-                    return true;
-                }
+            Statement::ErrorCeiling(ec) if stmts_contain_async_unmold(&ec.handler_body) => {
+                return true;
             }
-            Statement::Expr(expr) => {
-                if expr_contains_os_async_unmold(expr, &os_async_vars) {
-                    return true;
-                }
+            Statement::Expr(expr) if expr_contains_os_async_unmold(expr, &os_async_vars) => {
+                return true;
             }
-            Statement::Assignment(assign) => {
-                if expr_contains_os_async_unmold(&assign.value, &os_async_vars) {
-                    return true;
-                }
+            Statement::Assignment(assign)
+                if expr_contains_os_async_unmold(&assign.value, &os_async_vars) =>
+            {
+                return true;
             }
             _ => {}
         }

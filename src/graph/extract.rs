@@ -1552,22 +1552,20 @@ impl GraphExtractor {
         func_names: &std::collections::HashSet<String>,
     ) {
         match expr {
-            Expr::Ident(name, _) => {
-                if func_names.contains(name) {
-                    let callee_id = graph_snapshot
-                        .nodes
-                        .iter()
-                        .find(|n| n.label == *name && matches!(n.kind, NodeKind::Function))
-                        .map(|n| n.id.clone());
-                    if let Some(cid) = callee_id {
-                        graph.add_edge(GraphEdge {
-                            source: caller_id.to_string(),
-                            target: cid,
-                            kind: EdgeKind::Calls,
-                            label: format!("references {}", name),
-                            metadata: HashMap::new(),
-                        });
-                    }
+            Expr::Ident(name, _) if func_names.contains(name) => {
+                let callee_id = graph_snapshot
+                    .nodes
+                    .iter()
+                    .find(|n| n.label == *name && matches!(n.kind, NodeKind::Function))
+                    .map(|n| n.id.clone());
+                if let Some(cid) = callee_id {
+                    graph.add_edge(GraphEdge {
+                        source: caller_id.to_string(),
+                        target: cid,
+                        kind: EdgeKind::Calls,
+                        label: format!("references {}", name),
+                        metadata: HashMap::new(),
+                    });
                 }
             }
             Expr::Pipeline(stages, _) => {
