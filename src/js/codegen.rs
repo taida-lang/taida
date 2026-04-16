@@ -1482,9 +1482,14 @@ impl JsCodegen {
     /// unreadable / unparseable — the downstream lowering will surface
     /// the real diagnostic. This helper only enriches enum_defs.
     fn absorb_cross_module_enum_defs(&mut self, import: &ImportStmt) {
-        // Only relative / absolute / package-root imports matter here.
-        // We don't try to follow package import chains for Phase 1; the
-        // relative-path case covers the Hachikuma workaround use-case.
+        // C18B-004 fix: resolve local, absolute, and package imports
+        // so that `>>> acme/lib => @(Color)` (deps-backed enum import)
+        // works on the JS backend too — not only the relative-path
+        // variant required by the original Hachikuma workaround smoke.
+        //
+        // The resolution path mirrors `validate_import_symbols` and
+        // the checker's `absorb_cross_module_enum_defs` so all three
+        // agree on which `.td` file owns the exported enum.
         let td_path = if import.path.starts_with("./")
             || import.path.starts_with("../")
             || import.path.starts_with('/')
@@ -1493,12 +1498,64 @@ impl JsCodegen {
                 Some(p) => p,
                 None => return,
             }
+        } else if import.path.starts_with("npm:")
+            || import.path == "taida-lang/net"
+            || import.path == "taida-lang/js"
+            || import.path == "taida-lang/os"
+            || import.path == "taida-lang/crypto"
+            || import.path == "taida-lang/pool"
+        {
+            // Core-bundled / npm packages — nothing to absorb.
+            return;
+        } else if import.path.contains('/') {
+            // Package import (e.g. `acme/lib` or `acme/lib/sub`) — use
+            // the `.taida/deps/` resolver the same way the checker
+            // does. Silent no-op on resolver / IO failure matches the
+            // checker side; downstream lowering produces the real
+            // diagnostic if anything is wrong.
+            let project_root = match self.project_root.as_ref() {
+                Some(r) => r.clone(),
+                None => return,
+            };
+            let resolution = if let Some(ref ver) = import.version {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    &project_root,
+                    &import.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(&project_root, &import.path)
+            };
+            let resolution = match resolution {
+                Some(r) => r,
+                None => return,
+            };
+            match &resolution.submodule {
+                Some(sub) => {
+                    let p = resolution.pkg_dir.join(format!("{}.td", sub));
+                    if !p.exists() {
+                        return;
+                    }
+                    p
+                }
+                None => {
+                    let entry_name =
+                        match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                            Ok(Some(manifest)) => manifest.entry,
+                            _ => "main.td".to_string(),
+                        };
+                    let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
+                        resolution.pkg_dir.join(stripped)
+                    } else {
+                        resolution.pkg_dir.join(&entry_name)
+                    };
+                    if !entry_path.exists() {
+                        return;
+                    }
+                    entry_path
+                }
+            }
         } else {
-            // Package imports: defer to validate_import_symbols's resolver.
-            // Phase 1 intentionally limits JS/Native cross-module enum
-            // plumbing to local paths since that is the only pattern
-            // required by the Hachikuma workaround smoke. Deps-backed
-            // enums can use the full resolution path in a later phase.
             return;
         };
 

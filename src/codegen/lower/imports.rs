@@ -40,12 +40,70 @@ impl Lowering {
                 return;
             }
             p
-        } else {
-            // Package import path: Phase 1 intentionally scopes JS/Native
-            // cross-module enum plumbing to local paths, which covers the
-            // Hachikuma workaround smoke. Expanded package-based enum
-            // sharing can follow in a later track.
+        } else if import.path.starts_with("npm:")
+            || import.path == "taida-lang/net"
+            || import.path == "taida-lang/js"
+            || import.path == "taida-lang/os"
+            || import.path == "taida-lang/crypto"
+            || import.path == "taida-lang/pool"
+        {
+            // Core-bundled / npm packages — they don't define user
+            // Enum types in .td sources that we can read, so there is
+            // nothing to absorb.
             return;
+        } else {
+            // C18B-004 fix: package import (`org/pkg` or
+            // `org/pkg/submodule`). Mirror the checker resolver path
+            // (`src/types/checker.rs::absorb_cross_module_enum_defs`)
+            // so `>>> acme/lib => @(Color)` produces the same
+            // `self.enum_defs` entries that the local-path branch
+            // would produce. Without this, downstream codegen for
+            // `Color:Red()` raised `Unknown enum variant` at lowering
+            // time even though the checker happily resolved the same
+            // import.
+            let source_dir = match &self.source_dir {
+                Some(d) => d.clone(),
+                None => return,
+            };
+            let project_root = Self::find_project_root(&source_dir);
+            let resolution = if let Some(ver) = import.version.as_ref() {
+                crate::pkg::resolver::resolve_package_module_versioned(
+                    &project_root,
+                    &import.path,
+                    ver,
+                )
+            } else {
+                crate::pkg::resolver::resolve_package_module(&project_root, &import.path)
+            };
+            let resolution = match resolution {
+                Some(r) => r,
+                None => return,
+            };
+            match &resolution.submodule {
+                Some(sub) => {
+                    let sub_path = resolution.pkg_dir.join(format!("{}.td", sub));
+                    if !sub_path.exists() {
+                        return;
+                    }
+                    sub_path
+                }
+                None => {
+                    let entry_name =
+                        match crate::pkg::manifest::Manifest::from_dir(&resolution.pkg_dir) {
+                            Ok(Some(manifest)) => manifest.entry,
+                            _ => "main.td".to_string(),
+                        };
+                    let entry_path = if let Some(stripped) = entry_name.strip_prefix("./") {
+                        resolution.pkg_dir.join(stripped)
+                    } else {
+                        resolution.pkg_dir.join(&entry_name)
+                    };
+                    if !entry_path.exists() {
+                        return;
+                    }
+                    entry_path
+                }
+            }
         };
 
         let source = match std::fs::read_to_string(&td_path) {
