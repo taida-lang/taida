@@ -1012,6 +1012,97 @@ mod tests {
         assert!(provider.can_resolve(&dep));
     }
 
+    // ==========================================================================
+    // C17-2 / C17-4: StoreProvider refresh flag integration
+    // ==========================================================================
+
+    #[test]
+    fn test_store_provider_with_refresh_flags_mutual_exclusion_panics() {
+        let result = std::panic::catch_unwind(|| {
+            StoreProvider::new().with_refresh_flags(true, true)
+        });
+        assert!(
+            result.is_err(),
+            "force_refresh + no_remote_check must panic at construction"
+        );
+    }
+
+    #[test]
+    fn test_store_provider_force_refresh_invalidates_cached_entry() {
+        // With force_refresh=true and --no-remote-check implicitly false,
+        // apply_stale_decision should remove the cached dir even when a
+        // sidecar is present. We simulate "network offline" by leaving
+        // TAIDA_GITHUB_API_URL pointing at a port that is closed, so the
+        // SHA lookup fails and is mapped to None. The invalidation still
+        // runs (force_refresh short-circuits the table), which is the
+        // contract Phase 4 guarantees.
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let dir = PathBuf::from("/tmp/taida_test_force_refresh_invalidates");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg_dir = dir.join("alice").join("http").join("b.12");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join(".taida_installed"), "").unwrap();
+        // Write a sidecar so the pre-force-refresh state looks "fresh".
+        let sidecar = super::super::store::StoreMeta {
+            schema_version: super::super::store::STORE_META_SCHEMA_VERSION,
+            commit_sha: "oldsha".to_string(),
+            tarball_sha256: "abc".to_string(),
+            tarball_etag: None,
+            fetched_at: "2026-04-16T00:00:00Z".to_string(),
+            source: "github:alice/http".to_string(),
+            version: "b.12".to_string(),
+        };
+        super::super::store::write_meta_atomic(
+            &super::super::store::meta_path_for(&pkg_dir),
+            &sidecar,
+        )
+        .unwrap();
+
+        let store = super::super::store::GlobalStore::with_root(dir.clone());
+        let provider = StoreProvider::with_store(store)
+            .with_refresh_flags(true, false);
+
+        // Point API at a closed port so resolve_version_to_sha returns None
+        // (offline). The sidecar *is* present; without force_refresh this
+        // would skip. With force_refresh it must invalidate.
+        let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1");
+        }
+
+        // Note: we assert directly against the private helper by calling
+        // the public resolve() and then checking that the pkg_dir no
+        // longer has the OLD .taida_installed marker until re-extract.
+        // Because this test cannot actually fetch from /127.0.0.1:1, the
+        // re-extraction will fail. That is acceptable: what we're verifying
+        // is that invalidation happened -- the directory should be gone
+        // after apply_stale_decision (or replaced by a partial state).
+        let _apply_result = provider.apply_stale_decision("alice", "http", "b.12");
+
+        // Invalidation must have occurred: either the dir is gone, or it
+        // was re-created by fetch_and_cache_with_meta. For this test we
+        // accept: the sidecar with "oldsha" must no longer exist.
+        let meta_path = super::super::store::meta_path_for(&pkg_dir);
+        if meta_path.exists() {
+            let m = super::super::store::read_meta(&meta_path).unwrap().unwrap();
+            assert_ne!(
+                m.commit_sha, "oldsha",
+                "sidecar must not keep oldsha after force-refresh path"
+            );
+        } else {
+            // Directory was invalidated and fetch couldn't rebuild it --
+            // also an acceptable end state for this isolated unit test.
+        }
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_store_provider_resolves_cached_package() {
         let dir = PathBuf::from("/tmp/taida_test_store_provider");
