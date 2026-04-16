@@ -453,10 +453,22 @@ impl PackageProvider for CoreBundledProvider {
 ///
 /// Downloads packages from GitHub repositories and caches them
 /// in the global store (`~/.taida/store/`).
+///
+/// C17-2: consults a stale-detection decision table before reusing a
+/// cached entry. See `store::classify_stale` and
+/// `.dev/C17_IMPL_SPEC.md` Phase 2.
 pub struct StoreProvider {
     store: GlobalStore,
     /// When true, bypass local cache for generation resolution (used by `taida update`).
     force_remote: bool,
+    /// C17-2 / C17-4: when true, invalidate any cached entry and re-extract
+    /// unconditionally. Skips the decision table.
+    force_refresh: bool,
+    /// C17-2: when true, skip the remote HEAD lookup entirely -- the
+    /// decision table is evaluated with `remote_sha = None` so sidecar
+    /// presence alone governs skip/warn. Mutually exclusive with
+    /// `force_refresh`; the CLI rejects the combination up front.
+    no_remote_check: bool,
 }
 
 impl Default for StoreProvider {
@@ -470,6 +482,8 @@ impl StoreProvider {
         StoreProvider {
             store: GlobalStore::new(),
             force_remote: false,
+            force_refresh: false,
+            no_remote_check: false,
         }
     }
 
@@ -479,7 +493,23 @@ impl StoreProvider {
         StoreProvider {
             store: GlobalStore::new(),
             force_remote: true,
+            force_refresh: false,
+            no_remote_check: false,
         }
+    }
+
+    /// C17-2 / C17-4: configure the store-side refresh behaviour.
+    ///
+    /// Panics if both `force_refresh` and `no_remote_check` are set --
+    /// the CLI should reject the combination at argument parsing time.
+    pub fn with_refresh_flags(mut self, force_refresh: bool, no_remote_check: bool) -> Self {
+        assert!(
+            !(force_refresh && no_remote_check),
+            "StoreProvider: --force-refresh and --no-remote-check are mutually exclusive"
+        );
+        self.force_refresh = force_refresh;
+        self.no_remote_check = no_remote_check;
+        self
     }
 
     #[cfg(test)]
@@ -487,8 +517,202 @@ impl StoreProvider {
         StoreProvider {
             store,
             force_remote: false,
+            force_refresh: false,
+            no_remote_check: false,
         }
     }
+
+    /// C17-2: consult the decision table for a cached package.
+    ///
+    /// Returns a `StaleOutcome` telling the caller (`resolve`) what to do:
+    /// - `Skip` -> fast-path / offline-warning / strong-warning / no-remote-check
+    ///   skip. The caller does not touch the cache.
+    /// - `Refresh { sha }` -> the caller must stage-swap the existing
+    ///   package directory out of the way, call `fetch_and_cache_with_meta`
+    ///   with this SHA, and then commit or rollback the swap depending on
+    ///   whether the fetch succeeded. `sha` is `None` when the remote lookup
+    ///   failed but a refresh was still requested (e.g. `--force-refresh`
+    ///   without online access).
+    ///
+    /// C17B-001: This function intentionally does NOT call
+    /// `invalidate_package` any more. The old contract deleted `pkg_dir`
+    /// unconditionally before the fetch, so a failed fetch destroyed the
+    /// user's working install. The stage-swap lives in `resolve()`.
+    ///
+    /// Side effects:
+    /// - stderr warning on rows 4 and 5 (`offline, cannot verify
+    ///   staleness` / `unknown provenance, use --force-refresh`).
+    /// - stderr info on a refresh (`remote moved: ...; refreshing store`).
+    ///
+    /// Never silent: every non-happy-path outcome emits stderr output so
+    /// the user can see what happened.
+    fn apply_stale_decision(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<StaleOutcome, String> {
+        use super::store::{
+            RefreshReason, StaleDecision, classify_stale, refresh_reason_short,
+            resolve_version_to_sha,
+        };
+
+        // Force-refresh short-circuits the table: stage the existing
+        // directory out of the way so the fetch path can re-extract.
+        // Phase 4 reuses this branch.
+        //
+        // C17B-001: `invalidate_package` used to delete `pkg_dir` outright.
+        // If the subsequent fetch failed (offline, rate-limited, 429...)
+        // the user's working install would be gone. The backup-swap lives
+        // in `resolve()` proper: it watches for the `refresh_triggered`
+        // signal and performs the rename + rollback there. Here we only
+        // resolve the remote SHA so it can be written into the new sidecar.
+        //
+        // C17B-007: `--force-refresh` and `--no-remote-check` are mutually
+        // exclusive at construction (`with_refresh_flags` and the CLI
+        // argparser reject the combination). The branch that checked
+        // `self.no_remote_check` here was therefore dead; we now call
+        // `resolve_version_to_sha` unconditionally. If it fails we fall
+        // through to `None` and the sidecar is written with `commit_sha=""`
+        // so the next install's row 2b path fills it in.
+        if self.force_refresh {
+            let sha = resolve_version_to_sha(org, name, version).ok().flatten();
+            eprintln!(
+                "  refreshing store for {}/{}@{} (--force-refresh)",
+                org, name, version
+            );
+            return Ok(StaleOutcome::Refresh { sha });
+        }
+
+        let sidecar = match self.store.read_package_meta(org, name, version) {
+            Ok(meta) => meta,
+            Err(e) => {
+                // Malformed or schema-mismatched sidecar: treat as missing
+                // and pessimistically refresh. Warn so the operator sees
+                // it.
+                //
+                // C17B-019: schema mismatches (older taida reading a newer
+                // sidecar, or vice versa) are unrecoverable without a
+                // version change. Surface a hint so the user knows what to
+                // do.
+                eprintln!(
+                    "  sidecar for {}/{}@{} unreadable ({}); re-extracting",
+                    org, name, version, e
+                );
+                if matches!(e, super::store::StoreError::UnknownMetaSchema { .. }) {
+                    eprintln!(
+                        "  hint: this sidecar was written by a different taida \
+                         version. Upgrade taida or pin {}/{}@{} to a version \
+                         published by a compatible taida release.",
+                        org, name, version
+                    );
+                }
+                None
+            }
+        };
+
+        // `--no-remote-check` short-circuit: the user has told us not to
+        // reach out. When a sidecar is present the skip is silent (the
+        // user asked for this); when it is absent we still print the
+        // strong warning so the user knows provenance is unverified.
+        if self.no_remote_check {
+            if sidecar.is_none() {
+                eprintln!(
+                    "  unknown provenance: {}/{}@{} (sidecar missing; --no-remote-check). \
+                     Re-run with --force-refresh when online.",
+                    org, name, version
+                );
+            }
+            return Ok(StaleOutcome::Skip);
+        }
+
+        let remote_sha = match resolve_version_to_sha(org, name, version) {
+            Ok(sha) => sha,
+            Err(e) => {
+                // Malformed response (distinct from "no network"):
+                // warn but continue as if offline.
+                eprintln!(
+                    "  warning: could not verify {}/{}@{} staleness: {}",
+                    org, name, version, e
+                );
+                None
+            }
+        };
+
+        let decision = classify_stale(sidecar.as_ref(), remote_sha.as_deref());
+
+        match decision {
+            StaleDecision::SkipFastPath => Ok(StaleOutcome::Skip),
+
+            StaleDecision::SkipWithOfflineWarning => {
+                eprintln!(
+                    "  offline, cannot verify staleness: {}/{}@{} (using cached entry)",
+                    org, name, version
+                );
+                Ok(StaleOutcome::Skip)
+            }
+
+            StaleDecision::SkipUnknownProvenanceStrongWarn => {
+                eprintln!(
+                    "  unknown provenance: {}/{}@{} (sidecar missing). \
+                     Re-run with --force-refresh when online.",
+                    org, name, version
+                );
+                Ok(StaleOutcome::Skip)
+            }
+
+            StaleDecision::Refresh(reason) => {
+                // C17B-010: The three `RefreshReason` variants all emit the
+                // same message template. Format once, print once. The
+                // variant-specific wording is produced by
+                // `refresh_reason_short`.
+                //
+                // C17B-016: For `SidecarShaUnknown` (row 2b -- the second
+                // install after a Phase 1 sidecar was written without a
+                // resolved SHA) we add a parenthetical that explains the
+                // refresh is filling in the missing SHA. This demystifies
+                // the re-download a new user sees on their second install.
+                let extra_hint = match &reason {
+                    RefreshReason::SidecarShaUnknown => " (filling in missing sidecar SHA)",
+                    _ => "",
+                };
+                eprintln!(
+                    "  {}/{}@{}: {}; refreshing store{}",
+                    org,
+                    name,
+                    version,
+                    refresh_reason_short(&reason),
+                    extra_hint
+                );
+                // C17B-001: do NOT call `invalidate_package` here. The
+                // caller (`StoreProvider::resolve`) stages a backup via
+                // `GlobalStore::stage_invalidation` /
+                // `commit_invalidation` / `rollback_invalidation` so a
+                // failed fetch rolls back the user's previous working
+                // install instead of leaving them with an empty directory.
+                // The `Ok(StaleOutcome::Refresh { sha })` return tells the
+                // caller to perform the swap.
+                Ok(StaleOutcome::Refresh { sha: remote_sha })
+            }
+        }
+    }
+}
+
+/// C17B-001: outcome of the Phase 2 stale-detection decision table, as
+/// consumed by `StoreProvider::resolve`.
+///
+/// - `Skip`: the cached entry is trustworthy (fast-path / offline-warned /
+///   strong-warned / no-remote-check). The caller does NOT touch the store.
+/// - `Refresh { sha }`: the caller must stage-swap the directory, call the
+///   fetcher, and commit or rollback depending on the fetch result. `sha`
+///   is the remote commit SHA to record in the new sidecar (`None` when
+///   the lookup failed but a refresh was still requested, e.g. under
+///   `--force-refresh` while offline; the sidecar will carry `commit_sha=""`
+///   and the next install will upgrade it via row 2b).
+#[derive(Debug)]
+enum StaleOutcome {
+    Skip,
+    Refresh { sha: Option<String> },
 }
 
 impl PackageProvider for StoreProvider {
@@ -525,8 +749,71 @@ impl PackageProvider for StoreProvider {
                     }
                 };
 
-                match self.store.fetch_and_cache(org, name, &exact_version) {
+                // C17B-009: take a per-package advisory lock so two
+                // concurrent `taida install` processes do not clobber each
+                // other's extract. The lock is held for the duration of the
+                // decision table + fetch + commit.
+                let _lock_guard = match self.store.acquire_install_lock(org, name, &exact_version) {
+                    Ok(g) => g,
+                    Err(e) => return ProviderResult::Error(e),
+                };
+
+                // C17-2: stale-detection decision table.
+                //
+                // Only engaged when the package is already cached -- an
+                // uncached install always falls through to
+                // `fetch_and_cache_with_meta` below, which is the natural
+                // "first install" path and is unchanged from C17-1.
+                //
+                // C17B-001: when the outcome is `Refresh`, we stage the
+                // existing directory aside (rename to `<dir>.refresh-staging`)
+                // BEFORE calling the fetcher. If the fetch fails we
+                // restore the backup so the user's working install is
+                // preserved. On success we drop the backup.
+                let (remote_sha_for_sidecar, stash) =
+                    if self.store.is_cached(org, name, &exact_version) {
+                        match self.apply_stale_decision(org, name, &exact_version) {
+                            Err(msg) => return ProviderResult::Error(msg),
+                            Ok(StaleOutcome::Skip) => (None, None),
+                            Ok(StaleOutcome::Refresh { sha }) => {
+                                match self.store.stage_invalidation(org, name, &exact_version) {
+                                    Ok(stash) => (sha, stash),
+                                    Err(e) => return ProviderResult::Error(e),
+                                }
+                            }
+                        }
+                    } else {
+                        // Uncached: do not do an extra remote round-trip here.
+                        // `fetch_and_cache_with_meta` will record the SHA we
+                        // pass in, but for the first install we leave it
+                        // `None` -- the next `taida install` will detect the
+                        // missing SHA and do a pessimistic refresh that fills
+                        // it in. This keeps the first-install UX unchanged.
+                        (None, None)
+                    };
+
+                let fetch_result = self.store.fetch_and_cache_with_meta(
+                    org,
+                    name,
+                    &exact_version,
+                    remote_sha_for_sidecar.as_deref(),
+                );
+
+                match fetch_result {
                     Ok(path) => {
+                        // Fetch succeeded; drop the backup (if any).
+                        if let Some(stash_path) = stash
+                            && let Err(e) = self.store.commit_invalidation(&stash_path)
+                        {
+                            // Non-fatal: the new install is already in
+                            // place, the stash is just leftover disk
+                            // space. Warn the user once.
+                            eprintln!(
+                                "  warning: could not remove refresh backup '{}': {}",
+                                stash_path.display(),
+                                e
+                            );
+                        }
                         let integrity = compute_dir_hash(&path);
                         ProviderResult::Resolved(ResolvedPackage {
                             name: dep_name.to_string(),
@@ -539,7 +826,37 @@ impl PackageProvider for StoreProvider {
                             integrity,
                         })
                     }
-                    Err(e) => ProviderResult::Error(e),
+                    Err(e) => {
+                        // C17B-001: fetch failed. Roll back the stash so
+                        // the user's previous install reappears instead of
+                        // being silently lost.
+                        if let Some(stash_path) = stash {
+                            let pkg_dir = self.store.package_path(org, name, &exact_version);
+                            match self.store.rollback_invalidation(&stash_path, &pkg_dir) {
+                                Ok(()) => {
+                                    eprintln!(
+                                        "  refresh of {}/{}@{} failed ({}); \
+                                         restored previous install from backup",
+                                        org, name, &exact_version, e
+                                    );
+                                }
+                                Err(rb_err) => {
+                                    eprintln!(
+                                        "  refresh of {}/{}@{} failed ({}); \
+                                         rollback also failed ({}). Previous \
+                                         install may be in '{}'",
+                                        org,
+                                        name,
+                                        &exact_version,
+                                        e,
+                                        rb_err,
+                                        stash_path.display()
+                                    );
+                                }
+                            }
+                        }
+                        ProviderResult::Error(e)
+                    }
                 }
             }
             _ => ProviderResult::NotApplicable,
@@ -614,10 +931,38 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
-                collect_files_recursive(&path, files)?;
-            } else {
+            // C17B-002 + HOLD M2 fix (2026-04-17): skip taida-managed metadata
+            // **files** that would otherwise make the directory hash churn
+            // between installs even though the package content is unchanged.
+            //
+            // Skipped files:
+            //   - `_meta.toml`        -- C17 sidecar (contains `fetched_at`)
+            //   - `.taida_installed`  -- completion marker
+            //   - `.*.tmp`            -- temp files from atomic sidecar writes
+            //                           (e.g. `._meta.toml.tmp` after crash)
+            //
+            // These files are Taida's provenance/management metadata, not
+            // part of the package's own content. Including them would cause
+            // `.taida/taida.lock` integrity hashes to drift every time the
+            // sidecar is rewritten, breaking lockfile reproducibility.
+            //
+            // The filter is applied **inside** the `is_file()` branch so a
+            // directory whose name happens to match (the `_meta.toml` edge
+            // case) still has its contents traversed. Pre-HOLD the filter
+            // ran before the is_file/is_dir split, which would have skipped
+            // entire subtrees whose directory name collided with these
+            // sentinel filenames.
+            if path.is_file() {
+                if let Some(fname) = path.file_name().and_then(|n| n.to_str())
+                    && (fname == crate::pkg::store::STORE_META_FILENAME
+                        || fname == ".taida_installed"
+                        || (fname.starts_with('.') && fname.ends_with(".tmp")))
+                {
+                    continue;
+                }
                 files.push(path);
+            } else if path.is_dir() {
+                collect_files_recursive(&path, files)?;
             }
         }
     }
@@ -806,6 +1151,212 @@ mod tests {
         };
         let provider = StoreProvider::new();
         assert!(provider.can_resolve(&dep));
+    }
+
+    // ==========================================================================
+    // C17-2 / C17-4: StoreProvider refresh flag integration
+    // ==========================================================================
+
+    #[test]
+    fn test_store_provider_with_refresh_flags_mutual_exclusion_panics() {
+        let result =
+            std::panic::catch_unwind(|| StoreProvider::new().with_refresh_flags(true, true));
+        assert!(
+            result.is_err(),
+            "force_refresh + no_remote_check must panic at construction"
+        );
+    }
+
+    #[test]
+    fn test_store_provider_force_refresh_returns_refresh_outcome() {
+        // C17B-001 / C17B-007 contract: with force_refresh=true,
+        // apply_stale_decision must return `StaleOutcome::Refresh` so
+        // `resolve()` can perform the stage-swap. It must NOT call
+        // invalidate_package itself -- that would regress the
+        // "fetch fails -> user loses install" data-loss bug.
+        //
+        // We point the GitHub API at a closed port to exercise the offline
+        // path: the remote SHA lookup fails, so the returned
+        // `StaleOutcome::Refresh.sha` is `None`. The cached directory is
+        // still present (no invalidation here); the caller owns the swap.
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let dir = PathBuf::from("/tmp/taida_test_force_refresh_outcome");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg_dir = dir.join("alice").join("http").join("b.12");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join(".taida_installed"), "").unwrap();
+        let sidecar = super::super::store::StoreMeta {
+            schema_version: super::super::store::STORE_META_SCHEMA_VERSION,
+            commit_sha: "oldsha".to_string(),
+            tarball_sha256: "abc".to_string(),
+            tarball_etag: None,
+            fetched_at: "2026-04-16T00:00:00Z".to_string(),
+            source: "github:alice/http".to_string(),
+            version: "b.12".to_string(),
+        };
+        super::super::store::write_meta_atomic(
+            &super::super::store::meta_path_for(&pkg_dir),
+            &sidecar,
+        )
+        .unwrap();
+
+        let store = super::super::store::GlobalStore::with_root(dir.clone());
+        let provider = StoreProvider::with_store(store).with_refresh_flags(true, false);
+
+        let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1");
+        }
+
+        let outcome = provider
+            .apply_stale_decision("alice", "http", "b.12")
+            .expect("apply_stale_decision returns Ok under force_refresh");
+        match outcome {
+            StaleOutcome::Refresh { sha } => {
+                // Remote SHA lookup failed (closed port) -> None.
+                assert!(
+                    sha.is_none(),
+                    "offline force-refresh: sha must be None (got {:?})",
+                    sha
+                );
+            }
+            StaleOutcome::Skip => panic!("force_refresh must return Refresh, not Skip"),
+        }
+
+        // C17B-001 verification: the cached sidecar / marker must still
+        // exist. Invalidation is the caller's job (in `resolve()`), not
+        // `apply_stale_decision`'s. This is the anti-data-loss contract.
+        let meta_path = super::super::store::meta_path_for(&pkg_dir);
+        assert!(
+            meta_path.exists(),
+            "apply_stale_decision must not delete the old sidecar under force_refresh"
+        );
+        let m = super::super::store::read_meta(&meta_path).unwrap().unwrap();
+        assert_eq!(
+            m.commit_sha, "oldsha",
+            "old sidecar content must be untouched by apply_stale_decision"
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_store_provider_force_refresh_rollback_on_fetch_failure() {
+        // C17B-001: the full `resolve()` path must restore the previous
+        // working install when the fetch fails. We simulate that by
+        // pointing BOTH the archive base URL and the API URL at closed
+        // ports, so the fetch errors out. The user's existing extracted
+        // directory (.taida_installed marker + sidecar) must reappear.
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let dir = PathBuf::from("/tmp/taida_test_force_refresh_rollback");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg_dir = dir.join("alice").join("http").join("b.12");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("main.td"), "// original content").unwrap();
+        std::fs::write(pkg_dir.join(".taida_installed"), "").unwrap();
+        let sidecar = super::super::store::StoreMeta {
+            schema_version: super::super::store::STORE_META_SCHEMA_VERSION,
+            commit_sha: "oldsha".to_string(),
+            tarball_sha256: "abc".to_string(),
+            tarball_etag: None,
+            fetched_at: "2026-04-16T00:00:00Z".to_string(),
+            source: "github:alice/http".to_string(),
+            version: "b.12".to_string(),
+        };
+        super::super::store::write_meta_atomic(
+            &super::super::store::meta_path_for(&pkg_dir),
+            &sidecar,
+        )
+        .unwrap();
+
+        let store = super::super::store::GlobalStore::with_root(dir.clone());
+        let provider = StoreProvider::with_store(store).with_refresh_flags(true, false);
+
+        let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:1");
+            std::env::set_var("TAIDA_GITHUB_BASE_URL", "http://127.0.0.1:1");
+        }
+
+        let manifest = Manifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: BTreeMap::new(),
+            root_dir: PathBuf::from("/tmp"),
+            exports: Vec::new(),
+        };
+        let dep = Dependency::Registry {
+            org: "alice".to_string(),
+            name: "http".to_string(),
+            version: "b.12".to_string(),
+        };
+        let result = provider.resolve("http", &dep, &manifest);
+        unsafe {
+            match prev_api {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+            match prev_base {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_BASE_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_BASE_URL"),
+            }
+        }
+
+        // The fetch must fail (offline mock).
+        assert!(
+            matches!(result, ProviderResult::Error(_)),
+            "offline fetch must error, got: {:?}",
+            match result {
+                ProviderResult::Error(_) => "Error",
+                ProviderResult::Resolved(_) => "Resolved",
+                ProviderResult::NotApplicable => "NotApplicable",
+            }
+        );
+
+        // C17B-001: the user's previous install must be restored.
+        assert!(
+            pkg_dir.join(".taida_installed").exists(),
+            "rollback must restore .taida_installed marker"
+        );
+        assert!(
+            pkg_dir.join("main.td").exists(),
+            "rollback must restore original file content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(pkg_dir.join("main.td")).unwrap(),
+            "// original content",
+            "rollback must restore the exact previous content"
+        );
+        let meta = super::super::store::read_meta(&super::super::store::meta_path_for(&pkg_dir))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.commit_sha, "oldsha",
+            "rollback must restore the old sidecar (commit_sha=oldsha)"
+        );
+
+        // The staging dir must also be cleaned up.
+        let parent = dir.join("alice").join("http");
+        let staging_count = std::fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".refresh-staging"))
+            .count();
+        assert_eq!(
+            staging_count, 0,
+            "rollback must remove the staging directory"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1001,6 +1552,113 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "hullo").unwrap();
         let hash3 = compute_dir_hash(&dir);
         assert_ne!(hash2, hash3, "Hash should change when file content changes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_dir_hash_ignores_taida_managed_metadata() {
+        // C17B-002 regression guard: `_meta.toml`, `.taida_installed`,
+        // and `.foo.tmp` files must not contribute to the directory hash.
+        // These are Taida-managed sidecar / scratch files that change
+        // every install even when package content is stable.
+        let dir = PathBuf::from("/tmp/taida_test_hash_c17b_002");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.td"), "stdout(\"hello\")\n").unwrap();
+        std::fs::write(dir.join("packages.tdm"), "<<<@a.1 x/y\n").unwrap();
+
+        let baseline = compute_dir_hash(&dir);
+
+        // Add `_meta.toml` with a timestamp -- must not change hash.
+        std::fs::write(
+            dir.join("_meta.toml"),
+            "schema_version = 1\nfetched_at = \"2026-01-01T00:00:00Z\"\n",
+        )
+        .unwrap();
+        let with_meta = compute_dir_hash(&dir);
+        assert_eq!(
+            baseline, with_meta,
+            "_meta.toml must NOT affect integrity hash (C17B-002)"
+        );
+
+        // Change sidecar content -> still same hash.
+        std::fs::write(
+            dir.join("_meta.toml"),
+            "schema_version = 1\nfetched_at = \"2026-12-31T23:59:59Z\"\n",
+        )
+        .unwrap();
+        let with_meta2 = compute_dir_hash(&dir);
+        assert_eq!(
+            baseline, with_meta2,
+            "mutating _meta.toml must NOT change integrity (C17B-002)"
+        );
+
+        // Add `.taida_installed` marker -> still same.
+        std::fs::write(dir.join(".taida_installed"), "").unwrap();
+        let with_marker = compute_dir_hash(&dir);
+        assert_eq!(
+            baseline, with_marker,
+            ".taida_installed marker must NOT affect integrity (C17B-002)"
+        );
+
+        // Add a `.foo.tmp` scratch file -> still same.
+        std::fs::write(dir.join("._meta.toml.tmp"), "stale").unwrap();
+        let with_tmp = compute_dir_hash(&dir);
+        assert_eq!(
+            baseline, with_tmp,
+            ".foo.tmp scratch must NOT affect integrity (C17B-002)"
+        );
+
+        // Sanity: a *real* content change still flips the hash.
+        std::fs::write(dir.join("main.td"), "stdout(\"changed\")\n").unwrap();
+        let changed = compute_dir_hash(&dir);
+        assert_ne!(
+            baseline, changed,
+            "actual content change must flip hash even with metadata filters"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_dir_hash_handles_meta_toml_directory_edge_case() {
+        // HOLD M2 fix (2026-04-17) regression guard: the metadata filter
+        // must only apply to regular files. A **directory** named
+        // `_meta.toml` (or `.taida_installed` / `._meta.toml.tmp`) is an
+        // edge case that does not trigger any of the filter predicates;
+        // its contents must still be hashed. Pre-fix the filter ran
+        // before the is_file/is_dir split and would have skipped the
+        // entire subtree.
+        let dir = PathBuf::from("/tmp/taida_test_hash_m2_edgecase");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.td"), "stdout(\"hi\")\n").unwrap();
+
+        // Put a real content file inside a directory whose name collides
+        // with the sidecar filename.
+        let quirky = dir.join("_meta.toml");
+        std::fs::create_dir_all(&quirky).unwrap();
+        std::fs::write(quirky.join("inner.td"), "x = 1\n").unwrap();
+
+        let h1 = compute_dir_hash(&dir);
+
+        // Mutating a file inside the `_meta.toml/` directory MUST flip
+        // the hash, proving the subtree was traversed.
+        std::fs::write(quirky.join("inner.td"), "x = 2\n").unwrap();
+        let h2 = compute_dir_hash(&dir);
+        assert_ne!(
+            h1, h2,
+            "content inside a dir named _meta.toml must still affect hash (HOLD M2)"
+        );
+
+        // Adding a sibling inside the quirky dir also flips.
+        std::fs::write(quirky.join("extra.td"), "y = 3\n").unwrap();
+        let h3 = compute_dir_hash(&dir);
+        assert_ne!(
+            h2, h3,
+            "new file inside dir named _meta.toml must flip hash (HOLD M2)"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

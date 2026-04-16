@@ -227,7 +227,7 @@ fn print_install_help() {
     println!(
         "\
 Usage:
-  taida install [--force-refresh] [--allow-local-addon-build]
+  taida install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
 
 Behavior:
   Install resolved dependencies and generate/update `.taida/taida.lock`.
@@ -241,8 +241,22 @@ Behavior:
   Large addon downloads (>= 256 KiB) show a progress indicator on stderr
   (RC15B-002).
 
+  C17: before reusing a cached `~/.taida/store/<pkg>/<version>/` entry,
+  `taida install` compares the resolved commit SHA of `<version>` on the
+  remote with the `commit_sha` recorded in the store `_meta.toml` sidecar.
+  When they differ (tag was retagged / recreated), the store entry is
+  re-extracted automatically. Offline or unverifiable states emit a
+  warning to stderr but never silently skip.
+
 Options:
-  --force-refresh              Ignore the addon cache and re-download every prebuild.
+  --force-refresh              Invalidate the cached store entry for every
+                               registry dependency and re-extract it. Also
+                               ignores the addon-cache (legacy behaviour).
+                               Mutually exclusive with --no-remote-check.
+  --no-remote-check            Skip the remote commit-SHA lookup; trust the
+                               existing store sidecar. Intended for offline
+                               or rate-limited environments. Mutually
+                               exclusive with --force-refresh.
   --allow-local-addon-build    When a prebuild is missing or unavailable, fall back
                                to building the addon from source using `cargo build`.
                                Integrity mismatches are never overridden by fallback.
@@ -250,6 +264,7 @@ Options:
 Example:
   taida install
   taida install --force-refresh
+  taida install --no-remote-check
   taida install --allow-local-addon-build"
     );
 }
@@ -4098,12 +4113,16 @@ fn run_deps(args: &[String]) {
 fn run_install(args: &[String]) {
     // RC1.5-3c: parse --force-refresh flag
     // RC2.7-4a: parse --allow-local-addon-build flag
+    // C17-2: parse --no-remote-check (mutually exclusive with --force-refresh)
     let mut force_refresh = false;
+    let mut no_remote_check = false;
     let mut allow_local_addon_build = false;
     let mut filtered: Vec<&str> = Vec::new();
     for arg in args {
         if arg == "--force-refresh" {
             force_refresh = true;
+        } else if arg == "--no-remote-check" {
+            no_remote_check = true;
         } else if arg == "--allow-local-addon-build" {
             allow_local_addon_build = true;
         } else if is_help_flag(arg.as_str()) {
@@ -4115,6 +4134,17 @@ fn run_install(args: &[String]) {
     }
     if !filtered.is_empty() {
         eprintln!("Unexpected arguments.");
+        eprintln!("Run `taida install --help` for usage.");
+        std::process::exit(1);
+    }
+    // C17-2: mutual exclusion is a hard error so users cannot silently
+    // combine the two refresh knobs with surprising semantics.
+    let refresh_flags = pkg::resolver::StoreRefreshFlags {
+        force_refresh,
+        no_remote_check,
+    };
+    if let Err(msg) = refresh_flags.validate() {
+        eprintln!("Error: {}", msg);
         eprintln!("Run `taida install --help` for usage.");
         std::process::exit(1);
     }
@@ -4163,10 +4193,12 @@ fn run_install(args: &[String]) {
     let existing_lockfile = pkg::lockfile::Lockfile::read(&lock_path).unwrap_or_default();
 
     // Resolve all dependencies using the provider chain,
-    // pinning generation-only versions to locked exact versions when available
+    // pinning generation-only versions to locked exact versions when available.
+    // C17-2: forward refresh flags so the StoreProvider can consult the
+    // stale-detection decision table (or bypass it for --force-refresh).
     let result = match &existing_lockfile {
-        Some(lf) => pkg::resolver::resolve_deps_locked(&manifest, lf),
-        None => pkg::resolver::resolve_deps(&manifest),
+        Some(lf) => pkg::resolver::resolve_deps_locked_with_flags(&manifest, lf, refresh_flags),
+        None => pkg::resolver::resolve_deps_with_flags(&manifest, refresh_flags),
     };
 
     // Report errors
@@ -4514,42 +4546,90 @@ fn run_cache(args: &[String]) {
         println!("Usage: taida cache <command> [options]");
         println!();
         println!("Commands:");
-        println!("  clean              Remove cached WASM runtime .o files (default)");
-        println!("  clean --addons     Remove cached addon prebuild binaries");
-        println!("                     (RC15B-001: prunes ~/.taida/addon-cache/)");
-        println!("  clean --all        Remove both WASM and addon caches");
+        println!("  clean                       Remove cached WASM runtime .o files (default)");
+        println!("  clean --addons              Remove cached addon prebuild binaries");
+        println!("                              (RC15B-001: prunes ~/.taida/addon-cache/)");
+        println!("  clean --store [--yes]       C17: prune ~/.taida/store/ (shows a summary");
+        println!("                              first; then asks to confirm interactively on a");
+        println!("                              TTY, or requires --yes in non-TTY contexts)");
+        println!("  clean --store-pkg <org>/<name>   C17: prune a single store package");
+        println!("                              (no confirmation prompt; scope is narrow)");
+        println!("  clean --all [--yes]         Remove WASM + addon cache + store (C17)");
         return;
     }
 
     match args[0].as_str() {
         "clean" => {
             // RC15B-001: parse optional --addons / --all flags.
+            // C17-3: add --store / --store-pkg / --yes flags.
             let mut clean_wasm = true;
             let mut clean_addons = false;
-            for extra in &args[1..] {
-                match extra.as_str() {
+            let mut clean_store = false;
+            let mut store_pkg: Option<String> = None;
+            let mut assume_yes = false;
+
+            let mut i = 1;
+            while i < args.len() {
+                let extra = args[i].as_str();
+                match extra {
                     "--addons" => {
                         clean_wasm = false;
                         clean_addons = true;
                     }
+                    "--store" => {
+                        clean_wasm = false;
+                        clean_store = true;
+                    }
+                    "--store-pkg" => {
+                        clean_wasm = false;
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("Missing value for --store-pkg. Expected <org>/<name>.");
+                            std::process::exit(1);
+                        }
+                        store_pkg = Some(args[i].clone());
+                    }
                     "--all" => {
                         clean_wasm = true;
                         clean_addons = true;
+                        clean_store = true;
+                    }
+                    "--yes" | "-y" => {
+                        assume_yes = true;
                     }
                     other => {
                         eprintln!(
-                            "Unknown flag '{}' for 'taida cache clean'. Use --addons, --all, or no flag.",
+                            "Unknown flag '{}' for 'taida cache clean'. \
+                             Use --addons, --store, --store-pkg <org>/<name>, --all, or no flag.",
                             other
                         );
                         std::process::exit(1);
                     }
                 }
+                i += 1;
             }
+
+            // --store-pkg is mutually exclusive with --store / --all:
+            // targeted prune should not also wipe the whole store.
+            if store_pkg.is_some() && (clean_store || (clean_wasm && clean_addons)) {
+                eprintln!(
+                    "--store-pkg cannot be combined with --store or --all. \
+                     Use one or the other."
+                );
+                std::process::exit(1);
+            }
+
             if clean_wasm {
                 run_cache_clean();
             }
             if clean_addons {
                 run_cache_clean_addons();
+            }
+            if clean_store {
+                run_cache_clean_store(assume_yes);
+            }
+            if let Some(pkg) = store_pkg {
+                run_cache_clean_store_pkg(&pkg);
             }
         }
         other => {
@@ -4633,6 +4713,158 @@ fn run_cache_clean_addons() {
         }
         Err(e) => {
             eprintln!("Error cleaning addon cache: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+// C17-3: prune `~/.taida/store/` (all packages, all versions).
+//
+// Shows a summary first. Requires confirmation (`y` / `yes` / `Y` / `YES`
+// on stdin) unless `--yes` is passed. Non-TTY stdin must pass `--yes`
+// explicitly so scripts do not wipe the store accidentally.
+fn run_cache_clean_store(assume_yes: bool) {
+    let store_root = match taida::util::taida_home_dir() {
+        Ok(home) => home.join(".taida").join("store"),
+        Err(e) => {
+            eprintln!("Cannot locate taida home directory: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let summary = match taida::pkg::store::summarize_store_root(&store_root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading store: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if !summary.root_existed {
+        println!("No store cache found at '{}'.", summary.root.display());
+        return;
+    }
+    if summary.packages_removed == 0 && summary.scratch_removed == 0 {
+        println!(
+            "Store cache at '{}' is already clean.",
+            summary.root.display()
+        );
+        return;
+    }
+
+    // Show summary.
+    let mib = summary.bytes_removed as f64 / (1024.0 * 1024.0);
+    println!(
+        "Store cache at '{}' contains {} package(s), {:.2} MiB.",
+        summary.root.display(),
+        summary.packages_removed,
+        mib
+    );
+    // C17B-011: report scratch (leftover .tmp-*, .refresh-staging-*)
+    // separately so the user sees what is being cleaned up without the
+    // count inflating the package number.
+    if summary.scratch_removed > 0 {
+        println!(
+            "  ... and {} leftover scratch directory(ies) from past installs",
+            summary.scratch_removed
+        );
+    }
+    // Preview the first few so a user can sanity-check.
+    let preview_n = 10usize;
+    for name in summary.packages.iter().take(preview_n) {
+        println!("  {}", name);
+    }
+    if summary.packages.len() > preview_n {
+        println!("  ... and {} more", summary.packages.len() - preview_n);
+    }
+
+    if !assume_yes {
+        use std::io::Write;
+        let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        if !is_tty {
+            eprintln!(
+                "Refusing to prune store in a non-TTY context without --yes. \
+                 Re-run with `taida cache clean --store --yes`."
+            );
+            std::process::exit(1);
+        }
+        print!("Remove all {} package(s)? [y/N] ", summary.packages_removed);
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            eprintln!("No input received; aborting.");
+            std::process::exit(1);
+        }
+        let answer = answer.trim();
+        if !matches!(answer, "y" | "Y" | "yes" | "YES") {
+            println!("Aborted.");
+            return;
+        }
+    }
+
+    match taida::pkg::store::prune_store_root(&store_root) {
+        Ok(report) => {
+            let mib = report.bytes_removed as f64 / (1024.0 * 1024.0);
+            println!(
+                "Removed {} package(s) ({:.2} MiB) from '{}'.",
+                report.packages_removed,
+                mib,
+                report.root.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Error pruning store: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+// C17-3: prune a single package from the store (all versions of
+// `<org>/<name>/*`). No confirmation is required since the scope is
+// narrow.
+fn run_cache_clean_store_pkg(pkg_spec: &str) {
+    let (org, name) = match pkg_spec.split_once('/') {
+        Some((o, n)) if !o.is_empty() && !n.is_empty() && !n.contains('/') => (o, n),
+        _ => {
+            eprintln!(
+                "Invalid --store-pkg value '{}'. Expected <org>/<name>.",
+                pkg_spec
+            );
+            std::process::exit(1);
+        }
+    };
+    let store_root = match taida::util::taida_home_dir() {
+        Ok(home) => home.join(".taida").join("store"),
+        Err(e) => {
+            eprintln!("Cannot locate taida home directory: {}", e);
+            std::process::exit(1);
+        }
+    };
+    match taida::pkg::store::prune_store_package(&store_root, org, name) {
+        Ok(report) => {
+            if !report.root_existed {
+                println!("No store cache found at '{}'.", report.root.display());
+                return;
+            }
+            if report.packages_removed == 0 {
+                println!(
+                    "Package '{}/{}' not found in store at '{}'.",
+                    org,
+                    name,
+                    report.root.display()
+                );
+                return;
+            }
+            let mib = report.bytes_removed as f64 / (1024.0 * 1024.0);
+            println!(
+                "Removed {} version(s) of {}/{} ({:.2} MiB) from '{}'.",
+                report.packages_removed,
+                org,
+                name,
+                mib,
+                report.root.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Error pruning store package: {}", e);
             std::process::exit(1);
         }
     }
