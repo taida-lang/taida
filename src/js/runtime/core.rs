@@ -406,6 +406,37 @@ function __taida_enumOrdinal(v) {
   return v;
 }
 
+// C18B-005 fix: strict ordinal extractor for the `Ordinal[]` mold.
+// Mirrors the interpreter contract at
+// `src/interpreter/mold_eval.rs:3373-3394`: rejects non-Enum inputs
+// so `--no-check` cannot silently erase misuse. The companion Native
+// check lives in `taida_ordinal_strict` in `core.c`.
+function __taida_enumOrdinalStrict(v) {
+  if (__taida_isEnumVal(v)) return v.__taida_enum_ordinal;
+  let got;
+  if (v === null || v === undefined) {
+    got = 'Unit';
+  } else if (typeof v === 'number') {
+    got = Number.isInteger(v) ? 'Int' : 'Float';
+  } else if (typeof v === 'string') {
+    got = 'Str';
+  } else if (typeof v === 'boolean') {
+    got = 'Bool';
+  } else if (Array.isArray(v)) {
+    got = 'List';
+  } else if (typeof v === 'object') {
+    got = v.__type ? v.__type : 'Pack';
+  } else {
+    got = typeof v;
+  }
+  throw new __TaidaError(
+    'RuntimeError',
+    'Ordinal: argument must be an Enum value, got ' + got + '. '
+      + 'Hint: pass an Enum variant such as `Ordinal[Color:Red()]()`.',
+    {}
+  );
+}
+
 // C16: Lax[Enum] shape identical to interpreter / native.
 //   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
 // First-variant-is-default rule is encoded via Int(0). Delegates to

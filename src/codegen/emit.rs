@@ -149,6 +149,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[],
         },
+        // C18B-005 fix: runtime abort with message. Used by the
+        // Ordinal[] lowering to reject non-Enum arguments at run time
+        // with the same shape as the interpreter's RuntimeError.
+        "taida_runtime_panic" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
 
         // ── 整数演算 ──
         "taida_int_add" | "taida_int_sub" | "taida_int_mul" | "taida_poly_add" => RuntimeAbi {

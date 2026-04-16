@@ -2584,10 +2584,16 @@ impl JsCodegen {
             Expr::MoldInst(name, type_args, fields, _) => {
                 // B5: MoldInst → function call with type args
 
-                // C18-3: Ordinal[<enum_value>]() → Number(v)
-                // Enum values are `__taida_enumVal` wrappers whose `valueOf`
-                // returns the ordinal. `Number(x)` forces primitive coercion
-                // for both wrapped and raw number inputs. Arity-1 only.
+                // C18-3: Ordinal[<enum_value>]() → strict Enum → Int.
+                //
+                // C18B-005 fix: call `__taida_enumOrdinalStrict` (not the
+                // permissive `__taida_enumOrdinal`) so non-Enum arguments
+                // raise a `RuntimeError` whose message matches the
+                // interpreter's exactly. Pre-fix, `Ordinal[42]()`
+                // silently returned `42` under JS / Native while the
+                // interpreter errored, which diverged 3-backend parity
+                // and invalidated the IMPL_SPEC comment claiming that
+                // non-Enum inputs are rejected.
                 if name == "Ordinal" {
                     if type_args.is_empty() {
                         return Err(JsError {
@@ -2596,7 +2602,7 @@ impl JsCodegen {
                                     .to_string(),
                         });
                     }
-                    self.write("__taida_enumOrdinal(");
+                    self.write("__taida_enumOrdinalStrict(");
                     self.gen_expr(&type_args[0])?;
                     self.write(")");
                     return Ok(());

@@ -508,6 +508,22 @@ taida_val taida_get_return_tag(void) {
 
 void taida_gorilla(void) { exit(1); }
 
+// C18B-005 fix: print a `RuntimeError: <msg>` line to stderr and exit
+// with status 1. Used by the native Ordinal[] lowering to reject
+// non-Enum arguments — mirrors the interpreter's
+// `mold_eval.rs::Ordinal` RuntimeError shape, and the JS runtime's
+// `__taida_enumOrdinalStrict` throw path. Keeping stderr (not stdout)
+// matches how the interpreter prints RuntimeError messages so parity
+// tests can diff `.expected` against stdout only.
+taida_val taida_runtime_panic(const char *msg) {
+    if (msg) {
+        fprintf(stderr, "Runtime error: %s\n", msg);
+    } else {
+        fprintf(stderr, "Runtime error\n");
+    }
+    exit(1);
+}
+
 taida_val taida_debug_int(taida_val value) {
     printf("%" PRId64 "\n", value);
     return 0;
