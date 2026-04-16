@@ -108,6 +108,60 @@ impl GlobalStore {
         self.fetch_and_cache_with_meta(org, name, version, None)
     }
 
+    /// C17-2: Remove a cached package directory so the next
+    /// `fetch_and_cache*` call re-downloads and re-extracts it.
+    ///
+    /// This is the shared invalidation primitive used by:
+    /// - the stale-detection decision table (`remote moved` case)
+    /// - `--force-refresh` (Phase 4)
+    /// - `taida cache clean --store-pkg` (Phase 3)
+    ///
+    /// Path traversal is rejected up front (RCB-307 / SEC-009). Returns `Ok(())`
+    /// when the directory does not exist -- invalidation is idempotent.
+    pub fn invalidate_package(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<(), String> {
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(version, "version")?;
+
+        let pkg_dir = self.package_path(org, name, version);
+        if !pkg_dir.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(&pkg_dir)
+            .map_err(|e| format!("Cannot remove store entry '{}': {}", pkg_dir.display(), e))?;
+        Ok(())
+    }
+
+    /// Read the sidecar for a cached package, if present.
+    ///
+    /// Returns `Ok(None)` when the package is not cached or the sidecar is
+    /// missing (pre-C17 install). Errors propagate parse / schema mismatches.
+    pub fn read_package_meta(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<StoreMeta>, StoreError> {
+        // Validation errors are treated as "nothing to read" -- invalid
+        // path components cannot produce a sidecar.
+        if Self::validate_path_component(org, "org").is_err()
+            || Self::validate_path_component(name, "package name").is_err()
+            || Self::validate_path_component(version, "version").is_err()
+        {
+            return Ok(None);
+        }
+        let pkg_dir = self.package_path(org, name, version);
+        if !pkg_dir.exists() {
+            return Ok(None);
+        }
+        read_meta(&meta_path_for(&pkg_dir))
+    }
+
     /// Fetch a package from GitHub and cache it, optionally recording a
     /// resolver-supplied commit SHA in the `_meta.toml` sidecar.
     ///
@@ -929,6 +983,377 @@ fn format_rfc3339_utc(unix_secs: u64) -> String {
     )
 }
 
+// =============================================================================
+// C17-2: stale-detection decision table
+// =============================================================================
+//
+// Given:
+//   - the sidecar read from the cached store entry (may be absent)
+//   - the remote commit SHA resolved by `resolve_version_to_sha` (may be
+//     absent when offline)
+//
+// the installer must decide: skip, refresh, or refresh-with-warning. The
+// table is pinned in `.dev/C17_IMPL_SPEC.md` Phase 2.
+//
+// `--force-refresh` bypasses this table (handled at the call site).
+// `--no-remote-check` skips the remote lookup, so `classify_stale` is
+// called with `remote_sha = None` and sidecar presence governs the outcome.
+
+/// Outcome of the Phase 2 decision table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleDecision {
+    /// Fast path: sidecar present and SHA matches remote. No refresh.
+    SkipFastPath,
+    /// Remote lookup failed but a sidecar is present -- trust it for this run,
+    /// emit an offline warning. `install` continues with exit 0.
+    SkipWithOfflineWarning,
+    /// No sidecar and no remote SHA -- cannot verify provenance. Skip but
+    /// emit a strong warning that points the user at `--force-refresh`.
+    SkipUnknownProvenanceStrongWarn,
+    /// Cached entry must be re-extracted before install proceeds. The
+    /// reason is carried for log output.
+    Refresh(RefreshReason),
+}
+
+/// Why the installer decided to refresh the store entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshReason {
+    /// No sidecar at all (legacy install from before C17, or a previous
+    /// crash between extract and sidecar write).
+    MissingSidecar,
+    /// Sidecar present but `commit_sha` is the empty string because Phase
+    /// 1 wrote it without a resolved SHA. Treated as pessimistic refresh
+    /// since we cannot prove freshness.
+    SidecarShaUnknown,
+    /// Remote commit SHA differs from sidecar. Carries the old/new pair
+    /// for the info log `remote moved: ... sha <old>..<new>`.
+    RemoteMoved { old_sha: String, new_sha: String },
+}
+
+/// Phase 2 decision table. Inputs:
+///   - `sidecar`: the parsed sidecar of the cached package, or `None` if
+///     the package is not cached / sidecar missing.
+///   - `remote_sha`: the commit SHA resolved via `resolve_version_to_sha`,
+///     or `None` if the remote lookup was skipped / failed.
+///
+/// The table is the authoritative contract of C17-2. See
+/// `.dev/C17_IMPL_SPEC.md` Phase 2 for the frozen mapping.
+pub fn classify_stale(
+    sidecar: Option<&StoreMeta>,
+    remote_sha: Option<&str>,
+) -> StaleDecision {
+    match (sidecar, remote_sha) {
+        // Row 1: no sidecar, remote known -> pessimistic refresh.
+        (None, Some(_)) => StaleDecision::Refresh(RefreshReason::MissingSidecar),
+
+        // Row 2: sidecar with known SHA, remote agrees -> fast path.
+        // Row 3: sidecar present but SHAs disagree -> refresh.
+        // Row 2b: sidecar present but SHA unknown -> pessimistic refresh
+        //   even when remote is reachable, so we do not silently trust a
+        //   tarball with no provenance once we have a SHA to record.
+        (Some(meta), Some(remote)) => {
+            if meta.commit_sha.is_empty() {
+                return StaleDecision::Refresh(RefreshReason::SidecarShaUnknown);
+            }
+            if meta.commit_sha == remote {
+                StaleDecision::SkipFastPath
+            } else {
+                StaleDecision::Refresh(RefreshReason::RemoteMoved {
+                    old_sha: meta.commit_sha.clone(),
+                    new_sha: remote.to_string(),
+                })
+            }
+        }
+
+        // Row 4: sidecar present, remote unreachable -> trust sidecar for
+        // this run, warn that staleness cannot be verified.
+        (Some(_), None) => StaleDecision::SkipWithOfflineWarning,
+
+        // Row 5: no sidecar AND remote unreachable -> cannot prove
+        // anything. Emit a strong warning that guides the user to
+        // `taida install --force-refresh` once they are back online.
+        (None, None) => StaleDecision::SkipUnknownProvenanceStrongWarn,
+    }
+}
+
+/// Short human-readable label for a `RefreshReason`, used as the `reason`
+/// half of the `remote moved: <pkg>@<version> sha <old>..<new>; refreshing
+/// store` info line. Kept small so callers can format the final message
+/// the way their surface requires.
+pub fn refresh_reason_short(reason: &RefreshReason) -> String {
+    match reason {
+        RefreshReason::MissingSidecar => "missing sidecar".to_string(),
+        RefreshReason::SidecarShaUnknown => {
+            "sidecar has no recorded commit sha".to_string()
+        }
+        RefreshReason::RemoteMoved { old_sha, new_sha } => {
+            format!("remote moved: sha {}..{}", truncate_sha(old_sha), truncate_sha(new_sha))
+        }
+    }
+}
+
+fn truncate_sha(sha: &str) -> String {
+    if sha.len() > 12 {
+        sha[..12].to_string()
+    } else {
+        sha.to_string()
+    }
+}
+
+// =============================================================================
+// C17-2: resolve_version_to_sha (GitHub git/refs API)
+// =============================================================================
+
+/// Resolve a Taida version tag to the commit SHA it points at on origin.
+///
+/// Uses `GET {api}/repos/{org}/{name}/git/refs/tags/{version}` which GitHub
+/// returns as JSON containing `"object": { "sha": "..." , "type": "commit" | "tag" }`.
+/// Annotated tags (type = "tag") dereference to the underlying commit via a
+/// second request; unannotated tags (type = "commit") return the commit SHA
+/// directly.
+///
+/// Honours `TAIDA_GITHUB_API_URL` for mock servers in tests.
+///
+/// Returns:
+/// - `Ok(Some(sha))` on a successful lookup.
+/// - `Ok(None)` when the remote cannot be reached (network error, or the
+///   mock/API returned a transient error). Callers map `None` to the
+///   pessimistic-skip branch of the decision table.
+/// - `Err(msg)` when the response is malformed or the tag does not exist
+///   (the latter is a hard failure that the caller surfaces as an install
+///   error, not a silent skip).
+pub fn resolve_version_to_sha(
+    org: &str,
+    name: &str,
+    version: &str,
+) -> Result<Option<String>, String> {
+    validate_component_free(org, "org")?;
+    validate_component_free(name, "package name")?;
+    validate_component_free(version, "version")?;
+
+    let api = github_api_url();
+    let api = api.trim_end_matches('/');
+    let url = format!(
+        "{}/repos/{}/{}/git/refs/tags/{}",
+        api, org, name, version
+    );
+    let body = match curl_get_optional(&url)? {
+        Some(body) => body,
+        None => return Ok(None), // network unreachable
+    };
+
+    // The response is either:
+    //   { "ref": "refs/tags/a.1",
+    //     "object": { "sha": "<hex>", "type": "commit" | "tag", ... } }
+    // or a 404 body that curl already treated as failure (caught above).
+    let object = match extract_json_object_field(&body, "object") {
+        Some(obj) => obj,
+        None => {
+            return Err(format!(
+                "resolve_version_to_sha: response for {}/{}@{} has no 'object' field",
+                org, name, version
+            ));
+        }
+    };
+
+    let sha = match extract_json_string_field(&object, "sha") {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "resolve_version_to_sha: 'object.sha' missing for {}/{}@{}",
+                org, name, version
+            ));
+        }
+    };
+
+    let ty = extract_json_string_field(&object, "type").unwrap_or_default();
+    if ty == "tag" {
+        // Annotated tag: the `sha` points at the tag object; we need to
+        // dereference it via `/repos/{org}/{name}/git/tags/{sha}` to get
+        // the underlying commit.
+        let tag_url = format!("{}/repos/{}/{}/git/tags/{}", api, org, name, sha);
+        let body = match curl_get_optional(&tag_url)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let obj = extract_json_object_field(&body, "object").ok_or_else(|| {
+            format!(
+                "resolve_version_to_sha: annotated tag {}/{}@{} has no 'object'",
+                org, name, version
+            )
+        })?;
+        let commit_sha = extract_json_string_field(&obj, "sha").ok_or_else(|| {
+            format!(
+                "resolve_version_to_sha: annotated tag {}/{}@{} 'object.sha' missing",
+                org, name, version
+            )
+        })?;
+        return Ok(Some(commit_sha));
+    }
+
+    Ok(Some(sha))
+}
+
+/// Validation wrapper so `resolve_version_to_sha` can share the
+/// traversal guard without borrowing `self` (mirrors
+/// `GlobalStore::validate_path_component`).
+fn validate_component_free(component: &str, label: &str) -> Result<(), String> {
+    if component.is_empty() {
+        return Err(format!("{} must not be empty", label));
+    }
+    if component.contains("..") || component.contains('/') || component.contains('\\') {
+        return Err(format!(
+            "Invalid {}: '{}'. Path traversal characters ('..', '/', '\\') are not allowed.",
+            label, component
+        ));
+    }
+    Ok(())
+}
+
+/// GET `url` via `curl -fsSL`. Returns:
+/// - `Ok(Some(body))` on HTTP 2xx.
+/// - `Ok(None)` when curl exits non-zero (network unreachable, DNS
+///   failure, 5xx, 4xx, ...). This is the "cannot verify" branch --
+///   callers pair it with an offline warning, never a silent skip.
+/// - `Err(msg)` only when curl itself cannot be launched.
+fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("curl")
+        .args(["-fsSL", "-H", "Accept: application/vnd.github+json"])
+        .arg(url)
+        .output()
+        .map_err(|e| format!("Failed to run curl: {}", e))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// Tiny JSON object extractor: returns the substring `{...}` that is the
+/// value of the named key, or `None` if not found. Sufficient for the
+/// two shapes we need (`object.sha`, `object.type`). Balances braces
+/// (including inside strings) to avoid truncating nested objects.
+fn extract_json_object_field(json: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{}\"", key);
+    let idx = find_key_index(json, &pat)?;
+    let after_colon = skip_to_value(json, idx + pat.len())?;
+    let bytes = json.as_bytes();
+    if bytes.get(after_colon)? != &b'{' {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut escape = false;
+    let mut end = after_colon;
+    for (i, c) in bytes.iter().enumerate().skip(after_colon) {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match *c {
+            b'\\' if in_str => escape = true,
+            b'"' => in_str = !in_str,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(json[after_colon..=end].to_string())
+}
+
+/// Tiny JSON string extractor: returns the decoded string value for the
+/// named key, or `None`. Supports `\"`, `\\`, `\n`, `\r`, `\t`.
+fn extract_json_string_field(json: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{}\"", key);
+    let idx = find_key_index(json, &pat)?;
+    let after_colon = skip_to_value(json, idx + pat.len())?;
+    let bytes = json.as_bytes();
+    if bytes.get(after_colon)? != &b'"' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut i = after_colon + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some(out),
+            b'\\' => {
+                i += 1;
+                match bytes.get(i).copied()? {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'/' => out.push('/'),
+                    other => out.push(other as char),
+                }
+            }
+            other => out.push(other as char),
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find `needle` in `json` at a position where the preceding non-whitespace
+/// byte is `{` or `,` -- i.e. it appears as a key, not embedded in another
+/// key like `"full_name"`. Returns the starting index of `needle`.
+fn find_key_index(json: &str, needle: &str) -> Option<usize> {
+    let bytes = json.as_bytes();
+    let n_bytes = needle.as_bytes();
+    if n_bytes.is_empty() {
+        return None;
+    }
+    let mut i = 0;
+    while i + n_bytes.len() <= bytes.len() {
+        if &bytes[i..i + n_bytes.len()] == n_bytes {
+            let mut j = i;
+            let ok = loop {
+                if j == 0 {
+                    break true;
+                }
+                j -= 1;
+                match bytes[j] {
+                    b' ' | b'\t' | b'\n' | b'\r' => continue,
+                    b'{' | b',' => break true,
+                    _ => break false,
+                }
+            };
+            if ok {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Skip whitespace + `:` after a key, returning the byte index of the
+/// value's first character.
+fn skip_to_value(json: &str, start: usize) -> Option<usize> {
+    let bytes = json.as_bytes();
+    let mut i = start;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b':' {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    Some(i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,5 +1955,421 @@ mod tests {
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // =========================================================================
+    // C17-2: decision table + JSON helpers
+    // =========================================================================
+
+    fn meta_with_sha(sha: &str) -> StoreMeta {
+        StoreMeta {
+            schema_version: STORE_META_SCHEMA_VERSION,
+            commit_sha: sha.to_string(),
+            tarball_sha256: "abc".to_string(),
+            tarball_etag: None,
+            fetched_at: "2026-04-16T00:00:00Z".to_string(),
+            source: "github:alice/http".to_string(),
+            version: "a.1".to_string(),
+        }
+    }
+
+    // --- decision table rows ---------------------------------------------
+
+    #[test]
+    fn test_classify_row1_no_sidecar_remote_known_refreshes_pessimistically() {
+        let d = classify_stale(None, Some("aaaa"));
+        assert_eq!(d, StaleDecision::Refresh(RefreshReason::MissingSidecar));
+    }
+
+    #[test]
+    fn test_classify_row2_sidecar_matches_remote_is_fast_path() {
+        let m = meta_with_sha("deadbeef");
+        let d = classify_stale(Some(&m), Some("deadbeef"));
+        assert_eq!(d, StaleDecision::SkipFastPath);
+    }
+
+    #[test]
+    fn test_classify_row2b_sidecar_sha_unknown_refreshes() {
+        // Phase 1-installed sidecars record commit_sha as "" because no
+        // resolver SHA was available. Once a remote SHA is reachable, we
+        // must re-extract so the sidecar gets a real SHA recorded.
+        let m = meta_with_sha("");
+        let d = classify_stale(Some(&m), Some("aaaa"));
+        assert_eq!(d, StaleDecision::Refresh(RefreshReason::SidecarShaUnknown));
+    }
+
+    #[test]
+    fn test_classify_row3_sidecar_sha_differs_refreshes_with_reason() {
+        let m = meta_with_sha("1111111111111111111111111111111111111111");
+        let d = classify_stale(
+            Some(&m),
+            Some("2222222222222222222222222222222222222222"),
+        );
+        match d {
+            StaleDecision::Refresh(RefreshReason::RemoteMoved { old_sha, new_sha }) => {
+                assert_eq!(old_sha, "1111111111111111111111111111111111111111");
+                assert_eq!(new_sha, "2222222222222222222222222222222222222222");
+            }
+            other => panic!("expected RemoteMoved, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_row4_sidecar_without_remote_is_offline_warn() {
+        let m = meta_with_sha("deadbeef");
+        let d = classify_stale(Some(&m), None);
+        assert_eq!(d, StaleDecision::SkipWithOfflineWarning);
+    }
+
+    #[test]
+    fn test_classify_row5_no_sidecar_no_remote_strong_warn() {
+        let d = classify_stale(None, None);
+        assert_eq!(d, StaleDecision::SkipUnknownProvenanceStrongWarn);
+    }
+
+    #[test]
+    fn test_refresh_reason_short_truncates_long_shas() {
+        let long_old = "1111111111111111111111111111111111111111"; // 40 hex
+        let long_new = "2222222222222222222222222222222222222222";
+        let s = refresh_reason_short(&RefreshReason::RemoteMoved {
+            old_sha: long_old.to_string(),
+            new_sha: long_new.to_string(),
+        });
+        assert!(s.contains("111111111111..222222222222"), "got: {}", s);
+    }
+
+    // --- invalidate_package ----------------------------------------------
+
+    #[test]
+    fn test_invalidate_package_removes_directory() {
+        let dir = unique_tmp_dir("invalidate_ok");
+        let pkg = dir.join("alice").join("http").join("a.1");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join(".taida_installed"), "").unwrap();
+        std::fs::write(pkg.join("main.td"), "stdout(1)\n").unwrap();
+
+        let store = GlobalStore::with_root(dir.clone());
+        store.invalidate_package("alice", "http", "a.1").unwrap();
+        assert!(!pkg.exists(), "package dir must be gone");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_invalidate_package_is_idempotent_when_missing() {
+        let dir = unique_tmp_dir("invalidate_missing");
+        let store = GlobalStore::with_root(dir.clone());
+        // Directory does not exist -- should still succeed.
+        store.invalidate_package("alice", "http", "a.1").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_invalidate_package_rejects_traversal() {
+        let dir = unique_tmp_dir("invalidate_traversal");
+        let store = GlobalStore::with_root(dir.clone());
+        let err = store
+            .invalidate_package("..", "http", "a.1")
+            .expect_err("must reject traversal");
+        assert!(err.contains("Invalid"), "got: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- read_package_meta ------------------------------------------------
+
+    #[test]
+    fn test_read_package_meta_returns_none_when_uncached() {
+        let dir = unique_tmp_dir("read_meta_uncached");
+        let store = GlobalStore::with_root(dir.clone());
+        let meta = store.read_package_meta("alice", "http", "a.1").unwrap();
+        assert!(meta.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_package_meta_reads_written_sidecar() {
+        let dir = unique_tmp_dir("read_meta_hit");
+        let store = GlobalStore::with_root(dir.clone());
+        let pkg = store.package_path("alice", "http", "a.1");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let sample = meta_with_sha("abc");
+        write_meta_atomic(&meta_path_for(&pkg), &sample).unwrap();
+
+        let loaded = store
+            .read_package_meta("alice", "http", "a.1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, sample);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- JSON helpers -----------------------------------------------------
+
+    #[test]
+    fn test_extract_json_string_field_basic() {
+        let body = r#"{"ref":"refs/tags/a.1","name":"x"}"#;
+        assert_eq!(
+            extract_json_string_field(body, "ref"),
+            Some("refs/tags/a.1".to_string())
+        );
+        assert_eq!(
+            extract_json_string_field(body, "name"),
+            Some("x".to_string())
+        );
+        assert_eq!(extract_json_string_field(body, "missing"), None);
+    }
+
+    #[test]
+    fn test_extract_json_string_field_handles_escapes() {
+        let body = r#"{"s": "a\"b\\c\n"}"#;
+        assert_eq!(
+            extract_json_string_field(body, "s"),
+            Some("a\"b\\c\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_object_field_balances_braces() {
+        let body = r#"{"ref":"r","object":{"sha":"deadbeef","type":"commit","url":"u"}}"#;
+        let obj = extract_json_object_field(body, "object").unwrap();
+        assert!(obj.starts_with('{') && obj.ends_with('}'));
+        assert_eq!(
+            extract_json_string_field(&obj, "sha"),
+            Some("deadbeef".to_string())
+        );
+        assert_eq!(
+            extract_json_string_field(&obj, "type"),
+            Some("commit".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_object_field_ignores_similar_key_suffix() {
+        // Make sure the extractor does not pick up "my_object" when we
+        // asked for "object".
+        let body = r#"{"my_object":{"x":1},"object":{"sha":"a"}}"#;
+        let obj = extract_json_object_field(body, "object").unwrap();
+        assert_eq!(
+            extract_json_string_field(&obj, "sha"),
+            Some("a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_object_field_handles_nested_braces_in_strings() {
+        // A `}` inside a string must not close the outer object.
+        let body = r#"{"object":{"msg":"} not end","sha":"x"}}"#;
+        let obj = extract_json_object_field(body, "object").unwrap();
+        assert_eq!(
+            extract_json_string_field(&obj, "sha"),
+            Some("x".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_key_index_rejects_embedded_match() {
+        // "tag_name" should not match "name".
+        let json = r#"{"tag_name":"va.99","name":"va.5"}"#;
+        // Should find "name" at the second occurrence.
+        let idx = find_key_index(json, "\"name\"").unwrap();
+        // Check that byte before idx (after whitespace) is ','.
+        let bytes = json.as_bytes();
+        let mut j = idx;
+        while j > 0 {
+            j -= 1;
+            if !matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
+                break;
+            }
+        }
+        assert_eq!(bytes[j], b',');
+    }
+
+    // --- resolve_version_to_sha: validation path --------------------------
+
+    #[test]
+    fn test_resolve_version_to_sha_rejects_traversal() {
+        // We can validate component rejection without going to the network.
+        let err = resolve_version_to_sha("..", "http", "a.1").expect_err("traversal must error");
+        assert!(err.contains("Invalid"), "got: {}", err);
+        let err = resolve_version_to_sha("alice", "..", "a.1").expect_err("traversal must error");
+        assert!(err.contains("Invalid"), "got: {}", err);
+        let err = resolve_version_to_sha("alice", "http", "..").expect_err("traversal must error");
+        assert!(err.contains("Invalid"), "got: {}", err);
+    }
+
+    // --- resolve_version_to_sha: mock server ------------------------------
+
+    // Minimal in-process HTTP server for mocking the GitHub git/refs API.
+    // Each test spawns its own listener on a random port so parallel runs
+    // do not collide. The env vars `TAIDA_GITHUB_API_URL` /
+    // `TAIDA_GITHUB_BASE_URL` are shared process state -- these tests
+    // serialize via `env_test_lock`.
+    struct MockServer {
+        addr: std::net::SocketAddr,
+        handle: Option<std::thread::JoinHandle<()>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for MockServer {
+        fn drop(&mut self) {
+            self.stop
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Best-effort wakeup: open a connection so the accept loop
+            // notices the stop flag.
+            let _ = std::net::TcpStream::connect(self.addr);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    fn start_mock_api<F>(responder: F) -> MockServer
+    where
+        F: Fn(&str) -> Option<(u16, String)> + Send + Sync + 'static,
+    {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        listener
+            .set_nonblocking(false)
+            .expect("set_nonblocking(false)");
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let handle = std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                if stop_clone.load(Ordering::SeqCst) {
+                    return;
+                }
+                let mut stream = match incoming {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0u8; 4096];
+                let n = match stream.read(&mut buf) {
+                    Ok(n) if n > 0 => n,
+                    _ => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let (status, body) = responder(&path).unwrap_or((404, "not found".to_string()));
+                let status_line = match status {
+                    200 => "200 OK",
+                    404 => "404 Not Found",
+                    500 => "500 Internal Server Error",
+                    _ => "200 OK",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        MockServer {
+            addr,
+            handle: Some(handle),
+            stop,
+        }
+    }
+
+    fn api_url_for(addr: std::net::SocketAddr) -> String {
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn test_resolve_version_to_sha_unannotated_tag() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let body = r#"{"ref":"refs/tags/a.1","object":{"sha":"abc123","type":"commit","url":"u"}}"#;
+        let server = start_mock_api(move |path| {
+            if path == "/repos/alice/http/git/refs/tags/a.1" {
+                Some((200, body.to_string()))
+            } else {
+                None
+            }
+        });
+        let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_API_URL", api_url_for(server.addr));
+        }
+        let result = resolve_version_to_sha("alice", "http", "a.1");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+        drop(server);
+        assert_eq!(result.unwrap(), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_version_to_sha_annotated_tag_dereferences() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let responder = |path: &str| -> Option<(u16, String)> {
+            if path == "/repos/alice/http/git/refs/tags/a.1" {
+                Some((
+                    200,
+                    r#"{"ref":"refs/tags/a.1","object":{"sha":"tagobj","type":"tag","url":"u"}}"#
+                        .to_string(),
+                ))
+            } else if path == "/repos/alice/http/git/tags/tagobj" {
+                Some((
+                    200,
+                    r#"{"object":{"sha":"realcommit","type":"commit"}}"#.to_string(),
+                ))
+            } else {
+                None
+            }
+        };
+        let server = start_mock_api(responder);
+        let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_API_URL", api_url_for(server.addr));
+        }
+        let result = resolve_version_to_sha("alice", "http", "a.1");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+        drop(server);
+        assert_eq!(result.unwrap(), Some("realcommit".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_version_to_sha_returns_none_when_404() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        // The mock returns 404 for any path -- curl -fsSL treats this as
+        // a failure, which `curl_get_optional` maps to Ok(None).
+        let server = start_mock_api(|_path| Some((404, "not found".to_string())));
+        let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        unsafe {
+            std::env::set_var("TAIDA_GITHUB_API_URL", api_url_for(server.addr));
+        }
+        let result = resolve_version_to_sha("alice", "http", "a.1");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TAIDA_GITHUB_API_URL", v),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+        }
+        drop(server);
+        assert_eq!(result.unwrap(), None, "404 -> Ok(None) pessimistic path");
     }
 }

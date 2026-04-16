@@ -33,12 +33,40 @@ pub struct ResolveResult {
     pub errors: Vec<String>,
 }
 
+/// C17-2: refresh-related flags forwarded from the CLI to the StoreProvider.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StoreRefreshFlags {
+    /// `--force-refresh`: invalidate the store entry and re-extract.
+    pub force_refresh: bool,
+    /// `--no-remote-check`: skip the remote HEAD lookup; sidecar presence
+    /// alone governs skip/warn.
+    pub no_remote_check: bool,
+}
+
+impl StoreRefreshFlags {
+    /// Validate CLI-level mutual exclusion. The CLI is expected to reject
+    /// the combination before constructing this struct -- this helper
+    /// exists so callers (and tests) can double-check.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.force_refresh && self.no_remote_check {
+            Err(
+                "--force-refresh and --no-remote-check cannot be combined \
+                 (force-refresh requires the remote lookup to be available \
+                 for the sidecar it rewrites)"
+                    .to_string(),
+            )
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Resolve all dependencies declared in the manifest using the provider chain.
 ///
 /// Tries each provider in order for each dependency:
 /// WorkspaceProvider -> CoreBundledProvider -> StoreProvider
 pub fn resolve_deps(manifest: &Manifest) -> ResolveResult {
-    resolve_deps_inner(manifest, false, None)
+    resolve_deps_inner(manifest, false, None, StoreRefreshFlags::default())
 }
 
 /// Resolve all dependencies using the provider chain, but pin generation-only
@@ -48,7 +76,23 @@ pub fn resolve_deps(manifest: &Manifest) -> ResolveResult {
 /// records `alice/demo@a.2`, a manifest dependency of `alice/demo@a` will
 /// resolve to `a.2` instead of the latest version in generation `a`.
 pub fn resolve_deps_locked(manifest: &Manifest, lockfile: &Lockfile) -> ResolveResult {
-    resolve_deps_inner(manifest, false, Some(lockfile))
+    resolve_deps_inner(manifest, false, Some(lockfile), StoreRefreshFlags::default())
+}
+
+/// C17-2: variant of `resolve_deps_locked` that forwards the C17 refresh
+/// flags to the `StoreProvider` (force-refresh / no-remote-check).
+pub fn resolve_deps_locked_with_flags(
+    manifest: &Manifest,
+    lockfile: &Lockfile,
+    flags: StoreRefreshFlags,
+) -> ResolveResult {
+    resolve_deps_inner(manifest, false, Some(lockfile), flags)
+}
+
+/// C17-2: variant of `resolve_deps` that forwards the C17 refresh flags
+/// to the `StoreProvider` when there is no prior lockfile.
+pub fn resolve_deps_with_flags(manifest: &Manifest, flags: StoreRefreshFlags) -> ResolveResult {
+    resolve_deps_inner(manifest, false, None, flags)
 }
 
 /// Resolve all dependencies, bypassing local cache for generation resolution.
@@ -56,7 +100,7 @@ pub fn resolve_deps_locked(manifest: &Manifest, lockfile: &Lockfile) -> ResolveR
 /// Used by `taida update` to re-resolve generation-only versions (e.g. "a")
 /// to the latest exact version (e.g. "a.47") by querying GitHub API directly.
 pub fn resolve_deps_update(manifest: &Manifest) -> ResolveResult {
-    resolve_deps_inner(manifest, true, None)
+    resolve_deps_inner(manifest, true, None, StoreRefreshFlags::default())
 }
 
 fn dep_decl_identity(dep: &Dependency, declared_from_root: &Path) -> String {
@@ -152,6 +196,7 @@ fn resolve_deps_inner(
     manifest: &Manifest,
     force_remote: bool,
     lockfile: Option<&Lockfile>,
+    flags: StoreRefreshFlags,
 ) -> ResolveResult {
     // Build a lookup table from lockfile: package name -> locked version.
     // HashMap<String, String> means last-writer-wins for duplicate names.
@@ -168,14 +213,22 @@ fn resolve_deps_inner(
         })
         .unwrap_or_default();
 
+    let store_provider: Box<dyn PackageProvider> = if force_remote {
+        Box::new(
+            StoreProvider::new_force_remote()
+                .with_refresh_flags(flags.force_refresh, flags.no_remote_check),
+        )
+    } else {
+        Box::new(
+            StoreProvider::new()
+                .with_refresh_flags(flags.force_refresh, flags.no_remote_check),
+        )
+    };
+
     let providers: Vec<Box<dyn PackageProvider>> = vec![
         Box::new(WorkspaceProvider),
         Box::new(CoreBundledProvider::new()),
-        if force_remote {
-            Box::new(StoreProvider::new_force_remote())
-        } else {
-            Box::new(StoreProvider::new())
-        },
+        store_provider,
     ];
 
     let mut resolved = BTreeMap::new();

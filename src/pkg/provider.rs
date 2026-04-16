@@ -453,10 +453,22 @@ impl PackageProvider for CoreBundledProvider {
 ///
 /// Downloads packages from GitHub repositories and caches them
 /// in the global store (`~/.taida/store/`).
+///
+/// C17-2: consults a stale-detection decision table before reusing a
+/// cached entry. See `store::classify_stale` and
+/// `.dev/C17_IMPL_SPEC.md` Phase 2.
 pub struct StoreProvider {
     store: GlobalStore,
     /// When true, bypass local cache for generation resolution (used by `taida update`).
     force_remote: bool,
+    /// C17-2 / C17-4: when true, invalidate any cached entry and re-extract
+    /// unconditionally. Skips the decision table.
+    force_refresh: bool,
+    /// C17-2: when true, skip the remote HEAD lookup entirely -- the
+    /// decision table is evaluated with `remote_sha = None` so sidecar
+    /// presence alone governs skip/warn. Mutually exclusive with
+    /// `force_refresh`; the CLI rejects the combination up front.
+    no_remote_check: bool,
 }
 
 impl Default for StoreProvider {
@@ -470,6 +482,8 @@ impl StoreProvider {
         StoreProvider {
             store: GlobalStore::new(),
             force_remote: false,
+            force_refresh: false,
+            no_remote_check: false,
         }
     }
 
@@ -479,7 +493,23 @@ impl StoreProvider {
         StoreProvider {
             store: GlobalStore::new(),
             force_remote: true,
+            force_refresh: false,
+            no_remote_check: false,
         }
+    }
+
+    /// C17-2 / C17-4: configure the store-side refresh behaviour.
+    ///
+    /// Panics if both `force_refresh` and `no_remote_check` are set --
+    /// the CLI should reject the combination at argument parsing time.
+    pub fn with_refresh_flags(mut self, force_refresh: bool, no_remote_check: bool) -> Self {
+        assert!(
+            !(force_refresh && no_remote_check),
+            "StoreProvider: --force-refresh and --no-remote-check are mutually exclusive"
+        );
+        self.force_refresh = force_refresh;
+        self.no_remote_check = no_remote_check;
+        self
     }
 
     #[cfg(test)]
@@ -487,6 +517,152 @@ impl StoreProvider {
         StoreProvider {
             store,
             force_remote: false,
+            force_refresh: false,
+            no_remote_check: false,
+        }
+    }
+
+    /// C17-2: consult the decision table for a cached package and, if the
+    /// table says so, invalidate the cached directory so the subsequent
+    /// `fetch_and_cache_with_meta` call re-extracts.
+    ///
+    /// Returns:
+    /// - `Ok(Some(sha))` -> the call site should pass this SHA into
+    ///   `fetch_and_cache_with_meta` so the new sidecar records it.
+    /// - `Ok(None)`      -> no SHA to record (either skip, or refresh
+    ///   without a known remote SHA -- e.g. force-refresh without remote
+    ///   lookup; the sidecar will carry `commit_sha = ""`).
+    /// - `Err(msg)`      -> surface as install error (e.g. invalidation
+    ///   failed on disk).
+    ///
+    /// Side effects:
+    /// - stderr warning on rows 4 and 5 (`offline, cannot verify
+    ///   staleness` / `unknown provenance, use --force-refresh`).
+    /// - stderr info on a refresh (`remote moved: ...; refreshing store`).
+    /// - `store.invalidate_package()` on every refresh path.
+    ///
+    /// Never silent: every non-happy-path outcome emits stderr output so
+    /// the user can see what happened.
+    fn apply_stale_decision(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<String>, String> {
+        use super::store::{
+            classify_stale, refresh_reason_short, resolve_version_to_sha, RefreshReason,
+            StaleDecision,
+        };
+
+        // Force-refresh short-circuits the table: invalidate and let the
+        // fetch path re-extract. Phase 4 reuses this branch.
+        if self.force_refresh {
+            self.store.invalidate_package(org, name, version)?;
+            // Remote SHA lookup is an additive improvement; failure falls
+            // back to `None` so the sidecar is written with `commit_sha=""`
+            // and a later install (or the very next `install`) can fill
+            // it in.
+            let sha = if self.no_remote_check {
+                None
+            } else {
+                resolve_version_to_sha(org, name, version).ok().flatten()
+            };
+            eprintln!(
+                "  refreshing store for {}/{}@{} (--force-refresh)",
+                org, name, version
+            );
+            return Ok(sha);
+        }
+
+        let sidecar = match self.store.read_package_meta(org, name, version) {
+            Ok(meta) => meta,
+            Err(e) => {
+                // Malformed or schema-mismatched sidecar: treat as missing
+                // and pessimistically refresh. Warn so the operator sees
+                // it.
+                eprintln!(
+                    "  sidecar for {}/{}@{} unreadable ({}); re-extracting",
+                    org, name, version, e
+                );
+                None
+            }
+        };
+
+        let remote_sha = if self.no_remote_check {
+            None
+        } else {
+            match resolve_version_to_sha(org, name, version) {
+                Ok(sha) => sha,
+                Err(e) => {
+                    // Malformed response (distinct from "no network"):
+                    // warn but continue as if offline.
+                    eprintln!(
+                        "  warning: could not verify {}/{}@{} staleness: {}",
+                        org, name, version, e
+                    );
+                    None
+                }
+            }
+        };
+
+        let decision = classify_stale(sidecar.as_ref(), remote_sha.as_deref());
+
+        match decision {
+            StaleDecision::SkipFastPath => Ok(None),
+
+            StaleDecision::SkipWithOfflineWarning => {
+                eprintln!(
+                    "  offline, cannot verify staleness: {}/{}@{} (using cached entry)",
+                    org, name, version
+                );
+                Ok(None)
+            }
+
+            StaleDecision::SkipUnknownProvenanceStrongWarn => {
+                eprintln!(
+                    "  unknown provenance: {}/{}@{} (sidecar missing). \
+                     Re-run with --force-refresh when online.",
+                    org, name, version
+                );
+                Ok(None)
+            }
+
+            StaleDecision::Refresh(reason) => {
+                // Info line explaining why we are re-extracting, then
+                // perform the invalidation so fetch_and_cache_with_meta
+                // gets a clean directory.
+                match &reason {
+                    RefreshReason::RemoteMoved { old_sha: _, new_sha: _ } => {
+                        eprintln!(
+                            "  {}/{}@{}: {}; refreshing store",
+                            org,
+                            name,
+                            version,
+                            refresh_reason_short(&reason)
+                        );
+                    }
+                    RefreshReason::MissingSidecar => {
+                        eprintln!(
+                            "  {}/{}@{}: {}; refreshing store",
+                            org,
+                            name,
+                            version,
+                            refresh_reason_short(&reason)
+                        );
+                    }
+                    RefreshReason::SidecarShaUnknown => {
+                        eprintln!(
+                            "  {}/{}@{}: {}; refreshing store",
+                            org,
+                            name,
+                            version,
+                            refresh_reason_short(&reason)
+                        );
+                    }
+                }
+                self.store.invalidate_package(org, name, version)?;
+                Ok(remote_sha)
+            }
         }
     }
 }
@@ -525,7 +701,35 @@ impl PackageProvider for StoreProvider {
                     }
                 };
 
-                match self.store.fetch_and_cache(org, name, &exact_version) {
+                // C17-2: stale-detection decision table.
+                //
+                // Only engaged when the package is already cached -- an
+                // uncached install always falls through to
+                // `fetch_and_cache_with_meta` below, which is the natural
+                // "first install" path and is unchanged from C17-1.
+                let remote_sha_for_sidecar = if self.store.is_cached(org, name, &exact_version) {
+                    match self.apply_stale_decision(org, name, &exact_version) {
+                        Err(msg) => return ProviderResult::Error(msg),
+                        Ok(sha) => sha,
+                    }
+                } else {
+                    // Uncached: do not do an extra remote round-trip here.
+                    // `fetch_and_cache_with_meta` will record the SHA we
+                    // pass in, but for the first install we leave it
+                    // `None` -- the next `taida install` will detect the
+                    // missing SHA and do a pessimistic refresh that fills
+                    // it in. This keeps the first-install UX unchanged.
+                    None
+                };
+
+                let fetch_result = self.store.fetch_and_cache_with_meta(
+                    org,
+                    name,
+                    &exact_version,
+                    remote_sha_for_sidecar.as_deref(),
+                );
+
+                match fetch_result {
                     Ok(path) => {
                         let integrity = compute_dir_hash(&path);
                         ProviderResult::Resolved(ResolvedPackage {
