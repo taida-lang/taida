@@ -701,6 +701,48 @@ Lax[42]().hasValue     // true
 
 ---
 
+## JSON モールディング型（溶鉄）
+
+### JSON[raw, Schema]
+
+生の JSON を型安全な Taida 値へ鋳造します。戻り値は常に `Lax[T]`（パース失敗時は `hasValue = false`）。詳細は `docs/guide/03_json.md` を参照してください。
+
+```taida
+User = @(name: Str, age: Int)
+raw <= '{"name": "Alice", "age": 30}'
+JSON[raw, User]() ]=> user
+// user: @(name <= "Alice", age <= 30)
+```
+
+#### スキーマで受ける型
+
+| スキーマ | 挙動 |
+|----------|------|
+| プリミティブ (`Int` / `Float` / `Str` / `Bool`) | 型一致なら値、不一致はデフォルト値 |
+| TypeDef（ぶちパック） | フィールド単位で再帰照合 |
+| `@[Schema]` | 配列を各要素ごとに再帰照合 |
+| **Enum（C16）** | variant 名の Str と照合し ordinal（`Int`）を返す |
+
+#### Enum 検査規則（C16）
+
+- JSON 側の Str が variant 集合に**含まれる** → その variant の ordinal を `Int` として返します。
+- 含まれない / キー欠落 / `null` → **`Lax[Enum]`** を返します。`hasValue = false`、`__value = __default = Int(0)`（最初のバリアント）。
+- silent coercion は**行いません**。利用側は `hasValue` / `| .hasValue |> ... | _ |> ...` / `getOrDefault(Variant)` で境界を明示処理します（`|==` は throw キャッチ演算子なので Lax には使えません — `docs/reference/operators.md` 参照）。
+
+```taida
+Enum => Status = :Active :Inactive :Pending
+User = @(name: Str, status: Status)
+
+raw <= '{"name": "Bob", "status": "Bogus"}'
+JSON[raw, User]() ]=> u
+u.status.hasValue                          // false
+u.status.getOrDefault(Status:Pending())    // 2
+```
+
+`Lax[Enum]` の shape は他の Lax と完全に同一です（`@(hasValue, __value, __default, __type="Lax")`）。JSON モールドは 3 バックエンド（Interpreter / JS / Native）で同じ Lax を返します。
+
+---
+
 ## Result
 
 ### Result[value, predicate]() / Result[value, predicate](throw <= error)

@@ -6817,30 +6817,152 @@ static int schema_find_closing_brace(const char *desc) {
 }
 
 // --- Default values from schema ---
-static taida_val json_default_value_for_desc(const char *desc) {
-    if (!desc || !*desc) return 0;
-    switch (desc[0]) {
-        case 'i': return 0;
-        case 'f': return _d2l(0.0);
+//
+// C16B-001: The descriptor walker for "pure" default values.
+//
+// This mirrors `src/interpreter/json.rs::default_for_schema` and must NOT be
+// confused with the Lax-producing `json_apply_schema(NULL, ...)` path. Interior
+// Enum fields of a TypeDef default MUST become `Int(0)` (first variant ordinal),
+// NOT `Lax[Enum]` — the Lax wrapping is only for actual schema validation
+// failures (mismatch / missing key / null field), not for "this is the baseline
+// default of an uninhabited schema".
+//
+// Advances `*desc` past the consumed schema token so nested descriptors are
+// parsed once with correct length accounting.
+static taida_val json_pure_default_apply(const char **desc) {
+    if (!desc || !*desc || !**desc) return 0;
+    const char *d = *desc;
+
+    switch (d[0]) {
+        case 'i': {
+            *desc = d + 1;
+            return 0;
+        }
+        case 'f': {
+            *desc = d + 1;
+            return _d2l(0.0);
+        }
         case 's': {
+            *desc = d + 1;
             char *empty = (char*)TAIDA_MALLOC(1, "json_default_str");
             empty[0] = '\0';
             return (taida_val)empty;
         }
-        case 'b': return 0;
+        case 'b': {
+            *desc = d + 1;
+            return 0;
+        }
         case 'T': {
-            // Create default BuchiPack for TypeDef
-            json_val null_val;
-            null_val.type = JSON_NULL;
-            null_val.str_val = NULL; null_val.arr = NULL; null_val.obj = NULL;
-            return json_apply_schema(&null_val, &desc);
+            // T{TypeName|field1:desc,field2:desc,...} — default BuchiPack with
+            // each field set to the pure default of its sub-schema. Crucially
+            // Enum fields resolve to Int(0), not Lax[Enum].
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;  // skip "T{"
+            // Read type name (until '|' or '}').
+            char type_name[256];
+            int tn_len = 0;
+            while (*d && *d != '|' && *d != '}' && tn_len < 255) {
+                type_name[tn_len++] = *d;
+                d++;
+            }
+            type_name[tn_len] = '\0';
+            if (*d == '|') d++;
+
+            // Count fields (mirrors the counting logic in json_apply_schema
+            // case 'T': 0 if body starts with '}', else 1 + (top-level ',' count)).
+            int field_count = 0;
+            {
+                const char *scan = d;
+                if (*scan && *scan != '}') field_count = 1;
+                int depth = 0;
+                while (*scan && !(*scan == '}' && depth == 0)) {
+                    if (*scan == '{') depth++;
+                    if (*scan == '}') depth--;
+                    if (*scan == ',' && depth == 0) field_count++;
+                    scan++;
+                }
+            }
+
+            // +1 for __type field.
+            taida_val pack = taida_pack_new(field_count + 1);
+            int idx = 0;
+            while (*d && *d != '}') {
+                // Read field name (until ':' or ',' or '}').
+                char fname[256];
+                int fn_len = 0;
+                while (*d && *d != ':' && *d != '}' && fn_len < 255) {
+                    fname[fn_len++] = *d;
+                    d++;
+                }
+                fname[fn_len] = '\0';
+                if (*d == ':') d++;
+
+                uint64_t hash = fnv1a(fname, fn_len);
+                taida_pack_set_hash(pack, idx, (taida_val)hash);
+
+                // Recurse into sub-schema using the pure-default walker.
+                taida_val field_val = json_pure_default_apply(&d);
+                taida_pack_set(pack, idx, field_val);
+                idx++;
+
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+
+            // Add __type field.
+            uint64_t type_hash = fnv1a("__type", 6);
+            taida_pack_set_hash(pack, idx, (taida_val)type_hash);
+            char *type_str = (char*)TAIDA_MALLOC((size_t)tn_len + 1, "json_type_str");
+            memcpy(type_str, type_name, (size_t)tn_len + 1);
+            taida_pack_set(pack, idx, (taida_val)type_str);
+
+            *desc = d;
+            return pack;
         }
         case 'L': {
-            // Empty list
+            // L{desc} — default for a list schema is the empty list regardless
+            // of inner schema. Skip past the nested descriptor to keep the
+            // outer pointer well-formed for any caller that continues parsing.
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return taida_list_new();
+            }
+            d += 2;  // skip "L{"
+            int inner_len = schema_find_closing_brace(d);
+            d += inner_len;
+            if (*d == '}') d++;
+            *desc = d;
             return taida_list_new();
         }
-        default: return 0;
+        case 'E': {
+            // C16: Enum default is the first variant's ordinal (= Int(0)).
+            // Matches `docs/guide/01_types.md:609` — 最初のバリアントがデフォルト —
+            // and the Interpreter's `default_for_schema(JsonSchema::Enum)`.
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;  // skip "E{"
+            int inner_len = schema_find_closing_brace(d);
+            d += inner_len;
+            if (*d == '}') d++;
+            *desc = d;
+            return 0;
+        }
+        default: {
+            *desc = d + 1;
+            return 0;
+        }
     }
+}
+
+static taida_val json_default_value_for_desc(const char *desc) {
+    if (!desc || !*desc) return 0;
+    const char *cur = desc;
+    return json_pure_default_apply(&cur);
 }
 
 // --- Convert JSON value to typed value using schema ---
@@ -7044,6 +7166,53 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
             if (*d == '}') d++;
             *desc = d;
             return list;
+        }
+        case 'E': {
+            // C16: E{EnumName|Variant1,Variant2,...}
+            // JSON String matching a variant -> Int(ordinal).
+            // Anything else -> Lax[Enum] empty (hasValue=false, __value=0, __default=0).
+            if (d[1] != '{') { *desc = d + 1; return taida_lax_empty(0); }
+            d += 2;  // skip "E{"
+
+            // Skip enum name (until '|').
+            while (*d && *d != '|' && *d != '}') d++;
+            if (*d == '|') d++;
+
+            // If JSON value is not a string, walk past the variants and return Lax.
+            int is_string_match_candidate = (jval && jval->type == JSON_STRING && jval->str_val);
+            const char *js = is_string_match_candidate ? jval->str_val : NULL;
+
+            int matched = 0;
+            taida_val ordinal = 0;
+            int64_t current_ordinal = 0;
+
+            // Parse variants one by one.
+            while (*d && *d != '}') {
+                // Read variant name until ',' or '}'.
+                const char *vstart = d;
+                while (*d && *d != ',' && *d != '}') d++;
+                int vlen = (int)(d - vstart);
+
+                if (!matched && js) {
+                    // Compare: js == vstart[0..vlen] exactly.
+                    if ((int)strlen(js) == vlen && strncmp(js, vstart, (size_t)vlen) == 0) {
+                        ordinal = (taida_val)current_ordinal;
+                        matched = 1;
+                    }
+                }
+
+                current_ordinal++;
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+            *desc = d;
+
+            if (matched) {
+                return ordinal;
+            }
+            // Mismatch / non-string / missing -> Lax[Enum] with hasValue=false.
+            // __value = __default = 0 (first variant ordinal) per C16 design.
+            return taida_lax_empty(0);
         }
         default: {
             *desc = d + 1;

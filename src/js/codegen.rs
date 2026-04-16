@@ -753,7 +753,22 @@ impl JsCodegen {
                 Ok(())
             }
             Statement::FuncDef(func_def) => self.gen_func_def(func_def),
-            Statement::EnumDef(_) => Ok(()),
+            Statement::EnumDef(enum_def) => {
+                // C16: Emit __taida_registerEnumDef so the JS JSON mold runtime
+                // can validate Enum fields against the variant set.
+                self.write_indent();
+                let variants_js: Vec<String> = enum_def
+                    .variants
+                    .iter()
+                    .map(|v| format!("'{}'", v.name))
+                    .collect();
+                self.write(&format!(
+                    "__taida_registerEnumDef('{}', [{}]);\n",
+                    enum_def.name,
+                    variants_js.join(", ")
+                ));
+                Ok(())
+            }
             Statement::TypeDef(type_def) => self.gen_type_def(type_def),
             Statement::InheritanceDef(inh_def) => self.gen_inheritance_def(inh_def),
             Statement::MoldDef(mold_def) => self.gen_mold_def(mold_def),

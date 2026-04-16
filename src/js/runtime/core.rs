@@ -351,6 +351,24 @@ function __taida_registerTypeDef(name, fieldDefs) {
   __taida_typeDefs[name] = fieldDefs;
 }
 
+// C16: Enum registry for JSON schema resolution.
+// Maps enum_name -> variant_names_in_ordinal_order.
+// Populated by __taida_registerEnumDef emitted alongside each `Enum => Name = :A :B` definition.
+const __taida_enumDefs = {};
+function __taida_registerEnumDef(name, variants) {
+  __taida_enumDefs[name] = variants;
+}
+
+// C16: Lax[Enum] shape identical to interpreter / native.
+//   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
+// First-variant-is-default rule is encoded via Int(0). Delegates to
+// `Lax(null, 0)` so the returned object carries the full Lax method set
+// (`hasValue`, `getOrDefault`, `isEmpty`, `map`, `flatMap`, `unmold`,
+// `toString`), preserving 3-backend parity for Lax-facing Taida code.
+function __taida_laxEnumEmpty() {
+  return Lax(null, 0);
+}
+
 function __taidaValueToJson(v) {
   if (v instanceof __TaidaJSON) return v.__value;
   if (Array.isArray(v)) return v.map(__taidaValueToJson);
@@ -384,6 +402,32 @@ function JSON_mold(rawValue, schema) {
   return Object.freeze({ __type: 'Lax', hasValue: __taida_hasValue(true), __value: typedValue, __default: defaultVal });
 }
 
+// C16: Decide whether a field default for a missing/null Enum field should be
+// a Lax[Enum] (silent coercion 禁止) or the regular schema default.
+function __taida_fieldMissingDefault(fschema) {
+  if (typeof fschema === 'string' && __taida_enumDefs[fschema]) {
+    return __taida_laxEnumEmpty();
+  }
+  // Recurse into nested TypeDef so inner Enum fields also get Lax.
+  if (typeof fschema === 'string' && __taida_typeDefs[fschema]) {
+    const td = __taida_typeDefs[fschema];
+    const result = { __type: fschema };
+    for (const [fname, inner] of Object.entries(td)) {
+      result[fname] = __taida_fieldMissingDefault(inner);
+    }
+    return Object.freeze(result);
+  }
+  // Inline BuchiPack
+  if (fschema && typeof fschema === 'object' && !fschema.__list && !Array.isArray(fschema)) {
+    const result = {};
+    for (const [fname, inner] of Object.entries(fschema)) {
+      result[fname] = __taida_fieldMissingDefault(inner);
+    }
+    return Object.freeze(result);
+  }
+  return __taida_defaultForSchema(fschema);
+}
+
 function __taida_castJson(json, schema) {
   if (typeof schema === 'string') {
     switch (schema) {
@@ -392,20 +436,32 @@ function __taida_castJson(json, schema) {
       case 'Str': return typeof json === 'string' ? json : (json === null || json === undefined ? '' : (typeof json === 'object' ? JSON.stringify(json) : String(json)));
       case 'Bool': return typeof json === 'boolean' ? json : false;
       default: {
-        // TypeDef lookup
+        // C16: TypeDef wins over Enum when both exist (mirrors Interpreter).
         const td = __taida_typeDefs[schema];
-        if (!td || typeof json !== 'object' || json === null || Array.isArray(json)) {
-          return __taida_defaultForSchema(schema);
-        }
-        const result = { __type: schema };
-        for (const [fname, fschema] of Object.entries(td)) {
-          if (fname in json && json[fname] !== null && json[fname] !== undefined) {
-            result[fname] = __taida_castJson(json[fname], fschema);
-          } else {
-            result[fname] = __taida_defaultForSchema(fschema);
+        if (td) {
+          if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+            return __taida_defaultForSchema(schema);
           }
+          const result = { __type: schema };
+          for (const [fname, fschema] of Object.entries(td)) {
+            if (fname in json && json[fname] !== null && json[fname] !== undefined) {
+              result[fname] = __taida_castJson(json[fname], fschema);
+            } else {
+              result[fname] = __taida_fieldMissingDefault(fschema);
+            }
+          }
+          return Object.freeze(result);
         }
-        return Object.freeze(result);
+        // C16: Enum lookup — resolve variant name to ordinal, Lax on mismatch.
+        const variants = __taida_enumDefs[schema];
+        if (variants) {
+          if (typeof json === 'string') {
+            const idx = variants.indexOf(json);
+            if (idx >= 0) return idx;
+          }
+          return __taida_laxEnumEmpty();
+        }
+        return __taida_defaultForSchema(schema);
       }
     }
   }
@@ -423,7 +479,7 @@ function __taida_castJson(json, schema) {
       if (fname in json && json[fname] !== null && json[fname] !== undefined) {
         result[fname] = __taida_castJson(json[fname], fschema);
       } else {
-        result[fname] = __taida_defaultForSchema(fschema);
+        result[fname] = __taida_fieldMissingDefault(fschema);
       }
     }
     return Object.freeze(result);
@@ -440,12 +496,17 @@ function __taida_defaultForSchema(schema) {
       case 'Bool': return false;
       default: {
         const td = __taida_typeDefs[schema];
-        if (!td) return '';
-        const result = { __type: schema };
-        for (const [fname, fschema] of Object.entries(td)) {
-          result[fname] = __taida_defaultForSchema(fschema);
+        if (td) {
+          const result = { __type: schema };
+          for (const [fname, fschema] of Object.entries(td)) {
+            result[fname] = __taida_defaultForSchema(fschema);
+          }
+          return Object.freeze(result);
         }
-        return Object.freeze(result);
+        // C16: Enum default stays Int(0) (= first variant ordinal). Matches
+        // Interpreter / Native. Lax is reserved for actual schema *mismatch*.
+        if (__taida_enumDefs[schema]) return 0;
+        return '';
       }
     }
   }
