@@ -23875,16 +23875,8 @@ stdout(r.requests)
     let _ = fs::remove_file(&key_path);
     cleanup_net_project(&dir);
 
-    let req_per_s = if elapsed_ms > 0 {
-        ok_count * 1000 / elapsed_ms
-    } else {
-        0
-    };
-    let latency_ms = if ok_count > 0 {
-        elapsed_ms / ok_count
-    } else {
-        0
-    };
+    let req_per_s = (ok_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
+    let latency_ms = elapsed_ms.checked_div(ok_count).unwrap_or(0);
     let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
         .trim()
         .parse()
@@ -23897,11 +23889,7 @@ stdout(r.requests)
         N_REQUESTS,
         req_per_s,
         latency_ms,
-        if req_per_s > 0 {
-            310000u64 / req_per_s
-        } else {
-            0
-        }
+        310000u64.checked_div(req_per_s).unwrap_or(0)
     );
 
     // Structural assertions (correctness, not timing)
@@ -24031,11 +24019,7 @@ stdout(r.requests)
     let _ = fs::remove_file(&key_path);
     cleanup_net_project(&dir);
 
-    let req_per_s = if elapsed_ms > 0 {
-        ok_count * 1000 / elapsed_ms
-    } else {
-        0
-    };
+    let req_per_s = (ok_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
     let server_count: u64 = normalize(&String::from_utf8_lossy(&server_out.stdout))
         .trim()
         .parse()
@@ -24204,8 +24188,7 @@ stdout(r.requests)
         N_REQUESTS
     );
     // Each successful response must have delivered the full 64KiB
-    if ok_count > 0 {
-        let avg_bytes = total_bytes / ok_count;
+    if let Some(avg_bytes) = total_bytes.checked_div(ok_count) {
         assert!(
             avg_bytes >= 65536 * 90 / 100,
             "NET6-3b-3: average response body too small: {} bytes (expected ~65536)",
@@ -24374,11 +24357,7 @@ stdout(r.requests)
         .next_back()
         .unwrap_or(0);
 
-    let req_per_s = if elapsed_ms > 0 {
-        ok_count * 1000 / elapsed_ms
-    } else {
-        0
-    };
+    let req_per_s = (ok_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
 
     eprintln!(
         "NET6-3b-4 [native h2 32-stream MULTIPLEX] ok={}/{} req/s={} total={}ms \

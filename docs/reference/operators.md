@@ -228,6 +228,28 @@ Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 riskyOperation()
 ```
 
+#### 関連: Lax 境界（throw ではなく値で表現される失敗）
+
+`|==` は `throw` されたエラーをキャッチします。対して Lax は**値の型**として失敗可能性を表現する別経路です（throw しないので `|==` では捕まりません）。
+
+代表的な Lax 境界の発生点:
+
+- `Div[x, y]()` / `Mod[x, y]()` — 0 除算時
+- `Int[str]()` / `Float[str]()` などの型変換モールド — パース失敗時
+- `.get(idx)` / `.first()` / `.last()` などの安全アクセス — 範囲外時
+- **`JSON[raw, Schema]()`**（C16 以降） — パース失敗時、**および Schema 内の Enum 型フィールドが JSON 側の variant 集合に一致しなかった / キー欠落 / null だった場合**。silent coercion は行わず、該当フィールドは `Lax[Enum]` で返ります。
+
+Lax 境界は `|==` ではなく、`hasValue` / `getOrDefault` / `|` による分岐で処理します:
+
+```taida
+result <= JSON[raw, User]()
+result ]=> user
+| user.status.hasValue |> stdout("status=" + user.status.__value.toString())
+| _                    |> stdout("status missing or invalid")
+```
+
+詳細は `docs/guide/03_json.md` の「Enum 型フィールドの検査」節および `docs/reference/mold_types.md` の「JSON モールディング型」節を参照してください。
+
 ### `|` `|>` 条件分岐
 
 条件に基づいて値を選択します。

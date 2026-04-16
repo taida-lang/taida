@@ -1555,54 +1555,54 @@ fn check_stmt_naming(stmt: &Statement, file: &str, findings: &mut Vec<VerifyFind
         }
 
         // Assignment: target must be snake_case
-        Statement::Assignment(assign) => {
-            if !is_excluded_name(&assign.target) && !is_snake_case(&assign.target) {
-                findings.push(VerifyFinding {
-                    check: "naming-convention".to_string(),
-                    severity: Severity::Warning,
-                    message: format!(
-                        "Variable name '{}' should be snake_case (suggestion: '{}')",
-                        assign.target,
-                        to_snake_case(&assign.target)
-                    ),
-                    file: Some(file.to_string()),
-                    line: Some(assign.span.line),
-                });
-            }
+        Statement::Assignment(assign)
+            if !is_excluded_name(&assign.target) && !is_snake_case(&assign.target) =>
+        {
+            findings.push(VerifyFinding {
+                check: "naming-convention".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "Variable name '{}' should be snake_case (suggestion: '{}')",
+                    assign.target,
+                    to_snake_case(&assign.target)
+                ),
+                file: Some(file.to_string()),
+                line: Some(assign.span.line),
+            });
         }
 
         // Unmold forward: target must be snake_case
-        Statement::UnmoldForward(uf) => {
-            if !is_excluded_name(&uf.target) && !is_snake_case(&uf.target) {
-                findings.push(VerifyFinding {
-                    check: "naming-convention".to_string(),
-                    severity: Severity::Warning,
-                    message: format!(
-                        "Variable name '{}' should be snake_case (suggestion: '{}')",
-                        uf.target,
-                        to_snake_case(&uf.target)
-                    ),
-                    file: Some(file.to_string()),
-                    line: Some(uf.span.line),
-                });
-            }
+        Statement::UnmoldForward(uf)
+            if !is_excluded_name(&uf.target) && !is_snake_case(&uf.target) =>
+        {
+            findings.push(VerifyFinding {
+                check: "naming-convention".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "Variable name '{}' should be snake_case (suggestion: '{}')",
+                    uf.target,
+                    to_snake_case(&uf.target)
+                ),
+                file: Some(file.to_string()),
+                line: Some(uf.span.line),
+            });
         }
 
         // Unmold backward: target must be snake_case
-        Statement::UnmoldBackward(ub) => {
-            if !is_excluded_name(&ub.target) && !is_snake_case(&ub.target) {
-                findings.push(VerifyFinding {
-                    check: "naming-convention".to_string(),
-                    severity: Severity::Warning,
-                    message: format!(
-                        "Variable name '{}' should be snake_case (suggestion: '{}')",
-                        ub.target,
-                        to_snake_case(&ub.target)
-                    ),
-                    file: Some(file.to_string()),
-                    line: Some(ub.span.line),
-                });
-            }
+        Statement::UnmoldBackward(ub)
+            if !is_excluded_name(&ub.target) && !is_snake_case(&ub.target) =>
+        {
+            findings.push(VerifyFinding {
+                check: "naming-convention".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "Variable name '{}' should be snake_case (suggestion: '{}')",
+                    ub.target,
+                    to_snake_case(&ub.target)
+                ),
+                file: Some(file.to_string()),
+                line: Some(ub.span.line),
+            });
         }
 
         // Error ceiling: error_param must be snake_case

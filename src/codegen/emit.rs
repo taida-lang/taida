@@ -1965,12 +1965,10 @@ impl Emitter {
     fn predeclare_runtime_funcs_recursive(&mut self, insts: &[IrInst]) -> Result<(), EmitError> {
         for inst in insts {
             match inst {
-                IrInst::Call(_, func_name, _) => {
-                    if !self.declared_funcs.contains_key(func_name) {
-                        let (params, returns) = runtime_func_signature_for(func_name, &self.abi)
-                            .map_err(|e| EmitError { message: e })?;
-                        self.declare_runtime_func(func_name, &params, &returns)?;
-                    }
+                IrInst::Call(_, func_name, _) if !self.declared_funcs.contains_key(func_name) => {
+                    let (params, returns) = runtime_func_signature_for(func_name, &self.abi)
+                        .map_err(|e| EmitError { message: e })?;
+                    self.declare_runtime_func(func_name, &params, &returns)?;
                 }
                 IrInst::PackNew(_, _) => {
                     self.ensure_runtime_func("taida_pack_new")?;
@@ -2045,10 +2043,8 @@ impl Emitter {
     ) {
         for inst in insts {
             match inst {
-                IrInst::CallUser(_, name, args) => {
-                    if targets.contains(name) {
-                        arities.insert(name.clone(), args.len());
-                    }
+                IrInst::CallUser(_, name, args) if targets.contains(name) => {
+                    arities.insert(name.clone(), args.len());
                 }
                 IrInst::CondBranch(_, arms) => {
                     for arm in arms {

@@ -84,6 +84,11 @@ pub enum JsonSchema {
     TypeDef(String, Vec<SchemaField>),
     /// List of a schema type: @[Schema]
     List(Box<JsonSchema>),
+    /// Enum type: (enum_name, variant_names in ordinal order).
+    /// JSON wire format is the variant name Str (e.g. `"Active"`).
+    /// On match the variant's ordinal is returned as `Value::Int(ordinal)`.
+    /// On mismatch/missing the caller is responsible for wrapping in `Lax[Enum]`.
+    Enum(String, Vec<String>),
 }
 
 /// Primitive type for JSON schema matching.
@@ -104,17 +109,19 @@ pub struct SchemaField {
 
 /// Build a JsonSchema from a TypeDef's field definitions, resolving nested types.
 /// `type_defs` maps type names to their field definitions.
+/// `enum_defs` maps enum names to their variant names in ordinal order (C16).
 pub fn build_schema_from_typedef(
     type_name: &str,
     fields: &[FieldDef],
     type_defs: &std::collections::HashMap<String, Vec<FieldDef>>,
+    enum_defs: &std::collections::HashMap<String, Vec<String>>,
 ) -> JsonSchema {
     let schema_fields: Vec<SchemaField> = fields
         .iter()
         .filter(|f| !f.is_method)
         .map(|f| {
             let schema = match &f.type_annotation {
-                Some(type_expr) => type_expr_to_schema(type_expr, type_defs),
+                Some(type_expr) => type_expr_to_schema(type_expr, type_defs, enum_defs),
                 None => JsonSchema::Primitive(PrimitiveType::Str), // default to Str
             };
             SchemaField {
@@ -127,9 +134,16 @@ pub fn build_schema_from_typedef(
 }
 
 /// Convert a TypeExpr to a JsonSchema.
+///
+/// Resolution order for `TypeExpr::Named`:
+/// 1. Primitives (`Int`/`Str`/`Float`/`Bool`)
+/// 2. `type_defs` (TypeDef — record-like schema)
+/// 3. `enum_defs` (C16 — Enum variant set)
+/// 4. Fallback to `Primitive(Str)` for unknown names
 fn type_expr_to_schema(
     type_expr: &crate::parser::TypeExpr,
     type_defs: &std::collections::HashMap<String, Vec<FieldDef>>,
+    enum_defs: &std::collections::HashMap<String, Vec<String>>,
 ) -> JsonSchema {
     match type_expr {
         crate::parser::TypeExpr::Named(name) => match name.as_str() {
@@ -138,9 +152,12 @@ fn type_expr_to_schema(
             "Float" => JsonSchema::Primitive(PrimitiveType::Float),
             "Bool" => JsonSchema::Primitive(PrimitiveType::Bool),
             other => {
-                // Look up TypeDef
+                // C16: TypeDef wins over Enum when both exist (Taida disallows
+                // collision today; kept explicit for future safety).
                 if let Some(fields) = type_defs.get(other) {
-                    build_schema_from_typedef(other, fields, type_defs)
+                    build_schema_from_typedef(other, fields, type_defs, enum_defs)
+                } else if let Some(variants) = enum_defs.get(other) {
+                    JsonSchema::Enum(other.to_string(), variants.clone())
                 } else {
                     // Unknown type: default to Str
                     JsonSchema::Primitive(PrimitiveType::Str)
@@ -148,7 +165,7 @@ fn type_expr_to_schema(
             }
         },
         crate::parser::TypeExpr::List(inner) => {
-            JsonSchema::List(Box::new(type_expr_to_schema(inner, type_defs)))
+            JsonSchema::List(Box::new(type_expr_to_schema(inner, type_defs, enum_defs)))
         }
         crate::parser::TypeExpr::BuchiPack(fields) => {
             // Inline buchi pack type: @(field: Type, ...)
@@ -157,7 +174,7 @@ fn type_expr_to_schema(
                 .filter(|f| !f.is_method)
                 .map(|f| {
                     let schema = match &f.type_annotation {
-                        Some(te) => type_expr_to_schema(te, type_defs),
+                        Some(te) => type_expr_to_schema(te, type_defs, enum_defs),
                         None => JsonSchema::Primitive(PrimitiveType::Str),
                     };
                     SchemaField {
@@ -191,12 +208,12 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                     for sf in schema_fields {
                         let value = if let Some(json_val) = obj.get(&sf.name) {
                             if json_val.is_null() {
-                                default_for_schema(&sf.schema)
+                                field_missing_default(&sf.schema)
                             } else {
                                 json_to_typed_value(json_val, &sf.schema)
                             }
                         } else {
-                            default_for_schema(&sf.schema)
+                            field_missing_default(&sf.schema)
                         };
                         fields.push((sf.name.clone(), value));
                     }
@@ -207,7 +224,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                     // null -> all defaults
                     let mut fields: Vec<(String, Value)> = Vec::new();
                     for sf in schema_fields {
-                        fields.push((sf.name.clone(), default_for_schema(&sf.schema)));
+                        fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
                     fields.push(("__type".to_string(), Value::Str(type_name.clone())));
                     Value::BuchiPack(fields)
@@ -216,7 +233,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                     // Non-object -> all defaults
                     let mut fields: Vec<(String, Value)> = Vec::new();
                     for sf in schema_fields {
-                        fields.push((sf.name.clone(), default_for_schema(&sf.schema)));
+                        fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
                     fields.push(("__type".to_string(), Value::Str(type_name.clone())));
                     Value::BuchiPack(fields)
@@ -234,7 +251,62 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
             serde_json::Value::Null => Value::List(Vec::new()),
             _ => Value::List(Vec::new()),
         },
+        JsonSchema::Enum(_name, variants) => {
+            // C16: JSON wire format is the variant name Str.
+            // On match: return the ordinal as Value::Int.
+            // On mismatch/non-string/null: return Lax[Enum] with hasValue=false,
+            // __value = Int(0) (first variant is default), __default = Int(0).
+            match json {
+                serde_json::Value::String(s) => {
+                    if let Some(ordinal) = variants.iter().position(|v| v == s) {
+                        Value::Int(ordinal as i64)
+                    } else {
+                        make_lax_enum_inline()
+                    }
+                }
+                _ => make_lax_enum_inline(),
+            }
+        }
     }
+}
+
+/// C16: Default value for a JSON schema field whose key is missing / null.
+///
+/// For most schemas this is identical to `default_for_schema` (Int(0), Str(""),
+/// nested defaults, etc.). For `JsonSchema::Enum` we diverge: a missing Enum
+/// field returns `Lax[Enum]` (silent coercion禁止) so the caller is forced to
+/// acknowledge the boundary via `|==` / `getOrDefault`.
+fn field_missing_default(schema: &JsonSchema) -> Value {
+    match schema {
+        JsonSchema::Enum(_, _) => make_lax_enum_inline(),
+        // Nested TypeDef: recurse so inner Enum fields get Lax, not Int(0).
+        JsonSchema::TypeDef(type_name, schema_fields) => {
+            let mut result_fields: Vec<(String, Value)> = schema_fields
+                .iter()
+                .map(|f| (f.name.clone(), field_missing_default(&f.schema)))
+                .collect();
+            result_fields.push(("__type".to_string(), Value::Str(type_name.clone())));
+            Value::BuchiPack(result_fields)
+        }
+        _ => default_for_schema(schema),
+    }
+}
+
+/// C16: Lax[Enum] shape for JSON mold Enum validation failure.
+///
+/// Kept identical to `mold_eval::make_lax_value(false, Int(0), Int(0))` so that
+/// the 3-backend parity can be verified structurally:
+///   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
+///
+/// `Int(0)` encodes the first variant's ordinal — Taida's "最初のバリアント = デフォルト"
+/// rule (`docs/guide/01_types.md:609`) is preserved as the Lax fallback.
+fn make_lax_enum_inline() -> Value {
+    Value::BuchiPack(vec![
+        ("hasValue".to_string(), Value::Bool(false)),
+        ("__value".to_string(), Value::Int(0)),
+        ("__default".to_string(), Value::Int(0)),
+        ("__type".to_string(), Value::Str("Lax".to_string())),
+    ])
 }
 
 /// Convert a JSON value to a primitive Taida value.
@@ -306,6 +378,9 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
             Value::BuchiPack(result_fields)
         }
         JsonSchema::List(_) => Value::List(Vec::new()),
+        // C16: Enum default is the first variant's ordinal (= Int(0)).
+        // This matches Taida's "最初のバリアントがデフォルト" rule.
+        JsonSchema::Enum(_, _) => Value::Int(0),
     }
 }
 
@@ -651,5 +726,312 @@ mod tests {
             )))),
             Value::List(Vec::new())
         );
+    }
+
+    // ── C16: Enum schema tests ─────────────────────────
+
+    fn enum_status_schema() -> JsonSchema {
+        JsonSchema::Enum(
+            "Status".to_string(),
+            vec![
+                "Active".to_string(),
+                "Inactive".to_string(),
+                "Pending".to_string(),
+            ],
+        )
+    }
+
+    fn is_lax_enum(value: &Value) -> bool {
+        let Value::BuchiPack(fields) = value else {
+            return false;
+        };
+        let has_value = fields
+            .iter()
+            .find(|(k, _)| k == "hasValue")
+            .map(|(_, v)| v == &Value::Bool(false))
+            .unwrap_or(false);
+        let inner_value = fields
+            .iter()
+            .find(|(k, _)| k == "__value")
+            .map(|(_, v)| v == &Value::Int(0))
+            .unwrap_or(false);
+        let default = fields
+            .iter()
+            .find(|(k, _)| k == "__default")
+            .map(|(_, v)| v == &Value::Int(0))
+            .unwrap_or(false);
+        let tag = fields
+            .iter()
+            .find(|(k, _)| k == "__type")
+            .map(|(_, v)| v == &Value::Str("Lax".to_string()))
+            .unwrap_or(false);
+        has_value && inner_value && default && tag
+    }
+
+    #[test]
+    fn test_c16_enum_variant_match_returns_ordinal() {
+        let schema = enum_status_schema();
+        assert_eq!(
+            json_to_typed_value(&serde_json::json!("Active"), &schema),
+            Value::Int(0)
+        );
+        assert_eq!(
+            json_to_typed_value(&serde_json::json!("Inactive"), &schema),
+            Value::Int(1)
+        );
+        assert_eq!(
+            json_to_typed_value(&serde_json::json!("Pending"), &schema),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn test_c16_enum_mismatch_returns_lax() {
+        let schema = enum_status_schema();
+        let result = json_to_typed_value(&serde_json::json!("Bogus"), &schema);
+        assert!(
+            is_lax_enum(&result),
+            "expected Lax[Enum] for mismatched variant, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_c16_enum_non_string_returns_lax() {
+        let schema = enum_status_schema();
+        for json in [
+            serde_json::json!(0),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let result = json_to_typed_value(&json, &schema);
+            assert!(
+                is_lax_enum(&result),
+                "expected Lax[Enum] for non-string JSON {:?}, got {:?}",
+                json,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_c16_enum_field_in_typedef_match() {
+        let schema = JsonSchema::TypeDef(
+            "User".to_string(),
+            vec![
+                SchemaField {
+                    name: "name".to_string(),
+                    schema: JsonSchema::Primitive(PrimitiveType::Str),
+                },
+                SchemaField {
+                    name: "status".to_string(),
+                    schema: enum_status_schema(),
+                },
+            ],
+        );
+        let json = serde_json::json!({"name": "Alice", "status": "Pending"});
+        let result = json_to_typed_value(&json, &schema);
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("expected BuchiPack, got {:?}", result);
+        };
+        assert_eq!(
+            fields.iter().find(|(k, _)| k == "status").unwrap().1,
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn test_c16_enum_field_in_typedef_mismatch_yields_lax() {
+        let schema = JsonSchema::TypeDef(
+            "User".to_string(),
+            vec![SchemaField {
+                name: "status".to_string(),
+                schema: enum_status_schema(),
+            }],
+        );
+        let json = serde_json::json!({"status": "Unknown"});
+        let result = json_to_typed_value(&json, &schema);
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("expected BuchiPack, got {:?}", result);
+        };
+        let status = &fields.iter().find(|(k, _)| k == "status").unwrap().1;
+        assert!(
+            is_lax_enum(status),
+            "expected Lax[Enum] for mismatched field, got {:?}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_c16_enum_field_missing_yields_lax() {
+        let schema = JsonSchema::TypeDef(
+            "User".to_string(),
+            vec![SchemaField {
+                name: "status".to_string(),
+                schema: enum_status_schema(),
+            }],
+        );
+        // key missing
+        let json = serde_json::json!({"name": "no status"});
+        let result = json_to_typed_value(&json, &schema);
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("expected BuchiPack, got {:?}", result);
+        };
+        let status = &fields.iter().find(|(k, _)| k == "status").unwrap().1;
+        assert!(
+            is_lax_enum(status),
+            "expected Lax[Enum] for missing field, got {:?}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_c16_enum_field_null_yields_lax() {
+        let schema = JsonSchema::TypeDef(
+            "User".to_string(),
+            vec![SchemaField {
+                name: "status".to_string(),
+                schema: enum_status_schema(),
+            }],
+        );
+        let json = serde_json::json!({"status": null});
+        let result = json_to_typed_value(&json, &schema);
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("expected BuchiPack, got {:?}", result);
+        };
+        let status = &fields.iter().find(|(k, _)| k == "status").unwrap().1;
+        assert!(
+            is_lax_enum(status),
+            "expected Lax[Enum] for null field, got {:?}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_c16_enum_nested_in_typedef_in_typedef() {
+        // Wrapper { meta: Info { status: Enum } }
+        let info = JsonSchema::TypeDef(
+            "Info".to_string(),
+            vec![SchemaField {
+                name: "status".to_string(),
+                schema: enum_status_schema(),
+            }],
+        );
+        let wrapper = JsonSchema::TypeDef(
+            "Wrapper".to_string(),
+            vec![SchemaField {
+                name: "meta".to_string(),
+                schema: info,
+            }],
+        );
+        // Outer missing → nested Enum must still be Lax.
+        let json = serde_json::json!({});
+        let result = json_to_typed_value(&json, &wrapper);
+        let Value::BuchiPack(fields) = result else {
+            unreachable!("expected BuchiPack, got {:?}", result);
+        };
+        let Value::BuchiPack(meta_fields) =
+            &fields.iter().find(|(k, _)| k == "meta").unwrap().1.clone()
+        else {
+            unreachable!("expected meta to be BuchiPack");
+        };
+        let status = &meta_fields.iter().find(|(k, _)| k == "status").unwrap().1;
+        assert!(
+            is_lax_enum(status),
+            "expected Lax[Enum] for deeply-nested missing field, got {:?}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_c16_default_for_schema_enum_is_first_ordinal() {
+        let schema = enum_status_schema();
+        // Top-level Enum __default stays Int(0) to preserve 最初のバリアント rule.
+        assert_eq!(default_for_schema(&schema), Value::Int(0));
+    }
+
+    // ── C16B-001 regression: TypeDef default for Enum field ─────────
+    //
+    // The parse-error path (outer Lax.__value / __default) must carry a
+    // TypeDef whose Enum field is `Int(0)` — NOT `Lax[Enum]`. `Lax[Enum]`
+    // is reserved for actual validation failures (mismatch / missing key /
+    // null field). This pins Interpreter as the reference; Native's
+    // `json_default_value_for_desc('T')` and JS's `__taida_defaultForSchema`
+    // are expected to match.
+
+    #[test]
+    fn test_c16b001_default_for_typedef_enum_field_is_int_not_lax() {
+        let schema = JsonSchema::TypeDef(
+            "User".to_string(),
+            vec![
+                SchemaField {
+                    name: "name".to_string(),
+                    schema: JsonSchema::Primitive(PrimitiveType::Str),
+                },
+                SchemaField {
+                    name: "status".to_string(),
+                    schema: enum_status_schema(),
+                },
+            ],
+        );
+        let Value::BuchiPack(fields) = default_for_schema(&schema) else {
+            unreachable!("expected BuchiPack default for TypeDef");
+        };
+        let status = &fields.iter().find(|(k, _)| k == "status").unwrap().1;
+        assert_eq!(
+            status,
+            &Value::Int(0),
+            "TypeDef default must embed Int(0) for Enum fields (not Lax)"
+        );
+        let name = &fields.iter().find(|(k, _)| k == "name").unwrap().1;
+        assert_eq!(name, &Value::Str(String::new()));
+    }
+
+    #[test]
+    fn test_c16b001_default_for_nested_typedef_enum_field_is_int_not_lax() {
+        let inner = JsonSchema::TypeDef(
+            "Info".to_string(),
+            vec![SchemaField {
+                name: "status".to_string(),
+                schema: enum_status_schema(),
+            }],
+        );
+        let outer = JsonSchema::TypeDef(
+            "Wrapper".to_string(),
+            vec![SchemaField {
+                name: "meta".to_string(),
+                schema: inner,
+            }],
+        );
+        let Value::BuchiPack(fields) = default_for_schema(&outer) else {
+            unreachable!("expected BuchiPack default for outer TypeDef");
+        };
+        let Value::BuchiPack(meta_fields) =
+            &fields.iter().find(|(k, _)| k == "meta").unwrap().1.clone()
+        else {
+            unreachable!("expected meta to be BuchiPack");
+        };
+        let status = &meta_fields.iter().find(|(k, _)| k == "status").unwrap().1;
+        assert_eq!(
+            status,
+            &Value::Int(0),
+            "Nested TypeDef default must embed Int(0) for Enum fields (not Lax)"
+        );
+    }
+
+    #[test]
+    fn test_c16b001_default_for_list_of_typedef_enum_is_empty_list() {
+        let user = JsonSchema::TypeDef(
+            "User".to_string(),
+            vec![SchemaField {
+                name: "status".to_string(),
+                schema: enum_status_schema(),
+            }],
+        );
+        let list = JsonSchema::List(Box::new(user));
+        assert_eq!(default_for_schema(&list), Value::List(Vec::new()));
     }
 }

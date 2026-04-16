@@ -136,6 +136,39 @@ JSON['"42"', Int]() ]=> num        // 42
 JSON['[1, 2, 3]', @[Int]]() ]=> nums  // @[1, 2, 3]
 ```
 
+### Enum 型フィールドの検査
+
+Enum 型はスキーマの一級市民です。`JSON` モールドは JSON 側の文字列が variant 集合に含まれることを**検査します**。
+
+- 一致したとき → そのバリアントの ordinal（`Value::Int`）を返します
+- 一致しなかった / キーが無かった / `null` だった → **`Lax[Enum]`** を返します（silent coercion は行いません）
+
+```taida
+Enum => Status = :Active :Inactive :Pending
+
+User = @(name: Str, status: Status)
+
+// variant 一致 → ordinal が入ります
+raw1 <= '{"name": "Alice", "status": "Active"}'
+JSON[raw1, User]() ]=> u1
+u1.status                  // 0（Active の ordinal）
+
+// 不正な文字列 → Lax[Enum] で境界が明示されます
+raw2 <= '{"name": "Dave", "status": "Bogus"}'
+JSON[raw2, User]() ]=> u2
+u2.status.hasValue         // false
+u2.status.getOrDefault(Status:Pending())  // 2（呼び出し側がフォールバックを決めます）
+
+// キー欠落も Lax[Enum] です
+raw3 <= '{"name": "Eve"}'
+JSON[raw3, User]() ]=> u3
+u3.status.hasValue         // false
+```
+
+この挙動は PHILOSOPHY の「**暗黙の型変換なし**」を境界で再現するものです。JSON に書かれた任意の Str が Enum 値として黙って通ることはなく、利用側は `hasValue` / `| .hasValue |> ... | _ |> ...` / `getOrDefault(Variant)` のいずれかで境界を明示的に処理する必要があります（`|==` は `throw` されたエラーをキャッチする演算子で、Lax には使えません — 詳細は `docs/reference/operators.md`）。
+
+> **補足**: Enum のデフォルトは「最初のバリアントの ordinal」（`01_types.md` 参照）です。Lax[Enum] の `__value` / `__default` はどちらも `Int(0)` に固定され、バリアント定義順が「既定値は何か」を直接示します。
+
 ---
 
 ## パース結果は Lax で返ります
@@ -375,7 +408,8 @@ JSON 溶鉄の原則:
 2. **`JSON[raw, Schema]()` がただ一つの入口です** -- スキーマ（鋳型）を通さなければ中身に触れません
 3. **戻り値は Lax です** -- パース失敗時は `hasValue = false` で、unmold するとデフォルト値が返ります
 4. **スキーママッチングの 6 ルールが動作します** -- フィールド一致、欠落はデフォルト値、型不一致はデフォルト値、null はデフォルト値、ネストは再帰、リストは各要素に適用
-5. **出力方向は jsonEncode / jsonPretty** -- Taida の型安全な値から JSON 文字列への変換です
-6. **JSON パースは `JSON[raw, Schema]()` のみです** -- 他の手段はありません
+5. **Enum 型フィールドは検査されます** -- variant 一致時は ordinal、不一致 / 欠落 / null は `Lax[Enum]`（silent coercion なし）
+6. **出力方向は jsonEncode / jsonPretty** -- Taida の型安全な値から JSON 文字列への変換です
+7. **JSON パースは `JSON[raw, Schema]()` のみです** -- 他の手段はありません
 
 型安全な世界と外部世界の境界を、溶鉄と鋳型のメタファーで厳格に守ります。

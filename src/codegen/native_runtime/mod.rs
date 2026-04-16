@@ -121,9 +121,20 @@ mod tests {
     /// modifies the runtime C source, update both the relevant fragment
     /// file and the `EXPECTED_TOTAL_LEN` constant below in the same
     /// commit.
+    ///
+    /// C16 (2026-04-16): +2,074 bytes in core.c from `E{...}` enum schema
+    /// descriptor support in `json_apply_schema` / `json_default_value_for_desc`.
+    /// New total: 888,531.
+    ///
+    /// C16B-001 (2026-04-16): +4,359 bytes in core.c — rewrote
+    /// `json_default_value_for_desc` to a dedicated `json_pure_default_apply`
+    /// walker so TypeDef defaults embed `Int(0)` for Enum fields instead of
+    /// routing through `json_apply_schema(NULL, ...)` which produced
+    /// `Lax[Enum]` and broke 3-backend parity (Interpreter/JS correctly
+    /// returned `Int(0)`). New total: 892,890.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 886_457;
+        const EXPECTED_TOTAL_LEN: usize = 892_890;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -215,11 +226,22 @@ mod tests {
         // NOTE: we compare bytes (not &str slices) because the "─" box
         // drawing character is multi-byte UTF-8 and a naive &str slice
         // of fixed length would land mid-char.
+        // C16 (2026-04-16): legacy fragment 2 grew by +2,074 bytes to host
+        // the `E{...}` enum schema descriptor logic. Fragment 1 boundary at
+        // offset 209,911 is unchanged — the F2_PREFIX anchor still lands
+        // exactly on the former error_json section header.
+        //
+        // C16B-001 (2026-04-16): legacy fragment 2 grew by a further +4,359
+        // bytes when `json_default_value_for_desc` was rewritten onto the new
+        // `json_pure_default_apply` walker (TypeDef defaults now embed
+        // `Int(0)` for Enum fields — fixes Interp/JS/Native parity regression
+        // detected in Phase 7 post-review). Fragment 1 boundary is still at
+        // offset 209,911.
         const F1_LEN: usize = 209_911;
         assert_eq!(
             CORE_SECTION.len(),
-            209_911 + 107_376,
-            "core.c total byte length must equal legacy fragment1 + fragment2"
+            209_911 + 113_809,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C16B-001 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

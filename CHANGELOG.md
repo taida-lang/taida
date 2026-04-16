@@ -1,5 +1,54 @@
 # Changelog
 
+## @c.16.rc4
+
+### Fixes
+
+- **`JSON[raw, Schema]()` now validates Enum-typed fields**. Previously,
+  `Schema` containing an `Enum` field (`Status: :Active :Inactive
+  :Pending`) would silently accept any JSON string — e.g.
+  `"status": "Bogus"` — and pass it through as a plain `Str`. This
+  broke the "暗黙の型変換なし" philosophy at the JSON boundary:
+  downstream code saw an Enum-typed field holding a value outside
+  the declared variant set. The fix:
+  - `JsonSchema::Enum(name, variants)` is now a first-class schema
+    variant alongside `Primitive` / `TypeDef` / `List`.
+  - On match, the variant's ordinal (`Int`) is returned (unchanged
+    Enum internal representation).
+  - On mismatch, key-missing, or `null`, the field becomes
+    `Lax[Enum]` with `hasValue=false`, `__value=Int(0)`, and
+    `__default=Int(0)` (first variant — the existing "最初のバリアント
+    がデフォルト" rule reused as the Lax fallback). Callers must
+    handle the boundary explicitly via `hasValue`,
+    `| .hasValue |> ... | _ |> ...`, or `getOrDefault(Variant)`
+    (`|==` is the `throw`-catching operator and does NOT branch on
+    Lax — see `docs/reference/operators.md`).
+  - Enum definition syntax (`Enum => Name = :A :B :C`) and the
+    first-variant-default rule are unchanged.
+  - All three backends (Interpreter / JS / Native) produce
+    byte-identical output on `examples/quality/json_enum_validate.td`.
+
+### Migration
+
+If pre-C16 code relied on the silent Str pass-through for Enum
+fields, the field now comes back as `Lax[Enum]` and a direct
+property access like `result.status.toString()` will surface the
+Lax metadata instead of the raw string. Update the access site to
+one of:
+
+```taida
+// 1. Resolve with a fallback
+u.status.getOrDefault(Status:Pending())
+
+// 2. Branch on hasValue
+| u.status.hasValue |> handleValid(u.status.__value)
+| _                 |> handleInvalid()
+```
+
+See `docs/guide/03_json.md` (Enum 型フィールドの検査) and
+`docs/reference/mold_types.md` (JSON モールディング型) for the full
+rules.
+
 ## @c.15.rc3
 
 ### Security

@@ -20,6 +20,11 @@ impl Lowering {
     ///   "i" = Int, "f" = Float, "s" = Str, "b" = Bool
     ///   "T{TypeName|field1:desc,field2:desc,...}" = TypeDef
     ///   "L{desc}" = List of elements
+    ///   "E{EnumName|Variant1,Variant2,...}" = Enum (C16)
+    ///
+    /// Taida の命名規則（英数字 + `_`、`docs/reference/naming_conventions.md`）により
+    /// Variant 名に `,` `|` `{` `}` は出現しないため、C16 ではエスケープ不要。
+    /// D1 懸念の最終決定: escape なし。parser 側で名前が汚染された場合は別 ticket。
     pub(crate) fn resolve_json_schema_descriptor(&self, expr: &Expr) -> Result<String, LowerError> {
         match expr {
             Expr::Ident(name, _) => match name.as_str() {
@@ -28,8 +33,13 @@ impl Lowering {
                 "Float" => Ok("f".to_string()),
                 "Bool" => Ok("b".to_string()),
                 type_name => {
+                    // C16: TypeDef wins over Enum when both exist (precedence
+                    // mirrors the interpreter; collisions are forbidden today
+                    // but explicit ordering keeps the runtime predictable).
                     if let Some(field_types) = self.type_field_types.get(type_name) {
                         self.typedef_to_schema_descriptor(type_name, field_types)
+                    } else if let Some(variants) = self.enum_defs.get(type_name) {
+                        Ok(Self::enum_to_schema_descriptor(type_name, variants))
                     } else {
                         Err(LowerError {
                             message: format!(
@@ -78,6 +88,15 @@ impl Lowering {
         Ok(format!("T{{{}|{}}}", type_name, parts.join(",")))
     }
 
+    /// C16: Format an Enum schema descriptor.
+    ///
+    /// Shape: `E{<EnumName>|<Variant1>,<Variant2>,...}`
+    /// Empty variant list becomes `E{<EnumName>|}` and is treated as
+    /// "no match possible" by the C runtime (always yields Lax[Enum]).
+    fn enum_to_schema_descriptor(enum_name: &str, variants: &[String]) -> String {
+        format!("E{{{}|{}}}", enum_name, variants.join(","))
+    }
+
     /// Convert a TypeExpr to a schema descriptor string.
     fn type_expr_to_schema_descriptor(
         &self,
@@ -92,6 +111,8 @@ impl Lowering {
                 other => {
                     if let Some(field_types) = self.type_field_types.get(other) {
                         self.typedef_to_schema_descriptor(other, field_types)
+                    } else if let Some(variants) = self.enum_defs.get(other) {
+                        Ok(Self::enum_to_schema_descriptor(other, variants))
                     } else {
                         Ok("s".to_string()) // Unknown type defaults to Str
                     }

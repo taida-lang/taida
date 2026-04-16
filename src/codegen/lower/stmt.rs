@@ -1788,14 +1788,13 @@ impl Lowering {
         seen: &mut std::collections::HashSet<String>,
     ) {
         match expr {
-            Expr::Ident(name, _) => {
+            Expr::Ident(name, _)
                 if !bound.contains(name.as_str())
                     && !self.user_funcs.contains(name)
-                    && !seen.contains(name)
-                {
-                    seen.insert(name.clone());
-                    free.push(name.clone());
-                }
+                    && !seen.contains(name) =>
+            {
+                seen.insert(name.clone());
+                free.push(name.clone());
             }
             Expr::BinaryOp(lhs, _, rhs, _) => {
                 self.collect_free_vars_inner(lhs, bound, free, seen);

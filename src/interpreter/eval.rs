@@ -1532,12 +1532,20 @@ impl Interpreter {
                 "Float" => Ok(JsonSchema::Primitive(PrimitiveType::Float)),
                 "Bool" => Ok(JsonSchema::Primitive(PrimitiveType::Bool)),
                 type_name => {
+                    // C16: TypeDef wins over Enum when both exist (collision
+                    // is currently disallowed by the parser, but keep the
+                    // precedence explicit for future-proofing).
                     if let Some(fields) = self.type_defs.get(type_name) {
                         Ok(build_schema_from_typedef(
                             type_name,
                             fields,
                             &self.type_defs,
+                            &self.enum_defs,
                         ))
+                    } else if let Some(variants) = self.enum_defs.get(type_name) {
+                        // C16: Enum as top-level JSON schema. On match returns
+                        // Value::Int(ordinal); on mismatch returns Lax[Enum].
+                        Ok(JsonSchema::Enum(type_name.to_string(), variants.clone()))
                     } else {
                         Err(RuntimeError {
                             message: format!(
