@@ -1,6 +1,6 @@
 [package]
 name = "taida-addon"
-version = "2.0.0"
+version = "2.1.0"
 edition.workspace = true
 license.workspace = true
 description = "Taida Lang addon authoring crate (ABI v1). Provides the frozen C ABI types and a safe Rust API for building Native-backend addons."

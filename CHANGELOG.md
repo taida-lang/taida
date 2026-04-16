@@ -2,109 +2,48 @@
 
 ## @c.13.rc3
 
-C13 closes out the two items C12 explicitly deferred: expression-block
-tail-binding semantics (C13-1) and the remaining mechanical file-split
-debt carried over from C12B-024 / C12B-025 / C12B-026. See
-`.dev/C13_PROGRESS.md` for the live progress tracker.
+### Language changes
 
-### Language-level changes
+- **Expression-block tail binding**: the last statement of a `| |>` arm
+  body, a function body, or a `|==` error-ceiling body may now be a
+  binding (`name <= expr`, `expr => name`, `expr ]=> name`, or
+  `name <=[ expr`). The bound value becomes the block's result, so a
+  redundant trailing `name` line is no longer required. Accepted in
+  all three backends (Interpreter / JS / Native).
 
-- **C13-1 — expression-block tail-binding semantics**
-  - Under C13-1 the tail statement of a `| |>` arm body, a function body,
-    or a `|==` error-ceiling body may be a binding (`name <= expr`,
-    `expr => name`, `expr ]=> name`, `name <=[ expr`). The bound value
-    becomes the block's result, so a redundant trailing `name` line is
-    no longer required.
-  - Pure `=>` single-direction pipelines now support intermediate
-    `=> name` as **bind-and-forward**: the current value is bound to
-    `name` *and* passed through unchanged. The binding is scoped to
-    the remainder of the pipeline statement, so a later step may
-    reference `name` without `[E1502] Undefined variable`.
-  - FB-17 safety is preserved: underscore-prefixed discard targets
-    (`... => _wr`, `_wr <= ...`, `... ]=> _wr`, `_wr <=[ ...`) remain
-    rejected inside `| |>` arm bodies, and non-tail bare call
-    statements / discard pipelines / nested definitions in arm bodies
-    continue to raise `[E1616]`.
-  - All three backends (Interpreter / JS / Native) evaluate tail
-    bindings identically. See `docs/guide/07_control_flow.md` for the
-    expanded rule, migration examples, and the C13-1 shorthand forms.
+- **Bind-and-forward in pipelines**: a single-direction `=>` pipeline
+  may now contain intermediate `=> name` steps. The current value is
+  bound to `name` *and* forwarded to the next step, and later steps
+  may reference `name`. Previously these produced
+  `[E1502] Undefined variable`.
 
-### Maintainability changes (mechanical splits — no behaviour change)
+- **Discard-binding rejection extended**: underscore-prefixed discard
+  targets (`=> _x`, `_x <= ...`, `]=> _x`, `_x <=[ ...`) are now
+  rejected at any position inside an arm body, function body, `|==`
+  handler body, or method body with `[E1616]`. Previously only arm
+  bodies enforced this — function / `|==` / method bodies silently
+  accepted discard bindings.
 
-All three splits are **move-only**: function bodies are preserved
-byte-for-byte, only visibility (`fn` → `pub(super) fn`) and
-cross-module paths are adjusted. Split layouts are documented in
-`.dev/C13_DESIGN.md` §§ C13-2 / C13-3 / C13-4.
+See `docs/guide/07_control_flow.md` for the full rule and shorthand
+forms.
 
-- **C13-2 — `src/codegen/lower/` mechanical split** (commit `34417ea`)
-  - Boundary layout:
-    - `lower/core.rs`, `lower/expr.rs`, `lower/imports.rs`,
-      `lower/infer.rs`, `lower/molds.rs`, `lower/stmt.rs`,
-      `lower/tag_prop.rs`, `lower/mod.rs` (existing splits preserved)
-    - `lower/stdlib.rs`, `lower/net.rs`, `lower/os.rs` (new fan-out
-      from the former monolithic stdlib section)
-  - Closes `C12B-024` (`lower.rs` split deferral).
+### Internal
 
-- **C13-3 — `src/interpreter/net_eval/` mechanical split** (commit `f6a7155`)
-  - Boundary layout (4,208-line `mod.rs` fanned out into five
-    responsibility-scoped submodules + a 346-line dispatcher `mod.rs`):
-    - `net_eval/mod.rs` — `try_net_func` dispatcher + `eval_net_bytes_arg`
-    - `net_eval/stream.rs` — v3 streaming (`startResponse` /
-      `writeChunk` / `endResponse` / `sseEvent`) + v4 body streaming
-      (`readBodyChunk` / `readBodyAll`) + chunked helpers
-    - `net_eval/ws.rs` — WebSocket implementation (`wsUpgrade` /
-      `wsSend` / `wsReceive` / `wsClose` / `wsCloseCode`) + frame I/O
-      + `finalize_websocket_close`
-    - `net_eval/h1.rs` — HTTP/1.1 accept loop (`eval_http_serve`) +
-      `try_read_request` + `dispatch_request`
-    - `net_eval/h2.rs` — HTTP/2 serve loop (`serve_h2` /
-      `h2_connection_loop` / `send_h2_response`)
-    - `net_eval/h3.rs` — HTTP/3 serve entry point (`serve_h3`)
-  - Follow-up (`C13B-008` / commit `314791a`): the `tests/parity.rs`
-    `read_net_eval_source()` fragment list was extended to include
-    `h1.rs` / `h2.rs` / `h3.rs` / `stream.rs` / `ws.rs`, restoring
-    three source-audit parity tests that went red against the new
-    layout (`test_nb7_13_h3_transport_pending_source_parity`,
-    `test_net6_5b_websocket_word_at_a_time_mask`,
-    `test_net7_12f_release_truth_blocker_closure_verified`).
-  - Closes `C12B-025` (`net_eval.rs` split deferral).
-
-- **C13-4 — `src/codegen/native_runtime/` mechanical split** (commit `75cd4c5`)
-  - Boundary layout (legacy 7-fragment 886,457-byte monolith fanned
-    out into five domain-scoped C sources + a shared header):
-    - `native_runtime/core.c` — legacy fragments 1+2 (7,838 lines,
-      317,287 bytes)
-    - `native_runtime/os.c` — legacy fragment 3 (668 lines,
-      26,425 bytes)
-    - `native_runtime/tls.c` — legacy fragment 4 (1,720 lines,
-      68,080 bytes)
-    - `native_runtime/net_h1_h2.c` — legacy fragments 5+6 (6,182 lines,
-      276,115 bytes)
-    - `native_runtime/net_h3_quic.c` — legacy fragment 7 (4,458 lines,
-      198,550 bytes)
-    - `native_runtime/runtime.h` — declarative responsibility index
-      (not part of the concatenated runtime source)
-  - Concatenated byte count 886,457 preserved from C12B-026; the new
-    invariant test
-    `test_native_runtime_c13_4_merge_preserves_historical_boundaries`
-    pins the historical inter-fragment byte boundaries.
-  - Closes `C12B-026` (`native_runtime.c` split deferral).
+- `src/codegen/lower/`, `src/interpreter/net_eval/`, and
+  `src/codegen/native_runtime/` were split along responsibility
+  boundaries. No user-visible behaviour change — only source layout
+  differs.
 
 ### Migration
 
-- Existing code that ended arm bodies / function bodies / `|==` handler
-  bodies with an expression continues to compile unchanged.
-- Code that worked around the former restriction by appending a
-  redundant `name` line can now drop that final line without any
-  semantic change (the bound value is the block result either way).
-- Code that wrote intermediate `=> name` in a pipeline and relied on
-  it being "passed through" previously produced `[E1502] Undefined
-  variable` — it now resolves as a bind-and-forward step. There is
-  no silent behaviour change for code that already compiled.
-- The three mechanical splits are not user-visible: no public API,
-  compiled output, or runtime behaviour changes. They only affect
-  source layout inside `src/codegen/lower/`,
-  `src/interpreter/net_eval/`, and `src/codegen/native_runtime/`.
+- Code that ended arm / function / `|==` bodies with an expression
+  continues to compile unchanged.
+- Code that appended a redundant `name` line to satisfy the old
+  restriction may drop that final line without semantic change.
+- Code that used discard bindings (`=> _x` etc.) in function or `|==`
+  bodies must be updated: either rename the target (dropping the
+  leading underscore) or remove the binding entirely if the value is
+  genuinely unused.
 
 ## @c.12.rc3 (in progress)
 
