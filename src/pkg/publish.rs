@@ -298,16 +298,27 @@ pub fn read_git_tags(project_dir: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Compare two Taida generation strings using the base-26-like
+/// progression that `next_generation` walks forward (`a..z`, then
+/// `aa..zz`, then `aaa..`, ...). Ordering is length-first, then
+/// lexicographic within the same length, so `"z" < "aa" < "ab" < "zz" < "aaa"`.
+///
+/// Plain `str::cmp` would put `"aa" < "z"` and silently re-age any
+/// repo that has crossed the `z -> aa` boundary (C14B-013).
+fn compare_generation(a: &str, b: &str) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
 pub fn latest_taida_tag(tags: &[String]) -> Option<String> {
     let mut parsed: Vec<(String, String, u64, Option<String>)> = tags
         .iter()
+        .filter(|t| crate::pkg::manifest::is_valid_taida_version(t))
         .filter_map(|t| {
-            let raw = t.strip_prefix('v').unwrap_or(t);
-            let (generation, num, label) = split_version(raw);
+            let (generation, num, label) = split_version(t);
             num.map(|n| (t.clone(), generation, n, label))
         })
         .collect();
-    parsed.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+    parsed.sort_by(|a, b| compare_generation(&a.1, &b.1).then(a.2.cmp(&b.2)));
     parsed.last().map(|t| t.0.clone())
 }
 
@@ -739,6 +750,80 @@ mod tests {
     #[test]
     fn latest_taida_tag_returns_none_when_empty() {
         assert_eq!(latest_taida_tag(&[]), None);
+    }
+
+    #[test]
+    fn compare_generation_orders_length_before_lex() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_generation("a", "b"), Ordering::Less);
+        assert_eq!(compare_generation("z", "aa"), Ordering::Less);
+        assert_eq!(compare_generation("aa", "z"), Ordering::Greater);
+        assert_eq!(compare_generation("aa", "ab"), Ordering::Less);
+        assert_eq!(compare_generation("zz", "aaa"), Ordering::Less);
+        assert_eq!(compare_generation("aa", "aa"), Ordering::Equal);
+    }
+
+    #[test]
+    fn latest_taida_tag_handles_z_to_aa_transition() {
+        // Regression for C14B-013: plain string cmp put "aa" < "z".
+        let tags = vec!["z.9".to_string(), "aa.1".to_string()];
+        assert_eq!(latest_taida_tag(&tags), Some("aa.1".to_string()));
+
+        let mixed = vec![
+            "a.3".to_string(),
+            "z.9".to_string(),
+            "aa.1".to_string(),
+            "aa.2".to_string(),
+            "ab.1".to_string(),
+        ];
+        assert_eq!(latest_taida_tag(&mixed), Some("ab.1".to_string()));
+    }
+
+    #[test]
+    fn latest_taida_tag_handles_zz_to_aaa_transition() {
+        let tags = vec!["zz.9".to_string(), "aaa.1".to_string()];
+        assert_eq!(latest_taida_tag(&tags), Some("aaa.1".to_string()));
+    }
+
+    #[test]
+    fn latest_taida_tag_ignores_v_prefixed_legacy_tags() {
+        // Regression for C14B-014: `v1.0.0` must not leak in as a
+        // Taida tag after being stripped to "1.0.0".
+        let tags = vec!["v1.0.0".to_string(), "a.1".to_string()];
+        assert_eq!(latest_taida_tag(&tags), Some("a.1".to_string()));
+    }
+
+    #[test]
+    fn latest_taida_tag_returns_none_when_only_legacy_tags() {
+        // Repo has v-prefixed semver tags only — no Taida release yet.
+        // Must report None so `next_version_from_diff` falls back to
+        // the initial `a.1` path.
+        let tags = vec![
+            "v1.0.0".to_string(),
+            "v1.0.1".to_string(),
+            "release-2024".to_string(),
+        ];
+        assert_eq!(latest_taida_tag(&tags), None);
+    }
+
+    #[test]
+    fn latest_taida_tag_rejects_non_taida_shaped_tags() {
+        // Upper-case generation, semver, bare integer, empty suffix —
+        // none of these satisfy is_valid_taida_version.
+        let tags = vec![
+            "A.1".to_string(),
+            "1.0.0".to_string(),
+            "42".to_string(),
+            "a.1.".to_string(),
+            "a.1.Alpha".to_string(),
+        ];
+        assert_eq!(latest_taida_tag(&tags), None);
+    }
+
+    #[test]
+    fn latest_taida_tag_accepts_label_suffix() {
+        let tags = vec!["a.1".to_string(), "a.2.rc".to_string()];
+        assert_eq!(latest_taida_tag(&tags), Some("a.2.rc".to_string()));
     }
 
     #[test]
