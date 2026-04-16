@@ -139,10 +139,18 @@ mod tests {
     /// and the tag-5 (Enum) branch in `json_serialize_pack_fields`. These
     /// changes let `jsonEncode` emit the variant-name Str (e.g. `"Running"`)
     /// for Enum fields, symmetric with the C16 `JSON[raw, Schema]()`
-    /// decoder. New total: 896,888.
+    /// decoder. Legacy total after C18-2: 896,888.
+    ///
+    /// C18B-003/005 (2026-04-17): +5,086 bytes in core.c — added the
+    /// per-pack enum registry
+    /// (`taida_register_pack_field_enum` / `taida_lookup_pack_field_enum_desc`
+    /// + `__pack_field_enum_registry`) so two packs sharing a field
+    /// name with different Enum types no longer collide in `jsonEncode`
+    /// (C18B-003); plus `taida_runtime_panic(msg)` for the strict
+    /// `Ordinal[]` runtime contract (C18B-005). New total: 901,974.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 896_888;
+        const EXPECTED_TOTAL_LEN: usize = 901_974;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -251,15 +259,23 @@ mod tests {
         // grew by +3,693 bytes (new registration helper, enum variant
         // emitter, tag-5 branch in `json_serialize_pack_fields`). Total
         // core.c growth is +3,998 bytes, splitting across the historical
-        // fragment boundary. The F2_PREFIX anchor now lands at offset
+        // fragment boundary. The F2_PREFIX anchor lands at offset
         // 210,216 (was 209,911). These changes let jsonEncode emit the
         // variant-name Str (e.g. `"Running"`) in symmetry with the C16
         // `JSON[raw, Schema]()` decoder.
-        const F1_LEN: usize = 210_216;
+        //
+        // C18B-003/005 (2026-04-17): fragment 1 grew by +1,114 bytes
+        // (forward declaration for `taida_register_pack_field_enum` +
+        // the `taida_runtime_panic` helper for C18B-005) and fragment 2
+        // grew by +3,972 bytes (per-pack enum registry storage + two
+        // register/lookup helpers + the preference-for-per-pack branch
+        // in `json_serialize_pack_fields`). F2_PREFIX now lands at
+        // offset 211,330.
+        const F1_LEN: usize = 211_330;
         assert_eq!(
             CORE_SECTION.len(),
-            210_216 + 117_502,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C18-2 adjusted)"
+            211_330 + 121_474,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C18B-003/005 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
