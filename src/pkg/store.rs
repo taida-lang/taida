@@ -1910,15 +1910,15 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
 /// `Authorization: Bearer     ` header that GitHub rejects with 401,
 /// silently masquerading as anonymous rate-limited access.
 fn github_auth_token() -> Option<String> {
-    if let Ok(t) = std::env::var("GH_TOKEN") {
-        if let Some(ok) = sanitize_auth_token(&t, "GH_TOKEN") {
-            return Some(ok);
-        }
+    if let Ok(t) = std::env::var("GH_TOKEN")
+        && let Some(ok) = sanitize_auth_token(&t, "GH_TOKEN")
+    {
+        return Some(ok);
     }
-    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        if let Some(ok) = sanitize_auth_token(&t, "GITHUB_TOKEN") {
-            return Some(ok);
-        }
+    if let Ok(t) = std::env::var("GITHUB_TOKEN")
+        && let Some(ok) = sanitize_auth_token(&t, "GITHUB_TOKEN")
+    {
+        return Some(ok);
     }
     match crate::auth::token::load_token() {
         Some(t) => sanitize_auth_token(&t.github_token, "~/.taida/auth.json"),
