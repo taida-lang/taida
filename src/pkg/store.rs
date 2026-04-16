@@ -1865,18 +1865,83 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
 /// unauthenticated requests.
 ///
 /// Pinned in `.dev/C17_IMPL_SPEC.md` so the precedence is auditable.
+///
+/// C18B-007 (carry from C17B-020): reject tokens containing `"` / `\`
+/// / `\n` / `\r` since the curl config stdin we pipe into looks like
+///   `header = "Authorization: Bearer <token>"`
+/// and those characters would either escape out of the quoted value
+/// or inject additional config directives. Silent failure is avoided
+/// by emitting a `warning:` line to stderr and treating the source as
+/// if the token were absent (offline fallback).
+///
+/// C18B-008 (carry from C17B-021): reject whitespace-only tokens for
+/// the same reason. A literal `"    "` would have produced an
+/// `Authorization: Bearer     ` header that GitHub rejects with 401,
+/// silently masquerading as anonymous rate-limited access.
 fn github_auth_token() -> Option<String> {
-    if let Ok(t) = std::env::var("GH_TOKEN")
-        && !t.is_empty()
-    {
-        return Some(t);
+    if let Ok(t) = std::env::var("GH_TOKEN") {
+        if let Some(ok) = sanitize_auth_token(&t, "GH_TOKEN") {
+            return Some(ok);
+        }
     }
-    if let Ok(t) = std::env::var("GITHUB_TOKEN")
-        && !t.is_empty()
-    {
-        return Some(t);
+    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+        if let Some(ok) = sanitize_auth_token(&t, "GITHUB_TOKEN") {
+            return Some(ok);
+        }
     }
-    crate::auth::token::load_token().map(|t| t.github_token)
+    match crate::auth::token::load_token() {
+        Some(t) => sanitize_auth_token(&t.github_token, "~/.taida/auth.json"),
+        None => None,
+    }
+}
+
+/// C18B-007/008 helper: validate a GitHub auth token before it is
+/// piped into `curl --config -`. Returns `Some(token)` when the token
+/// is safe to interpolate into
+///   `header = "Authorization: Bearer <token>"`,
+/// `None` otherwise. On rejection we emit a `warning:` line to stderr
+/// naming the source so the fallback to unauthenticated requests is
+/// visible in CI logs rather than silent.
+///
+/// Rejected shapes (each produces its own warning):
+///   - empty or whitespace-only tokens
+///   - tokens containing `"` / `\` / `\n` / `\r` — would either break
+///     out of the quoted curl config directive or inject another
+///     directive on a fresh line.
+fn sanitize_auth_token(raw: &str, source: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        if !raw.is_empty() {
+            // Non-empty but whitespace-only — callers would otherwise
+            // produce `Authorization: Bearer     ` and degrade into a
+            // silent 401 fallback (C18B-008).
+            eprintln!(
+                "warning: {} is whitespace-only; ignoring it and falling back to anonymous GitHub requests.",
+                source
+            );
+        }
+        return None;
+    }
+    // C18B-007: forbid control + quote + backslash inside the token.
+    // The curl config uses double-quotes around the header value so
+    // `"` / `\` / CR / LF escape out of that context.
+    for ch in trimmed.chars() {
+        if ch == '"' || ch == '\\' || ch == '\n' || ch == '\r' {
+            eprintln!(
+                "warning: {} contains an illegal character ({}); ignoring it and falling back to anonymous GitHub requests.",
+                source,
+                match ch {
+                    '"' => "double quote",
+                    '\\' => "backslash",
+                    '\n' => "newline",
+                    '\r' => "carriage return",
+                    _ => "control character",
+                }
+            );
+            return None;
+        }
+    }
+    Some(trimmed.to_string())
 }
 
 /// Tiny JSON object extractor: returns the substring `{...}` that is the
@@ -3532,6 +3597,88 @@ mod tests {
             req.contains("Accept: application/vnd.github.v3+json"),
             "HOLD M1: Accept header for tags API must be preserved. req: {}",
             req
+        );
+    }
+
+    // ── C18B-007 / C18B-008 regression: sanitize_auth_token ──
+    //
+    // The helper is a pure function (env-free); we exercise it
+    // directly to pin the rejection rules:
+    //   - empty → None (no warning, treated as "unset")
+    //   - whitespace-only → None (with warning per C18B-008)
+    //   - contains `"` → None (per C18B-007)
+    //   - contains `\` → None (per C18B-007)
+    //   - contains `\n` → None (per C18B-007)
+    //   - contains `\r` → None (per C18B-007)
+    //   - well-formed token → Some(trimmed)
+
+    #[test]
+    fn test_sanitize_auth_token_rejects_empty() {
+        assert_eq!(super::sanitize_auth_token("", "TEST_SRC"), None);
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_rejects_whitespace_only() {
+        // C18B-008: `"    "` used to pass through and produce
+        // `Authorization: Bearer     ` which GitHub 401-rejects.
+        assert_eq!(super::sanitize_auth_token("    ", "TEST_SRC"), None);
+        assert_eq!(super::sanitize_auth_token("\t\t", "TEST_SRC"), None);
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_rejects_double_quote() {
+        // C18B-007: `"` escapes out of the curl config's quoted value.
+        assert_eq!(
+            super::sanitize_auth_token("ghp_abc\"def", "TEST_SRC"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_rejects_backslash() {
+        // C18B-007: `\` is the escape prefix inside the curl config.
+        assert_eq!(
+            super::sanitize_auth_token("ghp_abc\\def", "TEST_SRC"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_rejects_newline() {
+        // C18B-007: `\n` in the raw token would inject a fresh config
+        // directive on the following line of the curl config stream.
+        assert_eq!(
+            super::sanitize_auth_token("ghp_abc\ndef", "TEST_SRC"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_rejects_cr() {
+        assert_eq!(
+            super::sanitize_auth_token("ghp_abc\rdef", "TEST_SRC"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_accepts_clean_token() {
+        // Typical shape: `ghp_` + 36 base62 chars.
+        let t = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+        assert_eq!(
+            super::sanitize_auth_token(t, "TEST_SRC"),
+            Some(t.to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_auth_token_trims_surrounding_whitespace() {
+        // Tokens routinely pick up a trailing newline from shell
+        // pipes (`echo $TOKEN`). Trimming is the expected behaviour
+        // — only the trimmed value is sent.
+        assert_eq!(
+            super::sanitize_auth_token("  ghp_abc123\n", "TEST_SRC"),
+            Some("ghp_abc123".to_string())
         );
     }
 }
