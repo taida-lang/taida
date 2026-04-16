@@ -268,13 +268,7 @@ fn c17b_004_cache_clean_store_with_yes_removes_all_packages() {
     let tmp = unique_temp_dir("c17b_004_store_yes");
     let home = tmp.join("home");
     fs::create_dir_all(&home).unwrap();
-    populate_store(
-        &home,
-        &[
-            ("alice", "http", "a.1"),
-            ("bob", "rpc", "c.1"),
-        ],
-    );
+    populate_store(&home, &[("alice", "http", "a.1"), ("bob", "rpc", "c.1")]);
     assert!(store_entry_exists(&home, "alice", "http", "a.1"));
     assert!(store_entry_exists(&home, "bob", "rpc", "c.1"));
 
@@ -358,13 +352,7 @@ fn c17b_004_cache_clean_store_pkg_conflicts_with_store() {
     populate_store(&home, &[("alice", "http", "a.1")]);
 
     let out = Command::new(taida_bin())
-        .args([
-            "cache",
-            "clean",
-            "--store",
-            "--store-pkg",
-            "alice/http",
-        ])
+        .args(["cache", "clean", "--store", "--store-pkg", "alice/http"])
         .env("HOME", &home)
         .output()
         .expect("cache clean conflict");

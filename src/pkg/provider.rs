@@ -553,8 +553,8 @@ impl StoreProvider {
         version: &str,
     ) -> Result<StaleOutcome, String> {
         use super::store::{
-            classify_stale, refresh_reason_short, resolve_version_to_sha, RefreshReason,
-            StaleDecision,
+            RefreshReason, StaleDecision, classify_stale, refresh_reason_short,
+            resolve_version_to_sha,
         };
 
         // Force-refresh short-circuits the table: stage the existing
@@ -599,10 +599,7 @@ impl StoreProvider {
                     "  sidecar for {}/{}@{} unreadable ({}); re-extracting",
                     org, name, version, e
                 );
-                if matches!(
-                    e,
-                    super::store::StoreError::UnknownMetaSchema { .. }
-                ) {
+                if matches!(e, super::store::StoreError::UnknownMetaSchema { .. }) {
                     eprintln!(
                         "  hint: this sidecar was written by a different taida \
                          version. Upgrade taida or pin {}/{}@{} to a version \
@@ -676,9 +673,7 @@ impl StoreProvider {
                 // refresh is filling in the missing SHA. This demystifies
                 // the re-download a new user sees on their second install.
                 let extra_hint = match &reason {
-                    RefreshReason::SidecarShaUnknown => {
-                        " (filling in missing sidecar SHA)"
-                    }
+                    RefreshReason::SidecarShaUnknown => " (filling in missing sidecar SHA)",
                     _ => "",
                 };
                 eprintln!(
@@ -758,11 +753,7 @@ impl PackageProvider for StoreProvider {
                 // concurrent `taida install` processes do not clobber each
                 // other's extract. The lock is held for the duration of the
                 // decision table + fetch + commit.
-                let _lock_guard = match self.store.acquire_install_lock(
-                    org,
-                    name,
-                    &exact_version,
-                ) {
+                let _lock_guard = match self.store.acquire_install_lock(org, name, &exact_version) {
                     Ok(g) => g,
                     Err(e) => return ProviderResult::Error(e),
                 };
@@ -779,32 +770,27 @@ impl PackageProvider for StoreProvider {
                 // BEFORE calling the fetcher. If the fetch fails we
                 // restore the backup so the user's working install is
                 // preserved. On success we drop the backup.
-                let (remote_sha_for_sidecar, stash) = if self.store.is_cached(
-                    org, name, &exact_version,
-                ) {
-                    match self.apply_stale_decision(org, name, &exact_version) {
-                        Err(msg) => return ProviderResult::Error(msg),
-                        Ok(StaleOutcome::Skip) => (None, None),
-                        Ok(StaleOutcome::Refresh { sha }) => {
-                            match self.store.stage_invalidation(
-                                org,
-                                name,
-                                &exact_version,
-                            ) {
-                                Ok(stash) => (sha, stash),
-                                Err(e) => return ProviderResult::Error(e),
+                let (remote_sha_for_sidecar, stash) =
+                    if self.store.is_cached(org, name, &exact_version) {
+                        match self.apply_stale_decision(org, name, &exact_version) {
+                            Err(msg) => return ProviderResult::Error(msg),
+                            Ok(StaleOutcome::Skip) => (None, None),
+                            Ok(StaleOutcome::Refresh { sha }) => {
+                                match self.store.stage_invalidation(org, name, &exact_version) {
+                                    Ok(stash) => (sha, stash),
+                                    Err(e) => return ProviderResult::Error(e),
+                                }
                             }
                         }
-                    }
-                } else {
-                    // Uncached: do not do an extra remote round-trip here.
-                    // `fetch_and_cache_with_meta` will record the SHA we
-                    // pass in, but for the first install we leave it
-                    // `None` -- the next `taida install` will detect the
-                    // missing SHA and do a pessimistic refresh that fills
-                    // it in. This keeps the first-install UX unchanged.
-                    (None, None)
-                };
+                    } else {
+                        // Uncached: do not do an extra remote round-trip here.
+                        // `fetch_and_cache_with_meta` will record the SHA we
+                        // pass in, but for the first install we leave it
+                        // `None` -- the next `taida install` will detect the
+                        // missing SHA and do a pessimistic refresh that fills
+                        // it in. This keeps the first-install UX unchanged.
+                        (None, None)
+                    };
 
                 let fetch_result = self.store.fetch_and_cache_with_meta(
                     org,
@@ -816,19 +802,17 @@ impl PackageProvider for StoreProvider {
                 match fetch_result {
                     Ok(path) => {
                         // Fetch succeeded; drop the backup (if any).
-                        if let Some(stash_path) = stash {
-                            if let Err(e) =
-                                self.store.commit_invalidation(&stash_path)
-                            {
-                                // Non-fatal: the new install is already in
-                                // place, the stash is just leftover disk
-                                // space. Warn the user once.
-                                eprintln!(
-                                    "  warning: could not remove refresh backup '{}': {}",
-                                    stash_path.display(),
-                                    e
-                                );
-                            }
+                        if let Some(stash_path) = stash
+                            && let Err(e) = self.store.commit_invalidation(&stash_path)
+                        {
+                            // Non-fatal: the new install is already in
+                            // place, the stash is just leftover disk
+                            // space. Warn the user once.
+                            eprintln!(
+                                "  warning: could not remove refresh backup '{}': {}",
+                                stash_path.display(),
+                                e
+                            );
                         }
                         let integrity = compute_dir_hash(&path);
                         ProviderResult::Resolved(ResolvedPackage {
@@ -847,13 +831,8 @@ impl PackageProvider for StoreProvider {
                         // the user's previous install reappears instead of
                         // being silently lost.
                         if let Some(stash_path) = stash {
-                            let pkg_dir = self
-                                .store
-                                .package_path(org, name, &exact_version);
-                            match self.store.rollback_invalidation(
-                                &stash_path,
-                                &pkg_dir,
-                            ) {
+                            let pkg_dir = self.store.package_path(org, name, &exact_version);
+                            match self.store.rollback_invalidation(&stash_path, &pkg_dir) {
                                 Ok(()) => {
                                     eprintln!(
                                         "  refresh of {}/{}@{} failed ({}); \
@@ -974,13 +953,12 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
             // entire subtrees whose directory name collided with these
             // sentinel filenames.
             if path.is_file() {
-                if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                    if fname == crate::pkg::store::STORE_META_FILENAME
+                if let Some(fname) = path.file_name().and_then(|n| n.to_str())
+                    && (fname == crate::pkg::store::STORE_META_FILENAME
                         || fname == ".taida_installed"
-                        || (fname.starts_with('.') && fname.ends_with(".tmp"))
-                    {
-                        continue;
-                    }
+                        || (fname.starts_with('.') && fname.ends_with(".tmp")))
+                {
+                    continue;
                 }
                 files.push(path);
             } else if path.is_dir() {
@@ -1181,9 +1159,8 @@ mod tests {
 
     #[test]
     fn test_store_provider_with_refresh_flags_mutual_exclusion_panics() {
-        let result = std::panic::catch_unwind(|| {
-            StoreProvider::new().with_refresh_flags(true, true)
-        });
+        let result =
+            std::panic::catch_unwind(|| StoreProvider::new().with_refresh_flags(true, true));
         assert!(
             result.is_err(),
             "force_refresh + no_remote_check must panic at construction"
@@ -1224,8 +1201,7 @@ mod tests {
         .unwrap();
 
         let store = super::super::store::GlobalStore::with_root(dir.clone());
-        let provider = StoreProvider::with_store(store)
-            .with_refresh_flags(true, false);
+        let provider = StoreProvider::with_store(store).with_refresh_flags(true, false);
 
         let prev = std::env::var("TAIDA_GITHUB_API_URL").ok();
         unsafe {
@@ -1300,8 +1276,7 @@ mod tests {
         .unwrap();
 
         let store = super::super::store::GlobalStore::with_root(dir.clone());
-        let provider = StoreProvider::with_store(store)
-            .with_refresh_flags(true, false);
+        let provider = StoreProvider::with_store(store).with_refresh_flags(true, false);
 
         let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
         let prev_base = std::env::var("TAIDA_GITHUB_BASE_URL").ok();
@@ -1361,11 +1336,9 @@ mod tests {
             "// original content",
             "rollback must restore the exact previous content"
         );
-        let meta = super::super::store::read_meta(
-            &super::super::store::meta_path_for(&pkg_dir),
-        )
-        .unwrap()
-        .unwrap();
+        let meta = super::super::store::read_meta(&super::super::store::meta_path_for(&pkg_dir))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             meta.commit_sha, "oldsha",
             "rollback must restore the old sidecar (commit_sha=oldsha)"
@@ -1376,11 +1349,7 @@ mod tests {
         let staging_count = std::fs::read_dir(&parent)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .contains(".refresh-staging")
-            })
+            .filter(|e| e.file_name().to_string_lossy().contains(".refresh-staging"))
             .count();
         assert_eq!(
             staging_count, 0,

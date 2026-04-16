@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! C17-5: offline-path contract.
 //!
 //! When the remote is unreachable:
@@ -21,19 +23,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use mock::{make_tarball, MockServer, TagState};
+use mock::{MockServer, TagState, make_tarball};
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
     fs::create_dir_all(&dir).unwrap();
     dir
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! C17B-003: decision-table Row 1 (sidecar missing, remote known, flag
 //! absent) pure end-to-end test.
 //!
@@ -18,19 +20,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use mock::{make_tarball, MockServer, TagState};
+use mock::{MockServer, TagState, make_tarball};
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -139,8 +136,7 @@ fn c17b_003_row1_sidecarless_online_refreshes_pessimistically() {
         meta
     );
     // Row 1 contract: content is replaced by remote's current tarball.
-    let main_td =
-        fs::read_to_string(store_pkg.join("main.td")).expect("main.td must exist");
+    let main_td = fs::read_to_string(store_pkg.join("main.td")).expect("main.td must exist");
     assert!(
         main_td.contains("FRESH_FROM_REMOTE"),
         "Row 1 refresh must replace legacy content with remote's, got:\n{}",
@@ -213,8 +209,8 @@ fn c17b_001_force_refresh_offline_rolls_back_to_previous_install() {
         .join("alice")
         .join("warm2")
         .join("a.1");
-    let precious = fs::read_to_string(store_pkg.join("main.td"))
-        .expect("precious content must exist");
+    let precious =
+        fs::read_to_string(store_pkg.join("main.td")).expect("precious content must exist");
     assert!(precious.contains("PRECIOUS_WORKING_CONTENT"));
 
     // Step 2: run force-refresh with every network endpoint closed.
@@ -292,11 +288,7 @@ fn c17b_015_corrupt_sidecar_re_extracts() {
         .join("a.1");
     fs::create_dir_all(&store_pkg).unwrap();
     fs::write(store_pkg.join(".taida_installed"), "").unwrap();
-    fs::write(
-        store_pkg.join("packages.tdm"),
-        "<<<@a.1 alice/corrupt\n",
-    )
-    .unwrap();
+    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 alice/corrupt\n").unwrap();
     fs::write(store_pkg.join("main.td"), "stdout(\"STALE\")\n").unwrap();
     // schema_version=99 triggers StoreError::UnknownMetaSchema on read.
     fs::write(

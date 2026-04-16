@@ -49,12 +49,10 @@ impl StoreRefreshFlags {
     /// exists so callers (and tests) can double-check.
     pub fn validate(&self) -> Result<(), String> {
         if self.force_refresh && self.no_remote_check {
-            Err(
-                "--force-refresh and --no-remote-check cannot be combined \
+            Err("--force-refresh and --no-remote-check cannot be combined \
                  (force-refresh requires the remote lookup to be available \
                  for the sidecar it rewrites)"
-                    .to_string(),
-            )
+                .to_string())
         } else {
             Ok(())
         }
@@ -76,7 +74,12 @@ pub fn resolve_deps(manifest: &Manifest) -> ResolveResult {
 /// records `alice/demo@a.2`, a manifest dependency of `alice/demo@a` will
 /// resolve to `a.2` instead of the latest version in generation `a`.
 pub fn resolve_deps_locked(manifest: &Manifest, lockfile: &Lockfile) -> ResolveResult {
-    resolve_deps_inner(manifest, false, Some(lockfile), StoreRefreshFlags::default())
+    resolve_deps_inner(
+        manifest,
+        false,
+        Some(lockfile),
+        StoreRefreshFlags::default(),
+    )
 }
 
 /// C17-2: variant of `resolve_deps_locked` that forwards the C17 refresh
@@ -220,8 +223,7 @@ fn resolve_deps_inner(
         )
     } else {
         Box::new(
-            StoreProvider::new()
-                .with_refresh_flags(flags.force_refresh, flags.no_remote_check),
+            StoreProvider::new().with_refresh_flags(flags.force_refresh, flags.no_remote_check),
         )
     };
 

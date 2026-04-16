@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! C17B-009: concurrent `taida install` processes must not corrupt the
 //! store.
 //!
@@ -16,19 +18,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use mock::{make_tarball, MockServer, TagState};
+use mock::{MockServer, TagState, make_tarball};
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -106,11 +103,7 @@ fn c17b_009_two_concurrent_installs_serialize_safely() {
 
     // The store must end in a consistent state: real version dir is
     // present with both marker and sidecar, no scratch dirs remain.
-    let pkg_parent = home
-        .join(".taida")
-        .join("store")
-        .join("alice")
-        .join("race");
+    let pkg_parent = home.join(".taida").join("store").join("alice").join("race");
     let version_dir = pkg_parent.join("a.1");
     assert!(
         version_dir.join(".taida_installed").exists(),

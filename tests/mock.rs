@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! C17-5: shared mock HTTP server for installer integration tests.
 //!
 //! Serves two endpoints that `taida install` talks to:
@@ -48,69 +50,71 @@ pub struct MockServer {
 impl MockServer {
     pub fn start(state: Arc<Mutex<TagState>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
-        listener
-            .set_nonblocking(false)
-            .expect("listener blocking");
+        listener.set_nonblocking(false).expect("listener blocking");
         let addr = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
 
-        let handle = std::thread::spawn(move || loop {
-            if stop_clone.load(Ordering::SeqCst) {
-                return;
-            }
-            // Check every accept for the stop flag. We use blocking accept
-            // but a short inactivity nudge: on accept we set a read
-            // timeout, handle, then loop.
-            let (mut stream, _peer) = match listener.accept() {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            if stop_clone.load(Ordering::SeqCst) {
-                return;
-            }
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-            let mut buf = [0u8; 4096];
-            let n = match stream.read(&mut buf) {
-                Ok(n) if n > 0 => n,
-                _ => continue,
-            };
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let path = req
-                .lines()
-                .next()
-                .and_then(|l| l.split_whitespace().nth(1))
-                .unwrap_or("/")
-                .to_string();
-            // Strip query string for matching.
-            let path_no_query = path.split_once('?').map(|(p, _)| p).unwrap_or(&path).to_string();
+        let handle = std::thread::spawn(move || {
+            loop {
+                if stop_clone.load(Ordering::SeqCst) {
+                    return;
+                }
+                // Check every accept for the stop flag. We use blocking accept
+                // but a short inactivity nudge: on accept we set a read
+                // timeout, handle, then loop.
+                let (mut stream, _peer) = match listener.accept() {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if stop_clone.load(Ordering::SeqCst) {
+                    return;
+                }
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let n = match stream.read(&mut buf) {
+                    Ok(n) if n > 0 => n,
+                    _ => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                // Strip query string for matching.
+                let path_no_query = path
+                    .split_once('?')
+                    .map(|(p, _)| p)
+                    .unwrap_or(&path)
+                    .to_string();
 
-            let s = state.lock().unwrap().clone();
-            let archive_pattern = format!(
-                "/{}/{}/archive/refs/tags/{}.tar.gz",
-                s.org, s.name, s.version
-            );
-            let refs_pattern = format!(
-                "/repos/{}/{}/git/refs/tags/{}",
-                s.org, s.name, s.version
-            );
-            let tags_pattern = format!("/repos/{}/{}/tags", s.org, s.name);
-
-            if path_no_query == archive_pattern {
-                write_binary_response(&mut stream, 200, "application/gzip", &s.tarball);
-            } else if path_no_query == refs_pattern {
-                let body = format!(
-                    "{{\"ref\":\"refs/tags/{}\",\"object\":{{\"sha\":\"{}\",\"type\":\"commit\",\"url\":\"u\"}}}}",
-                    s.version, s.commit_sha
+                let s = state.lock().unwrap().clone();
+                let archive_pattern = format!(
+                    "/{}/{}/archive/refs/tags/{}.tar.gz",
+                    s.org, s.name, s.version
                 );
-                write_text_response(&mut stream, 200, "application/json", &body);
-            } else if path_no_query == tags_pattern {
-                let body = format!("[{{\"name\":\"{}\"}}]", s.version);
-                write_text_response(&mut stream, 200, "application/json", &body);
-            } else {
-                write_text_response(&mut stream, 404, "text/plain", "not found");
+                let refs_pattern =
+                    format!("/repos/{}/{}/git/refs/tags/{}", s.org, s.name, s.version);
+                let tags_pattern = format!("/repos/{}/{}/tags", s.org, s.name);
+
+                if path_no_query == archive_pattern {
+                    write_binary_response(&mut stream, 200, "application/gzip", &s.tarball);
+                } else if path_no_query == refs_pattern {
+                    let body = format!(
+                        "{{\"ref\":\"refs/tags/{}\",\"object\":{{\"sha\":\"{}\",\"type\":\"commit\",\"url\":\"u\"}}}}",
+                        s.version, s.commit_sha
+                    );
+                    write_text_response(&mut stream, 200, "application/json", &body);
+                } else if path_no_query == tags_pattern {
+                    let body = format!("[{{\"name\":\"{}\"}}]", s.version);
+                    write_text_response(&mut stream, 200, "application/json", &body);
+                } else {
+                    write_text_response(&mut stream, 404, "text/plain", "not found");
+                }
+                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
-            let _ = stream.shutdown(std::net::Shutdown::Both);
         });
 
         MockServer {

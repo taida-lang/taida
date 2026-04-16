@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! C17-5: `taida install --force-refresh` re-extracts the store entry even
 //! when sidecar SHA matches the remote (fast-path would otherwise skip).
 //!
@@ -16,19 +18,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use mock::{make_tarball, MockServer, TagState};
+use mock::{MockServer, TagState, make_tarball};
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -53,10 +50,10 @@ fn sidecar_fetched_at(pkg_dir: &std::path::Path) -> String {
     let text = fs::read_to_string(pkg_dir.join("_meta.toml")).expect("sidecar exists");
     for line in text.lines() {
         let line = line.trim();
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "fetched_at" {
-                return value.trim().trim_matches('"').to_string();
-            }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "fetched_at"
+        {
+            return value.trim().trim_matches('"').to_string();
         }
     }
     panic!("sidecar has no fetched_at line:\n{}", text);
@@ -110,7 +107,11 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     // Install 1 (cold): sidecar is written with commit_sha="" because
     // Phase 2 does not do a remote lookup on the first install path.
     let out1 = run_install(&project, &home, &server.base_url(), &server.api_url(), &[]);
-    assert!(out1.status.success(), "first install failed: {}", String::from_utf8_lossy(&out1.stderr));
+    assert!(
+        out1.status.success(),
+        "first install failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
 
     let store_dir = home
         .join(".taida")
@@ -123,7 +124,11 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     // After this install, sidecar's commit_sha is the real SHA.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let out2 = run_install(&project, &home, &server.base_url(), &server.api_url(), &[]);
-    assert!(out2.status.success(), "2nd install failed: {}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        out2.status.success(),
+        "2nd install failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
     assert!(
         stderr2.contains("refreshing store"),
@@ -135,7 +140,11 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     let fetched_at_2 = sidecar_fetched_at(&store_dir);
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let out3 = run_install(&project, &home, &server.base_url(), &server.api_url(), &[]);
-    assert!(out3.status.success(), "3rd install failed: {}", String::from_utf8_lossy(&out3.stderr));
+    assert!(
+        out3.status.success(),
+        "3rd install failed: {}",
+        String::from_utf8_lossy(&out3.stderr)
+    );
     let stderr3 = String::from_utf8_lossy(&out3.stderr);
     assert!(
         !stderr3.contains("refreshing store"),
@@ -157,7 +166,11 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
         &server.api_url(),
         &["--force-refresh"],
     );
-    assert!(out4.status.success(), "force-refresh install failed: {}", String::from_utf8_lossy(&out4.stderr));
+    assert!(
+        out4.status.success(),
+        "force-refresh install failed: {}",
+        String::from_utf8_lossy(&out4.stderr)
+    );
     let stderr4 = String::from_utf8_lossy(&out4.stderr);
     assert!(
         stderr4.contains("refreshing store"),
@@ -168,7 +181,8 @@ fn c17_5_force_refresh_rewrites_store_entry_even_when_fresh() {
     assert!(
         fetched_at_4 > fetched_at_3,
         "--force-refresh must re-extract: sidecar.fetched_at must advance ({} !> {})",
-        fetched_at_4, fetched_at_3
+        fetched_at_4,
+        fetched_at_3
     );
 
     drop(server);
@@ -244,11 +258,7 @@ fn c17_5_force_refresh_handles_sidecar_less_install() {
         .join("a.1");
     fs::create_dir_all(&store_pkg).unwrap();
     fs::write(store_pkg.join(".taida_installed"), "").unwrap();
-    fs::write(
-        store_pkg.join("packages.tdm"),
-        "<<<@a.1 alice/legacy\n",
-    )
-    .unwrap();
+    fs::write(store_pkg.join("packages.tdm"), "<<<@a.1 alice/legacy\n").unwrap();
     fs::write(store_pkg.join("main.td"), "stdout(\"old\")\n").unwrap();
     // Deliberately no `_meta.toml`.
 
@@ -266,7 +276,11 @@ fn c17_5_force_refresh_handles_sidecar_less_install() {
         &server.api_url(),
         &["--force-refresh"],
     );
-    assert!(out.status.success(), "force-refresh install failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "force-refresh install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("unknown provenance"),

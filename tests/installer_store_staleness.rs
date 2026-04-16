@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! C17-5: end-to-end test that `taida install` detects a retag / delete+recreate
 //! on the remote and auto-refreshes the cached store entry.
 //!
@@ -19,19 +21,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use mock::{make_tarball, MockServer, TagState};
+use mock::{MockServer, TagState, make_tarball};
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        nanos
-    ));
+    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -103,9 +100,17 @@ fn c17_5_install_autorefreshes_when_tag_retags() {
     );
 
     // Verify first install placed `demo_v1.td` (from tarball v1) in the store.
-    let store_dir = fake_home.join(".taida").join("store").join("alice").join("demo").join("a.1");
+    let store_dir = fake_home
+        .join(".taida")
+        .join("store")
+        .join("alice")
+        .join("demo")
+        .join("a.1");
     assert!(store_dir.join("demo_v1.td").exists(), "v1 content missing");
-    assert!(!store_dir.join("demo_v2.td").exists(), "v2 content leaked in");
+    assert!(
+        !store_dir.join("demo_v2.td").exists(),
+        "v2 content leaked in"
+    );
 
     // Now swap the mock to v2 with a new SHA (simulate retag).
     {

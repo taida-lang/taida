@@ -121,12 +121,7 @@ impl GlobalStore {
     ///
     /// Path traversal is rejected up front (RCB-307 / SEC-009). Returns `Ok(())`
     /// when the directory does not exist -- invalidation is idempotent.
-    pub fn invalidate_package(
-        &self,
-        org: &str,
-        name: &str,
-        version: &str,
-    ) -> Result<(), String> {
+    pub fn invalidate_package(&self, org: &str, name: &str, version: &str) -> Result<(), String> {
         Self::validate_path_component(org, "org")?;
         Self::validate_path_component(name, "package name")?;
         Self::validate_path_component(version, "version")?;
@@ -215,9 +210,8 @@ impl GlobalStore {
         if !stash.exists() {
             return Ok(());
         }
-        std::fs::remove_dir_all(stash).map_err(|e| {
-            format!("Cannot remove refresh backup '{}': {}", stash.display(), e)
-        })
+        std::fs::remove_dir_all(stash)
+            .map_err(|e| format!("Cannot remove refresh backup '{}': {}", stash.display(), e))
     }
 
     /// C17B-001: Roll back a failed refresh by restoring the staged
@@ -374,9 +368,8 @@ impl GlobalStore {
         // curl's stdin-based `--config -` inside
         // `github_curl_download_to_file` so it does not leak through
         // `/proc/<pid>/cmdline`.
-        let download_ok = github_curl_download_to_file(&url, &archive_path).map_err(|e| {
+        let download_ok = github_curl_download_to_file(&url, &archive_path).inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            e
         })?;
         if !download_ok {
             let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -542,7 +535,7 @@ impl GlobalStore {
         // Parse tag names from JSON (handles both pretty-printed and compressed JSON)
         // Tags can be "a.3", "a.3.alpha" (new) or "va.3" (legacy) — extract num and pick highest
         let mut best: Option<(u64, String)> = None; // (num, version_without_v)
-        for tag in extract_json_name_values(&body) {
+        for tag in extract_json_name_values(body) {
             let suffix = tag
                 .strip_prefix(&prefix_new)
                 .or_else(|| tag.strip_prefix(&prefix_legacy));
@@ -1310,9 +1303,7 @@ fn summarize_store_root_impl(
         let names: Vec<PathBuf> = match scope {
             Some((_, name)) => vec![org_dir.join(name)],
             None => std::fs::read_dir(&org_dir)
-                .map_err(|e| {
-                    format!("cannot read store org {}: {}", org_dir.display(), e)
-                })?
+                .map_err(|e| format!("cannot read store org {}: {}", org_dir.display(), e))?
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())
@@ -1335,11 +1326,10 @@ fn summarize_store_root_impl(
                 if !ver_path.is_dir() {
                     continue;
                 }
-                let ver_name =
-                    match ver_path.file_name().and_then(|n| n.to_str()) {
-                        Some(s) => s.to_string(),
-                        None => continue,
-                    };
+                let ver_name = match ver_path.file_name().and_then(|n| n.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
                 let bytes = dir_size_bytes(&ver_path);
                 report.bytes_removed += bytes;
                 // C17B-011: classify real packages vs Taida-owned scratch
@@ -1430,9 +1420,8 @@ pub fn prune_store_package(
     }
     let pkg_dir = store_root.join(org).join(name);
     if pkg_dir.is_dir() {
-        std::fs::remove_dir_all(&pkg_dir).map_err(|e| {
-            format!("cannot remove {}: {}", pkg_dir.display(), e)
-        })?;
+        std::fs::remove_dir_all(&pkg_dir)
+            .map_err(|e| format!("cannot remove {}: {}", pkg_dir.display(), e))?;
     }
     Ok(report)
 }
@@ -1501,10 +1490,7 @@ pub enum RefreshReason {
 ///
 /// The table is the authoritative contract of C17-2. See
 /// `.dev/C17_IMPL_SPEC.md` Phase 2 for the frozen mapping.
-pub fn classify_stale(
-    sidecar: Option<&StoreMeta>,
-    remote_sha: Option<&str>,
-) -> StaleDecision {
+pub fn classify_stale(sidecar: Option<&StoreMeta>, remote_sha: Option<&str>) -> StaleDecision {
     match (sidecar, remote_sha) {
         // Row 1: no sidecar, remote known -> pessimistic refresh.
         (None, Some(_)) => StaleDecision::Refresh(RefreshReason::MissingSidecar),
@@ -1546,11 +1532,13 @@ pub fn classify_stale(
 pub fn refresh_reason_short(reason: &RefreshReason) -> String {
     match reason {
         RefreshReason::MissingSidecar => "missing sidecar".to_string(),
-        RefreshReason::SidecarShaUnknown => {
-            "sidecar has no recorded commit sha".to_string()
-        }
+        RefreshReason::SidecarShaUnknown => "sidecar has no recorded commit sha".to_string(),
         RefreshReason::RemoteMoved { old_sha, new_sha } => {
-            format!("remote moved: sha {}..{}", truncate_sha(old_sha), truncate_sha(new_sha))
+            format!(
+                "remote moved: sha {}..{}",
+                truncate_sha(old_sha),
+                truncate_sha(new_sha)
+            )
         }
     }
 }
@@ -1610,10 +1598,7 @@ pub fn resolve_version_to_sha(
 
     let api = github_api_url();
     let api = api.trim_end_matches('/');
-    let url = format!(
-        "{}/repos/{}/{}/git/refs/tags/{}",
-        api, org, name, version
-    );
+    let url = format!("{}/repos/{}/{}/git/refs/tags/{}", api, org, name, version);
     let body = match curl_get_optional(&url)? {
         Some(body) => body,
         None => {
@@ -1775,10 +1760,7 @@ fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
 ///   stderr warning so the fallback is never silent.
 /// - `Err(msg)` only when the curl process itself cannot be launched
 ///   or stdin writing fails.
-fn github_curl_api_get_optional(
-    url: &str,
-    accept: &str,
-) -> Result<Option<String>, String> {
+fn github_curl_api_get_optional(url: &str, accept: &str) -> Result<Option<String>, String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args([
         "-fsSL",
@@ -1805,14 +1787,14 @@ fn github_curl_api_get_optional(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to run curl: {}", e))?;
-    if let Some(token) = token_opt {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            writeln!(stdin, "header = \"Authorization: Bearer {}\"", token)
-                .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
-            // Explicit drop closes stdin so curl stops reading.
-            drop(stdin);
-        }
+    if let Some(token) = token_opt
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        use std::io::Write;
+        writeln!(stdin, "header = \"Authorization: Bearer {}\"", token)
+            .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
+        // Explicit drop closes stdin so curl stops reading.
+        drop(stdin);
     }
     let output = child
         .wait_with_output()
@@ -1835,10 +1817,7 @@ fn github_curl_api_get_optional(
 /// - `--max-time 120` (tarballs are larger than API responses)
 /// - writes to `-o <dest>` instead of stdout
 /// - uses curl's default `Accept: */*`
-fn github_curl_download_to_file(
-    url: &str,
-    dest: &Path,
-) -> Result<bool, String> {
+fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args([
         "-fsSL",
@@ -1861,13 +1840,13 @@ fn github_curl_download_to_file(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to run curl: {}", e))?;
-    if let Some(token) = token_opt {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            writeln!(stdin, "header = \"Authorization: Bearer {}\"", token)
-                .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
-            drop(stdin);
-        }
+    if let Some(token) = token_opt
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        use std::io::Write;
+        writeln!(stdin, "header = \"Authorization: Bearer {}\"", token)
+            .map_err(|e| format!("Failed to pipe auth header to curl: {}", e))?;
+        drop(stdin);
     }
     let status = child
         .wait()
@@ -1887,15 +1866,15 @@ fn github_curl_download_to_file(
 ///
 /// Pinned in `.dev/C17_IMPL_SPEC.md` so the precedence is auditable.
 fn github_auth_token() -> Option<String> {
-    if let Ok(t) = std::env::var("GH_TOKEN") {
-        if !t.is_empty() {
-            return Some(t);
-        }
+    if let Ok(t) = std::env::var("GH_TOKEN")
+        && !t.is_empty()
+    {
+        return Some(t);
     }
-    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        if !t.is_empty() {
-            return Some(t);
-        }
+    if let Ok(t) = std::env::var("GITHUB_TOKEN")
+        && !t.is_empty()
+    {
+        return Some(t);
     }
     crate::auth::token::load_token().map(|t| t.github_token)
 }
@@ -2068,13 +2047,7 @@ impl InstallLock {
             .write(true)
             .truncate(false)
             .open(lock_path)
-            .map_err(|e| {
-                format!(
-                    "Cannot open lock file '{}': {}",
-                    lock_path.display(),
-                    e
-                )
-            })?;
+            .map_err(|e| format!("Cannot open lock file '{}': {}", lock_path.display(), e))?;
         Self::lock_blocking(&file, lock_path)?;
         Ok(InstallLock {
             file,
@@ -2098,11 +2071,7 @@ impl InstallLock {
             if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return Err(format!(
-                "flock('{}') failed: {}",
-                path.display(),
-                err
-            ));
+            return Err(format!("flock('{}') failed: {}", path.display(), err));
         }
     }
 
@@ -2403,8 +2372,8 @@ mod tests {
         StoreMeta {
             schema_version: STORE_META_SCHEMA_VERSION,
             commit_sha: "0cd5588720ac44e58a01e8f8831a62c023fab5cf".to_string(),
-            tarball_sha256:
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            tarball_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .to_string(),
             tarball_etag: Some("W/\"abcd-1234\"".to_string()),
             fetched_at: "2026-04-16T12:20:16Z".to_string(),
             source: "github:taida-lang/terminal".to_string(),
@@ -2688,8 +2657,8 @@ mod tests {
         let meta = StoreMeta {
             schema_version: STORE_META_SCHEMA_VERSION,
             commit_sha: "".to_string(), // Phase 1: unknown, Phase 2 fills in
-            tarball_sha256:
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            tarball_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .to_string(),
             tarball_etag: None,
             fetched_at: rfc3339_now(),
             source: "github:taida-lang/terminal".to_string(),
@@ -2769,10 +2738,7 @@ mod tests {
     #[test]
     fn test_classify_row3_sidecar_sha_differs_refreshes_with_reason() {
         let m = meta_with_sha("1111111111111111111111111111111111111111");
-        let d = classify_stale(
-            Some(&m),
-            Some("2222222222222222222222222222222222222222"),
-        );
+        let d = classify_stale(Some(&m), Some("2222222222222222222222222222222222222222"));
         match d {
             StaleDecision::Refresh(RefreshReason::RemoteMoved { old_sha, new_sha }) => {
                 assert_eq!(old_sha, "1111111111111111111111111111111111111111");
@@ -2980,8 +2946,7 @@ mod tests {
 
     impl Drop for MockServer {
         fn drop(&mut self) {
-            self.stop
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
             // Best-effort wakeup: open a connection so the accept loop
             // notices the stop flag.
             let _ = std::net::TcpStream::connect(self.addr);
@@ -2997,8 +2962,8 @@ mod tests {
     {
         use std::io::{Read, Write};
         use std::net::TcpListener;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         listener
@@ -3189,10 +3154,7 @@ mod tests {
         assert_eq!(report.packages_removed, 2);
         assert_eq!(
             report.packages,
-            vec![
-                "alice/http@a.1".to_string(),
-                "alice/http@a.2".to_string(),
-            ]
+            vec!["alice/http@a.1".to_string(), "alice/http@a.2".to_string(),]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3212,10 +3174,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         populate_store(
             &dir,
-            &[
-                ("alice", "http", "a.1", 8),
-                ("bob", "rpc", "c.1", 8),
-            ],
+            &[("alice", "http", "a.1", 8), ("bob", "rpc", "c.1", 8)],
         );
         // Also drop an orphan scratch dir.
         std::fs::create_dir_all(dir.join("alice").join("http").join(".tmp-a.3")).unwrap();
@@ -3244,7 +3203,10 @@ mod tests {
         }
 
         // Root itself is kept; org directories are gone.
-        assert!(dir.exists(), "root must remain so next install needn't mkdir");
+        assert!(
+            dir.exists(),
+            "root must remain so next install needn't mkdir"
+        );
         assert!(!dir.join("alice").exists(), "org dir must be gone");
         assert!(!dir.join("bob").exists(), "org dir must be gone");
 
@@ -3257,18 +3219,14 @@ mod tests {
         // crashed `--force-refresh`) must not show up as a package.
         let dir = unique_tmp_dir("summarize_scratch");
         std::fs::create_dir_all(&dir).unwrap();
-        populate_store(
-            &dir,
-            &[("alice", "http", "a.1", 8)],
-        );
+        populate_store(&dir, &[("alice", "http", "a.1", 8)]);
         std::fs::create_dir_all(
             dir.join("alice")
                 .join("http")
                 .join("a.1.refresh-staging-12345-678"),
         )
         .unwrap();
-        std::fs::create_dir_all(dir.join("alice").join("http").join(".tmp-b.9"))
-            .unwrap();
+        std::fs::create_dir_all(dir.join("alice").join("http").join(".tmp-b.9")).unwrap();
 
         let report = summarize_store_root(&dir).unwrap();
         assert_eq!(report.packages_removed, 1);
@@ -3345,10 +3303,7 @@ mod tests {
     /// bearer token.
     fn start_mock_api_capturing<F>(
         responder: F,
-    ) -> (
-        MockServer,
-        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    )
+    ) -> (MockServer, std::sync::Arc<std::sync::Mutex<Vec<String>>>)
     where
         F: Fn(&str) -> Option<(u16, String)> + Send + Sync + 'static,
     {

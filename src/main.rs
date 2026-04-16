@@ -4552,9 +4552,7 @@ fn run_cache(args: &[String]) {
         println!("  clean --store [--yes]       C17: prune ~/.taida/store/ (shows a summary");
         println!("                              first; then asks to confirm interactively on a");
         println!("                              TTY, or requires --yes in non-TTY contexts)");
-        println!(
-            "  clean --store-pkg <org>/<name>   C17: prune a single store package"
-        );
+        println!("  clean --store-pkg <org>/<name>   C17: prune a single store package");
         println!("                              (no confirmation prompt; scope is narrow)");
         println!("  clean --all [--yes]         Remove WASM + addon cache + store (C17)");
         return;
