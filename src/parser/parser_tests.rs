@@ -2120,9 +2120,11 @@ validateProjectRoot =\n  \
 }
 
 #[test]
-fn test_c12_4_arm_body_trailing_let_binding_rejected() {
-    // The *final* statement must be an expression — a trailing
-    // let-binding with no following expression is a static error.
+fn test_c13_1_arm_body_trailing_let_binding_accepted() {
+    // C13-1 migration of the former test_c12_4_arm_body_trailing_let_binding_rejected.
+    // Under C13-1 a trailing `name <= expr` (or `expr => name`) in a
+    // `| |>` arm body is accepted as a tail binding that yields the
+    // bound value as the arm result.
     let source = "\
 broken n =\n  \
   | n > 0 |>\n    \
@@ -2130,21 +2132,14 @@ broken n =\n  \
   | _ |> 0\n\
 => :Int\n";
     let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
     assert!(
-        !errors.is_empty(),
-        "Expected [E1616] for arm body ending in a let-binding"
-    );
-    assert!(
-        errors.iter().any(|e| e.message.contains("E1616")),
-        "Expected E1616, got: {:?}",
-        errors
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("must end with a result expression")),
-        "Expected end-with-result-expression mention, got: {:?}",
-        errors
+        e1616.is_empty(),
+        "C13-1: trailing `x <= n + 1` should be accepted as a tail binding, got: {:?}",
+        e1616
     );
 }
 
@@ -2162,4 +2157,227 @@ classify x =\n  \
     let (program, errors) = parse(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert_eq!(program.statements.len(), 1);
+}
+
+// ── C13-1: expression-block tail-binding semantics ───────────
+
+#[test]
+fn test_c13_1_arm_body_tail_assignment_accepted() {
+    // `name <= expr` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the bound value as the arm result.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    doubled <= x * 2\n    \
+    result <= doubled + 1\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `result <= doubled + 1` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_tail_forward_assignment_accepted() {
+    // `expr => name` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the bound value as the arm result.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    x * 2 => doubled\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `x * 2 => doubled` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_tail_unmold_forward_accepted() {
+    // `expr ]=> name` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the unmolded value.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    lax <= Lax[x]()\n    \
+    lax ]=> n\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `lax ]=> n` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_tail_unmold_backward_accepted() {
+    // `name <=[ expr` at the tail of a `| |>` arm body is accepted
+    // under C13-1 and yields the unmolded value.
+    let source = "\
+f x =\n  \
+  | x > 0 |>\n    \
+    lax <= Lax[x]()\n    \
+    n <=[ lax\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    let e1616: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("E1616"))
+        .collect();
+    assert!(
+        e1616.is_empty(),
+        "C13-1: tail `n <=[ lax` should be accepted, got: {:?}",
+        e1616
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_discard_binding_still_rejected_at_tail() {
+    // FB-17 safety: an underscore-prefixed binding target is a discard
+    // pattern and must stay rejected even at the tail position in C13-1.
+    let source = "\
+bad x =\n  \
+  | x > 0 |>\n    \
+    writeFile(\"/tmp/x\", \"y\") => _wr\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13-1: `=> _wr` must stay rejected as a discard pattern, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("discard binding")),
+        "Expected 'discard binding' mention, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c13b_010_function_body_discard_binding_rejected() {
+    // C13B-010: discard bindings (`=> _x`, `_x <=`, `]=> _x`, `_x <=[`)
+    // must be rejected anywhere inside a function body — same rule as
+    // `| |>` arm body. Only `validate_cond_arm_body` previously enforced
+    // this, leaving function bodies as a safety hole.
+    let source = "\
+f =\n  \
+  1 => _x\n  \
+  42\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13B-010: `=> _x` inside function body must be rejected, got: {:?}",
+        errors
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("function body") && e.message.contains("discard binding")),
+        "C13B-010: error must mention `function body` and `discard binding`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c13b_010_function_body_discard_assignment_rejected() {
+    // C13B-010: `_y <= expr` variant in function body.
+    let source = "\
+f =\n  \
+  _y <= 1\n  \
+  42\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13B-010: `_y <=` inside function body must be rejected, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c13b_010_error_ceiling_body_discard_binding_rejected() {
+    // C13B-010: discard bindings inside `|==` handler body must also
+    // be rejected — the spec treats arm / function / error-ceiling
+    // bodies uniformly as expression blocks.
+    let source = "\
+boom =\n  \
+  0\n\
+=> :Int\n\
+|== e: Error =\n  \
+  1 => _x\n  \
+  0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13B-010: `=> _x` inside `|==` handler body must be rejected, got: {:?}",
+        errors
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("`|==` handler body")
+                && e.message.contains("discard binding")),
+        "C13B-010: error must mention `|==` handler body, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c13b_010_function_body_non_discard_binding_still_accepted() {
+    // C13B-010 guard: a normal (non-underscore) binding in function
+    // body must still be accepted — only discard targets trip the check.
+    let source = "\
+f =\n  \
+  x <= 1\n  \
+  x + 41\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("E1616")),
+        "C13B-010: `x <= 1` (non-discard) must be accepted, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_c13_1_arm_body_non_final_bare_call_still_rejected() {
+    // FB-17 safety: a non-tail bare call statement (side-effect in
+    // arm body before the final result) remains rejected in C13-1.
+    let source = "\
+bad x =\n  \
+  | x > 0 |>\n    \
+    stdout(\"debug\")\n    \
+    x\n  \
+  | _ |> 0\n\
+=> :Int\n";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("E1616")),
+        "C13-1: bare call at non-tail must stay rejected, got: {:?}",
+        errors
+    );
 }

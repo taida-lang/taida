@@ -26,30 +26,28 @@ fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")
 }
 
-/// C12B-026: `src/codegen/native_runtime.c` was split into 7 fragment
-/// files (`01_core.inc.c` .. `07_net_h3_main.inc.c`) under
-/// `src/codegen/native_runtime/`. Rust-level concatenation via
+/// C12B-026 / C13-4: `src/codegen/native_runtime.c` was first split
+/// (C12B-026) into 7 fragment files (`01_core.inc.c` .. `07_net_h3_main.inc.c`)
+/// and then re-aligned (C13-4) to 5 responsibility-based files
+/// (`core.c`, `os.c`, `tls.c`, `net_h1_h2.c`, `net_h3_quic.c`) plus a
+/// declarative shared header (`runtime.h`). See
+/// `src/codegen/native_runtime/runtime.h` and `mod.rs` for the
+/// responsibility map. Rust-level concatenation via
 /// `crate::codegen::native_runtime::NATIVE_RUNTIME_C` produces a
 /// byte-identical source for the clang invocation.
 ///
 /// Source-audit parity tests read the C source from disk (rather than
 /// via `include_str!`) so they pick up edits without recompiling the
-/// crate. After the split, those tests must concatenate all 7
-/// fragments themselves; this helper does exactly that and is
-/// byte-equivalent to `fs::read_to_string("src/codegen/native_runtime.c")`
-/// pre-split.
+/// crate. After the C13-4 merge, those tests must concatenate the 5
+/// fragments in the documented order; this helper does exactly that and
+/// is byte-equivalent to both the C12B-026 seven-fragment concatenation
+/// and the pre-split monolithic `native_runtime.c`.
 fn read_native_runtime_source() -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = manifest_dir.join("src/codegen/native_runtime");
-    let fragments = [
-        "01_core.inc.c",
-        "02_error_json.inc.c",
-        "03_os.inc.c",
-        "04_tls_tcp.inc.c",
-        "05_net_v1.inc.c",
-        "06_net_h2.inc.c",
-        "07_net_h3_main.inc.c",
-    ];
+    // C13-4 order: core -> os -> tls -> net_h1_h2 -> net_h3_quic.
+    // This order matches the legacy C12B-026 fragment 1..7 byte layout.
+    let fragments = ["core.c", "os.c", "tls.c", "net_h1_h2.c", "net_h3_quic.c"];
     let mut out = String::new();
     for name in fragments {
         let path = dir.join(name);
@@ -61,13 +59,23 @@ fn read_native_runtime_source() -> String {
 }
 
 /// C12B-025 (2026-04-15): `src/interpreter/net_eval.rs` was mechanically split
-/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`. Audit tests
+/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`.
+/// C13-3 (2026-04-16): further split into `h1/h2/h3/stream/ws`. Audit tests
 /// that look for wire-format patterns across the net runtime concatenate the
 /// non-test files so the checks remain path-stable.
 fn read_net_eval_source() -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = manifest_dir.join("src/interpreter/net_eval");
-    let fragments = ["mod.rs", "types.rs", "helpers.rs"];
+    let fragments = [
+        "mod.rs",
+        "types.rs",
+        "helpers.rs",
+        "h1.rs",
+        "h2.rs",
+        "h3.rs",
+        "stream.rs",
+        "ws.rs",
+    ];
     let mut out = String::new();
     for name in fragments {
         let path = dir.join(name);
@@ -2735,7 +2743,7 @@ fn test_time_sleep_timeout_via_var_three_way_parity() {
 waitWithTimeout p =
   s <= sleep(0)
   t <= Timeout[s, 100]()
-  t ]=> _done
+  t ]=> done
   "ok"
 => :Str
 
@@ -3120,9 +3128,9 @@ fn web_server_single_request_source(port: u16) -> String {
 respondAndClose socket body =
   wire <= "HTTP/1.1 200 OK\r\nContent-Length: " + body.length().toString() + "\r\nConnection: close\r\n\r\n" + body
   sendAsync <= socketSendAll(socket, wire, 5000)
-  sendAsync ]=> _sent
+  sendAsync ]=> sent
   closeAsync <= socketClose(socket)
-  closeAsync ]=> _closed
+  closeAsync ]=> closed
   0
 => :Int
 
@@ -3137,11 +3145,11 @@ main dummy =
   acceptAsync <= tcpAccept(listener.__value.listener, 5000)
   acceptAsync ]=> accepted
   recvAsync <= socketRecv(accepted.__value.socket, 5000)
-  recvAsync ]=> _req
+  recvAsync ]=> req
   jsonBody <= jsonEncode(@(ok <= true))
   respondAndClose(accepted.__value.socket, jsonBody)
   lcloseAsync <= listenerClose(listener.__value.listener)
-  lcloseAsync ]=> _lclosed
+  lcloseAsync ]=> lclosed
   0
 => :Int
 

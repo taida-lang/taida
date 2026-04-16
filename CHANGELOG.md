@@ -1,5 +1,50 @@
 # Changelog
 
+## @c.13.rc3
+
+### Language changes
+
+- **Expression-block tail binding**: the last statement of a `| |>` arm
+  body, a function body, or a `|==` error-ceiling body may now be a
+  binding (`name <= expr`, `expr => name`, `expr ]=> name`, or
+  `name <=[ expr`). The bound value becomes the block's result, so a
+  redundant trailing `name` line is no longer required. Accepted in
+  all three backends (Interpreter / JS / Native).
+
+- **Bind-and-forward in pipelines**: a single-direction `=>` pipeline
+  may now contain intermediate `=> name` steps. The current value is
+  bound to `name` *and* forwarded to the next step, and later steps
+  may reference `name`. Previously these produced
+  `[E1502] Undefined variable`.
+
+- **Discard-binding rejection extended**: underscore-prefixed discard
+  targets (`=> _x`, `_x <= ...`, `]=> _x`, `_x <=[ ...`) are now
+  rejected at any position inside an arm body, function body, `|==`
+  handler body, or method body with `[E1616]`. Previously only arm
+  bodies enforced this — function / `|==` / method bodies silently
+  accepted discard bindings.
+
+See `docs/guide/07_control_flow.md` for the full rule and shorthand
+forms.
+
+### Internal
+
+- `src/codegen/lower/`, `src/interpreter/net_eval/`, and
+  `src/codegen/native_runtime/` were split along responsibility
+  boundaries. No user-visible behaviour change — only source layout
+  differs.
+
+### Migration
+
+- Code that ended arm / function / `|==` bodies with an expression
+  continues to compile unchanged.
+- Code that appended a redundant `name` line to satisfy the old
+  restriction may drop that final line without semantic change.
+- Code that used discard bindings (`=> _x` etc.) in function or `|==`
+  bodies must be updated: either rename the target (dropping the
+  leading underscore) or remove the binding entirely if the value is
+  genuinely unused.
+
 ## @c.12.rc3 (in progress)
 
 In-flight release tracking the @c.12.rc3 milestone (`FUTURE_BLOCKERS.md`
