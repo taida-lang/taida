@@ -952,9 +952,9 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            // C17B-002: Skip taida-managed metadata files that would otherwise
-            // make the directory hash churn between installs even though the
-            // package content is unchanged.
+            // C17B-002 + HOLD M2 fix (2026-04-17): skip taida-managed metadata
+            // **files** that would otherwise make the directory hash churn
+            // between installs even though the package content is unchanged.
             //
             // Skipped files:
             //   - `_meta.toml`        -- C17 sidecar (contains `fetched_at`)
@@ -966,18 +966,25 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), s
             // part of the package's own content. Including them would cause
             // `.taida/taida.lock` integrity hashes to drift every time the
             // sidecar is rewritten, breaking lockfile reproducibility.
-            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                if fname == crate::pkg::store::STORE_META_FILENAME
-                    || fname == ".taida_installed"
-                    || (fname.starts_with('.') && fname.ends_with(".tmp"))
-                {
-                    continue;
+            //
+            // The filter is applied **inside** the `is_file()` branch so a
+            // directory whose name happens to match (the `_meta.toml` edge
+            // case) still has its contents traversed. Pre-HOLD the filter
+            // ran before the is_file/is_dir split, which would have skipped
+            // entire subtrees whose directory name collided with these
+            // sentinel filenames.
+            if path.is_file() {
+                if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                    if fname == crate::pkg::store::STORE_META_FILENAME
+                        || fname == ".taida_installed"
+                        || (fname.starts_with('.') && fname.ends_with(".tmp"))
+                    {
+                        continue;
+                    }
                 }
-            }
-            if path.is_dir() {
-                collect_files_recursive(&path, files)?;
-            } else {
                 files.push(path);
+            } else if path.is_dir() {
+                collect_files_recursive(&path, files)?;
             }
         }
     }
@@ -1640,6 +1647,48 @@ mod tests {
         assert_ne!(
             baseline, changed,
             "actual content change must flip hash even with metadata filters"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_dir_hash_handles_meta_toml_directory_edge_case() {
+        // HOLD M2 fix (2026-04-17) regression guard: the metadata filter
+        // must only apply to regular files. A **directory** named
+        // `_meta.toml` (or `.taida_installed` / `._meta.toml.tmp`) is an
+        // edge case that does not trigger any of the filter predicates;
+        // its contents must still be hashed. Pre-fix the filter ran
+        // before the is_file/is_dir split and would have skipped the
+        // entire subtree.
+        let dir = PathBuf::from("/tmp/taida_test_hash_m2_edgecase");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.td"), "stdout(\"hi\")\n").unwrap();
+
+        // Put a real content file inside a directory whose name collides
+        // with the sidecar filename.
+        let quirky = dir.join("_meta.toml");
+        std::fs::create_dir_all(&quirky).unwrap();
+        std::fs::write(quirky.join("inner.td"), "x = 1\n").unwrap();
+
+        let h1 = compute_dir_hash(&dir);
+
+        // Mutating a file inside the `_meta.toml/` directory MUST flip
+        // the hash, proving the subtree was traversed.
+        std::fs::write(quirky.join("inner.td"), "x = 2\n").unwrap();
+        let h2 = compute_dir_hash(&dir);
+        assert_ne!(
+            h1, h2,
+            "content inside a dir named _meta.toml must still affect hash (HOLD M2)"
+        );
+
+        // Adding a sibling inside the quirky dir also flips.
+        std::fs::write(quirky.join("extra.td"), "y = 3\n").unwrap();
+        let h3 = compute_dir_hash(&dir);
+        assert_ne!(
+            h2, h3,
+            "new file inside dir named _meta.toml must flip hash (HOLD M2)"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
