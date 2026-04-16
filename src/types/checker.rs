@@ -3314,20 +3314,37 @@ defaulted fields must be provided via `()`",
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
-                        // FL-4: Ordering operators require numeric or string operands
+                        // FL-4: Ordering operators require numeric or string operands.
+                        //
+                        // C18-4: Same-Enum ordering is also allowed. `>=` / `<=` /
+                        // `<` / `>` compare the declared ordinal position of the
+                        // two variants. Cross-Enum and Enum↔Int ordering stays
+                        // rejected with `[E1605]` — use `Ordinal[]` to obtain
+                        // the Int explicitly (added in C18-3). The declared
+                        // order of an Enum is therefore semantic; see
+                        // `docs/guide/01_types.md` for the author contract.
                         if left_type != Type::Unknown
                             && right_type != Type::Unknown
                             && !Self::contains_unknown(&left_type)
                             && !Self::contains_unknown(&right_type)
                         {
-                            let valid = (left_type.is_numeric() && right_type.is_numeric())
-                                || (matches!(left_type, Type::Str)
-                                    && matches!(right_type, Type::Str));
+                            let both_numeric =
+                                left_type.is_numeric() && right_type.is_numeric();
+                            let both_str = matches!(left_type, Type::Str)
+                                && matches!(right_type, Type::Str);
+                            let same_enum = match (&left_type, &right_type) {
+                                (Type::Named(a), Type::Named(b)) => {
+                                    a == b && self.registry.is_enum_type(a)
+                                }
+                                _ => false,
+                            };
+                            let valid = both_numeric || both_str || same_enum;
                             if !valid {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1605] Cannot compare {} with {} using {:?}. \
-                                         Hint: Ordering comparison requires numeric or string operands.",
+                                         Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                                         For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
                                         left_type, right_type, op
                                     ),
                                     span: span.clone(),
