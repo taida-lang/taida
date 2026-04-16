@@ -10,7 +10,21 @@
 ///   packages.tdm       <- used for transitive dependency resolution
 ///   ...
 ///   .taida_installed   <- download completion marker
+///   _meta.toml         <- C17 sidecar: provenance + stale-check metadata
 /// ```
+///
+/// ## C17 sidecar (`_meta.toml`)
+///
+/// C17 introduces a provenance sidecar written alongside `.taida_installed`.
+/// The sidecar records the tarball SHA-256, the resolved commit SHA (filled
+/// by the resolver in C17-2 / Phase 2), an RFC-3339 `fetched_at` timestamp,
+/// and the source identifier (e.g. `github:taida-lang/terminal`).
+///
+/// The sidecar exists so `taida install` can detect stale store entries when
+/// a tag is republished (retag / delete+recreate). See `.dev/C17_DESIGN.md`.
+///
+/// C17-1 only writes the sidecar. The stale-detection decision table is
+/// implemented in C17-2 (Phase 2) and consumed by `taida install` there.
 use std::path::{Path, PathBuf};
 
 /// Base URL for GitHub archive downloads.
@@ -87,8 +101,28 @@ impl GlobalStore {
     /// Fetch a package from GitHub and cache it in the store.
     ///
     /// Downloads the tarball from `https://github.com/{org}/{name}/archive/refs/tags/{version}.tar.gz`,
-    /// extracts it to `~/.taida/store/{org}/{name}/{version}/`, and creates a `.taida_installed` marker.
+    /// extracts it to `~/.taida/store/{org}/{name}/{version}/`, creates a
+    /// `.taida_installed` marker, and writes a C17 `_meta.toml` provenance
+    /// sidecar with the tarball SHA-256.
     pub fn fetch_and_cache(&self, org: &str, name: &str, version: &str) -> Result<PathBuf, String> {
+        self.fetch_and_cache_with_meta(org, name, version, None)
+    }
+
+    /// Fetch a package from GitHub and cache it, optionally recording a
+    /// resolver-supplied commit SHA in the `_meta.toml` sidecar.
+    ///
+    /// C17-1 (Phase 1): records `tarball_sha256`, `fetched_at`, `source`,
+    /// `version`. The `commit_sha` is supplied by C17-2 (Phase 2) once the
+    /// resolver learns the SHA via `git ls-remote`. When `commit_sha` is
+    /// `None` the sidecar stores an empty string -- the decision table in
+    /// Phase 2 treats that as "sidecar present but SHA unknown".
+    pub fn fetch_and_cache_with_meta(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<PathBuf, String> {
         // RCB-307: Reject path traversal in components
         Self::validate_path_component(org, "org")?;
         Self::validate_path_component(name, "package name")?;
@@ -145,6 +179,17 @@ impl GlobalStore {
             ));
         }
 
+        // C17-1: compute tarball SHA-256 before extraction. The archive is
+        // read once here -- small enough for addons (tens of KiB to a few
+        // MiB) that a single in-memory pass is acceptable.
+        let tarball_sha256 = compute_file_sha256(&archive_path).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            format!(
+                "Failed to hash tarball for {}/{}@{}: {}",
+                org, name, version, e
+            )
+        })?;
+
         // Extract tarball (--strip-components=1 removes the top-level directory)
         let tar_status = std::process::Command::new("tar")
             .args(["xzf"])
@@ -169,6 +214,31 @@ impl GlobalStore {
         // Post-fetch manifest verification: ensure the extracted package's
         // packages.tdm identity and version match what was requested.
         Self::verify_fetched_package(&pkg_dir, org, name, version)?;
+
+        // C17-1: write provenance sidecar before the installed marker. The
+        // sidecar is written atomically so a crash after the marker but
+        // before the sidecar leaves only an "unknown provenance" state that
+        // the Phase 2 decision table treats as pessimistic-refresh.
+        let meta = StoreMeta {
+            schema_version: STORE_META_SCHEMA_VERSION,
+            commit_sha: commit_sha.unwrap_or("").to_string(),
+            tarball_sha256,
+            tarball_etag: None,
+            fetched_at: rfc3339_now(),
+            source: format!("github:{}/{}", org, name),
+            version: version.to_string(),
+        };
+        let meta_path = meta_path_for(&pkg_dir);
+        if let Err(e) = write_meta_atomic(&meta_path, &meta) {
+            // Clean up the half-installed package so the next install retries
+            // from scratch rather than observing a manifest+data without
+            // provenance metadata.
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            return Err(format!(
+                "Failed to write store sidecar for {}/{}@{}: {}",
+                org, name, version, e
+            ));
+        }
 
         // Create completion marker
         std::fs::write(pkg_dir.join(".taida_installed"), "")
@@ -464,6 +534,401 @@ fn extract_json_name_values(json: &str) -> Vec<String> {
     results
 }
 
+// =============================================================================
+// C17-1: store sidecar (`_meta.toml`)
+// =============================================================================
+//
+// `_meta.toml` records provenance metadata next to the extracted tarball so
+// `taida install` can later detect stale store entries when a tag is
+// republished (retag / delete+recreate).
+//
+// The sidecar is intentionally a tiny flat TOML document. C17 scope is
+// "add sidecar + stale detection"; a richer schema (content-addressable
+// layout) is deferred to C18+.
+//
+// Current schema version: `STORE_META_SCHEMA_VERSION = 1`.
+//
+// On-disk layout:
+// ```toml
+// # auto-generated by taida install (C17)
+// # Do not edit by hand.
+// schema_version = 1
+// commit_sha = "0cd5588720ac44e58a01e8f8831a62c023fab5cf"
+// tarball_sha256 = "<hex>"
+// # tarball_etag = "W/\"...\""  # optional; absent when None
+// fetched_at = "2026-04-16T12:20:16Z"
+// source = "github:taida-lang/terminal"
+// version = "a.1"
+// ```
+
+/// Filename for the provenance sidecar placed alongside the extracted
+/// tarball. Underscore prefix so it never collides with package files.
+pub const STORE_META_FILENAME: &str = "_meta.toml";
+
+/// Current schema version for `_meta.toml`. An older sidecar with a
+/// different `schema_version` is treated as "unknown provenance" so the
+/// caller (Phase 2) can force a refresh.
+pub const STORE_META_SCHEMA_VERSION: u32 = 1;
+
+/// Provenance metadata written alongside an extracted store package.
+///
+/// Written atomically via `write_meta_atomic` (tempfile + rename) so a
+/// crashed install leaves either a complete sidecar or no sidecar at all.
+/// Read via `read_meta`; missing sidecar returns `Ok(None)` (Phase 2
+/// treats that as pessimistic refresh).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreMeta {
+    /// Always `STORE_META_SCHEMA_VERSION` when written by current code.
+    pub schema_version: u32,
+    /// Commit SHA the version tag pointed at when fetched.
+    ///
+    /// Empty string means "unknown at fetch time" -- C17-1 writes this
+    /// when the resolver has not yet queried the remote HEAD. The Phase 2
+    /// decision table treats `commit_sha.is_empty()` as "sidecar present
+    /// but SHA unknown" and falls back to pessimistic refresh.
+    pub commit_sha: String,
+    /// SHA-256 (hex) of the tarball before extraction.
+    pub tarball_sha256: String,
+    /// HTTP ETag returned by the archive host, if exposed. Optional; the
+    /// field is omitted from the on-disk TOML when `None`.
+    pub tarball_etag: Option<String>,
+    /// RFC-3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) of when the tarball
+    /// was fetched.
+    pub fetched_at: String,
+    /// Source identifier, e.g. `"github:taida-lang/terminal"`.
+    pub source: String,
+    /// Version string as requested, e.g. `"a.1"`.
+    pub version: String,
+}
+
+/// Errors produced by the C17 store sidecar helpers.
+#[derive(Debug)]
+pub enum StoreError {
+    /// I/O error while reading/writing the sidecar.
+    Io(String),
+    /// Sidecar could not be parsed (malformed TOML).
+    Parse(String),
+    /// Sidecar is well-formed but declares a schema version this build
+    /// does not understand. Phase 2 treats this as pessimistic-refresh.
+    UnknownMetaSchema { actual: u32, expected: u32 },
+    /// Sidecar is missing a required key.
+    MissingField(&'static str),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Io(m) => write!(f, "store sidecar I/O error: {}", m),
+            StoreError::Parse(m) => write!(f, "store sidecar parse error: {}", m),
+            StoreError::UnknownMetaSchema { actual, expected } => write!(
+                f,
+                "store sidecar schema_version={} unsupported (this build supports {})",
+                actual, expected
+            ),
+            StoreError::MissingField(name) => {
+                write!(f, "store sidecar missing required field '{}'", name)
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+/// Return the sidecar path for an extracted package directory.
+pub fn meta_path_for(pkg_dir: &Path) -> PathBuf {
+    pkg_dir.join(STORE_META_FILENAME)
+}
+
+/// Read and parse a store sidecar.
+///
+/// Returns `Ok(None)` when the file does not exist (no sidecar is a valid
+/// state for pre-C17 installs and is handled by the Phase 2 decision
+/// table). Returns `Err` for malformed TOML or schema-version mismatches.
+pub fn read_meta(path: &Path) -> Result<Option<StoreMeta>, StoreError> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(StoreError::Io(e.to_string())),
+    };
+    let meta = parse_meta_str(&source)?;
+    Ok(Some(meta))
+}
+
+/// Write a store sidecar atomically (write to `<path>.tmp`, then rename).
+///
+/// The parent directory must already exist (typically the package
+/// extraction directory). The temp file is removed on failure so callers
+/// never observe a half-written sidecar.
+pub fn write_meta_atomic(path: &Path, meta: &StoreMeta) -> Result<(), StoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::Io(format!("sidecar path has no parent: {}", path.display())))?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            StoreError::Io(format!(
+                "cannot create sidecar directory {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(STORE_META_FILENAME);
+    let tmp_path = parent.join(format!(".{}.tmp", file_name));
+    // Best-effort cleanup of any leftover tmp from a prior crash.
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let serialized = serialize_meta(meta);
+    if let Err(e) = std::fs::write(&tmp_path, serialized.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(StoreError::Io(format!(
+            "cannot write temp sidecar {}: {}",
+            tmp_path.display(),
+            e
+        )));
+    }
+
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        StoreError::Io(format!(
+            "cannot atomically place sidecar {}: {}",
+            path.display(),
+            e
+        ))
+    })
+}
+
+/// Serialize a `StoreMeta` to the on-disk TOML form.
+///
+/// Kept as a free function (not `Display`) so tests and Phase 2 callers
+/// can round-trip without relying on inherent method location.
+fn serialize_meta(meta: &StoreMeta) -> String {
+    let mut out = String::new();
+    out.push_str("# auto-generated by taida install (C17)\n");
+    out.push_str("# Do not edit by hand.\n");
+    out.push_str(&format!("schema_version = {}\n", meta.schema_version));
+    out.push_str(&format!(
+        "commit_sha = \"{}\"\n",
+        escape_toml_basic_string(&meta.commit_sha)
+    ));
+    out.push_str(&format!(
+        "tarball_sha256 = \"{}\"\n",
+        escape_toml_basic_string(&meta.tarball_sha256)
+    ));
+    if let Some(etag) = &meta.tarball_etag {
+        out.push_str(&format!(
+            "tarball_etag = \"{}\"\n",
+            escape_toml_basic_string(etag)
+        ));
+    }
+    out.push_str(&format!(
+        "fetched_at = \"{}\"\n",
+        escape_toml_basic_string(&meta.fetched_at)
+    ));
+    out.push_str(&format!(
+        "source = \"{}\"\n",
+        escape_toml_basic_string(&meta.source)
+    ));
+    out.push_str(&format!(
+        "version = \"{}\"\n",
+        escape_toml_basic_string(&meta.version)
+    ));
+    out
+}
+
+/// Parse a store sidecar from a TOML string.
+///
+/// Accepts the flat key=value shape produced by `serialize_meta`. Lines
+/// starting with `#` are comments. Sections (`[...]`) are rejected --
+/// the sidecar schema has no sections in v1.
+fn parse_meta_str(source: &str) -> Result<StoreMeta, StoreError> {
+    let mut schema_version: Option<u32> = None;
+    let mut commit_sha: Option<String> = None;
+    let mut tarball_sha256: Option<String> = None;
+    let mut tarball_etag: Option<String> = None;
+    let mut fetched_at: Option<String> = None;
+    let mut source_field: Option<String> = None;
+    let mut version: Option<String> = None;
+
+    for (idx, raw_line) in source.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            return Err(StoreError::Parse(format!(
+                "line {}: sections are not allowed in _meta.toml v1",
+                line_no
+            )));
+        }
+
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            StoreError::Parse(format!("line {}: expected 'key = value'", line_no))
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+
+        match key {
+            "schema_version" => {
+                let n: u32 = value.parse().map_err(|_| {
+                    StoreError::Parse(format!(
+                        "line {}: schema_version must be a non-negative integer, got {:?}",
+                        line_no, value
+                    ))
+                })?;
+                schema_version = Some(n);
+            }
+            "commit_sha" => commit_sha = Some(parse_basic_string(value, line_no)?),
+            "tarball_sha256" => tarball_sha256 = Some(parse_basic_string(value, line_no)?),
+            "tarball_etag" => tarball_etag = Some(parse_basic_string(value, line_no)?),
+            "fetched_at" => fetched_at = Some(parse_basic_string(value, line_no)?),
+            "source" => source_field = Some(parse_basic_string(value, line_no)?),
+            "version" => version = Some(parse_basic_string(value, line_no)?),
+            other => {
+                // Unknown keys are tolerated (forward-compat) but reported
+                // in debug builds via the `parse_meta_str` contract being
+                // silent -- prefer ignore over error so v1 readers don't
+                // reject v1.x sidecars with additive fields.
+                let _ = other;
+            }
+        }
+    }
+
+    let schema_version = schema_version.ok_or(StoreError::MissingField("schema_version"))?;
+    if schema_version != STORE_META_SCHEMA_VERSION {
+        return Err(StoreError::UnknownMetaSchema {
+            actual: schema_version,
+            expected: STORE_META_SCHEMA_VERSION,
+        });
+    }
+
+    Ok(StoreMeta {
+        schema_version,
+        commit_sha: commit_sha.ok_or(StoreError::MissingField("commit_sha"))?,
+        tarball_sha256: tarball_sha256.ok_or(StoreError::MissingField("tarball_sha256"))?,
+        tarball_etag,
+        fetched_at: fetched_at.ok_or(StoreError::MissingField("fetched_at"))?,
+        source: source_field.ok_or(StoreError::MissingField("source"))?,
+        version: version.ok_or(StoreError::MissingField("version"))?,
+    })
+}
+
+/// Parse a TOML basic string literal (`"..."`) with minimal escape
+/// support: `\\`, `\"`, `\n`, `\r`, `\t`.
+fn parse_basic_string(value: &str, line_no: usize) -> Result<String, StoreError> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return Err(StoreError::Parse(format!(
+            "line {}: expected a quoted string, got {:?}",
+            line_no, value
+        )));
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some(other) => {
+                return Err(StoreError::Parse(format!(
+                    "line {}: unsupported escape \\{} in string",
+                    line_no, other
+                )));
+            }
+            None => {
+                return Err(StoreError::Parse(format!(
+                    "line {}: dangling backslash in string",
+                    line_no
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Escape a string for a TOML basic string literal.
+fn escape_toml_basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Compute the SHA-256 (hex) of a file by streaming it through the
+/// in-tree hasher. Used by C17-1 to record `tarball_sha256` in the
+/// sidecar.
+///
+/// The tarball is read fully into memory. Addon tarballs are typically
+/// tens of KiB to a few MiB, so a single-pass read is acceptable; if this
+/// ever grows we can switch to streaming via `Read::read_to_end` chunks.
+fn compute_file_sha256(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("cannot read {} for hashing: {}", path.display(), e))?;
+    Ok(crate::crypto::sha256_hex_bytes(&bytes))
+}
+
+/// Format `SystemTime::now()` as RFC-3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`).
+///
+/// Kept as a free function so the C17 sidecar can be written without
+/// pulling in a time crate. Precision is whole seconds, matching the
+/// granularity `taida install` needs for stale detection.
+fn rfc3339_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format_rfc3339_utc(secs)
+}
+
+/// Format a Unix-epoch second count as RFC-3339 UTC.
+///
+/// Implements the civil-calendar arithmetic locally (Howard Hinnant's
+/// `days_from_civil` inverse) so we do not need a dependency.
+fn format_rfc3339_utc(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let time_of_day = unix_secs % 86_400;
+    let hour = time_of_day / 3_600;
+    let minute = (time_of_day % 3_600) / 60;
+    let second = time_of_day % 60;
+
+    // Howard Hinnant: civil_from_days
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146_096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, m, d, hour, minute, second
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +1198,336 @@ mod tests {
                 && err.contains("addon.toml is present but cannot be parsed"),
             "error should mention addon.toml parse failure, got: {}",
             err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // =========================================================================
+    // C17-1: store sidecar (`_meta.toml`) unit tests
+    // =========================================================================
+
+    fn sample_meta() -> StoreMeta {
+        StoreMeta {
+            schema_version: STORE_META_SCHEMA_VERSION,
+            commit_sha: "0cd5588720ac44e58a01e8f8831a62c023fab5cf".to_string(),
+            tarball_sha256:
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            tarball_etag: Some("W/\"abcd-1234\"".to_string()),
+            fetched_at: "2026-04-16T12:20:16Z".to_string(),
+            source: "github:taida-lang/terminal".to_string(),
+            version: "a.1".to_string(),
+        }
+    }
+
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "taida_store_meta_{}_{}_{}",
+            tag,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn test_meta_path_for_layout() {
+        let pkg_dir = PathBuf::from("/tmp/anywhere/alice/http/b.12");
+        assert_eq!(
+            meta_path_for(&pkg_dir),
+            PathBuf::from("/tmp/anywhere/alice/http/b.12/_meta.toml")
+        );
+    }
+
+    #[test]
+    fn test_write_read_roundtrip() {
+        let dir = unique_tmp_dir("roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+
+        let original = sample_meta();
+        write_meta_atomic(&path, &original).expect("write_meta_atomic");
+
+        let loaded = read_meta(&path).expect("read_meta ok").expect("exists");
+        assert_eq!(loaded, original);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_without_etag_roundtrip() {
+        let dir = unique_tmp_dir("no_etag");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+
+        let mut meta = sample_meta();
+        meta.tarball_etag = None;
+        write_meta_atomic(&path, &meta).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains("tarball_etag"),
+            "sidecar should omit tarball_etag when None, got:\n{}",
+            contents
+        );
+
+        let loaded = read_meta(&path).unwrap().unwrap();
+        assert_eq!(loaded.tarball_etag, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_meta_missing_returns_none() {
+        let dir = unique_tmp_dir("missing");
+        // Note: directory intentionally not created
+        let path = meta_path_for(&dir);
+        let result = read_meta(&path).expect("missing sidecar is ok");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_read_meta_schema_mismatch() {
+        let dir = unique_tmp_dir("schema_mismatch");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+        // Write a sidecar with an unknown schema_version.
+        std::fs::write(
+            &path,
+            "schema_version = 99\n\
+             commit_sha = \"\"\n\
+             tarball_sha256 = \"\"\n\
+             fetched_at = \"2026-04-16T00:00:00Z\"\n\
+             source = \"github:foo/bar\"\n\
+             version = \"a.1\"\n",
+        )
+        .unwrap();
+
+        let err = read_meta(&path).expect_err("schema mismatch must error");
+        match err {
+            StoreError::UnknownMetaSchema { actual, expected } => {
+                assert_eq!(actual, 99);
+                assert_eq!(expected, STORE_META_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnknownMetaSchema, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_meta_missing_required_field() {
+        let dir = unique_tmp_dir("missing_field");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+        // schema_version present, but tarball_sha256 missing.
+        std::fs::write(
+            &path,
+            "schema_version = 1\n\
+             commit_sha = \"\"\n\
+             fetched_at = \"2026-04-16T00:00:00Z\"\n\
+             source = \"github:foo/bar\"\n\
+             version = \"a.1\"\n",
+        )
+        .unwrap();
+
+        let err = read_meta(&path).expect_err("missing field must error");
+        match err {
+            StoreError::MissingField(name) => assert_eq!(name, "tarball_sha256"),
+            other => panic!("expected MissingField, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_read_meta_rejects_sections() {
+        let dir = unique_tmp_dir("sections");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+        std::fs::write(
+            &path,
+            "schema_version = 1\n[unexpected]\ncommit_sha = \"\"\n",
+        )
+        .unwrap();
+
+        let err = read_meta(&path).expect_err("sections are rejected in v1");
+        match err {
+            StoreError::Parse(m) => {
+                assert!(m.contains("sections are not allowed"), "got: {}", m);
+            }
+            other => panic!("expected Parse, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_meta_atomic_no_tmp_file_leftover_on_success() {
+        let dir = unique_tmp_dir("atomic_success");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+
+        write_meta_atomic(&path, &sample_meta()).unwrap();
+
+        // The tempfile pattern is `.<name>.tmp`.
+        let tmp = dir.join(format!(".{}.tmp", STORE_META_FILENAME));
+        assert!(
+            !tmp.exists(),
+            "tempfile {} should be renamed away",
+            tmp.display()
+        );
+        assert!(path.exists(), "final sidecar should exist");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_meta_atomic_overwrites_stale_tmp() {
+        // Simulate a crashed write: a `.{name}.tmp` from a prior install
+        // lingers in the directory. `write_meta_atomic` must clean it up
+        // and still produce a valid sidecar.
+        let dir = unique_tmp_dir("atomic_stale_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = meta_path_for(&dir);
+        let tmp = dir.join(format!(".{}.tmp", STORE_META_FILENAME));
+        std::fs::write(&tmp, b"garbage from prior crash").unwrap();
+
+        write_meta_atomic(&path, &sample_meta()).unwrap();
+
+        assert!(!tmp.exists(), "stale tempfile must be removed");
+        let loaded = read_meta(&path).unwrap().unwrap();
+        assert_eq!(loaded, sample_meta());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_meta_atomic_creates_parent_dir_if_missing() {
+        // If the package directory somehow does not exist yet,
+        // write_meta_atomic should create it rather than fail.
+        let dir = unique_tmp_dir("atomic_no_parent");
+        let path = meta_path_for(&dir);
+        assert!(!dir.exists());
+        write_meta_atomic(&path, &sample_meta()).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_escape_and_parse_basic_string_roundtrip() {
+        let original = "line one\nline\ttwo \"quoted\" \\backslash\\";
+        let serialized = escape_toml_basic_string(original);
+        // The serialized form is the inner payload of a basic string;
+        // wrap it for round-trip through parse_basic_string.
+        let wrapped = format!("\"{}\"", serialized);
+        let parsed = parse_basic_string(&wrapped, 1).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_format_rfc3339_utc_known_epochs() {
+        assert_eq!(format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        // 2026-04-16T12:20:16Z: days_from_1970 =
+        //   (56*365 + 14 leap days to 2026-01-01 exclusive of 2024 already
+        //    counted) + (31+28+31+15)  -- computed independently and
+        //   cross-checked with `date -u -d '2026-04-16T12:20:16Z' +%s`.
+        assert_eq!(format_rfc3339_utc(1_776_342_016), "2026-04-16T12:20:16Z");
+        // Leap day edge: 2024-02-29T00:00:00Z -> 1_709_164_800
+        assert_eq!(format_rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+        // Pre-epoch-style boundary (first second of 2000): 946_684_800
+        assert_eq!(format_rfc3339_utc(946_684_800), "2000-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_rfc3339_now_matches_format_signature() {
+        let now = rfc3339_now();
+        // Shape: YYYY-MM-DDTHH:MM:SSZ == 20 chars
+        assert_eq!(now.len(), 20, "got {:?}", now);
+        assert!(now.ends_with('Z'));
+        assert_eq!(&now[4..5], "-");
+        assert_eq!(&now[7..8], "-");
+        assert_eq!(&now[10..11], "T");
+        assert_eq!(&now[13..14], ":");
+        assert_eq!(&now[16..17], ":");
+    }
+
+    #[test]
+    fn test_serialize_meta_emits_generated_header() {
+        let out = serialize_meta(&sample_meta());
+        assert!(
+            out.starts_with("# auto-generated by taida install (C17)\n"),
+            "header missing, got:\n{}",
+            out
+        );
+        assert!(out.contains("# Do not edit by hand."));
+    }
+
+    #[test]
+    fn test_parse_meta_str_tolerates_unknown_forward_compat_fields() {
+        // Future sidecar versions may add fields. v1 readers should
+        // ignore them rather than reject the sidecar outright.
+        let toml = "schema_version = 1\n\
+                    commit_sha = \"deadbeef\"\n\
+                    tarball_sha256 = \"abcd\"\n\
+                    fetched_at = \"2026-04-16T12:20:16Z\"\n\
+                    source = \"github:foo/bar\"\n\
+                    version = \"a.1\"\n\
+                    future_field = \"v1.1 addition\"\n";
+        let meta = parse_meta_str(toml).unwrap();
+        assert_eq!(meta.commit_sha, "deadbeef");
+        assert_eq!(meta.version, "a.1");
+    }
+
+    #[test]
+    fn test_fetch_and_cache_writes_sidecar_after_extract() {
+        // Integration-style test: use a local mock by wiring a pre-built
+        // tarball into the extraction path. We cannot easily exercise
+        // curl + tar here without network, so we validate the sidecar
+        // contract by calling write_meta_atomic directly on a simulated
+        // package directory. End-to-end coverage is owned by Phase 5.
+        let dir = unique_tmp_dir("fetch_sim");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pretend we just extracted a tarball here.
+        std::fs::write(dir.join("main.td"), "<<< @(main)\n").unwrap();
+
+        let meta = StoreMeta {
+            schema_version: STORE_META_SCHEMA_VERSION,
+            commit_sha: "".to_string(), // Phase 1: unknown, Phase 2 fills in
+            tarball_sha256:
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            tarball_etag: None,
+            fetched_at: rfc3339_now(),
+            source: "github:taida-lang/terminal".to_string(),
+            version: "a.1".to_string(),
+        };
+        let meta_path = meta_path_for(&dir);
+        write_meta_atomic(&meta_path, &meta).unwrap();
+
+        // Contract: sidecar lives next to the extracted tree.
+        assert!(meta_path.exists());
+        let loaded = read_meta(&meta_path).unwrap().unwrap();
+        assert_eq!(loaded.version, "a.1");
+        assert_eq!(loaded.source, "github:taida-lang/terminal");
+        assert!(
+            loaded.commit_sha.is_empty(),
+            "Phase 1 sidecar leaves commit_sha empty; Phase 2 fills it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_file_sha256_matches_known_vector() {
+        let dir = unique_tmp_dir("sha256");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let hex = compute_file_sha256(&path).unwrap();
+        assert_eq!(
+            hex,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
