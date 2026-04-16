@@ -984,6 +984,213 @@ fn format_rfc3339_utc(unix_secs: u64) -> String {
 }
 
 // =============================================================================
+// C17-3: store prune helpers (taida cache clean --store / --store-pkg)
+// =============================================================================
+
+/// Summary of a store prune pass. Reported to the user via `taida cache clean`.
+#[derive(Debug, Default, Clone)]
+pub struct StorePruneReport {
+    /// `~/.taida/store/` existed before the prune ran. When false,
+    /// nothing was removed and the caller should print
+    /// "No store cache found at ...".
+    pub root_existed: bool,
+    /// Number of store entries (`<org>/<name>/<version>/`) removed.
+    pub packages_removed: u64,
+    /// Number of bytes freed. Best-effort: computed by walking the
+    /// directory before deletion.
+    pub bytes_removed: u64,
+    /// Absolute path to the store root (for display).
+    pub root: PathBuf,
+    /// Names of the removed package entries, in deterministic order.
+    /// Format: `<org>/<name>@<version>`. Used for the summary preview
+    /// before a destructive prune.
+    pub packages: Vec<String>,
+}
+
+/// Compute a pre-flight summary of what `prune_store_root` would remove.
+///
+/// Non-destructive: merely walks `~/.taida/store/` and collects sizes.
+/// Used by `taida cache clean --store` to present a summary before the
+/// user confirms.
+pub fn summarize_store_root(store_root: &Path) -> Result<StorePruneReport, String> {
+    summarize_store_root_impl(store_root, None)
+}
+
+/// Same as `summarize_store_root` but scoped to a single
+/// `<org>/<name>` package (all versions).
+pub fn summarize_store_package(
+    store_root: &Path,
+    org: &str,
+    name: &str,
+) -> Result<StorePruneReport, String> {
+    validate_component_free(org, "org")?;
+    validate_component_free(name, "package name")?;
+    summarize_store_root_impl(store_root, Some((org, name)))
+}
+
+fn summarize_store_root_impl(
+    store_root: &Path,
+    scope: Option<(&str, &str)>,
+) -> Result<StorePruneReport, String> {
+    let mut report = StorePruneReport {
+        root: store_root.to_path_buf(),
+        root_existed: store_root.exists(),
+        ..Default::default()
+    };
+    if !report.root_existed {
+        return Ok(report);
+    }
+    // Walk <root>/<org>/<name>/<version> and collect each version dir.
+    let orgs: Vec<PathBuf> = match scope {
+        Some((org, _)) => vec![store_root.join(org)],
+        None => std::fs::read_dir(store_root)
+            .map_err(|e| format!("cannot read store root {}: {}", store_root.display(), e))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+    };
+    for org_dir in orgs {
+        if !org_dir.is_dir() {
+            continue;
+        }
+        let org_name = match org_dir.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let names: Vec<PathBuf> = match scope {
+            Some((_, name)) => vec![org_dir.join(name)],
+            None => std::fs::read_dir(&org_dir)
+                .map_err(|e| {
+                    format!("cannot read store org {}: {}", org_dir.display(), e)
+                })?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect(),
+        };
+        for name_dir in names {
+            if !name_dir.is_dir() {
+                continue;
+            }
+            let pkg_name = match name_dir.file_name().and_then(|n| n.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let versions = match std::fs::read_dir(&name_dir) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for ver_entry in versions.filter_map(|e| e.ok()) {
+                let ver_path = ver_entry.path();
+                if !ver_path.is_dir() {
+                    continue;
+                }
+                let ver_name =
+                    match ver_path.file_name().and_then(|n| n.to_str()) {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    };
+                // `.tmp-<ver>` directories from failed extractions are
+                // also pruned (they are store-owned scratch space).
+                report.packages_removed += 1;
+                report.bytes_removed += dir_size_bytes(&ver_path);
+                report
+                    .packages
+                    .push(format!("{}/{}@{}", org_name, pkg_name, ver_name));
+            }
+        }
+    }
+    // Deterministic order so CLI output is stable.
+    report.packages.sort();
+    Ok(report)
+}
+
+/// Best-effort recursive byte count. Errors are silently skipped (the
+/// prune summary is informational).
+fn dir_size_bytes(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += dir_size_bytes(&p);
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Prune the entire store root (`~/.taida/store/`).
+///
+/// Removes every `<org>/<name>/<version>/` directory, which also
+/// removes the sidecar and `.taida_installed` marker inside. Orphan
+/// `.tmp-*` scratch directories are removed too. `~/.taida/store/`
+/// itself is left in place (empty) so subsequent installs do not need
+/// to recreate it.
+///
+/// Returns a `StorePruneReport` describing what was removed.
+pub fn prune_store_root(store_root: &Path) -> Result<StorePruneReport, String> {
+    let mut report = summarize_store_root(store_root)?;
+    if !report.root_existed {
+        return Ok(report);
+    }
+    // Remove everything under <root> (including org dirs) but keep the
+    // root itself so the next install does not need to mkdir.
+    let entries = std::fs::read_dir(store_root)
+        .map_err(|e| format!("cannot read store root {}: {}", store_root.display(), e))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if p.is_dir() {
+            let _ = std::fs::remove_dir_all(&p);
+        } else {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    report.root = store_root.to_path_buf();
+    Ok(report)
+}
+
+/// Prune a single package (`<org>/<name>/*`) from the store.
+///
+/// Removes every version directory under `<root>/<org>/<name>/`. Returns
+/// `Ok(report)` with `packages_removed == 0` when nothing matched, so
+/// callers can distinguish "package not cached" from "prune failed".
+pub fn prune_store_package(
+    store_root: &Path,
+    org: &str,
+    name: &str,
+) -> Result<StorePruneReport, String> {
+    let report = summarize_store_package(store_root, org, name)?;
+    if !report.root_existed {
+        return Ok(report);
+    }
+    let pkg_dir = store_root.join(org).join(name);
+    if pkg_dir.is_dir() {
+        std::fs::remove_dir_all(&pkg_dir).map_err(|e| {
+            format!("cannot remove {}: {}", pkg_dir.display(), e)
+        })?;
+    }
+    Ok(report)
+}
+
+impl GlobalStore {
+    /// C17-3: absolute path to the store root. Used by
+    /// `taida cache clean --store` to surface the location in user-facing
+    /// summaries.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+// =============================================================================
 // C17-2: stale-detection decision table
 // =============================================================================
 //
@@ -2350,6 +2557,152 @@ mod tests {
         }
         drop(server);
         assert_eq!(result.unwrap(), Some("realcommit".to_string()));
+    }
+
+    // =========================================================================
+    // C17-3: store prune helpers
+    // =========================================================================
+
+    fn populate_store(root: &Path, entries: &[(&str, &str, &str, usize)]) {
+        // Each tuple: (org, name, version, bytes).
+        for (org, name, version, size) in entries {
+            let dir = root.join(org).join(name).join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".taida_installed"), "").unwrap();
+            let payload = vec![b'x'; *size];
+            std::fs::write(dir.join("main.td"), payload).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_summarize_store_root_empty_root_missing() {
+        let dir = unique_tmp_dir("prune_missing");
+        let report = summarize_store_root(&dir).unwrap();
+        assert!(!report.root_existed);
+        assert_eq!(report.packages_removed, 0);
+        assert!(report.packages.is_empty());
+        assert_eq!(report.root, dir);
+    }
+
+    #[test]
+    fn test_summarize_store_root_counts_packages() {
+        let dir = unique_tmp_dir("prune_summary");
+        std::fs::create_dir_all(&dir).unwrap();
+        populate_store(
+            &dir,
+            &[
+                ("alice", "http", "a.1", 16),
+                ("alice", "http", "a.2", 32),
+                ("bob", "rpc", "c.1", 64),
+            ],
+        );
+        let report = summarize_store_root(&dir).unwrap();
+        assert!(report.root_existed);
+        assert_eq!(report.packages_removed, 3);
+        assert!(report.bytes_removed >= (16 + 32 + 64));
+        assert_eq!(
+            report.packages,
+            vec![
+                "alice/http@a.1".to_string(),
+                "alice/http@a.2".to_string(),
+                "bob/rpc@c.1".to_string(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_summarize_store_package_scopes_to_org_name() {
+        let dir = unique_tmp_dir("prune_summary_pkg");
+        std::fs::create_dir_all(&dir).unwrap();
+        populate_store(
+            &dir,
+            &[
+                ("alice", "http", "a.1", 16),
+                ("alice", "http", "a.2", 32),
+                ("bob", "rpc", "c.1", 64),
+            ],
+        );
+        let report = summarize_store_package(&dir, "alice", "http").unwrap();
+        assert!(report.root_existed);
+        assert_eq!(report.packages_removed, 2);
+        assert_eq!(
+            report.packages,
+            vec![
+                "alice/http@a.1".to_string(),
+                "alice/http@a.2".to_string(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_summarize_store_package_rejects_traversal() {
+        let dir = unique_tmp_dir("prune_summary_traversal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = summarize_store_package(&dir, "..", "http").expect_err("traversal rejected");
+        assert!(err.contains("Invalid"), "got: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prune_store_root_removes_everything() {
+        let dir = unique_tmp_dir("prune_root");
+        std::fs::create_dir_all(&dir).unwrap();
+        populate_store(
+            &dir,
+            &[
+                ("alice", "http", "a.1", 8),
+                ("bob", "rpc", "c.1", 8),
+            ],
+        );
+        // Also drop an orphan scratch dir.
+        std::fs::create_dir_all(dir.join("alice").join("http").join(".tmp-a.3")).unwrap();
+
+        let report = prune_store_root(&dir).unwrap();
+        assert!(report.root_existed);
+        assert!(report.packages_removed >= 2);
+
+        // Root itself is kept; org directories are gone.
+        assert!(dir.exists(), "root must remain so next install needn't mkdir");
+        assert!(!dir.join("alice").exists(), "org dir must be gone");
+        assert!(!dir.join("bob").exists(), "org dir must be gone");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prune_store_package_only_touches_scope() {
+        let dir = unique_tmp_dir("prune_pkg");
+        std::fs::create_dir_all(&dir).unwrap();
+        populate_store(
+            &dir,
+            &[
+                ("alice", "http", "a.1", 8),
+                ("alice", "http", "a.2", 8),
+                ("alice", "other", "a.1", 8),
+                ("bob", "rpc", "c.1", 8),
+            ],
+        );
+
+        let report = prune_store_package(&dir, "alice", "http").unwrap();
+        assert_eq!(report.packages_removed, 2);
+
+        assert!(!dir.join("alice").join("http").exists(), "http gone");
+        assert!(dir.join("alice").join("other").exists(), "other kept");
+        assert!(dir.join("bob").join("rpc").exists(), "bob kept");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prune_store_package_missing_is_ok() {
+        let dir = unique_tmp_dir("prune_pkg_missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = prune_store_package(&dir, "alice", "http").unwrap();
+        assert!(report.root_existed);
+        assert_eq!(report.packages_removed, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

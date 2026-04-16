@@ -4546,42 +4546,92 @@ fn run_cache(args: &[String]) {
         println!("Usage: taida cache <command> [options]");
         println!();
         println!("Commands:");
-        println!("  clean              Remove cached WASM runtime .o files (default)");
-        println!("  clean --addons     Remove cached addon prebuild binaries");
-        println!("                     (RC15B-001: prunes ~/.taida/addon-cache/)");
-        println!("  clean --all        Remove both WASM and addon caches");
+        println!("  clean                       Remove cached WASM runtime .o files (default)");
+        println!("  clean --addons              Remove cached addon prebuild binaries");
+        println!("                              (RC15B-001: prunes ~/.taida/addon-cache/)");
+        println!("  clean --store [--yes]       C17: prune ~/.taida/store/ (shows a summary");
+        println!("                              then asks to confirm unless --yes is passed");
+        println!("                              or stdin is a TTY with y/Y)");
+        println!(
+            "  clean --store-pkg <org>/<name>   C17: prune a single store package"
+        );
+        println!("                              (no confirmation prompt; scope is narrow)");
+        println!("  clean --all [--yes]         Remove WASM + addon cache + store (C17)");
         return;
     }
 
     match args[0].as_str() {
         "clean" => {
             // RC15B-001: parse optional --addons / --all flags.
+            // C17-3: add --store / --store-pkg / --yes flags.
             let mut clean_wasm = true;
             let mut clean_addons = false;
-            for extra in &args[1..] {
-                match extra.as_str() {
+            let mut clean_store = false;
+            let mut store_pkg: Option<String> = None;
+            let mut assume_yes = false;
+
+            let mut i = 1;
+            while i < args.len() {
+                let extra = args[i].as_str();
+                match extra {
                     "--addons" => {
                         clean_wasm = false;
                         clean_addons = true;
                     }
+                    "--store" => {
+                        clean_wasm = false;
+                        clean_store = true;
+                    }
+                    "--store-pkg" => {
+                        clean_wasm = false;
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("Missing value for --store-pkg. Expected <org>/<name>.");
+                            std::process::exit(1);
+                        }
+                        store_pkg = Some(args[i].clone());
+                    }
                     "--all" => {
                         clean_wasm = true;
                         clean_addons = true;
+                        clean_store = true;
+                    }
+                    "--yes" | "-y" => {
+                        assume_yes = true;
                     }
                     other => {
                         eprintln!(
-                            "Unknown flag '{}' for 'taida cache clean'. Use --addons, --all, or no flag.",
+                            "Unknown flag '{}' for 'taida cache clean'. \
+                             Use --addons, --store, --store-pkg <org>/<name>, --all, or no flag.",
                             other
                         );
                         std::process::exit(1);
                     }
                 }
+                i += 1;
             }
+
+            // --store-pkg is mutually exclusive with --store / --all:
+            // targeted prune should not also wipe the whole store.
+            if store_pkg.is_some() && (clean_store || (clean_wasm && clean_addons)) {
+                eprintln!(
+                    "--store-pkg cannot be combined with --store or --all. \
+                     Use one or the other."
+                );
+                std::process::exit(1);
+            }
+
             if clean_wasm {
                 run_cache_clean();
             }
             if clean_addons {
                 run_cache_clean_addons();
+            }
+            if clean_store {
+                run_cache_clean_store(assume_yes);
+            }
+            if let Some(pkg) = store_pkg {
+                run_cache_clean_store_pkg(&pkg);
             }
         }
         other => {
@@ -4665,6 +4715,149 @@ fn run_cache_clean_addons() {
         }
         Err(e) => {
             eprintln!("Error cleaning addon cache: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+// C17-3: prune `~/.taida/store/` (all packages, all versions).
+//
+// Shows a summary first. Requires confirmation (`y` / `yes` / `Y` / `YES`
+// on stdin) unless `--yes` is passed. Non-TTY stdin must pass `--yes`
+// explicitly so scripts do not wipe the store accidentally.
+fn run_cache_clean_store(assume_yes: bool) {
+    let store_root = match taida::util::taida_home_dir() {
+        Ok(home) => home.join(".taida").join("store"),
+        Err(e) => {
+            eprintln!("Cannot locate taida home directory: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let summary = match taida::pkg::store::summarize_store_root(&store_root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading store: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if !summary.root_existed {
+        println!("No store cache found at '{}'.", summary.root.display());
+        return;
+    }
+    if summary.packages_removed == 0 {
+        println!(
+            "Store cache at '{}' is already clean.",
+            summary.root.display()
+        );
+        return;
+    }
+
+    // Show summary.
+    let mib = summary.bytes_removed as f64 / (1024.0 * 1024.0);
+    println!(
+        "Store cache at '{}' contains {} package(s), {:.2} MiB.",
+        summary.root.display(),
+        summary.packages_removed,
+        mib
+    );
+    // Preview the first few so a user can sanity-check.
+    let preview_n = 10usize;
+    for name in summary.packages.iter().take(preview_n) {
+        println!("  {}", name);
+    }
+    if summary.packages.len() > preview_n {
+        println!("  ... and {} more", summary.packages.len() - preview_n);
+    }
+
+    if !assume_yes {
+        use std::io::Write;
+        let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        if !is_tty {
+            eprintln!(
+                "Refusing to prune store in a non-TTY context without --yes. \
+                 Re-run with `taida cache clean --store --yes`."
+            );
+            std::process::exit(1);
+        }
+        print!("Remove all {} package(s)? [y/N] ", summary.packages_removed);
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            eprintln!("No input received; aborting.");
+            std::process::exit(1);
+        }
+        let answer = answer.trim();
+        if !matches!(answer, "y" | "Y" | "yes" | "YES") {
+            println!("Aborted.");
+            return;
+        }
+    }
+
+    match taida::pkg::store::prune_store_root(&store_root) {
+        Ok(report) => {
+            let mib = report.bytes_removed as f64 / (1024.0 * 1024.0);
+            println!(
+                "Removed {} package(s) ({:.2} MiB) from '{}'.",
+                report.packages_removed,
+                mib,
+                report.root.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Error pruning store: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+// C17-3: prune a single package from the store (all versions of
+// `<org>/<name>/*`). No confirmation is required since the scope is
+// narrow.
+fn run_cache_clean_store_pkg(pkg_spec: &str) {
+    let (org, name) = match pkg_spec.split_once('/') {
+        Some((o, n)) if !o.is_empty() && !n.is_empty() && !n.contains('/') => (o, n),
+        _ => {
+            eprintln!(
+                "Invalid --store-pkg value '{}'. Expected <org>/<name>.",
+                pkg_spec
+            );
+            std::process::exit(1);
+        }
+    };
+    let store_root = match taida::util::taida_home_dir() {
+        Ok(home) => home.join(".taida").join("store"),
+        Err(e) => {
+            eprintln!("Cannot locate taida home directory: {}", e);
+            std::process::exit(1);
+        }
+    };
+    match taida::pkg::store::prune_store_package(&store_root, org, name) {
+        Ok(report) => {
+            if !report.root_existed {
+                println!("No store cache found at '{}'.", report.root.display());
+                return;
+            }
+            if report.packages_removed == 0 {
+                println!(
+                    "Package '{}/{}' not found in store at '{}'.",
+                    org,
+                    name,
+                    report.root.display()
+                );
+                return;
+            }
+            let mib = report.bytes_removed as f64 / (1024.0 * 1024.0);
+            println!(
+                "Removed {} version(s) of {}/{} ({:.2} MiB) from '{}'.",
+                report.packages_removed,
+                org,
+                name,
+                mib,
+                report.root.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Error pruning store package: {}", e);
             std::process::exit(1);
         }
     }
