@@ -359,6 +359,53 @@ function __taida_registerEnumDef(name, variants) {
   __taida_enumDefs[name] = variants;
 }
 
+// C18-2: Construct a tagged Enum value that coerces to its ordinal Int for
+// arithmetic / comparison but emits its declared variant-name Str when
+// `JSON.stringify` is invoked (via `toJSON`). Mirrors the interpreter's
+// `Value::EnumVal(enum_name, ordinal)` variant.
+//
+// The return is wrapped in a Number subclass equivalent so that:
+//  - `a === b` (ordinal equality) still works with `Number.prototype`
+//    primitive coercion under `==`;
+//  - strict `===` against a primitive number requires `Number(a) === b`
+//    — we handle this at the callsites that matter (binary ops below);
+//  - `JSON.stringify` uses `toJSON` automatically (emits variant name);
+//  - `typeof` reports `'object'`, not `'number'` — this is acceptable
+//    because `typeof` on Enum values was never a contract, whereas the
+//    ordinal equality / arithmetic was. If a future test relies on
+//    `typeof`, we can revisit.
+function __taida_enumVal(enumName, ordinal) {
+  // Using a function-object wrapper — `new Number(ordinal)` is rejected
+  // by eslint in many configs, and assigning enumerable own properties
+  // keeps the object inspectable. `valueOf` drives primitive coercion
+  // (arithmetic, comparisons, ==). `toJSON` drives JSON.stringify.
+  const obj = Object.create(null);
+  obj.__taida_enum_name = enumName;
+  obj.__taida_enum_ordinal = ordinal;
+  obj.valueOf = function () { return ordinal; };
+  obj.toJSON = function () {
+    const variants = __taida_enumDefs[enumName];
+    if (variants && ordinal >= 0 && ordinal < variants.length) {
+      return variants[ordinal];
+    }
+    return ordinal;
+  };
+  obj.toString = function () { return String(ordinal); };
+  return obj;
+}
+
+// C18-2: Detect a tagged Enum value produced by `__taida_enumVal`.
+function __taida_isEnumVal(v) {
+  return v !== null && typeof v === 'object' && typeof v.__taida_enum_name === 'string' && typeof v.__taida_enum_ordinal === 'number';
+}
+
+// C18-2: Ordinal-coerce a value (enum wrapper or primitive number) for use
+// in arithmetic / comparison contexts that require a primitive.
+function __taida_enumOrdinal(v) {
+  if (__taida_isEnumVal(v)) return v.__taida_enum_ordinal;
+  return v;
+}
+
 // C16: Lax[Enum] shape identical to interpreter / native.
 //   @(hasValue=false, __value=Int(0), __default=Int(0), __type="Lax")
 // First-variant-is-default rule is encoded via Int(0). Delegates to
@@ -1953,6 +2000,9 @@ if (!String.prototype.__taida_str_patched) {
 
 // ── Helper: sort object keys for deterministic JSON output ──
 function __taidaSortKeys(obj) {
+  // C18-2: Pass Enum wrappers through untouched so JSON.stringify invokes
+  // their `toJSON` method and emits the variant-name Str.
+  if (__taida_isEnumVal(obj)) return obj;
   if (Array.isArray(obj)) return obj.map(__taidaSortKeys);
   if (obj && typeof obj === 'object' && !(obj instanceof __TaidaJSON)) {
     const sorted = {};

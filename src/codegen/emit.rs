@@ -1444,6 +1444,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val, Ptr, Val],
             returns: &[Val],
         },
+        // C18-2: taida_register_field_enum(hash, name_ptr, variants_csv_ptr)
+        // variants_csv_ptr is a C string "Red,Green,Blue" which the runtime
+        // splits at encode-time to find the variant name by ordinal.
+        "taida_register_field_enum" => RuntimeAbi {
+            params: &[Val, Ptr, Ptr],
+            returns: &[Val],
+        },
 
         // ── taida-lang/os package — input molds ──
         "taida_os_read" => RuntimeAbi {

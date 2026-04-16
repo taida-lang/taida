@@ -2514,7 +2514,14 @@ impl JsCodegen {
                     .ok_or_else(|| JsError {
                         message: format!("Unknown enum variant '{}:{}()'", enum_name, variant_name),
                     })?;
-                self.write(&ordinal.to_string());
+                // C18-2: Emit a tagged wrapper whose `toJSON` returns the
+                // variant-name Str. Arithmetic / comparison with the
+                // ordinal continues to work via `valueOf`. See
+                // `src/js/runtime/core.rs::__taida_enumVal`.
+                self.write(&format!(
+                    "__taida_enumVal('{}', {})",
+                    enum_name, ordinal
+                ));
                 Ok(())
             }
             Expr::MoldInst(name, type_args, fields, _) => {

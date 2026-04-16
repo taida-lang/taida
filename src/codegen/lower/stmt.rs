@@ -109,7 +109,21 @@ impl Lowering {
                                     "Float" => 2,
                                     "Str" => 3,
                                     "Bool" => 4,
-                                    _ => 0,
+                                    // C18-2: Enum-typed field → tag 5 (Enum).
+                                    // Look up variants so the runtime can emit
+                                    // the variant-name Str via
+                                    // `taida_register_field_enum`.
+                                    other => {
+                                        if let Some(variants) = self.enum_defs.get(other) {
+                                            // Record the descriptor so we can emit
+                                            // the register_field_enum call later.
+                                            self.field_enum_descriptors
+                                                .insert(field_def.name.clone(), variants.join(","));
+                                            5
+                                        } else {
+                                            0
+                                        }
+                                    }
                                 },
                                 _ => 0,
                             };
@@ -628,7 +642,26 @@ impl Lowering {
             for name in &sorted_names {
                 let hash = simple_hash(name);
                 let type_tag = self.field_type_tags.get(name).copied().unwrap_or(0);
-                if type_tag > 0 {
+                if type_tag == 5 {
+                    // C18-2: Enum field — register with variants CSV.
+                    let variants_csv = self
+                        .field_enum_descriptors
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let hash_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::ConstInt(hash_var, hash as i64));
+                    let name_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::ConstStr(name_var, name.clone()));
+                    let variants_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::ConstStr(variants_var, variants_csv));
+                    let result_var = main_fn.alloc_var();
+                    reg_insts.push(IrInst::Call(
+                        result_var,
+                        "taida_register_field_enum".to_string(),
+                        vec![hash_var, name_var, variants_var],
+                    ));
+                } else if type_tag > 0 {
                     // Use register_field_type (with type tag)
                     let hash_var = main_fn.alloc_var();
                     reg_insts.push(IrInst::ConstInt(hash_var, hash as i64));

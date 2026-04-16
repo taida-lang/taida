@@ -1573,6 +1573,19 @@ impl Lowering {
                 self.register_field_type_tag(&field.name, 4); // 4 = Bool
             }
 
+            // C18-2: Detect Enum-variant field values so anonymous
+            // BuchiPack literals (`@(state <= HiveState:Running())`) emit
+            // variant-name Str via jsonEncode. `expr_enum_type_name`
+            // walks the expression to find the source Enum name.
+            let enum_descriptor = self
+                .expr_enum_type_name(&field.value)
+                .and_then(|name| self.enum_defs.get(&name).map(|v| v.join(",")));
+            if let Some(csv) = enum_descriptor {
+                self.register_field_type_tag(&field.name, 5);
+                self.field_enum_descriptors
+                    .insert(field.name.clone(), csv);
+            }
+
             // Emit inline field registration for jsonEncode (ensures library modules
             // register their field names at runtime, not just in _taida_main)
             let hash = simple_hash(&field.name);

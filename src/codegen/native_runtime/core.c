@@ -278,6 +278,10 @@ taida_ptr taida_json_encode(taida_val val);
 taida_ptr taida_json_pretty(taida_val val);
 taida_val taida_register_field_name(taida_val hash, taida_ptr name_ptr);
 taida_val taida_register_field_type(taida_val hash, taida_ptr name_ptr, taida_val type_tag);
+/// C18-2: Register `field_hash` as an Enum-typed field. `variants_ptr`
+/// points to a comma-separated list of variant names, used by
+/// `json_serialize_pack_fields` to emit variant-name Str in jsonEncode.
+taida_val taida_register_field_enum(taida_val hash, taida_ptr name_ptr, taida_ptr variants_ptr);
 static const char* taida_lookup_field_name(taida_val hash);
 static int taida_lookup_field_type(taida_val hash);
 static taida_val taida_is_hashmap(taida_val ptr);
@@ -7393,8 +7397,15 @@ taida_val taida_float_mul(taida_val a, taida_val b) { return _d2l(_to_double(a) 
 // Populated by taida_register_field_name() calls emitted at compile time.
 
 #define FIELD_REGISTRY_CAP 256
-// type_tag: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool
-static struct { taida_val hash; const char *name; int type_tag; } __field_registry[FIELD_REGISTRY_CAP];
+// type_tag: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool, 5=Enum (C18-2)
+// When type_tag == 5, `enum_desc` points to "VariantA,VariantB,..." so the
+// encoder can emit the variant name Str for a given ordinal.
+static struct {
+    taida_val hash;
+    const char *name;
+    int type_tag;
+    const char *enum_desc;
+} __field_registry[FIELD_REGISTRY_CAP];
 static int __field_registry_len = 0;
 
 taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
@@ -7406,6 +7417,7 @@ taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
         __field_registry[__field_registry_len].hash = hash;
         __field_registry[__field_registry_len].name = (const char*)name_ptr;
         __field_registry[__field_registry_len].type_tag = 0;
+        __field_registry[__field_registry_len].enum_desc = NULL;
         __field_registry_len++;
     }
     return 0;
@@ -7423,6 +7435,28 @@ taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_va
         __field_registry[__field_registry_len].hash = hash;
         __field_registry[__field_registry_len].name = (const char*)name_ptr;
         __field_registry[__field_registry_len].type_tag = (int)type_tag;
+        __field_registry[__field_registry_len].enum_desc = NULL;
+        __field_registry_len++;
+    }
+    return 0;
+}
+
+// C18-2: register a field as an Enum-typed field with variant descriptor.
+// `variants_ptr` points to a comma-separated list of variant names
+// (e.g. "Creating,Running,Stopped") emitted by the native lowering.
+taida_val taida_register_field_enum(taida_val hash, taida_val name_ptr, taida_val variants_ptr) {
+    for (int i = 0; i < __field_registry_len; i++) {
+        if (__field_registry[i].hash == hash) {
+            __field_registry[i].type_tag = 5;
+            __field_registry[i].enum_desc = (const char*)variants_ptr;
+            return 0;
+        }
+    }
+    if (__field_registry_len < FIELD_REGISTRY_CAP) {
+        __field_registry[__field_registry_len].hash = hash;
+        __field_registry[__field_registry_len].name = (const char*)name_ptr;
+        __field_registry[__field_registry_len].type_tag = 5;
+        __field_registry[__field_registry_len].enum_desc = (const char*)variants_ptr;
         __field_registry_len++;
     }
     return 0;
@@ -7431,6 +7465,13 @@ taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_va
 static const char* taida_lookup_field_name(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].name;
+    }
+    return NULL;
+}
+
+static const char* taida_lookup_field_enum_desc(taida_val hash) {
+    for (int i = 0; i < __field_registry_len; i++) {
+        if (__field_registry[i].hash == hash) return __field_registry[i].enum_desc;
     }
     return NULL;
 }
@@ -7498,12 +7539,59 @@ static void json_append_indent(char **buf, size_t *cap, size_t *len, int indent,
     }
 }
 
+// C18-2: Emit a variant-name Str for an Enum-typed field. `ordinal` is
+// the Int(ordinal) stored in the BuchiPack field; `variants_csv` is the
+// comma-separated variant list registered via `taida_register_field_enum`.
+// Falls back to emitting the raw ordinal number when the descriptor is
+// missing or the ordinal is out of range.
+static void json_append_enum_variant(char **buf, size_t *cap, size_t *len, taida_val ordinal, const char *variants_csv) {
+    if (!variants_csv) {
+        char num[32];
+        snprintf(num, sizeof(num), "%" PRId64 "", ordinal);
+        json_append(buf, cap, len, num);
+        return;
+    }
+    int64_t idx = 0;
+    const char *start = variants_csv;
+    const char *p = variants_csv;
+    while (*p) {
+        if (*p == ',') {
+            if (idx == ordinal) {
+                int vlen = (int)(p - start);
+                char buf_name[128];
+                int copy_len = vlen < (int)sizeof(buf_name) - 1 ? vlen : (int)sizeof(buf_name) - 1;
+                memcpy(buf_name, start, (size_t)copy_len);
+                buf_name[copy_len] = '\0';
+                json_append_escaped_str(buf, cap, len, buf_name);
+                return;
+            }
+            idx++;
+            start = p + 1;
+        }
+        p++;
+    }
+    // Last variant (no trailing comma)
+    if (idx == ordinal) {
+        int vlen = (int)(p - start);
+        char buf_name[128];
+        int copy_len = vlen < (int)sizeof(buf_name) - 1 ? vlen : (int)sizeof(buf_name) - 1;
+        memcpy(buf_name, start, (size_t)copy_len);
+        buf_name[copy_len] = '\0';
+        json_append_escaped_str(buf, cap, len, buf_name);
+        return;
+    }
+    // Out of range — fall back to ordinal Int.
+    char num[32];
+    snprintf(num, sizeof(num), "%" PRId64 "", ordinal);
+    json_append(buf, cap, len, num);
+}
+
 // Helper: serialize a BuchiPack's fields as JSON object
 // Fields are sorted alphabetically (matching interpreter/JS behavior).
 // All __ fields are skipped (__type, __value, __default, __entries, __items).
 static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, taida_val *pack, taida_val fc, int indent, int depth) {
-    // Collect visible fields: (name, val, type_hint, index for stable sort)
-    typedef struct { const char *name; taida_val val; int type_hint; } JsonField;
+    // Collect visible fields: (name, val, type_hint, enum_desc, index for stable sort)
+    typedef struct { const char *name; taida_val val; int type_hint; const char *enum_desc; } JsonField;
     JsonField fields[100];
     int nfields = 0;
     for (taida_val i = 0; i < fc && nfields < 100; i++) {
@@ -7519,6 +7607,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         fields[nfields].name = fname;
         fields[nfields].val = field_val;
         fields[nfields].type_hint = ftype;
+        fields[nfields].enum_desc = (ftype == 5) ? taida_lookup_field_enum_desc(field_hash) : NULL;
         nfields++;
     }
     // Sort fields alphabetically by name (insertion sort — nfields is small)
@@ -7539,7 +7628,12 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         json_append_escaped_str(buf, cap, len, fields[i].name);
         json_append_char(buf, cap, len, ':');
         if (indent > 0) json_append_char(buf, cap, len, ' ');
-        json_serialize_typed(buf, cap, len, fields[i].val, indent, depth + 1, fields[i].type_hint);
+        // C18-2: Enum-typed field → emit variant name Str via descriptor.
+        if (fields[i].type_hint == 5) {
+            json_append_enum_variant(buf, cap, len, fields[i].val, fields[i].enum_desc);
+        } else {
+            json_serialize_typed(buf, cap, len, fields[i].val, indent, depth + 1, fields[i].type_hint);
+        }
     }
     if (indent > 0 && nfields > 0) json_append_indent(buf, cap, len, indent, depth);
     json_append_char(buf, cap, len, '}');

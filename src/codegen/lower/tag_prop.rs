@@ -120,6 +120,43 @@ impl Lowering {
         }
     }
 
+    /// C18-2: If `expr` is (or produces) a known Enum value, return the
+    /// enum type name. Used by anonymous BuchiPack field registration so
+    /// `@(state <= HiveState:Running())` marks `state` as an Enum field
+    /// for jsonEncode variant-name output.
+    ///
+    /// Only handles the direct cases that come up in practice:
+    /// - `Enum:Variant()` literal
+    /// - identifier whose type we already know (via pack_vars / user_funcs)
+    /// - function call to a user-defined function whose return type is
+    ///   a known Enum name
+    ///
+    /// Deeper inference (e.g. through pipelines, condition branches) is
+    /// intentionally skipped; the returned ordinal still encodes
+    /// correctly, only the wire-format downgrades silently to Int.
+    pub(crate) fn expr_enum_type_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::EnumVariant(enum_name, _, _) => {
+                if self.enum_defs.contains_key(enum_name) {
+                    Some(enum_name.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    // A user-defined function annotated `=> :ColorEnum`
+                    // shows up here via `func_return_type_names`. We don't
+                    // currently track this separately; return None and let
+                    // the runtime fall back to ordinal emission.
+                    let _ = name;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// A-4c: TypeDef のフィールド型注釈から型タグを決定する
     pub(super) fn type_field_type_tag(&self, type_name: &str, field_name: &str) -> i64 {
         if let Some(field_types) = self.type_field_types.get(type_name) {

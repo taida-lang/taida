@@ -75,8 +75,12 @@ pub struct Lowering {
     current_func_name: Option<String>,
     /// BuchiPack フィールド名のセット（jsonEncode 用フィールド名レジストリ）
     field_names: std::collections::HashSet<String>,
-    /// フィールド名 → 型タグ (0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool)
+    /// フィールド名 → 型タグ (0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool, 5=Enum)
     field_type_tags: std::collections::HashMap<String, i64>,
+    /// C18-2: フィールド名 → Enum variants CSV (例: "Red,Green,Blue")。
+    /// `taida_register_field_enum` 呼び出しで native runtime に渡され、
+    /// jsonEncode が variant-name Str 出力に使用する。
+    field_enum_descriptors: std::collections::HashMap<String, String>,
     /// Mold 定義レジストリ（custom mold lowering 用）
     pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::MoldDef>,
     /// Enum definitions: enum_name -> variants in ordinal order

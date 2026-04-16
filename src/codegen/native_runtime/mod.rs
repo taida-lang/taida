@@ -132,9 +132,17 @@ mod tests {
     /// routing through `json_apply_schema(NULL, ...)` which produced
     /// `Lax[Enum]` and broke 3-backend parity (Interpreter/JS correctly
     /// returned `Int(0)`). New total: 892,890.
+    ///
+    /// C18-2 (2026-04-17): +3,998 bytes in core.c — added
+    /// `taida_register_field_enum`, `taida_lookup_field_enum_desc`, the
+    /// `enum_desc` slot in the per-field registry, `json_append_enum_variant`,
+    /// and the tag-5 (Enum) branch in `json_serialize_pack_fields`. These
+    /// changes let `jsonEncode` emit the variant-name Str (e.g. `"Running"`)
+    /// for Enum fields, symmetric with the C16 `JSON[raw, Schema]()`
+    /// decoder. New total: 896,888.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 892_890;
+        const EXPECTED_TOTAL_LEN: usize = 896_888;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -237,11 +245,21 @@ mod tests {
         // `Int(0)` for Enum fields — fixes Interp/JS/Native parity regression
         // detected in Phase 7 post-review). Fragment 1 boundary is still at
         // offset 209,911.
-        const F1_LEN: usize = 209_911;
+        //
+        // C18-2 (2026-04-17): fragment 1 grew by +305 bytes (new
+        // `taida_register_field_enum` forward declaration) and fragment 2
+        // grew by +3,693 bytes (new registration helper, enum variant
+        // emitter, tag-5 branch in `json_serialize_pack_fields`). Total
+        // core.c growth is +3,998 bytes, splitting across the historical
+        // fragment boundary. The F2_PREFIX anchor now lands at offset
+        // 210,216 (was 209,911). These changes let jsonEncode emit the
+        // variant-name Str (e.g. `"Running"`) in symmetry with the C16
+        // `JSON[raw, Schema]()` decoder.
+        const F1_LEN: usize = 210_216;
         assert_eq!(
             CORE_SECTION.len(),
-            209_911 + 113_809,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C16B-001 adjusted)"
+            210_216 + 117_502,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C18-2 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

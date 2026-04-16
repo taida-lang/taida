@@ -353,6 +353,11 @@ impl Lowering {
     /// This ensures field names are registered at runtime even in library modules
     /// that don't have a _taida_main to batch-register field names.
     /// The C runtime's registry handles duplicates safely (skips if already registered).
+    ///
+    /// C18-2: `type_tag == 5` is an Enum field — we emit
+    /// `taida_register_field_enum(hash, name, variants_csv)` so the
+    /// runtime can look up the variant name by ordinal when serializing
+    /// to JSON.
     pub(super) fn emit_field_registration_inline(
         &mut self,
         func: &mut IrFunction,
@@ -360,7 +365,26 @@ impl Lowering {
         hash: u64,
         type_tag: i64,
     ) {
-        if type_tag > 0 {
+        if type_tag == 5 {
+            // Enum field: need both the name and the variant CSV.
+            let variants_csv = self
+                .field_enum_descriptors
+                .get(field_name)
+                .cloned()
+                .unwrap_or_default();
+            let hash_var = func.alloc_var();
+            func.push(IrInst::ConstInt(hash_var, hash as i64));
+            let name_var = func.alloc_var();
+            func.push(IrInst::ConstStr(name_var, field_name.to_string()));
+            let variants_var = func.alloc_var();
+            func.push(IrInst::ConstStr(variants_var, variants_csv));
+            let result_var = func.alloc_var();
+            func.push(IrInst::Call(
+                result_var,
+                "taida_register_field_enum".to_string(),
+                vec![hash_var, name_var, variants_var],
+            ));
+        } else if type_tag > 0 {
             let hash_var = func.alloc_var();
             func.push(IrInst::ConstInt(hash_var, hash as i64));
             let name_var = func.alloc_var();
