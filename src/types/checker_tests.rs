@@ -4153,3 +4153,223 @@ fn test_c18_1_function_returning_imported_enum_is_usable() {
         errors
     );
 }
+
+// ── C19B-002: runInteractive / execShellInteractive Gorillax[@(code)] pin ──
+
+/// `runInteractive` returns `Gorillax[@(code: Int)]`, so accessing
+/// `.__value.stdout` at compile time must be rejected. Before C19B-002
+/// the checker treated unimported os symbols as `Type::Unknown`, which
+/// silently passed any field-access chain.
+#[test]
+fn test_c19b_002_run_interactive_rejects_stdout_field() {
+    let source = ">>> taida-lang/os => @(runInteractive)\n\
+                  r <= runInteractive(\"/bin/sh\", @[\"-c\", \"exit 0\"])\n\
+                  x <= r.__value.stdout\n";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Field 'stdout' does not exist")),
+        "runInteractive().__value.stdout must be rejected, got: {:?}",
+        errors
+    );
+}
+
+/// `runInteractive` — `.__value.code` is a valid field and must pass.
+#[test]
+fn test_c19b_002_run_interactive_accepts_code_field() {
+    let source = ">>> taida-lang/os => @(runInteractive)\n\
+                  r <= runInteractive(\"/bin/sh\", @[\"-c\", \"exit 0\"])\n\
+                  c <= r.__value.code\n";
+    let (_, errors) = check(source);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("Field 'code' does not exist")),
+        "runInteractive().__value.code must pass, got: {:?}",
+        errors
+    );
+}
+
+/// `execShellInteractive` — `.__value.stderr` is absent by design and
+/// must be rejected the same way as `runInteractive`.
+#[test]
+fn test_c19b_002_exec_shell_interactive_rejects_stderr_field() {
+    let source = ">>> taida-lang/os => @(execShellInteractive)\n\
+                  r <= execShellInteractive(\"exit 0\")\n\
+                  x <= r.__value.stderr\n";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Field 'stderr' does not exist")),
+        "execShellInteractive().__value.stderr must be rejected, got: {:?}",
+        errors
+    );
+}
+
+/// Captured `run` must remain non-interfering: accessing any of the
+/// pre-existing `stdout` / `stderr` / `code` fields (and even wholly
+/// bogus names) must stay silent, because the checker does not pin
+/// the captured variant's inner shape. If this test ever starts
+/// failing, it means a change to `register_os_import_symbol` /
+/// FieldAccess resolution has accidentally tightened the captured API.
+#[test]
+fn test_c19b_002_captured_run_remains_non_interfering() {
+    let source = ">>> taida-lang/os => @(run)\n\
+                  r <= run(\"/bin/sh\", @[\"-c\", \"echo hi\"])\n\
+                  s <= r.__value.stdout\n\
+                  e <= r.__value.stderr\n\
+                  c <= r.__value.code\n\
+                  // even a clearly bogus name stays silent — we\n\
+                  // intentionally do not pin the captured shape\n\
+                  x <= r.__value.bogus\n";
+    let (_, errors) = check(source);
+    let field_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("Field '"))
+        .collect();
+    assert!(
+        field_errors.is_empty(),
+        "Captured run must stay non-interfering, got field errors: {:?}",
+        field_errors
+    );
+}
+
+/// `stdout(r.__value.stdout)` — builtin-arg recursion must surface the
+/// pinned-shape error even when the field access is buried inside a
+/// builtin call. This is the real shape of the failure from the
+/// code-review HOLD.
+#[test]
+fn test_c19b_002_run_interactive_rejects_inside_builtin_arg() {
+    let source = ">>> taida-lang/os => @(runInteractive)\n\
+                  r <= runInteractive(\"/bin/sh\", @[\"-c\", \"exit 0\"])\n\
+                  stdout(r.__value.stdout)\n";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Field 'stdout' does not exist")),
+        "stdout(r.__value.stdout) must be rejected for runInteractive, got: {:?}",
+        errors
+    );
+}
+
+// ── C19B-002 (import-less): pin must apply without `taida-lang/os` import ──
+//
+// `runInteractive` and `execShellInteractive` are core-bundled in
+// `src/codegen/lower/core.rs` and resolve as bare calls in the interpreter
+// / JS / native backends, so the checker must pin their shape without
+// requiring an explicit `>>> taida-lang/os => @(runInteractive)` import.
+// These tests are the import-less twins of the tests above — together
+// they guarantee both surfaces (imported and bare) are caught.
+
+/// Import-less twin of `test_c19b_002_run_interactive_rejects_stdout_field`:
+/// bare `runInteractive(...).__value.stdout` must fail `taida check`.
+#[test]
+fn test_c19b_002_run_interactive_bare_rejects_stdout_field() {
+    let source = "r <= runInteractive(\"/bin/sh\", @[\"-c\", \"exit 0\"])\n\
+                  x <= r.__value.stdout\n";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Field 'stdout' does not exist")),
+        "bare runInteractive().__value.stdout must be rejected, got: {:?}",
+        errors
+    );
+}
+
+/// Import-less twin of `test_c19b_002_run_interactive_accepts_code_field`:
+/// bare `runInteractive(...).__value.code` stays green.
+#[test]
+fn test_c19b_002_run_interactive_bare_accepts_code_field() {
+    let source = "r <= runInteractive(\"/bin/sh\", @[\"-c\", \"exit 0\"])\n\
+                  c <= r.__value.code\n";
+    let (_, errors) = check(source);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("Field 'code' does not exist")),
+        "bare runInteractive().__value.code must pass, got: {:?}",
+        errors
+    );
+}
+
+/// Import-less twin of
+/// `test_c19b_002_exec_shell_interactive_rejects_stderr_field`:
+/// bare `execShellInteractive(...).__value.stderr` must fail.
+#[test]
+fn test_c19b_002_exec_shell_interactive_bare_rejects_stderr_field() {
+    let source = "r <= execShellInteractive(\"exit 0\")\n\
+                  x <= r.__value.stderr\n";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Field 'stderr' does not exist")),
+        "bare execShellInteractive().__value.stderr must be rejected, got: {:?}",
+        errors
+    );
+}
+
+/// Import-less twin of
+/// `test_c19b_002_run_interactive_rejects_inside_builtin_arg`:
+/// the pinned-shape error must surface even when the field access is
+/// buried inside a builtin argument, on the bare-call path.
+#[test]
+fn test_c19b_002_run_interactive_bare_rejects_inside_builtin_arg() {
+    let source = "r <= runInteractive(\"/bin/sh\", @[\"-c\", \"exit 0\"])\n\
+                  stdout(r.__value.stdout)\n";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("Field 'stdout' does not exist")),
+        "bare stdout(r.__value.stdout) must be rejected for runInteractive, got: {:?}",
+        errors
+    );
+}
+
+/// Import-less twin of `test_c19b_002_captured_run_remains_non_interfering`:
+/// bare `run(...)` — the captured variant — must stay non-interfering
+/// even though the interactive variants are now pinned on the
+/// core-bundled path. This is the regression guard that confirms the
+/// import-less pin is scoped exclusively to the two interactive symbols.
+#[test]
+fn test_c19b_002_captured_run_bare_remains_non_interfering() {
+    let source = "r <= run(\"/bin/sh\", @[\"-c\", \"echo hi\"])\n\
+                  s <= r.__value.stdout\n\
+                  e <= r.__value.stderr\n\
+                  c <= r.__value.code\n\
+                  x <= r.__value.bogus\n";
+    let (_, errors) = check(source);
+    let field_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("Field '"))
+        .collect();
+    assert!(
+        field_errors.is_empty(),
+        "bare captured run must stay non-interfering, got field errors: {:?}",
+        field_errors
+    );
+}
+
+/// Pre-existing Error-subtype `__type` access must keep passing
+/// (regression guard against the C12-2c invariant). Without the
+/// `.starts_with(\"__\")` escape hatch in the Named-type FieldAccess
+/// branch, driving `infer_expr_type` through builtin args to catch the
+/// C19B-002 case would spuriously flag `err.__type` on Error-inheriting
+/// Named types.
+#[test]
+fn test_c19b_002_error_inheriting_named_type_type_access_ok() {
+    let source = "Error => AppError = @(code: Int)\n\
+                  err <= AppError(type <= \"AppError\", message <= \"test\", code <= 42)\n\
+                  stdout(err.__type)\n";
+    let (_, errors) = check(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1602]")),
+        "err.__type on an Error-inheriting Named type must not trigger E1602, got: {:?}",
+        errors
+    );
+}

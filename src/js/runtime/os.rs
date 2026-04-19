@@ -20,11 +20,32 @@ function __taida_os_result_ok(inner) {
   return __taida_result_create(inner, null, null);
 }
 
-// Helper: build IoError value from runtime error object
+// Helper: build IoError value from runtime error object.
+//
+// C19 compatibility: `code` and `kind` are mirrored at the top level so
+// that `err.code` / `err.kind` work on the JS backend — matching the
+// interpreter's `Value::Error` dot-access behaviour. The `fields` object
+// is kept so existing `err.fields.code` callers keep working.
+//
+// C19B-001: Node exposes `err.errno` as a negative POSIX errno on Linux
+// (e.g. `-2` for ENOENT). The interpreter and native backends surface the
+// positive errno (`2`), so normalize here so 3-backend parity callers can
+// compare `r.__error.code` without per-backend abs().
 function __taida_os_io_error(err) {
-  const code = err && err.errno !== undefined ? err.errno : -1;
+  let code = err && err.errno !== undefined ? err.errno : -1;
+  if (typeof code === 'number' && code < 0 && code !== -1) {
+    code = -code;
+  }
   const message = err && err.message ? err.message : String(err);
-  return { __type: 'IoError', type: 'IoError', message: message, fields: { code: code } };
+  const kind = __taida_os_classify_error_kind(err);
+  return {
+    __type: 'IoError',
+    type: 'IoError',
+    message: message,
+    code: code,
+    kind: kind,
+    fields: { code: code, kind: kind },
+  };
 }
 
 // Helper: classify error kind from errno/message (mirrors Rust classify_io_error_kind)
@@ -75,6 +96,34 @@ function __taida_os_ok_inner() {
 // Helper: process result inner @(stdout, stderr, code)
 function __taida_os_process_inner(stdout, stderr, code) {
   return Object.freeze({ stdout: stdout, stderr: stderr, code: code });
+}
+
+// C19: code-only inner @(code: Int) for runInteractive / execShellInteractive.
+// Intentionally omits stdout / stderr because interactive variants do not
+// capture them — the child writes directly to the inherited TTY.
+function __taida_os_process_inner_code_only(code) {
+  return Object.freeze({ code: code });
+}
+
+// C19: POSIX signal name -> number. Only the main ones are mapped; unknown
+// signals fall back to 0 so that `128 + signal` becomes 128 rather than NaN.
+function __taida_os_signal_to_number(sig) {
+  const map = {
+    SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5,
+    SIGABRT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10,
+    SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15
+  };
+  return map[sig] || 0;
+}
+
+// C19: extract an exit code from a Node `spawnSync` result, following the
+// `128 + signal` convention used by the interpreter and Native backends.
+function __taida_os_extract_spawn_sync_code(result) {
+  if (result.status !== null && result.status !== undefined) return result.status;
+  if (result.signal !== null && result.signal !== undefined) {
+    return 128 + __taida_os_signal_to_number(result.signal);
+  }
+  return -1;
 }
 
 // ── Input molds (Read, ListDir, Stat, Exists, EnvVar) ──
@@ -251,6 +300,22 @@ function __taida_os_rename(from, to) {
 
 // ── Process functions (run, execShell) ──
 
+// C19 note: ProcessError objects also mirror `code` at the top level (in
+// addition to `fields.code`) so that `.code` on the JS backend matches the
+// interpreter's `Value::Error` dot-access behaviour.
+function __taida_os_process_error(program_or_cmd, code, is_shell) {
+  const message = is_shell
+    ? 'Shell command exited with code ' + code + ': ' + program_or_cmd
+    : "Process '" + program_or_cmd + "' exited with code " + code;
+  return {
+    __type: 'ProcessError',
+    type: 'ProcessError',
+    message: message,
+    code: code,
+    fields: { code: code },
+  };
+}
+
 function __taida_os_run(program, args) {
   if (!__os_cp) {
     return __taida_os_gorillax_fail(__taida_os_io_error(new __NativeError('child_process not available')));
@@ -263,8 +328,7 @@ function __taida_os_run(program, args) {
     if (e.status !== undefined) {
       // Process exited with non-zero code
       const code = e.status !== null ? e.status : -1;
-      const throwVal = { __type: 'ProcessError', type: 'ProcessError', message: "Process '" + program + "' exited with code " + code, fields: { code: code } };
-      return __taida_os_gorillax_fail(throwVal);
+      return __taida_os_gorillax_fail(__taida_os_process_error(program, code, false));
     }
     return __taida_os_gorillax_fail(__taida_os_io_error(e));
   }
@@ -281,9 +345,71 @@ function __taida_os_execShell(command) {
   } catch (e) {
     if (e.status !== undefined) {
       const code = e.status !== null ? e.status : -1;
-      const throwVal = { __type: 'ProcessError', type: 'ProcessError', message: 'Shell command exited with code ' + code + ': ' + command, fields: { code: code } };
-      return __taida_os_gorillax_fail(throwVal);
+      return __taida_os_gorillax_fail(__taida_os_process_error(command, code, true));
     }
+    return __taida_os_gorillax_fail(__taida_os_io_error(e));
+  }
+}
+
+// ── C19: Interactive process functions (TTY passthrough) ──
+//
+// These variants call spawnSync with stdio: 'inherit', which hands the
+// parent process's stdin / stdout / stderr file descriptors directly to the
+// child. No pipes are created, and nothing is captured; the child can draw
+// a TUI (nvim, vim, less, fzf, git commit) and read keystrokes live.
+//
+// Contract (must match the interpreter reference exactly):
+// - Success: Gorillax.ok(Object.freeze({ code: 0 }))
+// - Non-zero exit: Gorillax.err(ProcessError{code})
+// - Pre-exec failure (ENOENT etc.): Gorillax.err(IoError{code, kind})
+// - Signal death: code = 128 + signum (best-effort)
+//
+// Note: inner shape is { code } only — stdout / stderr are deliberately
+// absent to signal that the caller cannot observe child I/O.
+
+function __taida_os_runInteractive(program, args) {
+  if (!__os_cp) {
+    return __taida_os_gorillax_fail(__taida_os_io_error(new __NativeError('child_process not available')));
+  }
+  try {
+    const result = __os_cp.spawnSync(program, args || [], { stdio: 'inherit' });
+
+    if (result.error) {
+      return __taida_os_gorillax_fail(__taida_os_io_error(result.error));
+    }
+
+    const code = __taida_os_extract_spawn_sync_code(result);
+    const inner = __taida_os_process_inner_code_only(code);
+    if (code === 0) {
+      return __taida_os_gorillax_ok(inner);
+    }
+    return __taida_os_gorillax_fail(__taida_os_process_error(program, code, false));
+  } catch (e) {
+    return __taida_os_gorillax_fail(__taida_os_io_error(e));
+  }
+}
+
+function __taida_os_execShellInteractive(command) {
+  if (!__os_cp) {
+    return __taida_os_gorillax_fail(__taida_os_io_error(new __NativeError('child_process not available')));
+  }
+  try {
+    const isWin = typeof process !== 'undefined' && process.platform === 'win32';
+    const shellProgram = isWin ? 'cmd' : 'sh';
+    const shellArgs = isWin ? ['/C', command] : ['-c', command];
+    const result = __os_cp.spawnSync(shellProgram, shellArgs, { stdio: 'inherit' });
+
+    if (result.error) {
+      return __taida_os_gorillax_fail(__taida_os_io_error(result.error));
+    }
+
+    const code = __taida_os_extract_spawn_sync_code(result);
+    const inner = __taida_os_process_inner_code_only(code);
+    if (code === 0) {
+      return __taida_os_gorillax_ok(inner);
+    }
+    return __taida_os_gorillax_fail(__taida_os_process_error(command, code, true));
+  } catch (e) {
     return __taida_os_gorillax_fail(__taida_os_io_error(e));
   }
 }

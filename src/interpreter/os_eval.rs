@@ -52,7 +52,11 @@ const MAX_READ_SIZE: u64 = 64 * 1024 * 1024;
 /// Default timeout for network operations (connect/send/recv/listen).
 const DEFAULT_NETWORK_TIMEOUT_MS: u64 = 30_000;
 
-/// The 35 symbols exported by the os package.
+/// The symbols exported by the os package.
+///
+/// NOTE (C19): the first 35 entries match the C18 layout exactly. New entries
+/// must be **appended** to the end — moving an existing entry would change the
+/// index observed by downstream tooling that snapshots OS_SYMBOLS ordering.
 pub(crate) const OS_SYMBOLS: &[&str] = &[
     "Read",
     "ListDir",
@@ -90,6 +94,11 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
     "socketClose",
     "listenerClose",
     "udpClose",
+    // ── C19: interactive process execution (TTY passthrough) ──
+    // Gorillax[@(code: Int)] — stdin / stdout / stderr are NOT captured.
+    // The child inherits the parent's TTY so it can render TUIs like nvim / vim / less.
+    "runInteractive",
+    "execShellInteractive",
 ];
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -290,6 +299,31 @@ fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
         ("stderr".into(), Value::Str(stderr)),
         ("code".into(), Value::Int(code)),
     ])
+}
+
+/// C19: Build a code-only inner BuchiPack `@(code: Int)` for the interactive
+/// exec variants. Intentionally does **not** carry stdout / stderr fields
+/// (stdio is passthrough, nothing to capture).
+fn process_inner_code_only(code: i64) -> Value {
+    Value::BuchiPack(vec![("code".into(), Value::Int(code))])
+}
+
+/// C19: Extract an exit code from a `std::process::ExitStatus`, following the
+/// `128 + signal` POSIX convention when the child was terminated by a signal.
+/// This mirrors the convention used by the JS `spawnSync` and Native
+/// `waitpid(WIFSIGNALED)` branches so the 3 backends agree.
+fn extract_exit_code(status: std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return code as i64;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig as i64;
+        }
+    }
+    -1
 }
 
 /// Format a SystemTime as RFC3339/UTC string (seconds precision).
@@ -1156,6 +1190,110 @@ impl Interpreter {
 
                         if code == 0 {
                             let inner = process_inner(stdout, stderr, code);
+                            Ok(Some(Signal::Value(make_gorillax_success(inner))))
+                        } else {
+                            let error_val = make_process_error(
+                                format!("Shell command exited with code {}: {}", code, command),
+                                code,
+                            );
+                            Ok(Some(Signal::Value(make_gorillax_failure(error_val))))
+                        }
+                    }
+                    Err(e) => Ok(Some(Signal::Value(make_gorillax_failure(make_io_error(
+                        &e,
+                    ))))),
+                }
+            }
+
+            // ── C19: runInteractive(program, args) → Gorillax[@(code: Int)] ──
+            //
+            // TTY passthrough variant of `run`. The child inherits the parent's
+            // stdin / stdout / stderr FDs so it can draw TUIs (nvim / vim /
+            // less / fzf / git commit). No stdio is captured; only the exit
+            // code is observable.
+            //
+            // Implementation notes (non-negotiable):
+            // - `Command::status()` inherits stdio by default. Do NOT touch
+            //   `.stdin()` / `.stdout()` / `.stderr()` — that is what separates
+            //   this variant from `run`.
+            // - Signal death uses the `128 + signal` convention (`extract_exit_code`).
+            // - The Gorillax inner shape is `@(code: Int)` only. stdout /
+            //   stderr fields are intentionally absent.
+            "runInteractive" => {
+                let program = self.eval_os_str_arg(args, 0, "runInteractive", "program")?;
+
+                let cmd_args = if let Some(arg) = args.get(1) {
+                    match self.eval_expr(arg)? {
+                        Signal::Value(Value::List(items)) => {
+                            let mut strs = Vec::new();
+                            for item in &items {
+                                if let Value::Str(s) = item {
+                                    strs.push(s.clone());
+                                } else {
+                                    strs.push(item.to_display_string());
+                                }
+                            }
+                            strs
+                        }
+                        Signal::Value(_) => Vec::new(),
+                        other => return Ok(Some(other)),
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                // NOTE: .status() — NOT .output(). .output() would spawn pipes
+                // and capture stdio, which is exactly what this variant must
+                // avoid.
+                match std::process::Command::new(&program)
+                    .args(&cmd_args)
+                    .status()
+                {
+                    Ok(status) => {
+                        let code = extract_exit_code(status);
+                        let inner = process_inner_code_only(code);
+
+                        if code == 0 {
+                            Ok(Some(Signal::Value(make_gorillax_success(inner))))
+                        } else {
+                            let error_val = make_process_error(
+                                format!("Process '{}' exited with code {}", program, code),
+                                code,
+                            );
+                            Ok(Some(Signal::Value(make_gorillax_failure(error_val))))
+                        }
+                    }
+                    Err(e) => Ok(Some(Signal::Value(make_gorillax_failure(make_io_error(
+                        &e,
+                    ))))),
+                }
+            }
+
+            // ── C19: execShellInteractive(command) → Gorillax[@(code: Int)] ──
+            //
+            // TTY passthrough variant of `execShell`. Wraps `command` with
+            // `sh -c` on POSIX and `cmd /C` on Windows. Argv form
+            // (`runInteractive`) is preferred for interactive TUIs; this
+            // variant exists only for cases that require shell expansion.
+            "execShellInteractive" => {
+                let command = self.eval_os_str_arg(args, 0, "execShellInteractive", "command")?;
+
+                let result = if cfg!(target_os = "windows") {
+                    std::process::Command::new("cmd")
+                        .args(["/C", &command])
+                        .status()
+                } else {
+                    std::process::Command::new("sh")
+                        .args(["-c", &command])
+                        .status()
+                };
+
+                match result {
+                    Ok(status) => {
+                        let code = extract_exit_code(status);
+                        let inner = process_inner_code_only(code);
+
+                        if code == 0 {
                             Ok(Some(Signal::Value(make_gorillax_success(inner))))
                         } else {
                             let error_val = make_process_error(
@@ -3313,8 +3451,9 @@ stdout(lax.hasValue)"#;
 
     #[test]
     fn test_os_symbols_count() {
-        // Verify all 35 symbols are registered
-        assert_eq!(OS_SYMBOLS.len(), 35);
+        // C18 layout: 35 symbols. C19 appends 2 more (runInteractive,
+        // execShellInteractive) at the end. Total expected = 37.
+        assert_eq!(OS_SYMBOLS.len(), 37);
         assert!(OS_SYMBOLS.contains(&"readBytes"));
         assert!(OS_SYMBOLS.contains(&"writeBytes"));
         assert!(OS_SYMBOLS.contains(&"argv"));
@@ -3337,6 +3476,195 @@ stdout(lax.hasValue)"#;
         assert!(OS_SYMBOLS.contains(&"socketClose"));
         assert!(OS_SYMBOLS.contains(&"listenerClose"));
         assert!(OS_SYMBOLS.contains(&"udpClose"));
+        // C19 additions
+        assert!(OS_SYMBOLS.contains(&"runInteractive"));
+        assert!(OS_SYMBOLS.contains(&"execShellInteractive"));
+    }
+
+    /// C19: the pre-C19 35 symbols must keep their original relative order.
+    /// If this test fails, some consumer that snapshots OS_SYMBOLS indices
+    /// (e.g. a cached dispatch table) may have silently broken.
+    #[test]
+    fn test_os_symbols_c18_prefix_preserved() {
+        let c18_prefix = [
+            "Read",
+            "ListDir",
+            "Stat",
+            "Exists",
+            "EnvVar",
+            "readBytes",
+            "writeFile",
+            "writeBytes",
+            "appendFile",
+            "remove",
+            "createDir",
+            "rename",
+            "run",
+            "execShell",
+            "allEnv",
+            "argv",
+            "ReadAsync",
+            "HttpGet",
+            "HttpPost",
+            "HttpRequest",
+            "tcpConnect",
+            "tcpListen",
+            "tcpAccept",
+            "socketSend",
+            "socketSendAll",
+            "socketRecv",
+            "socketSendBytes",
+            "socketRecvBytes",
+            "socketRecvExact",
+            "udpBind",
+            "udpSendTo",
+            "udpRecvFrom",
+            "socketClose",
+            "listenerClose",
+            "udpClose",
+        ];
+        for (i, name) in c18_prefix.iter().enumerate() {
+            assert_eq!(
+                OS_SYMBOLS[i], *name,
+                "OS_SYMBOLS[{}] changed: expected {:?}, got {:?} (C19 must append, not reorder)",
+                i, name, OS_SYMBOLS[i]
+            );
+        }
+        // And the C19 additions live strictly after the C18 prefix.
+        assert_eq!(OS_SYMBOLS[35], "runInteractive");
+        assert_eq!(OS_SYMBOLS[36], "execShellInteractive");
+    }
+
+    // ── C19: runInteractive / execShellInteractive tests ──
+    //
+    // NOTE: we cannot exercise the true TTY-passthrough behaviour in an
+    // automated test (CI has no real TTY). These tests pin the exit-code
+    // contract and error shape; the actual passthrough is validated via
+    // `examples/quality/os_interactive_*.td` smoke and manual Hachikuma
+    // B-006 runs.
+
+    #[test]
+    fn test_c19_run_interactive_exit_0() {
+        let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
+stdout(r.hasValue)
+stdout(r.__value.code)"#;
+        let out = run_code(code);
+        assert_eq!(out, vec!["true", "0"]);
+    }
+
+    #[test]
+    fn test_c19_run_interactive_exit_7() {
+        let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 7"])
+stdout(r.hasValue)
+stdout(r.__error.code)"#;
+        let out = run_code(code);
+        assert_eq!(out, vec!["false", "7"]);
+    }
+
+    #[test]
+    fn test_c19_run_interactive_missing_program_returns_io_error() {
+        let code = r#"r <= runInteractive("/nonexistent/taida_c19_xyz", @[])
+stdout(r.hasValue)
+stdout(r.__error.kind)"#;
+        let out = run_code(code);
+        assert_eq!(out[0], "false");
+        assert_eq!(
+            out[1], "not_found",
+            "Missing program must be classified as not_found IoError"
+        );
+    }
+
+    #[test]
+    fn test_c19_exec_shell_interactive_exit_0() {
+        let code = r#"r <= execShellInteractive("exit 0")
+stdout(r.hasValue)
+stdout(r.__value.code)"#;
+        let out = run_code(code);
+        assert_eq!(out, vec!["true", "0"]);
+    }
+
+    #[test]
+    fn test_c19_exec_shell_interactive_exit_3() {
+        let code = r#"r <= execShellInteractive("exit 3")
+stdout(r.hasValue)
+stdout(r.__error.code)"#;
+        let out = run_code(code);
+        assert_eq!(out, vec!["false", "3"]);
+    }
+
+    /// The code-only helper must produce a BuchiPack with `code` and nothing
+    /// else — catching regressions that sneak stdout / stderr fields back in.
+    #[test]
+    fn test_c19_process_inner_code_only_shape() {
+        let v = process_inner_code_only(42);
+        if let Value::BuchiPack(fields) = v {
+            assert_eq!(fields.len(), 1, "inner must be single-field (code)");
+            assert_eq!(fields[0].0, "code");
+            assert_eq!(fields[0].1, Value::Int(42));
+        } else {
+            panic!("process_inner_code_only must return BuchiPack");
+        }
+    }
+
+    /// C19-4: runtime-level pin. Accessing `stdout` / `stderr` on a
+    /// `runInteractive` result must not silently succeed — it must raise
+    /// a runtime error (missing field). This is the safety net that
+    /// prevents callers from mistaking the interactive variant for the
+    /// captured one at runtime.
+    ///
+    /// Rationale: Taida's checker does not pin BuchiPack inner shapes at
+    /// compile time (consistent with how `run` / `execShell` work today),
+    /// so this invariant lives at the runtime level. If the interpreter
+    /// ever auto-defaults missing fields for Gorillax inner, this test
+    /// will immediately scream.
+    #[test]
+    fn test_c19_run_interactive_stdout_field_is_absent_at_runtime() {
+        let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
+stdout(r.__value.stdout)"#;
+        let result = run_code_result(code);
+        assert!(
+            result.is_err(),
+            "Accessing .stdout on runInteractive result must error at runtime, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_c19_run_interactive_stderr_field_is_absent_at_runtime() {
+        let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
+stdout(r.__value.stderr)"#;
+        let result = run_code_result(code);
+        assert!(
+            result.is_err(),
+            "Accessing .stderr on runInteractive result must error at runtime, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_c19_exec_shell_interactive_stdout_field_is_absent_at_runtime() {
+        let code = r#"r <= execShellInteractive("exit 0")
+stdout(r.__value.stdout)"#;
+        let result = run_code_result(code);
+        assert!(
+            result.is_err(),
+            "Accessing .stdout on execShellInteractive result must error at runtime, got: {:?}",
+            result
+        );
+    }
+
+    /// Sanity check: the captured `run` still has `stdout`. This exists
+    /// to fail loudly if the C19 additive change ever accidentally strips
+    /// fields from the legacy captured API.
+    #[test]
+    fn test_c19_run_captured_stdout_field_still_present() {
+        let code = r#"r <= run("/bin/sh", @["-c", "exit 0"])
+stdout(r.__value.stdout)
+stdout(r.__value.code)"#;
+        let out = run_code(code);
+        // stdout is "" and code is 0.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1], "0");
     }
 
     // ── HTTP helper tests ──

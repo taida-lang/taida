@@ -233,9 +233,16 @@ impl CoreBundledProvider {
 //   rename(from, to)            -- move/rename (atomic)
 //
 // Process APIs (functions -> Gorillax):
-//   run(program, args)          -- direct exec (safe, no shell)
-//   execShell(command)          -- shell exec (pipes, redirects)
+//   run(program, args)          -- direct exec (safe, no shell) — captures stdout/stderr
+//   execShell(command)          -- shell exec (pipes, redirects) — captures stdout/stderr
 //     WARNING: Shell injection risk. Prefer run() for safety.
+//
+// Interactive process APIs (functions -> Gorillax[@(code: Int)], C19):
+//   runInteractive(program, args)  -- TTY passthrough, child inherits parent's stdin/stdout/stderr
+//   execShellInteractive(command)  -- TTY passthrough via `sh -c` (POSIX) / `cmd /C` (Windows)
+//     NOTE: stdout / stderr are NOT captured — only the exit code is observable.
+//     Intended for TUI apps (nvim, less, fzf, git commit). If you need to
+//     inspect output programmatically, use the captured `run` / `execShell`.
 //
 // Query APIs:
 //   allEnv()                    -- all env vars as HashMap[Str, Str]
@@ -264,7 +271,7 @@ impl CoreBundledProvider {
 //   listenerClose(listener)
 //   udpClose(socket)            -- alias of socketClose
 
-<<< @(Read, ListDir, Stat, Exists, readBytes, writeFile, writeBytes, appendFile, remove, createDir, rename, run, execShell, EnvVar, allEnv, argv, ReadAsync, HttpGet, HttpPost, HttpRequest, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose)
+<<< @(Read, ListDir, Stat, Exists, readBytes, writeFile, writeBytes, appendFile, remove, createDir, rename, run, execShell, runInteractive, execShellInteractive, EnvVar, allEnv, argv, ReadAsync, HttpGet, HttpPost, HttpRequest, tcpConnect, tcpListen, tcpAccept, socketSend, socketSendAll, socketRecv, socketSendBytes, socketRecvBytes, socketRecvExact, udpBind, udpSendTo, udpRecvFrom, socketClose, listenerClose, udpClose)
 "#
     }
 

@@ -199,7 +199,7 @@ impl CompileTarget {
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self {
+        let mut checker = Self {
             registry: TypeRegistry::new(),
             errors: Vec::new(),
             scope_stack: vec![HashMap::new()], // global scope
@@ -218,7 +218,53 @@ impl TypeChecker {
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
             net_http_protocol_type_names: HashSet::new(),
-        }
+        };
+        // C19B-002 (import-less): the C19 interactive variants are core-bundled
+        // in `src/codegen/lower/core.rs` (import-less parity with interpreter/
+        // JS), so their typed signatures must be pinned whether or not the
+        // user writes `>>> taida-lang/os => @(runInteractive)`. Installing
+        // them unconditionally at checker construction guarantees that bare
+        // calls (`runInteractive(...).__value.stdout`) are caught at
+        // `taida check` time, matching the imported path.
+        checker.install_core_bundled_os_pins();
+        checker
+    }
+
+    /// C19B-002: install pinned signatures for the C19 interactive os
+    /// variants. Idempotent — `register_os_import_symbol` delegates here
+    /// for the same symbol names, so the import path remains a no-op
+    /// overwrite with the identical `Gorillax[@(code: Int)]` shape.
+    ///
+    /// Captured `run` / `execShell` are intentionally left out: pinning
+    /// them would change the non-interfering contract documented in
+    /// `register_os_import_symbol` and tightening on the core-bundled
+    /// path would silently affect every existing program that never
+    /// imports `taida-lang/os`.
+    fn install_core_bundled_os_pins(&mut self) {
+        self.pin_run_interactive_signature("runInteractive");
+        self.pin_exec_shell_interactive_signature("execShellInteractive");
+    }
+
+    fn pin_run_interactive_signature(&mut self, local_name: &str) {
+        // runInteractive(program: Str, args: @[Str]) → Gorillax[@(code: Int)]
+        let inner = Type::BuchiPack(vec![("code".to_string(), Type::Int)]);
+        let ret = Type::Generic("Gorillax".to_string(), vec![inner]);
+        self.func_types.insert(local_name.to_string(), ret);
+        self.func_param_counts.insert(local_name.to_string(), 2);
+        self.func_param_types.insert(
+            local_name.to_string(),
+            vec![Type::Str, Type::List(Box::new(Type::Str))],
+        );
+    }
+
+    fn pin_exec_shell_interactive_signature(&mut self, local_name: &str) {
+        // execShellInteractive(command: Str) → Gorillax[@(code: Int)]
+        let inner = Type::BuchiPack(vec![("code".to_string(), Type::Int)]);
+        let ret = Type::Generic("Gorillax".to_string(), vec![inner]);
+        self.func_types.insert(local_name.to_string(), ret);
+        self.func_param_counts.insert(local_name.to_string(), 1);
+        self.func_param_types
+            .insert(local_name.to_string(), vec![Type::Str]);
     }
 
     pub fn set_source_file(&mut self, path: &std::path::Path) {
@@ -248,6 +294,40 @@ impl TypeChecker {
                     .insert(local_name.to_string());
             }
             _ => {}
+        }
+    }
+
+    /// C19B-002: register typed signatures for `taida-lang/os` symbols that
+    /// need compile-time Gorillax inner-shape pinning.
+    ///
+    /// Currently only the C19 interactive variants are pinned, because
+    /// their inner shape `@(code: Int)` is strictly narrower than the
+    /// captured `run` / `execShell` form `@(stdout, stderr, code)` — and
+    /// callers who reach for `.__value.stdout` on an interactive result
+    /// must get a compile error rather than silent Unknown.
+    ///
+    /// The captured variants are intentionally left Unknown so we stay
+    /// non-interfering with pre-existing callers (`run(...).__value.stdout`
+    /// etc. must keep working). If/when we want to pin those too, add
+    /// matches for "run" / "execShell" below.
+    fn register_os_import_symbol(&mut self, symbol_name: &str, local_name: &str) {
+        match symbol_name {
+            "runInteractive" => {
+                // Delegates to the same helper used by the import-less path
+                // (`install_core_bundled_os_pins`), so the pinned shape is
+                // identical whether or not the user wrote
+                // `>>> taida-lang/os => @(runInteractive)`. When the import
+                // uses an alias (`runInteractive as foo`), this path also
+                // installs the alias under the same pin.
+                self.pin_run_interactive_signature(local_name);
+            }
+            "execShellInteractive" => {
+                self.pin_exec_shell_interactive_signature(local_name);
+            }
+            _ => {
+                // Other os symbols stay unregistered so the checker treats
+                // them as Type::Unknown (pre-C19 behaviour, non-interfering).
+            }
         }
     }
 
@@ -1945,6 +2025,11 @@ impl TypeChecker {
                         let local_name = sym.alias.as_ref().unwrap_or(&sym.name);
                         self.register_net_import_symbol(&sym.name, local_name);
                     }
+                } else if imp.path == "taida-lang/os" {
+                    for sym in &imp.symbols {
+                        let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
+                        self.register_os_import_symbol(&sym.name, &local_name);
+                    }
                 }
             }
             _ => {}
@@ -2818,6 +2903,46 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    /// C19B-002: narrow walker that triggers full type inference only on
+    /// FieldAccess nodes inside builtin call arguments (e.g.
+    /// `stdout(r.__value.stdout)`). This lets us surface pinned-Gorillax
+    /// field-access rejections without retroactively tightening other
+    /// builtin arg subtrees (BinaryOp / MethodCall / etc.) that pre-C19
+    /// callers were silently relying on.
+    ///
+    /// The returned type is intentionally discarded; we only care about
+    /// errors pushed into `self.errors` during traversal.
+    fn check_pinned_field_access_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::FieldAccess(_, _, _) => {
+                let _ = self.infer_expr_type(expr);
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_pinned_field_access_in_expr(obj);
+                for arg in args {
+                    self.check_pinned_field_access_in_expr(arg);
+                }
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_pinned_field_access_in_expr(callee);
+                for arg in args {
+                    self.check_pinned_field_access_in_expr(arg);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.check_pinned_field_access_in_expr(l);
+                self.check_pinned_field_access_in_expr(r);
+            }
+            Expr::UnaryOp(_, inner, _) => self.check_pinned_field_access_in_expr(inner),
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_pinned_field_access_in_expr(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Type-check a statement (second pass).
     fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
@@ -3088,12 +3213,21 @@ defaulted fields must be provided via `()`",
                 // between a local redefinition and the imported module and emits
                 // [E1618] when they disagree.
                 self.register_imported_types(imp);
+                // C19B-002: pin typed signatures for select `taida-lang/os`
+                // symbols (runInteractive / execShellInteractive) so that
+                // field access through their Gorillax result resolves at
+                // compile time. Unpinned os symbols still fall through to
+                // `Type::Unknown` below.
+                let os_import = imp.path == "taida-lang/os";
                 // Register imported symbols as Unknown
                 // (We don't have cross-module type info yet)
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
                     if imp.path == "taida-lang/net" {
                         self.register_net_import_symbol(&sym.name, name);
+                    }
+                    if os_import {
+                        self.register_os_import_symbol(&sym.name, name);
                     }
                     self.define_var(name, Type::Unknown);
                 }
@@ -3786,10 +3920,20 @@ defaulted fields must be provided via `()`",
                     // are still rejected. Scoped narrowly to `toString`
                     // to avoid changing type-inference semantics for
                     // other builtin arg contexts.
+                    //
+                    // C19B-002: also walk for FieldAccess nodes whose
+                    // receiver type is a pinned Gorillax (or reducible
+                    // to one) so that `.__value.<bogus>` chains inside
+                    // builtin args surface the same E1602-style rejection
+                    // as when assigned to a variable. We deliberately do
+                    // NOT recurse into BinaryOp / arithmetic subtrees: that
+                    // would retroactively surface pre-existing Str+Int
+                    // tolerance in examples like `"foo" + lax.getOrDefault(0)`.
                     if builtin_arity.is_some() && name != "debug" {
                         for arg in args.iter() {
                             if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                                 self.check_tostring_arity_in_expr(arg);
+                                self.check_pinned_field_access_in_expr(arg);
                             }
                         }
                     }
@@ -3915,6 +4059,15 @@ defaulted fields must be provided via `()`",
                         if let Some(fields) = self.registry.get_type_fields(type_name) {
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
                                 ty.clone()
+                            } else if field.starts_with("__") {
+                                // C19B-002: skip compiler-internal `__*` fields
+                                // (`__type`, `__value`, `__error`, `__default`,
+                                // etc.). Error-derived packs surface these at
+                                // runtime even when they aren't in the user's
+                                // explicit field list, and flagging them here
+                                // would regress existing patterns like
+                                // `err.__type` on Error-inheriting named types.
+                                Type::Unknown
                             } else {
                                 // FL-2: Report undefined field access on Named types
                                 self.errors.push(TypeError {
@@ -3929,6 +4082,35 @@ defaulted fields must be provided via `()`",
                             }
                         } else {
                             Type::Unknown
+                        }
+                    }
+                    // C19B-002: Gorillax / RelaxedGorillax `__value` / `__error`
+                    // dot-access. When the Gorillax is parameterized — e.g.
+                    // `runInteractive` → `Gorillax[@(code: Int)]` — accessing
+                    // `.__value` must yield the inner BuchiPack so that a
+                    // further `.stdout` / `.bogus` access is rejected by the
+                    // BuchiPack branch above.
+                    //
+                    // `hasValue` is always Bool. `__error` is deliberately
+                    // returned as Unknown because the error inner shape
+                    // (IoError / ProcessError) is heterogeneous and not pinned
+                    // by this checker; falling back to Unknown keeps existing
+                    // `r.__error.code` / `.kind` callers compiling.
+                    Type::Generic(name, args)
+                        if name == "Gorillax" || name == "RelaxedGorillax" =>
+                    {
+                        match field.as_str() {
+                            "__value" => args.first().cloned().unwrap_or(Type::Unknown),
+                            "hasValue" => Type::Bool,
+                            "__error" | "throw" | "__type" => Type::Unknown,
+                            _ => {
+                                // Only surface an error for fields that are
+                                // clearly not Gorillax envelope slots. Unknown
+                                // user-level names fall through to Unknown so
+                                // we don't regress any callers that treat a
+                                // Gorillax as a dyn pack on purpose.
+                                Type::Unknown
+                            }
                         }
                     }
                     Type::Unknown => Type::Unknown,

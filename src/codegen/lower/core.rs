@@ -35,6 +35,15 @@ impl Lowering {
         stdlib_runtime_funcs.insert("rename".to_string(), "taida_os_rename".to_string());
         stdlib_runtime_funcs.insert("run".to_string(), "taida_os_run".to_string());
         stdlib_runtime_funcs.insert("execShell".to_string(), "taida_os_exec_shell".to_string());
+        // C19: interactive TTY-passthrough variants (import-less parity)
+        stdlib_runtime_funcs.insert(
+            "runInteractive".to_string(),
+            "taida_os_run_interactive".to_string(),
+        );
+        stdlib_runtime_funcs.insert(
+            "execShellInteractive".to_string(),
+            "taida_os_exec_shell_interactive".to_string(),
+        );
         stdlib_runtime_funcs.insert("allEnv".to_string(), "taida_os_all_env".to_string());
         stdlib_runtime_funcs.insert("argv".to_string(), "taida_os_argv".to_string());
         stdlib_runtime_funcs.insert("dnsResolve".to_string(), "taida_os_dns_resolve".to_string());

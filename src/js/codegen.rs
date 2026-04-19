@@ -185,6 +185,8 @@ impl JsCodegen {
                 | "rename"
                 | "run"
                 | "execShell"
+                | "runInteractive"
+                | "execShellInteractive"
                 | "allEnv"
                 | "argv"
                 | "tcpConnect"
@@ -2388,6 +2390,9 @@ impl JsCodegen {
                             "rename" => self.write("__taida_os_rename"),
                             "run" => self.write("__taida_os_run"),
                             "execShell" => self.write("__taida_os_execShell"),
+                            // C19: interactive TTY-passthrough variants
+                            "runInteractive" => self.write("__taida_os_runInteractive"),
+                            "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
                             "allEnv" => self.write("__taida_os_allEnv"),
                             "argv" => self.write("__taida_os_argv"),
                             "tcpConnect" => self.write("__taida_os_tcpConnect"),
@@ -2458,6 +2463,9 @@ impl JsCodegen {
                         "rename" => self.write("__taida_os_rename"),
                         "run" => self.write("__taida_os_run"),
                         "execShell" => self.write("__taida_os_execShell"),
+                        // C19: interactive TTY-passthrough variants
+                        "runInteractive" => self.write("__taida_os_runInteractive"),
+                        "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
                         "allEnv" => self.write("__taida_os_allEnv"),
                         "argv" => self.write("__taida_os_argv"),
                         "tcpConnect" => self.write("__taida_os_tcpConnect"),
@@ -3443,6 +3451,9 @@ impl JsCodegen {
                             "rename" => self.write("__taida_os_rename"),
                             "run" => self.write("__taida_os_run"),
                             "execShell" => self.write("__taida_os_execShell"),
+                            // C19: interactive TTY-passthrough variants
+                            "runInteractive" => self.write("__taida_os_runInteractive"),
+                            "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
                             "allEnv" => self.write("__taida_os_allEnv"),
                             "argv" => self.write("__taida_os_argv"),
                             "tcpConnect" => self.write("__taida_os_tcpConnect"),
@@ -3656,6 +3667,9 @@ impl JsCodegen {
                     "rename" => self.write("__taida_os_rename(__p)"),
                     "run" => self.write("__taida_os_run(__p)"),
                     "execShell" => self.write("__taida_os_execShell(__p)"),
+                    // C19: interactive TTY-passthrough variants (pipeline form)
+                    "runInteractive" => self.write("__taida_os_runInteractive(__p)"),
+                    "execShellInteractive" => self.write("__taida_os_execShellInteractive(__p)"),
                     "allEnv" => self.write("__taida_os_allEnv(__p)"),
                     "argv" => self.write("__taida_os_argv()"),
                     "tcpConnect" => self.write("__taida_os_tcpConnect(__p)"),

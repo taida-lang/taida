@@ -156,9 +156,38 @@ mod tests {
     /// embedded-NUL JSON strings from silently truncating into a
     /// successful variant match (carry from C16B-005). New total:
     /// 904,246.
+    ///
+    /// C19 (2026-04-19): +195 bytes in core.c (two new forward
+    /// declarations `taida_os_run_interactive` /
+    /// `taida_os_exec_shell_interactive`) and +4,228 bytes in os.c
+    /// (new `taida_os_process_inner_code_only` / `taida_os_extract_wait_code`
+    /// helpers plus the two TTY-passthrough functions). Fragment 1 grew
+    /// by +195 bytes (boundary now at 211,525); fragment 2 is unchanged.
+    /// New total: 908,669.
+    ///
+    /// C19B-001 (2026-04-19): +19 bytes in core.c (added `#include <fcntl.h>`
+    /// preamble required for `FD_CLOEXEC` / `F_SETFD` in the errno pipe used
+    /// by the interactive exec helpers) and +4,429 bytes in os.c (rewrote
+    /// `taida_os_run_interactive` / `taida_os_exec_shell_interactive` to
+    /// propagate child `execvp` errno to the parent via a CLOEXEC self-pipe
+    /// so ENOENT surfaces as `IoError` instead of `ProcessError(127)`,
+    /// plus two shared `taida_os_write_all` / `taida_os_read_all` helpers).
+    /// Fragment 1 grew by +19 bytes (boundary now at 211,544); fragment 2
+    /// is unchanged. Intermediate total: 913,117.
+    ///
+    /// C19B-002 (2026-04-19): +396 bytes in core.c — introduced the
+    /// `HASH___ERROR` field-hash constant (FNV-1a of `"__error"`) and
+    /// threaded it through `taida_gorillax_new` / `taida_gorillax_err` /
+    /// `taida_gorillax_relax` so Taida code can actually look up
+    /// `gorillax.__error.<field>` at runtime. Before this fix the slot was
+    /// stored under `HASH___DEFAULT` and field access silently missed.
+    /// This unblocks the failure-path parity test which asserts that
+    /// ENOENT surfaces as an observable `IoError` on all three backends.
+    /// Fragment 1 grew by +396 bytes (boundary now at 211,940); fragment 2
+    /// is unchanged. New total: 913,513.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 904_246;
+        const EXPECTED_TOTAL_LEN: usize = 913_513;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -285,11 +314,26 @@ mod tests {
         // `json_parse_string_raw_len` + `str_len` field plumbing +
         // `memcmp` length check in the `E{...}` enum branch of
         // `json_apply_schema`).
-        const F1_LEN: usize = 211_330;
+        // C19 (2026-04-19): fragment 1 grew by +195 bytes (two new
+        // `taida_os_run_interactive` / `taida_os_exec_shell_interactive`
+        // forward declarations added near the other os function prototypes).
+        // Fragment 2 is unchanged. F1_LEN moves from 211,330 to 211,525.
+        //
+        // C19B-001 (2026-04-19): fragment 1 grew by another +19 bytes from
+        // the `#include <fcntl.h>` preamble required by the errno-pipe
+        // (FD_CLOEXEC) used inside the interactive exec helpers. Fragment
+        // 2 is still untouched. F1_LEN moves from 211,525 to 211,544.
+        //
+        // C19B-002 (2026-04-19): fragment 1 grew by another +396 bytes from
+        // the `HASH___ERROR` constant introduction and the Gorillax field-
+        // hash corrections in `taida_gorillax_new` / `_err` / `_relax` so
+        // `.__error.<field>` actually resolves at runtime. Fragment 2 is
+        // unchanged. F1_LEN moves from 211,544 to 211,940.
+        const F1_LEN: usize = 211_940;
         assert_eq!(
             CORE_SECTION.len(),
-            211_330 + 123_746,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C18B-006 adjusted)"
+            211_940 + 123_746,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C19B-002 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

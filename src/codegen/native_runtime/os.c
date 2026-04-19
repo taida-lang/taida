@@ -69,6 +69,25 @@ static taida_val taida_os_process_inner(const char *out, const char *err, taida_
     return inner;
 }
 
+// C19: build code-only process result inner @(code: Int).
+// Used by runInteractive / execShellInteractive. stdout / stderr are not
+// captured because the child inherits the TTY directly.
+static taida_val taida_os_process_inner_code_only(taida_val code) {
+    taida_val inner = taida_pack_new(1);
+    taida_val code_hash = 0x0bb51791194b4414ULL;  // FNV-1a("code")
+    taida_pack_set_hash(inner, 0, (taida_val)code_hash);
+    taida_pack_set(inner, 0, code);
+    return inner;
+}
+
+// C19: derive exit code from a `waitpid` status, following the
+// `128 + signum` POSIX convention used by the interpreter / JS backends.
+static taida_val taida_os_extract_wait_code(int status) {
+    if (WIFEXITED(status)) return (taida_val)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (taida_val)(128 + WTERMSIG(status));
+    return (taida_val)(-1);
+}
+
 // ── Read[path]() → Lax[Str] ──────────────────────────────
 taida_val taida_os_read(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
@@ -610,6 +629,211 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
         taida_val error = taida_make_error("ProcessError", msg);
         return taida_gorillax_err(error);
     }
+}
+
+// ── C19: runInteractive(program, args) → Gorillax[@(code: Int)] ──
+//
+// TTY-passthrough variant of `run`. The child inherits the parent's
+// stdin/stdout/stderr so it can draw TUIs (nvim, less, fzf, git commit).
+//
+// Contract (must match interpreter and JS exactly):
+// - Success (exit 0): Gorillax.ok(@(code = 0))
+// - Non-zero exit: Gorillax.err(ProcessError{code})
+// - Pre-exec / fork failure: Gorillax.err(IoError{errno, kind})
+// - ENOENT / exec failure: Gorillax.err(IoError{errno, kind})
+// - Signal death: code = 128 + signum (best-effort)
+//
+// Critical difference from `taida_os_run`:
+// - NO pipe() calls for stdio (child keeps the parent's TTY FDs)
+// - NO dup2() in the child
+// - NO read() in the parent (nothing to drain)
+//
+// The errno pipe (CLOEXEC) is separate from stdio: it is used only to
+// transport the errno of a failed `execvp` from child to parent so that
+// ENOENT / EACCES etc. surface as `IoError` rather than `ProcessError(127)`.
+// On successful exec the pipe auto-closes (CLOEXEC) and the parent's
+// read() returns 0 bytes, indicating "exec succeeded; child is running".
+
+// Write-all helper (handles short writes / EINTR). Returns 0 on success,
+// -1 on failure. Used only by the child to push errno to the parent.
+static int taida_os_write_all(int fd, const void *buf, size_t len) {
+    const unsigned char *p = (const unsigned char*)buf;
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t n = write(fd, p, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        p += (size_t)n;
+        remaining -= (size_t)n;
+    }
+    return 0;
+}
+
+// Read-all helper (handles short reads / EINTR). Returns the number of
+// bytes actually read, or -1 on error. Used by the parent to drain the
+// errno pipe after the child exits.
+static ssize_t taida_os_read_all(int fd, void *buf, size_t len) {
+    unsigned char *p = (unsigned char*)buf;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = read(fd, p + total, len - total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) break; // EOF (pipe closed on successful exec)
+        total += (size_t)n;
+    }
+    return (ssize_t)total;
+}
+
+taida_val taida_os_run_interactive(taida_val program_ptr, taida_val args_list_ptr) {
+    const char *program = (const char*)program_ptr;
+    if (!program) return taida_gorillax_err(taida_make_io_error(EINVAL, "runInteractive: invalid arguments"));
+
+    taida_val *list = (taida_val*)args_list_ptr;
+    taida_val argc = list ? list[2] : 0;
+
+    // CLOEXEC error pipe: child writes errno here if execvp fails; on
+    // successful exec the kernel auto-closes both ends so the parent
+    // sees EOF.
+    int err_pipe[2];
+    if (pipe(err_pipe) != 0) {
+        return taida_gorillax_err(taida_make_io_error(errno, strerror(errno)));
+    }
+    if (fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        int saved = errno;
+        close(err_pipe[0]);
+        close(err_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        int saved = errno;
+        close(err_pipe[0]);
+        close(err_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
+    }
+
+    if (pid == 0) {
+        // Child: do NOT dup2 stdio. The error pipe's read end is unused here;
+        // the write end stays open and is CLOEXEC so it vanishes on
+        // successful execvp.
+        close(err_pipe[0]);
+
+        char **argv = (char**)TAIDA_MALLOC((argc + 2) * sizeof(char*), "exec_argv_interactive");
+        argv[0] = (char*)program;
+        for (taida_val i = 0; i < argc; i++) {
+            argv[i + 1] = (char*)list[4 + i];
+        }
+        argv[argc + 1] = NULL;
+
+        execvp(program, argv);
+        // execvp failed — push errno to the parent before dying.
+        int exec_errno = errno;
+        (void)taida_os_write_all(err_pipe[1], &exec_errno, sizeof(exec_errno));
+        close(err_pipe[1]);
+        _exit(127);
+    }
+
+    // Parent: close the write end (child holds its copy), then drain the
+    // error pipe. If the pipe yields sizeof(int) bytes, execvp failed and
+    // that int is the child's errno. If it yields 0 bytes (EOF), execvp
+    // succeeded and the child is running / has exited normally.
+    close(err_pipe[1]);
+
+    int child_errno = 0;
+    ssize_t got = taida_os_read_all(err_pipe[0], &child_errno, sizeof(child_errno));
+    close(err_pipe[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (got == (ssize_t)sizeof(child_errno) && child_errno != 0) {
+        // execvp failed — classify as IoError, not ProcessError.
+        return taida_gorillax_err(taida_make_io_error(child_errno, strerror(child_errno)));
+    }
+
+    taida_val exit_code = taida_os_extract_wait_code(status);
+    taida_val inner = taida_os_process_inner_code_only(exit_code);
+    if (exit_code == 0) {
+        return taida_gorillax_new(inner);
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Process '%s' exited with code %" PRId64, program, exit_code);
+    taida_val error = taida_make_error("ProcessError", msg);
+    return taida_gorillax_err(error);
+}
+
+// ── C19: execShellInteractive(command) → Gorillax[@(code: Int)] ──
+//
+// TTY-passthrough variant of `execShell`. Uses `sh -c` (no cmd /C branch
+// here — Windows would use _spawnvp and is best-effort).
+//
+// Uses the same CLOEXEC errno-pipe pattern as `taida_os_run_interactive`
+// so that failures to even spawn `/bin/sh` surface as IoError. In
+// practice this path is almost never ENOENT (sh is always present) but
+// we keep the classification consistent for symmetry.
+taida_val taida_os_exec_shell_interactive(taida_val command_ptr) {
+    const char *command = (const char*)command_ptr;
+    if (!command) return taida_gorillax_err(taida_make_io_error(EINVAL, "execShellInteractive: invalid arguments"));
+
+    int err_pipe[2];
+    if (pipe(err_pipe) != 0) {
+        return taida_gorillax_err(taida_make_io_error(errno, strerror(errno)));
+    }
+    if (fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        int saved = errno;
+        close(err_pipe[0]);
+        close(err_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        int saved = errno;
+        close(err_pipe[0]);
+        close(err_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
+    }
+
+    if (pid == 0) {
+        // Child: no dup2 — inherit parent's TTY FDs.
+        close(err_pipe[0]);
+        execl("/bin/sh", "sh", "-c", command, (char*)NULL);
+        int exec_errno = errno;
+        (void)taida_os_write_all(err_pipe[1], &exec_errno, sizeof(exec_errno));
+        close(err_pipe[1]);
+        _exit(127);
+    }
+
+    close(err_pipe[1]);
+
+    int child_errno = 0;
+    ssize_t got = taida_os_read_all(err_pipe[0], &child_errno, sizeof(child_errno));
+    close(err_pipe[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (got == (ssize_t)sizeof(child_errno) && child_errno != 0) {
+        return taida_gorillax_err(taida_make_io_error(child_errno, strerror(child_errno)));
+    }
+
+    taida_val exit_code = taida_os_extract_wait_code(status);
+    taida_val inner = taida_os_process_inner_code_only(exit_code);
+    if (exit_code == 0) {
+        return taida_gorillax_new(inner);
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Shell command exited with code %" PRId64 ": %s", exit_code, command);
+    taida_val error = taida_make_error("ProcessError", msg);
+    return taida_gorillax_err(error);
 }
 
 // ── allEnv() → HashMap[Str, Str] ──────────────────────────
