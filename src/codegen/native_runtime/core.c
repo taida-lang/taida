@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <time.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
@@ -348,6 +349,9 @@ taida_val taida_os_create_dir(taida_val path_ptr);
 taida_val taida_os_rename(taida_val from_ptr, taida_val to_ptr);
 taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr);
 taida_val taida_os_exec_shell(taida_val command_ptr);
+// C19: interactive TTY-passthrough variants
+taida_val taida_os_run_interactive(taida_val program_ptr, taida_val args_list_ptr);
+taida_val taida_os_exec_shell_interactive(taida_val command_ptr);
 taida_val taida_os_all_env(void);
 taida_val taida_os_argv(void);
 // OS package Phase 2: async APIs
@@ -794,6 +798,7 @@ static const char __bytes_cursor_type_str[] = "BytesCursor";
 #define HASH_HAS_VALUE 0x9e9c6dc733414d60ULL
 #define HASH___VALUE   0x0a7fc9f13472bbe0ULL
 #define HASH___DEFAULT 0xed4fba440f8602d4ULL
+#define HASH___ERROR   0x15c3e6e41a99a6cbULL
 #define HASH___TYPE    0x84d2d84b631f799bULL
 #define HASH_TODO_ID   0x08b72e07b55c3ac0ULL
 #define HASH_TODO_TASK 0xd9603bef07a9524cULL
@@ -991,7 +996,9 @@ taida_val taida_gorillax_new(taida_val value) {
     taida_pack_set(pack, 1, value);
     // retain-on-store: value が Pack/List/Closure の場合 retain + tag 設定
     taida_retain_and_tag_field(pack, 1, value);
-    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);  // reuse hash slot (field 2)
+    // C19B-001: field 2 is `__error`, not `__default`. Using the correct
+    // FNV-1a hash lets user code actually look up `.__error` at runtime.
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___ERROR);
     taida_pack_set(pack, 2, 0);  // __error = Unit (no error)
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__gorillax_type_str);
@@ -1005,7 +1012,8 @@ taida_val taida_gorillax_err(taida_val error) {
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
     taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, 0);  // __value = Unit
-    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);  // reuse hash slot (field 2)
+    // C19B-001: use the correct `__error` hash so `.__error.<field>` resolves.
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___ERROR);
     taida_pack_set(pack, 2, error);  // __error may be a Pack
     taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
     if (error != 0) taida_retain(error);  // retain-on-store: error pack child
@@ -1034,7 +1042,10 @@ taida_val taida_gorillax_relax(taida_val ptr) {
     taida_pack_set(pack, 1, taida_pack_get_idx(ptr, 1));  // __value
     // QF-50: retain-on-store for __value (may be Pack/List/Closure/HMap/Set/Str)
     taida_retain_and_tag_field(pack, 1, taida_pack_get_idx(ptr, 1));
-    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);
+    // C19B-001: field 2 is `__error`, keep its hash consistent with the
+    // producer side (taida_gorillax_err) so `.__error.<field>` stays
+    // resolvable across relax() transitions.
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___ERROR);
     taida_pack_set(pack, 2, taida_pack_get_idx(ptr, 2));  // __error
     // QF-50: retain-on-store for __error (typically a Pack)
     taida_retain_and_tag_field(pack, 2, taida_pack_get_idx(ptr, 2));

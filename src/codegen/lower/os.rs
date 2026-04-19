@@ -28,6 +28,9 @@ impl Lowering {
             "rename" => Some("taida_os_rename"),
             "run" => Some("taida_os_run"),
             "execShell" => Some("taida_os_exec_shell"),
+            // C19: interactive TTY-passthrough variants
+            "runInteractive" => Some("taida_os_run_interactive"),
+            "execShellInteractive" => Some("taida_os_exec_shell_interactive"),
             "allEnv" => Some("taida_os_all_env"),
             "argv" => Some("taida_os_argv"),
             "dnsResolve" => Some("taida_os_dns_resolve"),

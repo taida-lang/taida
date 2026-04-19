@@ -1526,6 +1526,16 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // C19: interactive TTY-passthrough variants. Same ABI shape as
+        // their captured counterparts above.
+        "taida_os_run_interactive" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_os_exec_shell_interactive" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
         // taida-lang/os package — query function
         "taida_os_all_env" => RuntimeAbi {
             params: &[],
