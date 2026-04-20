@@ -1900,16 +1900,30 @@ impl Interpreter {
         // current_func tracks which function to execute (may change for mutual recursion)
         let mut current_func = func.clone();
         let mut current_args = arg_values;
-        // C20B-015 / ROOT-18: overlay defining-module typedef scope. On
-        // mutual tail call the target function may live in a different
-        // module, so we re-overlay when `current_func` changes. The initial
-        // snapshot is taken once and restored on final exit; between
-        // trampoline iterations we restore-then-re-overlay so a self tail
-        // call is a no-op (the overlay is idempotent) and a mutual tail
-        // call picks up the correct module scope.
+        // C20B-015 / ROOT-18: overlay defining-module typedef scope.
+        //
+        // Invariant: on *every* exit path from this trampoline we restore
+        // `self.type_defs` / `self.enum_defs` to the snapshot captured here
+        // (`saved_td_root` / `saved_ed_root`), regardless of which callee
+        // within the tail-call chain actually required an overlay.
+        //
+        // Before the fix, the initial callee's `td_changed` flag gated the
+        // restore. When the initial callee was a *local* function
+        // (`td_changed == false`) and a mutual tail-call retargeted to an
+        // *imported* function (whose overlay push succeeded), the exit
+        // path skipped the restore and the imported function's private
+        // TypeDefs leaked into the caller's scope permanently. Pinned by
+        // `c20b_015_interpreter_mutual_tail_call_does_not_leak_overlay`.
+        //
+        // The unconditional clone-and-restore is the only correct contract
+        // here: any subset of iterations may or may not push an overlay,
+        // but the caller's pre-call scope is always `saved_*_root` and
+        // must be the state we return to. Cost: `HashMap::clone` of the
+        // root registries, paid per top-level function call (not per
+        // trampoline iteration).
         let saved_td_root = self.type_defs.clone();
         let saved_ed_root = self.enum_defs.clone();
-        let (_, _, td_changed) = self.push_func_module_scope(&current_func);
+        let _ = self.push_func_module_scope(&current_func);
         loop {
             // Create closure scope (separate from local scope so user variables
             // can shadow captured names without "already defined" errors)
@@ -1927,10 +1941,8 @@ impl Interpreter {
                 Ok(Some(signal)) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
-                    if td_changed {
-                        self.type_defs = saved_td_root.clone();
-                        self.enum_defs = saved_ed_root.clone();
-                    }
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
                     self.call_depth -= 1;
                     return Ok(signal);
@@ -1939,10 +1951,8 @@ impl Interpreter {
                 Err(err) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
-                    if td_changed {
-                        self.type_defs = saved_td_root.clone();
-                        self.enum_defs = saved_ed_root.clone();
-                    }
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
                     self.call_depth -= 1;
                     return Err(err);
@@ -1977,12 +1987,14 @@ impl Interpreter {
                             self.active_function = Some(target_name);
                             current_args = new_args;
                             // C20B-015 / ROOT-18: target function may be from
-                            // a different module — reset to the outer scope
-                            // then re-overlay with the new function's scope.
-                            if td_changed {
-                                self.type_defs = saved_td_root.clone();
-                                self.enum_defs = saved_ed_root.clone();
-                            }
+                            // a different module. Reset to the caller's
+                            // saved root scope, then re-overlay with the new
+                            // function's defining-module scope. This keeps
+                            // overlays scoped to exactly the iterations that
+                            // need them and never leaks a previous iteration's
+                            // overlay into a later iteration's scope.
+                            self.type_defs = saved_td_root.clone();
+                            self.enum_defs = saved_ed_root.clone();
                             let _ = self.push_func_module_scope(&current_func);
                             continue;
                         } else {
@@ -1991,10 +2003,8 @@ impl Interpreter {
                             // where a non-recursive function call in tail position was
                             // speculatively treated as a mutual tail call.
                             self.active_function = prev_active.clone();
-                            if td_changed {
-                                self.type_defs = saved_td_root.clone();
-                                self.enum_defs = saved_ed_root.clone();
-                            }
+                            self.type_defs = saved_td_root.clone();
+                            self.enum_defs = saved_ed_root.clone();
                             // Re-evaluate the original function body without tail call optimization.
                             // We need to re-execute the function with the original args but
                             // as a normal call. Instead, we reconstruct the call.
@@ -2014,11 +2024,9 @@ impl Interpreter {
                     continue;
                 }
                 other => {
-                    // Normal result: restore and return
-                    if td_changed {
-                        self.type_defs = saved_td_root.clone();
-                        self.enum_defs = saved_ed_root.clone();
-                    }
+                    // Normal result: restore and return.
+                    self.type_defs = saved_td_root.clone();
+                    self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
                     self.call_depth -= 1;
                     return Ok(other);

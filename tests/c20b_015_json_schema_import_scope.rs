@@ -280,6 +280,87 @@ stdout(JSON[raw, UserSchema]().__value.name)
     );
 }
 
+// ── Interpreter: mutual tail-call retarget does not leak overlay ──
+//
+// Regression guard for the C20B-015 reopen (2026-04-21 review). Pre-fix
+// (post-Phase 5.6): the trampoline captured `td_changed` from the
+// *initial* callee and used that flag to decide whether to restore the
+// outer scope on exit. If the initial callee was a *local* function
+// (`td_changed == false`) and a mutual tail-call retargeted to an
+// *imported* function whose push overlaid the defining module's private
+// typedefs, the overlay was never restored and leaked into the caller's
+// top-level scope.
+//
+// Repro shape: a local wrapper `wrap raw = load(raw)` whose tail call
+// retargets to imported `load` (which lives in a module with private
+// `Schema`). After `wrap("...")` returns, the caller attempts
+// `JSON[raw, Schema]()` at the top level. This must fail with
+// "Unknown schema type 'Schema'" because the caller never imported
+// `Schema`. Pre-fix, the caller-scope call silently succeeded.
+
+#[test]
+fn c20b_015_interpreter_mutual_tail_call_does_not_leak_overlay() {
+    let tmp = unique_temp("c20b015_tail", "dir");
+    fs::create_dir_all(&tmp).expect("mkdir");
+    let schema_mod = "\
+Schema = @(name: Str)
+
+load raw: Str =
+  parsed <= JSON[raw, Schema]()
+  | parsed.hasValue |> parsed.__value.name
+  | _ |> \"no\"
+=> :Str
+
+<<< @(load)
+";
+    fs::write(tmp.join("schema_mod.td"), schema_mod).expect("write schema_mod");
+    // `wrap` is a local function whose body is a direct call to the
+    // imported `load`. This triggers the mutual tail-call path in the
+    // trampoline (initial callee `wrap` is local; retarget is imported
+    // `load` which pushes an overlay).
+    let caller = "\
+>>> ./schema_mod.td => @(load)
+
+wrap raw: Str = load(raw) => :Str
+
+stdout(wrap(\"{\\\"name\\\":\\\"ok\\\"}\"))
+stdout(\"\\n\")
+stdout(JSON[\"{\\\"name\\\":\\\"leak\\\"}\", Schema]().__value.name)
+stdout(\"\\n\")
+";
+    fs::write(tmp.join("caller.td"), caller).expect("write caller");
+    let out = Command::new(taida_bin())
+        .arg(tmp.join("caller.td"))
+        .output()
+        .expect("spawn interp");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let combined = format!("{}\n{}", stdout, stderr);
+    let _ = fs::remove_dir_all(&tmp);
+    // `wrap("…")` must still succeed — the imported function's overlay
+    // is applied for the duration of its body.
+    assert!(
+        stdout.contains("ok"),
+        "imported function call via local wrapper did not produce expected 'ok'. stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    // The caller-scope `JSON[..., Schema]()` must still be rejected. The
+    // overlay from `load`'s body is NOT allowed to persist back into the
+    // caller's top-level scope after `wrap(…)` returns.
+    assert!(
+        combined.contains("Unknown schema type") && combined.contains("Schema"),
+        "caller-scope JSON[raw, Schema]() was silently allowed — mutual \
+         tail-call overlay leak regression. combined={}",
+        combined
+    );
+    // The program as a whole should terminate with a runtime error
+    // (not exit 0), because the second `stdout(JSON[...]().__value.name)`
+    // must throw before reaching `stdout`.
+    // NB: taida interpreter currently returns exit 0 even on Runtime error;
+    // what matters is the "Unknown schema type" assertion above.
+}
+
 // ── Interpreter: truly unknown schema still errors ──
 
 #[test]
