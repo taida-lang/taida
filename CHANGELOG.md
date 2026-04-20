@@ -1,5 +1,98 @@
 # Changelog
 
+## @c.20.rc4 (in progress)
+
+Complete the Hachikuma Phase 8-10 / Phase D follow-up track: parser
+silent-bug elimination, stdin UX alignment across three backends, and
+a list-of-record shape for `HttpRequest` headers so dash-bearing names
+like `x-api-key` are finally reachable from Taida.
+
+### Parser — new diagnostic `E0303`
+
+`name <= | cond |> A | _ |> B` written across multiple physical lines
+on the right-hand side of `<=` silently greedy-absorbed the next
+statement as a continuation arm (C19B-009 / ROOT-5). One-line
+`|== error: Error = <expr>` dropped every subsequent top-level
+definition from the loaded module (C19B-008 / ROOT-4). Both shapes
+checker-green'd and broke at runtime.
+
+Now:
+
+- One-line `|== error: Error = <expr>` parses as a single-expression
+  handler body and leaves surrounding definitions intact (equivalent
+  to the multi-line block form).
+- Multi-line multi-arm `| cond |> A | _ |> B` on the right-hand side
+  of `<=` is rejected with
+  `[E0303] rhs of \`<=\` cannot contain a multi-arm conditional`.
+  Use `If[cond, then, else]()`, extract a helper, or wrap the
+  conditional in parentheses (`name <= (| ... |> ...)`), which
+  restores the top-level parsing context.
+- Single-line rhs guards (`name <= | a |> 1 | _ |> 2` on one
+  physical line) remain a legal one-shot shape.
+- Top-level / function-body `| cond |> body` is untouched.
+
+### `stdin` — three-backend parity (no new API)
+
+`stdin(prompt?)` now behaves identically on Interpreter, JS, and
+Native:
+
+- Returns `""` on EOF / read error everywhere (Interpreter used to
+  throw `IoError`; JS and Native already silently returned empty).
+  Callers that need failure awareness should use the new
+  `stdinLine => :Lax[Str]` API (see next section).
+- Prompt is optional on every backend including the type checker
+  (`stdin()` is now valid; previously `[E1507]` rejected it).
+- JS decodes stdin via a streaming `TextDecoder('utf-8', { stream })`
+  over a 4 KiB chunk buffer — multibyte codepoints survive chunk
+  boundaries instead of collapsing to U+FFFD.
+- JS stringifies non-Str prompts via `String(prompt)` inside the
+  try/catch so `stdin(1)` / `stdin(@(...))` no longer crashes Node
+  with `ERR_INVALID_ARG_TYPE`.
+- Native replaces the fixed `char[4096]` stack buffer with
+  `getline(3)` on POSIX / a `fgets` realloc loop on Windows, so long
+  pasted lines are read completely instead of bleeding the tail into
+  the next `stdin` call.
+
+### `HttpRequest` — list-of-record headers
+
+Dash-bearing HTTP headers (`x-api-key`, `anthropic-version`,
+`content-type`, ...) are no longer reachable via buchi-pack
+identifier keys. C20 adds a second accepted shape:
+
+```taida
+resp <= HttpRequest["POST", "https://api.example.com/v1/echo"](
+  headers <= @[
+    @(name <= "x-api-key", value <= "secret-k"),
+    @(name <= "anthropic-version", value <= "2023-06-01"),
+  ],
+  body <= "{}",
+) ]=> await
+```
+
+Both shapes are supported on all three backends:
+
+- Legacy: `headers <= @(ident <= "value")` — identifier becomes the
+  wire header name as before.
+- New: `headers <= @[@(name <= "...", value <= "...")]` — any UTF-8
+  is legal in the wire name.
+
+Also:
+- JS `HttpRequest[method]()` (fewer than 2 type args) now fails at
+  `taida build --target js` time with
+  `HttpRequest requires at least 2 type arguments`, matching the
+  Interpreter and Native rejection path instead of emitting
+  syntactically invalid JavaScript.
+
+### Tests
+
+- `tests/c20_parser_silent_bugs.rs` (parser unit, 8 cases)
+- `tests/c20_stdin_parity.rs` (3 backends × 4 fixtures + checker
+  no-prompt + JS non-Str prompt guard, 14 cases)
+- `tests/c20_http_dash_header.rs` (3 backends × 2 header shapes +
+  JS arity guard, 7 cases)
+- `examples/quality/c20_parser/*` (2 pins)
+- `examples/quality/c20_stdin/*` (4 pins)
+
 ## @c.19.rc4
 
 Add TTY-passthrough variants of the process-execution APIs so Taida

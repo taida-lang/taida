@@ -98,7 +98,14 @@ stdout / stderr を pipe で捕捉し、文字列として返します。
 | `ReadAsync[path]()` | `Str -> Async[Lax[Str]]` |
 | `HttpGet[url]()` | `Str -> Async[Lax[Str]]` |
 | `HttpPost[url, body]()` | `(Str, Str) -> Async[Lax[Str]]` |
-| `HttpRequest[method, url](headers, body)` | `(Str, Str, BuchiPack, Str) -> Async[Lax[Str]]` |
+| `HttpRequest[method, url](headers, body)` | `(Str, Str, BuchiPack \| List[@(name: Str, value: Str)], Str) -> Async[Lax[@(status: Int, body: Str, headers: BuchiPack)]]` |
+
+`HttpRequest` の `headers` 引数は 2 形式を受け付けます（C20-4 以降、どちらも 3 バックエンドで等価）:
+
+- 旧: `headers <= @(content_type <= "application/json")` — buchi-pack。フィールド識別子がそのまま wire header 名になります（`-` や `.` は識別子に使えないので `x-api-key` 等は書けません）。
+- 新: `headers <= @[@(name <= "x-api-key", value <= "secret"), @(name <= "anthropic-version", value <= "2023-06-01")]` — `List[@(name: Str, value: Str)]`。任意 UTF-8 header 名が使えます。
+
+新規コードは新形式を推奨します。`HttpRequest["GET"]()` のように type arg が 2 未満の呼び出しは Interpreter / JS / Native すべてで拒否されます（JS backend は `taida build --target js` 時点で arity error）。
 
 ---
 

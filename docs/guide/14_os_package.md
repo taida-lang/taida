@@ -47,6 +47,26 @@ content <= Read["/etc/hosts"]()
 
 ---
 
+## 1.5 標準入力（stdin）
+
+Taida プレリュードの `stdin(prompt?)` は、端末（cooked mode）から 1 行読み取って `Str` を返します。プロンプトは省略可能で、`stdin()` / `stdin("name: ")` の両形式が checker / Interpreter / JS / Native すべてで受理されます（C20-3 以降）。
+
+```taida
+line <= stdin("name: ")
+stdout("hello, " + line)
+```
+
+**3 バックエンドの挙動（C20-3 以降）**:
+
+- EOF / IO エラー時は `""` を返します（失敗検知には `stdinLine` を使う — 後述）。
+- 改行は `\n` / `\r\n` どちらも strip します。
+- 長い行も truncate されません（Native は `getline(3)` / realloc loop、JS は 4 KiB chunk stream decode で multibyte も壊れません）。
+- プロンプトは `Str` 以外でも display string 化されます（`stdin(1)` は `1` を出力してから読み取り）。
+
+**C20 以降の代替 API (予定)**: `stdinLine(prompt) => :Lax[Str]` は UTF-8-aware な line editor（rustyline / readline / linenoise）を提供し、EOF を `Lax[Str].failure("")` として返すので失敗判定がそのまま書けます。対話 CLI は `stdinLine` を推奨します（C20-2 で導入、C20 merge 後に標準化）。
+
+---
+
 ## 2. プロセス起動
 
 プロセス起動は「**出力を捕捉するか（captured）**」と「**端末を子に渡すか（interactive）**」で 4 種類あります。
