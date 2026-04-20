@@ -1684,6 +1684,15 @@ function __taida_stderr(...args) {
 // ESM: node:fs is loaded via top-level await dynamic import (no require())
 const __taida_fs = await import('node:fs').catch(() => null);
 
+// C20-2: readline/promises is loaded alongside node:fs so that
+// `stdinLine(prompt) ]=> line` has a UTF-8-aware editor available on the
+// JS backend. We deliberately choose `readline/promises` over `readline`
+// because `rl.question(prompt)` returns a Promise directly — Taida's
+// Async[Lax[Str]] surface wraps it without a sync / async bridge.
+// (Atomics.wait + SharedArrayBuffer is out of scope per C20_DESIGN.md
+// Stop Conditions.)
+const __taida_readline_promises_mod = await import('node:readline/promises').catch(() => null);
+
 function __taida_stdin(prompt) {
   if (typeof globalThis.process !== 'undefined' && __taida_fs) {
     // C20-3 (ROOT-14): prompt may arrive as any Value (Int/Bool/BuchiPack);
@@ -1724,6 +1733,97 @@ function __taida_stdin(prompt) {
     } catch (_e) { return ''; }
   }
   return '';
+}
+
+// ── stdinLine — UTF-8-aware line editor (prelude) ─────────
+//
+// C20-2 (ROOT-7): `stdin` above delegates to the kernel's cooked-mode
+// line discipline, which deletes one byte per Backspace. Multibyte
+// (日本語 / 한국어 / 中文 / emoji) input therefore becomes corrupted when
+// users edit their typing. `stdinLine` routes through
+// `node:readline/promises`, whose `rl.question(prompt)` resolves with a
+// full UTF-8 line and whose terminal mode understands char-wide
+// Backspace / arrow keys / Ctrl-U on real TTYs.
+//
+// Shape: Async[Lax[Str]]. The Async wrapper is shared across 3 backends
+// (Interpreter, JS, Native) — JS is async-only, so we pin the surface
+// type to Async and let the Interpreter / Native backends resolve
+// immediately. Taida callers write:
+//
+//     stdinLine("name: ") ]=> line
+//     stdout("hi, " + line.getOrDefault("stranger"))
+//
+// Any failure (missing readline module, EOF on pipe, Ctrl-C, non-TTY
+// stdin, …) collapses to `Lax(null, '')` so the default-value guarantee
+// is preserved.
+async function __taida_stdinLine_inner(prompt) {
+  if (!__taida_readline_promises_mod || typeof process === 'undefined') {
+    return Lax(null, '');
+  }
+  // Parity with Interpreter (rustyline) / Native (termios editor):
+  // when stdin or stdout is NOT a TTY, we cannot do char-wide editing
+  // anyway, so run with `terminal: false`. That stops node:readline
+  // from echoing every byte back and emitting CSI 1G/0J cursor
+  // sequences to stdout — behaviour that the other two backends do
+  // not exhibit because their raw-mode paths short-circuit on pipe.
+  const stdinIsTty = !!(process.stdin && process.stdin.isTTY);
+  const stdoutIsTty = !!(process.stdout && process.stdout.isTTY);
+  const terminalMode = stdinIsTty && stdoutIsTty;
+
+  let rl;
+  try {
+    rl = __taida_readline_promises_mod.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: terminalMode, // TTY: unicode-aware editing. Pipe: line mode.
+    });
+  } catch (_e) {
+    return Lax(null, '');
+  }
+  try {
+    // Stringify prompt (ROOT-14 parity): Interpreter / Native both
+    // display-stringify non-Str prompts, so JS must do the same.
+    const promptStr = prompt === undefined || prompt === null ? '' : String(prompt);
+    // In non-terminal mode readline still accepts the prompt arg and
+    // writes it — but only to the output stream (stdout) when there
+    // is something to write. To match the Interpreter / Native
+    // behaviour (prompt is echoed only on a TTY) we skip the write
+    // ourselves when stdout is piped.
+    let line;
+    // Race rl.question against the 'close' event so that a piped / EOF
+    // stdin does NOT hang the process forever. `rl.question(...)` returns
+    // a Promise that resolves on a newline; when stdin closes before a
+    // newline it never settles (Node 20 behaviour). We pair it with a
+    // manual 'close' listener that resolves with a sentinel and convert
+    // that sentinel into the Lax failure shape.
+    const LAX_EOF = Symbol('stdinLine.eof');
+    const questionArg = terminalMode ? promptStr : '';
+    if (!terminalMode && promptStr && stdoutIsTty) {
+      // Only write the prompt when stdout is a TTY; callers piping
+      // stdout (test harnesses, log capture) do not want the prompt
+      // interleaved with program output.
+      try { process.stdout.write(promptStr); } catch (_e) { /* ignore */ }
+    } else if (!terminalMode && promptStr) {
+      // stdout is piped — write prompt to stderr so interactive users
+      // still see it, matching the interpreter cooked-mode print path.
+      try { process.stderr.write(promptStr); } catch (_e) { /* ignore */ }
+    }
+    const questionPromise = rl.question(questionArg);
+    const closePromise = new Promise((resolve) => {
+      rl.once('close', () => resolve(LAX_EOF));
+    });
+    line = await Promise.race([questionPromise, closePromise]);
+    if (line === LAX_EOF) return Lax(null, '');
+    return Lax(line);
+  } catch (_e) {
+    return Lax(null, '');
+  } finally {
+    try { rl.close(); } catch (_e) { /* best-effort close */ }
+  }
+}
+
+function __taida_stdinLine(prompt) {
+  return __taida_async_pending_from_promise(__taida_stdinLine_inner(prompt));
 }
 
 const __TAIDA_MAX_SLEEP_MS = 2147483647;

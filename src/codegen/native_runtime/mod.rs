@@ -203,9 +203,18 @@ mod tests {
     /// `taida_os_http_headers_to_lines` and the curl header loop in
     /// `taida_os_http_do_curl` now accept both shapes. core.c and
     /// other fragments are unchanged. New total: 917,805.
+    ///
+    /// C20-2 (2026-04-20): +8,477 bytes in core.c — added the
+    /// UTF-8-aware `taida_io_stdin_line` line editor (derived from
+    /// linenoise BSD-2-Clause) so that `stdinLine(prompt) ]=> line`
+    /// returns an `Async[Lax[Str]]` that survives multibyte input
+    /// editing on a POSIX TTY (fixes ROOT-7). Non-TTY fallback uses
+    /// getline to keep pipe / redirect parity with the other two
+    /// backends. Include of `<termios.h>` / `<unistd.h>` is local to
+    /// this block. Other fragments unchanged. New total: 926,282.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 917_805;
+        const EXPECTED_TOTAL_LEN: usize = 926_282;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -353,11 +362,18 @@ mod tests {
         // `getline` on POSIX / realloc-loop on Windows replacing the
         // fixed 4 KiB stack buffer). Fragment 1 is unchanged. Fragment 2
         // size moves from 123,746 to 124,852.
-        const F1_LEN: usize = 211_940;
+        //
+        // C20-2 (2026-04-20): fragment 1 grew by +178 bytes from the
+        // `taida_io_stdin_line` forward declaration (and its doc-comment
+        // header). Fragment 2 grew by +8,299 bytes from the UTF-8-aware
+        // line editor body (static helpers + termios raw-mode loop).
+        // F1 moves from 211,940 to 212,118; F2 moves from 124,852 to
+        // 133,151.
+        const F1_LEN: usize = 212_118;
         assert_eq!(
             CORE_SECTION.len(),
-            211_940 + 124_852,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C20-3 adjusted)"
+            212_118 + 133_151,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C20-2 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

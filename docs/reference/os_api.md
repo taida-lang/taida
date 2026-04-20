@@ -91,6 +91,26 @@ stdout / stderr を pipe で捕捉し、文字列として返します。
 
 ---
 
+## 3.5 標準入力（prelude）
+
+| API | Signature | 備考 |
+|-----|-----------|------|
+| `stdin(prompt?)` | `() -> Str` / `Str -> Str` | cooked-mode 1 行読み取り。EOF / IO エラー時は `""`（失敗検知不可）。ASCII 入力 / pipe 用途向け |
+| `stdinLine(prompt?)` | `() -> Async[Lax[Str]]` / `Str -> Async[Lax[Str]]` | UTF-8-aware line editor (rustyline / readline/promises / linenoise 派生)。caller は `]=>` で unmold して `Lax[Str]` を得る。EOF / Ctrl-C / Ctrl-D で `Lax.failure("")` |
+
+`stdinLine` の典型的な使い方:
+
+```taida
+stdinLine("お名前: ") ]=> line
+stdout("こんにちは、" + line.getOrDefault("旅人"))
+```
+
+`stdin` vs `stdinLine` の使い分けはガイド [14_os_package.md §1.5a](../guide/14_os_package.md) を参照。対話 CLI / multibyte 入力は `stdinLine` を推奨します。
+
+どちらも import なしの prelude 関数です（`>>> taida-lang/os` は不要）。
+
+---
+
 ## 4. 非同期入力（モールド）
 
 | API | Signature |

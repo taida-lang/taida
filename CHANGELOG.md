@@ -31,6 +31,44 @@ Now:
   physical line) remain a legal one-shot shape.
 - Top-level / function-body `| cond |> body` is untouched.
 
+### New: `stdinLine(prompt?) => :Async[Lax[Str]]`
+
+Hachikuma Phase D's Japanese interview flow exposed ROOT-7: kernel
+cooked-mode Backspace deletes one byte at a time, corrupting
+multibyte UTF-8 when users edit their typing. C20-2 introduces a
+dedicated prelude API that routes through a UTF-8-aware line editor
+on all three backends:
+
+- Interpreter: `rustyline` (MIT/Apache-2.0), default editor with
+  codepoint-wide Backspace, arrow keys, and Ctrl-U line clear.
+- JS: `node:readline/promises` + `rl.question()`; TTY mode enables
+  the full editor, pipe mode falls back to line-buffered reads.
+- Native: a trimmed derivative of linenoise (BSD-2-Clause, see
+  `LICENSES/linenoise.LICENSE`) — termios raw mode, UTF-8
+  codepoint-aware Backspace, pipe input drops through to `getline`.
+
+```taida
+stdinLine("お名前: ") ]=> line
+stdout("こんにちは、" + line.getOrDefault("旅人"))
+```
+
+Shape and discipline:
+
+- Return type is **`Async[Lax[Str]]`** across all three backends. The
+  Async wrapper exists so the JS path (async-only readline) and the
+  Interpreter / Native paths (sync editors) share one surface. Callers
+  **must** unmold with `]=>` to obtain the inner `Lax[Str]`; `<=`
+  binding leaves the Async in place.
+- Any failure (EOF, pipe close, Ctrl-C, Ctrl-D on empty line, missing
+  `node:readline/promises`, `termios` error, …) collapses to
+  `Lax(null, "")` so the default-value guarantee is preserved —
+  `.getOrDefault("")` and `.isEmpty()` both keep working.
+- Prompt is optional; non-Str prompts are display-stringified before
+  being written, matching the ROOT-14 parity rule already applied to
+  `stdin`.
+- Out of scope: history, tab completion, multi-line edit. A future
+  `taida-lang/readline` addon will layer those features on top.
+
 ### `stdin` — three-backend parity (no new API)
 
 `stdin(prompt?)` now behaves identically on Interpreter, JS, and
@@ -88,10 +126,14 @@ Also:
 - `tests/c20_parser_silent_bugs.rs` (parser unit, 8 cases)
 - `tests/c20_stdin_parity.rs` (3 backends × 4 fixtures + checker
   no-prompt + JS non-Str prompt guard, 14 cases)
+- `tests/c20_stdinline_parity.rs` (3 backends × 3 fixtures + 3 checker
+  cases, 12 cases — pins `Async[Lax[Str]]` surface, EOF failure, UTF-8
+  round-trip)
 - `tests/c20_http_dash_header.rs` (3 backends × 2 header shapes +
   JS arity guard, 7 cases)
 - `examples/quality/c20_parser/*` (2 pins)
 - `examples/quality/c20_stdin/*` (4 pins)
+- `examples/quality/c20_stdinline/*` (3 pins)
 
 ## @c.19.rc4
 

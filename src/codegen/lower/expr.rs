@@ -815,6 +815,24 @@ impl Lowering {
                     func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
                     return Ok(result);
                 }
+                // C20-2: stdinLine — mirrors `stdin` arity / prompt
+                // stringification but the runtime returns Async[Lax[Str]]
+                // rather than a bare Str. The prompt is optional and is
+                // display-stringified when present so non-Str prompts
+                // parity-match the interpreter / JS behaviour.
+                if name == "stdinLine" {
+                    let prompt_var = if let Some(arg) = args.first() {
+                        let arg_var = self.lower_expr(func, arg)?;
+                        self.convert_to_string(func, arg, arg_var)?
+                    } else {
+                        let empty = func.alloc_var();
+                        func.push(IrInst::ConstStr(empty, String::new()));
+                        empty
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
+                    return Ok(result);
+                }
                 // v5: wsClose(ws) or wsClose(ws, code) — always pass 2 args.
                 // When code is omitted, pass 0 (C runtime treats 0 as default 1000).
                 if name == "wsClose" {

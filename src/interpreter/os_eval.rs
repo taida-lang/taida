@@ -124,6 +124,19 @@ fn make_lax_failure(default_val: Value) -> Value {
     ])
 }
 
+/// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
+/// any other prelude-scope builder that needs to hand back a Lax[T])
+/// can build `Lax` values without duplicating the BuchiPack shape.
+pub(crate) fn make_lax_success_pub(val: Value) -> Value {
+    make_lax_success(val)
+}
+
+/// C20-2: pub(crate) counterpart for `make_lax_failure`. See
+/// `make_lax_success_pub` above.
+pub(crate) fn make_lax_failure_pub(default_val: Value) -> Value {
+    make_lax_failure(default_val)
+}
+
 /// Create an os Result success value: @(ok=true, code=0, message="").
 fn make_result_success(inner: Value) -> Value {
     Value::BuchiPack(vec![

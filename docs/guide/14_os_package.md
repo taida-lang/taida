@@ -63,7 +63,41 @@ stdout("hello, " + line)
 - 長い行も truncate されません（Native は `getline(3)` / realloc loop、JS は 4 KiB chunk stream decode で multibyte も壊れません）。
 - プロンプトは `Str` 以外でも display string 化されます（`stdin(1)` は `1` を出力してから読み取り）。
 
-**C20 以降の代替 API (予定)**: `stdinLine(prompt) => :Lax[Str]` は UTF-8-aware な line editor（rustyline / readline / linenoise）を提供し、EOF を `Lax[Str].failure("")` として返すので失敗判定がそのまま書けます。対話 CLI は `stdinLine` を推奨します（C20-2 で導入、C20 merge 後に標準化）。
+### 1.5a `stdinLine(prompt?)` — UTF-8-aware 対話入力 (C20-2 以降)
+
+`stdinLine(prompt?)` は C20-2 で新設された UTF-8-aware な対話入力 API です。ASCII しか扱わない簡易スクリプトなら従来通り `stdin` で十分ですが、日本語 / 中国語 / 韓国語 / 絵文字を含む入力や、実際の対話 CLI では `stdinLine` を使ってください。
+
+```taida
+stdinLine("名前: ") ]=> line
+stdout("こんにちは、" + line.getOrDefault("旅人"))
+```
+
+戻り値は `Async[Lax[Str]]` です。`]=>` で Async を unmold すると `Lax[Str]` が得られ、`.getOrDefault("")` で失敗時のデフォルトを書けます。**同期 `=>` 代入 (`x <= stdinLine("p")`) では Lax が取り出せない** ため、対話入力は必ず `]=>` で受けてください（単一方向制約）。
+
+失敗モード — すべて `Lax[Str].failure("")` に集約され、デフォルト値保証が維持されます:
+
+- EOF / pipe クローズ
+- Ctrl-D（行頭で）
+- Ctrl-C / SIGINT
+- 非 TTY 環境で line editor が使えない
+- JS: `node:readline/promises` が読み込めない環境（古い Node.js 等）
+
+**3 バックエンド実装**:
+
+| Backend | 使用ライブラリ | 挙動 |
+|---------|-----------------|------|
+| Interpreter | `rustyline` (MIT) | UTF-8 aware, Backspace で multibyte 単位削除, 矢印キー cursor 移動 |
+| JS | `node:readline/promises` | TTY 時は `terminal: true` で unicode 対応, pipe 時は line mode fallback |
+| Native | linenoise 派生 (BSD-2-Clause, `LICENSES/linenoise.LICENSE` 参照) | termios raw mode + UTF-8 codepoint 単位 Backspace, pipe 時は `getline` fallback |
+
+**`stdin` vs `stdinLine` 使い分け**:
+
+| API | 戻り型 | 失敗検知 | UTF-8 編集 | 推奨ユースケース |
+|-----|-------|---------|----------|----------------|
+| `stdin(prompt?)` | `Str` | 失敗時 `""` (見分け不可) | 環境依存（kernel cooked mode） | ASCII-only / 非対話 pipe 入力 |
+| `stdinLine(prompt?)` | `Async[Lax[Str]]` | `Lax.hasValue()` == false | POSIX TTY で保証（pipe は kernel 委譲） | 対話 CLI / 日本語 / UTF-8 input |
+
+**C20 scope 外** — 履歴 / tab completion / 複数行編集は将来 `taida-lang/readline` addon に分離予定。本 API は「最小限の UTF-8-aware line editor」として固定。
 
 ---
 

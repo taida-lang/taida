@@ -2377,6 +2377,8 @@ impl JsCodegen {
                             "stdout" => self.write("__taida_stdout"),
                             "stderr" => self.write("__taida_stderr"),
                             "stdin" => self.write("__taida_stdin"),
+                            // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
+                            "stdinLine" => self.write("__taida_stdinLine"),
                             "jsonEncode" => self.write("__taida_jsonEncode"),
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
@@ -2450,6 +2452,8 @@ impl JsCodegen {
                         "stdout" => self.write("__taida_stdout"),
                         "stderr" => self.write("__taida_stderr"),
                         "stdin" => self.write("__taida_stdin"),
+                        // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
+                        "stdinLine" => self.write("__taida_stdinLine"),
                         "jsonEncode" => self.write("__taida_jsonEncode"),
                         "jsonPretty" => self.write("__taida_jsonPretty"),
                         "nowMs" => self.write("__taida_nowMs"),
@@ -3448,6 +3452,8 @@ impl JsCodegen {
                             "stdout" => self.write("__taida_stdout"),
                             "stderr" => self.write("__taida_stderr"),
                             "stdin" => self.write("__taida_stdin"),
+                            // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
+                            "stdinLine" => self.write("__taida_stdinLine"),
                             "jsonEncode" => self.write("__taida_jsonEncode"),
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
@@ -3664,6 +3670,8 @@ impl JsCodegen {
                     "stdout" => self.write("__taida_stdout(__p)"),
                     "stderr" => self.write("__taida_stderr(__p)"),
                     "stdin" => self.write("__taida_stdin(__p)"),
+                    // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
+                    "stdinLine" => self.write("__taida_stdinLine(__p)"),
                     "jsonEncode" => self.write("__taida_jsonEncode(__p)"),
                     "jsonPretty" => self.write("__taida_jsonPretty(__p)"),
                     "nowMs" => self.write("__taida_nowMs()"),
