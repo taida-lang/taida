@@ -51,10 +51,12 @@ remove(path)
 pickEditor =
   visual <= EnvVar["VISUAL"]()
   editor <= EnvVar["EDITOR"]()
-  picked <=
+  // C20 / E0303: 複数行の rhs 多アーム条件は丸括弧で包む。
+  picked <= (
     | visual.hasValue |> visual.__value
     | editor.hasValue |> editor.__value
     | _                 |> "nvim"
+  )
   picked
 => :Str
 ```

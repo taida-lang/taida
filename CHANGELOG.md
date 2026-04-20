@@ -120,6 +120,13 @@ Also:
   `HttpRequest requires at least 2 type arguments`, matching the
   Interpreter and Native rejection path instead of emitting
   syntactically invalid JavaScript.
+- Native lowering's undocumented third-type-arg body fallback
+  (`HttpRequest["POST", url, body]()`) has been removed. Interpreter
+  and JS always consulted the `body <= ...` field only, so this shape
+  silently sent a body on Native while the other two backends sent an
+  empty string — a cross-backend parity trap (C20B-012 / ROOT-15). No
+  in-tree Taida code relied on the legacy shape; migrate to
+  `HttpRequest["POST", url](body <= "...")`.
 
 ### Tests
 

@@ -1934,11 +1934,16 @@ impl Lowering {
                     }
                 };
 
-                // Backward compatibility: allow legacy 3rd type arg as body fallback.
+                // C20-5 (ROOT-15 / C20B-012): the undocumented legacy 3rd type arg
+                // body fallback (`HttpRequest["POST", url, body]()`) was removed
+                // here to align Native lowering with Interpreter and JS codegen,
+                // which only ever consult the `body <= ...` field. Keeping the
+                // legacy branch made Native silently send a request body that
+                // the other two backends left empty — a cross-backend parity
+                // trap. No Taida code in this tree uses the 3-type-arg shape;
+                // callers must migrate to `HttpRequest["POST", url](body <= ...)`.
                 let body_var = if let Some(v) = self.lower_mold_field_expr(func, fields, "body")? {
                     v
-                } else if type_args.len() > 2 {
-                    self.lower_expr(func, &type_args[2])?
                 } else {
                     let v = func.alloc_var();
                     func.push(IrInst::ConstStr(v, String::new()));
