@@ -2935,12 +2935,22 @@ impl JsCodegen {
                     return Ok(());
                 }
                 if name == "HttpRequest" {
-                    self.write("__taida_os_httpRequest(");
-                    if type_args.len() >= 2 {
-                        self.gen_expr(&type_args[0])?;
-                        self.write(", ");
-                        self.gen_expr(&type_args[1])?;
+                    // C20-4 (ROOT-16): Interpreter / Native reject
+                    // `HttpRequest[method]()` with an explicit runtime
+                    // error; the JS backend previously emitted
+                    // `__taida_os_httpRequest(, null, null)` — syntax-
+                    // invalid JS that failed at parse time with a
+                    // cryptic message. Surface the arity violation at
+                    // codegen so all three backends fail the same way.
+                    if type_args.len() < 2 {
+                        return Err(JsError {
+                            message: "HttpRequest requires at least 2 type arguments: HttpRequest[method, url]()".to_string(),
+                        });
                     }
+                    self.write("__taida_os_httpRequest(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(", ");
+                    self.gen_expr(&type_args[1])?;
                     // Pass headers and body from optional fields
                     let mut has_headers = false;
                     let mut has_body = false;

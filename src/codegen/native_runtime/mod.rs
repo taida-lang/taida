@@ -193,9 +193,19 @@ mod tests {
     /// Interpreter `""`-on-error behaviour (ROOT-9) — Interpreter
     /// side-change is Rust, not C. Fragment 1 is unchanged; fragment 2
     /// grew from 123,746 to 124,852. New total: 914,619.
+    ///
+    /// C20-4 (2026-04-20): +3,186 bytes in tls.c — added the
+    /// list-of-record headers shape `@[@(name <= "...", value <= "...")]`
+    /// for `HttpRequest` (C19B-007), complementing the legacy
+    /// buchi-pack identifier shape. Two helpers
+    /// (`taida_os_http_append_header_line`,
+    /// `taida_os_http_pack_str_field`) were introduced and both
+    /// `taida_os_http_headers_to_lines` and the curl header loop in
+    /// `taida_os_http_do_curl` now accept both shapes. core.c and
+    /// other fragments are unchanged. New total: 917,805.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 914_619;
+        const EXPECTED_TOTAL_LEN: usize = 917_805;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
