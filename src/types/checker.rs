@@ -3889,7 +3889,11 @@ defaulted fields must be provided via `()`",
                         "stdout" => Some((1, 1)),
                         "stderr" => Some((1, 1)),
                         "exit" => Some((1, 1)),
-                        "stdin" => Some((1, 1)),
+                        // C20-3 (ROOT-13): prompt is optional. The prelude
+                        // runtime, Native lowering and LSP / docs all treat
+                        // `stdin()` (no-prompt) as valid. Before C20 the
+                        // checker rejected it with [E1507].
+                        "stdin" => Some((0, 1)),
                         "argv" => Some((0, 0)),
                         "sleep" => Some((1, 1)),
                         // C12 Phase 6 (FB-5): Regex(pattern, flags?)

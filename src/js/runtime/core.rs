@@ -1686,18 +1686,42 @@ const __taida_fs = await import('node:fs').catch(() => null);
 
 function __taida_stdin(prompt) {
   if (typeof globalThis.process !== 'undefined' && __taida_fs) {
-    if (prompt) process.stdout.write(prompt);
+    // C20-3 (ROOT-14): prompt may arrive as any Value (Int/Bool/BuchiPack);
+    // the interpreter and Native convert it via display-string while the JS
+    // backend used to hand the raw value to `process.stdout.write`, raising
+    // ERR_INVALID_ARG_TYPE outside the try/catch. Stringify explicitly and
+    // keep the write inside try so the empty-string fallback is reachable.
     try {
-      const buf = Buffer.alloc(1024); let line = '';
-      // Use fd 0 (process.stdin.fd) for cross-platform compatibility.
-      // Use fd instead of /dev/stdin for Windows compatibility.
-      // Note: Do NOT close this fd — it is process.stdin.fd, not a newly opened handle.
-      const fd = process.stdin.fd ?? 0;
-      let n; while ((n = __taida_fs.readSync(fd, buf, 0, 1)) > 0) {
-        const ch = buf.toString('utf-8', 0, n); if (ch === '\n') break; line += ch;
+      if (prompt !== undefined && prompt !== null && prompt !== '') {
+        process.stdout.write(String(prompt));
       }
+      // C20-3 (ROOT-10): previously read one byte at a time and
+      // decoded each via `Buffer.toString('utf-8', 0, 1)`. Continuation
+      // bytes of a multibyte codepoint decoded in isolation surfaced as
+      // U+FFFD, corrupting non-ASCII input. Read into a 4 KiB chunk
+      // buffer and let a streaming UTF-8 decoder stitch codepoints
+      // across byte-boundaries.
+      const decoder = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true });
+      const chunk = Buffer.alloc(4096);
+      const fd = process.stdin.fd ?? 0;
+      let line = '';
+      while (true) {
+        const n = __taida_fs.readSync(fd, chunk, 0, chunk.length);
+        if (n <= 0) break;
+        const decoded = decoder.decode(chunk.subarray(0, n), { stream: true });
+        const nl = decoded.indexOf('\n');
+        if (nl >= 0) {
+          line += decoded.substring(0, nl);
+          break;
+        }
+        line += decoded;
+      }
+      // Flush any residual state held by the streaming decoder so the
+      // caller sees a complete line even if the final read ended mid-
+      // codepoint (malformed UTF-8 becomes U+FFFD per spec).
+      line += decoder.decode();
       return line.replace(/\r$/, '');
-    } catch(e) { return ''; }
+    } catch (_e) { return ''; }
   }
   return '';
 }

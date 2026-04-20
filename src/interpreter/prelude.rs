@@ -176,13 +176,13 @@ impl Interpreter {
                         }
                         Ok(Some(Signal::Value(Value::Str(line))))
                     }
-                    Err(e) => Ok(Some(Signal::Throw(Value::Error(
-                        super::value::ErrorValue {
-                            error_type: "IoError".to_string(),
-                            message: format!("Cannot read from stdin: {}", e),
-                            fields: Vec::new(),
-                        },
-                    )))),
+                    // C20-3 (ROOT-9): previously threw IoError, but JS and
+                    // Native silently returned "" on failure, breaking
+                    // 3-backend parity. Align on the silently-empty fallback
+                    // (default-value guarantee). Callers that need
+                    // error-awareness must switch to the new `stdinLine`
+                    // API which returns `Lax[Str]`.
+                    Err(_) => Ok(Some(Signal::Value(Value::Str(String::new())))),
                 }
             }
 

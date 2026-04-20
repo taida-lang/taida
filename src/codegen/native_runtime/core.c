@@ -8155,31 +8155,60 @@ taida_val taida_sha256(taida_val value) {
     return out;
 }
 
+// C20-3 (ROOT-8): previously a fixed 4096-byte stack buffer truncated
+// long paste input; the unread tail would bleed into the next `stdin`
+// call and break 3-backend parity (Interpreter / JS both use dynamic
+// buffers). Switch to a dynamic growth strategy: `getline(3)` on POSIX
+// and a realloc-loop around `fgets` on Windows.
 taida_val taida_io_stdin(taida_val prompt_ptr) {
-    // Print prompt if provided
     const char *prompt = (const char*)prompt_ptr;
     if (prompt && prompt[0] != '\0') {
         printf("%s", prompt);
         fflush(stdout);
     }
-    // Read a line from stdin
-    char line[4096];
-    if (fgets(line, sizeof(line), stdin) == NULL) {
-        // EOF or error — return empty string
-        return (taida_val)taida_str_alloc(0);
-    }
-    // Strip trailing newline
-    size_t slen = strlen(line);
-    if (slen > 0 && line[slen - 1] == '\n') {
-        line[slen - 1] = '\0';
-        slen--;
-        if (slen > 0 && line[slen - 1] == '\r') {
-            line[slen - 1] = '\0';
-            slen--;
+#if defined(_WIN32)
+    // Windows fallback: realloc loop around fgets. `getline` is not
+    // part of the Windows CRT. We grow the buffer until `\n` is seen
+    // or EOF / error is reached.
+    size_t cap = 1024;
+    char *buf = (char*)TAIDA_MALLOC(cap, "stdin_buf");
+    size_t len = 0;
+    for (;;) {
+        if (fgets(buf + len, (int)(cap - len), stdin) == NULL) {
+            if (len == 0) {
+                free(buf);
+                return (taida_val)taida_str_alloc(0);
+            }
+            break; // EOF with data already read
+        }
+        len += strlen(buf + len);
+        if (len > 0 && buf[len - 1] == '\n') break;
+        if (cap - len <= 1) {
+            cap *= 2;
+            TAIDA_REALLOC(buf, cap, "stdin_buf");
         }
     }
-    char *r = taida_str_alloc(slen);
-    memcpy(r, line, slen);
+    size_t ulen = len;
+#else
+    char *buf = NULL;
+    size_t cap = 0;
+    ssize_t got = getline(&buf, &cap, stdin);
+    if (got < 0) {
+        // EOF or error. `getline` may have allocated buf even on
+        // failure — free it to avoid leaks.
+        free(buf);
+        return (taida_val)taida_str_alloc(0);
+    }
+    size_t ulen = (size_t)got;
+#endif
+    // Strip trailing \n / \r\n.
+    if (ulen > 0 && buf[ulen - 1] == '\n') {
+        ulen--;
+        if (ulen > 0 && buf[ulen - 1] == '\r') ulen--;
+    }
+    char *r = taida_str_alloc(ulen);
+    memcpy(r, buf, ulen);
+    free(buf);
     return (taida_val)r;
 }
 

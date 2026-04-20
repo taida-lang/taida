@@ -185,9 +185,17 @@ mod tests {
     /// ENOENT surfaces as an observable `IoError` on all three backends.
     /// Fragment 1 grew by +396 bytes (boundary now at 211,940); fragment 2
     /// is unchanged. New total: 913,513.
+    ///
+    /// C20-3 (2026-04-20): +1,106 bytes in core.c — rewrote
+    /// `taida_io_stdin` to use `getline` (POSIX) / realloc-loop
+    /// (Windows) instead of a fixed `char[4096]` stack buffer so long
+    /// stdin lines are no longer truncated (ROOT-8). Also keeps JS /
+    /// Interpreter `""`-on-error behaviour (ROOT-9) — Interpreter
+    /// side-change is Rust, not C. Fragment 1 is unchanged; fragment 2
+    /// grew from 123,746 to 124,852. New total: 914,619.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 913_513;
+        const EXPECTED_TOTAL_LEN: usize = 914_619;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -329,11 +337,17 @@ mod tests {
         // hash corrections in `taida_gorillax_new` / `_err` / `_relax` so
         // `.__error.<field>` actually resolves at runtime. Fragment 2 is
         // unchanged. F1_LEN moves from 211,544 to 211,940.
+        //
+        // C20-3 (2026-04-20): fragment 2 grew by +1,106 bytes from the
+        // dynamic-buffer rewrite of `taida_io_stdin` (ROOT-8 fix:
+        // `getline` on POSIX / realloc-loop on Windows replacing the
+        // fixed 4 KiB stack buffer). Fragment 1 is unchanged. Fragment 2
+        // size moves from 123,746 to 124,852.
         const F1_LEN: usize = 211_940;
         assert_eq!(
             CORE_SECTION.len(),
-            211_940 + 123_746,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C19B-002 adjusted)"
+            211_940 + 124_852,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C20-3 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
