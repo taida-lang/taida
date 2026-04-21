@@ -49,6 +49,13 @@ pub struct JsCodegen {
     /// by `is_js_pipeline_callable_ident` to distinguish a callable
     /// intermediate pipeline step from a bind-and-forward target.
     user_funcs: std::collections::HashSet<String>,
+    /// C21-5: User-defined functions declared with `=> :Float` return type.
+    /// Used for compile-time Float-origin propagation so that
+    /// `stdout(triple(4.0))` renders `12.0` instead of `12` (JS `Number`
+    /// cannot distinguish `12` from `12.0` at runtime — the design
+    /// forbids wrapping every FloatLit, so we instead specialise call
+    /// sites whose argument is statically known to be Float-origin).
+    float_return_funcs: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -96,6 +103,7 @@ impl JsCodegen {
             shadowed_net_builtins: std::collections::HashSet::new(),
             type_parents: std::collections::HashMap::new(),
             user_funcs: std::collections::HashSet::new(),
+            float_return_funcs: std::collections::HashSet::new(),
         }
     }
 
@@ -133,6 +141,50 @@ impl JsCodegen {
     pub fn set_build_context(&mut self, entry_root: &std::path::Path, out_root: &std::path::Path) {
         self.entry_root = Some(entry_root.to_path_buf());
         self.out_root = Some(out_root.to_path_buf());
+    }
+
+    /// C21-5: Compile-time Float-origin analysis for JS codegen.
+    ///
+    /// Returns `true` when we can statically prove that `expr` evaluates to
+    /// a Taida `Float`. Used to specialise `stdout` / `debug` / `.toString()`
+    /// call sites so they format `12` as `"12.0"`, matching the interpreter.
+    ///
+    /// The analysis is deliberately conservative (closure-crossing is out of
+    /// scope, per the design): we recognise only
+    ///   - `FloatLit`
+    ///   - arithmetic (`+` / `-` / `*`) where at least one side is Float-origin
+    ///   - unary negation of a Float-origin operand
+    ///   - calls to user functions declared `=> :Float`
+    ///   - parenthesised / pipelined Float-origin sub-expressions
+    ///
+    /// All other expressions (`Ident`, opaque calls, `Int[]` results, method
+    /// calls, etc.) return `false`. This keeps the specialisation strictly
+    /// additive — the current `Number.isInteger`-based runtime fallback
+    /// remains in place for dynamic cases, preserving best-effort behaviour.
+    fn is_float_origin_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::FloatLit(..) => true,
+            Expr::BinaryOp(lhs, BinOp::Add | BinOp::Sub | BinOp::Mul, rhs, _) => {
+                self.is_float_origin_expr(lhs) || self.is_float_origin_expr(rhs)
+            }
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) => self.is_float_origin_expr(inner),
+            Expr::FuncCall(callee, _, _) => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    self.float_return_funcs.contains(name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// C21-5: Compile-time Int-origin analysis (symmetric with
+    /// `is_float_origin_expr`). Currently recognises only `IntLit` — used
+    /// by `TypeIs[x, :Float]()` static fold so `TypeIs[3, :Float]()` emits
+    /// literal `false` in JS to match the interpreter.
+    fn is_int_origin_expr(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::IntLit(..))
     }
 
     /// Check if a net builtin name should be rewritten to its __taida_net_* form.
@@ -350,10 +402,18 @@ impl JsCodegen {
         // C13-1 / C13B-007: collect all top-level user-defined function names
         // so intermediate pipeline `=> name` can disambiguate bind-and-forward
         // (non-function name) from classic pipeline step (function name).
+        // C21-5: at the same pass, collect functions declared `=> :Float` so
+        // that call sites feeding their result into `stdout` / `debug` /
+        // `.toString()` can be specialised to format as `N.0` when the
+        // runtime value is integer-valued (JS `Number` has no Int/Float tag).
         self.user_funcs.clear();
+        self.float_return_funcs.clear();
         for stmt in &program.statements {
             if let Statement::FuncDef(fd) = stmt {
                 self.user_funcs.insert(fd.name.clone());
+                if matches!(&fd.return_type, Some(TypeExpr::Named(n)) if n == "Float") {
+                    self.float_return_funcs.insert(fd.name.clone());
+                }
             }
         }
 
@@ -2445,59 +2505,83 @@ impl JsCodegen {
                 }
 
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    match name.as_str() {
-                        "debug" => self.write("__taida_debug"),
-                        "typeof" => self.write("__taida_typeof"),
-                        "assert" => self.write("__taida_assert"),
-                        "stdout" => self.write("__taida_stdout"),
-                        "stderr" => self.write("__taida_stderr"),
-                        "stdin" => self.write("__taida_stdin"),
-                        // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
-                        "stdinLine" => self.write("__taida_stdinLine"),
-                        "jsonEncode" => self.write("__taida_jsonEncode"),
-                        "jsonPretty" => self.write("__taida_jsonPretty"),
-                        "nowMs" => self.write("__taida_nowMs"),
-                        "sleep" => self.write("__taida_sleep"),
-                        "readBytes" => self.write("__taida_os_readBytes"),
-                        "writeFile" => self.write("__taida_os_writeFile"),
-                        "writeBytes" => self.write("__taida_os_writeBytes"),
-                        "appendFile" => self.write("__taida_os_appendFile"),
-                        "remove" => self.write("__taida_os_remove"),
-                        "createDir" => self.write("__taida_os_createDir"),
-                        "rename" => self.write("__taida_os_rename"),
-                        "run" => self.write("__taida_os_run"),
-                        "execShell" => self.write("__taida_os_execShell"),
-                        // C19: interactive TTY-passthrough variants
-                        "runInteractive" => self.write("__taida_os_runInteractive"),
-                        "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
-                        "allEnv" => self.write("__taida_os_allEnv"),
-                        "argv" => self.write("__taida_os_argv"),
-                        "tcpConnect" => self.write("__taida_os_tcpConnect"),
-                        "tcpListen" => self.write("__taida_os_tcpListen"),
-                        "tcpAccept" => self.write("__taida_os_tcpAccept"),
-                        "socketSend" => self.write("__taida_os_socketSend"),
-                        "socketSendAll" => self.write("__taida_os_socketSendAll"),
-                        "socketRecv" => self.write("__taida_os_socketRecv"),
-                        "socketSendBytes" => self.write("__taida_os_socketSendBytes"),
-                        "socketRecvBytes" => self.write("__taida_os_socketRecvBytes"),
-                        "socketClose" => self.write("__taida_os_socketClose"),
-                        "listenerClose" => self.write("__taida_os_listenerClose"),
-                        "udpBind" => self.write("__taida_os_udpBind"),
-                        "udpSendTo" => self.write("__taida_os_udpSendTo"),
-                        "udpRecvFrom" => self.write("__taida_os_udpRecvFrom"),
-                        "udpClose" => self.write("__taida_os_udpClose"),
-                        "socketRecvExact" => self.write("__taida_os_socketRecvExact"),
-                        "dnsResolve" => self.write("__taida_os_dnsResolve"),
-                        "poolCreate" => self.write("__taida_os_poolCreate"),
-                        "poolAcquire" => self.write("__taida_os_poolAcquire"),
-                        "poolRelease" => self.write("__taida_os_poolRelease"),
-                        "poolClose" => self.write("__taida_os_poolClose"),
-                        "poolHealth" => self.write("__taida_os_poolHealth"),
-                        // C12-6a: Regex(pattern, flags?) prelude constructor
-                        "Regex" => self.write("__taida_regex"),
-                        // taida-lang/net HTTP v1 (only when imported)
-                        _ if self.try_write_net_builtin(name, "") => {}
-                        _ => self.gen_expr(callee)?,
+                    // C21-5: specialise single-arg stdout / debug / stderr
+                    // when the argument is statically Float-origin, so that
+                    // `stdout(triple(4.0))` renders `12.0` (matching the
+                    // interpreter) without runtime-wrapping every Number.
+                    let float_specialise = args.len() == 1
+                        && self.is_float_origin_expr(&args[0])
+                        && matches!(name.as_str(), "stdout" | "debug" | "stderr");
+                    if float_specialise {
+                        match name.as_str() {
+                            "stdout" => self.write("__taida_stdout_f"),
+                            "debug" => self.write("__taida_debug_f"),
+                            // stderr does not have a dedicated float variant
+                            // — delegate to __taida_to_string_f so the
+                            // written payload carries the `.0` suffix.
+                            "stderr" => {
+                                self.write("__taida_stderr(__taida_to_string_f(");
+                                self.gen_expr(&args[0])?;
+                                self.write("))");
+                                return Ok(());
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        match name.as_str() {
+                            "debug" => self.write("__taida_debug"),
+                            "typeof" => self.write("__taida_typeof"),
+                            "assert" => self.write("__taida_assert"),
+                            "stdout" => self.write("__taida_stdout"),
+                            "stderr" => self.write("__taida_stderr"),
+                            "stdin" => self.write("__taida_stdin"),
+                            // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
+                            "stdinLine" => self.write("__taida_stdinLine"),
+                            "jsonEncode" => self.write("__taida_jsonEncode"),
+                            "jsonPretty" => self.write("__taida_jsonPretty"),
+                            "nowMs" => self.write("__taida_nowMs"),
+                            "sleep" => self.write("__taida_sleep"),
+                            "readBytes" => self.write("__taida_os_readBytes"),
+                            "writeFile" => self.write("__taida_os_writeFile"),
+                            "writeBytes" => self.write("__taida_os_writeBytes"),
+                            "appendFile" => self.write("__taida_os_appendFile"),
+                            "remove" => self.write("__taida_os_remove"),
+                            "createDir" => self.write("__taida_os_createDir"),
+                            "rename" => self.write("__taida_os_rename"),
+                            "run" => self.write("__taida_os_run"),
+                            "execShell" => self.write("__taida_os_execShell"),
+                            // C19: interactive TTY-passthrough variants
+                            "runInteractive" => self.write("__taida_os_runInteractive"),
+                            "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
+                            "allEnv" => self.write("__taida_os_allEnv"),
+                            "argv" => self.write("__taida_os_argv"),
+                            "tcpConnect" => self.write("__taida_os_tcpConnect"),
+                            "tcpListen" => self.write("__taida_os_tcpListen"),
+                            "tcpAccept" => self.write("__taida_os_tcpAccept"),
+                            "socketSend" => self.write("__taida_os_socketSend"),
+                            "socketSendAll" => self.write("__taida_os_socketSendAll"),
+                            "socketRecv" => self.write("__taida_os_socketRecv"),
+                            "socketSendBytes" => self.write("__taida_os_socketSendBytes"),
+                            "socketRecvBytes" => self.write("__taida_os_socketRecvBytes"),
+                            "socketClose" => self.write("__taida_os_socketClose"),
+                            "listenerClose" => self.write("__taida_os_listenerClose"),
+                            "udpBind" => self.write("__taida_os_udpBind"),
+                            "udpSendTo" => self.write("__taida_os_udpSendTo"),
+                            "udpRecvFrom" => self.write("__taida_os_udpRecvFrom"),
+                            "udpClose" => self.write("__taida_os_udpClose"),
+                            "socketRecvExact" => self.write("__taida_os_socketRecvExact"),
+                            "dnsResolve" => self.write("__taida_os_dnsResolve"),
+                            "poolCreate" => self.write("__taida_os_poolCreate"),
+                            "poolAcquire" => self.write("__taida_os_poolAcquire"),
+                            "poolRelease" => self.write("__taida_os_poolRelease"),
+                            "poolClose" => self.write("__taida_os_poolClose"),
+                            "poolHealth" => self.write("__taida_os_poolHealth"),
+                            // C12-6a: Regex(pattern, flags?) prelude constructor
+                            "Regex" => self.write("__taida_regex"),
+                            // taida-lang/net HTTP v1 (only when imported)
+                            _ if self.try_write_net_builtin(name, "") => {}
+                            _ => self.gen_expr(callee)?,
+                        }
                     }
                 } else {
                     self.gen_expr(callee)?;
@@ -2534,7 +2618,14 @@ impl JsCodegen {
                 // have Taida-compatible prototype patches applied, so the
                 // helper only overrides dispatch for untyped plain objects.
                 if method == "toString" && args.is_empty() {
-                    self.write("__taida_to_string(");
+                    // C21-5: Float-origin specialisation so that
+                    // `triple(4.0).toString()` renders `"12.0"` matching
+                    // the interpreter's `Value::Float(12.0).to_string()`.
+                    if self.is_float_origin_expr(obj) {
+                        self.write("__taida_to_string_f(");
+                    } else {
+                        self.write("__taida_to_string(");
+                    }
                     self.gen_expr(obj)?;
                     self.write(")");
                     return Ok(());
@@ -2689,6 +2780,40 @@ impl JsCodegen {
                     self.write("(");
                     match &type_args[1] {
                         Expr::TypeLiteral(type_name, None, _) => {
+                            // C21-5: compile-time Int/Float static fold for
+                            // TypeIs[FloatLit, :Int]() and symmetric cases.
+                            // The Taida interpreter distinguishes
+                            // `Value::Int(3)` from `Value::Float(3.0)`; JS
+                            // cannot at runtime, so we emit a literal when
+                            // the static origin is known, and fall back to
+                            // the previous `Number.isInteger` check only
+                            // for dynamic values (best-effort parity).
+                            let static_fold: Option<bool> = match type_name.as_str() {
+                                "Int" => {
+                                    if self.is_float_origin_expr(&type_args[0]) {
+                                        Some(false)
+                                    } else if self.is_int_origin_expr(&type_args[0]) {
+                                        Some(true)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                "Float" => {
+                                    if self.is_float_origin_expr(&type_args[0]) {
+                                        Some(true)
+                                    } else if self.is_int_origin_expr(&type_args[0]) {
+                                        Some(false)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if let Some(lit) = static_fold {
+                                self.write(if lit { "true" } else { "false" });
+                                self.write(")");
+                                return Ok(());
+                            }
                             let val_code = {
                                 let saved = std::mem::take(&mut self.output);
                                 self.gen_expr(&type_args[0])?;
@@ -2696,16 +2821,10 @@ impl JsCodegen {
                             };
                             match type_name.as_str() {
                                 "Int" => {
-                                    self.write(&format!(
-                                        "typeof {} === \"number\" && Number.isInteger({})",
-                                        val_code, val_code
-                                    ));
+                                    self.write(&format!("__taida_is_int({})", val_code));
                                 }
                                 "Float" => {
-                                    self.write(&format!(
-                                        "typeof {} === \"number\" && !Number.isInteger({})",
-                                        val_code, val_code
-                                    ));
+                                    self.write(&format!("__taida_is_float({})", val_code));
                                 }
                                 "Num" => {
                                     self.write(&format!("typeof {} === \"number\"", val_code));

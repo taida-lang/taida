@@ -34,6 +34,74 @@ function __taida_debug(...args) {
   }
 }
 
+// ── C21-5 / seed-04: Float-origin formatting helpers ─────
+//
+// JS `Number` cannot distinguish `12` from `12.0` at runtime. The Taida
+// interpreter (reference) renders `Value::Float(12.0)` as `"12.0"` and
+// `Value::Int(12)` as `"12"`. To preserve 3-backend parity without
+// wrapping every Number at runtime (which would deopt arithmetic), the
+// JS codegen performs compile-time Float-origin analysis and, at
+// terminal sites (`stdout` / `debug` / `.toString()`) where the
+// expression is known to be Float-origin, emits these `_f` variants.
+//
+// Non-number values (Str, Bool, BuchiPack, List, Bytes, Lax/Result
+// wrappers, etc.) fall through to the same formatting path as the
+// non-`_f` helpers so parity is preserved for mixed-type output.
+function __taida_float_render(v) {
+  if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v)) {
+    // Match Rust's `format!("{:.1}", n)` used by the interpreter.
+    return v.toFixed(1);
+  }
+  return String(v);
+}
+
+function __taida_stdout_f(v) {
+  // Float-origin specialisation of __taida_stdout for a single value.
+  // Falls back to the generic stdout renderer for non-number values so
+  // a Float-returning function that yields NaN / Inf / Error / etc.
+  // still prints sensibly.
+  let rendered;
+  if (typeof v === 'number') {
+    rendered = __taida_float_render(v);
+  } else if (__taida_isBytes(v)) {
+    rendered = __taida_bytes_to_string(v);
+  } else {
+    // Delegate to the full stdout path for BuchiPack / Array / typed
+    // wrappers. Re-entering __taida_stdout is safe because `v` is not
+    // a number here so the specialisation never recurses.
+    return __taida_stdout(v);
+  }
+  console.log(rendered);
+  return __taida_utf8_byte_length(rendered);
+}
+
+function __taida_debug_f(v) {
+  if (typeof v === 'number') {
+    console.log(__taida_float_render(v));
+    return;
+  }
+  return __taida_debug(v);
+}
+
+function __taida_to_string_f(v) {
+  if (typeof v === 'number') {
+    return __taida_float_render(v);
+  }
+  return __taida_to_string(v);
+}
+
+// C21-5 / seed-04: runtime fallback for Int[x]()/Float[x]() when the
+// arg is not a compile-time-known FloatLit / IntLit. Matches the
+// existing `Number.isInteger`-based behaviour — dynamic cases remain
+// best-effort per design (closure-crossing is out of scope).
+function __taida_is_int(v) {
+  return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v);
+}
+
+function __taida_is_float(v) {
+  return typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v);
+}
+
 function __taida_ensureNotNull(value, defaultValue) {
   return (value === null || value === undefined) ? defaultValue : value;
 }
