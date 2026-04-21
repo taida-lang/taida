@@ -3712,8 +3712,49 @@ double taida_float_abs(double a) { return a < 0 ? -a : a; }
 taida_val taida_float_to_int(double a) { return (taida_val)a; }
 
 taida_val taida_float_to_str(double a) {
+    // C21-4: Match the interpreter's Rust-f64::Display contract — integer
+    // values render as "X.0" (not "X"), non-integers use the **shortest**
+    // decimal representation that round-trips back to the same f64.
+    // This mirrors Rust's Grisu/Ryu-based `f64::to_string` which Taida's
+    // interpreter delegates to via `n.to_string()`. The previous `%g`
+    // dropped the trailing ".0" and sometimes lost precision; switching
+    // naively to `%.17g` added spurious trailing digits (symptom:
+    // `3.14` → `3.1400000000000001`). The loop below picks the shortest
+    // precision that survives a round-trip, matching Rust's behaviour
+    // for every double in practice while remaining self-contained.
     char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%g", a);
+    if (isnan(a)) { snprintf(tmp, sizeof(tmp), "NaN"); }
+    else if (isinf(a)) { snprintf(tmp, sizeof(tmp), a < 0 ? "-inf" : "inf"); }
+    else if (a == 0.0) { snprintf(tmp, sizeof(tmp), "0.0"); }
+    else if (a == floor(a) && fabs(a) < 1e16) {
+        // Integer-valued float in the exact range — always "X.0".
+        snprintf(tmp, sizeof(tmp), "%.1f", a);
+    } else {
+        // Find the smallest precision p in [1..17] such that
+        // `strtod(sprintf("%.*g", p, a))` round-trips. That is the
+        // shortest decimal form, matching Rust's f64::Display.
+        int chosen = 17;
+        for (int p = 1; p <= 17; p++) {
+            snprintf(tmp, sizeof(tmp), "%.*g", p, a);
+            double back = strtod(tmp, NULL);
+            if (back == a) { chosen = p; break; }
+        }
+        if (chosen != 17) {
+            // tmp already holds the chosen rendering.
+        } else {
+            snprintf(tmp, sizeof(tmp), "%.17g", a);
+        }
+        // If the output lacks a '.' (e.g. `%g` elided the fraction on
+        // an integer-looking float outside the above range), append ".0"
+        // so the Rust-style invariant holds.
+        if (!strchr(tmp, '.') && !strchr(tmp, 'e') && !strchr(tmp, 'E')
+            && !strchr(tmp, 'n') && !strchr(tmp, 'i')) {
+            size_t l = strlen(tmp);
+            if (l + 2 < sizeof(tmp)) {
+                tmp[l] = '.'; tmp[l+1] = '0'; tmp[l+2] = '\0';
+            }
+        }
+    }
     return (taida_val)taida_str_new_copy(tmp);
 }
 
@@ -8248,6 +8289,23 @@ taida_val taida_io_stdout_with_tag(taida_val val, taida_val tag) {
         printf("%s\n", bool_buf);
         return (taida_val)bytes;
     }
+    // C21-4 / seed-03 / seed-05: FLOAT tag path — the boxed i64 carries
+    // the f64 bit pattern, so decode via memcpy and format with the
+    // Rust-display-compatible renderer `taida_float_to_str`. Without
+    // this, the value falls through to `taida_polymorphic_to_string`
+    // which has no tag context and the runtime prints the raw i64
+    // (symptom: `stdout(triple(4.0))` → `4622382067542392832`).
+    if ((int)tag == TAIDA_TAG_FLOAT) {
+        double d;
+        memcpy(&d, &val, sizeof(double));
+        taida_val fstr = taida_float_to_str(d);
+        s = (const char*)fstr;
+        if (s) {
+            printf("%s\n", s);
+            return (taida_val)strlen(s);
+        }
+        return 0;
+    }
     taida_val str = taida_polymorphic_to_string(val);
     s = (const char*)str;
     if (s) {
@@ -8275,6 +8333,18 @@ taida_val taida_io_stderr_with_tag(taida_val val, taida_val tag) {
         s = val ? "true" : "false";
         fprintf(stderr, "%s\n", s);
         return (taida_val)strlen(s);
+    }
+    // C21-4: FLOAT tag path — same rationale as taida_io_stdout_with_tag.
+    if ((int)tag == TAIDA_TAG_FLOAT) {
+        double d;
+        memcpy(&d, &val, sizeof(double));
+        taida_val fstr = taida_float_to_str(d);
+        s = (const char*)fstr;
+        if (s) {
+            fprintf(stderr, "%s\n", s);
+            return (taida_val)strlen(s);
+        }
+        return 0;
     }
     taida_val str = taida_polymorphic_to_string(val);
     s = (const char*)str;

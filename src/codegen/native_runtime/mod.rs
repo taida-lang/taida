@@ -212,9 +212,21 @@ mod tests {
     /// getline to keep pipe / redirect parity with the other two
     /// backends. Include of `<termios.h>` / `<unistd.h>` is local to
     /// this block. Other fragments unchanged. New total: 926,282.
+    ///
+    /// C21-4 (2026-04-21): +3,228 bytes in core.c — FLOAT-tag dispatch
+    /// in `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag`
+    /// (decode the boxed f64 bit-pattern via `memcpy` and render through
+    /// `taida_float_to_str`) and the `taida_float_to_str` formatter
+    /// rewritten to match the interpreter's Rust-f64::Display contract
+    /// ("X.0" for integer-valued floats, shortest-round-trip via a
+    /// `%.*g` + `strtod` loop for non-integers — matches Grisu/Ryu).
+    /// Fixes the seed-03 / C21B-008 family: `stdout(triple(4.0))` now
+    /// prints `12.0` on native (was a raw i64 bit pattern) and avoids
+    /// spurious `3.14 → 3.1400000000000001` rendering. New total:
+    /// 929,510.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 926_282;
+        const EXPECTED_TOTAL_LEN: usize = 929_510;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -369,11 +381,21 @@ mod tests {
         // line editor body (static helpers + termios raw-mode loop).
         // F1 moves from 211,940 to 212,118; F2 moves from 124,852 to
         // 133,151.
-        const F1_LEN: usize = 212_118;
+        //
+        // C21-4 (2026-04-21): fragment 1 grew by +2,122 bytes from the
+        // `taida_float_to_str` rewrite (Rust-display-compatible "X.0"
+        // integer output + shortest-round-trip `%.*g`/`strtod` loop for
+        // non-integers) and the doc comment for it. Fragment 2 grew by
+        // +1,106 bytes from the FLOAT-tag fast paths added to
+        // `taida_io_stdout_with_tag` and `taida_io_stderr_with_tag`
+        // (seed-03 / C21B-008 fix — `stdout(triple(4.0))` prints `12.0`
+        // instead of the boxed f64 bit pattern). F1 moves from 212,118
+        // to 214,240; F2 moves from 133,151 to 134,257.
+        const F1_LEN: usize = 214_240;
         assert_eq!(
             CORE_SECTION.len(),
-            212_118 + 133_151,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C20-2 adjusted)"
+            214_240 + 134_257,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C21-4 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

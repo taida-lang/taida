@@ -207,6 +207,8 @@ static int _wf_is_whitespace(char c) {
 #endif
 /* B11-2: Forward declaration for polymorphic display */
 int64_t taida_polymorphic_to_string(int64_t obj);
+/* C21-4: Forward declaration for FLOAT tag fast path in stdout_with_tag */
+int64_t taida_float_to_str(int64_t val);
 
 /* ── taida_io_stdout: stdout 出力（boxed 文字列ポインタ） ──
    C12-5 (FB-18): returns the UTF-8 byte length of the payload as Int.
@@ -268,8 +270,24 @@ int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
         }
         return 0;
     }
-    /* Non-Bool, non-Str tag → let the polymorphic converter produce a
-       safe char* representation. Handles Int / Float / Pack / List /
+    /* C21-4 / seed-03: Float tag path — decode the i64 bit-pattern via
+       `taida_float_to_str` so `stdout(triple(4.0))` prints `12.0` instead
+       of the raw bit pattern. Without this, the value flows through
+       `taida_polymorphic_to_string` → `_wasm_value_to_display_string`
+       which has no tag context and renders the f64 bits as an int64_t. */
+    if ((int)tag == WASM_TAG_FLOAT) {
+        int64_t str_v = taida_float_to_str(val);
+        const char *sf = (const char *)(intptr_t)str_v;
+        if (sf) {
+            int32_t len = wasm_strlen(sf);
+            write_stdout(sf, len);
+            write_stdout("\n", 1);
+            return (int64_t)len;
+        }
+        return 0;
+    }
+    /* Non-Bool, non-Str, non-Float tag → let the polymorphic converter
+       produce a safe char* representation. Handles Int / Pack / List /
        UNKNOWN(-1) runtime values emitted through `param_tag_vars`. */
     int64_t str_v = taida_polymorphic_to_string(val);
     const char *s2 = (const char *)(intptr_t)str_v;
@@ -326,12 +344,17 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
     }
     /* C12B-034 fix: same rationale as taida_io_stdout_with_tag — treat
        non-Bool / non-Str tags as polymorphic values rather than blindly
-       casting to char*. */
+       casting to char*.
+       C21-4: FLOAT tag routes through taida_float_to_str (bit-pattern
+       decode) so the i64 bits are rendered as a proper "12.0" decimal. */
     const char *s;
     int32_t len;
     int64_t scratch = 0;
     if ((int)tag == WASM_TAG_STR) {
         s = (const char *)(intptr_t)val;
+    } else if ((int)tag == WASM_TAG_FLOAT) {
+        scratch = taida_float_to_str(val);
+        s = (const char *)(intptr_t)scratch;
     } else {
         scratch = taida_polymorphic_to_string(val);
         s = (const char *)(intptr_t)scratch;

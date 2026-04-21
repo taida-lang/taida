@@ -88,9 +88,16 @@ mod tests {
     /// go through plain `taida_io_stdout(char*)`; everything else reaches
     /// `taida_io_stdout_with_tag` polymorphic formatter). Runtime bodies
     /// of `_with_tag` are unchanged — only comments grew.
+    ///
+    /// C21-4 (2026-04-21): +1103 bytes for the new FLOAT-tag fast path in
+    /// `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag` (dispatch
+    /// the boxed f64 bit-pattern through `taida_float_to_str`) plus its
+    /// forward declaration at the top of the file. Fixes `stdout(...)`
+    /// of a function-returned Float rendering as the raw i64 bit pattern
+    /// (symptom `4622945017495814144` for `stdout(triple(4.0))`).
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 238_363;
+        const EXPECTED_TOTAL_LEN: usize = 239_466;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
