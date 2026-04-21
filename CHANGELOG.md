@@ -1,5 +1,82 @@
 # Changelog
 
+## @c.22.rc1 (in progress)
+
+Restore observable I/O symmetry in the interpreter and harden the CLI
+against pipe-chain termination. Post-C20 smoke (Hachikuma Phase 11
+TUI-First) exposed that `stderr` / `stdin` already flushed eagerly
+while `stdout` / `debug` silently accumulated into an internal Vec
+and only surfaced after `eval_program` returned — breaking progress
+output, spinners, printf-debugging, and TUI rendering. The same
+audit found that `taida run file.td | head -N` exited 141 because
+the process carried the default SIGPIPE disposition.
+
+### Interpreter — `stdout` / `debug` two-mode API
+
+`Interpreter` now carries a `stream_stdout: bool` flag and exposes
+two public constructors:
+
+- `Interpreter::new()` keeps the legacy buffered behaviour. REPL,
+  the in-process `eval_with_output` test harness, and the JS
+  codegen embedding path all stay on this mode unchanged, so every
+  existing call site works without modification.
+- `Interpreter::new_streaming()` switches `stdout` / `debug` to
+  `writeln!(io::stdout().lock(), "{}", line)` + `flush().ok()`.
+  `taida <file>` / `taida run <file>` now use this variant so
+  progress output hits the terminal line-by-line, matching the
+  POSIX-standard behaviour every other CLI tool ships with.
+
+Taida surface is unchanged: `stdout(...)` / `debug(...)` still
+accept the same arguments, still return the written byte count as
+`Int`, still append the implicit trailing newline, and still
+suppress the "final value auto-display" when stdout has been
+emitted to. No Taida source needs to be edited.
+
+Design note on `debug` routing: an earlier IMPL_SPEC draft routed
+stream-mode `debug` to stderr for symmetry with `stderr()`. That
+would have broken 3-backend parity — JS (`console.log`) and Native
+(`taida_debug_*` → `printf`) already emit to stdout, and the
+`test_native_compile_parity` harness diffs captured stdout across
+backends. The interpreter was the outlier, so it lines up with the
+other two: stream-mode `debug` writes to stdout as well. The
+observable symptom (progress / printf-debug surfaces in real time)
+is still fixed; only the stream differs from the original plan.
+
+### CLI — SIGPIPE tolerance
+
+`fn main()` now installs `signal(SIGPIPE, SIG_IGN)` once at startup
+(unix only, behind `#[cfg(unix)]`). Combined with the `writeln!` +
+`flush().ok()` pattern above, `taida run script.td | head -N` now
+exits cleanly — the `stdout` builtin silently absorbs `EPIPE` and
+returns a zero byte count, matching the standard `ripgrep` / `bat`
+convention. Process-wide signal disposition is touched in exactly
+one place; individual `stdout` / `debug` call sites do not
+re-install handlers.
+
+### Tests
+
+- `tests/c22_stdout_stream.rs` (5 tests) pins the Rust API parity
+  between `Interpreter::new()` and `Interpreter::new_streaming()`,
+  including the byte-count return and the implicit trailing newline.
+- `tests/c22_sigpipe.rs` (4 tests) exercises `taida | head`, stdout
+  close, stream-mode `debug` routing to stdout, and the mixed
+  stdout/debug ordering contract.
+- `tests/c22_stdout_stream_parity.rs` (6 tests) drives the three
+  backends (Interpreter / JS / Native) subprocess-style against
+  `examples/quality/c22_stdout_stream/progress_loop.{td,expected}`
+  and `debug_stream.{td,expected}` so a future regression in
+  either backend's stdout routing is caught immediately.
+
+### Out of scope
+
+- REPL remains on buffered mode; its return-value indentation
+  machinery is Vec-dependent and will move in a dedicated track.
+- Raw-mode / alt-screen auto-leave on panic, SIGHUP, SIGTERM is
+  parked as a follow-up (future FB entry).
+- Addon-level raw-write path (`terminal.Write`) and the SIGWINCH
+  install-order race moved to the TM track (TMB-016 / TMB-017) so
+  `taida-lang/terminal` and the main repo can ship independently.
+
 ## @c.20.rc4 (in progress)
 
 Complete the Hachikuma Phase 8-10 / Phase D follow-up track: parser
