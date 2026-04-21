@@ -1,5 +1,102 @@
 # Changelog
 
+## @c.21.rc4 (in progress)
+
+Restore 3-backend Float semantics and open the WASM SIMD path that
+bonsai-wasm Phase 0 identified as a one-shot blocker for writing
+matmul-shaped numeric code in Taida. The observable behaviour changes
+cluster into four mutually-reinforcing fixes (C21-1 through C21-5) plus
+the `-msimd128` profile split (C21-3) that this release tag is pinned
+on. The Taida surface — `3.0` vs `3`, `Float[x]()` / `Int[x]()`,
+`@[Float]`, `:Float`, arithmetic operators — is unchanged; every fix
+lives inside codegen / runtime helpers.
+
+### Interpreter is the reference, the other three backends line up behind it
+
+- **C21-1 (regression guard, Phase 1)**: `examples/quality/c21b_float_fn_boundary/triple.{td,expected}`
+  (`triple(4.0) => 12.0`) and `dot_product.{td,expected}`
+  (`dotProductAt(@[1.0,2.0], @[3.0,4.0], 0, 2, 0.0) => 11.0`) pin the
+  minimal Float-function-boundary behaviour across Interpreter / JS /
+  Native / WASM-wasi with `tests/c21_float_fn_boundary.rs`. This fixture
+  would have caught every Phase 2-5 bug before it reached bonsai-wasm.
+- **C21-2 (Wasm Float hot loop, Phase 2)**: `@[Float]`-element
+  `a.get(i) ]=> av` now propagates the element type through
+  `track_unmold_type`, so `av * bv` lowers to `taida_float_mul` instead
+  of `taida_int_mul`. Fixes the "internal dot product silently computes
+  0" class of bug observed in bonsai-wasm's hot loop.
+- **C21-4 (Float → Str ABI, Phase 4)**: the native Cranelift path
+  bitcasts `ConstFloat` into the boxed `value_ty` on emit (fixes the
+  `define_function failed: Compilation error: Verifier errors` that
+  blocked every `=> :Float` function in native builds). The native
+  `taida_float_to_str` now matches Rust's `f64::Display`
+  (shortest-round-trip `%.*g` + `strtod` loop + integer-form `X.0`);
+  both native and WASM `taida_io_stdout_with_tag` / `_stderr_with_tag`
+  route the `FLOAT` tag through that formatter so `stdout(triple(4.0))`
+  no longer leaks the i64 bit-pattern.
+- **C21-5 (JS `Int[x]` / `Float[x]` parity, Phase 5)**: JS
+  `Number.isInteger(3.0) === true` closed the door on the naive
+  `typeof+isInteger` checker; we now carry a compile-time
+  `is_float_origin_expr` / `is_int_origin_expr` analysis in
+  `src/js/codegen.rs`, specialize `stdout` / `debug` / `stderr` /
+  `.toString()` call sites for Float-origin arguments
+  (`__taida_stdout_f`, `__taida_debug_f`, `__taida_to_string_f`,
+  `__taida_float_render`) and fold `Int[floatLit]()` / `Float[intLit]()`
+  statically. Arithmetic paths are untouched — zero deopt for the hot
+  case, compile-time fold covers every literal / single-bind case that
+  used to diverge from Interpreter / Native.
+
+### `-msimd128` profile split (C21-3, this tag's pin)
+
+`WASM_CLANG_FLAGS` was a single profile-agnostic constant that lacked
+`-msimd128`. That silently closed the SIMD door at the clang layer for
+every `wasm-*` target, so even after C21-2 taught the wasm codegen to
+emit f64 Float operations LLVM's auto-vectorizer could not consider
+`v128.*` lowerings. `src/codegen/driver.rs` now splits the flags:
+
+- `WASM_CLANG_FLAGS_COMMON` (`--target=wasm32-unknown-wasi`, `-nostdlib`,
+  `-O2`, `-c`) stays the same.
+- `wasm_clang_flags_for(profile)` appends `-msimd128` for `Wasi`,
+  `Edge`, `Full` — and **nothing** for `Min`, so consumers who pick
+  `--target wasm-min` for minimal-runtime compatibility still get a
+  `.wasm` that does not request the `simd128` feature.
+- `WasmRuntimeCache` is profile-aware: `rt_core` / `rt_wasi` / `rt_edge`
+  / `rt_full` now take a `WasmProfile`, their cache keys hash the
+  per-profile flag vector so a wasm-min `rt_core.o` is never served to
+  a wasm-wasi build (and vice versa), and the stale-entry cleanup
+  preserves every live profile's key for the same source.
+
+Result: on `examples/quality/c21b_wasm_simd/matmul_small.td`
+(sum-of-squares of 8 Floats), the disassembled `.wasm` now contains
+`v128.*` and `i8x16.*` instructions under `wasm-wasi` while `wasm-min`
+stays at zero SIMD opcodes. `tests/c21_wasm_simd.rs` locks both
+directions in place. On bonsai-wasm's `bench/matmul.td` smoke the same
+shift is visible (v128 count: `0 → 27`, f64 count: `5 → 10`), which was
+the goal that motivated C21 in the first place.
+
+### Tests
+
+- `tests/c21_float_fn_boundary.rs` — 8 cross-backend tests (Interpreter
+  reference + JS / Native / WASM-wasi parity × 2 fixtures).
+- `tests/c21_wasm_simd.rs` — 3 tests: `wasm-wasi` disassembly must
+  contain Float ops and at least one SIMD-family opcode; `wasm-min`
+  disassembly must contain zero SIMD opcodes; matmul_small runs
+  correctly under wasmtime and prints `204.0`.
+- `src/codegen/driver.rs::tests::test_cache_key_differs_on_source_change`
+  gains a fourth key comparing `wasm-min` vs `wasm-wasi` with identical
+  source + clang version, asserting that the profile-specific flag
+  change alone produces a distinct cache key.
+
+### Out of scope
+
+- Taida-level `@[Float<f32>]` / `@[Float<f64>]` quantifier additions are
+  a language-surface change and stay deferred.
+- Manual `v128.*` intrinsic exposure from Taida source remains
+  out-of-bounds (Taida-first design — auto-vectorize only).
+- JS closure-crossing dynamic Float/Int discrimination is still
+  best-effort; the compile-time analysis covers every single-bind case,
+  dynamic `map`/`fold` callbacks fall back to `Number.isInteger`. This
+  is a language-spec limitation of JS `Number`, not a C21 regression.
+
 ## @c.22.rc1 (in progress)
 
 Restore observable I/O symmetry in the interpreter and harden the CLI
