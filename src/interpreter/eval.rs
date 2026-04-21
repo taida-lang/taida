@@ -108,14 +108,18 @@ pub struct Interpreter {
     /// implicit `\n`). The 3-backend generated code (JS / Native / WASM) is
     /// unaffected — it emits its own I/O directly.
     pub stream_stdout: bool,
-    /// Number of `stdout` invocations seen so far (C22-2).
+    /// Number of stdout-visible emissions (from `stdout` **or** `debug`
+    /// builtins) seen so far (C22-2).
     ///
     /// In stream mode, `output` Vec is always empty, so `main.rs` cannot use
     /// `output.is_empty()` to decide whether to print the final value. This
-    /// counter replaces that check: after `eval_program`, if `stdout_count == 0`
-    /// and the final value is not `Unit`, print it (matches existing buffered
-    /// behavior where `output.is_empty()` conveys the same signal).
-    pub stdout_count: usize,
+    /// counter replaces that check: after `eval_program`, if
+    /// `stdout_emissions == 0` and the final value is not `Unit`, print it
+    /// (matches existing buffered behavior where `output.is_empty()` conveys
+    /// the same signal). Named "emissions" rather than "stdout_count" because
+    /// `debug` also increments it — both builtins surface to stdout in stream
+    /// mode (see `prelude.rs` for the debug→stdout design rationale).
+    pub stdout_emissions: usize,
     /// Current file path (for resolving relative imports)
     pub(crate) current_file: Option<PathBuf>,
     /// Cache of loaded modules (canonical path -> exports)
@@ -198,7 +202,7 @@ impl Interpreter {
             env: Environment::new(),
             output: Vec::new(),
             stream_stdout: false,
-            stdout_count: 0,
+            stdout_emissions: 0,
             current_file: None,
             loaded_modules: HashMap::new(),
             loading_modules: HashSet::new(),

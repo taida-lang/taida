@@ -147,7 +147,7 @@ impl Interpreter {
                     let mut lock = stdout.lock();
                     let _ = writeln!(lock, "{}", joined);
                     let _ = lock.flush();
-                    self.stdout_count += 1;
+                    self.stdout_emissions += 1;
                 } else {
                     self.output.push(joined);
                 }
@@ -448,7 +448,7 @@ impl Interpreter {
                     let mut lock = stdout.lock();
                     let _ = writeln!(lock, "{}", line);
                     let _ = lock.flush();
-                    self.stdout_count += 1;
+                    self.stdout_emissions += 1;
                 } else {
                     self.output.push(line);
                 }

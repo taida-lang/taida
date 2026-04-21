@@ -531,12 +531,12 @@ fn run_source(source: &str, filename: &str, no_check: bool) {
             // If the last value is not Unit and nothing was ever printed
             // via `stdout(...)`, print the value so that `taida run expr.td`
             // continues to show the result of a pure-expression script.
-            let no_stdout = if interpreter.stream_stdout {
-                interpreter.stdout_count == 0
+            let no_emissions = if interpreter.stream_stdout {
+                interpreter.stdout_emissions == 0
             } else {
                 interpreter.output.is_empty()
             };
-            if !matches!(val, taida::interpreter::Value::Unit) && no_stdout {
+            if !matches!(val, taida::interpreter::Value::Unit) && no_emissions {
                 println!("{}", val);
             }
         }

@@ -102,7 +102,7 @@ fn stdout_returns_byte_count() {
 /// Empty script with a final non-Unit expression auto-displays that value in
 /// CLI stream mode — matches the legacy buffered behavior where the final
 /// value was printed when `output.is_empty()`. We keep that ergonomics via
-/// the new `stdout_count` counter.
+/// the new `stdout_emissions` counter.
 #[test]
 fn pure_expression_final_value_still_printed() {
     let src = "42\n";
