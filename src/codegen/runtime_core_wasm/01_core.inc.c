@@ -1933,8 +1933,16 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
 /* W-5f: Detect Lax, Result, Gorillax, RelaxedGorillax by pack structure.
    These all have fc=4 with distinctive first-field hashes:
    - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)
-   - Gorillax/Relaxed: hash0 = WASM_HASH_IS_OK     (0x6550c1c5b98b56bf)
-   - Result:           hash0 = WASM_HASH___VALUE    (0x0a7fc9f13472bbe0) */
+   - Gorillax/Relaxed: hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)  [C24-A]
+   - Result:           hash0 = WASM_HASH___VALUE    (0x0a7fc9f13472bbe0)
+
+   C24-A (2026-04-23): Lax and Gorillax now share hash0 (both use
+   `hasValue` as the first-field name to match interpreter / JS / native).
+   `_wasm_is_gorillax` / `_wasm_is_lax` disambiguate via the field-2
+   hash — `__error` (WASM_HASH___ERROR) for Gorillax / RelaxedGorillax
+   vs `__default` (WASM_HASH___DEFAULT) for Lax. The hash check is a
+   plain int64_t compare (no pointer dereference), which keeps the
+   wasm-min size gate green. */
 
 /* W-5g: Bounds-check helper for WASM32. On wasm32, intptr_t is 32-bit,
    so int64_t values that are bitcast floats (e.g. _d2l(3.14)) would be
@@ -1964,9 +1972,12 @@ static int _wasm_is_result(int64_t val) {
 static int _wasm_is_gorillax(int64_t val) {
     if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    /* Gorillax/RelaxedGorillax: fc=4, hash0 = WASM_HASH_IS_OK */
-    if (p[0] == 4 && p[1] == WASM_HASH_IS_OK) return 1;
-    return 0;
+    /* C24-A: Gorillax / RelaxedGorillax: fc=4, hash0 = WASM_HASH_HAS_VALUE
+       (unified with Lax), disambiguate via field-2 hash
+       (`__error` for Gorillax / RelaxedGorillax, `__default` for Lax).
+       Pack layout places field-2 hash at offset `1 + 2*3 = 7`. */
+    if (p[0] != 4 || p[1] != WASM_HASH_HAS_VALUE) return 0;
+    return p[1 + 2 * 3] == WASM_HASH___ERROR ? 1 : 0;
 }
 
 /* Detect Gorillax type: 0 = unknown, 1 = Gorillax, 2 = RelaxedGorillax */
@@ -2316,13 +2327,35 @@ int64_t taida_pack_new(int64_t field_count) {
        empty pack by `data[0] == 0 && data[1] == WASM_EMPTY_PACK_MAGIC`,
        which is collision-free with any int64_t value produced by user
        code (the magic has high bits set and a unique trailing-byte
-       pattern — see the `WASM_EMPTY_PACK_MAGIC` definition below). */
+       pattern — see the `WASM_EMPTY_PACK_MAGIC` definition below).
+
+       C25B-026 (2026-04-23, Codex reopen of C24-A HOLD): cache a single
+       empty-pack allocation and reuse the pointer on every subsequent
+       call. The wasm bump allocator never frees, so the old
+       "one 16-byte allocation per empty pack" path leaked linearly for
+       every `Gorillax[v]()` (which stamps `__error <= @()` by calling
+       `taida_pack_new(0)`) or any other repeated `@()` producer. A
+       long-running program that constructs successful Gorillax values
+       in a loop would grow `bump_ptr` by 16 B × N until
+       `memory.grow` ran out of pages and trapped. Because an empty
+       pack is immutable (field_count = 0 means no `taida_pack_set`
+       target exists) and all readers only consult the
+       `WASM_EMPTY_PACK_MAGIC` slot, the singleton is race-free and
+       indistinguishable from per-call allocation at the observable
+       level. Native's `taida_gorillax_new` already avoids this leak
+       via a `PACK + 0 → @()` rendering special-case (no per-call
+       allocation); the singleton approach here is the wasm-side
+       equivalent without touching the detector or renderer path. */
     if (field_count == 0) {
-        int64_t *pack = (int64_t *)wasm_alloc(16);
-        if (!pack) return 0;
-        pack[0] = 0;
-        pack[1] = WASM_EMPTY_PACK_MAGIC;
-        return (int64_t)(intptr_t)pack;
+        static int64_t empty_pack_singleton = 0;
+        if (empty_pack_singleton == 0) {
+            int64_t *pack = (int64_t *)wasm_alloc(16);
+            if (!pack) return 0;
+            pack[0] = 0;
+            pack[1] = WASM_EMPTY_PACK_MAGIC;
+            empty_pack_singleton = (int64_t)(intptr_t)pack;
+        }
+        return empty_pack_singleton;
     }
     /* C23B-005 (2026-04-22): append a magic sentinel slot after the last
        field so `_looks_like_pack` can positive-identify non-empty packs

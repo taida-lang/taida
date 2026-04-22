@@ -923,7 +923,12 @@ taida_val taida_lax_new(taida_val value, taida_val default_value) {
     taida_retain_and_tag_field(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__lax_type_str);
-    // __lax_type_str is static, not heap-allocated - leave as INT(0) to skip free
+    // C24-B (2026-04-23): stamp STR tag on __type so the new explicit
+    // `render_int` branch in `taida_pack_to_display_string_full` doesn't
+    // intercept this slot as a raw integer. `__lax_type_str` is a static
+    // C string (not heap-allocated), so TAIDA_TAG_STR is rendering-only —
+    // release / free paths still see it as non-heap and skip.
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
     return pack;
 }
 
@@ -943,7 +948,7 @@ taida_val taida_lax_empty(taida_val default_value) {
     taida_retain_and_tag_field(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__lax_type_str);
-    // __lax_type_str is static - leave tag as INT(0)
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);  // C24-B: see `taida_lax_new`
     return pack;
 }
 
@@ -1054,6 +1059,7 @@ taida_val taida_gorillax_new(taida_val value) {
     taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__gorillax_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);  // C24-B: __type is a string
     return pack;
 }
 
@@ -1072,6 +1078,7 @@ taida_val taida_gorillax_err(taida_val error) {
     if (error != 0) taida_retain(error);  // retain-on-store: error pack child
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__gorillax_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);  // C24-B: __type is a string
     return pack;
 }
 
@@ -1104,6 +1111,7 @@ taida_val taida_gorillax_relax(taida_val ptr) {
     taida_retain_and_tag_field(pack, 2, taida_pack_get_idx(ptr, 2));
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__relaxed_gorillax_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);  // C24-B: __type is a string
     return pack;
 }
 
@@ -4337,7 +4345,26 @@ taida_val taida_list_drop_while(taida_val list_ptr, taida_val fn_ptr) {
 #define HASH_INDEX  0x83cf8e8f9081468bULL
 #define HASH_VALUE  0x7ce4fd9430e80ceaULL
 
+// C24-B (2026-04-23): Register zip/enumerate pair-pack field names into
+// the global field-name registry so `taida_pack_to_display_string_full`
+// emits `first <= …, second <= …` / `index <= …, value <= …`. Without
+// these, the registry lookup returns NULL and every pair pack renders
+// as empty `@()`, which crashed on dereference when the outer list's
+// elem_type_tag = TAIDA_TAG_PACK triggered the full-form recursion.
+// Idempotent — follows the same pattern as
+// `taida_register_lax_field_names` + C23B-009's entries() registration.
+static void taida_register_zip_enumerate_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+    taida_register_field_name((taida_val)HASH_FIRST,  (taida_val)"first");
+    taida_register_field_name((taida_val)HASH_SECOND, (taida_val)"second");
+    taida_register_field_name((taida_val)HASH_INDEX,  (taida_val)"index");
+    taida_register_field_name((taida_val)HASH_VALUE,  (taida_val)"value");
+}
+
 taida_val taida_list_zip(taida_val list1, taida_val list2) {
+    taida_register_zip_enumerate_field_names();  // C24-B
     taida_val *l1 = (taida_val*)list1;
     taida_val *l2 = (taida_val*)list2;
     taida_val len1 = l1[2], len2 = l2[2];
@@ -4366,6 +4393,7 @@ taida_val taida_list_zip(taida_val list1, taida_val list2) {
 }
 
 taida_val taida_list_enumerate(taida_val list_ptr) {
+    taida_register_zip_enumerate_field_names();  // C24-B
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     taida_val elem_tag = list[3];  // ソースリストの要素型タグ
@@ -6223,6 +6251,25 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         // `Value::Unit` (absence of error) on Gorillax. The interpreter's
         // `to_debug_string()` on `Value::Unit` returns `"@()"`, not `"0"`.
         int render_unit_pack = (field_tag == TAIDA_TAG_PACK && field_val == 0);
+        // C24-B (2026-04-23): explicit INT branch — symmetric with WASM's
+        // `_wasm_pack_to_string_full` `render_int` guard (C23B-005). Before
+        // this guard, `zip(@[1,2,3], @["x","y","z"])` crashed: the pair
+        // pack's `first` slot carried an INT value (e.g. `1`) with the
+        // source list's elem_type_tag (TAIDA_TAG_INT = 0) stamped on the
+        // pack field. Without a dedicated INT render branch, the `else`
+        // fell into `taida_value_to_debug_string_full(1)`, which
+        // dereferenced `(char*)1` and segfaulted on
+        // `taida_read_cstr_len_safe`. The guard uses
+        // `!render_bool` to keep Lax's `hasValue` (INT tag +
+        // legacy ftype-4 registry hint) rendering as `true`/`false`.
+        int render_int = (field_tag == TAIDA_TAG_INT) && !render_bool && !render_unit_pack;
+        // C24-B: explicit STR branch — symmetric with WASM. Without it,
+        // `zip`'s `second` slot for a string list would fall into
+        // `taida_value_to_debug_string_full` which has a char* path, but
+        // going through the explicit branch here both matches WASM's
+        // layout and adds defence in depth against heap-address aliasing
+        // in the structural detectors.
+        int render_str = (field_tag == TAIDA_TAG_STR);
         if (render_bool) {
             const char *bv = field_val ? "true" : "false";
             size_t sl = strlen(bv); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, bv, sl); len += sl; buf[len] = '\0';
@@ -6238,6 +6285,24 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         } else if (render_unit_pack) {
             const char *uv = "@()";
             size_t sl = 3; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, uv, sl); len += sl; buf[len] = '\0';
+        } else if (render_int) {
+            char tmp[32];
+            snprintf(tmp, sizeof(tmp), "%" PRId64 "", (int64_t)field_val);
+            size_t sl = strlen(tmp); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, tmp, sl); len += sl; buf[len] = '\0';
+        } else if (render_str) {
+            const char *sv = (const char*)field_val;
+            size_t sl = 0;
+            if (sv && taida_read_cstr_len_safe(sv, 65536, &sl)) {
+                while (len + sl + 3 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+                buf[len++] = '"';
+                memcpy(buf + len, sv, sl); len += sl;
+                buf[len++] = '"';
+                buf[len] = '\0';
+            } else {
+                // Fallback: unresolvable string slot, render as "" quotes
+                while (len + 2 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); }
+                buf[len++] = '"'; buf[len++] = '"'; buf[len] = '\0';
+            }
         } else {
             // C23B-003 reopen 2: nested typed runtime objects must keep
             // their full-form rendering. The short-form

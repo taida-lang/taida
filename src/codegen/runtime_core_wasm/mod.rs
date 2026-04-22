@@ -299,9 +299,77 @@ mod tests {
     /// `taida_register_field_name` calls so all four backends now
     /// emit `@(key <= …, value <= …)` for `.entries()`, matching the
     /// interpreter and `docs/reference/standard_library.md:238`.
+    ///
+    /// C24-B (2026-04-23): 299,284 → 301,386 (+2,102). Added the
+    /// `_wasm_register_zip_enumerate_field_names` helper and called it
+    /// at the head of `taida_list_zip` / `taida_list_enumerate` in
+    /// `03_typeof_list.inc.c` so the `first` / `second` / `index` /
+    /// `value` field names resolve in `_wasm_pack_to_string_full`
+    /// (previously unregistered → NULL → every pair rendered as
+    /// `@()`, which then trapped on the recursive full-form walk
+    /// because the outer list's `elem_type_tag = WASM_TAG_PACK` forced
+    /// the pair through tagged fast-path rendering into unresolved
+    /// slots). Also propagated per-source-list `elem_type_tag` to each
+    /// pair slot's tag (index keeps WASM_TAG_INT, zip's first/second
+    /// and enumerate's value carry the source tag) and stamped
+    /// WASM_TAG_PACK on the returned list's `elem_type_tag` so outer
+    /// list renders each pair through the structural Pack path.
+    /// Idempotent registration follows the C23B-009
+    /// `taida_hashmap_entries` pattern. Interpreter / JS were already
+    /// correct; this closes the native / wasm empty-list / segfault
+    /// divergence flagged as C24B-002.
+    ///
+    /// C25B-026 (2026-04-23, Codex reopen of C24-A HOLD): 301,386 →
+    /// 302,700 (+1,314). Replaced the per-call `taida_pack_new(0)`
+    /// allocation with a lazily-initialised singleton cached in a
+    /// function-local `static int64_t empty_pack_singleton`. Previously
+    /// the wasm bump allocator (which never frees) appended 16 bytes to
+    /// `bump_ptr` for every empty-pack producer — C24-A's Gorillax /
+    /// RelaxedGorillax allocators invoke it on every successful value
+    /// to populate the `__error <= @()` slot, so a long-running program
+    /// constructing N Gorillax values in a loop leaked 16 × N bytes
+    /// until `memory.grow` ran out of pages and trapped. The empty
+    /// pack is immutable (`field_count == 0` means `taida_pack_set`
+    /// has no valid target) and every reader only consults the
+    /// `WASM_EMPTY_PACK_MAGIC` sentinel at slot[1], so reusing the
+    /// same pointer is indistinguishable from per-call allocation at
+    /// the observable level. Native's `taida_gorillax_new` already
+    /// avoids the leak through a different mechanism (`PACK + 0 →
+    /// @()` rendering special-case, no per-call allocation); the
+    /// singleton is the wasm-side equivalent without touching the
+    /// detector or renderer path. Fixes the linear-memory OOM flagged
+    /// in Codex's C24 HOLD review.
+    ///
+    /// C24-A (2026-04-23): 295,319 → 299,284 (+3,965). Unified WASM
+    /// Gorillax's first-field hash from `WASM_HASH_IS_OK` (0x6550…) to
+    /// `WASM_HASH_HAS_VALUE` (0x9e9c…) so `Str[Gorillax[v]()]()` matches
+    /// the interpreter / JS / native `@(hasValue <= …, __value <= …,
+    /// __error <= @(), __type <= "Gorillax")` shape byte-for-byte. The
+    /// five Gorillax / RelaxedGorillax allocators in `02_containers.inc.c`
+    /// (`taida_gorillax_new`, `taida_gorillax_err`, `taida_gorillax_relax`,
+    /// `taida_relaxed_gorillax_new`, `taida_relaxed_gorillax_err`) now
+    /// (a) set `hash0 = WASM_HASH_HAS_VALUE`, (b) idempotently register
+    /// the `hasValue` / `__value` / `__error` / `__type` field names via
+    /// the new `_wasm_register_gorillax_field_names` helper so
+    /// `_wasm_pack_to_string_full` resolves all four fields (previously
+    /// `__error` was unregistered and silently skipped), (c) stamp
+    /// `WASM_TAG_PACK` on the `__error` slot plus store a proper empty
+    /// pack pointer (via `taida_pack_new(0)`) when there is no error so
+    /// the display helper emits `__error <= @()` instead of `"0"`, and
+    /// (d) stamp `WASM_TAG_STR` on the `__type` slot so the `"Gorillax"` /
+    /// `"RelaxedGorillax"` string is quoted. Because Lax and Gorillax
+    /// now share `hash0`, `_wasm_is_gorillax` (in `01_core.inc.c`) and
+    /// `_wasm_is_lax` (in `02_containers.inc.c`) disambiguate via the
+    /// field-2 hash (`__error` for Gorillax / RelaxedGorillax vs
+    /// `__default` for Lax) — a plain int64_t compare, no pointer
+    /// dereference, which keeps the wasm-min size gate green. The
+    /// `isOk` field name was WASM internal-only — no user-facing
+    /// `.isOk()` method dispatches to this slot (that method lives on
+    /// `Result` and routes through `taida_result_is_ok`), so no
+    /// compatibility shim is required.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 295_319;
+        const EXPECTED_TOTAL_LEN: usize = 302_700;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
