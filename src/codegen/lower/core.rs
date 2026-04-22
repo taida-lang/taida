@@ -27,6 +27,24 @@ impl Lowering {
         // Prelude collection constructors
         stdlib_runtime_funcs.insert("hashMap".to_string(), "taida_hashmap_new".to_string());
         stdlib_runtime_funcs.insert("setOf".to_string(), "taida_set_from_list".to_string());
+        // Prelude collection functions — function form parity with mold form
+        // (`Zip[a, b]()` / `Enumerate[xs]()`). C25B-027 (2026-04-23 Codex
+        // reopen of C24-B HOLD): the mold form was wired up by
+        // `src/codegen/lower_molds.rs::Zip|Enumerate`, but the function form
+        // previously fell through `stdlib_runtime_funcs` lookup → user-func
+        // lookup → lambda `CallIndirect` and crashed (native: segfault,
+        // wasm: `uninitialized element` trap). Routing both spellings to
+        // the same `taida_list_zip` / `taida_list_enumerate` runtime
+        // helpers keeps 4-backend parity and does not touch the
+        // interpreter (`src/interpreter/prelude.rs::zip|enumerate` is the
+        // source of truth). No dedicated branch is needed in
+        // `lower_func_call` — the generic stdlib tail at the bottom of
+        // the Ident block lowers argv positionally and emits
+        // `IrInst::Call(result, rt_name, arg_vars)`, which matches the
+        // helpers' ABI (zip: 2 args, enumerate: 1 arg; any arity
+        // mismatch is caught upstream by the parser / typer).
+        stdlib_runtime_funcs.insert("zip".to_string(), "taida_list_zip".to_string());
+        stdlib_runtime_funcs.insert("enumerate".to_string(), "taida_list_enumerate".to_string());
         // Core-bundled os side-effect/query/async functions (import-less parity with interpreter/JS)
         stdlib_runtime_funcs.insert("readBytes".to_string(), "taida_os_read_bytes".to_string());
         stdlib_runtime_funcs.insert("writeFile".to_string(), "taida_os_write_file".to_string());

@@ -734,33 +734,69 @@ int64_t taida_list_drop(int64_t list_ptr, int64_t n) {
     return new_list;
 }
 
+/* C24-B (2026-04-23): Register zip / enumerate pair-pack field names
+   into `_wasm_field_registry` so `_wasm_pack_to_string_full` resolves
+   `first` / `second` / `index` / `value` (previously unregistered →
+   NULL → every pair rendered as `@()`, which then trapped on the
+   recursive full-form walk because the outer list's `elem_type_tag`
+   = WASM_TAG_PACK forced the pair through tagged fast-path rendering).
+   Idempotent — follows C23B-009's `taida_hashmap_entries` pattern
+   (registers inside the helper body rather than at startup because
+   the field names are only meaningful on the zip / enumerate path). */
+static void _wasm_register_zip_enumerate_field_names(void) {
+    taida_register_field_name((int64_t)WASM_HASH_FIRST,  (int64_t)(intptr_t)"first");
+    taida_register_field_name((int64_t)WASM_HASH_SECOND, (int64_t)(intptr_t)"second");
+    taida_register_field_name((int64_t)WASM_HASH_INDEX,  (int64_t)(intptr_t)"index");
+    taida_register_field_name((int64_t)WASM_HASH_VALUE2, (int64_t)(intptr_t)"value");
+}
+
 int64_t taida_list_enumerate(int64_t list_ptr) {
+    _wasm_register_zip_enumerate_field_names();
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
+    /* C24-B: propagate source list's elem_type_tag to the pair's value
+       slot so primitives render through the tagged fast-path. The
+       `index` slot is always INT (tag 0), no explicit stamping needed
+       since `taida_pack_new` zero-initialises tags to INT. */
+    int64_t elem_tag = list[2];
     int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = WASM_TAG_PACK;  /* C24-B: enumerate produces Pack elements */
     for (int64_t i = 0; i < len; i++) {
         int64_t pair = taida_pack_new(2);
         taida_pack_set_hash(pair, 0, (int64_t)WASM_HASH_INDEX);
         taida_pack_set(pair, 0, i);
+        taida_pack_set_tag(pair, 0, WASM_TAG_INT);
         taida_pack_set_hash(pair, 1, (int64_t)WASM_HASH_VALUE2);
         taida_pack_set(pair, 1, list[WASM_LIST_ELEMS + i]);
+        taida_pack_set_tag(pair, 1, elem_tag);
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
 }
 
 int64_t taida_list_zip(int64_t list1, int64_t list2) {
+    _wasm_register_zip_enumerate_field_names();
     int64_t *l1 = (int64_t *)(intptr_t)list1;
     int64_t *l2 = (int64_t *)(intptr_t)list2;
     int64_t len1 = l1[1], len2 = l2[1];
     int64_t min_len = len1 < len2 ? len1 : len2;
+    /* C24-B: propagate each source list's elem_type_tag to its pair
+       slot so primitives in either position render through tagged
+       fast-path dispatch. */
+    int64_t elem_tag1 = l1[2];
+    int64_t elem_tag2 = l2[2];
     int64_t new_list = taida_list_new();
+    int64_t *nl = (int64_t *)(intptr_t)new_list;
+    nl[2] = WASM_TAG_PACK;  /* C24-B: zip produces Pack elements */
     for (int64_t i = 0; i < min_len; i++) {
         int64_t pair = taida_pack_new(2);
         taida_pack_set_hash(pair, 0, (int64_t)WASM_HASH_FIRST);
         taida_pack_set(pair, 0, l1[WASM_LIST_ELEMS + i]);
+        taida_pack_set_tag(pair, 0, elem_tag1);
         taida_pack_set_hash(pair, 1, (int64_t)WASM_HASH_SECOND);
         taida_pack_set(pair, 1, l2[WASM_LIST_ELEMS + i]);
+        taida_pack_set_tag(pair, 1, elem_tag2);
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;

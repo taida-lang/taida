@@ -324,46 +324,91 @@ int64_t taida_lax_is_empty(int64_t lax_ptr) {
    (detected by field count == 4 and hasValue field), extract the value;
    otherwise return identity. */
 
-/* Forward declare: check if a value is a Lax pack */
+/* Forward declare: check if a value is a Lax pack.
+   C24-A (2026-04-23): Gorillax now also uses `hash0 = HASH_HAS_VALUE`
+   (previously `HASH_IS_OK`), so structural-only disambiguation by
+   `p[0] == 4 && p[1] == HASH_HAS_VALUE` would match both Lax AND
+   Gorillax / RelaxedGorillax. We disambiguate by the field-2 hash:
+   - Lax:             slot-2 hash = WASM_HASH___DEFAULT
+   - Gorillax / RelaxedGorillax: slot-2 hash = WASM_HASH___ERROR
+   This avoids a pointer dereference + _looks_like_string call,
+   keeping the wasm-min size gate green. The pack layout places
+   field 2's hash at offset `1 + 2*3 = 7`. */
 static int _wasm_is_lax(int64_t val) {
     if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    /* Check if it looks like a pack with 4 fields and first hash = HASH_HAS_VALUE */
-    if (p[0] == 4 && p[1] == WASM_HASH_HAS_VALUE) return 1;
-    return 0;
+    if (p[0] != 4 || p[1] != WASM_HASH_HAS_VALUE) return 0;
+    /* Reject Gorillax / RelaxedGorillax (slot-2 hash == __error). */
+    return p[1 + 2 * 3] == WASM_HASH___DEFAULT ? 1 : 0;
 }
 
 /* ── W-5: Gorillax (Result container) ── */
-/* Gorillax: @(isOk: Bool, __value: T, __error: Error, __type: "Gorillax")
-   Using pack fields at fixed indices. */
+/* Gorillax: @(hasValue: Bool, __value: T, __error: Error, __type: "Gorillax")
+   Using pack fields at fixed indices.
 
-/* WASM_HASH_IS_OK, __ERROR defined in W-5f monadic type hash section */
+   C24-A (2026-04-23): unified Gorillax first-field name from `isOk` to
+   `hasValue` so `Str[Gorillax[v]()]()` on wasm matches the interpreter /
+   JS / native output byte-for-byte. The old `isOk` field name was WASM
+   internal-only — no user-facing `.isOk()` method dispatches to this
+   slot (that method lives on `Result`, routed through
+   `taida_result_is_ok`). Disambiguation with Lax (which shares
+   `hash0 = HASH_HAS_VALUE` after the rename) is performed on the
+   `__type` first character by `_wasm_is_gorillax` / `_wasm_is_lax` in
+   `01_core.inc.c` — Gorillax = 'G', RelaxedGorillax = 'R', Lax = 'L'. */
+
+/* WASM_HASH_HAS_VALUE / __ERROR defined in W-5f monadic type hash section */
+
+/* Idempotent registration of Gorillax field names into the global
+   `_wasm_field_registry` so `_wasm_pack_to_string_full` can resolve the
+   `__error` field (previously unregistered, which caused
+   `Str[Gorillax[v]()]()` to silently skip the error slot). The other
+   three fields (`hasValue`, `__value`, `__type`) are already registered
+   by `_wasm_register_lax_field_names`, but we re-register them here as
+   a defence-in-depth so the Gorillax path is self-sufficient. */
+static void _wasm_register_gorillax_field_names(void) {
+    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"hasValue");
+    taida_register_field_name(WASM_HASH___VALUE,   (int64_t)(intptr_t)"__value");
+    taida_register_field_name(WASM_HASH___ERROR,   (int64_t)(intptr_t)"__error");
+    taida_register_field_name(WASM_HASH___TYPE,    (int64_t)(intptr_t)"__type");
+}
 
 int64_t taida_gorillax_new(int64_t value) {
+    _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
-    taida_pack_set(pack, 0, 1); /* isOk = true */
-    taida_pack_set_tag(pack, 0, 2); /* BOOL */
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 1); /* hasValue = true */
+    taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, value);
     taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
-    taida_pack_set(pack, 2, 0);
+    /* C24-A: store an empty pack pointer (not raw 0) so
+       `_wasm_value_to_debug_string_full` renders `__error <= @()`
+       instead of the `"0"` literal. Tagged as PACK so the display
+       branch recurses into the full-form helper. Matches the native
+       `taida_gorillax_new` tagging (TAIDA_TAG_PACK + raw 0 → `@()`
+       via native's dedicated empty-pack branch). */
+    taida_pack_set(pack, 2, taida_pack_new(0));
+    taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Gorillax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 
 int64_t taida_gorillax_err(int64_t error) {
+    _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
-    taida_pack_set(pack, 0, 0); /* isOk = false */
-    taida_pack_set_tag(pack, 0, 2); /* BOOL */
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 0); /* hasValue = false */
+    taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, 0);
     taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
     taida_pack_set(pack, 2, error);
+    taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Gorillax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 
@@ -381,44 +426,53 @@ int64_t taida_gorillax_get_error(int64_t gx) {
 
 int64_t taida_gorillax_relax(int64_t gx) {
     /* RelaxedGorillax: same layout, just change __type */
+    _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
     taida_pack_set(pack, 0, taida_pack_get_idx(gx, 0));
-    taida_pack_set_tag(pack, 0, 2);
+    taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, taida_pack_get_idx(gx, 1));
     taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
     taida_pack_set(pack, 2, taida_pack_get_idx(gx, 2));
+    taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 
 int64_t taida_relaxed_gorillax_new(int64_t value) {
+    _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 1);
-    taida_pack_set_tag(pack, 0, 2);
+    taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, value);
     taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
-    taida_pack_set(pack, 2, 0);
+    taida_pack_set(pack, 2, taida_pack_new(0));
+    taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 
 int64_t taida_relaxed_gorillax_err(int64_t error) {
+    _wasm_register_gorillax_field_names();
     int64_t pack = taida_pack_new(4);
-    taida_pack_set_hash(pack, 0, WASM_HASH_IS_OK);
+    taida_pack_set_hash(pack, 0, WASM_HASH_HAS_VALUE);
     taida_pack_set(pack, 0, 0);
-    taida_pack_set_tag(pack, 0, 2);
+    taida_pack_set_tag(pack, 0, WASM_TAG_BOOL);
     taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
     taida_pack_set(pack, 1, 0);
     taida_pack_set_hash(pack, 2, WASM_HASH___ERROR);
     taida_pack_set(pack, 2, error);
+    taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 

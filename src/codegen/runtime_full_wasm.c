@@ -350,13 +350,24 @@ static int64_t _wf_gorillax_to_str(int64_t gx) {
 /// Fixes Gorillax/RelaxedGorillax type detection that fails in core due to
 /// the > 4096 address threshold for data section strings.
 /// Linked via #define redirect: taida_polymorphic_to_string -> _full.
+///
+/// C24-A (2026-04-23): Gorillax's first-field hash was unified from
+/// WASM_HASH_IS_OK (0x6550c1c5b98b56bf) to WASM_HASH_HAS_VALUE
+/// (0x9e9c6dc733414d60) so `Str[Gorillax[v]()]()` matches interpreter /
+/// JS / native output. Lax / Gorillax / RelaxedGorillax now share hash0
+/// and are disambiguated via the `__type` field first character
+/// ('G' / 'R' = Gorillax / RelaxedGorillax; anything else = Lax).
 int64_t taida_polymorphic_to_string_full(int64_t obj) {
     if (obj == 0) return (int64_t)(intptr_t)"0";
     // Check Gorillax BEFORE delegating to core (core's gorillax type detection
     // has the > 4096 threshold issue)
     if (_wf_is_valid_ptr(obj, 104)) {
         int64_t *p = (int64_t *)(intptr_t)obj;
-        if (p[0] == 4 && p[1] == 0x6550c1c5b98b56bfLL) { // WASM_HASH_IS_OK
+        // C24-A: Gorillax / Lax share hash0 = HASH_HAS_VALUE. Disambiguate
+        // via the field-2 hash: `__error` (0x15c3e6e41a99a6cb) for
+        // Gorillax / RelaxedGorillax, `__default` for Lax.
+        if (p[0] == 4 && p[1] == 0x9e9c6dc733414d60LL
+            && p[1 + 2 * 3] == 0x15c3e6e41a99a6cbLL) { // WASM_HASH___ERROR
             return _wf_gorillax_to_str(obj);
         }
     }

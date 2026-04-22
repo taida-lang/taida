@@ -290,7 +290,16 @@ mod tests {
     ///   JSON serializer walk the new side-index.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 961_515;
+        // C24-B (2026-04-23): +4,014 bytes in core.c total. F1 region
+        // grew by +1,697 bytes (+1,114 zip/enumerate field-name
+        // registration helper, +583 TAIDA_TAG_STR stamps on Lax /
+        // Gorillax / RelaxedGorillax `__type` slots). F2 region grew by
+        // +2,317 bytes (explicit `render_int` / `render_str` branches in
+        // `taida_pack_to_display_string_full` so INT / STR fields
+        // stamped via `taida_pack_set_tag` no longer fall into the
+        // pointer-dereference path and segfault). See the F1_LEN test
+        // body below for the detailed breakdown.
+        const EXPECTED_TOTAL_LEN: usize = 965_529;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -539,11 +548,51 @@ mod tests {
         // diverging from interpreter / JS / documented
         // `docs/reference/standard_library.md:238` shape). F2 is unchanged.
         // F1 moves from 228,417 to 229,325; F2 stays at 151,177.
-        const F1_LEN: usize = 229_325;
+        //
+        // C24-B (2026-04-23): F1 grew by +1,114 bytes; F2 grew by +2,317.
+        // - F1: added the `taida_register_zip_enumerate_field_names`
+        //   helper + idempotent registration calls at the head of
+        //   `taida_list_zip` / `taida_list_enumerate` so the `first` /
+        //   `second` / `index` / `value` field names resolve in
+        //   `taida_pack_to_display_string_full` (previously unregistered
+        //   → NULL → every pair pack rendered as `@()`, which segfaulted
+        //   when the outer list's elem_type_tag = TAIDA_TAG_PACK forced
+        //   the full-form recursion to deref into the pair's unresolved
+        //   slots). Field hashes themselves were already defined
+        //   (`HASH_FIRST` / `HASH_SECOND` / `HASH_INDEX` / `HASH_VALUE`)
+        //   and already stamped on each pair; the missing piece was
+        //   name registration.
+        // - F2: added explicit `render_int` and `render_str` branches
+        //   inside `taida_pack_to_display_string_full` (symmetric with
+        //   the WASM version's C23B-005 guards). Before this change,
+        //   an INT-tagged pack field fell into the generic
+        //   `taida_value_to_debug_string_full(field_val)` which
+        //   dereferenced a small int (e.g. `1`) as `(char*)1` and
+        //   segfaulted in `taida_read_cstr_len_safe`. The guard uses
+        //   `!render_bool && !render_unit_pack` so Lax's `hasValue`
+        //   (INT tag + legacy ftype-4 registry hint) continues to
+        //   render as `true` / `false`, and Gorillax's `__error`
+        //   (PACK tag + field_val == 0) continues to render as `@()`.
+        // F1 moves from 229,325 to 231,022 (+1,697 total); F2 moves
+        // from 151,177 to 153,494 (+2,317).
+        // F1 breakdown:
+        //  - +1,114 bytes for zip/enumerate field-name registration
+        //    (`taida_register_zip_enumerate_field_names` helper + calls)
+        //  - +583 bytes for `TAIDA_TAG_STR` stamps on the `__type` slot
+        //    of `taida_lax_new` / `taida_lax_empty` / `taida_gorillax_new`
+        //    / `taida_gorillax_err` / `taida_gorillax_relax`. Without
+        //    these, the new `render_int` branch in F2 intercepts the
+        //    INT-defaulted `__type` slot (stored pointer, tag left at 0)
+        //    and renders the string pointer as a decimal integer
+        //    (repro: `Str[@[Gorillax[42]()]]()` emitted
+        //    `__type <= 4522605`). The string is a static C literal so
+        //    TAIDA_TAG_STR is rendering-only — release / free paths
+        //    continue to skip via the existing `value > 4096` gate.
+        const F1_LEN: usize = 231_022;
         assert_eq!(
             CORE_SECTION.len(),
-            229_325 + 151_177,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C23B-009 adjusted)"
+            231_022 + 153_494,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C24-B adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

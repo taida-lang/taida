@@ -31,11 +31,10 @@
 //!
 //! Some fixtures are scoped narrower than 4-backend because of pre-existing
 //! backend limitations that fall outside the C23 track:
-//!   * `str_from_gorillax` — skipped on wasm-wasi (see
-//!     `WASM_SKIP_FIXTURES`). The wasm runtime stores Gorillax with
-//!     `isOk` as the first field name, while interpreter / JS / native
-//!     all use `hasValue`. Unifying this requires changing wasm's
-//!     `WASM_HASH_IS_OK` scheme and is a separate follow-up.
+//!   * `str_from_gorillax` — fully 4-backend since C24-A (2026-04-23).
+//!     The WASM Gorillax first-field was unified from `isOk` to
+//!     `hasValue` so every backend now emits the same full-form pack.
+//!     `WASM_SKIP_FIXTURES` is now empty.
 //!   * `str_from_stream` — interpreter + JS only (see
 //!     `STREAM_ONLY_FIXTURES`). Native / wasm lowering do not yet support
 //!     Stream (`unsupported mold type: Stream`).
@@ -344,14 +343,16 @@ const STREAM_ONLY_FIXTURES: &[&str] = &["str_from_stream"];
 
 /// Fixtures skipped on wasm-wasi because of a pre-existing backend
 /// divergence (not a C23 regression, not solvable inside the C23 track).
-const WASM_SKIP_FIXTURES: &[&str] = &[
-    // Wasm Gorillax packs use `isOk` for the first field (see
-    // `src/codegen/runtime_core_wasm/02_containers.inc.c:344`) where
-    // interpreter / JS / native all use `hasValue`. Unifying the wasm
-    // hash scheme is a separate follow-up (would also require auditing
-    // any user-facing `.isOk()` calls compiled for wasm).
-    "str_from_gorillax",
-];
+///
+/// C24-A (2026-04-23): `str_from_gorillax` was removed from this list.
+/// The WASM Gorillax first-field was unified from `isOk` to `hasValue`
+/// in `src/codegen/runtime_core_wasm/02_containers.inc.c` (five
+/// allocators) and `_wasm_is_gorillax` / `_wasm_is_lax` were taught to
+/// disambiguate the shared `hash0 = HASH_HAS_VALUE` via the `__type`
+/// field's first character ('G' / 'R' → Gorillax / RelaxedGorillax,
+/// anything else → Lax). Now byte-for-byte matches interpreter / JS /
+/// native for `Str[Gorillax[v]()]()`.
+const WASM_SKIP_FIXTURES: &[&str] = &[];
 
 fn is_stream_only(name: &str) -> bool {
     STREAM_ONLY_FIXTURES.contains(&name)
