@@ -25,25 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      # C25B-003 Phase 2B: migrate from hand-rolled actions/cache to
+      # Swatinem/rust-cache@v2. Advantages:
+      #  - save-on-success semantics avoid polluting the cache with broken
+      #    artefacts from failed runs
+      #  - incremental target cleanup (rust-cache prunes unreferenced
+      #    .rmeta / .rlib before upload) keeps restore size bounded
+      #  - shared-key allows explicit cross-job cache sharing without the
+      #    hand-maintained `cargo-base` restore-keys fallback
+      #  - automatic `cargo-home` + per-job target partitioning
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          # C24 Phase 5 (RC-SLOW-6 / C24B-008 adjacent): share a
-          # `cargo-base` warm cache across jobs so check / test / parity /
-          # e2e / clippy no longer each bring their own cold target/
-          # build. Job-specific key takes first priority on exact match;
-          # missing cases fall through `cargo-base` before giving up.
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --all-targets
 
   test:
@@ -63,23 +57,14 @@ jobs:
           mkdir -p "$HOME/.wasmtime/bin"
           mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
-      - uses: actions/cache@v5
+      # C25B-003 Phase 2B: Unit Tests is the largest target/ footprint; set
+      # `save-if: true` unconditionally here so warm main caches are
+      # produced on every main push (other jobs restore via the
+      # `cargo-base` shared-key).
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          # Write canonical cargo-base cache from Unit Tests (largest
-          # target/ of all jobs). Other jobs restore it via `cargo-base`
-          # restore-keys.
-          key: ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo nextest run --all-targets --profile ci
 
   parity:
@@ -89,20 +74,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
@@ -115,20 +90,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --release
       - name: Run E2E smoke tests
         run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
@@ -141,20 +106,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-base-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-base-
-            ${{ runner.os }}-cargo-
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --all-targets -- -D warnings
 
   fmt:
