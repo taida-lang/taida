@@ -336,7 +336,16 @@ mod tests {
         // core.c size moves from 393,260 to 395,155. Other fragments
         // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New
         // total: 974,273 → 976,168.
-        const EXPECTED_TOTAL_LEN: usize = 976_168;
+        //
+        // C26B-020 柱 1 (@c.26): readBytesAt forward decl added to
+        // core.c (+140 bytes in F1, before the Error ceiling) and
+        // taida_os_read_bytes_at function body added to os.c
+        // (+1,995 bytes). F1_LEN moves from 235,748 to 235,888;
+        // F2_LEN unchanged at 159,407. core.c total moves from
+        // 395,155 to 395,295. os.c total moves from 34,942 to
+        // 37,077 (additive +2,135). New grand total:
+        // 976,168 + 140 + 1,995 = 978,303.
+        const EXPECTED_TOTAL_LEN: usize = 978_303;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -653,11 +662,13 @@ mod tests {
         //    C25 native_runtime drift.
         // C25B-025 Phase 5-I: F1 absorbs +1,895 bytes (math mold family)
         // inserted ahead of the "Error ceiling" marker. F2 unchanged.
-        const F1_LEN: usize = 235_748;
+        // C26B-020 柱 1 (@c.26): F1 absorbs +140 bytes for the
+        // taida_os_read_bytes_at forward declaration. F2 unchanged.
+        const F1_LEN: usize = 235_888;
         assert_eq!(
             CORE_SECTION.len(),
-            235_748 + 159_407,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 adjusted)"
+            235_888 + 159_407,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-020 adjusted)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

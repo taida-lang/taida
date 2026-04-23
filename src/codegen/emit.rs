@@ -1511,6 +1511,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        // C26B-020 柱 1: readBytesAt(path, offset, len) -> Lax[Bytes]
+        "taida_os_read_bytes_at" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
         "taida_os_list_dir" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],
