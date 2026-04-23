@@ -54,15 +54,15 @@ use std::time::{Duration, Instant};
 /// the unrelated `Append` builder path entirely.
 const CELL_COUNT: usize = 4800;
 const TOUCH_CHAIN_LEN: usize = 11;
-// Ceiling chosen to absorb CI 2C runner noise. Local release builds
-// complete in 3-4 s post-session-20 (the Append/Prepend semantic revert
-// means the interpreter's bind-clone envelope is no longer the 4 ms
-// target documented in Phase 5-F2-1). GitHub ubuntu-latest 2C runners
-// measured 15.8 s on PR #39. The guard exists to catch *freeze*-class
-// regressions (≥ 60 s / runaway touch()-chain O(N²) behaviour), not
-// per-run jitter. Post-stable RC will restore the 4 ms envelope via
-// persistent-Vec / builder-scoped list primitive and tighten this back.
-const MAX_DURATION: Duration = Duration::from_secs(30);
+// The 15.8 s seen on PR #39 was caused by the fixture building its
+// cells via Append recursion — the O(N²) Append ceiling that
+// session-20 reverted. After switching the fixture to a 4800-item
+// literal list (no Append), the test measures only the touch-chain
+// shallow-clone path, which Phase 5-F2-1's List interior-Arc keeps
+// effectively O(chain). Local measurement: ~0.03 s release / 3-run
+// median. The 1 s ceiling leaves room for CI 2C jitter while still
+// catching freeze-class regressions.
+const MAX_DURATION: Duration = Duration::from_secs(1);
 
 fn clone_probe_fixture() -> String {
     let cell_literal = "@(ch <= \"a\", fg <= \"white\", bg <= \"black\")";
