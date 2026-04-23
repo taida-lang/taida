@@ -1096,8 +1096,14 @@ function __taida_display_string(v) {
     // C23B-003 reopen — Stream: interpreter uses `Value::Stream` (not a
     // BuchiPack), so `to_display_string()` returns
     // `"Stream[completed: N items]"` / `"Stream[active]"`
-    // (`src/interpreter/value.rs:378-381`). Native/wasm don't support
-    // Stream lowering yet; parity is enforced only for interpreter+JS.
+    // (`src/interpreter/value.rs:378-381`). Stream lowering has landed
+    // on Native / WASM-wasi since C25B-001 Phase 3 (@c.25.rc7), so all
+    // 4 backends share this formatting contract. The JS runtime keeps
+    // using the `Value::Stream`-shaped object literal (__type /
+    // __status / __items) because the JS transpiler lowers Taida
+    // `Stream` values to this shape rather than a native Stream
+    // primitive — the shape is internal to the JS backend, not a
+    // surface concern.
     if (v.__type === 'Stream') {
       if (v.__status === 'active') return 'Stream[active]';
       const items = Array.isArray(v.__items) ? v.__items : [];

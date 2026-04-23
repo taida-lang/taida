@@ -1,17 +1,20 @@
 # Taida Lang Stability Policy
 
-> Target: **`@c.25.rc7`** (in preparation)
-> Status: **provisional** — this document lands inside an RC cycle. The
-> label-less `@c.25` stable tag is *deferred* to a follow-up RC cycle
-> (see CHANGELOG `@c.25.rc7` § Deferred). This file locks the policy
-> contract now so that downstream tooling, packagers, and addon authors
-> have a fixed target to aim at before stable is declared.
+> Target: **`@c.26`** (gen-C stable — second candidate)
+> Status: **provisional** — the label-less `@c.25` tag was **skipped**
+> (see §1.3 below); the gen-C stable tag is now being pursued through
+> the C26 fix-only RC cycle. Intermediate tags are `@c.26.rcM`. The
+> policy contract in this document is pinned for the whole gen-C
+> generation (`@c.25.*` and `@c.26.*`) so downstream tooling, packagers,
+> and addon authors have a fixed target before stable is declared.
 
 Related references:
 
 - `PHILOSOPHY.md` — the four philosophies the language is bound to.
-- `.dev/C25_BLOCKERS.md` — open quality blockers and their severity.
-- `.dev/C25_PROGRESS.md` — phase map (Phase 9 = stability policy).
+- `.dev/C26_BLOCKERS.md` — open quality blockers and their severity
+  (C26 track; `.dev/C25_BLOCKERS.md` is archived).
+- `.dev/C26_PROGRESS.md` — phase map for the C26 fix-only RC cycle.
+- `.dev/D27_BLOCKERS.md` — breaking changes deferred to the gen-D phase.
 - `docs/reference/addon_manifest.md` — addon manifest schema.
 - `docs/reference/operators.md`, `docs/reference/mold_types.md`,
   `docs/reference/standard_library.md`, `docs/reference/standard_methods.md`
@@ -43,13 +46,19 @@ Taida does **not** use semver. Versions are:
 Examples:
 
 - `@c.25.rc7` — 25th generation, 7th release-candidate iteration.
-- `@c.25` — 25th generation, stable (label absent).
-- `@c.26.rc1` — breaking-change generation (see D26 below).
+- `@c.25` — **skipped**; see §1.3.
+- `@c.26.rcM` — gen-C fix-only RC cycle (this track).
+- `@c.26` — gen-C stable (label absent) — the second candidate for
+  gen-C stable, pursued by C26.
+- `@d.27.rc1` — next breaking-change generation (see §1.2 below).
 
 **Agents / automation must not write semver-shaped numbers (`0.1.0`,
 `1.2.3`) into release artifacts, tag names, or manifest versions.**
 Doing so is an immediate reject condition — see
 `MEMORY/feedback_taida_versioning.md`.
+
+**Build numbers are one-way.** `@c.26.rcM` does **not** auto-promote
+to `@c.26`; the stable tag is a separate build with its own number.
 
 ### 1.1. Generation bump (= breaking change) policy
 
@@ -70,17 +79,18 @@ are treated as breaking:
 Additions that keep every previously-legal program working unchanged
 do **not** constitute a breaking change. They land at a `<num>` bump.
 
-### 1.2. D26 (breaking-change phase)
+### 1.2. D27 (breaking-change phase)
 
-Generation D26 is reserved for the breaking changes currently planned
-but intentionally not executed during C25. The principal motivators
-are (non-exhaustive):
+Generation D27 (originally planned as D26 and renamed on 2026-04-24 —
+see `MEMORY/project_d27_breaking_change_phase.md`) is reserved for the
+breaking changes deliberately deferred from gen-C. The principal
+motivators are (non-exhaustive):
 
 - **Function name capitalisation cleanup** — `Str` / `lower` /
   `toString` etc. have drifted between `PascalCase` / `camelCase` /
-  `lowercase`. D26 will pick one convention and migrate en masse.
-- **WASM backend extension for addons** — C25 locks `AddonBackend`
-  to `Native | Interpreter` and rejects `Js`. D26 introduces a
+  `lowercase`. D27 will pick one convention and migrate en masse.
+- **WASM backend extension for addons** — gen-C locks `AddonBackend`
+  to `Native | Interpreter` and rejects `Js`. D27 introduces a
   WASM backend, potentially requiring manifest schema changes
   (`targets` field, see §4.3).
 - **Addon ABI v2** — host-side callbacks (`on_panic_cleanup`,
@@ -88,9 +98,26 @@ are (non-exhaustive):
 - **Diagnostic renumbering** — any cleanups that require renaming or
   renumbering `E1xxx` codes.
 
-See `.dev/D26_BLOCKERS.md` and `MEMORY/project_d26_breaking_change_phase.md`
-for the live worklist. Anything in that list is out-of-scope for C25
-even if it is otherwise attractive.
+See `.dev/D27_BLOCKERS.md` and `MEMORY/project_d27_breaking_change_phase.md`
+for the live worklist. Anything in that list is out-of-scope for
+both C25 and C26 even if it is otherwise attractive.
+
+> **Error-string note.** The legacy substring `wasm planned for D26`
+> remains in the runtime diagnostic emitted by
+> `src/addon/backend_policy.rs` (see §4.2). That substring is a
+> **pinned surface token** for the entire gen-C generation and will
+> not be renamed to `D27` mid-generation; doing so would break
+> tooling that matches on the substring. The rename to `D27` in prose
+> here is documentation-only. The token is planned to be rewritten
+> at the gen-D boundary alongside the other breaking changes.
+
+### 1.3. `@c.25` label skip
+
+The label-less `@c.25` tag is **skipped** (no re-issue condition).
+`@c.25.rc7` was the final RC iteration of C25; the stable-candidate
+effort continues as the C26 fix-only RC cycle with the label-less
+`@c.26` as its target. Agents and release tooling must not attempt
+to tag `@c.25` retroactively.
 
 ---
 
@@ -200,33 +227,39 @@ change.
 
 ### 4.2. Backend policy
 
-At `@c.25.rc7`:
+Across the whole gen-C generation (`@c.25.*` and `@c.26.*`):
 
 - `Native` — supported.
 - `Interpreter` — supported (first-class, not a degraded fallback).
 - `Js` — deterministically rejected; no dispatcher exists.
-- `Wasm` — deterministically rejected; planned for D26.
+- `Wasm` — deterministically rejected; planned for the D27
+  breaking-change phase (see §1.2).
 
 The error message `"(supported: interpreter, native; wasm planned for
 D26). Run 'taida build --target native' or use the interpreter."` is
-part of the stable surface for the `@c.25` generation — tooling is
+part of the stable surface for the gen-C generation — tooling is
 permitted to match on the substring `"supported: interpreter, native"`
-to detect the current policy.
+to detect the current policy. The literal `D26` token inside that
+string is a pinned surface artefact from C25B-030 and is **not**
+renamed to `D27` mid-generation; the rename is a gen-D breaking
+change (see §1.2). New code should match on the
+`"supported: interpreter, native"` prefix rather than the trailing
+`D26` token.
 
 ### 4.3. `targets` field (forward-compat pin)
 
-`addon.toml` at `@c.25.rc7` has **no** `targets` field. The
-label-less `@c.25` stable release will ship the same schema.
+`addon.toml` across the gen-C generation has **no** `targets` field.
+The label-less `@c.26` stable release will ship the same schema.
 
-When `targets` is introduced at a later generation (tentatively D26,
+When `targets` is introduced at a later generation (tentatively D27,
 coupled with the WASM backend), the migration rule is **pinned now**
-so that existing `@c.25` addons remain valid:
+so that existing gen-C addons remain valid:
 
 > An `addon.toml` with no `targets` field is interpreted as
 > `targets = ["native"]`.
 
 That is: the absence of `targets` means **native only**, matching the
-`@c.25` reality. Addon authors who want multi-target support at D26+
+gen-C reality. Addon authors who want multi-target support at D27+
 opt in explicitly; addon authors who do nothing remain valid
 native-only addons.
 
@@ -242,9 +275,9 @@ callbacks at the end of the vtable, new optional exported symbols)
 may land at a `<num>` bump. Reordering, renaming, or changing the
 signature of an existing slot is a breaking change.
 
-D26 is expected to introduce ABI v2 (adds `on_panic_cleanup` etc.
-host callbacks). `@c.25` will keep ABI v1 intact for the full
-generation.
+D27 is expected to introduce ABI v2 (adds `on_panic_cleanup` etc.
+host callbacks). The gen-C generation (`@c.25.*` / `@c.26.*`) keeps
+ABI v1 intact for the full generation.
 
 ### 4.5. Publishing workflow
 
@@ -265,44 +298,51 @@ addon at `@c.25.rc7` is `taida-lang/terminal`.
 
 ## 5. Deferred / Caveats
 
-The following items are **not** covered by the `@c.25.rc7` stability
-contract. They are the reason `@c.25.rc7` is an RC cycle and the
-label-less `@c.25` release is deferred.
+The following items are **not** covered by the current stability
+contract. They are the reason `@c.26` is still an RC-track target
+rather than a landed stable tag. All items below are owned by the
+C26 fix-only RC cycle (see `.dev/C26_BLOCKERS.md`); none are
+deferred past C26.
 
 ### 5.1. NET stable viewpoint
 
-The following NET-adjacent items are the reason `@c.25.rc7` keeps
-its `rc` label and the label-less `@c.25` stable tag is deferred:
+The following NET-adjacent items are owned by the **C26 fix-only
+RC cycle** (`.dev/C26_BLOCKERS.md::C26B-001〜C26B-006`). They block
+the label-less `@c.26` tag until FIXED; the severity assignments
+below are pinned by the 2026-04-24 Phase 0 Design Lock:
 
-- **HTTP/2 parity across interpreter / native / wasm** —
+- **HTTP/2 parity across interpreter / native / JS** —
   scatter-gather response handling, flow-control edge cases, and
-  real-world client conformance are not yet locked.
+  real-world client conformance (C26B-001, Must Fix, 3-backend).
 - **TLS construction** — cert chains, ALPN, and verification modes
-  that the current `taida-lang/net` facade covers only partially.
-- **HTTP parity under port-bind race** — hyper / tokio port-bind
-  failures under concurrent tests still lean on the retry shim.
-- **Port-bind race eradication (C25B-002)** — `flaky_h2_parity`
-  is still papered over with a retry shim rather than
-  eliminated at the root.
-- **Throughput regression guard (C25B-004)** — the
-  `benches/perf_baseline.rs` harness runs `continue-on-error`;
-  there is no automated perf benchmark that blocks regressions.
-- **Scatter-gather long-run** — the `httpServe` path has not
-  been stressed with multi-hour runs yet.
+  that the current `taida-lang/net` facade covers only partially
+  (C26B-002, Must Fix, 3-backend).
+- **Port-bind race eradication** — `flaky_h2_parity` currently leans
+  on a retry shim; C26B-003 tracks the root-cause fix (Critical,
+  inherited from C25B-002).
+- **Throughput regression guard hard-fail promotion** — the
+  `benches/perf_baseline.rs` harness is `continue-on-error` today;
+  C26B-004 promotes it to hard-fail on 10% regression against a
+  30-sample baseline (Must Fix).
+- **Scatter-gather long-run** — the `httpServe` path is verified
+  under a 24-hour soak test via a manual runbook
+  (`.dev/C26_SOAK_RUNBOOK.md`, C26B-005, Must Fix).
+- **HTTP parity retry-shim retirement** — C26B-006 removes the
+  remaining retry shim once C26B-003 is FIXED at the root
+  (Must Fix).
 
-These are expected to close out in a follow-up RC cycle (`@c.25.rcN+`
-or `@c.26.rcM`, decision deferred) before the label-less `@c.25`
-is tagged. The label-less `@c.25` tag **will not** be declared
-inside the `@c.25.rc7` cycle.
+The scope is pinned to the **3-backend** matrix (interpreter / JS /
+native); the wasm targets are out of gen-C scope except for
+C26B-020 pillar 3 (a widening addition, §6.2).
 
 ### 5.2. Addon WASM backend
 
-C25 locks `AddonBackend::Wasm` as "rejected, planned for D26".
-The stable surface contract at §4.2 explicitly permits D26 to add
-WASM support without a `<gen>` bump, because doing so only widens
-the set of accepted backends. The `targets` default-to-`["native"]`
-rule at §4.3 ensures no existing addon is reinterpreted by the
-widening.
+Gen-C locks `AddonBackend::Wasm` as "rejected, planned for D27"
+(see §1.2 for the D26→D27 rename note). The stable surface
+contract at §4.2 explicitly permits D27 to add WASM support
+without a `<gen>` bump, because doing so only widens the set of
+accepted backends. The `targets` default-to-`["native"]` rule at
+§4.3 ensures no existing addon is reinterpreted by the widening.
 
 ### 5.3. Async redesign
 
@@ -311,21 +351,29 @@ suspend points. Until that audit lands, the `Async[T]` surface is
 stable in **syntax and type shape** (pinned by §2.2) but the exact
 behaviour of a lambda whose closure outlives its defining frame
 through a `]=>` suspend is not contractual. Programs that depend on
-this edge case should assume it will be redesigned at D26+.
+this edge case should assume it will be redesigned at D27+.
 
 ### 5.4. Terminal addon async FIFO
 
-C25B-019 tracks `PENDING_BYTES` FIFO ordering across concurrent
-`ReadEvent()` calls. Until that lands (coupled with §5.3), the
-terminal addon's behaviour under concurrent event-read is not
-contractual.
+`PENDING_BYTES` FIFO ordering across concurrent `ReadEvent()` calls
+is owned by **C26B-012** (formerly tracked under C25B-019, promoted
+to Must Fix at the 2026-04-24 Phase 0 Design Lock and coupled with
+the BuchiPack interior Arc migration). The terminal addon's
+behaviour under concurrent event-read becomes contractual at
+`@c.26`; until then the ordering is not guaranteed.
 
 ### 5.5. Performance
 
-No wallclock / RSS / throughput guarantee is made for any program.
-The perf-gate harness (`benches/perf_baseline.rs`, C25B-004) tracks
-regressions but is continue-on-error throughout `@c.25.rc7`.
-Hard-fail gating is a post-stable follow-up.
+No wallclock / RSS / throughput guarantee is made for any program
+at `@c.25.rc7`. The perf-gate harness (`benches/perf_baseline.rs`,
+inherited from C25B-004) tracks regressions but is
+`continue-on-error` throughout the `@c.25.*` track. Hard-fail
+gating is **C26 scope** (C26B-004, Must Fix): the label-less
+`@c.26` tag ships with the gate promoted to hard-fail on 10%
+regression against a 30-sample baseline. Related runtime-perf
+work items (`C26B-010` / `C26B-012` / `C26B-018` / `C26B-020`
+/ `C26B-024`) land alongside the gate promotion so the baseline
+is measured against the post-fix runtime.
 
 ---
 
@@ -333,7 +381,7 @@ Hard-fail gating is a post-stable follow-up.
 
 ### 6.1. How breaking changes are introduced
 
-1. The change is proposed in `.dev/D26_BLOCKERS.md` (or the
+1. The change is proposed in `.dev/D27_BLOCKERS.md` (or the
    successor D-series tracker) with motivation, migration plan,
    and an explicit statement of which §1.1 bullet it touches.
 2. The proposal is reviewed and accepted / rejected by the
@@ -345,7 +393,7 @@ Hard-fail gating is a post-stable follow-up.
 ### 6.2. How additions are introduced
 
 1. The addition is proposed in `.dev/FUTURE_PROGRESS.md` or a
-   tracked blocker (`C25B-xxx` style, or `D26B-xxx`, or
+   tracked blocker (`C26B-xxx` style, or `D27B-xxx`, or
    `FB-xx`).
 2. The addition is implemented with 4-backend parity from the
    first commit.

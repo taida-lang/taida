@@ -1,5 +1,186 @@
 # Changelog
 
+## @c.26 (in progress — gen-C stable, second candidate)
+
+**Fix-only RC cycle.** The label-less `@c.25` tag was **skipped**
+(see `docs/STABILITY.md` §1.3); the gen-C stable tag is now being
+pursued as `@c.26`. Intermediate tags are `@c.26.rcM`. No breaking
+changes land here — everything breaking is deferred to the D27
+generation (`.dev/D27_BLOCKERS.md`, formerly D26; the rename is
+documented in `docs/STABILITY.md` §1.2).
+
+The build-number rule is one-way: `@c.26.rcM` does **not**
+auto-promote to `@c.26`. The stable tag is a separate build with
+its own number.
+
+### In-scope (fix-only)
+
+All items below are **Must Fix** or **Critical** under the 2026-04-24
+Phase 0 Design Lock (`DEFERRED` / `Should Fix` / `CONDITIONAL` /
+`tentative` are retired). Live worklist: `.dev/C26_BLOCKERS.md`.
+
+#### Cluster 1 — NET stable viewpoint (Phase 1–6)
+
+- **C26B-001** — HTTP/2 parity across 3-backend (interpreter / JS /
+  native). `@c.25.rc7` shipped with partial pin only.
+- **C26B-002** — TLS construction (cert chains, ALPN, verification
+  modes) locked across 3-backend.
+- **C26B-003** — **Critical**. Port-bind race eradication (inherited
+  from C25B-002). Candidate solutions 1 → 2 → 3 tried in order with
+  the D27-escalation checklist applied per candidate.
+- **C26B-004** — Throughput regression gate promoted from
+  `continue-on-error` to hard-fail on 10% regression against a
+  30-sample baseline.
+- **C26B-005** — Scatter-gather 24-hour soak verification via a
+  manual runbook (`.dev/C26_SOAK_RUNBOOK.md`, new).
+- **C26B-006** — HTTP parity retry shim retired once C26B-003 roots
+  out the underlying port-bind race.
+
+WASM targets are explicitly out of scope for gen-C NET (3-backend
+fixed); the single exception is C26B-020 pillar 3 (a widening
+addition under §6.2).
+
+#### Cluster 2 — Security (Phase 7–8)
+
+- **C26B-007** — SEC-002 through SEC-010 localised fixes;
+  cargo-audit / cargo-deny promoted to hard-fail; cppcheck +
+  clang-tidy integration for C21–C24 runtime C code. Includes
+  sub-phase 7.4 **SEC-011**: Sigstore (cosign keyless) signing +
+  SLSA provenance attestation wired into the `taida publish`
+  workflow. Verify-on-install step added to `taida install`.
+- **C26B-008** — C25B-014 advisory publication + CVE request
+  (owner action).
+
+#### Cluster 3 — Parser quality (Phase 9)
+
+- **C26B-009** — State-machine transition-graph formalisation for
+  `parse_error_ceiling` / `parse_cond_branch` recovery paths.
+  `| _ |> <throw>` arm-body throw propagation bug fixed.
+- **C26B-019** — Multi-line `TypeDef` constructor parse; `taida
+  check` vs `taida build` parser divergence eliminated.
+
+#### Cluster 4 — Runtime perf / memory (Phase 10)
+
+Gated on a **common abstraction decision** (Arc + try_unwrap COW /
+arena / zero-copy slice view) landed in `src/interpreter/value.rs`
+before any implementation work. No implementation lands until the
+abstraction is pinned.
+
+- **C26B-010** — valgrind + peak-RSS + coverage integration.
+- **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
+  concurrent `ReadEvent()`) + BuchiPack interior Arc migration.
+- **C26B-018** — `Str` primitive super-linear paths resolved via
+  (A) char-index cache + (B) byte-level primitive + (C)
+  `StringRepeatJoin` mold. Option (D) `StringBuilder` is explicitly
+  **discarded** (conflicts with Taida's immutable-first philosophy
+  — not deferred, not revisited at D27).
+- **C26B-020** — **Downstream-blocking hard blocker.** Three
+  pillars, all required for DONE:
+  1. `readBytesAt(path, offset, len) -> Bytes` API; `readBytes`
+     gets a runtime-configurable 64 MB ceiling.
+  2. `BytesCursorTake` zero-copy via `Arc<[u8]>` + offset/len view.
+  3. `BytesCursor` + related molds (`readBytesAt`,
+     `BytesCursorTake`, `BytesCursorAdvance`,
+     `BytesCursorRemaining`) lowered for `wasm-wasi` / `wasm-edge`
+     / `wasm-full`. This is the **only** wasm-scope addition in
+     gen-C NET work.
+- **C26B-024** — Native list / `BuchiPack` clone-heavy paths fixed;
+  `bench_router.td` hard-gates `Native ≤ JS × 2` with `sys/real
+  ≤ 30%`.
+
+#### Cluster 5 — Float parity (Phase 11)
+
+- **C26B-011** — NaN / ±Infinity / denormal parity across 3-backend;
+  `Div[1.0, 0.0]()` Lax-default rendering divergence resolved;
+  `Mul[1.5, 2.0]()` native-build exit-code-1 fixed.
+
+#### Cluster 6 — Surface fixes (Phase 12) & docs (Phase 13)
+
+- **C26B-013** — Stability / CHANGELOG / `net_api.md` (new) /
+  Stream-lowering doc updates / 2nd-party inbox rule
+  (`.dev/C26_PROGRESS.md` § NEW-E).
+- **C26B-014** — Core-bundled packages (`taida-lang/os`, `net`,
+  `crypto`, `pool`, `js`) resolvable without an explicit
+  `packages.tdm` entry. **Option B pinned** (implementation brought
+  in line with docs — widening, not breaking).
+- **C26B-015** — Native-backend path-traversal check no longer
+  rejects project-root-internal `..` imports; parity across
+  3-backend (root-escape is still rejected).
+- **C26B-016** — `httpServe` handler `req` pack shape pinned in
+  `docs/reference/net_api.md` (new). **Option B+ pinned**: the
+  zero-copy span pack (`make_span`,
+  `src/interpreter/net_eval/helpers.rs:195-200`) is **retained**
+  for perf; ergonomics is widened via new public molds
+  `strOf` / `SpanEquals` / `SpanStartsWith` / `SpanSlice` /
+  `SpanContains`. Option A (auto-`Str` promotion of `req.method`)
+  would break `tests/parity.rs` fixtures and is **deferred to D27**.
+- **C26B-017** — Interpreter: partially-applied function returned
+  from an outer function no longer collapses to `@()`; closure
+  capture works across return boundaries (3-backend parity:
+  `makeAdder(10)(7) == 17`).
+- **C26B-021** — `stdout` / `stderr` now line-buffered at the C
+  entry point via `setvbuf(_IOLBF, 0)`. **Option B pinned**
+  (per-call `fflush` is not adopted).
+- **C26B-022** — HTTP wire parser enforces method 16 / path 2048 /
+  authority 256 byte ceilings; over-limit requests emit `400 Bad
+  Request`. **Step 3 Option B pinned**. `-Wformat-truncation` is
+  warning-as-error in CI.
+- **C26B-023** — 2-arg `httpServe` handler: `req.body` empty-span
+  edge case emits a runtime warning; `readBody(req)` /
+  `readBodyChunk` / `readBodyAll` usage pinned in `net_api.md`.
+- **C26B-025** — `taida publish` validates `packages.tdm`
+  self-identity (`<<<@version` vs tag) before push; `--retag`
+  respects the same check; `--bump-manifest` auto-rewrites.
+
+#### Cluster 7 — Stable GATE (Phase 14)
+
+- User-approved `@c.26` tag (agent must never cut `@c.26.rcM` /
+  `@c.26` tags). Promotion gate requires:
+  - All Critical / Must Fix closed.
+  - `cargo test --release` all-pass, 0 red, 0 SLOW warnings.
+  - 3-backend parity across all fixtures.
+  - CI 2C wall-clock median ≤ 8 minutes.
+  - Parallelism efficiency ≥ 80%.
+  - 24-hour soak test PASS (C26B-005).
+  - Downstream `bonsai-wasm` Phase 6 smoke (C26B-020 acceptance).
+  - `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete.
+  - Sigstore + SLSA-signed official addon release.
+
+### Docs / infrastructure landed alongside
+
+- `docs/STABILITY.md` — `Target: @c.26`, §1 `@c.25`-skip pin,
+  §1.2 D26→D27 rename (prose-only; the pinned runtime error string
+  keeps the legacy `D26` token for gen-C), §4.2 / §4.3 / §4.4
+  generational language clarified, §5.1 / §5.4 / §5.5 ownership
+  transferred to C26 blockers.
+- `docs/reference/net_api.md` (new) — `httpServe` `req` pack shape
+  (1-arg / 2-arg table), span-aware mold reference, perf guidance
+  (hot path `SpanEquals`, cold path `strOf`).
+- `docs/reference/mold_types.md:717` — Stream lowering landed at
+  C25B-001 Phase 3; `STREAM_ONLY_FIXTURES` is empty (4-backend
+  parity now applies).
+- `docs/reference/addon_manifest.md` / `docs/guide/13_creating_addons.md`
+  — D26→D27 prose rename; the pinned runtime error string is
+  preserved and its `D26` token documented as a gen-C surface
+  artefact.
+- `src/js/runtime/core.rs:1100` — Stream-lowering comment updated
+  to reflect 4-backend parity.
+
+### Out-of-scope for C26 (deferred to D27)
+
+- Function-name capitalisation cleanup.
+- WASM backend for addons (`AddonBackend::Wasm`) — gen-D only.
+- Addon ABI v2 (`on_panic_cleanup`, termios-restore hook).
+- Diagnostic renumbering (`E1xxx` rename / retire).
+- `req.method` auto-`Str` promotion (C26B-016 Option A).
+- Rewriting the legacy `wasm planned for D26` error-string token
+  (pinned surface for gen-C).
+
+See `.dev/D27_BLOCKERS.md` and
+`MEMORY/project_d27_breaking_change_phase.md`.
+
+---
+
 ## @c.25.rc7 (2026-04-23)
 
 Quality-consolidation RC cycle. `stable` (label-less `@c.25`) is
