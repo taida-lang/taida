@@ -658,12 +658,12 @@ impl Interpreter {
         method: &str,
         args: &[Value],
     ) -> Result<Signal, RuntimeError> {
-        let entries = fields
+        let entries: Vec<Value> = fields
             .iter()
             .find(|(n, _)| n == "__entries")
             .and_then(|(_, v)| {
                 if let Value::List(items) = v {
-                    Some(items.clone())
+                    Some(items.as_ref().clone())
                 } else {
                     None
                 }
@@ -673,7 +673,7 @@ impl Interpreter {
         match method {
             "get" => {
                 let key = args.first().cloned().unwrap_or(Value::Str(String::new()));
-                for entry in &entries {
+                for entry in entries.iter() {
                     if let Value::BuchiPack(ef) = entry {
                         let entry_key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
                         if entry_key == Some(&key) {
@@ -705,7 +705,7 @@ impl Interpreter {
                 let value = args.get(1).cloned().unwrap_or(Value::Unit);
                 let mut new_entries = Vec::new();
                 let mut found = false;
-                for entry in &entries {
+                for entry in entries.iter() {
                     if let Value::BuchiPack(ef) = entry {
                         let entry_key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
                         if entry_key == Some(&key) {
@@ -726,7 +726,7 @@ impl Interpreter {
                     ]));
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(new_entries)),
+                    ("__entries".into(), Value::list(new_entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
             }
@@ -744,7 +744,7 @@ impl Interpreter {
                     })
                     .collect();
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(new_entries)),
+                    ("__entries".into(), Value::list(new_entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
             }
@@ -770,7 +770,7 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::List(keys)))
+                Ok(Signal::Value(Value::list(keys)))
             }
             "values" => {
                 let values: Vec<Value> = entries
@@ -785,7 +785,7 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::List(values)))
+                Ok(Signal::Value(Value::list(values)))
             }
             "entries" => {
                 let pairs: Vec<Value> = entries
@@ -809,18 +809,18 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::List(pairs)))
+                Ok(Signal::Value(Value::list(pairs)))
             }
             "size" => Ok(Signal::Value(Value::Int(entries.len() as i64))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(entries.is_empty()))),
             "merge" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_entries = if let Value::BuchiPack(of) = &other {
+                let other_entries: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__entries")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -849,7 +849,7 @@ impl Interpreter {
                     }
                 };
                 let other_keys: Vec<Value> = other_entries.iter().filter_map(extract_key).collect();
-                let mut merged = entries;
+                let mut merged: Vec<Value> = entries;
                 if let Some(other_key_fps) = try_build_fingerprint_set(&other_keys) {
                     merged.retain(|e| match extract_key(e) {
                         Some(k) => match ValueKey::new(&k) {
@@ -880,7 +880,7 @@ impl Interpreter {
                     }
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__entries".into(), Value::List(merged)),
+                    ("__entries".into(), Value::list(merged)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
             }
@@ -922,12 +922,12 @@ impl Interpreter {
         method: &str,
         args: &[Value],
     ) -> Result<Signal, RuntimeError> {
-        let items = fields
+        let items: Vec<Value> = fields
             .iter()
             .find(|(n, _)| n == "__items")
             .and_then(|(_, v)| {
                 if let Value::List(items) = v {
-                    Some(items.clone())
+                    Some(items.as_ref().clone())
                 } else {
                     None
                 }
@@ -942,7 +942,7 @@ impl Interpreter {
                     new_items.push(item);
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(new_items)),
+                    ("__items".into(), Value::list(new_items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
@@ -950,7 +950,7 @@ impl Interpreter {
                 let item = args.first().cloned().unwrap_or(Value::Unit);
                 let new_items: Vec<Value> = items.into_iter().filter(|i| i != &item).collect();
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(new_items)),
+                    ("__items".into(), Value::list(new_items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
@@ -960,12 +960,12 @@ impl Interpreter {
             }
             "union" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_items = if let Value::BuchiPack(of) = &other {
+                let other_items: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__items")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -1014,18 +1014,18 @@ impl Interpreter {
                     }
                 }
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(result)),
+                    ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
             "intersect" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_items = if let Value::BuchiPack(of) = &other {
+                let other_items: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__items")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -1058,18 +1058,18 @@ impl Interpreter {
                             .collect()
                     };
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(result)),
+                    ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
             "diff" => {
                 let other = args.first().cloned().unwrap_or(Value::Unit);
-                let other_items = if let Value::BuchiPack(of) = &other {
+                let other_items: Vec<Value> = if let Value::BuchiPack(of) = &other {
                     of.iter()
                         .find(|(n, _)| n == "__items")
                         .and_then(|(_, v)| {
                             if let Value::List(items) = v {
-                                Some(items.clone())
+                                Some(items.as_ref().clone())
                             } else {
                                 None
                             }
@@ -1098,11 +1098,11 @@ impl Interpreter {
                             .collect()
                     };
                 Ok(Signal::Value(Value::BuchiPack(vec![
-                    ("__items".into(), Value::List(result)),
+                    ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
             }
-            "toList" => Ok(Signal::Value(Value::List(items))),
+            "toList" => Ok(Signal::Value(Value::list(items))),
             "size" => Ok(Signal::Value(Value::Int(items.len() as i64))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(items.is_empty()))),
             "toString" => {
@@ -1310,7 +1310,7 @@ impl Interpreter {
                 if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
                     match super::regex_eval::split(s, &pat, &flags) {
                         Ok(parts) => {
-                            return Ok(Signal::Value(Value::List(
+                            return Ok(Signal::Value(Value::list(
                                 parts.into_iter().map(Value::Str).collect(),
                             )));
                         }
@@ -1334,7 +1334,7 @@ impl Interpreter {
                         .map(|p| Value::Str(p.to_string()))
                         .collect()
                 };
-                Ok(Signal::Value(Value::List(parts)))
+                Ok(Signal::Value(Value::list(parts)))
             }
             // C12-6c: match / search methods — Regex arg required.
             // Surface a RuntimeError if the first arg isn't a Regex
@@ -1614,7 +1614,7 @@ impl Interpreter {
             }
             // Display (C12-2b: universal .toString() adoption)
             "toString" => Ok(Signal::Value(Value::Str(
-                Value::List(items.to_vec()).to_display_string(),
+                Value::list(items.to_vec()).to_display_string(),
             ))),
             _ => Err(RuntimeError {
                 message: format!(

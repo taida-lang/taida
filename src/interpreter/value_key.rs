@@ -180,7 +180,7 @@ fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
         Value::List(items) => {
             7u8.hash(state);
             items.len().hash(state);
-            for it in items {
+            for it in items.iter() {
                 hash_value_into(it, state);
             }
         }
@@ -237,16 +237,16 @@ mod tests {
         let f = Value::Float(f64::NAN);
         assert!(ValueKey::new(&f).is_none());
         assert!(
-            ValueKey::new(&Value::List(vec![Value::Int(1), Value::Float(2.0)])).is_none(),
+            ValueKey::new(&Value::list(vec![Value::Int(1), Value::Float(2.0)])).is_none(),
             "list containing float must be non-eligible"
         );
     }
 
     #[test]
     fn value_key_list_eligibility_is_recursive() {
-        let pure = Value::List(vec![Value::Int(1), Value::Str("a".into())]);
+        let pure = Value::list(vec![Value::Int(1), Value::Str("a".into())]);
         assert!(ValueKey::new(&pure).is_some());
-        let nested = Value::List(vec![Value::List(vec![
+        let nested = Value::list(vec![Value::list(vec![
             Value::Int(1),
             Value::Bytes(vec![5]),
         ])]);

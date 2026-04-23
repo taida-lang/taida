@@ -926,7 +926,7 @@ impl Interpreter {
                     };
                     result_items.push(value);
                 }
-                Ok(Signal::Value(Value::List(result_items)))
+                Ok(Signal::Value(Value::list(result_items)))
             }
 
             Expr::BinaryOp(left, op, right, _) => {
@@ -1511,7 +1511,7 @@ impl Interpreter {
                     }
                 }
             },
-            TypeExpr::List(_) => Ok(Value::List(Vec::new())),
+            TypeExpr::List(_) => Ok(Value::list(Vec::new())),
             TypeExpr::BuchiPack(fields) => {
                 let mut result = Vec::new();
                 for field_def in fields.iter().filter(|f| !f.is_method) {

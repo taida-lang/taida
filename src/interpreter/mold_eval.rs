@@ -302,7 +302,7 @@ impl Interpreter {
                 };
                 let parts: Vec<Value> =
                     s.split(&delim).map(|p| Value::Str(p.to_string())).collect();
-                Ok(Some(Signal::Value(Value::List(parts))))
+                Ok(Some(Signal::Value(Value::list(parts))))
             }
             "Chars" => {
                 if type_args.len() != 1 {
@@ -320,7 +320,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let chars: Vec<Value> = s.chars().map(|ch| Value::Str(ch.to_string())).collect();
-                Ok(Some(Signal::Value(Value::List(chars))))
+                Ok(Some(Signal::Value(Value::list(chars))))
             }
             "Replace" => {
                 if type_args.len() < 3 {
@@ -517,9 +517,9 @@ impl Interpreter {
                 match val {
                     Value::Str(s) => Ok(Some(Signal::Value(Value::Str(s.chars().rev().collect())))),
                     Value::List(items) => {
-                        let mut reversed = items;
+                        let mut reversed = Value::list_take(items);
                         reversed.reverse();
-                        Ok(Some(Signal::Value(Value::List(reversed))))
+                        Ok(Some(Signal::Value(Value::list(reversed))))
                     }
                     _ => Err(RuntimeError {
                         message: format!("Reverse: argument must be a string or list, got {}", val),
@@ -1329,9 +1329,9 @@ impl Interpreter {
                 };
                 match (left, right) {
                     (Value::List(list), Value::List(other)) => {
-                        let mut result = list;
-                        result.extend(other);
-                        Ok(Some(Signal::Value(Value::List(result))))
+                        let mut result = Value::list_take(list);
+                        result.extend(Value::list_take(other));
+                        Ok(Some(Signal::Value(Value::list(result))))
                     }
                     (Value::Bytes(mut a), Value::Bytes(b)) => {
                         a.extend(b);
@@ -1410,7 +1410,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let items = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-                Ok(Some(Signal::Value(Value::List(items))))
+                Ok(Some(Signal::Value(Value::list(items))))
             }
             "Append" => {
                 if type_args.len() < 2 {
@@ -1431,9 +1431,9 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let mut result = list;
+                let mut result = Value::list_take(list);
                 result.push(val);
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
             "Prepend" => {
                 if type_args.len() < 2 {
@@ -1455,8 +1455,8 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut result = vec![val];
-                result.extend(list);
-                Ok(Some(Signal::Value(Value::List(result))))
+                result.extend(Value::list_take(list));
+                Ok(Some(Signal::Value(Value::list(result))))
             }
             "Join" => {
                 if type_args.len() < 2 {
@@ -1535,10 +1535,10 @@ impl Interpreter {
                     .unwrap_or(false);
                 let by_fn = self.eval_mold_option(fields, "by")?;
 
-                let mut sorted = if let Some(Value::Function(func)) = by_fn {
+                let mut sorted: Vec<Value> = if let Some(Value::Function(func)) = by_fn {
                     // Sort by key extraction function
                     let mut keyed: Vec<(Value, Value)> = Vec::new();
-                    for item in &list {
+                    for item in list.iter() {
                         let key =
                             self.call_function_with_values(&func, std::slice::from_ref(item))?;
                         keyed.push((item.clone(), key));
@@ -1548,14 +1548,14 @@ impl Interpreter {
                     });
                     keyed.into_iter().map(|(item, _)| item).collect()
                 } else {
-                    let mut items = list;
+                    let mut items = Value::list_take(list);
                     items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     items
                 };
                 if reverse {
                     sorted.reverse();
                 }
-                Ok(Some(Signal::Value(Value::List(sorted))))
+                Ok(Some(Signal::Value(Value::list(sorted))))
             }
             "Unique" => {
                 if type_args.is_empty() {
@@ -1588,7 +1588,7 @@ impl Interpreter {
                     let mut seen_fallback: Vec<Value> = Vec::new();
                     let mut fallback_armed = false;
                     let mut result: Vec<Value> = Vec::new();
-                    for item in &list {
+                    for item in list.iter() {
                         let key =
                             self.call_function_with_values(&func, std::slice::from_ref(item))?;
                         if fallback_armed {
@@ -1628,7 +1628,7 @@ impl Interpreter {
                         // iterating and tracking first-occurrence only.
                         seen.clear();
                         let mut result: Vec<Value> = Vec::new();
-                        for item in &list {
+                        for item in list.iter() {
                             let vk = ValueKey::new(item).expect("hashability pre-checked above");
                             if seen.insert(vk.fingerprint()) {
                                 result.push(item.clone());
@@ -1637,7 +1637,7 @@ impl Interpreter {
                         result
                     } else {
                         let mut result: Vec<Value> = Vec::new();
-                        for item in &list {
+                        for item in list.iter() {
                             if !result.contains(item) {
                                 result.push(item.clone());
                             }
@@ -1645,7 +1645,7 @@ impl Interpreter {
                         result
                     }
                 };
-                Ok(Some(Signal::Value(Value::List(unique))))
+                Ok(Some(Signal::Value(Value::list(unique))))
             }
             "Flatten" => {
                 if type_args.is_empty() {
@@ -1663,14 +1663,14 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut flat = Vec::new();
-                for item in &list {
+                for item in list.iter() {
                     if let Value::List(inner) = item {
-                        flat.extend(inner.clone());
+                        flat.extend(inner.iter().cloned());
                     } else {
                         flat.push(item.clone());
                     }
                 }
-                Ok(Some(Signal::Value(Value::List(flat))))
+                Ok(Some(Signal::Value(Value::list(flat))))
             }
             "Find" => {
                 if type_args.len() < 2 {
@@ -1696,7 +1696,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                for item in &list {
+                for item in list.iter() {
                     let result =
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if result.is_truthy() {
@@ -1786,7 +1786,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut count = 0i64;
-                for item in &list {
+                for item in list.iter() {
                     let result =
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if result.is_truthy() {
@@ -1829,7 +1829,7 @@ impl Interpreter {
                         ])
                     })
                     .collect();
-                Ok(Some(Signal::Value(Value::List(zipped))))
+                Ok(Some(Signal::Value(Value::list(zipped))))
             }
             "Enumerate" => {
                 if type_args.is_empty() {
@@ -1856,7 +1856,7 @@ impl Interpreter {
                         ])
                     })
                     .collect();
-                Ok(Some(Signal::Value(Value::List(enumerated))))
+                Ok(Some(Signal::Value(Value::list(enumerated))))
             }
 
             _ => self.try_core_mold(name, type_args, fields),
@@ -2412,10 +2412,10 @@ impl Interpreter {
                     Value::List(items) => {
                         let mut out = Vec::with_capacity(items.len());
                         let mut ok = true;
-                        for item in items {
+                        for item in items.iter() {
                             if let Value::Int(n) = item {
-                                if (0..=255).contains(&n) {
-                                    out.push(n as u8);
+                                if (0..=255).contains(n) {
+                                    out.push(*n as u8);
                                 } else {
                                     ok = false;
                                     break;
@@ -2608,12 +2608,12 @@ impl Interpreter {
                     }
                 };
                 let mut result = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     let mapped =
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     result.push(mapped);
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "Filter" => {
@@ -2666,13 +2666,13 @@ impl Interpreter {
                     }
                 };
                 let mut result = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     let keep = self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if keep.is_truthy() {
                         result.push(item.clone());
                     }
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "Fold" | "Reduce" => {
@@ -2695,8 +2695,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2745,8 +2745,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2813,8 +2813,8 @@ impl Interpreter {
                         status: s.status,
                     }))));
                 }
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     _ => {
                         return Err(RuntimeError {
                             message: format!(
@@ -2825,7 +2825,7 @@ impl Interpreter {
                     }
                 };
                 let result: Vec<Value> = items.into_iter().take(n).collect();
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "TakeWhile" => {
@@ -2878,7 +2878,7 @@ impl Interpreter {
                     }
                 };
                 let mut result = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     let keep = self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if keep.is_truthy() {
                         result.push(item.clone());
@@ -2886,7 +2886,7 @@ impl Interpreter {
                         break;
                     }
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "Drop" => {
@@ -2905,8 +2905,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2929,7 +2929,7 @@ impl Interpreter {
                     }
                 };
                 let result: Vec<Value> = items.into_iter().skip(n).collect();
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             "DropWhile" => {
@@ -2948,8 +2948,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match &list_val {
-                    Value::List(items) => items.clone(),
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     Value::Stream(s) => self.collect_stream_items(s)?,
                     _ => {
                         return Err(RuntimeError {
@@ -2985,7 +2985,7 @@ impl Interpreter {
                     }
                     result.push(item.clone());
                 }
-                Ok(Some(Signal::Value(Value::List(result))))
+                Ok(Some(Signal::Value(Value::list(result))))
             }
 
             // ── JSON Mold Type (Molten Iron) ─────────────────
@@ -3117,7 +3117,7 @@ impl Interpreter {
 
                 // First, resolve any pending async values
                 let mut resolved_items = Vec::new();
-                for item in &items {
+                for item in items.iter() {
                     match item {
                         Value::Async(a) => {
                             let resolved = self.resolve_async(a)?;
@@ -3146,7 +3146,7 @@ impl Interpreter {
                 }
                 Ok(Some(Signal::Value(Value::Async(AsyncValue {
                     status: AsyncStatus::Fulfilled,
-                    value: Box::new(Value::List(results)),
+                    value: Box::new(Value::list(results)),
                     error: Box::new(Value::Unit),
                     task: None,
                 }))))
@@ -3175,7 +3175,7 @@ impl Interpreter {
                 };
 
                 // Check for already-resolved items first (fast path)
-                for item in &items {
+                for item in items.iter() {
                     if let Value::Async(a) = item
                         && a.status == AsyncStatus::Fulfilled
                         && a.task.is_none()
@@ -3354,8 +3354,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let items = match list_val {
-                    Value::List(items) => items,
+                let items: Vec<Value> = match &list_val {
+                    Value::List(items) => items.as_ref().clone(),
                     _ => {
                         return Err(RuntimeError {
                             message: format!(

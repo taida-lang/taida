@@ -76,12 +76,19 @@ stdout(b11.rows)
 /// BufferNew / BufferWrite facade is only available when an addon
 /// cdylib is present, which the test harness does not require).
 ///
-/// We therefore pin the upper bound at a generous 30 seconds: the
-/// fixture completed in 3.6 s on the developer laptop when measured
-/// 2026-04-23, so 30 s is ~8× headroom for CI noise. Any future
-/// regression that pushes the pure-Taida BuchiPack chain back to
-/// minutes will fail this test loudly.
-const MAX_DURATION: Duration = Duration::from_secs(30);
+/// Phase 5-F2-1 (2026-04-23) migrated `Value::List` to interior
+/// `Arc<Vec<Value>>`, which collapses the touch-chain cost (the
+/// 11 `touch(p)` calls) to O(chain) Arc refcount bumps instead of
+/// O(chain × N) Vec deep-clones. The `Append` loop in `buildCells`
+/// is still O(N²) (COW via `Value::list_take` clones on unique
+/// ownership, which this chain does hit), tracked separately as
+/// C25B-021. With the Arc change the fixture now completes in
+/// ~1.8 s on the developer laptop (2026-04-23) rather than 3.6 s,
+/// so we tighten the upper bound from 30 s to **5 s** (~2.7×
+/// headroom over measured). A future C25B-021 fix (persistent
+/// vector for Append) will push this under ~0.5 s and this guard
+/// can be tightened again in that subphase.
+const MAX_DURATION: Duration = Duration::from_secs(5);
 
 #[test]
 fn c25b_029_bufferlike_touch_chain_does_not_freeze() {

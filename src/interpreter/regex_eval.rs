@@ -278,7 +278,7 @@ pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
             ("full".into(), Value::Str(m.full)),
             (
                 "groups".into(),
-                Value::List(m.groups.into_iter().map(Value::Str).collect()),
+                Value::list(m.groups.into_iter().map(Value::Str).collect()),
             ),
             ("start".into(), Value::Int(m.start)),
             ("__type".into(), Value::Str("RegexMatch".into())),
@@ -286,7 +286,7 @@ pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
         None => Value::BuchiPack(vec![
             ("hasValue".into(), Value::Bool(false)),
             ("full".into(), Value::Str(String::new())),
-            ("groups".into(), Value::List(Vec::new())),
+            ("groups".into(), Value::list(Vec::new())),
             ("start".into(), Value::Int(-1)),
             ("__type".into(), Value::Str("RegexMatch".into())),
         ]),
