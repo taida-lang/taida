@@ -1418,6 +1418,76 @@ impl Interpreter {
                         message: "Append requires 2 arguments: Append[list, val]()".into(),
                     });
                 }
+                // C25B-021 / Phase 5-F2-2 Stage B: unique-ownership fast path.
+                //
+                // The hot pattern `build(Append[acc, x](), ...)` in a tail-
+                // recursive loop used to be O(N²): each iteration the env
+                // still held a clone of `acc`, so `list_take` (try_unwrap)
+                // failed and fell back to a full Vec::clone of length N.
+                //
+                // When the first arg is a bare `Expr::Ident(name)` defined
+                // in the innermost scope AND the rest of the type_args do
+                // not reference the same name, we can temporarily move the
+                // binding out of env — making us the sole Arc holder — do
+                // the push via `Arc::make_mut` in O(1) amortized, then
+                // rebind env[name] to the result so subsequent observers
+                // in the same scope see the append result (consistent with
+                // immutable-single-assignment semantics: the binding is
+                // effectively reassigned to the tail-call argument value,
+                // which is what the caller would have done anyway).
+                //
+                // Safety: on every exit path before the rebind we must
+                // restore env[name] so the scope invariants hold in the
+                // event of a Throw/TailCall/Gorilla signal during second-
+                // arg evaluation.
+                let rest = &type_args[1..];
+                if let Expr::Ident(first_name, _) = &type_args[0]
+                    && self.env.is_defined_in_current_scope(first_name)
+                    && !rest
+                        .iter()
+                        .any(|e| Self::expr_references_any(e, std::slice::from_ref(first_name)))
+                {
+                    let taken = self
+                        .env
+                        .take_from_current_scope(first_name)
+                        .expect("is_defined_in_current_scope guarantees presence");
+                    match taken {
+                        Value::List(items) => {
+                            let val_sig = self.eval_expr(&type_args[1]);
+                            let val = match val_sig {
+                                Ok(Signal::Value(v)) => v,
+                                Ok(other) => {
+                                    // restore scope on non-value signal
+                                    self.env.define_force(first_name, Value::List(items));
+                                    return Ok(Some(other));
+                                }
+                                Err(e) => {
+                                    self.env.define_force(first_name, Value::List(items));
+                                    return Err(e);
+                                }
+                            };
+                            let mut items_arc = items;
+                            // O(1) when unique (env no longer holds it);
+                            // O(N) once if any other clone escaped (rare).
+                            std::sync::Arc::make_mut(&mut items_arc).push(val);
+                            let new_list = Value::List(items_arc);
+                            self.env.define_force(first_name, new_list.clone());
+                            return Ok(Some(Signal::Value(new_list)));
+                        }
+                        other => {
+                            let err_value = other.clone();
+                            self.env.define_force(first_name, other);
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "Append: first argument must be a list, got {}",
+                                    err_value
+                                ),
+                            });
+                        }
+                    }
+                }
+                // Fallback (non-Ident, cross-reference, or outer-scope binding):
+                // preserve original behaviour.
                 let list = match self.eval_expr(&type_args[0])? {
                     Signal::Value(Value::List(items)) => items,
                     Signal::Value(v) => {
@@ -1440,6 +1510,55 @@ impl Interpreter {
                     return Err(RuntimeError {
                         message: "Prepend requires 2 arguments: Prepend[list, val]()".into(),
                     });
+                }
+                // C25B-021 / Phase 5-F2-2 Stage B: unique-ownership fast path.
+                // See the Append arm above for the full rationale.
+                let rest = &type_args[1..];
+                if let Expr::Ident(first_name, _) = &type_args[0]
+                    && self.env.is_defined_in_current_scope(first_name)
+                    && !rest
+                        .iter()
+                        .any(|e| Self::expr_references_any(e, std::slice::from_ref(first_name)))
+                {
+                    let taken = self
+                        .env
+                        .take_from_current_scope(first_name)
+                        .expect("is_defined_in_current_scope guarantees presence");
+                    match taken {
+                        Value::List(items) => {
+                            let val_sig = self.eval_expr(&type_args[1]);
+                            let val = match val_sig {
+                                Ok(Signal::Value(v)) => v,
+                                Ok(other) => {
+                                    self.env.define_force(first_name, Value::List(items));
+                                    return Ok(Some(other));
+                                }
+                                Err(e) => {
+                                    self.env.define_force(first_name, Value::List(items));
+                                    return Err(e);
+                                }
+                            };
+                            let mut items_arc = items;
+                            // Prepend: mutate in place via make_mut.
+                            // Vec::insert(0, v) is O(N) on the Vec itself,
+                            // but make_mut on a uniquely-held Arc avoids
+                            // the separate Arc-alloc + full clone cycle.
+                            std::sync::Arc::make_mut(&mut items_arc).insert(0, val);
+                            let new_list = Value::List(items_arc);
+                            self.env.define_force(first_name, new_list.clone());
+                            return Ok(Some(Signal::Value(new_list)));
+                        }
+                        other => {
+                            let err_value = other.clone();
+                            self.env.define_force(first_name, other);
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "Prepend: first argument must be a list, got {}",
+                                    err_value
+                                ),
+                            });
+                        }
+                    }
                 }
                 let list = match self.eval_expr(&type_args[0])? {
                     Signal::Value(Value::List(items)) => items,

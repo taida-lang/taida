@@ -2022,8 +2022,21 @@ impl Interpreter {
             // Create local scope for parameters and function body
             self.env.push_scope();
             // Bind parameters using effective defaults.
+            //
+            // C25B-021 / Phase 5-F2-2 Stage B: after binding, release our
+            // hold on `current_args` so the env becomes the unique Arc
+            // owner for any Value::List passed as an argument. Without
+            // this, the Append / Prepend unique-ownership fast path
+            // always sees rc>=2 and falls back to a full Vec clone,
+            // making the tail-recursive Append loop O(N²).
+            //
+            // `bind_params_with_effective_defaults` still clones each
+            // slot internally, but once it returns the slots themselves
+            // are no longer needed for this trampoline iteration — we'll
+            // receive a fresh TailCall(new_args) if tail-recursion loops.
             let bind_outcome =
                 self.bind_params_with_effective_defaults(&current_func, &current_args);
+            current_args.clear();
             match bind_outcome {
                 Ok(Some(signal)) => {
                     self.env.pop_scope(); // pop local scope

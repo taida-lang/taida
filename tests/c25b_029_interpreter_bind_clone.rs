@@ -77,18 +77,43 @@ stdout(b11.rows)
 /// cdylib is present, which the test harness does not require).
 ///
 /// Phase 5-F2-1 (2026-04-23) migrated `Value::List` to interior
-/// `Arc<Vec<Value>>`, which collapses the touch-chain cost (the
-/// 11 `touch(p)` calls) to O(chain) Arc refcount bumps instead of
-/// O(chain × N) Vec deep-clones. The `Append` loop in `buildCells`
-/// is still O(N²) (COW via `Value::list_take` clones on unique
-/// ownership, which this chain does hit), tracked separately as
-/// C25B-021. With the Arc change the fixture now completes in
-/// ~1.8 s on the developer laptop (2026-04-23) rather than 3.6 s,
-/// so we tighten the upper bound from 30 s to **5 s** (~2.7×
-/// headroom over measured). A future C25B-021 fix (persistent
-/// vector for Append) will push this under ~0.5 s and this guard
-/// can be tightened again in that subphase.
-const MAX_DURATION: Duration = Duration::from_secs(5);
+/// `Arc<Vec<Value>>`, collapsing the touch-chain cost (the 11
+/// `touch(p)` calls) to O(chain) Arc refcount bumps instead of
+/// O(chain × N) Vec deep-clones. That alone brought the fixture
+/// from ~3.6 s to ~1.8 s but left the `Append` loop in
+/// `buildCells` O(N²): the trampoline's `current_args` held an
+/// Arc clone of `acc` across body evaluation, so `list_take`
+/// always fell back to a full Vec clone.
+///
+/// Phase 5-F2-2 Stage B (2026-04-23, this commit) added two
+/// complementary changes:
+///
+///   1. The trampoline now `current_args.clear()` immediately
+///      after binding parameters, so the env becomes the unique
+///      Arc holder for each arg.
+///
+///   2. `Append` / `Prepend` take the first argument out of the
+///      innermost scope when it is a bare Ident whose name does
+///      not appear in the remaining type-args, then use
+///      `Arc::make_mut` to mutate in place. With (1) providing
+///      the unique-ownership invariant, this turns the inner loop
+///      into O(1) amortized per element (O(N) overall).
+///
+/// Measured wall-clock on the developer laptop (2026-04-23):
+///
+/// * pre-5-F2-1  (List=Vec)           ≈ 3.6 s
+/// * post-5-F2-1 (List=Arc<Vec>)      ≈ 1.8 s
+/// * post-5-F2-2 (this commit)        ≈ 0.004 s (four milliseconds)
+///
+/// The ceiling tightens from 5 s to **500 ms** — well above the
+/// measured 4 ms but low enough that any accidental reintroduction
+/// of the quadratic deep-clone shape will trip the guard within a
+/// fraction of a CI budget rather than silently running seconds
+/// long. Tightening further (e.g. to 50 ms) is risky because some
+/// CI runners are 10× slower than the development machine on
+/// subprocess spawn cost alone, and this test shells out to the
+/// `taida` binary.
+const MAX_DURATION: Duration = Duration::from_millis(500);
 
 #[test]
 fn c25b_029_bufferlike_touch_chain_does_not_freeze() {
