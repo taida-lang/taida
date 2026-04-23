@@ -40,10 +40,49 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --all-targets
 
+  # C25B-003 Phase 2D: build test binaries exactly once via `cargo nextest
+  # archive` and reuse the archive in the downstream `test` job. Previously
+  # `check` and `test` each produced their own .rmeta/.rlib via
+  # `cargo check --all-targets` followed by `cargo nextest run --all-targets`,
+  # and the cross-job Swatinem cache (Phase 2B) only partially closed the gap
+  # (the `test` job still had to re-link test binaries under its own
+  # partition). The archive job produces a single tarball
+  # (`taida-nextest.tar.zst`) containing every test binary; consumers use
+  # `cargo nextest run --archive-file ...` and skip compilation entirely.
+  #
+  # Why not reuse for `parity` / `e2e`?
+  #   - `parity` shells out to `tests/run_backend_parity.sh` which invokes
+  #     `cargo test --test <name>` three times. Those code paths expect
+  #     live cargo metadata (not an archive); leaving them on Swatinem
+  #     cache keeps the backend-parity semantics unchanged.
+  #   - `e2e` needs `target/release/taida` (a CLI, not a test binary).
+  #     nextest archive doesn't ship release artifacts.
+  build-archive:
+    name: Build Test Archive
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build nextest archive
+        run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: taida-nextest.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
-    needs: check
+    needs: build-archive
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -57,15 +96,15 @@ jobs:
           mkdir -p "$HOME/.wasmtime/bin"
           mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
-      # C25B-003 Phase 2B: Unit Tests is the largest target/ footprint; set
-      # `save-if: true` unconditionally here so warm main caches are
-      # produced on every main push (other jobs restore via the
-      # `cargo-base` shared-key).
-      - uses: Swatinem/rust-cache@v2
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
         with:
-          shared-key: cargo-base
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo nextest run --all-targets --profile ci
+          name: nextest-archive
+      # `cargo nextest run --archive-file` skips compilation entirely and
+      # loads test binaries directly from the archive. `--workspace-remap .`
+      # tells nextest the repository root at test-run time (fixture paths in
+      # `tests/**/*.rs` resolve relative to workspace root at runtime).
+      - run: cargo nextest run --archive-file taida-nextest.tar.zst --workspace-remap . --profile ci
 
   parity:
     name: Backend Parity
