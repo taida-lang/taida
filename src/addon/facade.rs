@@ -669,11 +669,10 @@ fn collect_refs_in_stmt(stmt: &Statement, bound: &HashSet<String>, out: &mut Has
 
 fn collect_refs_in_expr(expr: &Expr, bound: &HashSet<String>, out: &mut HashSet<String>) {
     match expr {
-        Expr::Ident(name, _) => {
-            if !bound.contains(name) {
-                out.insert(name.clone());
-            }
+        Expr::Ident(name, _) if !bound.contains(name) => {
+            out.insert(name.clone());
         }
+        Expr::Ident(_, _) => {}
         Expr::BinaryOp(lhs, _, rhs, _) => {
             collect_refs_in_expr(lhs, bound, out);
             collect_refs_in_expr(rhs, bound, out);

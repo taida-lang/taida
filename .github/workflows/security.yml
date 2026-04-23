@@ -64,8 +64,9 @@ jobs:
       - name: Run cargo-audit
         # `--deny warnings` would turn warnings into failures; we
         # explicitly do *not* pass it. The job is informational for
-        # @c.25.rc7.
-        run: cargo audit --ignore-source
+        # @c.25.rc7. (`--ignore-source` was removed in cargo-audit
+        # 0.21+; rely on default source policy.)
+        run: cargo audit
 
   cargo-deny:
     name: cargo-deny (licences / bans / sources)
