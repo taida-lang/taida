@@ -1127,6 +1127,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[Ptr],
         },
+        // C25B-001: minimal Stream wrapper — see `taida_stream_new` in
+        // src/codegen/native_runtime/core.c and runtime_core_wasm/
+        // 02_containers.inc.c for the implementation.
+        "taida_stream_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         "taida_stub_new" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],

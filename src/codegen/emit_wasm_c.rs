@@ -740,6 +740,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // W-5: Error/Molten/Stub helpers
         "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
+        // C25B-001: minimal Stream wrapper (runtime lives in
+        // runtime_core_wasm/02_containers.inc.c).
+        "taida_stream_new" => "int64_t taida_stream_new(int64_t inner_value);".to_string(),
         "taida_stub_new" => "int64_t taida_stub_new(int64_t message);".to_string(),
         "taida_todo_new" => {
             "int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm);"

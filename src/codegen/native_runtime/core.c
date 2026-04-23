@@ -337,6 +337,8 @@ static taida_val taida_is_set(taida_val ptr);
 static int taida_is_list(taida_val ptr);
 static int taida_is_bytes(taida_val ptr);
 static int taida_is_buchi_pack(taida_val ptr);
+static int taida_is_stream_pack(taida_val ptr);
+static taida_val taida_stream_to_display_string(taida_val stream_ptr);
 static taida_ptr taida_lax_to_string(taida_ptr lax_ptr);
 static taida_ptr taida_set_to_string(taida_ptr set_ptr);
 static int taida_has_magic_header(taida_val tag);
@@ -980,6 +982,63 @@ taida_val taida_molten_new(void) {
     taida_pack_set(pack, 0, (taida_val)__molten_type_str);
     // Static string - leave tag as INT(0) to skip free
     return pack;
+}
+
+// C25B-001: Stream[val]() — minimal wrapper matching the interpreter's
+// `Stream[val]()` semantics (wrap a single value as a single-item
+// completed stream; see `src/interpreter/mold_eval.rs:3127`). Phase 3
+// scope: string-form parity with `Str[Stream[...]]()` →
+// `Lax[Str]("Stream[completed: N items]")`. Full lazy-transform chain
+// (Map / Filter / Take / TakeWhile) remains interpreter-only until a
+// later Phase / C26+ roadmap.
+//
+// Layout: fc=2 pack
+//   field 0: hash = HASH_STREAM_STATUS, val = status tag (1 = Completed)
+//   field 1: hash = HASH_STREAM_COUNT,  val = item count (Int)
+//   plus a third slot carrying __type = "Stream" for display paths.
+#define HASH_STREAM_STATUS 0x6d32b928f2c5d8aeULL /* FNV-1a("__stream_status") */
+#define HASH_STREAM_COUNT  0x1c0dd3a9e6fd1178ULL /* FNV-1a("__stream_count")  */
+static const char __stream_type_str[] = "Stream";
+static const char __stream_status_completed[] = "completed";
+
+static int __stream_names_registered = 0;
+static void taida_register_stream_field_names(void) {
+    if (__stream_names_registered) return;
+    __stream_names_registered = 1;
+    taida_register_field_name((taida_val)HASH_STREAM_STATUS, (taida_val)"__stream_status");
+    taida_register_field_name((taida_val)HASH_STREAM_COUNT,  (taida_val)"__stream_count");
+}
+
+taida_val taida_stream_new(taida_val inner_value) {
+    (void)inner_value; // Minimal impl: only retain the item count (=1).
+    taida_register_stream_field_names();
+    taida_val pack = taida_pack_new(3);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_STREAM_STATUS);
+    taida_pack_set(pack, 0, (taida_val)__stream_status_completed);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_STREAM_COUNT);
+    taida_pack_set(pack, 1, 1); // single-item stream
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_INT);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 2, (taida_val)__stream_type_str);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    return pack;
+}
+
+// Detect a Stream pack by structural shape (fc=3, hash0=HASH_STREAM_STATUS).
+static int taida_is_stream_pack(taida_val ptr) {
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 3)) return 0;
+    taida_val *obj = (taida_val*)ptr;
+    if (obj[1] != 3) return 0; // fc must be 3
+    return obj[2] == (taida_val)HASH_STREAM_STATUS ? 1 : 0;
+}
+
+static taida_val taida_stream_to_display_string(taida_val stream_ptr) {
+    taida_val *obj = (taida_val*)stream_ptr;
+    taida_val count = obj[2 + 1 * 3 + 2]; // slot 1 value
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Stream[completed: %" PRId64 " items]", count);
+    return (taida_val)taida_str_new_copy(buf);
 }
 
 taida_val taida_stub_new(taida_val message) {
@@ -6660,6 +6719,11 @@ static taida_val taida_set_to_display_string_full(taida_val set_ptr) {
 
 taida_val taida_stdout_display_string(taida_val obj) {
     if (obj == 0) return (taida_val)taida_str_new_copy("0");
+    // C25B-001: Stream packs render as `Stream[completed: N items]`
+    // (matching the interpreter's `Value::Stream` display shape). Must
+    // precede the generic BuchiPack path so `Str[Stream[...]]()` doesn't
+    // stringify the internal `__stream_count` / `__stream_status` fields.
+    if (taida_is_stream_pack(obj)) return taida_stream_to_display_string(obj);
     // C23B-003 reopen: route HashMap / Set through their synthetic full-form
     // helpers so `Str[...]()` matches the interpreter's
     // `BuchiPack(__entries/__items, __type)` rendering instead of the

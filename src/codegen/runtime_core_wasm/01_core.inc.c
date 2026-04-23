@@ -1880,8 +1880,17 @@ static int64_t _wasm_set_to_display_string_full(int64_t set_ptr) {
    `__type`. `.toString()` still uses the short forms (`Lax(v)` /
    `Result(v)` / `Gorillax(v)`) — that split mirrors the interpreter's
    `to_display_string()` vs. `to_string()` separation. */
+/* C25B-001 forward declarations (definitions live in 02_containers.inc.c). */
+static int _wasm_is_stream_pack(int64_t obj);
+static int64_t _wasm_stream_to_display_string(int64_t stream_ptr);
+
 static int64_t _wasm_stdout_display_string(int64_t obj) {
     if (obj == 0) return (int64_t)(intptr_t)"0";
+    /* C25B-001: Stream packs render as `Stream[completed: N items]`
+       (matching the interpreter's `Value::Stream` display shape).
+       Must precede the generic pack path so `Str[Stream[...]]()`
+       doesn't stringify the internal `__stream_*` fields. */
+    if (_wasm_is_stream_pack(obj)) return _wasm_stream_to_display_string(obj);
     /* C23B-003 reopen: route HashMap / Set through their synthetic full-form
        helpers so `Str[...]()` matches the interpreter's
        `BuchiPack(__entries/__items, __type)` rendering instead of the

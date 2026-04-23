@@ -1457,6 +1457,27 @@ impl Lowering {
                 func.push(IrInst::Call(result, "taida_molten_new".to_string(), vec![]));
                 Ok(result)
             }
+            // C25B-001: Stream[val]() — minimal native/wasm lowering for
+            // string-form parity. Wraps a single value into a completed
+            // single-item stream; `Str[stream]()` renders it as
+            // `Lax[Str]("Stream[completed: N items]")`. Full lazy-
+            // transform chain (Map / Filter / Take / TakeWhile) remains
+            // interpreter-only until a future C26 phase.
+            "Stream" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: "Stream requires 1 type argument: Stream[value]()".into(),
+                    });
+                }
+                let val = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_stream_new".to_string(),
+                    vec![val],
+                ));
+                Ok(result)
+            }
             "Stub" => {
                 if !fields.is_empty() {
                     return Err(LowerError {
