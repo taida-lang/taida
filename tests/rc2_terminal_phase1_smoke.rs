@@ -302,8 +302,8 @@ stdout("unreachable")
     );
     assert!(
         combined.contains("not supported on backend 'js'")
-            || combined.contains("(RC1: native only)"),
-        "diagnostic must use the RC1 backend-policy template, got: {}",
+            && combined.contains("supported: interpreter, native; wasm planned for D26"),
+        "diagnostic must use the C25B-030 backend-policy template, got: {}",
         combined
     );
 

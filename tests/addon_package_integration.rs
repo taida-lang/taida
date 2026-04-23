@@ -421,8 +421,8 @@ stdout(echo("x"))
     let combined = format!("{}{}", stderr, stdout);
     assert!(
         combined.contains("not supported on backend 'js'")
-            || combined.contains("(RC1: native only)"),
-        "diagnostic must classify the JS rejection, got: {}",
+            && combined.contains("supported: interpreter, native; wasm planned for D26"),
+        "diagnostic must classify the JS rejection with the C25B-030 template, got: {}",
         combined
     );
 
