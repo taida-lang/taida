@@ -445,17 +445,32 @@ impl Lowering {
         }
     }
 
-    /// RC2.5 Phase 2: parse the optional Taida-side facade for an
-    /// addon-backed package, if one exists at `<pkg_dir>/taida/<stem>.td`.
+    /// RC2.5 Phase 2 / C25B-030 Phase 1E-α: parse the optional
+    /// Taida-side facade for an addon-backed package, if one exists
+    /// at `<pkg_dir>/taida/<stem>.td`.
     ///
     /// Returns `Ok(None)` if no facade file is present (lowercase-only
     /// addons work without a facade). Returns a populated
-    /// [`AddonFacadeSummary`] when a facade exists; the summary is
-    /// intentionally shallow — only top-level assignments and a single
-    /// `<<< @(...)` export statement are supported in RC2.5 v1. Any
-    /// other construct (nested imports, function definitions, etc.)
-    /// triggers a deterministic compile error so unsupported facades
-    /// fail loudly rather than silently diverging between backends.
+    /// [`AddonFacadeSummary`] when a facade exists.
+    ///
+    /// Supported top-level constructs (C25B-030 Phase 1E-α):
+    ///
+    /// - `Name <= lowercaseFn` — alias of a manifest [functions]
+    ///   entry, possibly reached through a child facade's addon alias
+    ///   (chained aliasing)
+    /// - `Name <= @(...)` — pure-Taida pack literal binding
+    /// - `>>> ./X.td => @(syms...)` — facade-internal relative import.
+    ///   The referenced file is recursively parsed using the same
+    ///   rules, and only the requested symbols (or all its exports
+    ///   when the import symbol list is empty) are merged into the
+    ///   parent summary.
+    /// - `<<< @(...)` — single explicit export clause
+    ///
+    /// Unsupported constructs (function definitions, TypeDefs,
+    /// EnumDefs, `>>>` pointing at non-relative paths, `<<< path`
+    /// re-exports, etc.) still trip a deterministic compile error
+    /// naming the file, the construct, and the C25B-030 Phase 1E-β /
+    /// 1E-γ follow-up where the limitation will be lifted.
     pub(super) fn load_addon_facade_for_lower(
         pkg_dir: &std::path::Path,
         manifest: &crate::addon::manifest::AddonManifest,
@@ -471,7 +486,80 @@ impl Lowering {
             return Ok(None);
         }
 
-        let source = std::fs::read_to_string(&facade_path).map_err(|e| LowerError {
+        let mut summary = AddonFacadeSummary::default();
+        let mut visiting: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        Self::load_addon_facade_file(
+            &facade_path,
+            manifest,
+            import_path,
+            None,
+            &mut summary,
+            &mut visiting,
+        )?;
+
+        // If the entry facade defined no explicit `<<<` exports, fall
+        // back to exporting every top-level binding we understood.
+        // This matches the facade behaviour of "export everything that
+        // reached the top level". Child facades reached through
+        // `>>> ./X.td => @(syms)` always restrict via the requested
+        // symbol list regardless of the child's own `<<<` clause.
+        if summary.exports.is_empty() {
+            for k in summary.aliases.keys() {
+                summary.exports.insert(k.clone());
+            }
+            for k in summary.pack_bindings.keys() {
+                summary.exports.insert(k.clone());
+            }
+        }
+
+        Ok(Some(summary))
+    }
+
+    /// C25B-030 Phase 1E-α: recursive facade file loader shared
+    /// between the top-level addon facade and its `>>> ./X.td`
+    /// relative children.
+    ///
+    /// Arguments:
+    ///
+    /// - `facade_path`: absolute path of the facade file to load.
+    /// - `manifest`: addon manifest used to resolve aliases into the
+    ///   `[functions]` table. Shared across the recursion so child
+    ///   facade files can still alias lowercase sentinels.
+    /// - `import_path`: the user-visible package id used in error
+    ///   messages (e.g. `taida-lang/terminal`).
+    /// - `restrict_to`: when `Some(set)`, only symbols listed in the
+    ///   set are merged into `out_summary`. Used by `>>> ./X.td
+    ///   => @(a, b)` to import a subset of the child's exports.
+    ///   `None` means "merge everything we understand from this
+    ///   facade" (the top-level call path).
+    /// - `out_summary`: accumulator that collects aliases / pack
+    ///   bindings / exports.
+    /// - `visiting`: set of facade paths currently on the recursion
+    ///   stack, used to detect circular `>>>` chains.
+    fn load_addon_facade_file(
+        facade_path: &std::path::Path,
+        manifest: &crate::addon::manifest::AddonManifest,
+        import_path: &str,
+        restrict_to: Option<&std::collections::HashSet<String>>,
+        out_summary: &mut AddonFacadeSummary,
+        visiting: &mut std::collections::HashSet<std::path::PathBuf>,
+    ) -> Result<(), LowerError> {
+        let canonical = facade_path
+            .canonicalize()
+            .unwrap_or_else(|_| facade_path.to_path_buf());
+        if !visiting.insert(canonical.clone()) {
+            return Err(LowerError {
+                message: format!(
+                    "circular facade import detected while loading addon facade chain for '{}' \
+                     at '{}'",
+                    import_path,
+                    facade_path.display()
+                ),
+            });
+        }
+
+        let source = std::fs::read_to_string(facade_path).map_err(|e| LowerError {
             message: format!(
                 "cannot read addon facade '{}' for '{}': {}",
                 facade_path.display(),
@@ -481,6 +569,7 @@ impl Lowering {
         })?;
         let (program, parse_errors) = crate::parser::parse(&source);
         if !parse_errors.is_empty() {
+            visiting.remove(&canonical);
             return Err(LowerError {
                 message: format!(
                     "parse errors in addon facade '{}' for '{}': {}",
@@ -495,7 +584,27 @@ impl Lowering {
             });
         }
 
-        let mut summary = AddonFacadeSummary::default();
+        // First pass: harvest this file's own bindings (aliases /
+        // pack literals) into a per-file staging summary. We then
+        // merge only the requested subset into `out_summary` once
+        // the entire file is scanned (matches the `<<<` semantics:
+        // exports are authoritative for the module, not the order
+        // of assignments).
+        let mut local_aliases: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut local_packs: std::collections::HashMap<String, Expr> =
+            std::collections::HashMap::new();
+        let mut local_exports: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Pending child imports discovered in this file. We resolve
+        // them after the first pass so chained aliasing (this file
+        // binds `Name <= otherChildName`) can look up the child's
+        // exports even if the `>>>` appears later in source order.
+        // For 1E-α the loop is single-pass because none of the
+        // observed facades rely on forward references, but the
+        // design keeps the door open for 1E-β.
+        let mut child_imports: Vec<(std::path::PathBuf, std::collections::HashSet<String>)> =
+            Vec::new();
 
         for stmt in &program.statements {
             match stmt {
@@ -503,64 +612,200 @@ impl Lowering {
                     // `Name <= Ident(B)` → alias if B is a known addon fn
                     Expr::Ident(target_fn, _) => {
                         if manifest.functions.contains_key(target_fn) {
-                            summary
-                                .aliases
-                                .insert(assign.target.clone(), target_fn.clone());
+                            local_aliases.insert(assign.target.clone(), target_fn.clone());
                         } else {
-                            // Could still be a facade-internal name,
-                            // but RC2.5 v1 does not support chained
-                            // aliasing. Flag it explicitly.
+                            visiting.remove(&canonical);
                             return Err(LowerError {
                                 message: format!(
                                     "addon facade '{}' aliases '{}' to '{}' which is not listed \
-                                     in [functions] (chained facade aliasing is not supported in \
-                                     RC2.5 v1)",
+                                     in [functions] of '{}'. Chained facade aliasing across pure-Taida \
+                                     helpers is not yet supported (C25B-030 Phase 1E-β).",
                                     facade_path.display(),
                                     assign.target,
-                                    target_fn
+                                    target_fn,
+                                    import_path
                                 ),
                             });
                         }
                     }
                     // `Name <= @(...)` → pure-Taida pack binding
                     Expr::BuchiPack(_, _) => {
-                        summary
-                            .pack_bindings
-                            .insert(assign.target.clone(), assign.value.clone());
+                        local_packs.insert(assign.target.clone(), assign.value.clone());
                     }
-                    // Anything else is out of scope for RC2.5 v1.
+                    // Anything else is out of scope for 1E-α.
                     _ => {
+                        visiting.remove(&canonical);
                         return Err(LowerError {
                             message: format!(
                                 "addon facade '{}' binds '{}' to an unsupported expression shape \
-                                 (RC2.5 v1 supports `Name <= lowercaseFn` aliases and \
-                                 `Name <= @(...)` pack literals only)",
+                                 (C25B-030 Phase 1E-α supports `Name <= lowercaseFn` aliases and \
+                                 `Name <= @(...)` pack literals only; function-form bindings are \
+                                 tracked for Phase 1E-β).",
                                 facade_path.display(),
                                 assign.target
                             ),
                         });
                     }
                 },
-                Statement::Export(export_stmt) => {
-                    if export_stmt.path.is_some() {
+                Statement::Import(import_stmt) => {
+                    // C25B-030 Phase 1E-α: support facade-internal
+                    // relative imports only. Non-relative paths
+                    // (package imports, `taida-lang/*`, `npm:*`,
+                    // ...) are out of scope for the current phase.
+                    let p = &import_stmt.path;
+                    if !(p.starts_with("./") || p.starts_with("../")) {
+                        visiting.remove(&canonical);
                         return Err(LowerError {
                             message: format!(
-                                "addon facade '{}' uses re-export with path which is not supported",
+                                "addon facade '{}' uses `>>> {}` — only relative `>>> ./X.td` \
+                                 or `>>> ../X.td` imports are supported in addon facades \
+                                 (C25B-030 Phase 1E-α).",
+                                facade_path.display(),
+                                p
+                            ),
+                        });
+                    }
+                    if import_stmt.version.is_some() {
+                        visiting.remove(&canonical);
+                        return Err(LowerError {
+                            message: format!(
+                                "addon facade '{}' uses `>>> {}@...` — versioned imports are not \
+                                 permitted for facade-internal relative imports.",
+                                facade_path.display(),
+                                p
+                            ),
+                        });
+                    }
+                    let base_dir = facade_path
+                        .parent()
+                        .ok_or_else(|| LowerError {
+                            message: format!(
+                                "addon facade '{}' has no parent directory while resolving \
+                                 internal import '{}'",
+                                facade_path.display(),
+                                p
+                            ),
+                        })?
+                        .to_path_buf();
+                    let child_path = if let Some(rest) = p.strip_prefix("./") {
+                        base_dir.join(rest)
+                    } else {
+                        base_dir.join(p)
+                    };
+                    if !child_path.exists() {
+                        visiting.remove(&canonical);
+                        return Err(LowerError {
+                            message: format!(
+                                "addon facade '{}' imports '{}' which resolves to '{}' but the \
+                                 file does not exist.",
+                                facade_path.display(),
+                                p,
+                                child_path.display()
+                            ),
+                        });
+                    }
+                    let requested: std::collections::HashSet<String> =
+                        if import_stmt.symbols.is_empty() {
+                            // No symbol list: will import "all the child
+                            // facade's exports". We resolve "all" lazily
+                            // below by passing `restrict_to = None` so
+                            // the recursive loader merges every binding.
+                            std::collections::HashSet::new()
+                        } else {
+                            import_stmt
+                                .symbols
+                                .iter()
+                                .map(|s| {
+                                    // C25B-030 Phase 1E-α: facade aliasing
+                                    // on the import side (`>>> ./x.td =>
+                                    // @(Foo as Bar)`) is not supported.
+                                    // The parent facade should instead
+                                    // re-export using its own `<<<`.
+                                    s.name.clone()
+                                })
+                                .collect()
+                        };
+                    child_imports.push((child_path, requested));
+                }
+                Statement::Export(export_stmt) => {
+                    if export_stmt.path.is_some() {
+                        visiting.remove(&canonical);
+                        return Err(LowerError {
+                            message: format!(
+                                "addon facade '{}' uses `<<< <path>` re-export which is not \
+                                 supported.",
                                 facade_path.display()
                             ),
                         });
                     }
                     for sym in &export_stmt.symbols {
-                        summary.exports.insert(sym.clone());
+                        local_exports.insert(sym.clone());
                     }
                 }
-                // Comments are not Statement nodes; anything else
-                // is a parse construct we do not permit in a facade.
+                // C25B-030 Phase 1E-α: function definitions, TypeDef
+                // / EnumDef / MoldDef statements and other
+                // full-module constructs are recognized but still
+                // rejected. Proper support requires lowering the
+                // facade file as a first-class Taida module and
+                // wiring its IR into the main module's function /
+                // TypeDef table (Phase 1E-β / 1E-γ).
+                Statement::FuncDef(fd) => {
+                    visiting.remove(&canonical);
+                    return Err(LowerError {
+                        message: format!(
+                            "addon facade '{}' defines function '{}' — function definitions \
+                             inside addon facades are not yet supported for native codegen \
+                             (C25B-030 Phase 1E-β pending). The interpreter already loads this \
+                             facade correctly; use `taida run --target interpreter` until the \
+                             native path lands.",
+                            facade_path.display(),
+                            fd.name
+                        ),
+                    });
+                }
+                Statement::TypeDef(td) => {
+                    visiting.remove(&canonical);
+                    return Err(LowerError {
+                        message: format!(
+                            "addon facade '{}' declares TypeDef '{}' — TypeDef statements \
+                             inside addon facades are not yet supported for native codegen \
+                             (C25B-030 Phase 1E-β pending).",
+                            facade_path.display(),
+                            td.name
+                        ),
+                    });
+                }
+                Statement::EnumDef(ed) => {
+                    visiting.remove(&canonical);
+                    return Err(LowerError {
+                        message: format!(
+                            "addon facade '{}' declares EnumDef '{}' — EnumDef statements \
+                             inside addon facades are not yet supported for native codegen \
+                             (C25B-030 Phase 1E-β pending).",
+                            facade_path.display(),
+                            ed.name
+                        ),
+                    });
+                }
+                Statement::MoldDef(md) => {
+                    visiting.remove(&canonical);
+                    return Err(LowerError {
+                        message: format!(
+                            "addon facade '{}' declares MoldDef '{}' — MoldDef statements \
+                             inside addon facades are not yet supported for native codegen \
+                             (C25B-030 Phase 1E-β pending).",
+                            facade_path.display(),
+                            md.name
+                        ),
+                    });
+                }
                 _ => {
+                    visiting.remove(&canonical);
                     return Err(LowerError {
                         message: format!(
                             "addon facade '{}' contains an unsupported top-level construct \
-                             (RC2.5 v1 facades may only use assignments and `<<<` exports)",
+                             (C25B-030 Phase 1E-α supports assignments, `>>> ./X.td` relative \
+                             imports, and `<<<` exports).",
                             facade_path.display()
                         ),
                     });
@@ -568,20 +813,98 @@ impl Lowering {
             }
         }
 
-        // If no explicit export statement was found, fall back to
-        // exporting every top-level binding we understood. This
-        // matches the facade behaviour of "export everything that
-        // reached the top level".
-        if summary.exports.is_empty() {
-            for k in summary.aliases.keys() {
-                summary.exports.insert(k.clone());
+        // Recursively load child facades, merging only the requested
+        // symbols into `out_summary`.
+        for (child_path, requested) in child_imports {
+            let child_restrict = if requested.is_empty() {
+                None
+            } else {
+                Some(&requested)
+            };
+            Self::load_addon_facade_file(
+                &child_path,
+                manifest,
+                import_path,
+                child_restrict,
+                out_summary,
+                visiting,
+            )?;
+            // When a child exposed symbols with no explicit listing,
+            // treat the merged set as "any name that the child is
+            // willing to publish". The child itself has already
+            // restricted itself (if requested_to was Some).
+        }
+
+        // Decide which local bindings from this file we will export.
+        // Precedence:
+        //   - `restrict_to = Some(set)`: only symbols in `set` — this
+        //     corresponds to the parent's `>>> ./X.td => @(a, b)`.
+        //   - `restrict_to = None` + local `<<<` present: the <<<
+        //     clause is authoritative for this file.
+        //   - `restrict_to = None` + no local `<<<`: all local
+        //     bindings are eligible.
+        let use_set: std::collections::HashSet<String> = if let Some(set) = restrict_to {
+            set.clone()
+        } else if !local_exports.is_empty() {
+            local_exports.clone()
+        } else {
+            let mut s = std::collections::HashSet::new();
+            s.extend(local_aliases.keys().cloned());
+            s.extend(local_packs.keys().cloned());
+            s
+        };
+
+        for (name, target) in &local_aliases {
+            if use_set.contains(name) {
+                out_summary.aliases.insert(name.clone(), target.clone());
             }
-            for k in summary.pack_bindings.keys() {
-                summary.exports.insert(k.clone());
+        }
+        for (name, expr) in &local_packs {
+            if use_set.contains(name) {
+                out_summary.pack_bindings.insert(name.clone(), expr.clone());
+            }
+        }
+        // Child-facade bindings already added through recursive
+        // calls above stay in `out_summary` regardless.
+
+        // If this call-site is the top-level entry (restrict_to is
+        // None), adopt the local `<<<` clause as the parent summary's
+        // export surface. Internal callers pass restrict_to = Some and
+        // rely on caller-driven export shaping.
+        if restrict_to.is_none() && !local_exports.is_empty() {
+            out_summary.exports.extend(local_exports.iter().cloned());
+        }
+
+        // If restrict_to came from a parent's `>>> ./X.td => @(a, b)`
+        // request, make sure every requested symbol was actually
+        // produced by this file or one of its child facades. Missing
+        // symbols are a compile error (matches interpreter's
+        // behaviour where an unresolved facade import yields a clean
+        // name error).
+        if let Some(set) = restrict_to {
+            for name in set {
+                let produced = out_summary.aliases.contains_key(name)
+                    || out_summary.pack_bindings.contains_key(name);
+                if !produced {
+                    visiting.remove(&canonical);
+                    return Err(LowerError {
+                        message: format!(
+                            "addon facade '{}' requested symbol '{}' from '{}' but that file \
+                             (and its child facades) did not produce a matching binding. \
+                             Possible causes: the symbol is declared via a function / TypeDef \
+                             (C25B-030 Phase 1E-β pending), the symbol is misspelled, or the \
+                             symbol lives in a sibling facade not yet imported.",
+                            import_path,
+                            name,
+                            facade_path.display()
+                        ),
+                    });
+                }
             }
         }
 
-        Ok(Some(summary))
+        visiting.remove(&canonical);
+        Ok(())
     }
 
     /// RC2.5 Phase 2: emit the IR for a single addon function call.

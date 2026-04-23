@@ -223,14 +223,27 @@ struct AddonFuncRef {
     arity: u32,
 }
 
-/// RC2.5 Phase 2: shallow summary of an addon facade file.
+/// RC2.5 Phase 2 / C25B-030 Phase 1E-α: shallow summary of an addon
+/// facade file.
 ///
-/// Facades are read only for their top-level bindings: alias
-/// assignments (`Name <= lowercaseFn`), pure-Taida pack assignments
-/// (`Name <= @(...)`), and a single `<<<` export clause. The full
-/// module loader is out of scope for RC2.5 v1; any construct we do
-/// not recognise trips a deterministic compile error in
-/// `load_addon_facade_for_lower`.
+/// Facades are parsed for top-level bindings and passed through to
+/// the native lowering pipeline. The following constructs are
+/// understood:
+///
+/// - Alias assignments `Name <= lowercaseFn` (`aliases`)
+/// - Pure-Taida pack assignments `Name <= @(...)` (`pack_bindings`)
+/// - Facade-internal relative imports `>>> ./X.td => @(syms...)`
+///   (C25B-030 Phase 1E-α) — the referenced file is recursively
+///   loaded under the same rules and its exports for the requested
+///   symbols are merged into the parent summary
+/// - A single `<<<` export clause (`exports`)
+///
+/// Function definitions, TypeDef statements, and other arbitrary
+/// constructs still trip a deterministic compile error so unsupported
+/// facades fail loudly rather than silently diverging between
+/// backends. Lifting those constraints is tracked as C25B-030
+/// Phase 1E-β (function-def lowering inside facade) and Phase 1E-γ
+/// (full module-graph integration).
 #[derive(Debug, Default, Clone)]
 struct AddonFacadeSummary {
     /// Map `FacadeName` -> lowercase addon function name, when the
