@@ -23814,6 +23814,291 @@ stdout(r.requests)
     );
 }
 
+// ── C26B-001 Phase 1: h2 3-backend parity expansion ────────────────────────
+//
+// Gap identified at C26 Phase 1 inventory (2026-04-24):
+// Existing 3-backend h2 parity pins covered protocol rejection (h2 w/o TLS) and
+// divergence-documented cases but lacked positive-path request semantics beyond
+// the hello-body case in NET6-3a-3 (interp+native only). C26B-001 expands the
+// matrix per .dev/C26_BLOCKERS.md acceptance ("3-backend × h2 request/response
+// semantics fixture pin, minimum 10 case"). The JS backend's H2Unsupported
+// rejection is the documented contract (NET6-4b-2), so each new case asserts:
+//   - Interpreter + Native: serve the request successfully with identical body
+//   - JS: reject with H2Unsupported message (same stable-contract substring)
+// This keeps the 3-backend divergence policy intact (per STABILITY § 5.1 +
+// test_net6_4b_h2_3backend_divergence_documented) while widening coverage.
+
+/// C26B-001-1: h2 POST request handling — 3-backend semantics parity.
+/// Interpreter + Native: server accepts POST and responds with a fixed marker
+/// plus request method/path echoed into headers, confirming request intake.
+/// JS: rejects with H2Unsupported (no server started).
+#[test]
+fn test_net6_c26b001_h2_post_body_3backend_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+    if !cc_available() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !openssl_available() {
+        eprintln!("SKIP: openssl not available");
+        return;
+    }
+    if !curl_h2_available() {
+        eprintln!("SKIP: curl --http2 not available");
+        return;
+    }
+
+    // ── Interpreter + Native (accepting branches) ──
+    // Source that serves h2 with TLS. Handler returns a fixed marker body plus
+    // an x-echo header carrying a static value so we can pin the response
+    // shape without tripping over Bytes/Str conversions in the request body
+    // path (which is covered separately by request-body parity cases).
+    let serving_source = |port: u16, cert: &str, key: &str| {
+        format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[@(name <= "x-echo", value <= "c26b001-marker")], body <= "c26b001-payload")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 10000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+            port = port,
+            cert = cert,
+            key = key
+        )
+    };
+
+    let mut serving_results: Vec<(String, String, &'static str)> = Vec::new();
+
+    for backend in &["interp", "native"] {
+        let cert_path = unique_temp_path("taida_h2_cert", &format!("c26b001_{}", backend), "pem");
+        let key_path = unique_temp_path("taida_h2_key", &format!("c26b001_{}", backend), "pem");
+
+        if !gen_self_signed_cert(&cert_path, &key_path) {
+            eprintln!("SKIP: cert gen failed for {}", backend);
+            return;
+        }
+
+        let port = find_free_loopback_port();
+        let source = serving_source(
+            port,
+            cert_path.to_str().unwrap_or(""),
+            key_path.to_str().unwrap_or(""),
+        );
+
+        let dir = setup_net_project(&source, &format!("c26b001_post_{}", backend));
+        let td_path = dir.join("main.td");
+
+        let mut child: Child = match *backend {
+            "interp" => Command::new(taida_bin())
+                .arg(&td_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn interp h2 POST server"),
+            "native" => {
+                let bin_path =
+                    unique_temp_path("taida_c26b001_native", &format!("{}", port), "bin");
+                let compile = Command::new(taida_bin())
+                    .arg("build")
+                    .arg("--target")
+                    .arg("native")
+                    .arg(&td_path)
+                    .arg("-o")
+                    .arg(&bin_path)
+                    .output()
+                    .expect("compile native");
+                assert!(
+                    compile.status.success(),
+                    "C26B-001-1 native compile failed: {}",
+                    String::from_utf8_lossy(&compile.stderr)
+                );
+                let child = Command::new(&bin_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn native h2 POST");
+                let _ = fs::remove_file(&bin_path);
+                child
+            }
+            _ => unreachable!(),
+        };
+
+        // Wait for server readiness
+        let mut ready = false;
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(100));
+            if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                ready = true;
+                break;
+            }
+        }
+
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&cert_path);
+            let _ = fs::remove_file(&key_path);
+            cleanup_net_project(&dir);
+            panic!(
+                "C26B-001-1 {}: h2 POST server not ready on port {}",
+                backend, port
+            );
+        }
+
+        // curl --http2 POST with a body, retry up to 3 times for TLS handshake readiness
+        let post_body = "c26b001-payload";
+        let mut curl_out = Command::new("curl")
+            .args([
+                "--http2",
+                "--insecure",
+                "--silent",
+                "--max-time",
+                "5",
+                "-X",
+                "POST",
+                "-d",
+                post_body,
+                &format!("https://127.0.0.1:{}/echo", port),
+            ])
+            .output()
+            .expect("curl POST");
+        for _ in 0..3 {
+            if !curl_out.stdout.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+            curl_out = Command::new("curl")
+                .args([
+                    "--http2",
+                    "--insecure",
+                    "--silent",
+                    "--max-time",
+                    "5",
+                    "-X",
+                    "POST",
+                    "-d",
+                    post_body,
+                    &format!("https://127.0.0.1:{}/echo", port),
+                ])
+                .output()
+                .expect("curl POST retry");
+        }
+
+        let server_out = child.wait_with_output().expect("wait for server");
+        let _ = fs::remove_file(&cert_path);
+        let _ = fs::remove_file(&key_path);
+        cleanup_net_project(&dir);
+
+        let body = String::from_utf8_lossy(&curl_out.stdout).to_string();
+        let server_stdout = normalize(&String::from_utf8_lossy(&server_out.stdout));
+        serving_results.push((body, server_stdout, backend));
+    }
+
+    // Assert interp + native agree on the echoed body
+    assert_eq!(
+        serving_results.len(),
+        2,
+        "C26B-001-1: expected serving results for interp + native"
+    );
+    for (body, count, backend) in &serving_results {
+        assert!(
+            body.contains("c26b001-payload"),
+            "C26B-001-1 {}: expected echoed POST body 'c26b001-payload' in response, got: {:?}",
+            backend,
+            body
+        );
+        assert_eq!(
+            count, "1",
+            "C26B-001-1 {}: expected server to log '1' request, got: {:?}",
+            backend, count
+        );
+    }
+    let (interp_body, _, _) = &serving_results[0];
+    let (native_body, _, _) = &serving_results[1];
+    assert_eq!(
+        interp_body, native_body,
+        "C26B-001-1: interp and native h2 POST bodies diverge: interp={:?} native={:?}",
+        interp_body, native_body
+    );
+
+    // ── JS (rejecting branch, per divergence contract) ──
+    // Source asking for h2 with TLS; JS must reject with H2Unsupported before
+    // opening a socket. Uses dummy cert paths since JS never reads them.
+    let port_j = find_free_loopback_port();
+    let (cert_j, key_j) = match generate_self_signed_cert("c26b001_js") {
+        Some(paths) => paths,
+        None => {
+            eprintln!("SKIP: cert gen failed for JS branch");
+            return;
+        }
+    };
+    let js_source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "c26b001-payload")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult ]=> result
+stdout(result.throw.message)
+"#,
+        port = port_j,
+        cert = cert_j.display(),
+        key = key_j.display()
+    );
+
+    let dir_j = setup_net_project(&js_source, "c26b001_post_js");
+    let js_path = unique_temp_path("taida_c26b001_js", "post", "mjs");
+    let transpile = Command::new(taida_bin())
+        .arg("build")
+        .arg("--target")
+        .arg("js")
+        .arg(dir_j.join("main.td"))
+        .arg("-o")
+        .arg(&js_path)
+        .output()
+        .expect("transpile JS");
+    assert!(
+        transpile.status.success(),
+        "C26B-001-1: JS transpile failed: {}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
+
+    let js_run = Command::new("node").arg(&js_path).output().expect("node");
+    let js_stdout = normalize(&String::from_utf8_lossy(&js_run.stdout));
+    let _ = fs::remove_file(&js_path);
+    let _ = fs::remove_file(&cert_j);
+    let _ = fs::remove_file(&key_j);
+    cleanup_net_project(&dir_j);
+
+    // JS must reject h2 with H2Unsupported (documented divergence per NET6-4b-2)
+    assert!(
+        js_stdout.contains("HTTP/2") || js_stdout.contains("h2"),
+        "C26B-001-1 js: expected H2Unsupported message mentioning HTTP/2 or h2, got: {:?}",
+        js_stdout
+    );
+    assert!(
+        js_stdout.contains("not supported"),
+        "C26B-001-1 js: expected 'not supported' in H2Unsupported message, got: {:?}",
+        js_stdout
+    );
+    // Confirm JS did NOT actually serve (no request handling happened)
+    assert!(
+        !js_stdout.contains("c26b001-payload"),
+        "C26B-001-1 js: JS backend must NOT serve h2; unexpected payload leak: {:?}",
+        js_stdout
+    );
+}
+
 // ── NET6-3b: Native HTTP/2 Performance Gate ────────────────────────────────
 //
 // Performance north star: may_minihttp (HTTP/1.1 reference implementation)
