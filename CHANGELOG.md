@@ -310,16 +310,25 @@ broken intermediate state.
   tokenisers) save the 64-entry pattern compare per call.
 - **Phase 5-C / 5-D / 5-E — ValueKey + HashSet fast path for
   Set / HashMap / Unique (C25B-021 / C25B-022 / C25B-023)**
-  (`f721c6d`) — `Set.union` / `Set.intersect` / `Set.diff`
-  / `HashMap.merge` / `Unique` were all `Vec<Value>::contains`
-  linear-scan structures with O(N*M) behaviour. A new
-  `ValueKey` wrapper (float NaN / Function / Closure fall
-  back to equality comparison, everything else hashes) feeds
-  per-operation `HashSet<ValueKey>` / `HashMap<ValueKey, _>`
-  fast paths. A 1000-element × 2 Set union now completes in
-  under 50 ms. `HashMap.merge` drops from O(N*M*K) (nested
-  retain with per-entry key-field linear scan) to O(N+M) via
-  a pre-built key index.
+  (`f721c6d`, cross-type fix in `166f0c3`) — `Set.union` /
+  `Set.intersect` / `Set.diff` / `HashMap.merge` / `Unique`
+  were all `Vec<Value>::contains` linear-scan structures with
+  O(N*M) behaviour. A new `ValueKey` wrapper (float NaN /
+  Function / Closure fall back to equality comparison,
+  everything else hashes) feeds per-operation
+  `HashSet<ValueKey>` / `HashMap<ValueKey, _>` fast paths.
+  A 1000-element × 2 Set union now completes in under 50 ms.
+  `HashMap.merge` drops from O(N*M*K) (nested retain with
+  per-entry key-field linear scan) to O(N+M) via a pre-built
+  key index. Phase 10 GATE pre-review (session 20) found the
+  initial `ValueKey` put `Int(n)` and `EnumVal(_, n)` in
+  separate key domains, which broke `Value::eq`'s cross-type
+  rule (`setOf(@[0]).union(setOf(@[Color:Red()])).length()`
+  returned 2 instead of 1); `hash_value_into` now normalizes
+  them to the same fingerprint and `exact_eq` carries the
+  Int↔EnumVal rule, restoring fast-path parity with the
+  linear-scan contract. Unique mold additionally falls back
+  to `Value::eq` on any fingerprint collision.
 - **Phase 5-F — env `HashMap<String, Rc<Value>>` migration
   (ABANDONED)** — the refcount-the-env probe demonstrated that
   `env.snapshot()` call sites hit a `Rc<Value> -> Value`
@@ -336,27 +345,29 @@ broken intermediate state.
   from O(N) Value::clone to O(1) Arc refcount bump. The
   C25B-029 guard in `tests/c25b_029_interpreter_bind_clone.rs`
   tightens from 30 s to 5 s.
-- **Phase 5-F2-2 Stage B + C — Append / Prepend O(N²) → O(N)
-  via `env.take_from_current_scope` + `Arc::make_mut`
-  (C25B-021 / C25B-029)** (`f043586`) — the 5-F2-1 Arc
-  migration made read paths cheap, but the `Append` hot loop
-  was still O(N²) because `call_function`'s trampoline
-  retained the arg Arcs in `current_args` for the full body
-  evaluation, keeping refcount = 2 and forcing every
-  `list_take` to full-clone. Fix is two-pronged:
-  (1) the trampoline calls `current_args.clear()` immediately
-  after `bind_params_with_effective_defaults`, handing unique
-  Arc ownership to `env`; (2) `Append` / `Prepend` get an
-  innermost-scope Ident fast path
-  (`env.take_from_current_scope` → `Arc::make_mut` → rebind)
-  guarded by `expr_references_any` on the remaining arguments.
-  Cross-reference cases and outer-scope bindings take the
-  fallback path unchanged. Measured (N=20000): 3.38 s → 9 ms
-  (375× improvement). C25B-029 touch-chain: 1.81 s → 4 ms
-  (450× improvement). The guard tightens from 5 s to 500 ms.
-  A new `tests/c25b_021_append_linear.rs` (3 tests) pins linear
-  Append / Prepend behaviour and the cross-reference fallback
-  correctness.
+- **Phase 5-F2-2 Stage B + C — Append / Prepend env-take fast
+  path (C25B-021 / C25B-029)** — initial commit (`f043586`)
+  introduced an `env.take_from_current_scope` + `Arc::make_mut`
+  fast path to drop `Append` / `Prepend` from O(N²) to O(N).
+  Phase 10 GATE pre-review (session 20) discovered the fast
+  path violated the mold contract: `Append[xs, v]()` mutated
+  the source binding (e.g. `xs.length()` changed after a
+  subsequent mold call consumed the returned value), since
+  `take_from_current_scope` stole the only Arc and
+  `Arc::make_mut` mutated in place. The optimization was
+  **reverted** in `166f0c3`: `take_from_current_scope` is
+  removed, the trampoline still calls `current_args.clear()`
+  (harmless independent of the fast path), and Append / Prepend
+  return to the COW fallback (`as_ref().clone()` → push →
+  rebind, i.e. O(N) per call / O(N²) per N-append loop). Perf
+  guards in `tests/c25b_021_append_linear.rs` are relaxed to
+  `N=5000 / 2 s` and `N=5000 / 3 s` with an in-file rationale;
+  the C25B-029 ceiling in
+  `tests/c25b_029_interpreter_bind_clone.rs` is relaxed from
+  500 ms back to 3 s. Semantic regression tests pinning the
+  binding-preservation contract land alongside. True O(1)-per-
+  append amortization (persistent vector / pure-functional
+  `BuilderEscape`) is deferred to Phase 5-F2-3+ or D26.
 - **Phase 5-G — wasm-wasi linear memory growth strategy
   (C25B-026)** (`6c6ccbb`) — four runtime helpers
   (`wasm_arena_enter` / `wasm_arena_leave(saved)` /
