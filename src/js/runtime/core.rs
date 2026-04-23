@@ -1731,6 +1731,35 @@ function Ceil(num) { return typeof num === 'number' ? Math.ceil(num) : 0; }
 function Round(num) { return typeof num === 'number' ? Math.round(num) : 0; }
 function Truncate(num) { return typeof num === 'number' ? Math.trunc(num) : 0; }
 function Clamp(num, min, max) { return typeof num === 'number' ? Math.min(Math.max(num, min), max) : 0; }
+// C25B-025 (Phase 5-A): math molds. All return Number; interpreter
+// widens Int inputs to f64 first so these accept either. Matches the
+// interpreter's `f64::sqrt` etc. semantics (NaN / ±Infinity preserved).
+function Sqrt(num) { return typeof num === 'number' ? Math.sqrt(num) : 0; }
+function Pow(base, exp) {
+  return (typeof base === 'number' && typeof exp === 'number') ? Math.pow(base, exp) : 0;
+}
+function Exp(num) { return typeof num === 'number' ? Math.exp(num) : 0; }
+function Ln(num) { return typeof num === 'number' ? Math.log(num) : 0; }
+function Log2(num) { return typeof num === 'number' ? Math.log2(num) : 0; }
+function Log10(num) { return typeof num === 'number' ? Math.log10(num) : 0; }
+function Log(value, base) {
+  if (typeof value !== 'number') return 0;
+  if (base === undefined) return Math.log(value);
+  if (typeof base !== 'number') return 0;
+  return Math.log(value) / Math.log(base);
+}
+function Sin(num) { return typeof num === 'number' ? Math.sin(num) : 0; }
+function Cos(num) { return typeof num === 'number' ? Math.cos(num) : 0; }
+function Tan(num) { return typeof num === 'number' ? Math.tan(num) : 0; }
+function Asin(num) { return typeof num === 'number' ? Math.asin(num) : 0; }
+function Acos(num) { return typeof num === 'number' ? Math.acos(num) : 0; }
+function Atan(num) { return typeof num === 'number' ? Math.atan(num) : 0; }
+function Atan2(y, x) {
+  return (typeof y === 'number' && typeof x === 'number') ? Math.atan2(y, x) : 0;
+}
+function Sinh(num) { return typeof num === 'number' ? Math.sinh(num) : 0; }
+function Cosh(num) { return typeof num === 'number' ? Math.cosh(num) : 0; }
+function Tanh(num) { return typeof num === 'number' ? Math.tanh(num) : 0; }
 
 // ── List Mold types (new operation molds) ───────────────
 function Concat(list, other) {

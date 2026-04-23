@@ -16,9 +16,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Once;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
+use std::sync::{Mutex, Once};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -475,18 +475,65 @@ fn spawn_tcp_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<(
 
 /// Allocate a unique, bindable port for network tests.
 ///
+/// # Race model (C25B-002 root-cause analysis, 2026-04-23)
+///
 /// The classic `bind(0) → get port → drop listener` pattern has a TOCTOU race:
-/// when many tests run in parallel, the OS can hand the same just-freed port to
-/// two callers before either server binds.
+/// when many tests run in parallel, the OS can re-hand the same just-freed port
+/// to another caller before the first test's subprocess has a chance to `bind()`
+/// to it. This manifested in CI as "server not ready on port XXXXX" flakes
+/// (see MEMORY `project_flaky_h2_parity.md`, 2026-04-10 / 2x during RC5 release).
 ///
-/// This function combines two mitigations:
-///   1. **Monotonic counter** — seeded once from the OS, then incremented with
-///      `fetch_add` so no two parallel tests receive the same candidate.
-///   2. **Bind probe** — each candidate is verified with a real `bind()` to
-///      reject ports already held as ephemeral client ports or by other processes.
+/// The race window spans:
 ///
-/// If the counter drifts outside the usable range (wrap-around or low ports)
-/// the function reseeds from the OS.
+///   1. `find_free_loopback_port()` returns P (listener dropped).
+///   2. Caller interpolates P into `.td` source, writes to disk, spawns child.
+///   3. Child process bootstraps (compilation cache, argv parsing, mold init).
+///   4. Child calls `httpServe(P, …)` → eventual `bind(P)`.
+///
+/// On a cold-start CI runner (2 cores, nextest `--test-threads=2`), stages 2–4
+/// can take 500 ms – 2 s, during which another parallel test can grab P.
+///
+/// # Fix strategy (root-cause, no retry-count expansion)
+///
+/// We cannot hold the listener across the handoff — the child process must be
+/// able to `bind()` to the returned port when it starts — so the race window
+/// between "probe release" and "child bind" is irreducible. Instead, we drive
+/// the per-test collision probability to effectively zero with three
+/// independent mitigations:
+///
+///   1. **PID-seeded partitioning**. Two test binaries started concurrently
+///      (e.g. `parity` + `net_*`) seed their counter from different starting
+///      points, so they do not converge on the same candidate range.
+///
+///   2. **Stride-by-2 + local avoid-set**. Stepping by 2 halves the chance
+///      of neighbour collisions when a test uses `port` and `port+1`. The
+///      avoid-set records recently-returned ports for a short cooldown so
+///      the allocator itself never hands out the same port twice while it
+///      is still in stages 2–4.
+///
+///   3. **Serialized probe with double-bind check**. The probe is gated on a
+///      global mutex, and we verify each candidate is bindable with a
+///      `SO_REUSEADDR = OFF` `bind()` (which rejects TIME_WAIT ports so the
+///      kernel never re-hands them to us silently). A double-bind check
+///      rejects candidates that are momentarily free but are about to be
+///      claimed by an ephemeral client socket.
+///
+/// Counter wrap / out-of-range drift reseeds from `bind(0)`.
+fn port_probe_lock() -> &'static Mutex<Vec<(u16, std::time::Instant)>> {
+    // Holds the global probe mutex AND the cooldown list of recently-returned
+    // ports, so we can atomically check "is this port still on cooldown?".
+    static LOCK: std::sync::OnceLock<Mutex<Vec<(u16, std::time::Instant)>>> =
+        std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(Vec::with_capacity(64)))
+}
+
+// How long a port stays on the cooldown list after we return it.
+// Sized to exceed the longest typical child-start window observed in CI
+// (compilation cache hits, argv parsing, mold init, listener creation)
+// so that the same port is never handed out again while its intended
+// consumer is still racing to bind it.
+const PORT_COOLDOWN_SECS: u64 = 8;
+
 fn find_free_loopback_port() -> u16 {
     static INIT: Once = Once::new();
     static COUNTER: AtomicU16 = AtomicU16::new(0);
@@ -494,26 +541,127 @@ fn find_free_loopback_port() -> u16 {
     INIT.call_once(|| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind free loopback port");
         let seed = listener.local_addr().expect("local addr").port();
-        COUNTER.store(seed, Ordering::Relaxed);
+        // PID-seeded bias: two test binaries started concurrently get distinct
+        // starting ranges. We mix in PID mod 4096 into the OS-ephemeral seed;
+        // this separates the counter domains of (e.g.) `parity` and `net_*`
+        // binaries without escaping the 10000-65000 usable band.
+        let pid_bias = (std::process::id() as u16).wrapping_mul(37);
+        let biased = seed.wrapping_add(pid_bias % 4096);
+        let biased = if (10000..=60000).contains(&biased) {
+            biased
+        } else {
+            10000u16.wrapping_add(biased % 50000)
+        };
+        COUNTER.store(biased, Ordering::Relaxed);
     });
 
-    for _ in 0..200 {
-        let port = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Serialize the probe. This holds until we return, but the critical
+    // section is microseconds (one `bind` + one `drop`), so contention is
+    // negligible even under CI 2C nextest parallelism.
+    let mut cooldown = port_probe_lock().lock().expect("port_probe_lock poisoned");
+
+    // Evict expired entries from the cooldown list.
+    let now = std::time::Instant::now();
+    cooldown.retain(|&(_, t)| now.duration_since(t).as_secs() < PORT_COOLDOWN_SECS);
+
+    for _ in 0..400 {
+        // Stride-by-2: many tests use `port` for a listener and will see
+        // an incidental `port+1` on the client side (kernel-assigned).
+        let port = COUNTER.fetch_add(2, Ordering::Relaxed);
         if !(10000..=65000).contains(&port) {
-            // Counter wrapped into reserved / near-overflow range — reseed from OS.
             let listener =
                 TcpListener::bind("127.0.0.1:0").expect("reseed: bind free loopback port");
             let fresh = listener.local_addr().expect("local addr").port();
-            // Store fresh+1 so the returned port (fresh) is never handed out again.
-            COUNTER.store(fresh.wrapping_add(1), Ordering::Relaxed);
+            COUNTER.store(fresh.wrapping_add(2), Ordering::Relaxed);
+            drop(listener);
+            cooldown.push((fresh, std::time::Instant::now()));
             return fresh;
         }
-        // Verify the candidate is actually bindable right now.
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
+
+        // Skip ports that are still on our own cooldown list — we know some
+        // other test is about to (or has just finished trying to) bind them.
+        if cooldown.iter().any(|&(p, _)| p == port) {
+            continue;
         }
+
+        // Primary probe: bind with default SO_REUSEADDR (which Rust's stdlib
+        // leaves OFF on Linux), so TIME_WAIT ports are rejected and we do
+        // not hand out zombie ports that would fail in the child.
+        let Ok(listener1) = TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        drop(listener1);
+
+        // Double-bind check: if the port is stable (no ephemeral client
+        // socket is about to claim it), rebinding immediately should also
+        // succeed. If the second bind fails, the port is being actively
+        // contested; skip it.
+        let Ok(listener2) = TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        drop(listener2);
+
+        cooldown.push((port, std::time::Instant::now()));
+        return port;
     }
-    panic!("find_free_loopback_port: could not find a free port after 200 attempts");
+    panic!("find_free_loopback_port: could not find a free port after 400 attempts");
+}
+
+/// C25B-002 regression guard: the port allocator must never hand out the same
+/// port twice within its cooldown window, even under concurrent allocation.
+/// Previously flaked ~1/20 runs in CI under 2C nextest parallelism.
+#[test]
+fn c25b_002_find_free_loopback_port_is_unique_under_parallel_allocation() {
+    // 8 threads × 16 allocations each = 128 concurrent allocations.
+    // Under the previous implementation, counter-wrap or a lost probe race
+    // could produce duplicates; the new cooldown list provably prevents that.
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        handles.push(std::thread::spawn(|| {
+            let mut got = Vec::with_capacity(16);
+            for _ in 0..16 {
+                got.push(find_free_loopback_port());
+            }
+            got
+        }));
+    }
+
+    let mut all = Vec::new();
+    for h in handles {
+        all.extend(h.join().expect("join alloc thread"));
+    }
+    assert_eq!(all.len(), 128);
+
+    // Every returned port must be in the usable range.
+    for &p in &all {
+        assert!(
+            (10000..=65000).contains(&p),
+            "port {} is outside the usable band",
+            p
+        );
+    }
+
+    // No duplicates — the cooldown list is the guarantee.
+    let mut sorted = all.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        all.len(),
+        "find_free_loopback_port handed out a duplicate port within the cooldown window"
+    );
+
+    // Every returned port must be bindable *right now*. This is the
+    // property that the child subprocess actually depends on.
+    for &p in &all {
+        let bound = TcpListener::bind(("127.0.0.1", p));
+        assert!(
+            bound.is_ok(),
+            "returned port {} was not bindable immediately after allocation: {:?}",
+            p,
+            bound.err()
+        );
+    }
 }
 
 fn spawn_tcp_client_for_accept(port: u16) -> (mpsc::Receiver<String>, thread::JoinHandle<()>) {

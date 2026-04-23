@@ -8,6 +8,35 @@ use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamTransform, Strea
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use crate::parser::Expr;
 
+/// C25B-025 (Phase 5-A): helper for single-argument numeric molds that
+/// return Float (Sqrt / Exp / Ln / Sin / Cos / ...). Accepts Int (widens
+/// to f64) or Float. Any other value produces a descriptive runtime
+/// error including the mold name. Non-value signals (Throw / TailCall)
+/// are propagated.
+fn eval_unary_math(
+    interp: &mut Interpreter,
+    type_args: &[Expr],
+    name: &str,
+    op: fn(f64) -> f64,
+) -> Result<Option<Signal>, RuntimeError> {
+    if type_args.is_empty() {
+        return Err(RuntimeError {
+            message: format!("{} requires 1 argument: {}[num]()", name, name),
+        });
+    }
+    let num = match interp.eval_expr(&type_args[0])? {
+        Signal::Value(Value::Int(n)) => n as f64,
+        Signal::Value(Value::Float(n)) => n,
+        Signal::Value(v) => {
+            return Err(RuntimeError {
+                message: format!("{}: argument must be numeric, got {}", name, v),
+            });
+        }
+        other => return Ok(Some(other)),
+    };
+    Ok(Some(Signal::Value(Value::Float(op(num)))))
+}
+
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     Value::BuchiPack(vec![
         ("hasValue".into(), Value::Bool(has_value)),
@@ -668,6 +697,126 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::Int(num.trunc() as i64))))
+            }
+            // C25B-025 (Phase 5-A): math molds.
+            //
+            // Previously `Sqrt[4.0]()` / `Pow[2.0, 10]()` flowed through the
+            // generic mold-instantiation fallback in `eval_expr::MoldInst`
+            // and produced `@(__value <= <first-arg>, __type <= "Sqrt")` —
+            // a silent wrong result (type inference registered `Float`,
+            // but the value was actually a Lax-shaped BuchiPack).
+            // Transcendentals (`Sin` / `Cos` / etc.) had no registration
+            // at all and therefore required the `__value` unwrap.
+            //
+            // These interpreter implementations delegate to `f64::sqrt`,
+            // `f64::powf`, etc. NaN / ±Infinity / denormal are preserved
+            // as Rust's `f64` semantics. Accepting `Int` widens to `f64`
+            // first; `Pow[Int, Int]` returns Float per `mold_returns.rs`.
+            "Sqrt" => eval_unary_math(self, type_args, "Sqrt", f64::sqrt),
+            "Exp" => eval_unary_math(self, type_args, "Exp", f64::exp),
+            "Ln" => eval_unary_math(self, type_args, "Ln", f64::ln),
+            "Log2" => eval_unary_math(self, type_args, "Log2", f64::log2),
+            "Log10" => eval_unary_math(self, type_args, "Log10", f64::log10),
+            "Sin" => eval_unary_math(self, type_args, "Sin", f64::sin),
+            "Cos" => eval_unary_math(self, type_args, "Cos", f64::cos),
+            "Tan" => eval_unary_math(self, type_args, "Tan", f64::tan),
+            "Asin" => eval_unary_math(self, type_args, "Asin", f64::asin),
+            "Acos" => eval_unary_math(self, type_args, "Acos", f64::acos),
+            "Atan" => eval_unary_math(self, type_args, "Atan", f64::atan),
+            "Sinh" => eval_unary_math(self, type_args, "Sinh", f64::sinh),
+            "Cosh" => eval_unary_math(self, type_args, "Cosh", f64::cosh),
+            "Tanh" => eval_unary_math(self, type_args, "Tanh", f64::tanh),
+            "Pow" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "Pow requires 2 arguments: Pow[base, exp]()".into(),
+                    });
+                }
+                let base = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Pow: base must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let exp_val = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Pow: exponent must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Float(base.powf(exp_val)))))
+            }
+            "Log" => {
+                // Log[value, base]() — explicit base. Base defaults to e
+                // if omitted (so `Log[x]()` == `Ln[x]()` semantically).
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: "Log requires 1-2 arguments: Log[value]() or Log[value, base]()"
+                            .into(),
+                    });
+                }
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Log: value must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = if type_args.len() >= 2 {
+                    let base = match self.eval_expr(&type_args[1])? {
+                        Signal::Value(Value::Int(n)) => n as f64,
+                        Signal::Value(Value::Float(n)) => n,
+                        Signal::Value(v) => {
+                            return Err(RuntimeError {
+                                message: format!("Log: base must be numeric, got {}", v),
+                            });
+                        }
+                        other => return Ok(Some(other)),
+                    };
+                    val.log(base)
+                } else {
+                    val.ln()
+                };
+                Ok(Some(Signal::Value(Value::Float(result))))
+            }
+            "Atan2" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "Atan2 requires 2 arguments: Atan2[y, x]()".into(),
+                    });
+                }
+                let y = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Atan2: y must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let x = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n as f64,
+                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("Atan2: x must be numeric, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Float(y.atan2(x)))))
             }
             "Clamp" => {
                 if type_args.len() < 3 {
