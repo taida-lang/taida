@@ -165,8 +165,8 @@ fn fixture_expected(name: &str) -> String {
         "examples/quality/c25b_028_json_monadic_parity/{}.expected",
         name
     ));
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     normalize(&raw)
 }
 
@@ -212,8 +212,8 @@ fn check_wasm_wasi_fixture(name: &str) {
     }
     let td = fixture_td(name);
     let exp = fixture_expected(name);
-    let out = run_wasm_wasi(&td)
-        .unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
+    let out =
+        run_wasm_wasi(&td).unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
     assert_eq!(
         out, exp,
         "wasm-wasi output for {} diverged from interpreter reference (C25B-028 regression?)",

@@ -497,8 +497,7 @@ fn load_facade_file(
                 out_summary
                     .aliases
                     .insert(local_name.clone(), target.clone());
-                universe_aliases
-                    .insert(local_name.clone(), target.clone());
+                universe_aliases.insert(local_name.clone(), target.clone());
             }
             if let Some(expr) = child_summary.pack_bindings.get(orig_name) {
                 out_summary
@@ -507,7 +506,9 @@ fn load_facade_file(
                 universe_packs.insert(local_name.clone(), expr.clone());
             }
             if let Some(fd) = child_summary.facade_funcs.get(orig_name) {
-                out_summary.facade_funcs.insert(local_name.clone(), fd.clone());
+                out_summary
+                    .facade_funcs
+                    .insert(local_name.clone(), fd.clone());
                 universe_funcs.insert(local_name.clone(), fd.clone());
             }
         }

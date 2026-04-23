@@ -2,18 +2,18 @@
 //! must resolve IntVars on native / wasm / js, matching the interpreter.
 //!
 //! Pre-fix (reproducible on upstream/main 2026-04-23):
-//!   * interpreter:  `World`
-//!   * native:       `Hello, World!`  ← pos_var ignored
-//!   * wasm-wasi:    `Hello, World!`  ← same
-//!   * js:           `Hello, World!`  ← runtime accepted `(val, opts)`
-//!                                      and treated the IntVar as opts
+//! * interpreter:  `World`
+//! * native:       `Hello, World!`  ← pos_var ignored
+//! * wasm-wasi:    `Hello, World!`  ← same
+//! * js:           `Hello, World!`  ← runtime accepted `(val, opts)`
+//!   and treated the IntVar as opts
 //!
 //! Fix:
-//!   * `src/codegen/lower_molds.rs::Slice` — prefer `type_args[1]` /
-//!     `type_args[2]` over named `fields` (matches interpreter dispatch
-//!     in `src/interpreter/mold_eval.rs:343`).
-//!   * `src/js/runtime/core.rs::Slice` — accept `(val, start, end)`
-//!     positional form in addition to `(val, {start, end})` named form.
+//! * `src/codegen/lower_molds.rs::Slice` — prefer `type_args[1]` /
+//!   `type_args[2]` over named `fields` (matches interpreter dispatch
+//!   in `src/interpreter/mold_eval.rs:343`).
+//! * `src/js/runtime/core.rs::Slice` — accept `(val, start, end)`
+//!   positional form in addition to `(val, {start, end})` named form.
 //!
 //! Fixtures live under `examples/quality/c25b_031_slice_positional/`.
 
@@ -160,8 +160,8 @@ fn fixture_expected(name: &str) -> String {
         "examples/quality/c25b_031_slice_positional/{}.expected",
         name
     ));
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     normalize(&raw)
 }
 
@@ -207,8 +207,8 @@ fn check_wasm_wasi_fixture(name: &str) {
     }
     let td = fixture_td(name);
     let exp = fixture_expected(name);
-    let out = run_wasm_wasi(&td)
-        .unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
+    let out =
+        run_wasm_wasi(&td).unwrap_or_else(|| panic!("wasm-wasi build+run failed for {}", name));
     assert_eq!(
         out, exp,
         "wasm-wasi output for {} diverged from interpreter reference (C25B-031 regression?)",
@@ -230,8 +230,4 @@ macro_rules! c25b031_per_fixture_tests {
     };
 }
 
-c25b031_per_fixture_tests!(
-    positional_int_var,
-    positional_int_var_both,
-    named_int_var,
-);
+c25b031_per_fixture_tests!(positional_int_var, positional_int_var_both, named_int_var,);
