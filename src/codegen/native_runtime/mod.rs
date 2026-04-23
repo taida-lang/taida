@@ -336,7 +336,15 @@ mod tests {
         // core.c size moves from 393,260 to 395,155. Other fragments
         // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New
         // total: 974,273 → 976,168.
-        const EXPECTED_TOTAL_LEN: usize = 976_168;
+        //
+        // C26B-021 (2026-04-24, commit ba6f6f5): +839 bytes in
+        // net_h3_quic.c from the native stdout line-buffering fix —
+        // `setvbuf(stdout, NULL, _IOLBF, 0)` + `setvbuf(stderr, ...)`
+        // at the top of main() plus the explanatory comment block.
+        // The landed hunk sits outside core.c so F1_LEN / F2_LEN are
+        // unaffected; only the total moves. New total: 976,168 →
+        // 977,007.
+        const EXPECTED_TOTAL_LEN: usize = 977_007;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
