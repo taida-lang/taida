@@ -678,17 +678,30 @@ impl Lowering {
             self.emit_imported_module_inits(&mut main_fn);
             self.bind_imported_values(&mut main_fn);
 
-            // RC2.5 Phase 2: replay addon facade pack bindings before
-            // any user statement runs. The bindings are synthetic
-            // `Name <= @(...)` assignments harvested from the addon's
-            // `taida/<stem>.td` facade during `lower_addon_import`; they
-            // are the native-backend equivalent of the
-            // `module_eval::load_addon_facade` path used by the
-            // interpreter (e.g. `KeyKind <= @(Char <= 0, ...)`).
+            // RC2.5 Phase 2 / C25B-030 Phase 1E-β-2: replay addon
+            // facade pack/value bindings before any user statement
+            // runs. The bindings are synthetic `Name <= @(...)`
+            // (or scalar) assignments harvested from the addon's
+            // `taida/<stem>.td` facade tree during
+            // `lower_addon_import`; they are the native-backend
+            // equivalent of the `module_eval::load_addon_facade`
+            // path used by the interpreter.
+            //
+            // Each binding is emitted with both `DefVar` (so user
+            // code in main runs with a local scope binding) and
+            // `GlobalSet` (so facade FuncDef bodies compiled
+            // elsewhere in the IR can `GlobalGet(hash)` the
+            // binding at runtime). Without the `GlobalSet`, a
+            // facade FuncDef body that references a private
+            // `_Cell` / `_KK_Char` helper would read 0 from the
+            // uninitialised global slot and behave as if the
+            // binding never existed.
             let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
             for (name, expr) in &facade_bindings {
                 let val = self.lower_expr(&mut main_fn, expr)?;
                 main_fn.push(IrInst::DefVar(name.clone(), val));
+                let hash = self.global_var_hash(name);
+                main_fn.push(IrInst::GlobalSet(hash, val));
             }
             // Put the bindings back so repeat calls to lower_program
             // (if any) would still see them. In practice lower_program

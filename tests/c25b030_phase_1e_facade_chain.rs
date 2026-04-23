@@ -503,6 +503,168 @@ stdout(MyGreet("Taida"))
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// Phase 1E-β-2: a facade FuncDef that calls a private `_`-prefixed
+/// helper in the same file must build and run — the helper is
+/// transitively pulled into the summary by reachability analysis
+/// even though the user import only names the public wrapper.
+#[test]
+fn phase_1e_beta2_private_funcdef_helper_is_reachable() {
+    let project = unique_temp_dir("beta2_priv_fn_helper");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    // Only `Greet` is exported. `_combine` is a private helper;
+    // without Phase 1E-β-2 reachability expansion the build
+    // would either fail or produce a binary that segfaults on
+    // the unresolved `_combine` call.
+    let terminal_td = r#"
+_combine who =
+  "greet: " + who
+=> :Str
+
+Greet who =
+  _combine(who)
+=> :Str
+
+<<< @(Greet)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(Greet)
+stdout(Greet("world"))
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β-2: private FuncDef helper must be pulled in. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("greet: world"),
+        "private helper body must execute; got: {:?}",
+        out
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β-2: a public facade FuncDef that reads a private
+/// pack binding (`_Cell.text`) must also resolve at runtime. The
+/// pack binding is replayed with both `DefVar` and `GlobalSet`
+/// into `_taida_main` so the FuncDef body's `GlobalGet` lookup
+/// finds the right pack handle.
+#[test]
+fn phase_1e_beta2_private_pack_binding_is_reachable() {
+    let project = unique_temp_dir("beta2_priv_pack_helper");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+_Cell <= @(
+  text <= "*"
+  fg   <= ""
+)
+
+GetDefault =
+  _Cell.text
+=> :Str
+
+<<< @(GetDefault)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(GetDefault)
+stdout(GetDefault())
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β-2: private pack binding must be pulled in. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("*"),
+        "private pack `_Cell.text` field must resolve at runtime; got: {:?}",
+        out
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β-2: reachability crosses file boundaries. The
+/// exported public FuncDef lives in the entry facade, but its
+/// body references a private helper declared in a sibling file
+/// imported via `>>>`. The reachability pass must promote the
+/// sibling-file private helper into the summary.
+#[test]
+fn phase_1e_beta2_cross_file_private_helper_is_reachable() {
+    let project = unique_temp_dir("beta2_cross_file_priv");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    // The top-level facade imports `helper_public` from
+    // `helpers.td`. `helper_public` internally calls a
+    // `_helper_private` which is NOT listed in any `<<<`
+    // clause. Phase 1E-β-2 reachability expansion must still
+    // pull `_helper_private` into the summary via the
+    // universe map, which spans every facade file in the tree.
+    let terminal_td = r#"
+>>> ./helpers.td => @(helper_public)
+
+<<< @(helper_public)
+"#;
+    let helpers_td = r#"
+_helper_private n =
+  n + 42
+=> :Int
+
+helper_public x =
+  _helper_private(x)
+=> :Int
+
+<<< @(helper_public)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[("helpers.td", helpers_td)]);
+
+    let main_td = r#">>> taida-lang/terminal => @(helper_public)
+stdout(`${helper_public(100)}`)
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β-2: cross-file private helper must be reachable. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("142"),
+        "cross-file private helper body must execute; got: {:?}",
+        out
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
 /// Phase 1E-β: TypeDef / EnumDef / MoldDef statements inside a
 /// facade remain rejected with a stable Phase-1E-γ-referencing
 /// message. Mirrors the original Phase 1E-α test shape but with

@@ -300,6 +300,73 @@ impl Lowering {
                 // pass).
                 self.register_facade_func_signature(fn_local_name, fn_def);
             }
+            // C25B-030 Phase 1E-β-2: pre-register private pack /
+            // value bindings that `facade_expand_reachable_symbols`
+            // pulled into the summary. User imports of a public
+            // pack still go through the per-symbol loop below
+            // (which honours aliasing); private `_`-prefixed
+            // bindings are pre-registered here so facade FuncDef
+            // bodies can reach them during lowering.
+            //
+            // `addon_facade_mangled` doubles as a deterministic
+            // dedup set — we prefix the value-binding marker with
+            // a distinct `facade_value::` namespace to avoid
+            // colliding with FuncDef mangles.
+            for (local_name, value_expr) in &facade_summary.pack_bindings {
+                if !local_name.starts_with('_') {
+                    continue;
+                }
+                let marker = format!("_taida_facade_value_{:016x}_{}", pkg_hash, local_name);
+                if !self.addon_facade_mangled.insert(marker) {
+                    continue;
+                }
+                self.addon_facade_pack_bindings
+                    .push((local_name.clone(), value_expr.clone()));
+                self.top_level_vars.insert(local_name.clone());
+                // Narrowed flagging mirrors the per-symbol loop
+                // below: only real `@(...)` packs become
+                // `pack_vars`; scalar / list / arithmetic
+                // bindings take the appropriate primitive tag.
+                if matches!(value_expr, Expr::BuchiPack(_, _)) {
+                    self.pack_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::ListLit(_, _)) {
+                    self.list_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::IntLit(_, _)) {
+                    self.int_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::FloatLit(_, _)) {
+                    self.float_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::StringLit(_, _) | Expr::TemplateLit(_, _)) {
+                    self.string_vars.insert(local_name.clone());
+                } else if matches!(value_expr, Expr::BoolLit(_, _)) {
+                    self.bool_vars.insert(local_name.clone());
+                }
+            }
+            // Private aliases (facade author wrote
+            // `_MyAlias <= terminalSize` as an internal rename).
+            // Rare in practice but cheap to support. The alias
+            // resolves to the manifest function's arity just like
+            // public aliases.
+            for (local_name, target_fn) in &facade_summary.aliases {
+                if !local_name.starts_with('_') {
+                    continue;
+                }
+                let marker = format!("_taida_facade_alias_{:016x}_{}", pkg_hash, local_name);
+                if !self.addon_facade_mangled.insert(marker) {
+                    continue;
+                }
+                if let Some(arity) = manifest.functions.get(target_fn) {
+                    self.addon_func_refs.insert(
+                        local_name.clone(),
+                        AddonFuncRef {
+                            package_id: manifest.package.clone(),
+                            cdylib_path: cdylib_str.clone(),
+                            function_name: target_fn.clone(),
+                            arity: *arity,
+                        },
+                    );
+                    self.user_funcs.insert(local_name.clone());
+                }
+            }
         }
 
         for sym in &import_stmt.symbols {
@@ -540,6 +607,201 @@ impl Lowering {
         }
     }
 
+    /// C25B-030 Phase 1E-β-2: walk a facade FuncDef body and collect
+    /// every identifier name that appears as a free variable (i.e.
+    /// not a function parameter, not shadowed by a local
+    /// assignment, and not bound inside a nested lambda).
+    ///
+    /// Used by [`Self::facade_expand_reachable_symbols`] to grow
+    /// the summary's export set transitively — a facade FuncDef
+    /// that references `_bufferNewInner` pulls the private helper
+    /// into the summary even if the user import did not name it.
+    ///
+    /// Lighter-weight than `collect_free_vars_inner`: it does NOT
+    /// filter against `user_funcs` / `top_level_vars` (those are
+    /// global to a lowering run, not facade-local) and it emits
+    /// every free identifier regardless of whether it resolves to
+    /// a function, a value, or a runtime builtin. The caller
+    /// intersects the result with the facade's own local symbol
+    /// set to pick out only the names that actually need
+    /// harvesting.
+    fn facade_collect_refs_in_body(
+        body: &[crate::parser::Statement],
+        param_names: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        let mut bound: std::collections::HashSet<String> = param_names.clone();
+        for stmt in body {
+            if let Statement::Assignment(assign) = stmt {
+                bound.insert(assign.target.clone());
+            }
+        }
+        for stmt in body {
+            Self::facade_collect_refs_in_stmt(stmt, &bound, out);
+        }
+    }
+
+    fn facade_collect_refs_in_stmt(
+        stmt: &crate::parser::Statement,
+        bound: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        match stmt {
+            Statement::Expr(expr) => Self::facade_collect_refs_in_expr(expr, bound, out),
+            Statement::Assignment(assign) => {
+                Self::facade_collect_refs_in_expr(&assign.value, bound, out);
+            }
+            Statement::UnmoldForward(uf) => {
+                Self::facade_collect_refs_in_expr(&uf.source, bound, out);
+            }
+            Statement::UnmoldBackward(ub) => {
+                Self::facade_collect_refs_in_expr(&ub.source, bound, out);
+            }
+            Statement::ErrorCeiling(ec) => {
+                for inner in &ec.handler_body {
+                    Self::facade_collect_refs_in_stmt(inner, bound, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn facade_collect_refs_in_expr(
+        expr: &crate::parser::Expr,
+        bound: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        match expr {
+            Expr::Ident(name, _) => {
+                if !bound.contains(name) {
+                    out.insert(name.clone());
+                }
+            }
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                Self::facade_collect_refs_in_expr(lhs, bound, out);
+                Self::facade_collect_refs_in_expr(rhs, bound, out);
+            }
+            Expr::UnaryOp(_, operand, _) => {
+                Self::facade_collect_refs_in_expr(operand, bound, out);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                Self::facade_collect_refs_in_expr(callee, bound, out);
+                for a in args {
+                    Self::facade_collect_refs_in_expr(a, bound, out);
+                }
+            }
+            Expr::FieldAccess(obj, _, _) => {
+                Self::facade_collect_refs_in_expr(obj, bound, out);
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                Self::facade_collect_refs_in_expr(obj, bound, out);
+                for a in args {
+                    Self::facade_collect_refs_in_expr(a, bound, out);
+                }
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    Self::facade_collect_refs_in_expr(e, bound, out);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        Self::facade_collect_refs_in_expr(cond, bound, out);
+                    }
+                    for s in &arm.body {
+                        Self::facade_collect_refs_in_stmt(s, bound, out);
+                    }
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    Self::facade_collect_refs_in_expr(&f.value, bound, out);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for i in items {
+                    Self::facade_collect_refs_in_expr(i, bound, out);
+                }
+            }
+            Expr::MoldInst(_, args, fields, _) => {
+                for a in args {
+                    Self::facade_collect_refs_in_expr(a, bound, out);
+                }
+                for f in fields {
+                    Self::facade_collect_refs_in_expr(&f.value, bound, out);
+                }
+            }
+            Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                Self::facade_collect_refs_in_expr(inner, bound, out);
+            }
+            Expr::Lambda(params, body, _) => {
+                let mut inner_bound = bound.clone();
+                for p in params {
+                    inner_bound.insert(p.name.clone());
+                }
+                Self::facade_collect_refs_in_expr(body, &inner_bound, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// C25B-030 Phase 1E-β-2: grow the facade summary so every
+    /// private helper transitively referenced by an already-
+    /// exported binding is also carried through.
+    ///
+    /// We repeatedly scan the bodies of already-harvested
+    /// FuncDefs and the expressions of already-harvested
+    /// pack/value bindings for identifiers that match names in
+    /// the `all_local_*` maps (the per-facade universe of
+    /// definitions, which is larger than `summary.*` because it
+    /// also contains the private `_`-prefixed helpers the first
+    /// merge pass skipped). When a match is found we promote
+    /// that binding into the summary and requeue its dependencies.
+    /// The loop terminates because each iteration either adds at
+    /// least one new symbol or does nothing.
+    fn facade_expand_reachable_symbols(
+        summary: &mut AddonFacadeSummary,
+        all_local_funcs: &std::collections::HashMap<String, crate::parser::FuncDef>,
+        all_local_packs: &std::collections::HashMap<String, crate::parser::Expr>,
+        all_local_aliases: &std::collections::HashMap<String, String>,
+    ) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for fn_def in summary.facade_funcs.values() {
+                let param_names: std::collections::HashSet<String> =
+                    fn_def.params.iter().map(|p| p.name.clone()).collect();
+                Self::facade_collect_refs_in_body(&fn_def.body, &param_names, &mut refs);
+            }
+            let empty_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for expr in summary.pack_bindings.values() {
+                Self::facade_collect_refs_in_expr(expr, &empty_params, &mut refs);
+            }
+            for r in &refs {
+                if all_local_funcs.contains_key(r) && !summary.facade_funcs.contains_key(r) {
+                    summary
+                        .facade_funcs
+                        .insert(r.clone(), all_local_funcs[r].clone());
+                    changed = true;
+                }
+                if all_local_packs.contains_key(r) && !summary.pack_bindings.contains_key(r) {
+                    summary
+                        .pack_bindings
+                        .insert(r.clone(), all_local_packs[r].clone());
+                    changed = true;
+                }
+                if all_local_aliases.contains_key(r) && !summary.aliases.contains_key(r) {
+                    summary
+                        .aliases
+                        .insert(r.clone(), all_local_aliases[r].clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+
     /// C25B-030 Phase 1E-β: register the arity, parameter defs, and
     /// return-type inference hints for a facade-declared FuncDef
     /// under `local_name`.
@@ -648,6 +910,17 @@ impl Lowering {
         let mut summary = AddonFacadeSummary::default();
         let mut visiting: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
+        // C25B-030 Phase 1E-β-2: track EVERY local binding across
+        // the facade file tree (both public and private), so the
+        // reachability expansion below can promote private
+        // `_`-prefixed helpers into the summary when they are
+        // transitively referenced by an exported FuncDef / pack.
+        let mut universe_funcs: std::collections::HashMap<String, crate::parser::FuncDef> =
+            std::collections::HashMap::new();
+        let mut universe_packs: std::collections::HashMap<String, crate::parser::Expr> =
+            std::collections::HashMap::new();
+        let mut universe_aliases: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         Self::load_addon_facade_file(
             &facade_path,
             manifest,
@@ -655,6 +928,9 @@ impl Lowering {
             None,
             &mut summary,
             &mut visiting,
+            &mut universe_funcs,
+            &mut universe_packs,
+            &mut universe_aliases,
         )?;
 
         // If the entry facade defined no explicit `<<<` exports, fall
@@ -667,12 +943,10 @@ impl Lowering {
         // Private FuncDef helpers (names starting with `_`) are
         // never surfaced here because the file-merge logic in
         // `load_addon_facade_file` only forwards `use_set` members
-        // up the chain, and the top-level pass uses `restrict_to
-        // = None` where `use_set = local_names`. Phase 1E-β-1
-        // therefore treats every top-level facade binding as
-        // potentially public; authors who want to hide an
-        // underscore-prefixed symbol should drop it from the
-        // `<<<` clause.
+        // up the chain. Authors who want to hide an underscore-
+        // prefixed symbol should drop it from the `<<<` clause;
+        // it will still get promoted by `facade_expand_reachable_
+        // symbols` below if an exported binding needs it.
         if summary.exports.is_empty() {
             for k in summary.aliases.keys() {
                 summary.exports.insert(k.clone());
@@ -684,6 +958,19 @@ impl Lowering {
                 summary.exports.insert(k.clone());
             }
         }
+
+        // C25B-030 Phase 1E-β-2: transitively pull in private
+        // helpers referenced by already-harvested bindings.
+        // Without this, `BufferNew` would build fine at the user
+        // call site but its body's `_bufferNewInner(...)` call
+        // would resolve to nothing because the private helper
+        // was filtered out by the initial `use_set` merge.
+        Self::facade_expand_reachable_symbols(
+            &mut summary,
+            &universe_funcs,
+            &universe_packs,
+            &universe_aliases,
+        );
 
         Ok(Some(summary))
     }
@@ -709,6 +996,19 @@ impl Lowering {
     ///   bindings / exports.
     /// - `visiting`: set of facade paths currently on the recursion
     ///   stack, used to detect circular `>>>` chains.
+    /// - `universe_funcs` / `universe_packs` / `universe_aliases`:
+    ///   C25B-030 Phase 1E-β-2 universe maps that record EVERY
+    ///   local binding seen across the entire facade file tree
+    ///   (both public and private). The caller of
+    ///   `load_addon_facade_for_lower` runs
+    ///   [`Self::facade_expand_reachable_symbols`] after this
+    ///   function returns to promote private `_`-prefixed helpers
+    ///   into `out_summary` when an already-harvested FuncDef /
+    ///   pack expression references them. On a duplicate local
+    ///   name across sibling files the first definition wins;
+    ///   duplicates within a single file are still rejected by
+    ///   the per-file first-pass check.
+    #[allow(clippy::too_many_arguments)]
     fn load_addon_facade_file(
         facade_path: &std::path::Path,
         manifest: &crate::addon::manifest::AddonManifest,
@@ -716,6 +1016,9 @@ impl Lowering {
         restrict_to: Option<&std::collections::HashSet<String>>,
         out_summary: &mut AddonFacadeSummary,
         visiting: &mut std::collections::HashSet<std::path::PathBuf>,
+        universe_funcs: &mut std::collections::HashMap<String, crate::parser::FuncDef>,
+        universe_packs: &mut std::collections::HashMap<String, crate::parser::Expr>,
+        universe_aliases: &mut std::collections::HashMap<String, String>,
     ) -> Result<(), LowerError> {
         let canonical = facade_path
             .canonicalize()
@@ -1057,6 +1360,9 @@ impl Lowering {
                 child_restrict,
                 out_summary,
                 visiting,
+                universe_funcs,
+                universe_packs,
+                universe_aliases,
             )?;
             // When a child exposed symbols with no explicit listing,
             // treat the merged set as "any name that the child is
@@ -1094,28 +1400,33 @@ impl Lowering {
             if use_set.contains(name) {
                 out_summary.aliases.insert(name.clone(), target.clone());
             }
+            // C25B-030 Phase 1E-β-2: universe record for
+            // reachability expansion below (first-wins across
+            // sibling files).
+            universe_aliases
+                .entry(name.clone())
+                .or_insert_with(|| target.clone());
         }
-        // Pack / value bindings. Phase 1E-β-1 propagates only
-        // symbols in `use_set` — private (`_`-prefixed) helpers
-        // stay scoped to their defining file and are NOT surfaced
-        // up the facade chain. Phase 1E-β-2 will add proper
-        // reachability analysis so a FuncDef body that references
-        // `_foo` pulls `_foo` through transitively.
+        // Pack / value bindings — direct merge gated by
+        // `use_set`; private `_`-prefixed helpers are pulled in
+        // transitively by `facade_expand_reachable_symbols`
+        // after the whole tree is loaded.
         for (name, expr) in &local_packs {
             if use_set.contains(name) {
                 out_summary.pack_bindings.insert(name.clone(), expr.clone());
             }
+            universe_packs
+                .entry(name.clone())
+                .or_insert_with(|| expr.clone());
         }
-        // C25B-030 Phase 1E-β-1: FuncDefs. Same rule — only
-        // `use_set` members propagate. A facade FuncDef that uses
-        // a private helper (e.g. `BufferNew` calling
-        // `_bufferNewInner`) will currently fail with
-        // "undefined function" at the call site; Phase 1E-β-2
-        // (intra-file reachability) lifts that restriction.
+        // FuncDefs — same rule as pack bindings.
         for (name, fd) in &local_funcs {
             if use_set.contains(name) {
                 out_summary.facade_funcs.insert(name.clone(), fd.clone());
             }
+            universe_funcs
+                .entry(name.clone())
+                .or_insert_with(|| fd.clone());
         }
         // Child-facade bindings already added through recursive
         // calls above stay in `out_summary` regardless.
