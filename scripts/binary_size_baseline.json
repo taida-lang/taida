@@ -1,0 +1,18 @@
+{
+  "_schema": "C25B-009 binary-size budget baseline",
+  "_captured_at": "2026-04-23",
+  "_captured_at_tag": "@c.24.rc1 (merge commit 0fd0029) + C25 in-progress at feat/c25 tip 972f6ee",
+  "_captured_at_commit": "972f6ee",
+  "_captured_by": "c25-driver Phase 9 session (scripts/measure_binary_size.sh)",
+  "_host": {
+    "os": "Linux 6.18.7",
+    "arch": "x86_64",
+    "note": "local developer machine measurement. The CI baseline must be refreshed on the first green run of .github/workflows/binary_size.yml by running scripts/measure_binary_size.sh --refresh-baseline on a GitHub runner and committing the result. Local vs CI numbers can differ by ~5% for bytes and 2-10x for startup_ms due to filesystem / IO contention differences; the +10% budget is set large enough to absorb that noise across @c.25.rc7."
+  },
+  "_policy": "see docs/STABILITY.md §5.5 (performance is non-contractual) and .dev/C25_BLOCKERS.md::C25B-009. A +10% regression in any of bytes / text / startup_ms fails .github/workflows/binary_size.yml (continue-on-error: true during @c.25.rc7). Hard-fail promotion is a post-stable follow-up.",
+  "bytes": 28602232,
+  "text": 22708840,
+  "data": 653353,
+  "bss": 13612,
+  "startup_ms": 0.45
+}
