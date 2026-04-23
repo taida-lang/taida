@@ -234,21 +234,32 @@ impl Lowering {
                     });
                 }
                 let value = self.lower_expr(func, &type_args[0])?;
-                // オプション: start (default 0), end (default -1)
-                let start_var = match self.lower_mold_field_expr(func, fields, "start")? {
-                    Some(v) => v,
-                    None => {
-                        let v = func.alloc_var();
-                        func.push(IrInst::ConstInt(v, 0));
-                        v
+                // C25B-031: positional (`Slice[s, start, end]()`) and named
+                // (`Slice[s](start <= n, end <= m)`) forms must both resolve
+                // the start/end variables. Interpreter prefers positional
+                // `type_args[1..]` over named `fields`; match that here.
+                let start_var = if type_args.len() >= 2 {
+                    self.lower_expr(func, &type_args[1])?
+                } else {
+                    match self.lower_mold_field_expr(func, fields, "start")? {
+                        Some(v) => v,
+                        None => {
+                            let v = func.alloc_var();
+                            func.push(IrInst::ConstInt(v, 0));
+                            v
+                        }
                     }
                 };
-                let end_var = match self.lower_mold_field_expr(func, fields, "end")? {
-                    Some(v) => v,
-                    None => {
-                        let v = func.alloc_var();
-                        func.push(IrInst::ConstInt(v, -1));
-                        v
+                let end_var = if type_args.len() >= 3 {
+                    self.lower_expr(func, &type_args[2])?
+                } else {
+                    match self.lower_mold_field_expr(func, fields, "end")? {
+                        Some(v) => v,
+                        None => {
+                            let v = func.alloc_var();
+                            func.push(IrInst::ConstInt(v, -1));
+                            v
+                        }
                     }
                 };
                 let result = func.alloc_var();

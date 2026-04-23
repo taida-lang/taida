@@ -1676,14 +1676,29 @@ function __taida_str_search(s, rx) {
   const prefix = s.slice(0, m.index);
   return Array.from(prefix).length;
 }
-function Slice(val, opts) {
-  const start = (opts && __taida_isIntNumber(opts.start)) ? opts.start : 0;
+function Slice(val, optsOrStart, maybeEnd) {
+  // C25B-031: support both forms —
+  //   named:      Slice[val]({start, end})         → optsOrStart is an object
+  //   positional: Slice[val, start, end]()         → optsOrStart is an Int
+  // This matches the interpreter, which prefers positional type_args over
+  // named fields.
+  let start = 0;
+  let endOpt = undefined;
+  if (__taida_isIntNumber(optsOrStart)) {
+    start = optsOrStart;
+    if (__taida_isIntNumber(maybeEnd)) {
+      endOpt = maybeEnd;
+    }
+  } else if (optsOrStart && typeof optsOrStart === 'object') {
+    if (__taida_isIntNumber(optsOrStart.start)) start = optsOrStart.start;
+    if (__taida_isIntNumber(optsOrStart.end)) endOpt = optsOrStart.end;
+  }
   if (typeof val === 'string') {
-    const end = (opts && __taida_isIntNumber(opts.end)) ? opts.end : val.length;
+    const end = (endOpt !== undefined) ? endOpt : val.length;
     return val.slice(start, end);
   }
   if (val instanceof Uint8Array) {
-    const end = (opts && __taida_isIntNumber(opts.end)) ? opts.end : val.length;
+    const end = (endOpt !== undefined) ? endOpt : val.length;
     const s = Math.max(0, Math.min(val.length, start));
     const e = Math.max(0, Math.min(val.length, end));
     const from = Math.min(s, e);
