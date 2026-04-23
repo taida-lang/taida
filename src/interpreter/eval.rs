@@ -753,7 +753,10 @@ impl Interpreter {
     /// Used for error-ceiling protected code so that function calls in tail
     /// position actually execute within the ceiling's scope instead of being
     /// deferred via Signal::TailCall (which would bypass the catch handler).
-    fn eval_statements_no_tco(&mut self, stmts: &[Statement]) -> Result<Signal, RuntimeError> {
+    pub(crate) fn eval_statements_no_tco(
+        &mut self,
+        stmts: &[Statement],
+    ) -> Result<Signal, RuntimeError> {
         let mut last_value = Value::Unit;
         for (i, stmt) in stmts.iter().enumerate() {
             // Check for nested error ceilings (delegate to full eval_statements)
