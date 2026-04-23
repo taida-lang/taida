@@ -52,13 +52,13 @@ pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
 ///   case is a small per-thread memory footprint.
 /// * **C25B-024 migration (2026-04-23)**: the C12B-036 VecDeque-based
 ///   FIFO cache was replaced with a `HashMap<(String, String), Regex>`
-///   + eviction-order `VecDeque<(String, String)>` to keep lookups at
-///   O(1) while preserving the fixed capacity of 64. Previous
-///   behaviour walked the entire VecDeque on every cache lookup, which
-///   dominated regex-heavy loops (lexers, tokenisers, template
-///   substitution). Per-lookup cost drops from O(capacity) to O(1)
-///   hash. FIFO semantics preserved so behaviour under saturation is
-///   identical.
+///   plus an eviction-order `VecDeque<(String, String)>` to keep
+///   lookups at O(1) while preserving the fixed capacity of 64.
+///   Previous behaviour walked the entire VecDeque on every cache
+///   lookup, which dominated regex-heavy loops (lexers, tokenisers,
+///   template substitution). Per-lookup cost drops from O(capacity)
+///   to O(1). FIFO semantics are preserved so saturation behaviour
+///   is identical.
 /// * Capacity 64 mirrors the JS runtime's `__TAIDA_REGEX_CACHE_CAPACITY`
 ///   so the three backends behave similarly under memory pressure.
 /// * Invalid patterns are never cached: [`compile`] returns `Err`

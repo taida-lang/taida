@@ -1574,26 +1574,76 @@ impl Interpreter {
                 };
                 let by_fn = self.eval_mold_option(fields, "by")?;
 
+                // C25B-021 派生 (Phase 5-C): replace the per-item
+                // `Vec::contains` linear scan (O(N²)) with a HashSet
+                // fingerprint probe (O(N)) when every produced key is
+                // hashable. Float / Function / Async keys fall back to
+                // the original linear path so `Value::eq` semantics are
+                // preserved for cross-type coercions.
+                use crate::interpreter::value_key::ValueKey;
+                use std::collections::HashSet;
+
                 let unique = if let Some(Value::Function(func)) = by_fn {
-                    let mut seen_keys: Vec<Value> = Vec::new();
+                    let mut seen_fps: HashSet<u64> = HashSet::new();
+                    let mut seen_fallback: Vec<Value> = Vec::new();
+                    let mut fallback_armed = false;
                     let mut result: Vec<Value> = Vec::new();
                     for item in &list {
                         let key =
                             self.call_function_with_values(&func, std::slice::from_ref(item))?;
-                        if !seen_keys.contains(&key) {
-                            seen_keys.push(key);
-                            result.push(item.clone());
+                        if fallback_armed {
+                            if !seen_fallback.contains(&key) {
+                                seen_fallback.push(key);
+                                result.push(item.clone());
+                            }
+                        } else if let Some(vk) = ValueKey::new(&key) {
+                            let fp = vk.fingerprint();
+                            if seen_fps.insert(fp) {
+                                seen_fallback.push(key);
+                                result.push(item.clone());
+                            }
+                        } else {
+                            // Key turned out not to be hashable. Replay
+                            // the fingerprints we already added into the
+                            // fallback list and continue with linear
+                            // contains for the remainder.
+                            fallback_armed = true;
+                            if !seen_fallback.contains(&key) {
+                                seen_fallback.push(key);
+                                result.push(item.clone());
+                            }
                         }
                     }
                     result
                 } else {
-                    let mut result: Vec<Value> = Vec::new();
-                    for item in &list {
-                        if !result.contains(item) {
-                            result.push(item.clone());
+                    // Fast path: build a fingerprint set up front if the
+                    // entire list is hashable.
+                    if let Some(mut seen) = list
+                        .iter()
+                        .map(|v| ValueKey::new(v).map(|k| k.fingerprint()))
+                        .collect::<Option<HashSet<u64>>>()
+                    {
+                        // All items are hashable, but `seen` already
+                        // contains all fingerprints — rebuild by
+                        // iterating and tracking first-occurrence only.
+                        seen.clear();
+                        let mut result: Vec<Value> = Vec::new();
+                        for item in &list {
+                            let vk = ValueKey::new(item).expect("hashability pre-checked above");
+                            if seen.insert(vk.fingerprint()) {
+                                result.push(item.clone());
+                            }
                         }
+                        result
+                    } else {
+                        let mut result: Vec<Value> = Vec::new();
+                        for item in &list {
+                            if !result.contains(item) {
+                                result.push(item.clone());
+                            }
+                        }
+                        result
                     }
-                    result
                 };
                 Ok(Some(Signal::Value(Value::List(unique))))
             }
