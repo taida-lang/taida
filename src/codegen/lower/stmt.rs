@@ -905,6 +905,20 @@ impl Lowering {
         // determined at compile time. This reads the type tag that the caller set via
         // taida_set_call_arg_tag(), enabling Bool/Int disambiguation in pack field tags.
         let prev_param_tag_vars = std::mem::take(&mut self.param_tag_vars);
+        // C25B-030 Phase 1E-β-3: snapshot and reset `return_tag_vars`
+        // across function boundaries. `IrVar`s are allocated per
+        // IR function, so an entry like `return_tag_vars[14] = 15`
+        // recorded while lowering function A aliases with var 14
+        // in function B's fresh `alloc_var()` counter, producing
+        // a Cranelift verifier error (`set_return_tag` argument
+        // references a value defined only inside a CondBranch arm,
+        // not in the outer block). The lambda path in
+        // `lower_lambda` already snapshots/restores this field;
+        // `lower_func_def` was missing the same discipline which
+        // became load-bearing once facade FuncDefs (Phase 1E-β)
+        // started lowering dozens of sibling functions in one
+        // `lower_program` invocation.
+        let prev_return_tag_vars = std::mem::take(&mut self.return_tag_vars);
         for (i, param) in func_def.params.iter().enumerate() {
             // Only emit for parameters that don't have a compile-time type
             let has_known_type = self.bool_vars.contains(&param.name)
@@ -1155,6 +1169,11 @@ impl Lowering {
         self.shadowed_net_builtins = prev_shadowed_net;
         // NB-14: Restore param_tag_vars to pre-function state
         self.param_tag_vars = prev_param_tag_vars;
+        // C25B-030 Phase 1E-β-3: restore return_tag_vars (see snapshot
+        // comment above — cross-function IrVar aliasing breaks
+        // Cranelift verification once facade FuncDefs stream through
+        // the same `Lowering` instance).
+        self.return_tag_vars = prev_return_tag_vars;
         // NB3-4 fix: Restore return_type_inferred_params to pre-function state
         self.return_type_inferred_params = prev_return_type_inferred_params;
         // NB3-4: Restore var_aliases, lambda_param_counts, lambda_vars, closure_vars
