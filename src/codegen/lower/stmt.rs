@@ -634,6 +634,37 @@ impl Lowering {
             }
         }
 
+        // C25B-030 Phase 1E-β: lower facade-declared FuncDefs
+        // harvested during `lower_addon_import`. Each entry is
+        // `(local_name, FuncDef, mangled_link_symbol)`; we
+        // temporarily rewrite the FuncDef so `lower_func_def`'s
+        // `resolve_user_func_symbol` returns the mangled symbol
+        // directly without tripping the usual user-function
+        // export-symbol mangling. The mangle is stable across
+        // multiple imports of the same addon (see
+        // `addon_facade_mangled` dedup in `lower_addon_import`).
+        //
+        // We drain the vec so repeated calls to `lower_program`
+        // on the same `Lowering` do not re-emit duplicate IR
+        // functions. Should that ever happen in practice
+        // (e.g. testing harnesses) the caller has to reset the
+        // `Lowering` state first.
+        let facade_funcs = std::mem::take(&mut self.addon_facade_funcs);
+        for (local_name, func_def, mangled) in &facade_funcs {
+            // Route the body's `resolve_user_func_symbol(local_name)`
+            // through the mangled link so self- and sibling-calls
+            // (including recursion and cross-FuncDef dispatch inside
+            // the same facade) land on the correct symbol.
+            self.imported_func_links
+                .insert(local_name.clone(), mangled.clone());
+            let ir_func = self.lower_func_def(func_def)?;
+            module.functions.push(ir_func);
+        }
+        // Put the harvested list back so post-lowering consumers
+        // (e.g. driver.rs diagnostics, potential test harnesses)
+        // can still observe what was emitted.
+        self.addon_facade_funcs = facade_funcs;
+
         // ライブラリモジュールの場合、モジュール単位の init 関数を生成
         if module.is_library {
             self.generate_module_init_func(&mut module, program)?;

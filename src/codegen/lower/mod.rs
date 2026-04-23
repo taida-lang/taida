@@ -202,6 +202,37 @@ pub struct Lowering {
     /// Keyed by the local binding name. The order field controls
     /// replay ordering so facade authors can express value dependencies.
     addon_facade_pack_bindings: Vec<(String, Expr)>,
+    /// C25B-030 Phase 1E-β: facade-declared FuncDefs harvested across
+    /// every addon-backed package imported by the current lowering
+    /// run.
+    ///
+    /// Each entry is `(local_name, func_def, mangled_link_symbol)`
+    /// where `local_name` is the name the facade author wrote
+    /// (e.g. `ClearScreen` or `_makeCellsLoop`) and
+    /// `mangled_link_symbol` is the IR function symbol actually
+    /// emitted (e.g. `_taida_fn_facade_<hash>_ClearScreen`). The
+    /// mangle carries a per-addon hash so FuncDefs from two
+    /// different addons can coexist without colliding, and so user
+    /// code can still declare a local `ClearScreen` without trouble.
+    ///
+    /// Populated during `lower_addon_import` via the facade loader
+    /// and drained during `lower_program`'s 2nd pass: each FuncDef
+    /// is fed through [`Lowering::lower_func_def`] under the
+    /// mangled name. User imports of a facade symbol rewrite to the
+    /// mangled symbol through `imported_func_links` so call sites
+    /// go through the normal `resolve_user_func_symbol` path.
+    ///
+    /// Deduplicated by mangled symbol: if the same facade file is
+    /// imported twice (two user imports referencing the same addon)
+    /// only the first entry wins. The loader canonicalises paths
+    /// before deriving the mangle so this check is O(1).
+    addon_facade_funcs: Vec<(String, FuncDef, String)>,
+    /// C25B-030 Phase 1E-β: set of mangled facade link symbols
+    /// already collected. Used by the facade loader for O(1)
+    /// dedup when the same addon is referenced by more than one
+    /// import statement (`>>> taida-lang/terminal => @(A)` then
+    /// `>>> taida-lang/terminal => @(B)`).
+    addon_facade_mangled: std::collections::HashSet<String>,
     /// RC2.5: the addon backend this lowering run targets. Only `Native`
     /// accepts addon imports; all WASM targets and JS/Interpreter path
     /// through the backend-policy error with a deterministic message.
@@ -223,8 +254,8 @@ struct AddonFuncRef {
     arity: u32,
 }
 
-/// RC2.5 Phase 2 / C25B-030 Phase 1E-α: shallow summary of an addon
-/// facade file.
+/// RC2.5 Phase 2 / C25B-030 Phase 1E-α + 1E-β: shallow summary of an
+/// addon facade file.
 ///
 /// Facades are parsed for top-level bindings and passed through to
 /// the native lowering pipeline. The following constructs are
@@ -236,14 +267,18 @@ struct AddonFuncRef {
 ///   (C25B-030 Phase 1E-α) — the referenced file is recursively
 ///   loaded under the same rules and its exports for the requested
 ///   symbols are merged into the parent summary
+/// - **Function definitions** `Name args = body => :Type`
+///   (C25B-030 Phase 1E-β) — lowered as sibling IR functions under
+///   a mangled symbol derived from the addon package id so they do
+///   not collide with user-defined functions of the same name.
 /// - A single `<<<` export clause (`exports`)
 ///
-/// Function definitions, TypeDef statements, and other arbitrary
-/// constructs still trip a deterministic compile error so unsupported
-/// facades fail loudly rather than silently diverging between
-/// backends. Lifting those constraints is tracked as C25B-030
-/// Phase 1E-β (function-def lowering inside facade) and Phase 1E-γ
-/// (full module-graph integration).
+/// TypeDef / EnumDef / MoldDef statements are still rejected
+/// deterministically; the public addon authoring contract only
+/// requires FuncDef + Assignment + Import. Lifting those remaining
+/// constraints is tracked as C25B-030 Phase 1E-γ (module-graph
+/// integration and full sibling module linkage via
+/// `src/addon/facade.rs`).
 #[derive(Debug, Default, Clone)]
 struct AddonFacadeSummary {
     /// Map `FacadeName` -> lowercase addon function name, when the
@@ -259,6 +294,15 @@ struct AddonFacadeSummary {
     /// export statement. When empty, every alias / pack binding is
     /// implicitly exported.
     exports: std::collections::HashSet<String>,
+    /// C25B-030 Phase 1E-β: map `FacadeFnName` -> the full
+    /// [`FuncDef`] AST harvested from the facade file. Includes
+    /// both exported public functions and facade-private helpers
+    /// (names starting with `_`) — every local FuncDef must be
+    /// collected so that internal calls between facade functions
+    /// resolve. Only entries whose key ends up in `exports` are
+    /// visible to user code; the rest stay private under their
+    /// mangled link symbol.
+    facade_funcs: std::collections::HashMap<String, FuncDef>,
 }
 
 #[derive(Debug)]

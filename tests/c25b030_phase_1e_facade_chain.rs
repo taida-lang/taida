@@ -298,12 +298,21 @@ stdout(`${Foo.bar}`)
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// A child facade file whose contents include a function definition
-/// must fail with a Phase-1E-β-referencing message so addon authors
-/// see a clear upgrade path.
+/// Phase 1E-β: a child facade file's zero-arg FuncDef whose body is
+/// a simple string literal (matches the real
+/// `.dev/official-package-repos/terminal/taida/ansi.td::ClearScreen`)
+/// must lower to a callable native symbol. User code imports the
+/// facade-exported name via `>>> taida-lang/terminal => @(ClearScreen)`
+/// and invokes it just like any other function.
+///
+/// This is the minimal end-to-end exercise for Phase 1E-β: a
+/// facade FuncDef survives the facade loader, gets collected into
+/// `addon_facade_funcs`, is lowered during the 2nd pass of the
+/// main module's `lower_program` under a mangled link symbol, and
+/// resolves through `imported_func_links` at the user call site.
 #[test]
-fn phase_1e_alpha_child_function_def_is_rejected_with_phase_1e_beta_note() {
-    let project = unique_temp_dir("child_fn");
+fn phase_1e_beta_child_zero_arg_funcdef_lowers_to_native() {
+    let project = unique_temp_dir("beta_child_fn_zero_arg");
     let _ = std::fs::remove_dir_all(&project);
     std::fs::create_dir_all(&project).unwrap();
 
@@ -317,7 +326,7 @@ fn phase_1e_alpha_child_function_def_is_rejected_with_phase_1e_beta_note() {
     // FuncDef — matches the real `.dev/official-package-repos/terminal/taida/ansi.td`.
     let ansi_td = r#"
 ClearScreen =
-  "\x1b[2J\x1b[H"
+  "clear-screen-marker"
 => :Str
 
 <<< @(ClearScreen)
@@ -328,14 +337,197 @@ ClearScreen =
 stdout(ClearScreen())
 "#;
 
-    let (ok, _stdout, stderr) = build_native(&project, main_td);
+    let (ok, stdout, stderr) = build_native(&project, main_td);
     assert!(
-        !ok,
-        "Phase 1E-α: child facade with FuncDef must be rejected until 1E-β"
+        ok,
+        "Phase 1E-β: child facade with FuncDef must build on native. \
+         stdout={}, stderr={}",
+        stdout, stderr
     );
     assert!(
-        stderr.contains("C25B-030 Phase 1E-β"),
-        "error must name Phase 1E-β as the follow-up, got: {}",
+        project.join("main.bin").exists(),
+        "native build must produce an executable. stderr={}",
+        stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    assert!(
+        run.status.success(),
+        "native binary must run. stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run_stdout.contains("clear-screen-marker"),
+        "FuncDef body must be executed by the native binary. got: {}",
+        run_stdout
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β: a FuncDef with non-trivial parameters and a
+/// pipeline-style body that uses `Error().throw()` guards plus
+/// string concatenation + `toString()` method calls (mirrors the
+/// real `ansi.td::CursorMoveTo`). Confirms that facade FuncDef
+/// lowering covers the typed-parameter + guard-branch combinator
+/// shape used throughout the terminal addon.
+#[test]
+fn phase_1e_beta_child_funcdef_with_args_and_guards() {
+    let project = unique_temp_dir("beta_child_fn_args");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+>>> ./ansi.td => @(CursorMoveTo)
+
+<<< @(CursorMoveTo)
+"#;
+    let ansi_td = r#"
+CursorMoveTo col row =
+  | col < 1 |> Error(type <= "CursorMoveInvalidPosition", message <= "col must be >= 1").throw()
+  | row < 1 |> Error(type <= "CursorMoveInvalidPosition", message <= "row must be >= 1").throw()
+  | _ |> "\x1b[" + row.toString() + ";" + col.toString() + "H"
+=> :Str
+
+<<< @(CursorMoveTo)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[("ansi.td", ansi_td)]);
+
+    let main_td = r#">>> taida-lang/terminal => @(CursorMoveTo)
+stdout(CursorMoveTo(10, 5))
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β: parameterised facade FuncDef with guards must build. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    assert!(run.status.success(), "binary must exit 0");
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run_stdout.contains("\x1b[5;10H"),
+        "CursorMoveTo(10, 5) must emit ESC[5;10H. got: {:?}",
+        run_stdout
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β: a top-level facade FuncDef declared directly in
+/// `terminal.td` (not in a child file) must also lower cleanly.
+/// Exercises the code path where `load_addon_facade_for_lower`
+/// harvests FuncDefs without the `>>>` indirection — the simplest
+/// possible Phase-1E-β surface.
+#[test]
+fn phase_1e_beta_toplevel_funcdef_lowers_to_native() {
+    let project = unique_temp_dir("beta_toplevel_fn");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+Greet who =
+  "hello " + who + "!"
+=> :Str
+
+<<< @(Greet)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(Greet)
+stdout(Greet("world"))
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β: top-level facade FuncDef must build. stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("hello world!"), "got: {:?}", out);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β: import aliasing (`>>> ... => @(Orig: Local)`) must
+/// still work when the imported symbol is a FuncDef from the
+/// facade. The mangled link symbol stays bound to `Orig`; only
+/// the user-facing name is rewritten via `imported_func_links`.
+#[test]
+fn phase_1e_beta_funcdef_user_import_alias_is_honoured() {
+    let project = unique_temp_dir("beta_import_alias");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+Greet who =
+  "hi " + who
+=> :Str
+
+<<< @(Greet)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(Greet: MyGreet)
+stdout(MyGreet("Taida"))
+"#;
+    let (ok, stdout, stderr) = build_native(&project, main_td);
+    assert!(
+        ok,
+        "Phase 1E-β: import alias for facade FuncDef must build. \
+         stdout={}, stderr={}",
+        stdout, stderr
+    );
+
+    let run = Command::new(project.join("main.bin"))
+        .current_dir(&project)
+        .output()
+        .expect("run produced binary");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("hi Taida"), "got: {:?}", out);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Phase 1E-β: TypeDef / EnumDef / MoldDef statements inside a
+/// facade remain rejected with a stable Phase-1E-γ-referencing
+/// message. Mirrors the original Phase 1E-α test shape but with
+/// the follow-up phase pointer rotated forward.
+#[test]
+fn phase_1e_beta_typedef_in_facade_is_still_rejected() {
+    let project = unique_temp_dir("beta_typedef_reject");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+
+    let terminal_td = r#"
+MyRecord = @(x: Int, y: Int)
+
+<<< @(MyRecord)
+"#;
+    write_terminal_fixture(&project, terminal_td, &[]);
+
+    let main_td = r#">>> taida-lang/terminal => @(MyRecord)
+stdout(`${MyRecord}`)
+"#;
+    let (ok, _stdout, stderr) = build_native(&project, main_td);
+    assert!(!ok, "TypeDef inside a facade must still fail the build");
+    assert!(
+        stderr.contains("C25B-030 Phase 1E-γ"),
+        "error must point to Phase 1E-γ as the follow-up, got: {}",
         stderr
     );
 
