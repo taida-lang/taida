@@ -340,6 +340,51 @@ mod tests {
     /// detector or renderer path. Fixes the linear-memory OOM flagged
     /// in Codex's C24 HOLD review.
     ///
+    /// C25B-001 Phase 3 (2026-04-23): 302,700 → 313,465 (+10,765). Added
+    /// minimal Stream lowering to `01_core.inc.c` so `Str[stream]()` on
+    /// wasm no longer errors with `unsupported mold type: Stream`: a
+    /// `taida_stream_new` allocator that emits the 3-field pack
+    /// `@(__stream_status <= "completed", __stream_count <= 1,
+    /// __type <= "Stream")`, a `_wasm_is_stream` detector keyed on the
+    /// `__type` FNV-1a hash, a `_wasm_stream_to_display_string` full-form
+    /// renderer, and the three-byte field-name registration block. Routed
+    /// from `_wasm_stdout_display_string` ahead of the generic BuchiPack
+    /// path so the Stream shape renders byte-for-byte identical to the
+    /// interpreter's `@(__stream_status <= "completed", __stream_count <=
+    /// 1, __type <= "Stream")` form. Closes the 4-backend Stream parity
+    /// gap flagged as C25B-001.
+    ///
+    /// C25B-026 Phase 5-G (2026-04-23): 313,465 → 318,189 (+4,724). Added
+    /// the arena-scoped release infrastructure to `01_core.inc.c`:
+    /// `wasm_arena_enter()` snapshots `bump_ptr` and returns it as an
+    /// opaque i32 handle; `wasm_arena_leave(saved)` restores `bump_ptr`
+    /// to the snapshot, releasing every allocation made since the
+    /// matching enter; `wasm_arena_used()` reports the current heap
+    /// consumption since `__heap_base`; and
+    /// `wasm_arena_roundtrip_test(iters, inner)` drives an
+    /// enter/alloc/leave loop and returns the net heap delta (0 on
+    /// success, `iters * inner * 64` on regression) so
+    /// `tests/wasm_wasi.rs::wasm_wasi_arena_release_is_bounded` can
+    /// invoke it via `wasmtime --invoke` as a single-call behavioural
+    /// assertion. For the wasm-wasi and wasm-full profiles,
+    /// `wasm_arena_export_flags()` in `src/codegen/driver.rs` emits
+    /// `--export=wasm_arena_*` wasm-ld flags that simultaneously keep
+    /// the symbols from `--gc-sections` and make them callable from
+    /// wasmtime / host harnesses. For wasm-min / wasm-edge the flag
+    /// list is empty and `--gc-sections` drops all four helpers
+    /// entirely, preserving the 512-byte hello.wasm ceiling guarded
+    /// by `tests/wasm_min.rs::wasm_min_size_gate`. Paired with the
+    /// runtime-linker plumbing in `src/codegen/driver.rs` that
+    /// translates `TAIDA_WASM_INITIAL_PAGES` / `TAIDA_WASM_MAX_PAGES`
+    /// env vars into `--initial-memory=…` / `--max-memory=…` wasm-ld
+    /// flags, giving per-build control of the initial and maximum
+    /// linear-memory footprint. This is the foundation for Phase 5-I
+    /// (or a later pass) to inject enter/leave around
+    /// escape-analysis-safe scopes; today it lets regression tests
+    /// assert that a bounded-scope loop does not monotonically leak
+    /// heap across iterations. Fixes the `@[Float]` / LLM forward-loop
+    /// linear-memory OOM flagged in C25B-026.
+    ///
     /// C24-A (2026-04-23): 295,319 → 299,284 (+3,965). Unified WASM
     /// Gorillax's first-field hash from `WASM_HASH_IS_OK` (0x6550…) to
     /// `WASM_HASH_HAS_VALUE` (0x9e9c…) so `Str[Gorillax[v]()]()` matches
@@ -369,7 +414,7 @@ mod tests {
     /// compatibility shim is required.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 302_700;
+        const EXPECTED_TOTAL_LEN: usize = 318_189;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
