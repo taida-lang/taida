@@ -2027,6 +2027,158 @@ impl Lowering {
                 }
                 self.collect_free_vars_inner(body, &inner_bound, free, seen);
             }
+            // C25B-030 Phase 1F: `TemplateLit` stores the raw
+            // interpolated source (`"${a}${sep}${b}"` etc.); the
+            // real interpolation expressions are re-parsed during
+            // `lower_template_lit`. Before Phase 1F this arm fell
+            // into the `_ => {}` catch-all, so a top-level binding
+            // referenced only from a template (e.g. `sep <= "-"` at
+            // module top level, then `join a b = \`${a}${sep}${b}\``
+            // as a FuncDef) was never added to `globals_referenced`
+            // and no `GlobalGet(hash)` was emitted at the head of
+            // the FuncDef body. The native binary read 0 from the
+            // uninitialised global slot and printed `ab` instead of
+            // `a-b`, diverging from the interpreter which eagerly
+            // resolves `sep` through lexical scope.
+            //
+            // The fix splits the template on `${...}` boundaries
+            // (same logic as `src/codegen/lower/expr.rs::
+            // lower_template_lit`) and re-parses each interpolation
+            // as a standalone expression so the normal free-var
+            // walker runs over it. Parse failures fall back to a
+            // bare-identifier capture, mirroring the real
+            // lowering's behaviour.
+            Expr::TemplateLit(template, _) => {
+                Self::collect_free_vars_in_template(template, bound, free, seen);
+            }
+            _ => {}
+        }
+    }
+
+    /// C25B-030 Phase 1F helper: walk a `TemplateLit` body for
+    /// free-variable references. Mirrors
+    /// `lower_template_lit`'s `${...}` parser so the free-var
+    /// collection sees exactly the same identifiers the native
+    /// lowering will later resolve. Structurally identical to
+    /// `facade_collect_refs_in_template` in
+    /// `src/codegen/lower/imports.rs`; kept as a sibling to avoid
+    /// coupling the `Lowering` struct's method signature to the
+    /// facade-loader universe maps.
+    fn collect_free_vars_in_template(
+        template: &str,
+        bound: &std::collections::HashSet<&str>,
+        free: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                i += 2;
+                let start = i;
+                let mut depth = 1;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' {
+                        depth += 1;
+                    }
+                    if chars[i] == '}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
+                }
+                let expr_str: String = chars[start..i].iter().collect();
+                let trimmed = expr_str.trim();
+                let (program, errors) = crate::parser::parse(trimmed);
+                if errors.is_empty()
+                    && !program.statements.is_empty()
+                    && let Statement::Expr(ref parsed_expr) = program.statements[0]
+                {
+                    Self::collect_free_vars_in_parsed_expr(parsed_expr, bound, free, seen);
+                } else if !trimmed.is_empty() && !bound.contains(trimmed) && !seen.contains(trimmed)
+                {
+                    // `lower_template_lit`'s fallback path: treat
+                    // the trimmed string as a bare identifier.
+                    seen.insert(trimmed.to_string());
+                    free.push(trimmed.to_string());
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Free-function variant of the free-vars walker used by the
+    /// template interpolation path. Does not consult `self` — the
+    /// enclosing `collect_free_vars_in_body` filter applies its
+    /// `top_level_vars` / `imported_value_names` pass after the
+    /// walk, so we can stay associative here.
+    fn collect_free_vars_in_parsed_expr(
+        expr: &Expr,
+        bound: &std::collections::HashSet<&str>,
+        free: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        match expr {
+            Expr::Ident(name, _) if !bound.contains(name.as_str()) && !seen.contains(name) => {
+                seen.insert(name.clone());
+                free.push(name.clone());
+            }
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                Self::collect_free_vars_in_parsed_expr(lhs, bound, free, seen);
+                Self::collect_free_vars_in_parsed_expr(rhs, bound, free, seen);
+            }
+            Expr::UnaryOp(_, operand, _) => {
+                Self::collect_free_vars_in_parsed_expr(operand, bound, free, seen);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                Self::collect_free_vars_in_parsed_expr(callee, bound, free, seen);
+                for arg in args {
+                    Self::collect_free_vars_in_parsed_expr(arg, bound, free, seen);
+                }
+            }
+            Expr::FieldAccess(obj, _, _) => {
+                Self::collect_free_vars_in_parsed_expr(obj, bound, free, seen);
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                Self::collect_free_vars_in_parsed_expr(obj, bound, free, seen);
+                for arg in args {
+                    Self::collect_free_vars_in_parsed_expr(arg, bound, free, seen);
+                }
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    Self::collect_free_vars_in_parsed_expr(e, bound, free, seen);
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    Self::collect_free_vars_in_parsed_expr(&field.value, bound, free, seen);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    Self::collect_free_vars_in_parsed_expr(item, bound, free, seen);
+                }
+            }
+            Expr::MoldInst(_, args, fields, _) => {
+                for arg in args {
+                    Self::collect_free_vars_in_parsed_expr(arg, bound, free, seen);
+                }
+                for field in fields {
+                    Self::collect_free_vars_in_parsed_expr(&field.value, bound, free, seen);
+                }
+            }
+            Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                Self::collect_free_vars_in_parsed_expr(inner, bound, free, seen);
+            }
+            Expr::TemplateLit(nested, _) => {
+                Self::collect_free_vars_in_template(nested, bound, free, seen);
+            }
             _ => {}
         }
     }

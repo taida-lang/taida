@@ -962,8 +962,16 @@ stdout(`action=${st.action}`)
          was not replayed; got: {:?}",
         out
     );
-    assert!(out.contains("cursor=5"), "cursor must pick up initial.length(): {:?}", out);
-    assert!(out.contains("action=0"), "action default must flow through: {:?}", out);
+    assert!(
+        out.contains("cursor=5"),
+        "cursor must pick up initial.length(): {:?}",
+        out
+    );
+    assert!(
+        out.contains("action=0"),
+        "action default must flow through: {:?}",
+        out
+    );
 
     let _ = std::fs::remove_dir_all(&project);
 }
@@ -1016,8 +1024,16 @@ stdout(`default=${State.text}`)
         .output()
         .expect("run produced binary");
     let out = String::from_utf8_lossy(&run.stdout);
-    assert!(out.contains("via_func=hi"), "FuncDef body path broken: {:?}", out);
-    assert!(out.contains("default=?"), "user-side pack default broken: {:?}", out);
+    assert!(
+        out.contains("via_func=hi"),
+        "FuncDef body path broken: {:?}",
+        out
+    );
+    assert!(
+        out.contains("default=?"),
+        "user-side pack default broken: {:?}",
+        out
+    );
 
     let _ = std::fs::remove_dir_all(&project);
 }

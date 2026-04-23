@@ -762,7 +762,83 @@ impl Lowering {
                 }
                 Self::facade_collect_refs_in_expr(body, &inner_bound, out);
             }
+            // C25B-030 Phase 1F: `TemplateLit(template, _)` stores the
+            // raw interpolated string (`"${_sep}-${who}"` etc.); the
+            // real sub-expressions are parsed only during
+            // `lower_template_lit`. To make reachability honest we
+            // run the same `${...}`-splitting logic here (matches
+            // `src/codegen/lower/expr.rs::lower_template_lit`) and
+            // walk each parsed interpolation expression. Before Phase
+            // 1F this arm fell into the `_ => {}` catch-all, so a
+            // private facade binding referenced only from a template
+            // (e.g. cross-file `_sep <= "-"` used inside
+            // `Join2 a b = \`${a}${_sep}${b}\`\ => :Str`) was never
+            // promoted into `summary.pack_bindings`. The resulting
+            // native binary read 0 from the uninitialised global slot
+            // and printed `hi0world` instead of `hi-world`. With this
+            // expansion the reachability pass mirrors the interpreter
+            // which eagerly resolves `_sep` through its lexical facade
+            // scope.
+            Expr::TemplateLit(template, _) => {
+                Self::facade_collect_refs_in_template(template, bound, out);
+            }
             _ => {}
+        }
+    }
+
+    /// C25B-030 Phase 1F helper: split a `TemplateLit` string on
+    /// `${ ... }` boundaries, re-parse each interpolation as a
+    /// standalone Taida expression, and walk it for referenced
+    /// identifiers. Mirrors the parsing strategy of
+    /// `lower_template_lit` so the reachability expansion honours
+    /// exactly the same lookup names that the native lowering will
+    /// later resolve. Parse failures are silently ignored — the
+    /// real `lower_template_lit` will surface them as compile
+    /// errors with full source spans.
+    fn facade_collect_refs_in_template(
+        template: &str,
+        bound: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                i += 2;
+                let start = i;
+                let mut depth = 1;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' {
+                        depth += 1;
+                    }
+                    if chars[i] == '}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
+                }
+                let expr_str: String = chars[start..i].iter().collect();
+                let trimmed = expr_str.trim();
+                let (program, errors) = crate::parser::parse(trimmed);
+                if errors.is_empty()
+                    && !program.statements.is_empty()
+                    && let Statement::Expr(ref parsed_expr) = program.statements[0]
+                {
+                    Self::facade_collect_refs_in_expr(parsed_expr, bound, out);
+                } else {
+                    // Fallback path in `lower_template_lit` treats the
+                    // trimmed string as a bare identifier; mirror that.
+                    if !trimmed.is_empty() && !bound.contains(trimmed) {
+                        out.insert(trimmed.to_string());
+                    }
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
         }
     }
 
