@@ -482,7 +482,21 @@ int64_t taida_relaxed_gorillax_err(int64_t error) {
 
 /* WASM_HASH___PREDICATE, WASM_HASH_THROW defined in W-5f monadic type hash section */
 
+/* C25B-028: register Result's `__predicate` / `throw` field names so
+   jsonEncode (and any other name-lookup based renderer) can see them.
+   Idempotent — mirrors the C23B-009 pattern used for Lax / Gorillax. */
+static int _wasm_result_names_registered = 0;
+static void _wasm_register_result_field_names(void) {
+    if (_wasm_result_names_registered) return;
+    _wasm_result_names_registered = 1;
+    taida_register_field_name(WASM_HASH___VALUE,     (int64_t)(intptr_t)"__value");
+    taida_register_field_name(WASM_HASH___PREDICATE, (int64_t)(intptr_t)"__predicate");
+    taida_register_field_name(WASM_HASH_THROW,       (int64_t)(intptr_t)"throw");
+    taida_register_field_name(WASM_HASH___TYPE,      (int64_t)(intptr_t)"__type");
+}
+
 int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate) {
+    _wasm_register_result_field_names();
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, WASM_HASH___VALUE);
     taida_pack_set(pack, 0, value);
@@ -492,6 +506,7 @@ int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate)
     taida_pack_set(pack, 2, throw_val);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
+    taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
 

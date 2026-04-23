@@ -5708,8 +5708,22 @@ static int taida_can_throw_payload(taida_val val) {
 
 // ── Result constructors ──
 
+// C25B-028: register Result's `__predicate` and `throw` field names so
+// jsonEncode (and any other name-lookup based renderer) can see them.
+// Idempotent — C23B-009 pattern.
+static void taida_register_result_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+    taida_register_field_name((taida_val)HASH_RES___VALUE, (taida_val)"__value");
+    taida_register_field_name((taida_val)HASH_RES___PREDICATE, (taida_val)"__predicate");
+    taida_register_field_name((taida_val)HASH_RES_THROW, (taida_val)"throw");
+    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+}
+
 // Result[value, predicate](throw <= error) — create Result with optional predicate
 taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val predicate) {
+    taida_register_result_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_RES___VALUE);
     taida_pack_set(pack, 0, value);
@@ -8356,8 +8370,60 @@ static void json_append_enum_variant(char **buf, size_t *cap, size_t *len, taida
 
 // Helper: serialize a BuchiPack's fields as JSON object
 // Fields are sorted alphabetically (matching interpreter/JS behavior).
-// All __ fields are skipped (__type, __value, __default, __entries, __items).
+// All __ fields are skipped for user packs, BUT monadic packs (Lax /
+// Gorillax / RelaxedGorillax / Result) expose `__value` / `__default` /
+// `__error` / `__predicate` to match the interpreter's `jsonEncode`.
+// `__type` is always skipped (internal metadata).
+//
+// C25B-028: detect monadic packs via `taida_monadic_field_count` on the
+// pack pointer; when monadic, allow `__*` fields through (except
+// `__type`). Non-monadic user BuchiPacks continue to skip all `__*` to
+// preserve the pre-existing "hide internal state" contract.
 static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, taida_val *pack, taida_val fc, int indent, int depth) {
+    int monadic_kind = taida_monadic_field_count((taida_val)(intptr_t)pack);
+    int is_monadic = (monadic_kind == 3 || monadic_kind == 4);
+    // C25B-028: for Lax (`monadic_kind == 4` with `__default` in slot 2)
+    // the `__default` field carries the same T as `__value`; if `__value`
+    // is tag-Int or heuristically an Int, force Int formatting on
+    // `__default` too. This is the only reliable way to render
+    // `Lax[N : Int]()` with `__default: 0` rather than `__default: {}`.
+    // 0 = no override, 1 = Int, 3 = Str. Bool/Float omitted for now
+    // (`Lax[true]()` / `Lax[1.0]()` produce true/0.0 which already round-
+    // trip through the slot-tag path; no 0-default ambiguity).
+    int lax_default_force_type = 0;
+    if (is_monadic && monadic_kind == 4) {
+        // Lax / Gorillax / RelaxedGorillax share the `hasValue` layout.
+        // Distinguish Lax (has `__default`) vs Gorillax (has `__error`)
+        // by checking slot 2's hash.
+        if (fc >= 3 && pack[2 + 2 * 3] == (taida_val)HASH___DEFAULT) {
+            taida_val value_slot_tag = pack[2 + 1 * 3 + 1];
+            taida_val value_slot_val = pack[2 + 1 * 3 + 2];
+            if (value_slot_tag == TAIDA_TAG_STR) {
+                lax_default_force_type = 3;
+            } else if (value_slot_tag == TAIDA_TAG_BOOL) {
+                lax_default_force_type = 1; // Bool renders as 0/1 numerically here.
+            } else if (value_slot_tag == TAIDA_TAG_INT) {
+                // TAIDA_TAG_INT (0) is also the "untagged" sentinel.
+                // Use the value shape to disambiguate:
+                //   - int-shaped (small positive / any negative / zero) → Int
+                //   - pointer-shaped (> 4096) with readable C-string →  Str
+                //     (covers string literals stamped with no STR magic)
+                size_t __slen = 0;
+                if (value_slot_val > 0 &&
+                    value_slot_val > 4096 &&
+                    taida_read_cstr_len_safe((const char*)value_slot_val, 65536, &__slen)) {
+                    lax_default_force_type = 3;
+                } else if (value_slot_val == 0 ||
+                           value_slot_val < 0 ||
+                           (value_slot_val > 0 && value_slot_val < 4096)) {
+                    lax_default_force_type = 1;
+                }
+            }
+            // Other tags (Float/Pack/List/...) leave the default path
+            // alone — either the slot tag picks up the type below, or
+            // the heuristic in json_serialize_typed handles a pointer.
+        }
+    }
     // Collect visible fields: (name, val, type_hint, enum_desc, index for stable sort)
     typedef struct { const char *name; taida_val val; int type_hint; const char *enum_desc; } JsonField;
     JsonField fields[100];
@@ -8367,11 +8433,39 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         taida_val field_val = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
-        // Skip all __ fields (__type, __value, __default, __entries, __items)
-        if (fname[0] == '_' && fname[1] == '_') {
+        // Always skip __type (internal metadata, not user data).
+        if (strcmp(fname, "__type") == 0) continue;
+        // Non-monadic packs hide all other __ fields.
+        // Monadic packs (Lax/Gorillax/RelaxedGorillax/Result) expose them
+        // so that jsonEncode output matches the interpreter.
+        if (!is_monadic && fname[0] == '_' && fname[1] == '_') {
             continue;
         }
         int ftype = taida_lookup_field_type(field_hash);
+        // C25B-028: pull per-slot tag from the pack layout so the
+        // monadic payload uses the correct formatter (Int/Float/Str vs
+        // pointer heuristic). Slot tag of 0 means TAIDA_TAG_INT /
+        // untagged — the caller-level force_int_default_for_lax
+        // compensates for Lax `__default`/`__value` ambiguity.
+        if (ftype == 0 && is_monadic) {
+            taida_val slot_tag = pack[2 + i * 3 + 1];
+            if (slot_tag == TAIDA_TAG_STR) ftype = 3;
+            else if (slot_tag == TAIDA_TAG_BOOL) ftype = 4;
+            // TAIDA_TAG_INT (0) / other: leave as 0 and fall back to
+            // heuristic inside json_serialize_typed.
+        }
+        // Lax payload: force formatting on `__value` and `__default`
+        // based on the sibling slot's tag so `Value::Int(0)` doesn't
+        // render as `{}` and `Value::Str("")` doesn't render as `{}`.
+        if (lax_default_force_type != 0 && ftype == 0 &&
+            (strcmp(fname, "__default") == 0 || strcmp(fname, "__value") == 0)) {
+            ftype = lax_default_force_type;
+            // Str-forced value with val=0: replace with an empty-string
+            // pointer so json_serialize_typed doesn't deref NULL.
+            if (ftype == 3 && field_val == 0) {
+                field_val = (taida_val)"";
+            }
+        }
         // C18B-003 fix: prefer per-pack descriptor (keyed by pack_ptr +
         // field_hash) over the global field registry so two enums that
         // share the field name (`state`, `status`, `kind`, …) emit
@@ -8430,21 +8524,24 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
         return;
     }
 
-    // Null/Unit
+    // Integer/Float hints take precedence over the val==0 Unit fallback
+    // so `Value::Int(0)` → `"0"` and not `"{}"`. Matches interpreter's
+    // `taida_value_to_json` which emits Int(0) as JSON number 0.
+    if (type_hint == 1 || type_hint == 2) { // Int or Float
+        char num[32];
+        snprintf(num, sizeof(num), "%" PRId64 "", val);
+        json_append(buf, cap, len, num);
+        return;
+    }
+
+    // Null/Unit (untyped val==0 falls through to empty object, matching
+    // interpreter's `Value::Unit` → `{}`).
     if (val == 0) {
         if (type_hint == 3) { // Str
             json_append(buf, cap, len, "\"\"");
         } else {
             json_append(buf, cap, len, "{}");
         }
-        return;
-    }
-
-    // Integer hints: always serialize as number
-    if (type_hint == 1 || type_hint == 2) { // Int or Float
-        char num[32];
-        snprintf(num, sizeof(num), "%" PRId64 "", val);
-        json_append(buf, cap, len, num);
         return;
     }
     // String hint: always treat as string pointer

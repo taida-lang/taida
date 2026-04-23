@@ -2502,17 +2502,55 @@ if (!String.prototype.__taida_str_patched) {
 }
 
 // ── Helper: sort object keys for deterministic JSON output ──
+//
+// C25B-028: monadic packs (Lax / Gorillax / RelaxedGorillax / Result) must
+// match the interpreter's `jsonEncode` output, which renders the `__*`
+// fields verbatim with two normalizations:
+//   - `hasValue` is exposed as a real Bool (the JS `Gorillax()` / `Lax()`
+//     constructors store it as a callable that returns a bool — JSON would
+//     otherwise drop the key).
+//   - `__error` / `__predicate` / `throw` fields hold internal error
+//     callables or null; the interpreter represents the absent-error case
+//     as `Value::Unit` which serializes as `{}`. We normalise `null` and
+//     functions to `{}` here to match.
+//   - `__default` is passed through when present (Lax).
+function __taida_is_monadic_pack_obj(obj) {
+  return obj && typeof obj === 'object' &&
+    (obj.__type === 'Lax' || obj.__type === 'Gorillax' ||
+     obj.__type === 'RelaxedGorillax' || obj.__type === 'Result');
+}
+function __taida_normalise_monadic_field(k, v) {
+  if (k === 'hasValue') {
+    // Callable wrapper from `__taida_hasValue` — unwrap to boolean.
+    if (typeof v === 'function') return !!v();
+    return !!v;
+  }
+  // Absent-error sentinels (null / function / undefined) render as `{}` to
+  // match the interpreter's `Value::Unit` → `serde_json` empty object.
+  if ((k === '__error' || k === '__predicate' || k === 'throw') &&
+      (v === null || v === undefined || typeof v === 'function')) {
+    return Object.freeze({});
+  }
+  return v;
+}
 function __taidaSortKeys(obj) {
   // C18-2: Pass Enum wrappers through untouched so JSON.stringify invokes
   // their `toJSON` method and emits the variant-name Str.
   if (__taida_isEnumVal(obj)) return obj;
   if (Array.isArray(obj)) return obj.map(__taidaSortKeys);
   if (obj && typeof obj === 'object' && !(obj instanceof __TaidaJSON)) {
+    const isMonadic = __taida_is_monadic_pack_obj(obj);
     const sorted = {};
     for (const k of Object.keys(obj).sort()) {
       // Skip __type — internal metadata, not user data
       if (k === '__type') continue;
-      sorted[k] = __taidaSortKeys(obj[k]);
+      let v = obj[k];
+      // Skip any remaining function-valued fields outside the monadic
+      // carve-out — JSON.stringify already drops them, but being explicit
+      // here keeps the key-order deterministic.
+      if (typeof v === 'function' && !(isMonadic && k === 'hasValue')) continue;
+      if (isMonadic) v = __taida_normalise_monadic_field(k, v);
+      sorted[k] = __taidaSortKeys(v);
     }
     return sorted;
   }
