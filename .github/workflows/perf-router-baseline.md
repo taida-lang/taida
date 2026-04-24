@@ -111,4 +111,4 @@ PR runs **never** update the baseline; they only read it.
 - [x] `.github/bench-baselines/perf_router.json` pins thresholds with documented headroom
 - [x] First 5 runs are WARN-only (sampling phase); then hard-fail
 - [x] Existing parity tests in `c26b_024_router_bench_parity.rs` are unchanged
-- [x] D27 escalation checklist: 3/3 NO (no surface / no error-string / no existing-assertion edits)
+- [x] D28 escalation checklist: 3/3 NO (no surface / no error-string / no existing-assertion edits)

@@ -21,7 +21,7 @@ Under `@c.25.rc7` the supported backend matrix for addons is:
 | Interpreter    | **Supported** | Addon facade runs as a dynamic module; cdylib functions dispatch via `dlopen` when the interpreter binary is built with `feature = "native"` (the default). |
 | Native (AOT)   | **Supported** | Addon facade is statically analysed into an `AddonFacadeSummary` by `src/addon/facade.rs` and lowered through `src/codegen/lower/imports.rs`. FuncDefs become IR functions; pack / scalar / list / template bindings are replayed into the module init path. |
 | JS transpiler  | **Rejected**  | There is no JS-side addon dispatcher today. The import produces a deterministic error. |
-| WASM (min / wasi) | **Rejected** | Reserved for the D27 breaking-change phase (see `docs/STABILITY.md` §1.2 for the D26→D27 rename note). The D27 wasm backend will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. |
+| WASM (min / wasi) | **Rejected** | Reserved for the D28 breaking-change phase (see `docs/STABILITY.md` §1.2 for the D26→D27→D28 rename trail). The D28 wasm backend will reuse the `src/addon/facade.rs` static analyser so authors will not have to re-write facades. |
 
 Authors targeting interpreter + native do not need to write two
 facade files. The same `taida/<stem>.td` must work on both — the

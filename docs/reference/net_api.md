@@ -15,7 +15,7 @@ Taida の NET surface は **zero-copy span** を基本単位とします:
 - `httpServe` handler / `httpParseRequestHead` が返す `req` pack の `method` / `path` / `query` / `headers[i].name` / `headers[i].value` / `body` は **`@(start: Int, len: Int)` の span pack** で、元の `req.raw: Bytes` に対する view です。
 - 原本の `Bytes` を clone せず、必要になった時点で user が明示的に **span → Str** または **span-aware 比較** を呼ぶ形にしています。これは C26B-018 / C26B-024 の clone-heavy 抑制方針 (`src/interpreter/value.rs` の Arc + try_unwrap COW 共通 abstraction) と一致する設計です。
 - span pack を受け取る公開 mold 群は `§ 4 span-aware 比較 mold` を参照。
-- 「`req.method` を自動で `Str` に昇格する」設計 (Option A) は `tests/parity.rs` 既存 assertion (`body <= req.method` 等) を破壊するため D27 送り (`.dev/D27_BLOCKERS.md`) に pin 済みです。gen-C では Option B+ (span 保持 + span-aware 公開 mold 追加) で ergonomics を解決します。
+- 「`req.method` を自動で `Str` に昇格する」設計 (Option A) は `tests/parity.rs` 既存 assertion (`body <= req.method` 等) を破壊するため D28 送り (`.dev/D28_BLOCKERS.md`、旧 D26 / D27) に pin 済みです。gen-C では Option B+ (span 保持 + span-aware 公開 mold 追加) で ergonomics を解決します。
 
 ---
 
@@ -233,7 +233,7 @@ HTTP client。TLS 自動判定 (`https://` なら TLS)。詳細は C26B-002 FIXE
 | 部分適用 closure capture | C26B-017 | Must Fix | 12 | `[FIXED]` (Round 3 / wH) |
 | bytes I/O 3-backend + wasm-wasi | C26B-020 | Must Fix | 10 | 柱 1 + 柱 3 `[FIXED]` (Round 1 / Round 3 wI); 柱 2 OPEN |
 
-WASM バックエンドは gen-C では rejected、D27 送り (`docs/STABILITY.md` §1.2 / §4.2 / §5.2)。例外として C26B-020 柱 3 (`readBytesAt` の `wasm-wasi` / `wasm-full` lowering) のみ § 6.2 widening addition として land 済。
+WASM バックエンドは gen-C では rejected、D28 送り (`docs/STABILITY.md` §1.2 / §4.2 / §5.2、旧 D26 / D27)。例外として C26B-020 柱 3 (`readBytesAt` の `wasm-wasi` / `wasm-full` lowering) のみ § 6.2 widening addition として land 済。
 
 ---
 

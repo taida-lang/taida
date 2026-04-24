@@ -14,7 +14,9 @@ Related references:
 - `.dev/C26_BLOCKERS.md` — open quality blockers and their severity
   (C26 track; `.dev/C25_BLOCKERS.md` is archived).
 - `.dev/C26_PROGRESS.md` — phase map for the C26 fix-only RC cycle.
-- `.dev/D27_BLOCKERS.md` — breaking changes deferred to the gen-D phase.
+- `.dev/C27_PROGRESS.md` — phase map for the C27 fix-only RC cycle
+  (C26 successor, opened 2026-04-25).
+- `.dev/D28_BLOCKERS.md` — breaking changes deferred to the gen-D phase.
 - `docs/reference/addon_manifest.md` — addon manifest schema.
 - `docs/reference/operators.md`, `docs/reference/mold_types.md`,
   `docs/reference/standard_library.md`, `docs/reference/standard_methods.md`
@@ -50,7 +52,7 @@ Examples:
 - `@c.26.rcM` — gen-C fix-only RC cycle (this track).
 - `@c.26` — gen-C stable (label absent) — the second candidate for
   gen-C stable, pursued by C26.
-- `@d.27.rc1` — next breaking-change generation (see §1.2 below).
+- `@d.28.rc1` — next breaking-change generation (see §1.2 below).
 
 **Agents / automation must not write semver-shaped numbers (`0.1.0`,
 `1.2.3`) into release artifacts, tag names, or manifest versions.**
@@ -79,18 +81,20 @@ are treated as breaking:
 Additions that keep every previously-legal program working unchanged
 do **not** constitute a breaking change. They land at a `<num>` bump.
 
-### 1.2. D27 (breaking-change phase)
+### 1.2. D28 (breaking-change phase)
 
-Generation D27 (originally planned as D26 and renamed on 2026-04-24 —
-see `MEMORY/project_d27_breaking_change_phase.md`) is reserved for the
+Generation D28 (originally planned as D26, renamed to D27 on
+2026-04-24, then renamed to D28 on 2026-04-25 alongside the opening
+of the C27 fix-only RC cycle — see
+`MEMORY/project_d28_breaking_change_phase.md`) is reserved for the
 breaking changes deliberately deferred from gen-C. The principal
 motivators are (non-exhaustive):
 
 - **Function name capitalisation cleanup** — `Str` / `lower` /
   `toString` etc. have drifted between `PascalCase` / `camelCase` /
-  `lowercase`. D27 will pick one convention and migrate en masse.
+  `lowercase`. D28 will pick one convention and migrate en masse.
 - **WASM backend extension for addons** — gen-C locks `AddonBackend`
-  to `Native | Interpreter` and rejects `Js`. D27 introduces a
+  to `Native | Interpreter` and rejects `Js`. D28 introduces a
   WASM backend, potentially requiring manifest schema changes
   (`targets` field, see §4.3).
 - **Addon ABI v2** — host-side callbacks (`on_panic_cleanup`,
@@ -98,18 +102,20 @@ motivators are (non-exhaustive):
 - **Diagnostic renumbering** — any cleanups that require renaming or
   renumbering `E1xxx` codes.
 
-See `.dev/D27_BLOCKERS.md` and `MEMORY/project_d27_breaking_change_phase.md`
+See `.dev/D28_BLOCKERS.md` and `MEMORY/project_d28_breaking_change_phase.md`
 for the live worklist. Anything in that list is out-of-scope for
-both C25 and C26 even if it is otherwise attractive.
+C25, C26, and C27 (the fix-only RC cycle series) even if it is
+otherwise attractive.
 
 > **Error-string note.** The legacy substring `wasm planned for D26`
 > remains in the runtime diagnostic emitted by
 > `src/addon/backend_policy.rs` (see §4.2). That substring is a
 > **pinned surface token** for the entire gen-C generation and will
-> not be renamed to `D27` mid-generation; doing so would break
-> tooling that matches on the substring. The rename to `D27` in prose
-> here is documentation-only. The token is planned to be rewritten
-> at the gen-D boundary alongside the other breaking changes.
+> not be renamed to `D27` / `D28` mid-generation; doing so would
+> break tooling that matches on the substring. The rename to `D28`
+> in prose here is documentation-only. The token is planned to be
+> rewritten at the gen-D boundary alongside the other breaking
+> changes.
 
 ### 1.3. `@c.25` label skip
 
@@ -232,7 +238,7 @@ Across the whole gen-C generation (`@c.25.*` and `@c.26.*`):
 - `Native` — supported.
 - `Interpreter` — supported (first-class, not a degraded fallback).
 - `Js` — deterministically rejected; no dispatcher exists.
-- `Wasm` — deterministically rejected; planned for the D27
+- `Wasm` — deterministically rejected; planned for the D28
   breaking-change phase (see §1.2).
 
 The error message `"(supported: interpreter, native; wasm planned for
@@ -241,8 +247,8 @@ part of the stable surface for the gen-C generation — tooling is
 permitted to match on the substring `"supported: interpreter, native"`
 to detect the current policy. The literal `D26` token inside that
 string is a pinned surface artefact from C25B-030 and is **not**
-renamed to `D27` mid-generation; the rename is a gen-D breaking
-change (see §1.2). New code should match on the
+renamed to `D27` / `D28` mid-generation; the rename is a gen-D
+breaking change (see §1.2). New code should match on the
 `"supported: interpreter, native"` prefix rather than the trailing
 `D26` token.
 
@@ -251,7 +257,7 @@ change (see §1.2). New code should match on the
 `addon.toml` across the gen-C generation has **no** `targets` field.
 The label-less `@c.26` stable release will ship the same schema.
 
-When `targets` is introduced at a later generation (tentatively D27,
+When `targets` is introduced at a later generation (tentatively D28,
 coupled with the WASM backend), the migration rule is **pinned now**
 so that existing gen-C addons remain valid:
 
@@ -259,7 +265,7 @@ so that existing gen-C addons remain valid:
 > `targets = ["native"]`.
 
 That is: the absence of `targets` means **native only**, matching the
-gen-C reality. Addon authors who want multi-target support at D27+
+gen-C reality. Addon authors who want multi-target support at D28+
 opt in explicitly; addon authors who do nothing remain valid
 native-only addons.
 
@@ -275,9 +281,9 @@ callbacks at the end of the vtable, new optional exported symbols)
 may land at a `<num>` bump. Reordering, renaming, or changing the
 signature of an existing slot is a breaking change.
 
-D27 is expected to introduce ABI v2 (adds `on_panic_cleanup` etc.
-host callbacks). The gen-C generation (`@c.25.*` / `@c.26.*`) keeps
-ABI v1 intact for the full generation.
+D28 is expected to introduce ABI v2 (adds `on_panic_cleanup` etc.
+host callbacks). The gen-C generation (`@c.25.*` / `@c.26.*` /
+`@c.27.*`) keeps ABI v1 intact for the full generation.
 
 ### 4.5. Publishing workflow
 
@@ -373,9 +379,9 @@ C26B-020 pillar 3 (a widening addition, §6.2).
 
 ### 5.2. Addon WASM backend
 
-Gen-C locks `AddonBackend::Wasm` as "rejected, planned for D27"
-(see §1.2 for the D26→D27 rename note). The stable surface
-contract at §4.2 explicitly permits D27 to add WASM support
+Gen-C locks `AddonBackend::Wasm` as "rejected, planned for D28"
+(see §1.2 for the D26→D27→D28 rename trail). The stable surface
+contract at §4.2 explicitly permits D28 to add WASM support
 without a `<gen>` bump, because doing so only widens the set of
 accepted backends. The `targets` default-to-`["native"]` rule at
 §4.3 ensures no existing addon is reinterpreted by the widening.
@@ -387,7 +393,7 @@ suspend points. Until that audit lands, the `Async[T]` surface is
 stable in **syntax and type shape** (pinned by §2.2) but the exact
 behaviour of a lambda whose closure outlives its defining frame
 through a `]=>` suspend is not contractual. Programs that depend on
-this edge case should assume it will be redesigned at D27+.
+this edge case should assume it will be redesigned at D28+.
 
 ### 5.4. Terminal addon async FIFO
 
@@ -494,7 +500,7 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 +
   landed as the family's cold-path materialiser at Round 3 / wH
   via pure IR composition (no new C runtime helpers).
   **Option B+ complete**; Option A (auto-`Str` promotion of
-  `req.method`) remains D27-deferred.
+  `req.method`) remains D28-deferred.
 - **C26B-017** — Interpreter partial-application closure-capture
   bug fixed (Round 3 / wH); `makeAdder(10)(7) == 17` 3-backend.
 - **C26B-019** — multi-line `TypeDef(field <= v, ...)`
@@ -562,7 +568,7 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 +
   + non-boundary rejection, `Arc` sharing of the cache across
   clones, and the `Value::str_take` unique + shared paths.
   Option (D) `StringBuilder` remains **discarded** (not
-  deferred, not revisited at D27). D27 escalation checklist:
+  deferred, not revisited at D28). D28 escalation checklist:
   3/3 NO — `Value::Str(Arc<StrValue>)` is an internal layout
   change, `StrValue` Deref is transparent, and no mold
   signature / pinned error string / existing assertion is
@@ -644,7 +650,7 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 +
   against `bench_router.td`) is additive infrastructure tracked
   separately under C26B-024 on `.dev/C26_BLOCKERS.md`; the
   stable-gate acceptance numbers above are the contractual
-  baseline it will enforce once wired. D27 escalation checklist:
+  baseline it will enforce once wired. D28 escalation checklist:
   3/3 NO — public mold surface untouched, error contract
   unchanged, all 185 parity tests + 880+ total tests green
   (including C25 / C24 / C23 / C21 regression guards and all
@@ -697,7 +703,7 @@ Design decisions locked without code (informational):
   all Phase 10 blockers (C26B-010 / 012 / 018 / 020 pillar 2 /
   024) adopt the **Arc + try_unwrap COW family**
   (`.dev/C26_CLUSTER4_ABSTRACTION.md`). Zero-copy slice views are
-  subsumed as a specialisation; the arena option is D27-deferred.
+  subsumed as a specialisation; the arena option is D28-deferred.
   No code landed in the wG session — the decision is a gating
   artefact for every Phase 10 follow-up session.
 
@@ -721,7 +727,7 @@ no behaviour change):
   `drain_and_cleanup`, the pairing is just split across helpers
   so the lint cannot see it). Test files only — no `src/`
   changes, no `EXPECTED_TOTAL_LEN` impact, no parity fixture
-  touched. D27 escalation checklist: 3/3 NO.
+  touched. D28 escalation checklist: 3/3 NO.
 
 Round 8 merge narrative (all on `feat/c26`, authored in this
 chronological order; merge commits `4c59078` (wZ) / `53e7040`
@@ -803,7 +809,7 @@ wθ (this commit) is the C26B-013 rolling docs amendment
 that absorbs the Round 9 + Round 10 merge narrative into
 both the CHANGELOG `@c.26` section and this §5.6 snapshot,
 and adds the `@c.26` GATE-READY status marker at §5.6.1.
-No code change. D27 escalation checklist: 3/3 NO.
+No code change. D28 escalation checklist: 3/3 NO.
 
 OPEN (owned by C26):
 
@@ -924,7 +930,7 @@ Remaining OPEN / REOPEN items on the stable-gate checklist:
 
 This subsection is informational (as is the rest of §5.6)
 and is not part of the stable-surface contract. It is
-removed once `@c.26` is tagged. D27 escalation checklist
+removed once `@c.26` is tagged. D28 escalation checklist
 for the Round 11 wι review amendment: 3/3 NO — no public
 mold signature / pinned error string / existing parity
 assertion altered. The new `test_net6_1c_c26b002_*` cases
@@ -939,7 +945,7 @@ the operator explicitly opts in with
 
 ### 6.1. How breaking changes are introduced
 
-1. The change is proposed in `.dev/D27_BLOCKERS.md` (or the
+1. The change is proposed in `.dev/D28_BLOCKERS.md` (or the
    successor D-series tracker) with motivation, migration plan,
    and an explicit statement of which §1.1 bullet it touches.
 2. The proposal is reviewed and accepted / rejected by the
@@ -951,8 +957,8 @@ the operator explicitly opts in with
 ### 6.2. How additions are introduced
 
 1. The addition is proposed in `.dev/FUTURE_PROGRESS.md` or a
-   tracked blocker (`C26B-xxx` style, or `D27B-xxx`, or
-   `FB-xx`).
+   tracked blocker (`C26B-xxx` style, `C27B-xxx`, or `D28B-xxx`,
+   or `FB-xx`).
 2. The addition is implemented with 4-backend parity from the
    first commit.
 3. It lands at the next `<num>` bump. No approval gate is

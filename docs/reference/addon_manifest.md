@@ -26,7 +26,7 @@ currently routes an addon-backed import through its dispatcher:
 | Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
 | Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
 | JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build --target native' or use the interpreter`. |
-| WASM (min / wasi) | **No**         | Deferred to the D27 breaking-change phase (see `docs/STABILITY.md` §1.2 for the D26→D27 rename note). The D27 wasm backend will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. |
+| WASM (min / wasi) | **No**         | Deferred to the D28 breaking-change phase (see `docs/STABILITY.md` §1.2 for the D26→D27→D28 rename trail). The D28 wasm backend will reuse the `src/addon/facade.rs` static analyser so published manifests do not need to change. |
 
 The error text for unsupported backends was standardised at `@c.25.rc7`
 under C25B-030 and is pinned for the whole gen-C generation:
@@ -38,7 +38,7 @@ The literal `D26` token inside the error string is a pinned surface
 artefact and is **not** renamed mid-generation (see `docs/STABILITY.md`
 §4.2). Tooling that matches on the policy should prefer the
 `"supported: interpreter, native"` prefix over the trailing `D26`
-label. The rename to `D27` is deferred to the gen-D boundary.
+label. The rename to `D28` is deferred to the gen-D boundary.
 
 See `docs/guide/13_creating_addons.md` for the author-facing view of
 which facade constructs the native backend's static analyser
