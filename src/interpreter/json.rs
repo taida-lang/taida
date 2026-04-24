@@ -56,7 +56,7 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
                 serde_json::Value::Null
             }
         }
-        Value::Str(s) => serde_json::Value::String((**s).clone()),
+        Value::Str(s) => serde_json::Value::String(s.as_string().clone()),
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::List(items) => {
             serde_json::Value::Array(items.iter().map(taida_value_to_json).collect())
@@ -109,7 +109,7 @@ pub fn taida_value_to_json_with_enum_defs(
                 serde_json::Value::Null
             }
         }
-        Value::Str(s) => serde_json::Value::String((**s).clone()),
+        Value::Str(s) => serde_json::Value::String(s.as_string().clone()),
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::List(items) => serde_json::Value::Array(
             items

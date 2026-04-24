@@ -4,9 +4,253 @@
 /// All values are immutable — operations return new values.
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::parser::{FieldDef, Param, Statement};
+
+/// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache layer
+///
+/// A string value with a lazy char-boundary cache. The `data` field holds
+/// the UTF-8 payload; `char_offsets` is populated on first access to a
+/// char-indexed operation (`char_at` / `char_count` / `char_slice`) and
+/// maps each char index `i` to its byte offset in `data`. Subsequent
+/// char-indexed access is then O(1) instead of O(n).
+///
+/// This type is wrapped by `Value::Str(Arc<StrValue>)`, so:
+/// - cloning a `Value::Str` still costs one atomic increment (Round 6 wP
+///   foundation preserved);
+/// - the cache is shared across all Arc clones and only ever computed once;
+/// - the public surface (ABI, error strings, test fixtures) is unchanged
+///   because `StrValue` implements `Deref<Target = String>`, so
+///   `s.chars()`, `s.len()`, `s.as_str()`, `s.as_ptr()`, `&s[..]`,
+///   `format!("{}", s)`, `a == b`, `a < b`, etc. all continue to work
+///   transparently.
+///
+/// `OnceLock` gives us thread-safe lock-free reads of the cache after the
+/// first write (single `Acquire` load), which matches Taida's
+/// immutable-first execution model and the Cluster 4 abstraction pin
+/// (Arc + try_unwrap COW, Round 3 wG LOCKED).
+#[derive(Debug)]
+pub struct StrValue {
+    /// The UTF-8 payload.
+    data: String,
+    /// Lazily-populated char-index → byte-offset table.
+    ///
+    /// When present, `char_offsets[i]` is the byte offset of the `i`-th
+    /// `char` in `data`, and `char_offsets.len()` equals the total char
+    /// count. One extra sentinel entry equal to `data.len()` is appended
+    /// so that `char_offsets[i+1] - char_offsets[i]` gives the byte width
+    /// of the `i`-th char without a separate bound check — but it is NOT
+    /// counted in the char count (see `cached_char_count`).
+    char_offsets: OnceLock<Vec<usize>>,
+}
+
+impl StrValue {
+    /// Construct a new `StrValue` without populating the cache.
+    pub fn new(data: String) -> Self {
+        StrValue {
+            data,
+            char_offsets: OnceLock::new(),
+        }
+    }
+
+    /// Borrow the UTF-8 payload as `&str`.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        &self.data
+    }
+
+    /// Borrow the underlying `String`.
+    #[inline]
+    pub fn as_string(&self) -> &String {
+        &self.data
+    }
+
+    /// Consume this `StrValue` and return the owned `String`.
+    #[inline]
+    pub fn into_string(self) -> String {
+        self.data
+    }
+
+    /// Get the char-offset table, computing and caching it on first call.
+    ///
+    /// The returned slice has `char_count + 1` entries: indices `0..N` are
+    /// the byte offsets of each char, and the final entry is the total
+    /// byte length (a sentinel that simplifies width computation).
+    #[inline]
+    fn offsets(&self) -> &[usize] {
+        self.char_offsets.get_or_init(|| {
+            // Reserve char_count + 1 entries (sentinel). Byte length is a
+            // safe upper bound because each char is at least 1 byte in
+            // UTF-8, so char_count ≤ byte_len.
+            let byte_len = self.data.len();
+            let mut table = Vec::with_capacity(byte_len + 1);
+            for (byte_idx, _) in self.data.char_indices() {
+                table.push(byte_idx);
+            }
+            table.push(byte_len); // sentinel
+            table.shrink_to_fit();
+            table
+        })
+    }
+
+    /// O(1) after first call: total number of Unicode scalar values (chars).
+    #[inline]
+    pub fn cached_char_count(&self) -> usize {
+        // Sentinel entry is present, so subtract 1.
+        self.offsets().len().saturating_sub(1)
+    }
+
+    /// O(1) after first call: get the char at index `idx` as an owned
+    /// single-char `String`. Returns `None` if `idx >= char_count`.
+    ///
+    /// Note: callers that receive a signed integer from user code must
+    /// bounds-check against negative values themselves before casting to
+    /// `usize` — wU Round 8 bug fix: the original draft used `idx + 1 >=
+    /// len` which overflowed when `idx == usize::MAX` (the result of
+    /// casting `-1i64 as usize`). Saturating arithmetic below keeps this
+    /// defensive.
+    #[inline]
+    pub fn cached_char_at(&self, idx: usize) -> Option<String> {
+        let offs = self.offsets();
+        // sentinel means offs.len() = char_count + 1 (when non-empty).
+        // Use saturating addition so usize::MAX + 1 → usize::MAX, which
+        // is unambiguously >= offs.len() and returns None.
+        if idx.saturating_add(1) >= offs.len() {
+            return None;
+        }
+        let start = offs[idx];
+        let end = offs[idx + 1];
+        Some(self.data[start..end].to_string())
+    }
+
+    /// O(1) after first call: slice `self` by char indices and return the
+    /// substring as an owned `String`. Bounds are clamped to `[0, char_count]`
+    /// and `start <= end` is assumed by the caller (caller should invoke
+    /// `clamp_slice_bounds` first; this helper does not clamp).
+    #[inline]
+    pub fn cached_char_slice(&self, start: usize, end: usize) -> String {
+        let offs = self.offsets();
+        let last = offs.len().saturating_sub(1); // char_count
+        let s = start.min(last);
+        let e = end.min(last);
+        if s >= e {
+            return String::new();
+        }
+        let byte_start = offs[s];
+        let byte_end = offs[e];
+        self.data[byte_start..byte_end].to_string()
+    }
+
+    /// O(1) after first call: convert a byte offset that lies on a char
+    /// boundary into its char index. Returns `None` if `byte_pos` is not
+    /// on a boundary. Used by `indexOf` / `lastIndexOf` to translate
+    /// `str::find` results.
+    #[inline]
+    pub fn cached_byte_to_char_index(&self, byte_pos: usize) -> Option<usize> {
+        let offs = self.offsets();
+        offs.binary_search(&byte_pos).ok()
+    }
+}
+
+impl Deref for StrValue {
+    type Target = String;
+    #[inline]
+    fn deref(&self) -> &String {
+        &self.data
+    }
+}
+
+impl Clone for StrValue {
+    fn clone(&self) -> Self {
+        // Cloning a `StrValue` drops the cache (it will be recomputed on
+        // demand). This path is only hit when the outer `Arc` is not
+        // uniquely owned and a consumer calls `Arc::try_unwrap` followed
+        // by an explicit clone. The common case — `Value::clone` on
+        // `Value::Str` — is an `Arc::clone` and does NOT invoke this.
+        StrValue::new(self.data.clone())
+    }
+}
+
+impl PartialEq for StrValue {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl Eq for StrValue {}
+
+impl PartialOrd for StrValue {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StrValue {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.data.cmp(&other.data)
+    }
+}
+
+impl fmt::Display for StrValue {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.data, f)
+    }
+}
+
+impl std::hash::Hash for StrValue {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.data.hash(state)
+    }
+}
+
+impl From<String> for StrValue {
+    #[inline]
+    fn from(s: String) -> Self {
+        StrValue::new(s)
+    }
+}
+
+impl From<&str> for StrValue {
+    #[inline]
+    fn from(s: &str) -> Self {
+        StrValue::new(s.to_string())
+    }
+}
+
+impl Default for StrValue {
+    #[inline]
+    fn default() -> Self {
+        StrValue::new(String::new())
+    }
+}
+
+impl AsRef<str> for StrValue {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        &self.data
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for StrValue {
+    #[inline]
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.data.as_ref()
+    }
+}
+
+impl std::borrow::Borrow<str> for StrValue {
+    #[inline]
+    fn borrow(&self) -> &str {
+        &self.data
+    }
+}
 
 /// A runtime value in Taida.
 #[derive(Debug, Clone)]
@@ -17,28 +261,35 @@ pub enum Value {
     Float(f64),
     /// String value.
     ///
-    /// # C26B-018 (A) / Round 6 wP (2026-04-24): interior `Arc<String>`
+    /// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache layer
     ///
-    /// Migrated from plain `String` to `Arc<String>` so that
-    /// `Value::clone()` on Str becomes an `Arc::clone()` (one atomic
-    /// increment) instead of a full byte-by-byte deep-clone. This
-    /// follows the same pattern as C25B-029 `Value::List` and C26B-020
-    /// 柱 2 `Value::Bytes` interior Arc migrations. Cluster 4 abstraction
-    /// (Round 3 wG LOCKED): Arc + try_unwrap COW.
+    /// The interior `StrValue` holds the UTF-8 payload plus a
+    /// lazily-computed char-offset table so that `CharAt` / `Slice` /
+    /// `length` / `get` / `indexOf` / `lastIndexOf` amortize to O(1) per
+    /// call after the cache is populated (previously O(n) per call due to
+    /// `chars().nth(idx)` / `chars().count()`). The cache is stored in an
+    /// `OnceLock<Vec<usize>>`, giving thread-safe lock-free reads after
+    /// the first write — matching Taida's immutable-first model.
+    ///
+    /// Wrapping `StrValue` in `Arc` preserves the Round 6 wP foundation
+    /// (O(1) clone via one atomic increment) and lets the cache be shared
+    /// across all clones of a given string.
     ///
     /// * **Construction**: prefer [`Value::str`] (wraps in `Arc::new`).
-    /// * **Reading from a match binding**: `s.as_str()` / `&s[..]` work
-    ///   via deref; `s.len()` / `s.is_empty()` / `s.chars()` forward
-    ///   transparently through `Arc<String>`.
+    /// * **Reading from a match binding**: `s.as_str()` / `&s[..]` /
+    ///   `s.chars()` / `s.len()` / `s.is_empty()` / `s.as_ptr()` /
+    ///   `format!("{}", s)` work via `Deref<Target = String>`.
+    /// * **Char-indexed fast paths**: call `s.cached_char_count()`,
+    ///   `s.cached_char_at(idx)`, `s.cached_char_slice(start, end)`,
+    ///   `s.cached_byte_to_char_index(byte_pos)` — O(1) after first
+    ///   touch.
     /// * **Consuming the inner `String`**: use [`Value::str_take`] —
-    ///   `Arc::try_unwrap` fast path, else `(*arc).clone()` fallback.
+    ///   `Arc::try_unwrap` fast path (drops the cache), else
+    ///   `(*arc).clone_into_string()` fallback.
     ///
     /// Equality, ordering, display, hashing semantics are unchanged
-    /// because `Arc<T>` transparently forwards read access to `T`.
-    ///
-    /// The char-index cache optimization (C26B-018 (A) goal) is deferred
-    /// to a follow-up iteration; this commit lands the O(1) clone foundation.
-    Str(Arc<String>),
+    /// because `StrValue` forwards all of them to its inner `String`.
+    Str(Arc<StrValue>),
     /// Bytes value (immutable byte sequence).
     ///
     /// # C26B-020 柱 2 / Round 5 wO (2026-04-24): interior `Arc<Vec<u8>>`
@@ -273,22 +524,27 @@ impl Value {
 
     /// Default value for Str.
     pub fn default_str() -> Self {
-        Value::Str(Arc::new(String::new()))
+        Value::Str(Arc::new(StrValue::new(String::new())))
     }
 
     /// Construct a `Value::Str` from an owned `String`, hiding the
-    /// `Arc` wrapping. See the doc comment on `Value::Str` for the
-    /// rationale (C26B-018 (A) interior migration, Round 6 wP).
+    /// `Arc<StrValue>` wrapping. See the doc comment on `Value::Str`
+    /// for the rationale (C26B-018 (A) char-index cache, Round 8 wU
+    /// extends Round 6 wP interior-Arc migration).
     pub fn str(s: String) -> Self {
-        Value::Str(Arc::new(s))
+        Value::Str(Arc::new(StrValue::new(s)))
     }
 
     /// COW helper: take ownership of the inner `String` from an
-    /// `Arc<String>`. If the `Arc` is uniquely owned, avoids allocation;
-    /// otherwise clones the String. Used at legacy consumer sites that
-    /// previously moved `String` out of `Value::Str`. C26B-018 (A).
-    pub fn str_take(s: Arc<String>) -> String {
-        Arc::try_unwrap(s).unwrap_or_else(|arc| (*arc).clone())
+    /// `Arc<StrValue>`. If the `Arc` is uniquely owned, avoids allocation
+    /// (the `StrValue` is destructured and its `data` field returned);
+    /// otherwise clones the `String`. Used at legacy consumer sites that
+    /// previously moved `String` out of `Value::Str`. C26B-018 (A) / wU.
+    pub fn str_take(s: Arc<StrValue>) -> String {
+        match Arc::try_unwrap(s) {
+            Ok(sv) => sv.into_string(),
+            Err(arc) => arc.as_string().clone(),
+        }
     }
 
     /// Default value for Bytes.
@@ -474,7 +730,7 @@ impl Value {
                     n.to_string()
                 }
             }
-            Value::Str(s) => (**s).clone(),
+            Value::Str(s) => s.as_string().clone(),
             Value::Bytes(bytes) => {
                 let elems: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
                 format!("Bytes[@[{}]]", elems.join(", "))
@@ -654,6 +910,152 @@ mod tests {
         assert_eq!(Value::default_bytes(), Value::bytes(Vec::new()));
         assert_eq!(Value::default_bool(), Value::Bool(false));
         assert_eq!(Value::default_list(), Value::list(Vec::new()));
+    }
+
+    // ── C26B-018 (A) / Round 8 wU: char-index cache tests ──
+
+    #[test]
+    fn wu_char_cache_ascii_char_count() {
+        let s = StrValue::new("hello".to_string());
+        assert_eq!(s.cached_char_count(), 5);
+        // Second call must still return the same count (cache hit path).
+        assert_eq!(s.cached_char_count(), 5);
+    }
+
+    #[test]
+    fn wu_char_cache_utf8_char_count() {
+        // Mix of 1-byte, 3-byte, and 4-byte UTF-8 sequences.
+        // "aあ🙂b" = a (1B) + あ (3B) + 🙂 (4B) + b (1B) = 9 bytes, 4 chars.
+        let s = StrValue::new("aあ🙂b".to_string());
+        assert_eq!(s.as_string().len(), 9);
+        assert_eq!(s.cached_char_count(), 4);
+    }
+
+    #[test]
+    fn wu_char_cache_empty_string() {
+        let s = StrValue::new(String::new());
+        assert_eq!(s.cached_char_count(), 0);
+        assert_eq!(s.cached_char_at(0), None);
+        assert_eq!(s.cached_char_slice(0, 0), String::new());
+    }
+
+    #[test]
+    fn wu_char_cache_char_at_ascii() {
+        let s = StrValue::new("hello".to_string());
+        assert_eq!(s.cached_char_at(0).as_deref(), Some("h"));
+        assert_eq!(s.cached_char_at(4).as_deref(), Some("o"));
+        assert_eq!(s.cached_char_at(5), None);
+        assert_eq!(s.cached_char_at(100), None);
+    }
+
+    #[test]
+    fn wu_char_cache_char_at_usize_max_is_none() {
+        // Regression: `n as usize` for `n = -1i64` yields `usize::MAX`.
+        // `cached_char_at(usize::MAX)` must return `None` without
+        // triggering `idx + 1` overflow. Covers
+        // `test_bt13_char_at_negative_index` regression path.
+        let s = StrValue::new("hello".to_string());
+        assert_eq!(s.cached_char_at(usize::MAX), None);
+    }
+
+    #[test]
+    fn wu_char_cache_char_at_utf8() {
+        let s = StrValue::new("aあ🙂b".to_string());
+        assert_eq!(s.cached_char_at(0).as_deref(), Some("a"));
+        assert_eq!(s.cached_char_at(1).as_deref(), Some("あ"));
+        assert_eq!(s.cached_char_at(2).as_deref(), Some("🙂"));
+        assert_eq!(s.cached_char_at(3).as_deref(), Some("b"));
+        assert_eq!(s.cached_char_at(4), None);
+    }
+
+    #[test]
+    fn wu_char_cache_slice_ascii() {
+        let s = StrValue::new("abcdef".to_string());
+        assert_eq!(s.cached_char_slice(0, 3), "abc");
+        assert_eq!(s.cached_char_slice(2, 5), "cde");
+        assert_eq!(s.cached_char_slice(0, 6), "abcdef");
+        assert_eq!(s.cached_char_slice(3, 3), "");
+        // Out-of-range end clamps to char_count.
+        assert_eq!(s.cached_char_slice(2, 100), "cdef");
+    }
+
+    #[test]
+    fn wu_char_cache_slice_utf8() {
+        let s = StrValue::new("aあ🙂b".to_string());
+        assert_eq!(s.cached_char_slice(0, 1), "a");
+        assert_eq!(s.cached_char_slice(1, 3), "あ🙂");
+        assert_eq!(s.cached_char_slice(2, 4), "🙂b");
+        assert_eq!(s.cached_char_slice(0, 4), "aあ🙂b");
+    }
+
+    #[test]
+    fn wu_char_cache_byte_to_char_index() {
+        // "aあ🙂b": byte offsets 0, 1, 4, 8; sentinel 9.
+        let s = StrValue::new("aあ🙂b".to_string());
+        assert_eq!(s.cached_byte_to_char_index(0), Some(0));
+        assert_eq!(s.cached_byte_to_char_index(1), Some(1));
+        assert_eq!(s.cached_byte_to_char_index(4), Some(2));
+        assert_eq!(s.cached_byte_to_char_index(8), Some(3));
+        // Sentinel byte offset maps to char_count (past-the-end).
+        assert_eq!(s.cached_byte_to_char_index(9), Some(4));
+        // Mid-char bytes are not on a boundary.
+        assert_eq!(s.cached_byte_to_char_index(2), None);
+        assert_eq!(s.cached_byte_to_char_index(3), None);
+    }
+
+    #[test]
+    fn wu_char_cache_shared_across_arc_clones() {
+        // The cache should be shared across all `Arc<StrValue>` clones —
+        // populating via one handle makes the same table visible through
+        // any other handle.
+        let a = Arc::new(StrValue::new("hello world".to_string()));
+        let b = Arc::clone(&a);
+        assert_eq!(a.cached_char_count(), 11); // populates the cache
+        assert_eq!(b.cached_char_count(), 11); // must be cache-hit path
+        // Identity check: both Arc clones point to the same StrValue,
+        // so they share the same OnceLock storage by definition.
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn wu_char_cache_deref_transparency() {
+        // StrValue must Deref to String so existing byte-level
+        // operations (contains, starts_with, as_ptr, len, chars, etc.)
+        // keep working unchanged through the Arc wrapper.
+        let s = StrValue::new("hello 🙂".to_string());
+        assert!(s.starts_with("hello"));
+        assert!(s.ends_with("🙂"));
+        assert!(s.contains("lo 🙂"));
+        assert_eq!(s.len(), 10); // byte length, not char count
+        assert_eq!(s.chars().count(), 7);
+    }
+
+    #[test]
+    fn wu_value_str_clone_is_cheap() {
+        // Round 6 wP guarantee: Value::clone on Str is an Arc::clone.
+        // Round 8 wU preserves it — clones share the cache.
+        let v = Value::str("the quick brown fox".to_string());
+        let Value::Str(arc1) = &v else { panic!() };
+        let v2 = v.clone();
+        let Value::Str(arc2) = &v2 else { panic!() };
+        assert!(Arc::ptr_eq(arc1, arc2));
+    }
+
+    #[test]
+    fn wu_str_take_unique_fast_path() {
+        // Unique Arc → try_unwrap succeeds → original String is returned.
+        let arc = Arc::new(StrValue::new("owned".to_string()));
+        let s = Value::str_take(arc);
+        assert_eq!(s, "owned");
+    }
+
+    #[test]
+    fn wu_str_take_shared_clone_path() {
+        // Shared Arc → try_unwrap fails → fall back to clone.
+        let arc = Arc::new(StrValue::new("shared".to_string()));
+        let _retained = Arc::clone(&arc);
+        let s = Value::str_take(arc);
+        assert_eq!(s, "shared");
     }
 
     // ── BT-18: Default value guarantee exhaustive tests ──

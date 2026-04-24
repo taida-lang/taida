@@ -962,7 +962,7 @@ impl Interpreter {
                                 Signal::Value(Value::BuchiPack(hfields)) => {
                                     for (k, v) in hfields.iter() {
                                         if let Value::Str(vs) = v {
-                                            extra_headers.push((k.clone(), (**vs).clone()));
+                                            extra_headers.push((k.clone(), vs.as_string().clone()));
                                         }
                                     }
                                 }
@@ -974,10 +974,10 @@ impl Interpreter {
                                             for (k, v) in rec.iter() {
                                                 match (k.as_str(), v) {
                                                     ("name", Value::Str(s)) => {
-                                                        name = Some((**s).clone());
+                                                        name = Some(s.as_string().clone());
                                                     }
                                                     ("value", Value::Str(s)) => {
-                                                        val = Some((**s).clone());
+                                                        val = Some(s.as_string().clone());
                                                     }
                                                     _ => {}
                                                 }
@@ -1273,7 +1273,7 @@ impl Interpreter {
                             let mut strs = Vec::new();
                             for item in items.iter() {
                                 if let Value::Str(s) = item {
-                                    strs.push((**s).clone());
+                                    strs.push(s.as_string().clone());
                                 } else {
                                     strs.push(item.to_display_string());
                                 }
@@ -1373,7 +1373,7 @@ impl Interpreter {
                             let mut strs = Vec::new();
                             for item in items.iter() {
                                 if let Value::Str(s) = item {
-                                    strs.push((**s).clone());
+                                    strs.push(s.as_string().clone());
                                 } else {
                                     strs.push(item.to_display_string());
                                 }

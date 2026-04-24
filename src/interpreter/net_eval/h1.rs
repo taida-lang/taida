@@ -318,7 +318,7 @@ impl Interpreter {
                         if let Some((_, proto_val)) = fields.iter().find(|(k, _)| k == "protocol") {
                             match proto_val {
                                 Value::Str(proto) => {
-                                    requested_protocol = Some((**proto).clone());
+                                    requested_protocol = Some(proto.as_string().clone());
                                 }
                                 Value::Int(ordinal) => {
                                     if let Some(protocol) = http_protocol_ordinal_to_wire(*ordinal)

@@ -277,7 +277,7 @@ pub(crate) fn get_field_int(fields: &[(String, Value)], key: &str) -> Option<i64
 /// Get a Str field from a BuchiPack field list.
 pub(crate) fn get_field_str(fields: &[(String, Value)], key: &str) -> Option<String> {
     match fields.iter().find(|(k, _)| k == key) {
-        Some((_, Value::Str(s))) => Some((**s).clone()),
+        Some((_, Value::Str(s))) => Some(s.as_string().clone()),
         _ => None,
     }
 }
@@ -929,7 +929,7 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
             }
         };
         let name: String = match hf.iter().find(|(k, _)| k == "name") {
-            Some((_, Value::Str(s))) => (**s).clone(),
+            Some((_, Value::Str(s))) => s.as_string().clone(),
             _ => {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].name must be Str",
@@ -938,7 +938,7 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
             }
         };
         let value: String = match hf.iter().find(|(k, _)| k == "value") {
-            Some((_, Value::Str(s))) => (**s).clone(),
+            Some((_, Value::Str(s))) => s.as_string().clone(),
             _ => {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].value must be Str",

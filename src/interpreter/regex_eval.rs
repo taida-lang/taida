@@ -121,7 +121,7 @@ pub(crate) fn as_regex(val: &Value) -> Option<(String, String)> {
         .iter()
         .find(|(k, _)| k == "pattern")
         .and_then(|(_, v)| match v {
-            Value::Str(s) => Some((**s).clone()),
+            Value::Str(s) => Some(s.as_string().clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -129,7 +129,7 @@ pub(crate) fn as_regex(val: &Value) -> Option<(String, String)> {
         .iter()
         .find(|(k, _)| k == "flags")
         .and_then(|(_, v)| match v {
-            Value::Str(s) => Some((**s).clone()),
+            Value::Str(s) => Some(s.as_string().clone()),
             _ => None,
         })
         .unwrap_or_default();
