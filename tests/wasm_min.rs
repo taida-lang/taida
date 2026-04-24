@@ -871,7 +871,21 @@ fn wasm_min_mold_fail() {
 /// Currently empty (Bug A-G + Reverse fix closed all known diffs).
 const WASM_MIN_EXPECTED_PARITY_DIFF: &[&str] = &[];
 
+/// Stems that must not run through the per-fixture parity loop because the
+/// interpreter side never terminates (server examples that block on accept).
+/// Symmetric with `WASI_SKIP_STEMS` / `FULL_SKIP_STEMS` in the sibling test
+/// files — they already filter `net_http_hello`; wasm_min was the last
+/// runner still feeding the fixture into `run_interpreter()` which blocks on
+/// `httpServe(...)` until the nextest 600s timeout fires.
+const WASM_MIN_SKIP_STEMS: &[&str] = &[
+    "net_http_hello", // server blocks on httpServe waiting for connections
+];
+
 fn run_wasm_min_parity_fixture(stem: &str) {
+    if WASM_MIN_SKIP_STEMS.contains(&stem) {
+        return;
+    }
+
     let Some(wasmtime) = wasmtime_bin() else {
         eprintln!("wasmtime not found, skipping wasm-min parity for {}", stem);
         return;

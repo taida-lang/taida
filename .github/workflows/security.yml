@@ -161,9 +161,19 @@ jobs:
           # from a pure boolean-algebra standpoint, but the intent is
           # a deliberate defence-in-depth pattern. The same applies to
           # the `value == K || value < THRESHOLD` tag-compare idiom.
+          #
+          # `--inline-suppr` enables `// cppcheck-suppress <id>` comments
+          # used in core.c for the `taida_hashmap_key_valid(...)` guard
+          # sites. That helper currently returns a constant (reserved
+          # for a future Null-key domain constraint) so cppcheck's
+          # value-analysis folds the guard into `knownConditionTrueFalse`;
+          # the call-site suppressions keep the defence-in-depth shape
+          # while still catching any new `knownConditionTrueFalse` that
+          # appears elsewhere in the TU.
           cppcheck --enable=warning,style,performance,portability \
                    --suppress=missingIncludeSystem \
                    --suppress=redundantCondition \
+                   --inline-suppr \
                    --error-exitcode=1 \
                    --quiet \
                    /tmp/c-analysis/native_runtime_assembled.c \
