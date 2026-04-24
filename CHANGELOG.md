@@ -160,6 +160,22 @@ zero code — it is a gating artefact so follow-up sessions land
   `@c.26` gate; the 24 h soak (C26B-005) is orthogonal.
 - **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
   concurrent `ReadEvent()`) + BuchiPack interior Arc migration.
+  - BuchiPack `[FIXED]` at Round 6 / wQ (`6f72f7c`): `Value::BuchiPack`
+    migrated to `Arc<Vec<(String, Value)>>`. `Value::clone()` on a pack
+    is now an `Arc::clone()` (one atomic increment) vs field-by-field
+    deep clone. New helpers: `Value::pack(Vec<(String, Value)>)` and
+    `Value::pack_take(Arc<…>)` (try_unwrap fast path, clone fallback).
+    Pattern-match arms such as `Value::BuchiPack(fields)` continue to
+    yield `&Vec<(String, Value)>` via transparent `Arc` deref. Regression
+    guard: `tests/c26b_012_buchipack_arc_ptr_eq.rs` pins `Arc::ptr_eq`
+    invariants after `fields.clone()` / pack construction. Layout change
+    is internal — `EXPECTED_TOTAL_LEN` unchanged; D27 escalation
+    checklist: 3/3 NO.
+  - PENDING_BYTES FIFO (terminal addon concurrent `ReadEvent()`) —
+    **OPEN**, tracked for a dedicated wV-class session on
+    `feat/c26`. The BuchiPack Arc migration above removes the main
+    interpreter-side deep-clone path on the event-batch return value,
+    so the FIFO work can land without re-visiting `Value` layout.
 - **C26B-018** — `Str` primitive super-linear paths resolved via
   (A) char-index cache + (B) byte-level primitive + (C)
   `StringRepeatJoin` mold. Option (D) `StringBuilder` is explicitly
@@ -171,11 +187,19 @@ zero code — it is a gating artefact so follow-up sessions land
     and the `StringRepeatJoin` mold lowered across 3-backend,
     pinned by `tests/c26b_018_byte_primitive.rs` and
     `tests/c26b_018_repeat_join.rs`.
-  - (A) char-index cache for `Value::Str` — **OPEN**. Deferred to
-    the next Cluster 4 session (the cross-cut on 500+ call sites
-    is incompatible with the 2 h Round-5 window without risking
-    the green baseline). Not a regression: the hot `Str`
-    super-linear path is bounded by (B) + (C) in the interim.
+  - (A) `Value::Str` Arc+COW foundation landed at Round 6 / wP
+    (`6cf6648`): `Value::Str` migrated to `Arc<String>`, so
+    `Value::clone()` on a string is now an `Arc::clone()` (atomic
+    refcount bump) vs an O(len) copy. New helpers:
+    `Value::str(String)` constructor and `Value::str_take(Arc<String>)`
+    (try_unwrap fast path, fallback to `(*arc).clone()`). Regression
+    guard: `tests/c26b_018_str_arc_ptr_eq.rs` pins `Arc::ptr_eq`
+    after `value.clone()` and after pass-through assignment.
+  - (A) char-index cache layer (`Option<Arc<Vec<usize>>>`) on top of
+    the Arc foundation — **OPEN**, tracked for a dedicated wU-class
+    session. The foundation above is a pure-refactor enabler; the hot
+    super-linear path (`CharAt` / `Slice` / `.length()`) is currently
+    bounded by (B) + (C) byte primitives.
 - **C26B-020** — **Downstream-blocking hard blocker.** Three
   pillars, all required for DONE:
   1. `[FIXED]` `readBytesAt(path, offset, len) -> Bytes` API;
@@ -212,10 +236,16 @@ zero code — it is a gating artefact so follow-up sessions land
 
 #### Cluster 5 — Float parity (Phase 11)
 
-- **C26B-011** `[FIXED]` — NaN / ±Infinity / denormal parity across
-  3-backend (`Div` / `Mod` / math molds), `Div[1.0, 0.0]()` Lax
-  default rendering divergence resolved, and `Mul[1.5, 2.0]()`
-  native-build exit-code-1 isolated and fixed.
+- **C26B-011** — NaN / ±Infinity / denormal parity across 3-backend
+  (`Div` / `Mod` / math molds), `Div[1.0, 0.0]()` Lax default
+  rendering divergence resolved, and `Mul[1.5, 2.0]()` native-build
+  exit-code-1 isolated and fixed.
+  - Signed-zero `-0.0` runtime handling `[FIXED]` at Round 6 / wS
+    (`547972c`) across interpreter and native; JS-codegen
+    Float-literal rendering of `-0.0` — **OPEN PARTIAL**: the value
+    path matches, but the JS `Float.toString` lowering does not
+    currently preserve the leading sign. Tracked for wV-class
+    follow-up.
 
 #### Cluster 6 — Surface fixes (Phase 12) & docs (Phase 13)
 
@@ -347,14 +377,38 @@ Round 5 additions: wO (`853900f`, C26B-020 pillar 2 —
 `BytesCursorTake(size)` becomes an `Arc::clone`; acceptance
 scales to 1 GB × 64 < 2 s under `TAIDA_BIG_BYTES=1`).
 
-Round 6 / wR — this session — amends STABILITY §5.5 / §5.6 and
-the CHANGELOG `@c.26` section to re-sync the FIXED set through
-Round 5, and stages the C26B-008 GHSA advisory template under
-`docs/advisory/` so the owner can publish without reaching into
-`.dev/`. Publication and CVE request remain a strictly manual
-step. Parallel Round 6 worktrees (wP `Value::Str` Arc migration;
-wQ `Value::BuchiPack` Arc migration; wS Float denormal parity +
-C26B-022 Native fixture) operate on disjoint file sets.
+Round 6 additions (all merged on `feat/c26`):
+
+- wR (`30c7283`, `a146b76` cascade) — amends STABILITY §5.5 / §5.6
+  and the CHANGELOG `@c.26` section to re-sync the FIXED set
+  through Round 5, and stages the C26B-008 GHSA advisory template
+  under `docs/advisory/` so the owner can publish without reaching
+  into `.dev/`. Publication and CVE request remain a strictly manual
+  step.
+- wP (`6cf6648`, C26B-018 (A) foundation) — `Value::Str` migrated
+  to `Arc<String>`. Pattern arms `Value::Str(s)` now yield `s:
+  Arc<String>` which derefs transparently. `Value::clone()` on a
+  string is an `Arc::clone`. `Value::str()` / `Value::str_take()`
+  helpers added; all call sites updated. The char-index cache layer
+  is tracked as OPEN for a wU-class follow-up.
+- wQ (`6f72f7c`, C26B-012 BuchiPack migration) — `Value::BuchiPack`
+  migrated to `Arc<Vec<(String, Value)>>`. Pattern arms
+  `Value::BuchiPack(fields)` now yield `fields:
+  Arc<Vec<(String, Value)>>`. New helpers `Value::pack()` /
+  `Value::pack_take()`. Write paths use `Arc::make_mut` or
+  `Arc::try_unwrap` COW. PENDING_BYTES FIFO remains OPEN, tracked
+  separately.
+- wS (`547972c`, C26B-022 Native authority + C26B-011 signed-zero
+  runtime + profiling defer) — lands the Native h2/h3 authority
+  byte-ceiling fixture, the runtime path for signed-zero `-0.0`
+  across interpreter and native (JS codegen rendering remains
+  PARTIAL), and defers the C26B-024 Native list/pack profile pass
+  onto the new Arc baseline.
+
+Parallel worktrees wP / wQ / wS operated on disjoint file sets
+(`Value` variants + isolated fixtures); the Round 6 `EXPECTED_TOTAL_LEN`
+rolled from 988,932 to 994,500 bytes driven by wS Native additions
+(wP / wQ are Rust-only, no C-fragment delta).
 
 ### Docs / infrastructure landed alongside
 

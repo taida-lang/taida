@@ -440,7 +440,7 @@ land. It is not part of the stable surface contract and may be
 removed once `@c.26` is tagged. Canonical worklist is
 `.dev/C26_BLOCKERS.md`.
 
-FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5):
+FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6):
 
 - **C26B-001** (Must Fix) — h2 3-backend parity pin reached 10
   cases (baseline GET / POST + C26B-001-{1..7}) at Round 3 / wE,
@@ -502,10 +502,28 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5):
   (`src/interpreter/mold_eval.rs` / `src/js/runtime/core.rs` /
   `src/codegen/native_runtime/core.c`). Regression guards:
   `tests/c26b_018_byte_primitive.rs` +
-  `tests/c26b_018_repeat_join.rs`. Option (A) char-index cache
-  remains OPEN (deferred to the next Cluster 4 session per the
-  wO commit note; the Str super-linear hot path is bounded by
-  (B) + (C) in the interim).
+  `tests/c26b_018_repeat_join.rs`.
+- **C26B-018** (A) `Value::Str` Arc+COW foundation landed at
+  Round 6 / wP (commit `6cf6648`). `Value::Str` migrated to
+  `Arc<String>`; `Value::clone()` on a string is now an
+  `Arc::clone` (one atomic increment) rather than an O(len)
+  buffer copy. `Value::str()` / `Value::str_take()` helpers added,
+  all call sites updated. Regression guard:
+  `tests/c26b_018_str_arc_ptr_eq.rs` pins `Arc::ptr_eq` after
+  `value.clone()` and after pass-through assignment. The
+  char-index cache layer (`Option<Arc<Vec<usize>>>`) on top of
+  this foundation remains OPEN (the Str super-linear hot path is
+  currently bounded by (B) + (C) byte primitives).
+- **C26B-012** BuchiPack interior Arc migration landed at
+  Round 6 / wQ (commit `6f72f7c`). `Value::BuchiPack` migrated to
+  `Arc<Vec<(String, Value)>>`; pack `Value::clone()` is now an
+  `Arc::clone` vs field-by-field deep clone. New helpers
+  `Value::pack()` / `Value::pack_take()`; write paths use
+  `Arc::make_mut` or `Arc::try_unwrap` COW. Regression guard:
+  `tests/c26b_012_buchipack_arc_ptr_eq.rs` pins `Arc::ptr_eq`
+  invariants. The PENDING_BYTES FIFO (terminal addon concurrent
+  `ReadEvent()`) portion of C26B-012 remains OPEN and is tracked
+  separately.
 - **C26B-006** `[FIXED]` — HTTP parity retry shim retired at
   Round 4 / wJ (commit `c3805ff`). C26B-003 root-cause fix made
   the shim safe to remove; `tests/parity.rs` now binds to
@@ -569,13 +587,18 @@ OPEN (owned by C26, not yet landed):
   at Round 6 / wR so the owner can submit it via `gh api` without
   hunting inside `.dev/`. The agent does not publish; the
   publication / CVE request remains a strictly manual step.
-- **C26B-018 (A)** char-index cache for `Value::Str`,
-  **C26B-012** `PENDING_BYTES` FIFO + BuchiPack interior Arc
-  migration, and **C26B-024** Native list / BuchiPack clone-heavy
-  paths — the three remaining Cluster 4 items. All land against
-  the locked Arc + try_unwrap COW abstraction; each is cross-cut
-  on 500+ call sites and is scheduled across the next Phase 10
-  sessions.
+- **C26B-018 (A)** char-index cache layer for `Value::Str`
+  (`Option<Arc<Vec<usize>>>` lazy byte-offset table), layered on
+  top of the Arc foundation that landed at Round 6 / wP. Scheduled
+  for a dedicated wU-class session.
+- **C26B-012** residual — `PENDING_BYTES` FIFO (terminal addon
+  concurrent `ReadEvent()`). The BuchiPack Arc migration half of
+  C26B-012 landed at Round 6 / wQ; the FIFO half lands separately
+  on a wV-class session.
+- **C26B-024** — Native list / BuchiPack clone-heavy paths. Arc
+  baseline established by the Round 5 / wO + Round 6 / wQ
+  migrations; the Native-side refcount + COW port + perf
+  regression fixture lands on a wT-class session.
 - **C26B-013** — ongoing docs amendment (this §5.6 snapshot, the
   `docs/advisory/` scaffold, and CHANGELOG re-syncs are part of
   the C26B-013 track).
