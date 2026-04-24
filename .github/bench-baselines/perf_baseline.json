@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "description": "C26B-004 perf regression gate baseline. Populated by main-branch bench runs (collect phase). Each entry's `sample_count` must reach `min_samples_required` before the gate applies its +10% tolerance hard-fail. Until then, the entry is treated as WARN-only.",
+  "min_samples_required": 30,
+  "tolerance_pct": 10.0,
+  "owner": "C26 Phase 4 (C26B-004)",
+  "last_updated": "2026-04-24",
+  "update_policy": "main-branch push bench.yml job auto-refreshes `ns_median` and increments `sample_count`. Manual edits are discouraged except to add/remove benches. When a bench is intentionally changed (new fixture, algorithmic change), reset its `sample_count` to 0 and document the reason in `notes`.",
+  "benches": {
+    "bench_parser/compile_arithmetic.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_cond.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_hello.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_buchi.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_hashmap_set.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_functions.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_closure.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_hof_molds.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_c13_1_tail_bind.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_parser/compile_bool_stdout.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_arithmetic.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_cond.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_hello.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_buchi.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_hashmap_set.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_functions.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_closure.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_hof_molds.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_c13_1_tail_bind.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "bench_interpreter/compile_bool_stdout.td": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "populated by scripts/bench/update_baseline.py on main push"
+    },
+    "net6_3b_native_h2_32_request_throughput": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "Derived from tests/parity.rs::test_net6_3b_native_h2_32_request_throughput_benchmark via scripts/bench/parse_net_throughput.py. ns = 1e9 / req_per_s."
+    },
+    "net6_3b_native_h2_64kib_data": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "Derived from tests/parity.rs::test_net6_3b_native_h2_64kib_data_benchmark via scripts/bench/parse_net_throughput.py. ns = 1e9 / req_per_s."
+    },
+    "net6_3b_native_h2_32_stream_multiplex": {
+      "ns_median": 0.0,
+      "sample_count": 0,
+      "notes": "Derived from tests/parity.rs::test_net6_3b_native_h2_32_stream_multiplex_benchmark via scripts/bench/parse_net_throughput.py. ns = 1e9 / req_per_s."
+    }
+  }
+}

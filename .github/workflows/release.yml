@@ -187,15 +187,30 @@ jobs:
           path: dist/taida-${{ needs.prepare.outputs.release_tag }}-${{ matrix.target }}.${{ matrix.archive_ext }}
           if-no-files-found: error
 
-  publish:
-    name: Publish Release
+  # C26B-007 Sub-phase 7.4 (SEC-011): Sigstore keyless signing.
+  # Each release artefact (including SHA256SUMS) is signed via cosign
+  # using the ambient GitHub OIDC token. No long-lived signing key is
+  # stored anywhere; verification relies on the Rekor transparency log.
+  #
+  # The resulting `.cosign.bundle` files are uploaded alongside the
+  # binaries so `install.sh` and `taida install` can call
+  # `scripts/release/verify-signatures.sh` before trusting a download.
+  sign:
+    name: Sign Release Artefacts (Sigstore)
     needs:
       - prepare
       - build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+      # Required by cosign for keyless OIDC flow.
+      id-token: write
+    outputs:
+      artefact_digests: ${{ steps.digest.outputs.digests }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.release_ref }}
       - uses: actions/download-artifact@v7
         with:
           path: dist
@@ -203,6 +218,93 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum taida-* > SHA256SUMS
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+      - name: Sign release artefacts (cosign keyless)
+        working-directory: dist
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # Sign each packaged binary plus SHA256SUMS. Skips anything
+          # that is already a .cosign.bundle or .sig (defensive — in
+          # case the job retries).
+          for f in taida-* SHA256SUMS; do
+              [ -f "${f}" ] || continue
+              case "${f}" in
+                  *.cosign.bundle|*.sig) continue ;;
+              esac
+              echo "::group::sign ${f}"
+              cosign sign-blob \
+                  --bundle "${f}.cosign.bundle" \
+                  --yes \
+                  "${f}"
+              echo "::endgroup::"
+          done
+          echo "Signed artefacts:"
+          ls -la *.cosign.bundle
+      - name: Compute artefact digests (for SLSA subjects)
+        id: digest
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # Emit a base64(sha256sum style) digest list for the SLSA
+          # generator. slsa-github-generator/generator_generic_slsa3
+          # expects `<digest>  <name>` newline-delimited.
+          digests=$(sha256sum taida-* SHA256SUMS | base64 -w0)
+          echo "digests=${digests}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-signed
+          path: |
+            dist/taida-*
+            dist/SHA256SUMS
+            dist/*.cosign.bundle
+          if-no-files-found: error
+
+  # C26B-007 Sub-phase 7.4 (SEC-011): SLSA Level 3 provenance.
+  # Uses the upstream reusable workflow so the provenance document is
+  # produced inside a hermetic GitHub-hosted builder, signed via the
+  # same Sigstore keyless flow, and uploaded to Rekor. The resulting
+  # `.intoto.jsonl` is attached to the release alongside the signatures.
+  provenance:
+    name: Generate SLSA Provenance
+    needs:
+      - prepare
+      - sign
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: ${{ needs.sign.outputs.artefact_digests }}
+      upload-assets: true
+      upload-tag-name: ${{ needs.prepare.outputs.release_tag }}
+      provenance-name: taida-${{ needs.prepare.outputs.release_tag }}.intoto.jsonl
+
+  publish:
+    name: Publish Release
+    needs:
+      - prepare
+      - build
+      - sign
+      - provenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-signed
+          path: dist
+      - name: List signed artefacts
+        working-directory: dist
+        run: |
+          ls -la
+          echo "expected: taida-* binaries + SHA256SUMS + *.cosign.bundle"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -212,6 +314,18 @@ jobs:
           HEADER="Official Taida release assets for \`${RELEASE_TAG}\`.
 
           \`install.sh\` should download one of the packaged binaries below, verify it against \`SHA256SUMS\`, and only fall back to source build when no prebuilt target matches.
+
+          Every artefact is signed via Sigstore keyless cosign (C26B-007 Sub-phase 7.4 / SEC-011). Verify a download with:
+
+          \`\`\`
+          cosign verify-blob \\
+              --bundle taida-<TAG>-<TARGET>.<EXT>.cosign.bundle \\
+              --certificate-identity-regexp '^https://github.com/${REPO}/' \\
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
+              taida-<TAG>-<TARGET>.<EXT>
+          \`\`\`
+
+          SLSA Level 3 provenance is attached as \`*.intoto.jsonl\` (generated by the \`slsa-github-generator\` reusable workflow).
 
           ---
           "
