@@ -112,15 +112,17 @@ addition under §6.2).
     signing + SLSA provenance attestation wired into the
     `taida publish` workflow, with a verify-on-install step for
     `taida install` (Round 2 / wB).
-- **C26B-008** — C25B-014 advisory publication + CVE request
-  (owner action). Advisory staged at
-  `docs/advisory/C25B-014-advisory.md` (Round 6 / wR), with
-  publication procedure at `docs/advisory/README.md` and an
-  optional owner helper at `scripts/advisory/publish-advisory.sh`.
-  The agent does not publish; the owner runs the `gh` CLI steps
-  from a trusted session. The pre-existing draft under
-  `.dev/security_advisories/GHSA-DRAFT-*` remains authoritative
-  until the GHSA ID is assigned and cross-referenced here.
+- **C26B-008** `[CLOSED — not required at @c.26 stable]` —
+  Taida Lang has no confirmed install base as of `@c.26` cycle,
+  so GHSA publication + CVE request has no notification target
+  and would generate spurious disclosure noise. The underlying
+  fix shipped in `@c.15.rc3`
+  (`src/upgrade.rs::canonical_release_source_is_taida_lang_org`
+  regression pin). Advisory scaffold staged at Round 6 / wR
+  (`docs/advisory/` + `scripts/advisory/`) was removed in Round 8;
+  the draft is recoverable from git history if an install base
+  later emerges and the pre-`@c.15.rc3` window is confirmed
+  exploitable against real users.
 
 #### Cluster 3 — Parser quality (Phase 9)
 
@@ -381,10 +383,12 @@ Round 6 additions (all merged on `feat/c26`):
 
 - wR (`30c7283`, `a146b76` cascade) — amends STABILITY §5.5 / §5.6
   and the CHANGELOG `@c.26` section to re-sync the FIXED set
-  through Round 5, and stages the C26B-008 GHSA advisory template
-  under `docs/advisory/` so the owner can publish without reaching
-  into `.dev/`. Publication and CVE request remain a strictly manual
-  step.
+  through Round 5, and originally staged the C26B-008 GHSA
+  advisory template under `docs/advisory/`. The advisory scaffold
+  (`docs/advisory/` + `scripts/advisory/`) was subsequently
+  removed in Round 8 when C26B-008 was closed as not required
+  given the zero install base at `@c.26` declaration; see the
+  C26B-008 entry above for the closure rationale.
 - wP (`6cf6648`, C26B-018 (A) foundation) — `Value::Str` migrated
   to `Arc<String>`. Pattern arms `Value::Str(s)` now yield `s:
   Arc<String>` which derefs transparently. `Value::clone()` on a

@@ -582,11 +582,15 @@ OPEN (owned by C26, not yet landed):
   landed a TLS-observability surface tranche (interpreter
   `net_eval/h1.rs` + `h3.rs`); the full 3-backend TLS
   construction pin is still OPEN.
-- **C26B-008** — C25B-014 advisory publication + CVE request
-  **(owner action)**. Advisory staging moved to `docs/advisory/`
-  at Round 6 / wR so the owner can submit it via `gh api` without
-  hunting inside `.dev/`. The agent does not publish; the
-  publication / CVE request remains a strictly manual step.
+- **C26B-008** — **CLOSED (not required at `@c.26` stable)**.
+  Taida Lang has no confirmed install base as of `@c.26` cycle, so
+  there are no affected parties to notify. The underlying fix
+  (`src/upgrade.rs::canonical_release_source_is_taida_lang_org`
+  regression pin) has shipped since `@c.15.rc3`. GHSA / CVE
+  publication was staged under Round 6 / wR but removed in Round 8
+  alongside the `docs/advisory/` scaffold; the draft is recoverable
+  from git history if an install base later emerges and the
+  pre-`@c.15.rc3` window is confirmed exploitable against real users.
 - **C26B-018 (A)** char-index cache layer for `Value::Str`
   (`Option<Arc<Vec<usize>>>` lazy byte-offset table), layered on
   top of the Arc foundation that landed at Round 6 / wP. Scheduled
@@ -599,9 +603,10 @@ OPEN (owned by C26, not yet landed):
   baseline established by the Round 5 / wO + Round 6 / wQ
   migrations; the Native-side refcount + COW port + perf
   regression fixture lands on a wT-class session.
-- **C26B-013** — ongoing docs amendment (this §5.6 snapshot, the
-  `docs/advisory/` scaffold, and CHANGELOG re-syncs are part of
-  the C26B-013 track).
+- **C26B-013** — ongoing docs amendment (this §5.6 snapshot,
+  and CHANGELOG re-syncs are part of the C26B-013 track). The
+  `docs/advisory/` scaffold landed at Round 6 / wR was removed
+  at Round 8 alongside the C26B-008 closure.
 - **C26B-022** residuals — (a) `-Wformat-truncation` promotion
   to warning-as-error in CI, and (b) Native-side parser
   enforcement of the method / path / authority ceilings. The

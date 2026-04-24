@@ -73,11 +73,12 @@ No finding is in an undecided state.
 `taida upgrade` (pre-`@c.15.rc3`) used to read releases from a
 personal GitHub fork; this was rotated to `taida-lang/taida` in
 `@c.15.rc3` (`src/upgrade.rs::canonical_release_source_is_taida_lang_org`
-pins the value against accidental regression). The advisory for the
-pre-`@c.15.rc3` window is tracked under C25B-014 and will be
-published at
-<https://github.com/taida-lang/taida/security/advisories> once
-issued.
+pins the value against accidental regression). No GitHub Security
+Advisory is currently published for this window — Taida Lang has no
+confirmed install base as of `@c.26`, so there are no affected
+parties to notify. If an install base emerges and the pre-`@c.15.rc3`
+window is confirmed as exploitable against real users, a GHSA +
+CVE request will be filed at that point.
 
 Dependency-graph monitoring is done by
 `.github/workflows/security.yml`, which runs `cargo-audit` (CVE
