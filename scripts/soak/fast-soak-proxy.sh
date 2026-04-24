@@ -10,7 +10,7 @@
 # 24h PASS recorded in `.dev/C26_SOAK_RUNBOOK.md` does.
 #
 # Usage:
-#   ./scripts/soak/fast-soak-proxy.sh [--duration-min N] [--backend interp|native]
+#   ./scripts/soak/fast-soak-proxy.sh [--duration-min N] [--backend interp|js|native]
 #
 # The script:
 #   1. Builds a release binary.
@@ -48,6 +48,13 @@ if [ "${DURATION_MIN}" -gt 180 ]; then
     exit 1
 fi
 
+case "${BACKEND}" in
+    interp) PORT=18081 ;;
+    js)     PORT=18082 ;;
+    native) PORT=18083 ;;
+    *) echo "unknown backend: ${BACKEND} (expected interp|js|native)" >&2; exit 1 ;;
+esac
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
@@ -56,30 +63,28 @@ trap 'echo "logs at ${OUTDIR}"' EXIT
 
 CSV="${OUTDIR}/samples.csv"
 LOG="${OUTDIR}/server.log"
+BUILD_LOG="${OUTDIR}/build.log"
 PROJECTION="${OUTDIR}/projection.txt"
+FIXTURE="${OUTDIR}/main.td"
 
 echo "timestamp_s,rss_kib,fds" > "${CSV}"
 
-echo "==> building release binary (backend=${BACKEND})"
+echo "==> building release binary (host, backend=${BACKEND})"
 cargo build --release --bin taida
 
-# Fixture: if not already present, write a minimal scatter-gather
-# server that loops forever and echoes a ~512 B response per request.
-# The runtime writev (scatter-gather) lives inside httpServe's response
-# path, not in user code — all the fixture needs is a steady 1-arg
-# handler returning a ~512 B body.
+# Fixture: regenerated per-invocation inside OUTDIR (so parallel runs
+# of different backends do not clobber each other's port). The runtime
+# writev (scatter-gather) lives inside httpServe's response path, not
+# in user code — the fixture is a steady 1-arg handler returning a
+# 512 B body.
 #
-# Port: fixed 18081 (below Linux ip_local_port_range.min = 32768, so
-# the kernel will not reassign it to an ephemeral socket mid-bind,
-# matching the invariant pinned by the C26B-003 port-bind fixture at
-# examples/quality/c26_portbind/serve_one.td which uses 18080).
-# Using a fixed port avoids a `getsockname` round-trip we cannot
-# easily express in a shell proxy today.
-FIXTURE_DIR="${REPO_ROOT}/examples/quality/c26_soak_fixture"
-FIXTURE_PORT=18081
+# Port policy: per-backend fixed port (interp=18081 / js=18082 /
+# native=18083), all below Linux ip_local_port_range.min = 32768 so
+# the kernel will not reassign them to ephemeral sockets mid-bind.
+# Using fixed ports avoids a `getsockname` round-trip the shell proxy
+# cannot express today — tracked as C27B-014 for the port-0 flow.
 FIXTURE_MAX_REQS=1000000000
-mkdir -p "${FIXTURE_DIR}"
-cat > "${FIXTURE_DIR}/main.td" <<TAIDA
+cat > "${FIXTURE}" <<TAIDA
 // C26B-005 scatter-gather soak fixture. Kept small so it is easy to
 // audit — each request returns a 512 B body which exercises the
 // runtime's scatter-gather (writev) response path without dominating
@@ -90,17 +95,51 @@ handler req =
   @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= Repeat["x", 512]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-asyncResult <= httpServe(${FIXTURE_PORT}, handler, ${FIXTURE_MAX_REQS})
+asyncResult <= httpServe(${PORT}, handler, ${FIXTURE_MAX_REQS})
 asyncResult ]=> result
 result ]=> r
 stdout(r.ok)
 stdout(r.requests)
 TAIDA
 
-PORT="${FIXTURE_PORT}"
-echo "==> launching server on port ${PORT} (log: ${LOG})"
-"${REPO_ROOT}/target/release/taida" "${FIXTURE_DIR}/main.td" > "${LOG}" 2>&1 &
-SERVER_PID=$!
+# Dispatch per backend. All three paths produce a long-running server
+# process whose PID is captured in SERVER_PID so the sampling loop can
+# read /proc/<pid>/status.
+case "${BACKEND}" in
+    interp)
+        echo "==> launching interpreter server on port ${PORT} (log: ${LOG})"
+        "${REPO_ROOT}/target/release/taida" "${FIXTURE}" > "${LOG}" 2>&1 &
+        SERVER_PID=$!
+        ;;
+    js)
+        if ! command -v node >/dev/null 2>&1; then
+            echo "node is required for --backend js but was not found on PATH" >&2
+            exit 1
+        fi
+        BUILT_JS="${OUTDIR}/main.mjs"
+        echo "==> compiling JS artifact (log: ${BUILD_LOG})"
+        if ! "${REPO_ROOT}/target/release/taida" build --target js "${FIXTURE}" -o "${BUILT_JS}" > "${BUILD_LOG}" 2>&1; then
+            echo "taida build --target js failed:" >&2
+            cat "${BUILD_LOG}" >&2
+            exit 2
+        fi
+        echo "==> launching node runtime on port ${PORT} (log: ${LOG})"
+        node "${BUILT_JS}" > "${LOG}" 2>&1 &
+        SERVER_PID=$!
+        ;;
+    native)
+        BUILT_NATIVE="${OUTDIR}/main"
+        echo "==> compiling native artifact (log: ${BUILD_LOG})"
+        if ! "${REPO_ROOT}/target/release/taida" build --target native "${FIXTURE}" -o "${BUILT_NATIVE}" > "${BUILD_LOG}" 2>&1; then
+            echo "taida build --target native failed:" >&2
+            cat "${BUILD_LOG}" >&2
+            exit 2
+        fi
+        echo "==> launching native binary on port ${PORT} (log: ${LOG})"
+        "${BUILT_NATIVE}" > "${LOG}" 2>&1 &
+        SERVER_PID=$!
+        ;;
+esac
 trap 'kill ${SERVER_PID} 2>/dev/null || true; echo "logs at ${OUTDIR}"' EXIT
 
 # Wait for bind. The interpreter does not emit a "listening on" line
