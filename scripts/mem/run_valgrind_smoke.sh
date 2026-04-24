@@ -68,13 +68,18 @@ for fixture in "${FIXTURES[@]}"; do
   # prevents any wrapped subprocess (e.g. a JS sidecar spawned by the
   # interpreter) from polluting the log with redundant leak reports.
   set +e
+  # `--trace-children=no` is the default in valgrind 3.22; combined
+  # with `--error-exitcode=1` it prevents redundant leak reports from
+  # any subprocess (e.g. a JS sidecar spawned by the interpreter)
+  # without relying on `--child-silent-after-exec`, which was removed
+  # from valgrind 3.22 on ubuntu-latest (24.04) runners.
   valgrind \
     --tool=memcheck \
     --leak-check=full \
     --show-leak-kinds=definite \
     --errors-for-leak-kinds=definite \
     --error-exitcode=1 \
-    --child-silent-after-exec=yes \
+    --trace-children=no \
     --log-file="${log}" \
     --quiet \
     "${BIN}" "${fixture}" > "${stdout_log}" 2>&1
