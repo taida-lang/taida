@@ -440,7 +440,7 @@ land. It is not part of the stable surface contract and may be
 removed once `@c.26` is tagged. Canonical worklist is
 `.dev/C26_BLOCKERS.md`.
 
-FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6):
+FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6 + Round 7 + Round 8):
 
 - **C26B-001** (Must Fix) — h2 3-backend parity pin reached 10
   cases (baseline GET / POST + C26B-001-{1..7}) at Round 3 / wE,
@@ -462,7 +462,20 @@ FIXED on `feat/c26` (Round 1 + Round 2 + Round 3 + Round 4 + Round 5 + Round 6):
 - **C26B-009** — parser state-machine transition graph
   (`.dev/C26_PARSER_FSM.md`) + arm-body throw propagation.
 - **C26B-011** — Float parity (NaN / ±Inf / denormal) + Div /
-  Mul divergence resolved across 3-backend.
+  Mul divergence resolved across 3-backend. The signed-zero
+  `-0.0` rendering path was split between rounds: interpreter +
+  native landed at Round 6 / wS (`547972c`, `signbit`-aware
+  `taida_float_to_str`); JS codegen landed at Round 7 / wV-a
+  (`d00e896`), closing the last 3-backend divergence.
+  `src/js/runtime/core.rs::__taida_float_render` probes
+  `Object.is(v, -0)` before `toFixed(1)`, and `__taida_mul` holds
+  the Number-path for `-0` operands so the BigInt integer
+  fast-path does not collapse the sign on `-1.0 * 0.0`.
+  `src/js/codegen.rs::Expr::FloatLit` adds defensive emission for
+  `-0.0` / NaN / ±Infinity (Rust `f64::to_string` surfaces
+  `"inf"` / `"-inf"` tokens that are invalid JS `Number`
+  literals). Regression guard:
+  `tests/c26b_011_signed_zero_parity.rs`.
 - **C26B-014** — core-bundled packages (`taida-lang/os`, `net`,
   `crypto`, `pool`, `js`) resolvable without an explicit
   `packages.tdm` entry (Option B pinned, widening).
@@ -576,6 +589,28 @@ Design decisions locked without code (informational):
   No code landed in the wG session — the decision is a gating
   artefact for every Phase 10 follow-up session.
 
+`@c.26` GATE-preparatory infrastructure sweeps (informational,
+no behaviour change):
+
+- **Round 7 / wX** (`eba5200`) — Rust 1.93 stricter
+  `clippy::collapsible_if` + `cargo fmt` sweep. Two pre-existing
+  `if … if …` nests folded into `let`-chain form
+  (`src/pkg/provider.rs:250` CoreBundledProvider write-needed
+  branch; `src/pkg/publish.rs:463` manifest-version label
+  comparison). Four unrelated files re-formatted. `-D warnings`
+  remains green on the updated toolchain.
+- **Round 8 / wY** (`af5c443`) — test-doc clippy cleanup ahead of
+  the `@c.26` GATE. Three lint categories confined to newly-added
+  C26 test files: `doc_list_item_overindented` (rustdoc),
+  `ptr_arg` (`&PathBuf` → `&Path` in test helpers where the
+  buffer is never mutated), and a `zombie_processes` false-positive
+  `#[allow]` on `spawn_and_wait_ready` in
+  `c26b_022_native_authority.rs` (every caller pairs spawn with
+  `drain_and_cleanup`, the pairing is just split across helpers
+  so the lint cannot see it). Test files only — no `src/`
+  changes, no `EXPECTED_TOTAL_LEN` impact, no parity fixture
+  touched. D27 escalation checklist: 3/3 NO.
+
 OPEN (owned by C26, not yet landed):
 
 - **C26B-002** — TLS construction across 3-backend. Round 4 / wJ
@@ -611,7 +646,9 @@ OPEN (owned by C26, not yet landed):
 - **Float denormal 3-backend rendering parity** (tracked under
   C26B-011's follow-up pin) — acceptance fixture still pending
   a cross-backend render audit; tracked for the next Cluster 5
-  session.
+  session. The signed-zero half of this follow-up closed at
+  Round 7 / wV-a; only the denormal rendering audit remains
+  under this pin.
 
 ---
 

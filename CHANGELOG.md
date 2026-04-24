@@ -236,16 +236,31 @@ zero code — it is a gating artefact so follow-up sessions land
 
 #### Cluster 5 — Float parity (Phase 11)
 
-- **C26B-011** — NaN / ±Infinity / denormal parity across 3-backend
-  (`Div` / `Mod` / math molds), `Div[1.0, 0.0]()` Lax default
-  rendering divergence resolved, and `Mul[1.5, 2.0]()` native-build
-  exit-code-1 isolated and fixed.
+- **C26B-011** `[FIXED]` — NaN / ±Infinity / denormal parity across
+  3-backend (`Div` / `Mod` / math molds), `Div[1.0, 0.0]()` Lax
+  default rendering divergence resolved, and `Mul[1.5, 2.0]()`
+  native-build exit-code-1 isolated and fixed.
   - Signed-zero `-0.0` runtime handling `[FIXED]` at Round 6 / wS
-    (`547972c`) across interpreter and native; JS-codegen
-    Float-literal rendering of `-0.0` — **OPEN PARTIAL**: the value
-    path matches, but the JS `Float.toString` lowering does not
-    currently preserve the leading sign. Tracked for wV-class
-    follow-up.
+    (`547972c`) across interpreter and native — `taida_float_to_str`
+    dispatches on `signbit` so `-0.0` renders as `"-0.0"` rather than
+    `"0.0"`.
+  - JS-codegen Float-literal rendering of `-0.0` `[FIXED]` at
+    Round 7 / wV-a (`d00e896`) — the final 3-backend divergence on
+    C26B-011 is now closed. Two fixes in
+    `src/js/runtime/core.rs`: (a) `__taida_float_render` probes
+    `Object.is(v, -0)` before `toFixed(1)` so signed zero surfaces
+    as `"-0.0"` (pure `(-0).toFixed(1)` drops the sign);
+    (b) `__taida_mul` stays on the Number multiplication path
+    when either operand is `-0` or when the Number-path product
+    itself is `-0` (BigInt has no `-0`, so the integer fast-path
+    would otherwise collapse the sign bit on `-1.0 * 0.0`).
+    `src/js/codegen.rs::Expr::FloatLit` adds defensive handling for
+    `-0.0` / NaN / ±Infinity literals (Rust `f64::to_string` emits
+    `"inf"` / `"-inf"` which are invalid JS `Number` literals; the
+    defensive path emits `(1/0)` / `(-1/0)` / `(0/0)` so the JS
+    backend remains safe for any float literal the interpreter
+    accepts). Regression guard:
+    `tests/c26b_011_signed_zero_parity.rs` (3-backend).
 
 #### Cluster 6 — Surface fixes (Phase 12) & docs (Phase 13)
 
@@ -401,14 +416,73 @@ Round 6 additions (all merged on `feat/c26`):
 - wS (`547972c`, C26B-022 Native authority + C26B-011 signed-zero
   runtime + profiling defer) — lands the Native h2/h3 authority
   byte-ceiling fixture, the runtime path for signed-zero `-0.0`
-  across interpreter and native (JS codegen rendering remains
-  PARTIAL), and defers the C26B-024 Native list/pack profile pass
-  onto the new Arc baseline.
+  across interpreter and native (JS codegen rendering was PARTIAL
+  at this point; completed at Round 7 / wV-a, see below), and
+  defers the C26B-024 Native list/pack profile pass onto the new
+  Arc baseline.
 
 Parallel worktrees wP / wQ / wS operated on disjoint file sets
 (`Value` variants + isolated fixtures); the Round 6 `EXPECTED_TOTAL_LEN`
 rolled from 988,932 to 994,500 bytes driven by wS Native additions
 (wP / wQ are Rust-only, no C-fragment delta).
+
+Round 7 additions (all merged on `feat/c26`):
+
+- wV-a (`d00e896`, C26B-011 JS signed-zero codegen completion) —
+  closes the last 3-backend divergence on C26B-011. JS-side
+  `__taida_float_render` now probes `Object.is(v, -0)` before
+  `toFixed(1)` so signed zero renders as `"-0.0"`; `__taida_mul`
+  stays on the Number multiplication path when either operand
+  or the Number-path product is `-0` (the BigInt integer
+  fast-path has no `-0` and would otherwise collapse the sign).
+  `Expr::FloatLit` JS codegen adds a defensive `-0.0` / NaN /
+  ±Infinity literal emitter (`(1/0)` / `(-1/0)` / `(0/0)`) so
+  Rust `f64::to_string`'s `"inf"` / `"-inf"` tokens — which are
+  invalid JS `Number` literals — are never surfaced in generated
+  JS. Regression guard: `tests/c26b_011_signed_zero_parity.rs`.
+- wW (`feb29f4`, C26B-013 docs amendment for Round 6) — promotes
+  wP / wQ from OPEN to FIXED in STABILITY §5.6 and CHANGELOG
+  `@c.26`, and records wS signed-zero runtime + the then-pending
+  JS follow-up. Superseded by wZ (Round 8) for the JS-side FIXED
+  promotion; wW's text is a faithful snapshot of the Round 6
+  merged state at the time of commit.
+- wX (`eba5200`, Rust 1.93 clippy + fmt sweep) — folds two
+  pre-existing `collapsible_if` nests flagged by Rust 1.93's
+  stricter lint (`src/pkg/provider.rs:250` and
+  `src/pkg/publish.rs:463`) into `let-chain` form, and applies
+  `cargo fmt` across four files with incidental formatting drift.
+  No behaviour change; `-D warnings` stays green on the updated
+  toolchain.
+
+Round 7 worktrees wV-a / wW / wX are disjoint
+(`src/js/runtime/` + `src/js/codegen.rs` / docs-only /
+`src/pkg/` + formatter-only); the Round 7 `EXPECTED_TOTAL_LEN`
+is unchanged from Round 6 (no C-fragment delta).
+
+Round 8 additions (all merged on `feat/c26`):
+
+- wY (`af5c443`, test-doc clippy cleanup ahead of `@c.26` GATE)
+  — zero behaviour change. Addresses three pre-existing lint
+  categories confined to newly-added C26 test files:
+  `doc_list_item_overindented` (rustdoc, 3-space continuation
+  flattened to 2-space hanging indent in
+  `c26b_011` / `c26b_016` / `c26b_018` module docs);
+  `ptr_arg` (clippy, `&PathBuf` → `&Path` in `run_js` /
+  `run_native` / `build_native` test helpers where the buffer
+  is never mutated); `zombie_processes` (clippy false-positive
+  `#[allow]` on `spawn_and_wait_ready` in
+  `c26b_022_native_authority.rs` — every caller pairs spawn
+  with `drain_and_cleanup` which kills + `wait_with_output`s,
+  but the pattern is split across helpers so the lint can't see
+  the pairing). Test scope only — no `src/` changes, no
+  `EXPECTED_TOTAL_LEN` impact, no parity fixture altered, no
+  new assertion added or modified. D27 escalation checklist:
+  3/3 NO.
+- wZ (this commit, C26B-013 rolling docs amendment) —
+  promotes C26B-011 to full `[FIXED]` in the Cluster 5 entry
+  above (the JS signed-zero path landed at wV-a), adds Round 7
+  and Round 8 sections to this changelog, and re-syncs
+  STABILITY §5.6 and §5.5 to match. No code change.
 
 ### Docs / infrastructure landed alongside
 
