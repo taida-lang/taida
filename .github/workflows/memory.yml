@@ -1,0 +1,137 @@
+name: memory
+
+# C26B-010: Memory leak definite-detection gate.
+#
+# Policy (stall-prevention scope, additive — ci.yml is not modified):
+#   1. Run valgrind memcheck against the smoke fixtures in
+#      examples/quality/c26_mem_smoke/ on every PR and on pushes to main.
+#      Fail the job on any `definitely lost` byte via
+#      `--errors-for-leak-kinds=definite --error-exitcode=1`.
+#      `indirectly lost` / `possibly lost` are surfaced in the job
+#      summary for trend visibility but do not gate merge.
+#   2. Run heaptrack on a weekly cron (Mondays 04:30 UTC) against the
+#      same fixtures. Artefacts are uploaded for follow-up analysis;
+#      this job does NOT hard-fail — it exists for timeline visibility
+#      only, complementing the memcheck gate.
+#   3. Peak-RSS gating is intentionally NOT duplicated here; it lives
+#      with the perf gate in .github/workflows/bench.yml (C26B-004)
+#      which already owns the EWMA baseline machinery.
+#   4. No existing workflow is touched (security.yml, bench.yml,
+#      coverage.yml, release.yml, ci.yml). This workflow is
+#      independent and gated by its own concurrency group.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Weekly heaptrack visibility run — Mondays 04:30 UTC.
+    - cron: "30 4 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: memory-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  valgrind-smoke:
+    name: valgrind smoke (definite-lost gate)
+    # PR + push + manual: run the fast gate. Skip on schedule — weekly
+    # run is covered by the heaptrack job below.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: shared cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Reuse the existing `cargo-base` partition from ci.yml so the
+          # release build below is incremental against prior CI runs.
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+
+      - name: build release taida binary
+        run: cargo build --release --bin taida
+
+      - name: run valgrind smoke (hard-fail on definitely-lost)
+        run: |
+          scripts/mem/run_valgrind_smoke.sh target/release/taida
+
+      - name: upload valgrind logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valgrind-smoke-${{ github.sha }}
+          path: target/mem-smoke/
+          if-no-files-found: warn
+          retention-days: 14
+
+  heaptrack-weekly:
+    name: heaptrack weekly (visibility only)
+    # Heaptrack is heavier than memcheck; gate it to the weekly cron
+    # and manual dispatch so PR latency stays under the memcheck gate.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: shared cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: install heaptrack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends heaptrack
+          heaptrack --version || true
+
+      - name: build release taida binary
+        run: cargo build --release --bin taida
+
+      - name: run heaptrack against smoke fixtures
+        run: |
+          set -euo pipefail
+          mkdir -p target/heaptrack
+          shopt -s nullglob
+          for fixture in examples/quality/c26_mem_smoke/*.td; do
+            name="$(basename "${fixture}" .td)"
+            echo "--- heaptrack :: ${name} ---"
+            heaptrack --output "target/heaptrack/${name}.zst" \
+              ./target/release/taida "${fixture}" || true
+          done
+          ls -lh target/heaptrack/ || true
+
+      - name: upload heaptrack data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heaptrack-weekly-${{ github.sha }}
+          path: target/heaptrack/
+          if-no-files-found: warn
+          retention-days: 30
