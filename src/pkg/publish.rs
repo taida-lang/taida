@@ -460,14 +460,14 @@ fn manifest_version_matches(manifest_version: &str, next_version: &str) -> bool 
         return true;
     }
     // Allow manifest "a.7" to match tag "a.7.rc3" (label-only addition).
-    if let Some(stripped) = next_version.strip_prefix(manifest_version) {
-        if let Some(rest) = stripped.strip_prefix('.') {
-            // `rest` is the label. It must be a non-empty label (no
-            // further dots) to ensure we are really matching an
-            // addended label, not a partial version prefix like "a.1"
-            // vs "a.12".
-            return !rest.is_empty() && !rest.contains('.');
-        }
+    if let Some(stripped) = next_version.strip_prefix(manifest_version)
+        && let Some(rest) = stripped.strip_prefix('.')
+    {
+        // `rest` is the label. It must be a non-empty label (no
+        // further dots) to ensure we are really matching an
+        // addended label, not a partial version prefix like "a.1"
+        // vs "a.12".
+        return !rest.is_empty() && !rest.contains('.');
     }
     false
 }

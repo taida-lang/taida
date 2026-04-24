@@ -1523,8 +1523,7 @@ impl Interpreter {
                                 return;
                             }
 
-                            let inner =
-                                Value::pack(vec![("addresses".into(), Value::list(out))]);
+                            let inner = Value::pack(vec![("addresses".into(), Value::list(out))]);
                             let _ = tx.send(Ok(make_result_success(inner)));
                         }
                     }

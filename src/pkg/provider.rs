@@ -247,13 +247,11 @@ impl CoreBundledProvider {
             Ok(existing) => existing != source,
             Err(_) => true,
         };
-        if needs_write {
-            if let Err(e) = std::fs::write(&main_td, source) {
-                return Some(Err(format!(
-                    "Cannot write bundled source for '{}': {}",
-                    name, e
-                )));
-            }
+        if needs_write && let Err(e) = std::fs::write(&main_td, source) {
+            return Some(Err(format!(
+                "Cannot write bundled source for '{}': {}",
+                name, e
+            )));
         }
         Some(Ok(bundled_dir))
     }

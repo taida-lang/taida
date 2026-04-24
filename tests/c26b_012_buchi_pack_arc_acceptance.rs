@@ -75,7 +75,10 @@ fn buchipack_take_is_cow_fast_path_when_unique() {
     // be the try_unwrap fast path (no allocation).
     assert_eq!(Arc::strong_count(&inner), 1);
     let taken = Value::pack_take(inner);
-    assert_eq!(taken, expected, "pack_take must preserve field order + values");
+    assert_eq!(
+        taken, expected,
+        "pack_take must preserve field order + values"
+    );
 }
 
 /// COW write-side invariant under contention: `Value::pack_take` on a

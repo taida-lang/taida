@@ -246,7 +246,9 @@ pub(crate) fn extract_result_value_owned(result: Value) -> Option<Vec<(String, V
     // consume `fields` via `Value::pack_take` to preserve the owned return
     // contract (`Option<Vec<(String, Value)>>`).
     let mut owned = Value::pack_take(fields);
-    let idx = owned.iter().position(|(k, v)| k == "__value" && matches!(v, Value::BuchiPack(_)));
+    let idx = owned
+        .iter()
+        .position(|(k, v)| k == "__value" && matches!(v, Value::BuchiPack(_)));
     if let Some(i) = idx {
         let (_, v) = owned.swap_remove(i);
         if let Value::BuchiPack(inner) = v {

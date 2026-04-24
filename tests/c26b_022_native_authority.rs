@@ -147,8 +147,8 @@ fn spawn_and_wait_ready(bin: &Path, port: u16) -> Child {
 /// Send `request_bytes` to the server and read the whole reply (until EOF
 /// or timeout).
 fn round_trip(port: u16, request_bytes: &[u8]) -> Vec<u8> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .expect("connect to native server");
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect to native server");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
@@ -170,11 +170,13 @@ fn round_trip(port: u16, request_bytes: &[u8]) -> Vec<u8> {
 
 fn drain_and_cleanup(mut child: Child, dir: &Path) -> String {
     let _ = child.kill();
-    let out = child.wait_with_output().unwrap_or_else(|_| std::process::Output {
-        status: std::process::ExitStatus::default(),
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-    });
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|_| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
     let _ = std::fs::remove_dir_all(dir);
     String::from_utf8_lossy(&out.stdout).to_string()
 }
