@@ -15,24 +15,24 @@
 //!
 //! # Semantics (consistent across backends)
 //!
-//!   - `n <= 0` → `""`
-//!   - `n == 1` → `str` (separator never emitted)
-//!   - `n >= 2` → `str + sep + str + sep + ... + str` (n copies, n-1 seps)
+//! - `n <= 0` → `""`
+//! - `n == 1` → `str` (separator never emitted)
+//! - `n >= 2` → `str + sep + str + sep + ... + str` (n copies, n-1 seps)
 //!
 //! # Backend implementation
 //!
-//!   - Interpreter: `src/interpreter/mold_eval.rs::StringRepeatJoin`
-//!   - JS:          `src/js/runtime/core.rs::StringRepeatJoin`
-//!                  (uses `String#repeat` when sep is empty,
-//!                   `Array(n).fill(str).join(sep)` otherwise)
-//!   - Native:      `src/codegen/lower_molds.rs::StringRepeatJoin` →
-//!                  `taida_str_repeat_join` in `core.c` (precomputes
-//!                  total length, single `taida_str_alloc`)
+//! - Interpreter: `src/interpreter/mold_eval.rs::StringRepeatJoin`
+//! - JS: `src/js/runtime/core.rs::StringRepeatJoin`
+//!   (uses `String#repeat` when sep is empty,
+//!   `Array(n).fill(str).join(sep)` otherwise)
+//! - Native: `src/codegen/lower_molds.rs::StringRepeatJoin` →
+//!   `taida_str_repeat_join` in `core.c` (precomputes
+//!   total length, single `taida_str_alloc`)
 
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn taida_bin() -> PathBuf {
@@ -84,7 +84,7 @@ fn run_interp(src: &PathBuf) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_js(src: &Path, dir: &Path) -> Option<String> {
     if !node_available() {
         eprintln!("node unavailable; skipping JS leg");
         return None;
@@ -111,7 +111,7 @@ fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
     Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
 }
 
-fn run_native(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_native(src: &Path, dir: &Path) -> Option<String> {
     if !cc_available() {
         eprintln!("cc unavailable; skipping native leg");
         return None;

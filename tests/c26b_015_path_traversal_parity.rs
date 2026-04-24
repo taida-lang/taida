@@ -19,6 +19,10 @@
 //! different resolver path that canonicalizes after source is written).
 //! This fix brings Native in line with the other two.
 
+// The variable `foo` mirrors `examples/foo.td` fixture filename; this
+// is a legitimate placeholder in the test domain.
+#![allow(clippy::disallowed_names)]
+
 mod common;
 
 use std::fs;

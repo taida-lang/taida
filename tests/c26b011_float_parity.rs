@@ -64,9 +64,7 @@ fn run_interpreter(td_path: &Path) -> Option<String> {
 }
 
 fn run_js(td_path: &Path) -> Option<String> {
-    if which_node().is_none() {
-        return None;
-    }
+    which_node()?;
     let stem = td_path.file_stem()?.to_string_lossy().to_string();
     let js_path = std::env::temp_dir().join(format!("c26b011_{}_{}.mjs", std::process::id(), stem));
     let build = Command::new(taida_bin())

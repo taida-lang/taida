@@ -9,29 +9,29 @@
 //!
 //! # Tolerant semantics (consistent across backends)
 //!
-//!   - Invalid UTF-8 span content  → empty `""`.
-//!   - Out-of-bounds span          → empty `""`.
-//!   - `len == 0`                  → empty `""`.
+//! - Invalid UTF-8 span content  → empty `""`.
+//! - Out-of-bounds span          → empty `""`.
+//! - `len == 0`                  → empty `""`.
 //!
 //! This matches the Span* family pattern: hot-path boolean molds return
 //! `false` on invalid input, cold-path materializers return empty Str.
 //!
 //! # Backend implementation
 //!
-//!   - Interpreter: `src/interpreter/mold_eval.rs::StrOf`
-//!   - JS:          `src/js/runtime/net.rs::__taida_net_StrOf` + codegen rewrite
-//!   - Native:      `src/codegen/lower_molds.rs::StrOf` (IR composition using
-//!                  existing `taida_pack_get` + `taida_slice_mold` +
-//!                  `taida_utf8_decode_mold` + `taida_lax_get_or_default` —
-//!                  no new C runtime helper, avoiding core.c churn during
-//!                  Round 3 co-ordination with wG/wI).
+//! - Interpreter: `src/interpreter/mold_eval.rs::StrOf`
+//! - JS: `src/js/runtime/net.rs::__taida_net_StrOf` + codegen rewrite
+//! - Native: `src/codegen/lower_molds.rs::StrOf` (IR composition using
+//!   existing `taida_pack_get` + `taida_slice_mold` +
+//!   `taida_utf8_decode_mold` + `taida_lax_get_or_default` —
+//!   no new C runtime helper, avoiding core.c churn during
+//!   Round 3 co-ordination with wG/wI).
 //!
 //! See `docs/reference/net_api.md §4.1` for the canonical docs reference.
 
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn taida_bin() -> PathBuf {
@@ -83,7 +83,7 @@ fn run_interp(src: &PathBuf) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_js(src: &Path, dir: &Path) -> Option<String> {
     if !node_available() {
         eprintln!("node unavailable; skipping JS leg");
         return None;
@@ -110,7 +110,7 @@ fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
     Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
 }
 
-fn run_native(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_native(src: &Path, dir: &Path) -> Option<String> {
     if !cc_available() {
         eprintln!("cc unavailable; skipping native leg");
         return None;

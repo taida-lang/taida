@@ -47,7 +47,7 @@
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn taida_bin() -> PathBuf {
@@ -99,7 +99,7 @@ fn run_interp(src: &PathBuf) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_js(src: &Path, dir: &Path) -> Option<String> {
     if !node_available() {
         eprintln!("node unavailable; skipping JS leg");
         return None;
@@ -126,7 +126,7 @@ fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
     Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
 }
 
-fn run_native(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_native(src: &Path, dir: &Path) -> Option<String> {
     if !cc_available() {
         eprintln!("cc unavailable; skipping native leg");
         return None;

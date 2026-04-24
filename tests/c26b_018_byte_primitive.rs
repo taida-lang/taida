@@ -7,32 +7,29 @@
 //!
 //! # Semantics (consistent across backends)
 //!
-//!   - `ByteAt[str, idx]()`       → `Lax[Int]` — byte value at idx (0..=255),
-//!                                  empty Lax if OOB. O(1).
-//!   - `ByteSlice[str, s, e]()`   → `Str` — byte-range slice. If the slice
-//!                                  cuts a UTF-8 sequence mid-codepoint,
-//!                                  the interp/native backends return the
-//!                                  raw bytes as-is (lossy where needed);
-//!                                  JS uses TextDecoder (non-fatal) which
-//!                                  matches when the slice lands on a
-//!                                  codepoint boundary. All test fixtures
-//!                                  use boundary-safe offsets.
-//!   - `ByteLength[str]()`        → `Int` — UTF-8 byte length. O(1).
+//! - `ByteAt[str, idx]()` → `Lax[Int]` — byte value at idx (0..=255),
+//!   empty Lax if OOB. O(1).
+//! - `ByteSlice[str, s, e]()` → `Str` — byte-range slice. If the slice
+//!   cuts a UTF-8 sequence mid-codepoint, the interp/native backends
+//!   return the raw bytes as-is (lossy where needed); JS uses TextDecoder
+//!   (non-fatal) which matches when the slice lands on a codepoint
+//!   boundary. All test fixtures use boundary-safe offsets.
+//! - `ByteLength[str]()` → `Int` — UTF-8 byte length. O(1).
 //!
 //! # Backend implementation
 //!
-//!   - Interpreter: `src/interpreter/mold_eval.rs` (ByteAt / ByteSlice /
-//!                  ByteLength handlers)
-//!   - JS:          `src/js/runtime/core.rs` (`function ByteAt` / `ByteSlice`
-//!                  / `ByteLength`, TextEncoder-backed)
-//!   - Native:      `src/codegen/lower_molds.rs` + `src/codegen/native_runtime/core.c`
-//!                  (`taida_str_byte_at_lax` / `taida_str_byte_slice` /
-//!                  `taida_str_byte_length`)
+//! - Interpreter: `src/interpreter/mold_eval.rs` (ByteAt / ByteSlice /
+//!   ByteLength handlers)
+//! - JS: `src/js/runtime/core.rs` (`function ByteAt` / `ByteSlice` /
+//!   `ByteLength`, TextEncoder-backed)
+//! - Native: `src/codegen/lower_molds.rs` + `src/codegen/native_runtime/core.c`
+//!   (`taida_str_byte_at_lax` / `taida_str_byte_slice` /
+//!   `taida_str_byte_length`)
 
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn taida_bin() -> PathBuf {
@@ -84,7 +81,7 @@ fn run_interp(src: &PathBuf) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_js(src: &Path, dir: &Path) -> Option<String> {
     if !node_available() {
         eprintln!("node unavailable; skipping JS leg");
         return None;
@@ -111,7 +108,7 @@ fn run_js(src: &PathBuf, dir: &PathBuf) -> Option<String> {
     Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
 }
 
-fn run_native(src: &PathBuf, dir: &PathBuf) -> Option<String> {
+fn run_native(src: &Path, dir: &Path) -> Option<String> {
     if !cc_available() {
         eprintln!("cc unavailable; skipping native leg");
         return None;

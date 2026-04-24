@@ -125,7 +125,11 @@ fn build_native(src: &Path, bin: &Path) -> bool {
 }
 
 /// Spawn the binary and wait until the server accepts a TCP connection.
-/// Returns the child handle for later cleanup.
+/// Returns the child handle for later cleanup. Callers pair every
+/// successful spawn with `drain_and_cleanup(child, ...)` which kills
+/// and `wait_with_output()`s the process, so the clippy::zombie_processes
+/// warning here is a false positive (pattern is spread across helpers).
+#[allow(clippy::zombie_processes)]
 fn spawn_and_wait_ready(bin: &Path, port: u16) -> Child {
     let child = Command::new(bin)
         .stdout(Stdio::piped())
