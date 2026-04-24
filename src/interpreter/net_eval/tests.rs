@@ -249,11 +249,11 @@ fn test_parse_no_query() {
 
 #[test]
 fn test_encode_200_text() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("content-type".into())),
                 ("value".into(), Value::Str("text/plain".into())),
             ])]),
@@ -275,7 +275,7 @@ fn test_encode_200_text() {
 
 #[test]
 fn test_encode_404_empty() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(404)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
@@ -293,7 +293,7 @@ fn test_encode_404_empty() {
 
 #[test]
 fn test_encode_binary_body() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::bytes(vec![0x00, 0xFF, 0x42])),
@@ -309,11 +309,11 @@ fn test_encode_binary_body() {
 
 #[test]
 fn test_encode_user_content_length_preserved() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("Content-Length".into())),
                 ("value".into(), Value::Str("99".into())),
             ])]),
@@ -552,7 +552,7 @@ fn test_parse_content_length_leading_zeros_over_max_safe() {
 
 #[test]
 fn test_encode_missing_status() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("Hello".into())),
     ]);
@@ -563,7 +563,7 @@ fn test_encode_missing_status() {
 
 #[test]
 fn test_encode_wrong_type_status() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Str("200".into())),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("Hello".into())),
@@ -575,7 +575,7 @@ fn test_encode_wrong_type_status() {
 
 #[test]
 fn test_encode_status_out_of_range() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(99)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("Hello".into())),
@@ -587,7 +587,7 @@ fn test_encode_status_out_of_range() {
 
 #[test]
 fn test_encode_missing_headers() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("body".into(), Value::Str("Hello".into())),
     ]);
@@ -598,7 +598,7 @@ fn test_encode_missing_headers() {
 
 #[test]
 fn test_encode_missing_body() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
     ]);
@@ -609,11 +609,11 @@ fn test_encode_missing_body() {
 
 #[test]
 fn test_encode_crlf_in_header_name() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("Bad\r\nHeader".into())),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -627,11 +627,11 @@ fn test_encode_crlf_in_header_name() {
 
 #[test]
 fn test_encode_crlf_in_header_value() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("X-Test".into())),
                 ("value".into(), Value::Str("inject\r\nEvil: header".into())),
             ])]),
@@ -645,7 +645,7 @@ fn test_encode_crlf_in_header_value() {
 
 #[test]
 fn test_encode_wrong_type_body() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Int(42)),
@@ -657,11 +657,11 @@ fn test_encode_wrong_type_body() {
 
 #[test]
 fn test_encode_header_name_not_str() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Int(42)),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -678,11 +678,11 @@ fn test_encode_header_name_not_str() {
 #[test]
 fn test_encode_header_name_exceeds_limit() {
     let long_name = "X".repeat(8193);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str(long_name)),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -701,11 +701,11 @@ fn test_encode_header_name_exceeds_limit() {
 #[test]
 fn test_encode_header_value_exceeds_limit() {
     let long_value = "V".repeat(65537);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("X-Data".into())),
                 ("value".into(), Value::Str(long_value)),
             ])]),
@@ -724,11 +724,11 @@ fn test_encode_header_value_exceeds_limit() {
 #[test]
 fn test_encode_header_name_at_limit_ok() {
     let name = "X".repeat(8192);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str(name)),
                 ("value".into(), Value::Str("ok".into())),
             ])]),
@@ -742,11 +742,11 @@ fn test_encode_header_name_at_limit_ok() {
 #[test]
 fn test_encode_header_value_at_limit_ok() {
     let value = "V".repeat(65536);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("X-Data".into())),
                 ("value".into(), Value::Str(value)),
             ])]),
@@ -761,7 +761,7 @@ fn test_encode_header_value_at_limit_ok() {
 
 #[test]
 fn test_encode_204_empty_body_ok() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(204)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
@@ -783,7 +783,7 @@ fn test_encode_204_empty_body_ok() {
 
 #[test]
 fn test_encode_204_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(204)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("oops".into())),
@@ -795,7 +795,7 @@ fn test_encode_204_with_body_rejected() {
 
 #[test]
 fn test_encode_304_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(304)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("cached".into())),
@@ -807,7 +807,7 @@ fn test_encode_304_with_body_rejected() {
 
 #[test]
 fn test_encode_205_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(205)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("data".into())),
@@ -819,7 +819,7 @@ fn test_encode_205_with_body_rejected() {
 
 #[test]
 fn test_encode_205_empty_body_ok() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(205)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
@@ -838,7 +838,7 @@ fn test_encode_205_empty_body_ok() {
 
 #[test]
 fn test_encode_1xx_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(100)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str("data".into())),
@@ -851,11 +851,11 @@ fn test_encode_1xx_with_body_rejected() {
 #[test]
 fn test_encode_204_content_length_stripped() {
     // User-provided Content-Length should be silently dropped for 204
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(204)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Str("Content-Length".into())),
                 ("value".into(), Value::Str("0".into())),
             ])]),
@@ -877,7 +877,7 @@ fn test_encode_204_content_length_stripped() {
 
 #[test]
 fn test_encode_429_reason_phrase() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(429)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
@@ -895,7 +895,7 @@ fn test_encode_429_reason_phrase() {
 
 #[test]
 fn test_encode_unknown_status_no_fake_reason() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(599)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Str(String::new())),
@@ -929,7 +929,7 @@ fn test_make_fulfilled_async() {
 
 #[test]
 fn test_extract_result_value_success() {
-    let result = make_result_success(Value::BuchiPack(vec![("ok".into(), Value::Bool(true))]));
+    let result = make_result_success(Value::pack(vec![("ok".into(), Value::Bool(true))]));
     let inner = extract_result_value(&result);
     assert!(inner.is_some());
 }
@@ -1156,20 +1156,20 @@ fn test_parse_http_version_0_9_rejected() {
 
 #[test]
 fn test_encode_multiple_headers() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
             Value::list(vec![
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("Content-Type".into())),
                     ("value".into(), Value::Str("application/json".into())),
                 ]),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("X-Request-Id".into())),
                     ("value".into(), Value::Str("abc-123".into())),
                 ]),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("Cache-Control".into())),
                     ("value".into(), Value::Str("no-cache".into())),
                 ]),
@@ -1196,20 +1196,20 @@ fn test_encode_multiple_headers() {
 #[test]
 fn test_encode_multiple_headers_order_preserved() {
     // Headers should appear in the order provided by the user.
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
             Value::list(vec![
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("X-First".into())),
                     ("value".into(), Value::Str("1".into())),
                 ]),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("X-Second".into())),
                     ("value".into(), Value::Str("2".into())),
                 ]),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("X-Third".into())),
                     ("value".into(), Value::Str("3".into())),
                 ]),
@@ -1242,16 +1242,16 @@ fn test_encode_multiple_headers_order_preserved() {
 #[test]
 fn test_encode_duplicate_header_names_preserved() {
     // Multiple headers with the same name should all appear (e.g. Set-Cookie).
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
             Value::list(vec![
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("Set-Cookie".into())),
                     ("value".into(), Value::Str("a=1".into())),
                 ]),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("name".into(), Value::Str("Set-Cookie".into())),
                     ("value".into(), Value::Str("b=2".into())),
                 ]),
@@ -2310,11 +2310,11 @@ fn test_read_body_content_length() {
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\nhello".to_vec();
     let body_start = 35i64; // "hello" starts at offset 35
     let body_len = 5i64;
-    let req = Value::BuchiPack(vec![
+    let req = Value::pack(vec![
         ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(body_start)),
                 ("len".into(), Value::Int(body_len)),
             ]),
@@ -2328,11 +2328,11 @@ fn test_read_body_content_length() {
 fn test_read_body_no_body() {
     // body.len == 0 should return empty Bytes
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
-    let req = Value::BuchiPack(vec![
+    let req = Value::pack(vec![
         ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(35)),
                 ("len".into(), Value::Int(0)),
             ]),
@@ -2345,9 +2345,9 @@ fn test_read_body_no_body() {
 #[test]
 fn test_read_body_missing_raw() {
     // Request pack without 'raw' field should produce RuntimeError
-    let req = Value::BuchiPack(vec![(
+    let req = Value::pack(vec![(
         "body".into(),
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("start".into(), Value::Int(0)),
             ("len".into(), Value::Int(5)),
         ]),
@@ -2372,17 +2372,17 @@ fn test_read_body_not_buchipack() {
 fn test_keep_alive_http11_default() {
     // HTTP/1.1 without Connection header → keep-alive
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)), // "Host"
                 ("len".into(), Value::Int(4)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(22)), // "localhost"
                 ("len".into(), Value::Int(9)),
             ]),
@@ -2396,33 +2396,33 @@ fn test_keep_alive_http11_connection_close() {
     // HTTP/1.1 with Connection: close → not keep-alive
     let raw = b"GET / HTTP/1.1\r\nConnection: close\r\nHost: localhost\r\n\r\n";
     let headers = vec![
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(16)),
                     ("len".into(), Value::Int(10)), // "Connection"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(28)),
                     ("len".into(), Value::Int(5)), // "close"
                 ]),
             ),
         ]),
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(35)),
                     ("len".into(), Value::Int(4)), // "Host"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(41)),
                     ("len".into(), Value::Int(9)), // "localhost"
                 ]),
@@ -2436,17 +2436,17 @@ fn test_keep_alive_http11_connection_close() {
 fn test_keep_alive_http10_default() {
     // HTTP/1.0 without Connection header → not keep-alive
     let raw = b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(4)), // "Host"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(22)),
                 ("len".into(), Value::Int(9)), // "localhost"
             ]),
@@ -2460,33 +2460,33 @@ fn test_keep_alive_http10_explicit() {
     // HTTP/1.0 with Connection: keep-alive → keep-alive
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive\r\nHost: localhost\r\n\r\n";
     let headers = vec![
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(16)),
                     ("len".into(), Value::Int(10)), // "Connection"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(28)),
                     ("len".into(), Value::Int(10)), // "keep-alive"
                 ]),
             ),
         ]),
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(40)),
                     ("len".into(), Value::Int(4)), // "Host"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(46)),
                     ("len".into(), Value::Int(9)), // "localhost"
                 ]),
@@ -2500,17 +2500,17 @@ fn test_keep_alive_http10_explicit() {
 fn test_keep_alive_case_insensitive() {
     // Connection header name and value should be case-insensitive
     let raw = b"GET / HTTP/1.1\r\nCONNECTION: CLOSE\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)), // "CONNECTION"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(5)), // "CLOSE"
             ]),
@@ -2523,17 +2523,17 @@ fn test_keep_alive_case_insensitive() {
 fn test_keep_alive_token_list_close_with_upgrade() {
     // "Connection: close, upgrade" — HTTP/1.1 should NOT keep alive (close token present)
     let raw = b"GET / HTTP/1.1\r\nConnection: close, upgrade\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)), // "Connection"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(14)), // "close, upgrade"
             ]),
@@ -2546,17 +2546,17 @@ fn test_keep_alive_token_list_close_with_upgrade() {
 fn test_keep_alive_token_list_keep_alive_with_extra() {
     // "Connection: keep-alive, foo" — HTTP/1.0 should keep alive (keep-alive token present)
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive, foo\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)), // "Connection"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(15)), // "keep-alive, foo"
             ]),
@@ -2569,17 +2569,17 @@ fn test_keep_alive_token_list_keep_alive_with_extra() {
 fn test_keep_alive_close_wins_over_keep_alive_same_header() {
     // "Connection: keep-alive, close" — close wins on both HTTP/1.0 and 1.1
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive, close\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(17)), // "keep-alive, close"
             ]),
@@ -2593,33 +2593,33 @@ fn test_keep_alive_close_wins_over_keep_alive_same_header() {
 fn test_keep_alive_close_wins_across_duplicate_headers() {
     // Two Connection headers: one says keep-alive, the other says close
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n";
-    let h1 = Value::BuchiPack(vec![
+    let h1 = Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(10)), // "keep-alive"
             ]),
         ),
     ]);
-    let h2 = Value::BuchiPack(vec![
+    let h2 = Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(40)),
                 ("len".into(), Value::Int(10)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(52)),
                 ("len".into(), Value::Int(5)), // "close"
             ]),
@@ -3548,11 +3548,11 @@ fn test_read_body_chunked() {
     let body_start = head.len() as i64;
     let body_len = compacted_body.len() as i64;
 
-    let req = Value::BuchiPack(vec![
+    let req = Value::pack(vec![
         ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(body_start)),
                 ("len".into(), Value::Int(body_len)),
             ]),

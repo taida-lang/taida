@@ -126,7 +126,7 @@ impl Interpreter {
                 ("query".into(), Value::Str(query_part)),
                 (
                     "version".into(),
-                    Value::BuchiPack(vec![
+                    Value::pack(vec![
                         ("major".into(), Value::Int(3)),
                         ("minor".into(), Value::Int(0)),
                     ]),
@@ -136,14 +136,14 @@ impl Interpreter {
             // Convert H3 headers to the same format as h1/h2.
             let mut header_values: Vec<Value> = Vec::new();
             for (name, value) in &req.headers {
-                header_values.push(Value::BuchiPack(vec![
+                header_values.push(Value::pack(vec![
                     ("name".into(), Value::Str(name.clone())),
                     ("value".into(), Value::Str(value.clone())),
                 ]));
             }
             // Add :authority as host header for compatibility (same as h2).
             if !req.authority.is_empty() {
-                header_values.push(Value::BuchiPack(vec![
+                header_values.push(Value::pack(vec![
                     ("name".into(), Value::Str("host".into())),
                     ("value".into(), Value::Str(req.authority.clone())),
                 ]));
@@ -168,7 +168,7 @@ impl Interpreter {
             request_fields.push(("chunked".into(), Value::Bool(false)));
             request_fields.push(("protocol".into(), Value::Str("h3".into())));
 
-            let request_pack = Value::BuchiPack(request_fields);
+            let request_pack = Value::pack(request_fields);
 
             // Call handler with request pack (1-arg path, same as h2).
             let handler_result = self.call_function_with_values(&handler, &[request_pack]);
@@ -191,7 +191,7 @@ impl Interpreter {
 
         match net_h3::serve_h3_loop(&cert_path, &key_path, port, max_requests, &mut h3_handler) {
             Ok(request_count) => {
-                let result_inner = Value::BuchiPack(vec![
+                let result_inner = Value::pack(vec![
                     ("ok".into(), Value::Bool(true)),
                     ("requests".into(), Value::Int(request_count)),
                 ]);

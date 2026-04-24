@@ -342,7 +342,7 @@ impl Interpreter {
             }
             "map" => {
                 if is_error {
-                    return Ok(Signal::Value(Value::BuchiPack(fields.to_vec())));
+                    return Ok(Signal::Value(Value::pack(fields.to_vec())));
                 }
                 let func = match args.first() {
                     Some(Value::Function(f)) => f.clone(),
@@ -353,7 +353,7 @@ impl Interpreter {
                     }
                 };
                 let result = self.call_function_with_values(&func, &[inner_value])?;
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__value".into(), result),
                     ("__predicate".into(), Value::Unit),
                     ("throw".into(), Value::Unit),
@@ -362,7 +362,7 @@ impl Interpreter {
             }
             "flatMap" => {
                 if is_error {
-                    return Ok(Signal::Value(Value::BuchiPack(fields.to_vec())));
+                    return Ok(Signal::Value(Value::pack(fields.to_vec())));
                 }
                 let func = match args.first() {
                     Some(Value::Function(f)) => f.clone(),
@@ -381,7 +381,7 @@ impl Interpreter {
                         return Ok(Signal::Value(result));
                     }
                 }
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__value".into(), result),
                     ("__predicate".into(), Value::Unit),
                     ("throw".into(), Value::Unit),
@@ -390,7 +390,7 @@ impl Interpreter {
             }
             "mapError" => {
                 if is_success {
-                    return Ok(Signal::Value(Value::BuchiPack(fields.to_vec())));
+                    return Ok(Signal::Value(Value::pack(fields.to_vec())));
                 }
                 let func = match args.first() {
                     Some(Value::Function(f)) => f.clone(),
@@ -408,7 +408,7 @@ impl Interpreter {
                     message: result.to_display_string(),
                     fields: Vec::new(),
                 });
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__value".into(), Value::Unit),
                     ("__predicate".into(), Value::Unit),
                     ("throw".into(), new_throw),
@@ -464,7 +464,7 @@ impl Interpreter {
             "isEmpty" => Ok(Signal::Value(Value::Bool(!has_value))),
             "relax" => {
                 // Convert to RelaxedGorillax — throwable instead of gorilla
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(has_value)),
                     ("__value".into(), inner_value),
                     ("__error".into(), error_value),
@@ -565,7 +565,7 @@ impl Interpreter {
             "map" => {
                 if !has_value {
                     // Empty Lax stays empty with same default
-                    return Ok(Signal::Value(Value::BuchiPack(vec![
+                    return Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
@@ -581,7 +581,7 @@ impl Interpreter {
                     }
                 };
                 let result = self.call_function_with_values(&func, &[inner_value])?;
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), result),
                     ("__default".into(), default_value),
@@ -590,7 +590,7 @@ impl Interpreter {
             }
             "flatMap" => {
                 if !has_value {
-                    return Ok(Signal::Value(Value::BuchiPack(vec![
+                    return Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_value.clone()),
                         ("__default".into(), default_value),
@@ -616,7 +616,7 @@ impl Interpreter {
                     }
                 }
                 // Wrap non-Lax result in Lax with value
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), result),
                     ("__default".into(), default_value),
@@ -683,7 +683,7 @@ impl Interpreter {
                                 .map(|(_, v)| v.clone())
                                 .unwrap_or(Value::Unit);
                             let default_value = Interpreter::default_for_value(&value);
-                            return Ok(Signal::Value(Value::BuchiPack(vec![
+                            return Ok(Signal::Value(Value::pack(vec![
                                 ("hasValue".into(), Value::Bool(true)),
                                 ("__value".into(), value),
                                 ("__default".into(), default_value),
@@ -693,7 +693,7 @@ impl Interpreter {
                     }
                 }
                 // Key not found — return empty Lax
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(false)),
                     ("__value".into(), Value::Unit),
                     ("__default".into(), Value::Unit),
@@ -709,7 +709,7 @@ impl Interpreter {
                     if let Value::BuchiPack(ef) = entry {
                         let entry_key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
                         if entry_key == Some(&key) {
-                            new_entries.push(Value::BuchiPack(vec![
+                            new_entries.push(Value::pack(vec![
                                 ("key".into(), key.clone()),
                                 ("value".into(), value.clone()),
                             ]));
@@ -720,12 +720,12 @@ impl Interpreter {
                     }
                 }
                 if !found {
-                    new_entries.push(Value::BuchiPack(vec![
+                    new_entries.push(Value::pack(vec![
                         ("key".into(), key),
                         ("value".into(), value),
                     ]));
                 }
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(new_entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
@@ -743,7 +743,7 @@ impl Interpreter {
                         }
                     })
                     .collect();
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(new_entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
@@ -800,7 +800,7 @@ impl Interpreter {
                                 .iter()
                                 .find(|(n, _)| n == "value")
                                 .map(|(_, v)| v.clone())?;
-                            Some(Value::BuchiPack(vec![
+                            Some(Value::pack(vec![
                                 ("key".into(), key),
                                 ("value".into(), value),
                             ]))
@@ -879,7 +879,7 @@ impl Interpreter {
                         merged.push(other_entry);
                     }
                 }
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(merged)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ])))
@@ -941,7 +941,7 @@ impl Interpreter {
                 if !new_items.contains(&item) {
                     new_items.push(item);
                 }
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(new_items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
@@ -949,7 +949,7 @@ impl Interpreter {
             "remove" => {
                 let item = args.first().cloned().unwrap_or(Value::Unit);
                 let new_items: Vec<Value> = items.into_iter().filter(|i| i != &item).collect();
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(new_items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
@@ -1013,7 +1013,7 @@ impl Interpreter {
                         }
                     }
                 }
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
@@ -1057,7 +1057,7 @@ impl Interpreter {
                             .filter(|item| other_items.contains(item))
                             .collect()
                     };
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
@@ -1097,7 +1097,7 @@ impl Interpreter {
                             .filter(|item| !other_items.contains(item))
                             .collect()
                     };
-                Ok(Signal::Value(Value::BuchiPack(vec![
+                Ok(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(result)),
                     ("__type".into(), Value::Str("Set".into())),
                 ])))
@@ -1133,14 +1133,14 @@ impl Interpreter {
                     _ => -1,
                 };
                 if idx >= 0 && (idx as usize) < bytes.len() {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), Value::Int(bytes[idx as usize] as i64)),
                         ("__default".into(), Value::Int(0)),
                         ("__type".into(), Value::Str("Lax".into())),
                     ])))
                 } else {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
@@ -1231,14 +1231,14 @@ impl Interpreter {
                         .nth(idx as usize)
                         .expect("bounds checked above")
                         .to_string();
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), Value::Str(ch)),
                         ("__default".into(), Value::Str(String::new())),
                         ("__type".into(), Value::Str("Lax".into())),
                     ])))
                 } else {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Str(String::new())),
                         ("__default".into(), Value::Str(String::new())),
@@ -1428,14 +1428,14 @@ impl Interpreter {
             "first" => {
                 if let Some(val) = items.first() {
                     let default_val = super::eval::Interpreter::default_for_value(val);
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), val.clone()),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::Str("Lax".into())),
                     ])))
                 } else {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
@@ -1446,14 +1446,14 @@ impl Interpreter {
             "last" => {
                 if let Some(val) = items.last() {
                     let default_val = super::eval::Interpreter::default_for_value(val);
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), val.clone()),
                         ("__default".into(), default_val),
                         ("__type".into(), Value::Str("Lax".into())),
                     ])))
                 } else {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
@@ -1471,7 +1471,7 @@ impl Interpreter {
                     let val = items[idx as usize].clone();
                     let default_val = custom_default
                         .unwrap_or_else(|| super::eval::Interpreter::default_for_value(&val));
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), val),
                         ("__default".into(), default_val),
@@ -1485,7 +1485,7 @@ impl Interpreter {
                             Value::Int(0)
                         }
                     });
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), default_val.clone()),
                         ("__default".into(), default_val),
@@ -1513,7 +1513,7 @@ impl Interpreter {
             }
             "max" => {
                 if items.is_empty() {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
@@ -1526,7 +1526,7 @@ impl Interpreter {
                         .cloned()
                         .unwrap_or_else(|| Value::default_for_list(items));
                     let default_val = super::eval::Interpreter::default_for_value(&max_val);
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), max_val),
                         ("__default".into(), default_val),
@@ -1536,7 +1536,7 @@ impl Interpreter {
             }
             "min" => {
                 if items.is_empty() {
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Int(0)),
                         ("__default".into(), Value::Int(0)),
@@ -1549,7 +1549,7 @@ impl Interpreter {
                         .cloned()
                         .unwrap_or_else(|| Value::default_for_list(items));
                     let default_val = super::eval::Interpreter::default_for_value(&min_val);
-                    Ok(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), min_val),
                         ("__default".into(), default_val),

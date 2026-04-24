@@ -30,7 +30,7 @@ impl Interpreter {
             Value::Bool(_) => "Bool",
             Value::BuchiPack(fields) => {
                 // Check for __type field for typed BuchiPacks
-                for (name, v) in fields {
+                for (name, v) in fields.iter() {
                     if name == "__type"
                         && let Value::Str(s) = v
                     {
@@ -484,7 +484,7 @@ impl Interpreter {
                     Value::Unit
                 };
                 let default_value = Self::default_for_value(&val);
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), val),
                     ("__default".into(), default_value),
@@ -582,14 +582,14 @@ impl Interpreter {
                                     if fields.len() >= 2 {
                                         let key = fields[0].1.clone();
                                         let value = fields[1].1.clone();
-                                        entries.push(Value::BuchiPack(vec![
+                                        entries.push(Value::pack(vec![
                                             ("key".into(), key),
                                             ("value".into(), value),
                                         ]));
                                     }
                                 } else if let Value::List(pair) = item
                                     && pair.len() >= 2 {
-                                        entries.push(Value::BuchiPack(vec![
+                                        entries.push(Value::pack(vec![
                                             ("key".into(), pair[0].clone()),
                                             ("value".into(), pair[1].clone()),
                                         ]));
@@ -601,8 +601,8 @@ impl Interpreter {
                             // BuchiPack argument: each field becomes a key-value entry
                             // hashMap(@(a <= 1, b <= 2)) -> [{key: "a", value: 1}, {key: "b", value: 2}]
                             let mut entries = Vec::new();
-                            for (name, value) in &fields {
-                                entries.push(Value::BuchiPack(vec![
+                            for (name, value) in fields.iter() {
+                                entries.push(Value::pack(vec![
                                     ("key".into(), Value::Str(name.clone())),
                                     ("value".into(), value.clone()),
                                 ]));
@@ -615,7 +615,7 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ]))))
@@ -641,7 +641,7 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(items)),
                     ("__type".into(), Value::Str("Set".into())),
                 ]))))
@@ -701,7 +701,7 @@ impl Interpreter {
                     .into_iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("index".into(), Value::Int(i as i64)),
                             ("value".into(), v),
                         ])
@@ -733,7 +733,7 @@ impl Interpreter {
                 let result: Vec<Value> = list_a
                     .into_iter()
                     .zip(list_b)
-                    .map(|(a, b)| Value::BuchiPack(vec![("first".into(), a), ("second".into(), b)]))
+                    .map(|(a, b)| Value::pack(vec![("first".into(), a), ("second".into(), b)]))
                     .collect();
                 Ok(Some(Signal::Value(Value::list(result))))
             }

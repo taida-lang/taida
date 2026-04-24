@@ -163,7 +163,7 @@ pub(crate) fn write_vectored_all(
 // ── Result helpers ──────────────────────────────────────────
 
 pub(crate) fn make_result_success(inner: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), Value::Unit),
         ("__predicate".into(), Value::Unit),
@@ -173,7 +173,7 @@ pub(crate) fn make_result_success(inner: Value) -> Value {
 
 pub(crate) fn make_result_failure_msg(kind: &str, message: impl Into<String>) -> Value {
     let message = message.into();
-    let inner = Value::BuchiPack(vec![
+    let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(-1)),
         ("message".into(), Value::Str(message.clone())),
@@ -184,7 +184,7 @@ pub(crate) fn make_result_failure_msg(kind: &str, message: impl Into<String>) ->
         message,
         fields: vec![("kind".into(), Value::Str(kind.to_string()))],
     });
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
@@ -193,7 +193,7 @@ pub(crate) fn make_result_failure_msg(kind: &str, message: impl Into<String>) ->
 }
 
 pub(crate) fn make_span(start: usize, len: usize) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("start".into(), Value::Int(start as i64)),
         ("len".into(), Value::Int(len as i64)),
     ])
@@ -223,7 +223,9 @@ pub(crate) fn extract_result_value(result: &Value) -> Option<&Vec<(String, Value
         _ => return None,
     }
     match fields.iter().find(|(k, _)| k == "__value") {
-        Some((_, Value::BuchiPack(inner))) => Some(inner),
+        // C26B-012 wQ: `inner: &Arc<Vec<(String, Value)>>` — deref to
+        // `&Vec<(String, Value)>` to preserve the existing borrow return.
+        Some((_, Value::BuchiPack(inner))) => Some(inner.as_ref()),
         _ => None,
     }
 }
@@ -240,12 +242,15 @@ pub(crate) fn extract_result_value_owned(result: Value) -> Option<Vec<(String, V
         Some((_, Value::Unit)) => {}
         _ => return None,
     }
-    // Find and move __value out
-    for (k, v) in fields {
-        if k == "__value"
-            && let Value::BuchiPack(inner) = v
-        {
-            return Some(inner);
+    // Find and move __value out. With interior `Arc` on BuchiPack we must
+    // consume `fields` via `Value::pack_take` to preserve the owned return
+    // contract (`Option<Vec<(String, Value)>>`).
+    let mut owned = Value::pack_take(fields);
+    let idx = owned.iter().position(|(k, v)| k == "__value" && matches!(v, Value::BuchiPack(_)));
+    if let Some(i) = idx {
+        let (_, v) = owned.swap_remove(i);
+        if let Value::BuchiPack(inner) = v {
+            return Some(Value::pack_take(inner));
         }
     }
     None
@@ -331,7 +336,7 @@ pub(crate) fn build_parse_result(
     };
 
     // version
-    let version = Value::BuchiPack(vec![
+    let version = Value::pack(vec![
         ("major".into(), Value::Int(1)),
         ("minor".into(), Value::Int(req.version.unwrap_or(1) as i64)),
     ]);
@@ -350,7 +355,7 @@ pub(crate) fn build_parse_result(
         }
         let name_start = header.name.as_ptr() as usize - base;
         let value_start = header.value.as_ptr() as usize - base;
-        headers_list.push(Value::BuchiPack(vec![
+        headers_list.push(Value::pack(vec![
             ("name".into(), make_span(name_start, header.name.len())),
             ("value".into(), make_span(value_start, header.value.len())),
         ]));
@@ -423,7 +428,7 @@ pub(crate) fn build_parse_result(
         );
     }
 
-    let parsed = Value::BuchiPack(vec![
+    let parsed = Value::pack(vec![
         ("complete".into(), Value::Bool(complete)),
         ("consumed".into(), Value::Int(consumed as i64)),
         ("method".into(), method_span),
@@ -819,7 +824,7 @@ pub(crate) fn encode_response(response: &Value) -> Value {
         buf.extend_from_slice(&body_bytes);
     }
 
-    let result = Value::BuchiPack(vec![("bytes".into(), Value::bytes(buf))]);
+    let result = Value::pack(vec![("bytes".into(), Value::bytes(buf))]);
     make_result_success(result)
 }
 
@@ -1044,7 +1049,7 @@ pub(crate) fn is_body_stream_request(req: &Value) -> bool {
 /// Returns None if the request is not a body-stream request or has no token.
 pub(crate) fn extract_body_token(req: &Value) -> Option<u64> {
     if let Value::BuchiPack(fields) = req {
-        for (k, v) in fields {
+        for (k, v) in fields.iter() {
             if k == "__body_token"
                 && let Value::Int(n) = v
             {

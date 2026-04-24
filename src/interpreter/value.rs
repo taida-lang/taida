@@ -38,8 +38,33 @@ pub enum Value {
     Bytes(Arc<Vec<u8>>),
     /// Boolean value
     Bool(bool),
-    /// Buchi pack (named fields, ordered)
-    BuchiPack(Vec<(String, Value)>),
+    /// Buchi pack (named fields, ordered).
+    ///
+    /// # C26B-012 / Round 6 wQ (2026-04-24): interior `Arc<Vec<(String, Value)>>`
+    ///
+    /// Migrated from plain `Vec<(String, Value)>` to
+    /// `Arc<Vec<(String, Value)>>` so that `Value::clone()` on a pack becomes
+    /// an `Arc::clone()` (one atomic increment) instead of a full
+    /// field-by-field deep-clone. This follows the same Cluster 4 abstraction
+    /// pattern (Arc + try_unwrap COW, LOCKED in Round 3 wG) applied to
+    /// `Value::List` (Phase 5-F2-1) and `Value::Bytes` (Round 5 wO).
+    ///
+    /// Pattern-match bindings such as `Value::BuchiPack(fields)` now yield
+    /// `fields: Arc<Vec<(String, Value)>>`, which derefs transparently to
+    /// `&Vec<(String, Value)>` for read operations.
+    ///
+    /// * **Construction**: prefer [`Value::pack`] (wraps in `Arc::new`).
+    /// * **Iteration from a match binding**: `fields.iter()` works via deref;
+    ///   `for f in &**fields` and `for f in fields.as_ref()` are both valid.
+    /// * **Mutation with COW**: `Arc::make_mut(&mut inner)` clones if shared,
+    ///   otherwise mutates in place.
+    /// * **Consuming the inner `Vec<(String, Value)>`**: use
+    ///   [`Value::pack_take`] — `Arc::try_unwrap` fast path, else
+    ///   `(*arc).clone()` fallback.
+    ///
+    /// Equality, ordering, display, hashing semantics are unchanged because
+    /// `Arc<T>` transparently forwards read access to `T`.
+    BuchiPack(Arc<Vec<(String, Value)>>),
     /// List of values.
     ///
     /// # C25B-029 / Phase 5-F2-1 (2026-04-23): interior `Arc<Vec<Value>>`
@@ -276,7 +301,23 @@ impl Value {
 
     /// Default value for BuchiPack (empty).
     pub fn default_buchi() -> Self {
-        Value::BuchiPack(Vec::new())
+        Value::BuchiPack(Arc::new(Vec::new()))
+    }
+
+    /// Construct a `Value::BuchiPack` from an owned `Vec<(String, Value)>`,
+    /// hiding the `Arc` wrapping. See the doc comment on `Value::BuchiPack`
+    /// for the rationale (C26B-012 interior migration, Round 6 wQ).
+    pub fn pack(fields: Vec<(String, Value)>) -> Self {
+        Value::BuchiPack(Arc::new(fields))
+    }
+
+    /// COW helper: take ownership of the inner `Vec<(String, Value)>` from an
+    /// `Arc<Vec<(String, Value)>>`. If the `Arc` is uniquely owned, avoids
+    /// allocation; otherwise clones the vec. Used at legacy consumer sites
+    /// that previously moved `Vec<(String, Value)>` out of `Value::BuchiPack`.
+    /// C26B-012 / Round 6 wQ.
+    pub fn pack_take(fields: Arc<Vec<(String, Value)>>) -> Vec<(String, Value)> {
+        Arc::try_unwrap(fields).unwrap_or_else(|arc| (*arc).clone())
     }
 
     /// Default value for JSON (empty object `{}`).
@@ -309,7 +350,7 @@ impl Value {
             Some(Value::Str(_)) => Value::Str(String::new()),
             Some(Value::Bytes(_)) => Value::bytes(Vec::new()),
             Some(Value::Bool(_)) => Value::Bool(false),
-            Some(Value::BuchiPack(_)) => Value::BuchiPack(Vec::new()),
+            Some(Value::BuchiPack(_)) => Value::default_buchi(),
             Some(Value::List(_)) => Value::list(Vec::new()),
             Some(Value::Json(_)) => Value::default_json(),
             Some(Value::Molten) => Value::Molten,
@@ -584,7 +625,7 @@ mod tests {
     fn test_bt18_default_buchi_pack() {
         // BuchiPack default is empty @()
         let d = Value::default_buchi();
-        assert_eq!(d, Value::BuchiPack(Vec::new()));
+        assert_eq!(d, Value::default_buchi());
         // Note: empty BuchiPack truthiness depends on implementation
         // (may be truthy since it's a valid struct, just with no fields)
     }
@@ -685,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_buchi_pack_field_access() {
-        let pack = Value::BuchiPack(vec![
+        let pack = Value::pack(vec![
             ("name".to_string(), Value::Str("Alice".to_string())),
             ("age".to_string(), Value::Int(30)),
         ]);
@@ -736,7 +777,7 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         // JSON != BuchiPack (different types)
-        assert_ne!(a, Value::BuchiPack(vec![("x".to_string(), Value::Int(1))]));
+        assert_ne!(a, Value::pack(vec![("x".to_string(), Value::Int(1))]));
     }
 
     #[test]

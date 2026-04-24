@@ -283,7 +283,7 @@ fn echo_round_trips_buchi_pack() {
             return;
         }
     };
-    let input = Value::BuchiPack(vec![
+    let input = Value::pack(vec![
         ("name".to_string(), Value::Str("Taida".to_string())),
         ("version".to_string(), Value::Int(2)),
         (

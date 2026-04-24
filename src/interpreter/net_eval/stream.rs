@@ -563,7 +563,7 @@ impl Interpreter {
 
     /// Build a Lax[Bytes] with a value.
     pub(super) fn make_lax_bytes_value(data: Vec<u8>) -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
             ("__value".into(), Value::bytes(data)),
             ("__default".into(), Value::bytes(vec![])),
@@ -573,7 +573,7 @@ impl Interpreter {
 
     /// Build a Lax[Bytes] empty (hasValue = false).
     pub(super) fn make_lax_bytes_empty() -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(false)),
             ("__value".into(), Value::bytes(vec![])),
             ("__default".into(), Value::bytes(vec![])),

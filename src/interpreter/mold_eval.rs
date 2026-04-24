@@ -40,7 +40,7 @@ fn eval_unary_math(
 }
 
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(has_value)),
         ("__value".into(), value),
         ("__default".into(), default),
@@ -55,7 +55,7 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
 fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
     let clamped = offset.clamp(0, bytes.len() as i64);
     let length = bytes.len() as i64;
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("bytes".into(), Value::Bytes(bytes)),
         ("offset".into(), Value::Int(clamped)),
         ("length".into(), Value::Int(length)),
@@ -64,7 +64,7 @@ fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
 }
 
 fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
-    Value::BuchiPack(vec![("value".into(), value), ("cursor".into(), cursor)])
+    Value::pack(vec![("value".into(), value), ("cursor".into(), cursor)])
 }
 
 fn parse_bytes_cursor(
@@ -2020,7 +2020,7 @@ impl Interpreter {
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if result.is_truthy() {
                         let default_val = Self::default_for_value(item);
-                        return Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                        return Ok(Some(Signal::Value(Value::pack(vec![
                             ("hasValue".into(), Value::Bool(true)),
                             ("__value".into(), item.clone()),
                             ("__default".into(), default_val),
@@ -2034,7 +2034,7 @@ impl Interpreter {
                 } else {
                     Value::Int(0)
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(false)),
                     ("__value".into(), default_val.clone()),
                     ("__default".into(), default_val),
@@ -2142,7 +2142,7 @@ impl Interpreter {
                     .iter()
                     .zip(other.iter())
                     .map(|(a, b)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("first".into(), a.clone()),
                             ("second".into(), b.clone()),
                         ])
@@ -2169,7 +2169,7 @@ impl Interpreter {
                     .iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("index".into(), Value::Int(i as i64)),
                             ("value".into(), v.clone()),
                         ])
@@ -2227,7 +2227,7 @@ impl Interpreter {
                         }
                     })
                     .unwrap_or(Value::Unit);
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__value".into(), inner_value),
                     ("__predicate".into(), predicate),
                     ("throw".into(), throw_value),
@@ -2308,7 +2308,7 @@ impl Interpreter {
                     .eval_mold_option(fields, "unm")?
                     .unwrap_or_else(|| type_default.clone());
 
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("id".into(), id),
                     ("task".into(), task),
                     ("sol".into(), sol.clone()),
@@ -2339,7 +2339,7 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), inner_value),
                     ("__error".into(), Value::Unit),
@@ -2380,13 +2380,13 @@ impl Interpreter {
                     }
                 };
                 match self.call_function_preserving_signals(&func, &[cage_value]) {
-                    Ok(Signal::Value(result)) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(result)) => Ok(Some(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), result),
                         ("__error".into(), Value::Unit),
                         ("__type".into(), Value::Str("Gorillax".into())),
                     ])))),
-                    Ok(Signal::Throw(err)) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Throw(err)) => Ok(Some(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Unit),
                         ("__error".into(), err),
@@ -2396,7 +2396,7 @@ impl Interpreter {
                     Ok(Signal::TailCall(_)) => Err(RuntimeError {
                         message: "Cage function must not use tail recursion".into(),
                     }),
-                    Err(e) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    Err(e) => Ok(Some(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Unit),
                         (
@@ -3065,7 +3065,7 @@ impl Interpreter {
                 let (a, b) = clamp_slice_bounds(base_len, sub_start, sub_end);
                 let new_start = base_start.saturating_add(a);
                 let new_len = b.saturating_sub(a);
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("start".into(), Value::Int(new_start as i64)),
                     ("len".into(), Value::Int(new_len as i64)),
                 ]))))
@@ -3567,7 +3567,7 @@ impl Interpreter {
                                 let schema = self.resolve_json_schema(&type_args[1])?;
                                 let default_val =
                                     crate::interpreter::json::default_for_schema(&schema);
-                                return Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                                return Ok(Some(Signal::Value(Value::pack(vec![
                                     ("hasValue".into(), Value::Bool(false)),
                                     ("__value".into(), default_val.clone()),
                                     ("__default".into(), default_val),
@@ -3596,7 +3596,7 @@ impl Interpreter {
                 let default_val = crate::interpreter::json::default_for_schema(&schema);
 
                 // Return as Lax (JSON parsing can fail)
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), typed_value),
                     ("__default".into(), default_val),

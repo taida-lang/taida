@@ -467,7 +467,7 @@ impl Interpreter {
                 );
                 let _ = self.env.define(
                     &ed.name,
-                    Value::BuchiPack(vec![
+                    Value::pack(vec![
                         ("__type".to_string(), Value::Str("EnumDef".to_string())),
                         ("__name".to_string(), Value::Str(ed.name.clone())),
                     ]),
@@ -494,7 +494,7 @@ impl Interpreter {
                 // マーカー値として __type: "TypeDef" の BuchiPack を使う
                 let _ = self.env.define(
                     &td.name,
-                    Value::BuchiPack(vec![
+                    Value::pack(vec![
                         ("__type".to_string(), Value::Str("TypeDef".to_string())),
                         ("__name".to_string(), Value::Str(td.name.clone())),
                     ]),
@@ -601,7 +601,7 @@ impl Interpreter {
                 // InheritanceDef 名もシンボルとして環境に登録（<<< @(ChildType) で export 可能にする）
                 let _ = self.env.define(
                     &inh.child,
-                    Value::BuchiPack(vec![
+                    Value::pack(vec![
                         ("__type".to_string(), Value::Str("TypeDef".to_string())),
                         ("__name".to_string(), Value::Str(inh.child.clone())),
                     ]),
@@ -924,7 +924,7 @@ impl Interpreter {
                     };
                     result_fields.push((field.name.clone(), value));
                 }
-                Ok(Signal::Value(Value::BuchiPack(result_fields)))
+                Ok(Signal::Value(Value::pack(result_fields)))
             }
 
             Expr::ListLit(items, _) => {
@@ -1327,7 +1327,7 @@ impl Interpreter {
 
                 // Add a __type field to track the type
                 result_fields.push(("__type".to_string(), Value::Str(name.clone())));
-                let instance = Value::BuchiPack(result_fields.clone());
+                let instance = Value::pack(result_fields.clone());
 
                 // `solidify` overrides what Name[args]() evaluates to.
                 if let Some(ref func_def) = solidify_method {
@@ -1436,7 +1436,7 @@ impl Interpreter {
                     result_fields = provided_fields;
                 }
                 result_fields.push(("__type".to_string(), Value::Str(name.clone())));
-                Ok(Signal::Value(Value::BuchiPack(result_fields)))
+                Ok(Signal::Value(Value::pack(result_fields)))
             }
 
             Expr::Throw(inner, _) => {
@@ -1501,7 +1501,7 @@ impl Interpreter {
                 "Molten" => Ok(Value::default_molten()),
                 _ => {
                     if visiting.contains(name) {
-                        return Ok(Value::BuchiPack(vec![(
+                        return Ok(Value::pack(vec![(
                             "__type".to_string(),
                             Value::Str(name.clone()),
                         )]));
@@ -1515,7 +1515,7 @@ impl Interpreter {
                         }
                         visiting.remove(name);
                         fields.push(("__type".to_string(), Value::Str(name.clone())));
-                        Ok(Value::BuchiPack(fields))
+                        Ok(Value::pack(fields))
                     } else {
                         Ok(Value::Unit)
                     }
@@ -1528,7 +1528,7 @@ impl Interpreter {
                     let default_val = self.default_for_field_def(field_def, visiting)?;
                     result.push((field_def.name.clone(), default_val));
                 }
-                Ok(Value::BuchiPack(result))
+                Ok(Value::pack(result))
             }
             TypeExpr::Generic(name, args) => {
                 if name == "Lax" {
@@ -1537,7 +1537,7 @@ impl Interpreter {
                     } else {
                         Value::Unit
                     };
-                    return Ok(Value::BuchiPack(vec![
+                    return Ok(Value::pack(vec![
                         ("hasValue".to_string(), Value::Bool(false)),
                         ("__value".to_string(), inner.clone()),
                         ("__default".to_string(), inner),

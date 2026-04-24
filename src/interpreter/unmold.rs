@@ -20,7 +20,7 @@ impl Interpreter {
             Value::Bytes(_) => Value::bytes(Vec::new()),
             Value::Bool(_) => Value::Bool(false),
             Value::List(_) => Value::list(Vec::new()),
-            Value::BuchiPack(_) => Value::BuchiPack(Vec::new()),
+            Value::BuchiPack(_) => Value::default_buchi(),
             Value::Json(_) => Value::Json(serde_json::Value::Object(serde_json::Map::new())),
             Value::Stream(_) => Value::default_stream(),
             Value::Unit => Value::Unit,

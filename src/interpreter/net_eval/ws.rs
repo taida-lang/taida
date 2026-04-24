@@ -346,7 +346,7 @@ impl Interpreter {
         }
 
         // Create WsConn BuchiPack with identity token.
-        let ws_pack = Value::BuchiPack(vec![
+        let ws_pack = Value::pack(vec![
             ("__ws_id".into(), Value::Str("__v4_websocket_conn".into())),
             ("__ws_token".into(), Value::Int(ws_token as i64)),
         ]);
@@ -357,21 +357,21 @@ impl Interpreter {
 
     /// Build Lax[@(ws: WsConn)] with value.
     pub(super) fn make_lax_ws_value(ws: Value) -> Value {
-        let inner = Value::BuchiPack(vec![("ws".into(), ws)]);
-        Value::BuchiPack(vec![
+        let inner = Value::pack(vec![("ws".into(), ws)]);
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
             ("__value".into(), inner),
-            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::Str("Lax".into())),
         ])
     }
 
     /// Build Lax empty for failed wsUpgrade.
     pub(super) fn make_lax_ws_empty() -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(false)),
-            ("__value".into(), Value::BuchiPack(vec![])),
-            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__value".into(), Value::pack(vec![])),
+            ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::Str("Lax".into())),
         ])
     }
@@ -538,7 +538,7 @@ impl Interpreter {
                     } else {
                         ("binary", Value::bytes(payload))
                     };
-                    let inner = Value::BuchiPack(vec![
+                    let inner = Value::pack(vec![
                         ("type".into(), Value::Str(type_str.into())),
                         ("data".into(), data_val),
                     ]);
@@ -643,20 +643,20 @@ impl Interpreter {
 
     /// Build Lax[@(type, data)] with value.
     pub(super) fn make_lax_ws_frame_value(inner: Value) -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
             ("__value".into(), inner),
-            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::Str("Lax".into())),
         ])
     }
 
     /// Build Lax empty for close / end of stream.
     pub(super) fn make_lax_ws_frame_empty() -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(false)),
-            ("__value".into(), Value::BuchiPack(vec![])),
-            ("__default".into(), Value::BuchiPack(vec![])),
+            ("__value".into(), Value::pack(vec![])),
+            ("__default".into(), Value::pack(vec![])),
             ("__type".into(), Value::Str("Lax".into())),
         ])
     }
