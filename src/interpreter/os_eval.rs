@@ -112,7 +112,7 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
 /// Create a Lax[T] success value: hasValue=true, __value=val, __default inferred.
 fn make_lax_success(val: Value) -> Value {
     let default_val = Interpreter::default_for_value(&val);
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__default".into(), default_val),
@@ -122,7 +122,7 @@ fn make_lax_success(val: Value) -> Value {
 
 /// Create a Lax[T] failure value: hasValue=false, __value=default, __default=default.
 fn make_lax_failure(default_val: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(false)),
         ("__value".into(), default_val.clone()),
         ("__default".into(), default_val),
@@ -145,7 +145,7 @@ pub(crate) fn make_lax_failure_pub(default_val: Value) -> Value {
 
 /// Create an os Result success value: @(ok=true, code=0, message="").
 fn make_result_success(inner: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), Value::Unit),
         ("__predicate".into(), Value::Unit),
@@ -158,14 +158,14 @@ fn make_result_failure(err: &std::io::Error) -> Value {
     let code = err.raw_os_error().unwrap_or(-1) as i64;
     let message = err.to_string();
     let kind = classify_io_error_kind(err).to_string();
-    let inner = Value::BuchiPack(vec![
+    let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(code)),
         ("message".into(), Value::Str(message.clone())),
         ("kind".into(), Value::Str(kind.clone())),
     ]);
     let error_val = make_io_error(err);
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
@@ -176,7 +176,7 @@ fn make_result_failure(err: &std::io::Error) -> Value {
 /// Create an os Result failure value with explicit kind/message (non-OS errors).
 fn make_result_failure_with_kind(kind: &str, message: impl Into<String>) -> Value {
     let message = message.into();
-    let inner = Value::BuchiPack(vec![
+    let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(-1)),
         ("message".into(), Value::Str(message.clone())),
@@ -190,7 +190,7 @@ fn make_result_failure_with_kind(kind: &str, message: impl Into<String>) -> Valu
             ("kind".into(), Value::Str(kind.to_string())),
         ],
     });
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
@@ -209,7 +209,7 @@ fn make_async_fulfilled(value: Value) -> Value {
 
 /// Create a Gorillax success value: hasValue=true, __value=val, __error=Unit.
 fn make_gorillax_success(val: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__error".into(), Value::Unit),
@@ -219,7 +219,7 @@ fn make_gorillax_success(val: Value) -> Value {
 
 /// Create a Gorillax failure value: hasValue=false, __error=err.
 fn make_gorillax_failure(err: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(false)),
         ("__value".into(), Value::Unit),
         ("__error".into(), err),
@@ -304,7 +304,7 @@ fn make_process_error(message: String, code: i64) -> Value {
 
 /// Build the standard success inner BuchiPack: @(ok=true, code=0, message="").
 fn ok_inner() -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("ok".into(), Value::Bool(true)),
         ("code".into(), Value::Int(0)),
         ("message".into(), Value::Str(String::new())),
@@ -313,7 +313,7 @@ fn ok_inner() -> Value {
 
 /// Build a process result inner BuchiPack: @(stdout, stderr, code).
 fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("stdout".into(), Value::Str(stdout)),
         ("stderr".into(), Value::Str(stderr)),
         ("code".into(), Value::Int(code)),
@@ -324,7 +324,7 @@ fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
 /// exec variants. Intentionally does **not** carry stdout / stderr fields
 /// (stdio is passthrough, nothing to capture).
 fn process_inner_code_only(code: i64) -> Value {
-    Value::BuchiPack(vec![("code".into(), Value::Int(code))])
+    Value::pack(vec![("code".into(), Value::Int(code))])
 }
 
 /// C19: Extract an exit code from a `std::process::ExitStatus`, following the
@@ -392,25 +392,25 @@ fn make_http_response(status: i64, body: String, headers: Vec<(String, String)>)
         .into_iter()
         .map(|(k, v)| (k, Value::Str(v)))
         .collect();
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(status)),
         ("body".into(), Value::Str(body)),
-        ("headers".into(), Value::BuchiPack(header_fields)),
+        ("headers".into(), Value::pack(header_fields)),
     ]);
     make_lax_success(response)
 }
 
 fn make_http_failure() -> Value {
-    let default_response = Value::BuchiPack(vec![
+    let default_response = Value::pack(vec![
         ("status".into(), Value::Int(0)),
         ("body".into(), Value::Str(String::new())),
-        ("headers".into(), Value::BuchiPack(vec![])),
+        ("headers".into(), Value::pack(vec![])),
     ]);
     make_lax_failure(default_response)
 }
 
 fn make_udp_recv_default_payload() -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("host".into(), Value::Str(String::new())),
         ("port".into(), Value::Int(0)),
         ("data".into(), Value::bytes(Vec::new())),
@@ -720,7 +720,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
 
-                let default_stat = Value::BuchiPack(vec![
+                let default_stat = Value::pack(vec![
                     ("size".into(), Value::Int(0)),
                     ("modified".into(), Value::Str(String::new())),
                     ("isDir".into(), Value::Bool(false)),
@@ -731,7 +731,7 @@ impl Interpreter {
                         let size = meta.len() as i64;
                         let modified = meta.modified().map(format_rfc3339_utc).unwrap_or_default();
                         let is_dir = meta.is_dir();
-                        let stat_pack = Value::BuchiPack(vec![
+                        let stat_pack = Value::pack(vec![
                             ("size".into(), Value::Int(size)),
                             ("modified".into(), Value::Str(modified)),
                             ("isDir".into(), Value::Bool(is_dir)),
@@ -960,7 +960,7 @@ impl Interpreter {
                             //     valid wire header name in this shape.
                             match self.eval_expr(&field.value)? {
                                 Signal::Value(Value::BuchiPack(hfields)) => {
-                                    for (k, v) in &hfields {
+                                    for (k, v) in hfields.iter() {
                                         if let Value::Str(vs) = v {
                                             extra_headers.push((k.clone(), vs.clone()));
                                         }
@@ -1442,14 +1442,14 @@ impl Interpreter {
             "allEnv" => {
                 let entries: Vec<Value> = std::env::vars()
                     .map(|(k, v)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("key".into(), Value::Str(k)),
                             ("value".into(), Value::Str(v)),
                         ])
                     })
                     .collect();
 
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(entries)),
                     ("__type".into(), Value::Str("HashMap".into())),
                 ]))))
@@ -1508,7 +1508,7 @@ impl Interpreter {
                             }
 
                             let inner =
-                                Value::BuchiPack(vec![("addresses".into(), Value::list(out))]);
+                                Value::pack(vec![("addresses".into(), Value::list(out))]);
                             let _ = tx.send(Ok(make_result_success(inner)));
                         }
                     }
@@ -1580,7 +1580,7 @@ impl Interpreter {
                                 }
                             }
 
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("socket".into(), Value::Int(socket_id)),
                                 ("host".into(), Value::Str(host)),
                                 ("port".into(), Value::Int(port as i64)),
@@ -1656,7 +1656,7 @@ impl Interpreter {
                                     return;
                                 }
                             }
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("listener".into(), Value::Int(listener_id)),
                                 ("port".into(), Value::Int(port as i64)),
                             ]);
@@ -1719,7 +1719,7 @@ impl Interpreter {
                                 }
                             }
 
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("socket".into(), Value::Int(socket_id)),
                                 ("host".into(), Value::Str(peer_addr.ip().to_string())),
                                 ("port".into(), Value::Int(peer_addr.port() as i64)),
@@ -1779,7 +1779,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(())) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(data.len() as i64)),
                             ]);
@@ -1838,7 +1838,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(())) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(data.len() as i64)),
                             ]);
@@ -1945,7 +1945,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(())) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(data.len() as i64)),
                             ]);
@@ -2145,7 +2145,7 @@ impl Interpreter {
                                     return;
                                 }
                             }
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("socket".into(), Value::Int(socket_id)),
                                 ("host".into(), Value::Str(host)),
                                 ("port".into(), Value::Int(port as i64)),
@@ -2210,7 +2210,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(bytes_sent)) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(bytes_sent as i64)),
                             ]);
@@ -2263,7 +2263,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok((n, peer))) => {
-                            let payload = Value::BuchiPack(vec![
+                            let payload = Value::pack(vec![
                                 ("host".into(), Value::Str(peer.ip().to_string())),
                                 ("port".into(), Value::Int(peer.port() as i64)),
                                 ("data".into(), Value::bytes(buf[..n].to_vec())),
@@ -2476,7 +2476,7 @@ impl Interpreter {
                     })?
                     .insert(pool_id, state);
 
-                let inner = Value::BuchiPack(vec![("pool".into(), Value::Int(pool_id))]);
+                let inner = Value::pack(vec![("pool".into(), Value::Int(pool_id))]);
                 Ok(Some(Signal::Value(make_result_success(inner))))
             }
 
@@ -2541,7 +2541,7 @@ impl Interpreter {
                 };
                 state.in_use_tokens.insert(token);
 
-                let inner = Value::BuchiPack(vec![
+                let inner = Value::pack(vec![
                     ("resource".into(), resource),
                     ("token".into(), Value::Int(token)),
                 ]);
@@ -2609,7 +2609,7 @@ impl Interpreter {
                     reused = true;
                 }
 
-                let inner = Value::BuchiPack(vec![
+                let inner = Value::pack(vec![
                     ("ok".into(), Value::Bool(true)),
                     ("reused".into(), Value::Bool(reused)),
                 ]);
@@ -2635,7 +2635,7 @@ impl Interpreter {
                 state.idle.clear();
                 state.in_use_tokens.clear();
 
-                let inner = Value::BuchiPack(vec![("ok".into(), Value::Bool(true))]);
+                let inner = Value::pack(vec![("ok".into(), Value::Bool(true))]);
                 Ok(Some(Signal::Value(make_async_fulfilled(
                     make_result_success(inner),
                 ))))
@@ -2651,7 +2651,7 @@ impl Interpreter {
                         message: "poolHealth: unknown pool handle".to_string(),
                     });
                 };
-                let health = Value::BuchiPack(vec![
+                let health = Value::pack(vec![
                     ("open".into(), Value::Bool(state.open)),
                     ("idle".into(), Value::Int(state.idle.len() as i64)),
                     ("inUse".into(), Value::Int(state.in_use_tokens.len() as i64)),
@@ -2836,7 +2836,7 @@ mod tests {
 
     fn lax_has_value(val: &Value) -> bool {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "hasValue"
                     && let Value::Bool(b) = v
                 {
@@ -2849,7 +2849,7 @@ mod tests {
 
     fn lax_value(val: &Value) -> &Value {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "__value" {
                     return v;
                 }
@@ -2860,7 +2860,7 @@ mod tests {
 
     fn result_is_success(val: &Value) -> bool {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "throw" {
                     return matches!(v, Value::Unit);
                 }
@@ -2871,7 +2871,7 @@ mod tests {
 
     fn result_inner(val: &Value) -> &Value {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "__value" {
                     return v;
                 }
@@ -2882,7 +2882,7 @@ mod tests {
 
     fn pack_field<'a>(val: &'a Value, field: &str) -> &'a Value {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == field {
                     return v;
                 }

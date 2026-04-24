@@ -239,7 +239,7 @@ fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
             // hasher so that two packs with the same fields in different
             // order produce the same outer hash.
             let mut mix: u64 = 0;
-            for (name, val) in fields {
+            for (name, val) in fields.iter() {
                 let mut fh = DefaultHasher::new();
                 name.hash(&mut fh);
                 hash_value_into(val, &mut fh);
@@ -302,11 +302,11 @@ mod tests {
 
     #[test]
     fn value_key_buchi_pack_is_order_independent() {
-        let a = Value::BuchiPack(vec![
+        let a = Value::pack(vec![
             ("x".into(), Value::Int(1)),
             ("y".into(), Value::Str("hi".into())),
         ]);
-        let b = Value::BuchiPack(vec![
+        let b = Value::pack(vec![
             ("y".into(), Value::Str("hi".into())),
             ("x".into(), Value::Int(1)),
         ]);

@@ -34,7 +34,7 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
                 .iter()
                 .map(|(k, v)| (k.clone(), json_to_taida_value(v)))
                 .collect();
-            Value::BuchiPack(fields)
+            Value::pack(fields)
         }
     }
 }
@@ -63,7 +63,7 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
         }
         Value::BuchiPack(fields) => {
             let mut map = serde_json::Map::new();
-            for (field_name, field_val) in fields {
+            for (field_name, field_val) in fields.iter() {
                 // Skip __type field — it's internal metadata, not user data
                 if field_name == "__type" {
                     continue;
@@ -119,7 +119,7 @@ pub fn taida_value_to_json_with_enum_defs(
         ),
         Value::BuchiPack(fields) => {
             let mut map = serde_json::Map::new();
-            for (field_name, field_val) in fields {
+            for (field_name, field_val) in fields.iter() {
                 if field_name == "__type" {
                     continue;
                 }
@@ -294,7 +294,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         fields.push((sf.name.clone(), value));
                     }
                     fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-                    Value::BuchiPack(fields)
+                    Value::pack(fields)
                 }
                 serde_json::Value::Null => {
                     // null -> all defaults
@@ -303,7 +303,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
                     fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-                    Value::BuchiPack(fields)
+                    Value::pack(fields)
                 }
                 _ => {
                     // Non-object -> all defaults
@@ -312,7 +312,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
                     fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-                    Value::BuchiPack(fields)
+                    Value::pack(fields)
                 }
             }
         }
@@ -364,7 +364,7 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
                 .map(|f| (f.name.clone(), field_missing_default(&f.schema)))
                 .collect();
             result_fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-            Value::BuchiPack(result_fields)
+            Value::pack(result_fields)
         }
         _ => default_for_schema(schema),
     }
@@ -379,7 +379,7 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
 /// `Int(0)` encodes the first variant's ordinal — Taida's "最初のバリアント = デフォルト"
 /// rule (`docs/guide/01_types.md:609`) is preserved as the Lax fallback.
 fn make_lax_enum_inline() -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".to_string(), Value::Bool(false)),
         ("__value".to_string(), Value::Int(0)),
         ("__default".to_string(), Value::Int(0)),
@@ -453,7 +453,7 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
                 .map(|f| (f.name.clone(), default_for_schema(&f.schema)))
                 .collect();
             result_fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-            Value::BuchiPack(result_fields)
+            Value::pack(result_fields)
         }
         JsonSchema::List(_) => Value::list(Vec::new()),
         // C16: Enum default is the first variant's ordinal (= Int(0)).
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_json_encode_buchi_pack() {
-        let pack = Value::BuchiPack(vec![
+        let pack = Value::pack(vec![
             ("name".to_string(), Value::Str("Alice".to_string())),
             ("age".to_string(), Value::Int(30)),
         ]);
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_json_pretty() {
-        let pack = Value::BuchiPack(vec![("x".to_string(), Value::Int(1))]);
+        let pack = Value::pack(vec![("x".to_string(), Value::Int(1))]);
         let result = stdlib_json_pretty(&[pack]).unwrap();
         let Value::Str(s) = result else {
             unreachable!("Expected Str from json_pretty");

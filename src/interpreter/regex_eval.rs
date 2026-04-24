@@ -150,7 +150,7 @@ pub(crate) fn build_regex_value(pattern: &str, flags: &str) -> Result<Value, Str
     // runtime where `new RegExp(...)` at construction primes the
     // `__taida_regex_cache` on the first method call.
     cached_compile(pattern, flags)?;
-    Ok(Value::BuchiPack(vec![
+    Ok(Value::pack(vec![
         ("pattern".into(), Value::Str(pattern.to_string())),
         ("flags".into(), Value::Str(flags.to_string())),
         ("__type".into(), Value::Str(REGEX_TYPE_TAG.into())),
@@ -273,7 +273,7 @@ pub(crate) fn search_first(s: &str, pattern: &str, flags: &str) -> Result<i64, S
 /// while keeping the payload (`full`, `groups`, `start`) inspectable.
 pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
     match m {
-        Some(m) => Value::BuchiPack(vec![
+        Some(m) => Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
             ("full".into(), Value::Str(m.full)),
             (
@@ -283,7 +283,7 @@ pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
             ("start".into(), Value::Int(m.start)),
             ("__type".into(), Value::Str("RegexMatch".into())),
         ]),
-        None => Value::BuchiPack(vec![
+        None => Value::pack(vec![
             ("hasValue".into(), Value::Bool(false)),
             ("full".into(), Value::Str(String::new())),
             ("groups".into(), Value::list(Vec::new())),
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_as_regex_rejects_non_regex_buchipack() {
-        let lax = Value::BuchiPack(vec![
+        let lax = Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
             ("__type".into(), Value::Str("Lax".into())),
         ]);

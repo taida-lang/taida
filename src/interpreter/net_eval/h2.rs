@@ -171,7 +171,7 @@ impl Interpreter {
             }
         }
 
-        let result_inner = Value::BuchiPack(vec![
+        let result_inner = Value::pack(vec![
             ("ok".into(), Value::Bool(true)),
             ("requests".into(), Value::Int(total_request_count)),
         ]);
@@ -366,7 +366,7 @@ impl Interpreter {
                     ("query".into(), Value::Str(query_part.to_string())),
                     (
                         "version".into(),
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("major".into(), Value::Int(2)),
                             ("minor".into(), Value::Int(0)),
                         ]),
@@ -376,14 +376,14 @@ impl Interpreter {
                 // Convert h2 headers to the same format as h1
                 let mut header_values: Vec<Value> = Vec::new();
                 for (name, value) in &regular_headers {
-                    header_values.push(Value::BuchiPack(vec![
+                    header_values.push(Value::pack(vec![
                         ("name".into(), Value::Str(name.clone())),
                         ("value".into(), Value::Str(value.clone())),
                     ]));
                 }
                 // Add :authority as host header for compatibility
                 if !authority.is_empty() {
-                    header_values.push(Value::BuchiPack(vec![
+                    header_values.push(Value::pack(vec![
                         ("name".into(), Value::Str("host".into())),
                         ("value".into(), Value::Str(authority.clone())),
                     ]));
@@ -402,7 +402,7 @@ impl Interpreter {
                 request_fields.push(("chunked".into(), Value::Bool(false)));
                 request_fields.push(("protocol".into(), Value::Str("h2".into())));
 
-                let request_pack = Value::BuchiPack(request_fields);
+                let request_pack = Value::pack(request_fields);
 
                 // Call handler with request pack (1-arg path for h2).
                 let handler_result = self.call_function_with_values(handler, &[request_pack]);

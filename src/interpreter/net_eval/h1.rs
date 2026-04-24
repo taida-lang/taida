@@ -60,7 +60,7 @@ fn span_start_len(v: &Value) -> (usize, usize) {
     if let Value::BuchiPack(fields) = v {
         let mut start = 0usize;
         let mut len = 0usize;
-        for (k, vv) in fields {
+        for (k, vv) in fields.iter() {
             if let Value::Int(n) = vv {
                 match k.as_str() {
                     "start" => start = (*n).max(0) as usize,
@@ -138,7 +138,7 @@ pub(crate) fn check_http_wire_limits(
                             // Resolve name + value spans from header pack
                             let mut name_span: Option<&Value> = None;
                             let mut value_span: Option<&Value> = None;
-                            for (hk, hv) in hf {
+                            for (hk, hv) in hf.iter() {
                                 match hk.as_str() {
                                     "name" => name_span = Some(hv),
                                     "value" => value_span = Some(hv),
@@ -771,7 +771,7 @@ impl Interpreter {
         }
 
         // Server completed successfully
-        let result_inner = Value::BuchiPack(vec![
+        let result_inner = Value::pack(vec![
             ("ok".into(), Value::Bool(true)),
             ("requests".into(), Value::Int(request_count)),
         ]);
@@ -984,10 +984,10 @@ impl Interpreter {
                 Value::Int(body_state.request_token as i64),
             ));
 
-            let request_pack = Value::BuchiPack(request_fields);
+            let request_pack = Value::pack(request_fields);
 
             // Create writer BuchiPack with sentinel for identification.
-            let writer_pack = Value::BuchiPack(vec![(
+            let writer_pack = Value::pack(vec![(
                 "__writer_id".into(),
                 Value::Str("__v3_streaming_writer".into()),
             )]);
@@ -1080,7 +1080,7 @@ impl Interpreter {
                 let effective_response = if is_response_pack {
                     response_value
                 } else {
-                    Value::BuchiPack(vec![
+                    Value::pack(vec![
                         ("status".into(), Value::Int(200)),
                         ("headers".into(), Value::list(vec![])),
                         ("body".into(), Value::Str(String::new())),
@@ -1318,7 +1318,7 @@ impl Interpreter {
             request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
             request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
 
-            let request_pack = Value::BuchiPack(request_fields);
+            let request_pack = Value::pack(request_fields);
 
             let handler_result = self.call_function_with_values(handler, &[request_pack]);
 

@@ -561,7 +561,7 @@ pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, B
         }
         Value::BuchiPack(fields) => {
             let mut entries: Vec<TaidaAddonPackEntryV1> = Vec::with_capacity(fields.len());
-            for (name, val) in fields {
+            for (name, val) in fields.iter() {
                 let owned_name = match std::ffi::CString::new(name.as_str()) {
                     Ok(c) => c,
                     Err(_) => {
@@ -801,7 +801,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                     fields.push((name, value));
                 }
             }
-            Ok(Value::BuchiPack(fields))
+            Ok(Value::pack(fields))
         }
     }
 }
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn roundtrip_empty_pack() {
-        match roundtrip(Value::BuchiPack(vec![])) {
+        match roundtrip(Value::pack(vec![])) {
             Value::BuchiPack(fields) => assert!(fields.is_empty()),
             other => panic!("expected BuchiPack, got {other:?}"),
         }
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn roundtrip_pack_with_fields() {
-        let value = Value::BuchiPack(vec![
+        let value = Value::pack(vec![
             ("name".to_string(), Value::Str("Taida".to_string())),
             ("version".to_string(), Value::Int(2)),
             (
