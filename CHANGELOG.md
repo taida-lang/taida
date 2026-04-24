@@ -119,10 +119,13 @@ addition under §6.2).
   fix shipped in `@c.15.rc3`
   (`src/upgrade.rs::canonical_release_source_is_taida_lang_org`
   regression pin). Advisory scaffold staged at Round 6 / wR
-  (`docs/advisory/` + `scripts/advisory/`) was removed in Round 8;
-  the draft is recoverable from git history if an install base
-  later emerges and the pre-`@c.15.rc3` window is confirmed
-  exploitable against real users.
+  (`docs/advisory/` + `scripts/advisory/`) was removed at
+  Round 8 / wX2 (`62fd54d`); the draft is recoverable from git
+  history if an install base later emerges and the
+  pre-`@c.15.rc3` window is confirmed exploitable against real
+  users. Closure rationale: scope-out reclassification aligned
+  with the DEFERRED 全廃方針 (Phase 0 Design Lock) — the fix
+  exists, there is nothing to defer.
 
 #### Cluster 3 — Parser quality (Phase 9)
 
@@ -197,11 +200,32 @@ zero code — it is a gating artefact so follow-up sessions land
     (try_unwrap fast path, fallback to `(*arc).clone()`). Regression
     guard: `tests/c26b_018_str_arc_ptr_eq.rs` pins `Arc::ptr_eq`
     after `value.clone()` and after pass-through assignment.
-  - (A) char-index cache layer (`Option<Arc<Vec<usize>>>`) on top of
-    the Arc foundation — **OPEN**, tracked for a dedicated wU-class
-    session. The foundation above is a pure-refactor enabler; the hot
-    super-linear path (`CharAt` / `Slice` / `.length()`) is currently
-    bounded by (B) + (C) byte primitives.
+  - (A) char-index cache layer `[FIXED]` at Round 8 / wU
+    (`9e69f96`): `Arc<String>` is wrapped in a new
+    `StrValue { data: String, char_offsets: OnceLock<Vec<usize>> }`
+    carrier so `Value::Str(Arc<StrValue>)` now carries a lazily-
+    populated byte-offset table of length `char_count + 1`.
+    `Deref<Target = String>` + full trait forwarding (`PartialEq`,
+    `Eq`, `PartialOrd`, `Ord`, `Display`, `Hash`, `Default`,
+    `AsRef<str>`, `AsRef<OsStr>`, `Borrow<str>`, `From<String>`,
+    `From<&str>`) keep every existing byte-oriented call site working
+    through autoderef — including the addon ABI surface
+    (`s.as_ptr()` / `s.len()`). The hot super-linear paths are now
+    O(1) per call after the first touch:
+    `Slice[str]()` / `CharAt[str, idx]()` / `Str.length()` /
+    `Str.get(idx)` / `Str.indexOf(sub)` / `.lastIndexOf(sub)`
+    (the last two use binary search over the cache for a
+    byte-offset → char-index mapping). Lock-free `OnceLock` matches
+    Taida's immutable-first model; no mutable interior state
+    escapes. `idx.saturating_add(1)` defends the negative-index
+    Lax cast (`-1i64 as usize == usize::MAX`) so the `CharAt`
+    out-of-bounds path continues to return `None`. 13 unit tests
+    in `src/interpreter/value.rs::tests` pin ASCII + UTF-8 char
+    counting (`aあ🙂b` = 9 B / 4 chars), `cached_char_at` /
+    `cached_char_slice` / `cached_byte_to_char_index` round-trip,
+    `Arc` sharing of the cache across clones, and the
+    `Value::str_take` unique + shared paths. Option (D)
+    `StringBuilder` remains **discarded** (not deferred).
 - **C26B-020** — **Downstream-blocking hard blocker.** Three
   pillars, all required for DONE:
   1. `[FIXED]` `readBytesAt(path, offset, len) -> Bytes` API;
@@ -232,9 +256,34 @@ zero code — it is a gating artefact so follow-up sessions land
   All three pillars are now **FIXED**. The downstream `bonsai-wasm`
   Phase 6 unblock is material; the end-to-end acceptance smoke
   still runs against the stable gate.
-- **C26B-024** — Native list / `BuchiPack` clone-heavy paths fixed;
-  `bench_router.td` hard-gates `Native ≤ JS × 2` with `sys/real
-  ≤ 30%`.
+- **C26B-024** `[PARTIAL FIXED]` — Native list / `BuchiPack`
+  clone-heavy paths. Step 2 (profiling) + Step 3 Option A first pass
+  landed at Round 8 / wT (`81c4fc1`): a bounded per-thread freelist
+  for 4-field Packs (`taida_pack4_freelist_pop` /
+  `taida_pack4_freelist_push` in `src/codegen/native_runtime/core.c`,
+  `__thread` storage, 32-entry cap, full-cap fallback to `free()`).
+  The profile-identified hot path was `taida_lax_new` allocating a
+  4-field Pack (112 B) on every `list.get(i) ]=> x`; allocator
+  thrash dominated wall time at `bench_router.td` N=1000 / M=5000
+  (sys/real = 80%). Freelist dispatch in `taida_pack_new` /
+  `taida_release` re-initialises every slot on reuse, so no stale
+  child leaks; bounded per-thread storage prevents unbounded RSS
+  growth; cross-thread release falls through to `free()`
+  (correct but without reuse win). Internal micro-bench (Lax churn
+  200k wrappers, 3-run median):
+  `baseline real 0.510s / sys 0.412s / user 0.094s` →
+  `freelist real 0.295s / sys 0.240s / user 0.056s` — delta
+  `-42% / -42% / -38%`. Five new 3-backend parity tests
+  (`tests/c26b_024_pack_freelist_parity.rs`: `lax_churn_int` /
+  `lax_churn_str` / `lax_oob_empty` / `freelist_bound` /
+  `mixed_type_lax`) exercise the optimised access pattern, the OOB
+  empty-Lax path, and 40-depth recursion that exceeds the
+  freelist cap — all GREEN on Interpreter / JS / Native. Step 1
+  (CI perf regression gate wiring) is not part of this pass.
+  Step 4 full acceptance (`bench_router.td` hard-gate
+  `Native ≤ JS × 2` with `sys/real ≤ 30%`) awaits the Arena + Str
+  refactor in later sessions — tracked separately under C26B-024
+  on `.dev/C26_BLOCKERS.md`.
 
 #### Cluster 5 — Float parity (Phase 11)
 
@@ -401,15 +450,18 @@ Round 6 additions (all merged on `feat/c26`):
   through Round 5, and originally staged the C26B-008 GHSA
   advisory template under `docs/advisory/`. The advisory scaffold
   (`docs/advisory/` + `scripts/advisory/`) was subsequently
-  removed in Round 8 when C26B-008 was closed as not required
-  given the zero install base at `@c.26` declaration; see the
-  C26B-008 entry above for the closure rationale.
+  removed at Round 8 / wX2 (`62fd54d`) when C26B-008 was closed
+  as not required given the zero install base at `@c.26`
+  declaration; see the C26B-008 entry above for the closure
+  rationale.
 - wP (`6cf6648`, C26B-018 (A) foundation) — `Value::Str` migrated
   to `Arc<String>`. Pattern arms `Value::Str(s)` now yield `s:
   Arc<String>` which derefs transparently. `Value::clone()` on a
   string is an `Arc::clone`. `Value::str()` / `Value::str_take()`
   helpers added; all call sites updated. The char-index cache layer
-  is tracked as OPEN for a wU-class follow-up.
+  was tracked as a wU-class follow-up at the time of this commit;
+  it subsequently landed at Round 8 / wU (`9e69f96`) — see the
+  Round 8 additions below and the C26B-018 (A) entry above.
 - wQ (`6f72f7c`, C26B-012 BuchiPack migration) — `Value::BuchiPack`
   migrated to `Arc<Vec<(String, Value)>>`. Pattern arms
   `Value::BuchiPack(fields)` now yield `fields:
@@ -482,11 +534,114 @@ Round 8 additions (all merged on `feat/c26`):
   `EXPECTED_TOTAL_LEN` impact, no parity fixture altered, no
   new assertion added or modified. D27 escalation checklist:
   3/3 NO.
-- wZ (this commit, C26B-013 rolling docs amendment) —
-  promotes C26B-011 to full `[FIXED]` in the Cluster 5 entry
-  above (the JS signed-zero path landed at wV-a), adds Round 7
-  and Round 8 sections to this changelog, and re-syncs
-  STABILITY §5.6 and §5.5 to match. No code change.
+- wZ (`ba720d3`, C26B-013 rolling docs amendment — Round 6 + 7
+  catch-up) — promotes C26B-011 to full `[FIXED]` in the
+  Cluster 5 entry above (the JS signed-zero path landed at
+  wV-a), adds Round 7 and Round 8 sections to this changelog,
+  and re-syncs STABILITY §5.6 and §5.5 to match. No code
+  change. wZ was authored before wT / wU / wX2 committed, so
+  its Round 8 subsection only pre-announced wY + itself; the
+  wδ rolling amendment below extends that narrative to cover
+  the remaining Round 8 landings without contradiction
+  (superset extension only).
+- wT (`81c4fc1`, C26B-024 Step 2 profiling + Step 3 Option A
+  first pass — thread-local 4-field Pack freelist) — the hottest
+  path in the Native runtime (`taida_lax_new` on every
+  `list.get(i) ]=> x`, 112 B Pack alloc) is fronted by a bounded
+  per-thread freelist (32 entries, `__thread` storage, falls
+  through to `free()` on cross-thread release or cap overflow).
+  Slot re-initialisation on reuse keeps the Lax wrapper
+  invariants intact. Native Lax-churn micro-bench shows
+  `sys/real -42%` on a 200k-wrapper workload (baseline real
+  0.510s / sys 0.412s → freelist real 0.295s / sys 0.240s).
+  Five new 3-backend parity tests in
+  `tests/c26b_024_pack_freelist_parity.rs` are all GREEN. Step 4
+  (`bench_router.td` hard-gate acceptance) + Step 1 (CI perf
+  gate wiring) are tracked separately — C26B-024 stays
+  **PARTIAL FIXED** in `.dev/C26_BLOCKERS.md`. The Native-side
+  `core.c` growth drives `EXPECTED_TOTAL_LEN` 994,500 → 998,598
+  (`F1_LEN` 247,780 → 251,878; F2 / other fragments / interp /
+  JS / wasm profiles all unchanged). D27 escalation checklist:
+  3/3 NO — mold signatures, pinned error strings, and existing
+  assertions are all untouched; five new parity tests are
+  additive.
+- wU (`9e69f96`, C26B-018 (A) char-index cache layer) — closes
+  the last sub-task of the Cluster 4 Str super-linear fix and
+  promotes C26B-018 (A) from OPEN to **FIXED**. `Value::Str`
+  now carries
+  `Arc<StrValue { data: String, char_offsets: OnceLock<Vec<usize>> }>`;
+  the lazy offset table gives O(1) `Slice` / `CharAt` /
+  `Str.length()` / `Str.get(idx)` after first touch, and
+  binary search over the cache gives O(log n)
+  `Str.indexOf` / `.lastIndexOf` by mapping byte offsets back
+  to char indices. Deref + full trait forwarding
+  (`PartialEq` / `Eq` / `PartialOrd` / `Ord` / `Display` /
+  `Hash` / `Default` / `AsRef` / `Borrow` / `From`) preserves
+  every byte-oriented call site through autoderef, including
+  the addon ABI (`s.as_ptr()` / `s.len()`). Lock-free `OnceLock`
+  matches the immutable-first model; the negative-index Lax
+  cast is guarded by `idx.saturating_add(1)`. 13 unit tests in
+  `src/interpreter/value.rs::tests` pin ASCII + UTF-8 char
+  counting, cache round-trip, `Arc` sharing across clones, and
+  the `Value::str_take` unique + shared paths. D27 escalation
+  checklist: 3/3 NO — `Value::Str(Arc<StrValue>)` is an internal
+  layout change, `StrValue` Deref is transparent, and no mold
+  signature / pinned error string / existing assertion is
+  altered.
+- wX2 (`62fd54d`, C26B-008 CLOSED — advisory not required, zero
+  install base) — reclassifies C26B-008 as out-of-scope for
+  `@c.26` stable because Taida Lang has no confirmed install
+  base as of the cycle; GHSA + CVE publication has no
+  notification target and would generate spurious disclosure
+  noise. Underlying fix shipped in `@c.15.rc3`
+  (`canonical_release_source_is_taida_lang_org` regression
+  pin). The advisory scaffold staged at Round 6 / wR
+  (`docs/advisory/C25B-014-advisory.md` +
+  `docs/advisory/README.md` + `scripts/advisory/publish-advisory.sh`)
+  is removed here; the draft is recoverable from git history
+  if an install base later emerges and the pre-`@c.15.rc3`
+  window is confirmed exploitable against real users
+  (re-open conditions pinned in
+  `.dev/C26_BLOCKERS.md::C26B-008`). Rewritten pointer files:
+  `.github/SECURITY.md`, `CHANGELOG.md`, `docs/STABILITY.md`
+  §5.6. **This closure is a scope-out reclassification, not a
+  DEFER** — it is aligned with the DEFERRED 全廃方針 (Phase 0
+  Design Lock): either FIX now or escalate to D27, and a
+  scope-out for which there is no fix to defer is neither.
+
+### New blockers opened during Round 8 (both OPEN, fresh tracks)
+
+The Round 8 landings surfaced two pre-existing test failures
+that are orthogonal to wT / wU / wX2 and were already failing
+on `af5c443` (wY baseline):
+
+- **C26B-027** `[OPEN]` — `c25b_008_doc_examples_parse` parse
+  regression at `docs/reference/net_api.md:258` / `:273`
+  (introduced by Round 4 / wN net_api.md edit). Blocks the
+  @c.26 GATE `cargo test --release` all-pass audit. Docs-only
+  fix path (no `src/` change anticipated).
+- **C26B-028** `[OPEN]` — `init_release_workflow_symmetry::test_jobs_match_core_contract`
+  asymmetry: the test expects 4 jobs but `release.yml` grew
+  to 6 after SEC-011 Sigstore + SLSA landed in `6a3189f`
+  (Round 2 / wB). Either the test fixture or the canonical
+  contract list needs to absorb the two new jobs. Blocks
+  the @c.26 GATE workflow-symmetry audit.
+
+Both are tracked under C26B-027 / C26B-028 in
+`.dev/C26_BLOCKERS.md`; neither is introduced by wT / wU /
+wX2, so Round 8 proceeds without blocking on them.
+
+### wδ rolling amendment (this commit)
+
+wδ (C26B-013 rolling docs amendment — Round 8 merge narrative)
+extends wZ's Round 8 subsection to cover wT + wU + wX2, flips
+the C26B-018 (A) and C26B-024 statuses above to their merged
+states (A → FIXED, 024 → PARTIAL FIXED), and records the
+`EXPECTED_TOTAL_LEN` 994,500 → 998,598 delta driven by wT.
+C26B-027 / C26B-028 are opened as new OPEN tracks so the
+`@c.26` GATE audit trail stays complete. No code change; the
+wZ narrative is extended monotonically — no prior text is
+contradicted. D27 escalation checklist: 3/3 NO.
 
 ### Docs / infrastructure landed alongside
 
