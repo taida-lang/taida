@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamTransform, StreamValue, Value};
 /// Operation mold evaluation for the Taida interpreter.
@@ -38,37 +40,47 @@ fn eval_unary_math(
 }
 
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(has_value)),
         ("__value".into(), value),
         ("__default".into(), default),
-        ("__type".into(), Value::Str("Lax".into())),
+        ("__type".into(), Value::str("Lax".into())),
     ])
 }
 
-fn make_bytes_cursor(bytes: Vec<u8>, offset: i64) -> Value {
+/// C26B-020 柱 2: zero-copy BytesCursor constructor.
+///
+/// Accepts an already-shared `Arc<Vec<u8>>`; cloning the Arc is O(1)
+/// atomic refcount bump rather than a full byte-by-byte memcpy.
+fn make_bytes_cursor_arc(bytes: Arc<Vec<u8>>, offset: i64) -> Value {
     let clamped = offset.clamp(0, bytes.len() as i64);
-    Value::BuchiPack(vec![
-        ("bytes".into(), Value::Bytes(bytes.clone())),
+    let length = bytes.len() as i64;
+    Value::pack(vec![
+        ("bytes".into(), Value::Bytes(bytes)),
         ("offset".into(), Value::Int(clamped)),
-        ("length".into(), Value::Int(bytes.len() as i64)),
-        ("__type".into(), Value::Str("BytesCursor".into())),
+        ("length".into(), Value::Int(length)),
+        ("__type".into(), Value::str("BytesCursor".into())),
     ])
 }
 
 fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
-    Value::BuchiPack(vec![("value".into(), value), ("cursor".into(), cursor)])
+    Value::pack(vec![("value".into(), value), ("cursor".into(), cursor)])
 }
 
-fn parse_bytes_cursor(value: Value, mold_name: &str) -> Result<(Vec<u8>, usize), RuntimeError> {
+fn parse_bytes_cursor(
+    value: Value,
+    mold_name: &str,
+) -> Result<(Arc<Vec<u8>>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
             message: format!("{}: argument must be BytesCursor, got {}", mold_name, value),
         });
     };
 
+    // C26B-020 柱 2: clone the Arc (refcount bump) instead of deep-copying
+    // the Vec. This is the hot-path zero-copy for GB-scale buffers.
     let bytes = match fields.iter().find(|(name, _)| name == "bytes") {
-        Some((_, Value::Bytes(v))) => v.clone(),
+        Some((_, Value::Bytes(v))) => Arc::clone(v),
         Some((_, v)) => {
             return Err(RuntimeError {
                 message: format!("{}: cursor.bytes must be Bytes, got {}", mold_name, v),
@@ -93,6 +105,37 @@ fn parse_bytes_cursor(value: Value, mold_name: &str) -> Result<(Vec<u8>, usize),
 
     let offset = offset_raw.clamp(0, bytes.len() as i64) as usize;
     Ok((bytes, offset))
+}
+
+/// C26B-016 (Option B+): extract `(start, len)` from a span pack
+/// `@(start: Int, len: Int)`. Returns None if the value is not a
+/// BuchiPack with both fields present as Int.
+fn extract_span_pack(value: &Value) -> Option<(usize, usize)> {
+    let Value::BuchiPack(fields) = value else {
+        return None;
+    };
+    let start = fields.iter().find_map(|(k, v)| match v {
+        Value::Int(n) if k == "start" => Some(*n),
+        _ => None,
+    })?;
+    let len = fields.iter().find_map(|(k, v)| match v {
+        Value::Int(n) if k == "len" => Some(*n),
+        _ => None,
+    })?;
+    if start < 0 || len < 0 {
+        return None;
+    }
+    Some((start as usize, len as usize))
+}
+
+/// C26B-016: resolve the raw byte buffer backing a span. Accepts `Bytes`
+/// directly or `Str` (UTF-8 re-encoded). Returns None for other types.
+fn raw_as_bytes(value: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
+    match value {
+        Value::Bytes(b) => Some(std::borrow::Cow::Borrowed(b.as_slice())),
+        Value::Str(s) => Some(std::borrow::Cow::Borrowed(s.as_bytes())),
+        _ => None,
+    }
 }
 
 fn clamp_slice_bounds(len: usize, start: i64, end: i64) -> (usize, usize) {
@@ -132,7 +175,7 @@ impl Interpreter {
             Expr::Ident(name, _) => match name.as_str() {
                 "Int" | "Num" => Ok(Value::Int(0)),
                 "Float" => Ok(Value::Float(0.0)),
-                "Str" => Ok(Value::Str(String::new())),
+                "Str" => Ok(Value::str(String::new())),
                 "Bool" => Ok(Value::Bool(false)),
                 "Molten" => Ok(Value::Molten),
                 _ => Ok(Value::Unit),
@@ -226,7 +269,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(s.to_uppercase()))))
+                Ok(Some(Signal::Value(Value::str(s.to_uppercase()))))
             }
             "Lower" => {
                 if type_args.is_empty() {
@@ -243,7 +286,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(s.to_lowercase()))))
+                Ok(Some(Signal::Value(Value::str(s.to_lowercase()))))
             }
             "Trim" => {
                 if type_args.is_empty() {
@@ -272,9 +315,9 @@ impl Interpreter {
                     (true, true) => s.trim().to_string(),
                     (true, false) => s.trim_start().to_string(),
                     (false, true) => s.trim_end().to_string(),
-                    (false, false) => s,
+                    (false, false) => Value::str_take(s),
                 };
-                Ok(Some(Signal::Value(Value::Str(result))))
+                Ok(Some(Signal::Value(Value::str(result))))
             }
             "Split" => {
                 if type_args.len() < 2 {
@@ -300,8 +343,10 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let parts: Vec<Value> =
-                    s.split(&delim).map(|p| Value::Str(p.to_string())).collect();
+                let parts: Vec<Value> = s
+                    .split(delim.as_str())
+                    .map(|p| Value::str(p.to_string()))
+                    .collect();
                 Ok(Some(Signal::Value(Value::list(parts))))
             }
             "Chars" => {
@@ -319,7 +364,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let chars: Vec<Value> = s.chars().map(|ch| Value::Str(ch.to_string())).collect();
+                let chars: Vec<Value> = s.chars().map(|ch| Value::str(ch.to_string())).collect();
                 Ok(Some(Signal::Value(Value::list(chars))))
             }
             "Replace" => {
@@ -363,11 +408,11 @@ impl Interpreter {
                     .map(|v| v.is_truthy())
                     .unwrap_or(false);
                 let result = if replace_all {
-                    s.replace(&old, &new_str)
+                    s.replace(old.as_str(), new_str.as_str())
                 } else {
-                    s.replacen(&old, &new_str, 1)
+                    s.replacen(old.as_str(), new_str.as_str(), 1)
                 };
-                Ok(Some(Signal::Value(Value::Str(result))))
+                Ok(Some(Signal::Value(Value::str(result))))
             }
             "Slice" if !type_args.is_empty() && type_args.len() <= 3 => {
                 // Slice[str|bytes](start <= n, end <= m)  — 1 type arg + optional fields
@@ -389,7 +434,11 @@ impl Interpreter {
                 };
                 match val {
                     Value::Str(s) => {
-                        let char_count = s.chars().count();
+                        // C26B-018 (A) wU: O(1) char count after cache
+                        // initialization (first touch is still O(n) to build
+                        // the offset table, but subsequent `Slice` calls on
+                        // the same `Arc<StrValue>` reuse it via `OnceLock`).
+                        let char_count = s.cached_char_count();
                         let end = if type_args.len() >= 3 {
                             match self.eval_expr(&type_args[2])? {
                                 Signal::Value(Value::Int(n)) => n,
@@ -402,12 +451,9 @@ impl Interpreter {
                         };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(char_count, start, end);
-                        let result: String = s
-                            .chars()
-                            .skip(clamped_start)
-                            .take(clamped_end.saturating_sub(clamped_start))
-                            .collect();
-                        Ok(Some(Signal::Value(Value::Str(result))))
+                        // C26B-018 (A) wU: O(1) char → byte offset via cache.
+                        let result = s.cached_char_slice(clamped_start, clamped_end);
+                        Ok(Some(Signal::Value(Value::str(result))))
                     }
                     Value::Bytes(bytes) => {
                         let end = if type_args.len() >= 3 {
@@ -423,7 +469,7 @@ impl Interpreter {
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(bytes.len(), start, end);
                         let result = bytes[clamped_start..clamped_end].to_vec();
-                        Ok(Some(Signal::Value(Value::Bytes(result))))
+                        Ok(Some(Signal::Value(Value::bytes(result))))
                     }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }
@@ -455,21 +501,25 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                match s.chars().nth(idx) {
-                    Some(c) => {
-                        let value = Value::Str(c.to_string());
+                // C26B-018 (A) wU: O(1) char-indexed access via
+                // `StrValue::cached_char_at` (first call builds the offset
+                // table, subsequent calls on shared `Arc<StrValue>` hit
+                // the `OnceLock` and return in O(1)).
+                match s.cached_char_at(idx) {
+                    Some(ch) => {
+                        let value = Value::str(ch);
                         Ok(Some(Signal::Value(make_lax_value(
                             true,
                             value,
-                            Value::Str(String::new()),
+                            Value::str(String::new()),
                         ))))
                     }
                     None => {
                         // Out of bounds: return Lax with hasValue=false
                         Ok(Some(Signal::Value(make_lax_value(
                             false,
-                            Value::Str(String::new()),
-                            Value::Str(String::new()),
+                            Value::str(String::new()),
+                            Value::str(String::new()),
                         ))))
                     }
                 }
@@ -501,7 +551,210 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(s.repeat(n)))))
+                Ok(Some(Signal::Value(Value::str(s.repeat(n)))))
+            }
+            // ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
+            // These operate on the raw UTF-8 byte stream (not Unicode
+            // scalar values). They give O(1) / O(len) predictable
+            // complexity for hot-path parsers where the caller already
+            // knows they are dealing with ASCII or byte-boundary-safe
+            // offsets. Added as a pure additive mold (§ 6.2 widening) —
+            // existing `CharAt` / `Slice` / `.length()` semantics are
+            // **unchanged** (still Unicode-scalar for surface safety).
+            "ByteAt" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "ByteAt requires 2 arguments: ByteAt[str, idx]()".into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("ByteAt: first argument must be a string, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let idx = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteAt: second argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let bytes = s.as_bytes();
+                if idx < 0 || (idx as usize) >= bytes.len() {
+                    Ok(Some(Signal::Value(make_lax_value(
+                        false,
+                        Value::Int(0),
+                        Value::Int(0),
+                    ))))
+                } else {
+                    let b = bytes[idx as usize] as i64;
+                    Ok(Some(Signal::Value(make_lax_value(
+                        true,
+                        Value::Int(b),
+                        Value::Int(0),
+                    ))))
+                }
+            }
+            "ByteSlice" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "ByteSlice requires 3 arguments: ByteSlice[str, start, end]()"
+                            .into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteSlice: first argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let start = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteSlice: second argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let end = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ByteSlice: third argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let bytes = s.as_bytes();
+                let len = bytes.len() as i64;
+                let s_i = start.clamp(0, len) as usize;
+                let e_i = end.clamp(0, len) as usize;
+                let (lo, hi) = if s_i <= e_i { (s_i, e_i) } else { (e_i, s_i) };
+                // Preserve exact bytes; if the slice lands on a UTF-8
+                // boundary mid-sequence, we fall back to a lossless
+                // String::from_utf8_lossy → owned. This matches "return
+                // what was there" semantics; callers who need scalar
+                // safety should use Slice (not ByteSlice).
+                let slice = &bytes[lo..hi];
+                let out = match std::str::from_utf8(slice) {
+                    Ok(v) => v.to_string(),
+                    Err(_) => String::from_utf8_lossy(slice).into_owned(),
+                };
+                Ok(Some(Signal::Value(Value::str(out))))
+            }
+            "ByteLength" => {
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: "ByteLength requires 1 argument: ByteLength[str]()".into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("ByteLength: argument must be a string, got {}", v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Int(s.len() as i64))))
+            }
+            // ── C26B-018 (C) StringRepeatJoin ─────────────────────────
+            // Single-allocation repeat + join primitive. Surface-level
+            // equivalent of `Join[Array(str; n), sep]()` but computes
+            // total length up front and allocates once, avoiding the
+            // O(N²) reallocation cascade in chained `+` concat idioms
+            // observed in terminal / hachikuma tui primitives.
+            //
+            // `StringRepeatJoin[str, n, sep]() -> Str`
+            //   n <= 0      → ""
+            //   n == 1      → str (sep never emitted)
+            //   n >= 2      → str + sep + str + sep + ... + str (n copies, n-1 seps)
+            "StringRepeatJoin" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message:
+                            "StringRepeatJoin requires 3 arguments: StringRepeatJoin[str, n, sep]()"
+                                .into(),
+                    });
+                }
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "StringRepeatJoin: first argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let n = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "StringRepeatJoin: second argument must be an integer, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let sep = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "StringRepeatJoin: third argument must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                if n <= 0 {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                }
+                let n = n as usize;
+                if n == 1 {
+                    return Ok(Some(Signal::Value(Value::Str(s))));
+                }
+                // Pre-compute the total length to allocate once.
+                let total = s
+                    .len()
+                    .saturating_mul(n)
+                    .saturating_add(sep.len().saturating_mul(n - 1));
+                let mut out = String::with_capacity(total);
+                out.push_str(&s);
+                for _ in 1..n {
+                    out.push_str(&sep);
+                    out.push_str(&s);
+                }
+                Ok(Some(Signal::Value(Value::str(out))))
             }
             "Reverse" => {
                 // Polymorphic: works on both Str and List
@@ -515,7 +768,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 match val {
-                    Value::Str(s) => Ok(Some(Signal::Value(Value::Str(s.chars().rev().collect())))),
+                    Value::Str(s) => Ok(Some(Signal::Value(Value::str(s.chars().rev().collect())))),
                     Value::List(items) => {
                         let mut reversed = Value::list_take(items);
                         reversed.reverse();
@@ -552,13 +805,25 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let side = self
+                let side: String = self
                     .eval_mold_option(fields, "side")?
-                    .and_then(|v| if let Value::Str(s) = v { Some(s) } else { None })
+                    .and_then(|v| {
+                        if let Value::Str(s) = v {
+                            Some(s.as_string().clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| "start".to_string());
-                let pad_char = self
+                let pad_char: String = self
                     .eval_mold_option(fields, "char")?
-                    .and_then(|v| if let Value::Str(s) = v { Some(s) } else { None })
+                    .and_then(|v| {
+                        if let Value::Str(s) = v {
+                            Some(s.as_string().clone())
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| " ".to_string());
                 if s.len() >= target_len {
                     Ok(Some(Signal::Value(Value::Str(s))))
@@ -569,7 +834,7 @@ impl Interpreter {
                     } else {
                         format!("{}{}", padding, s)
                     };
-                    Ok(Some(Signal::Value(Value::Str(result))))
+                    Ok(Some(Signal::Value(Value::str(result))))
                 }
             }
 
@@ -602,7 +867,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Str(format!(
+                Ok(Some(Signal::Value(Value::str(format!(
                     "{:.prec$}",
                     num,
                     prec = digits
@@ -1030,15 +1295,15 @@ impl Interpreter {
                 if !(2..=36).contains(&base) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Str(String::new()),
-                        Value::Str(String::new()),
+                        Value::str(String::new()),
+                        Value::str(String::new()),
                     ))));
                 }
                 let out = to_radix_i64(val, base as u32);
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Str(out),
-                    Value::Str(String::new()),
+                    Value::str(out),
+                    Value::str(String::new()),
                 ))))
             }
             "U16BE" | "U16LE" => {
@@ -1059,8 +1324,8 @@ impl Interpreter {
                 if !(0..=u16::MAX as i64).contains(&value) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Bytes(Vec::new()),
-                        Value::Bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
                     ))));
                 }
                 let n = value as u16;
@@ -1071,8 +1336,8 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Bytes(bytes),
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(bytes),
+                    Value::bytes(Vec::new()),
                 ))))
             }
             "U32BE" | "U32LE" => {
@@ -1093,8 +1358,8 @@ impl Interpreter {
                 if !(0..=u32::MAX as i64).contains(&value) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Bytes(Vec::new()),
-                        Value::Bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
                     ))));
                 }
                 let n = value as u32;
@@ -1115,8 +1380,8 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Bytes(bytes),
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(bytes),
+                    Value::bytes(Vec::new()),
                 ))))
             }
             "U16BEDecode" | "U16LEDecode" => {
@@ -1215,7 +1480,7 @@ impl Interpreter {
                     }
                     None => 0,
                 };
-                Ok(Some(Signal::Value(make_bytes_cursor(bytes, offset))))
+                Ok(Some(Signal::Value(make_bytes_cursor_arc(bytes, offset))))
             }
             "BytesCursorRemaining" => {
                 if type_args.is_empty() {
@@ -1254,9 +1519,13 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let current_cursor = make_bytes_cursor(bytes.clone(), offset as i64);
+                // C26B-020 柱 2: zero-copy. `bytes` is already Arc<Vec<u8>>,
+                // so Arc::clone is refcount bump (O(1)) and the underlying
+                // buffer is shared between current_cursor / default_step /
+                // next_cursor without memcpy.
+                let current_cursor = make_bytes_cursor_arc(Arc::clone(&bytes), offset as i64);
                 let default_step =
-                    make_bytes_cursor_step(Value::Bytes(Vec::new()), current_cursor.clone());
+                    make_bytes_cursor_step(Value::bytes(Vec::new()), current_cursor.clone());
                 if size < 0 {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
@@ -1272,9 +1541,17 @@ impl Interpreter {
                         default_step,
                     ))));
                 }
+                // Zero-copy hot path: chunk is a slice-to-owned `Vec<u8>`
+                // of exactly `size` bytes. This is the one remaining copy
+                // per `take(size)` call (N bytes, not the full buffer).
+                // A future enhancement would emit a `BytesView { buf, offset,
+                // len }` variant to avoid even this O(size) copy; deferred
+                // until a separate variant lands to keep parity with JS/C
+                // surface semantics ( `Value::Bytes` consumers still expect
+                // a standalone `Arc<Vec<u8>>`).
                 let chunk = bytes[offset..offset + size].to_vec();
-                let next_cursor = make_bytes_cursor(bytes, (offset + size) as i64);
-                let step = make_bytes_cursor_step(Value::Bytes(chunk), next_cursor);
+                let next_cursor = make_bytes_cursor_arc(bytes, (offset + size) as i64);
+                let step = make_bytes_cursor_step(Value::bytes(chunk), next_cursor);
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
                     step,
@@ -1293,7 +1570,9 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let (bytes, offset) = parse_bytes_cursor(cursor_val, "BytesCursorU8")?;
-                let current_cursor = make_bytes_cursor(bytes.clone(), offset as i64);
+                // C26B-020 柱 2: Arc::clone refcount bump (O(1)) instead of
+                // full deep-copy of the buffer.
+                let current_cursor = make_bytes_cursor_arc(Arc::clone(&bytes), offset as i64);
                 let default_step = make_bytes_cursor_step(Value::Int(0), current_cursor.clone());
                 if offset >= bytes.len() {
                     return Ok(Some(Signal::Value(make_lax_value(
@@ -1303,7 +1582,7 @@ impl Interpreter {
                     ))));
                 }
                 let value = bytes[offset] as i64;
-                let next_cursor = make_bytes_cursor(bytes, (offset + 1) as i64);
+                let next_cursor = make_bytes_cursor_arc(bytes, (offset + 1) as i64);
                 let step = make_bytes_cursor_step(Value::Int(value), next_cursor);
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
@@ -1333,9 +1612,14 @@ impl Interpreter {
                         result.extend(Value::list_take(other));
                         Ok(Some(Signal::Value(Value::list(result))))
                     }
-                    (Value::Bytes(mut a), Value::Bytes(b)) => {
-                        a.extend(b);
-                        Ok(Some(Signal::Value(Value::Bytes(a))))
+                    (Value::Bytes(a), Value::Bytes(b)) => {
+                        // C26B-020 柱 2: COW extend. If `a` is uniquely
+                        // owned, take its Vec via try_unwrap (zero-copy);
+                        // otherwise clone (fallback). `b` is iterated by
+                        // reference via Arc deref.
+                        let mut result = Value::bytes_take(a);
+                        result.extend(b.iter().copied());
+                        Ok(Some(Signal::Value(Value::bytes(result))))
                     }
                     (a, b) => Err(RuntimeError {
                         message: format!(
@@ -1382,16 +1666,18 @@ impl Interpreter {
                 if idx < 0 || (idx as usize) >= bytes.len() || !(0..=255).contains(&value) {
                     return Ok(Some(Signal::Value(make_lax_value(
                         false,
-                        Value::Bytes(Vec::new()),
-                        Value::Bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
+                        Value::bytes(Vec::new()),
                     ))));
                 }
-                let mut out = bytes.clone();
+                // C26B-020 柱 2: COW write. Take ownership via try_unwrap
+                // if possible (O(1)), else deep-clone once (O(n)).
+                let mut out = Value::bytes_take(bytes);
                 out[idx as usize] = value as u8;
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
-                    Value::Bytes(out),
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(out),
+                    Value::bytes(Vec::new()),
                 ))))
             }
             "BytesToList" => {
@@ -1409,7 +1695,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let items = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
+                let items = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
                 Ok(Some(Signal::Value(Value::list(items))))
             }
             "Append" => {
@@ -1516,7 +1802,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let result: Vec<String> = list.iter().map(|v| v.to_display_string()).collect();
-                Ok(Some(Signal::Value(Value::Str(result.join(&sep)))))
+                Ok(Some(Signal::Value(Value::str(result.join(&sep)))))
             }
             "Sum" => {
                 if type_args.is_empty() {
@@ -1746,11 +2032,11 @@ impl Interpreter {
                         self.call_function_with_values(&func, std::slice::from_ref(item))?;
                     if result.is_truthy() {
                         let default_val = Self::default_for_value(item);
-                        return Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                        return Ok(Some(Signal::Value(Value::pack(vec![
                             ("hasValue".into(), Value::Bool(true)),
                             ("__value".into(), item.clone()),
                             ("__default".into(), default_val),
-                            ("__type".into(), Value::Str("Lax".into())),
+                            ("__type".into(), Value::str("Lax".into())),
                         ]))));
                     }
                 }
@@ -1760,11 +2046,11 @@ impl Interpreter {
                 } else {
                     Value::Int(0)
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(false)),
                     ("__value".into(), default_val.clone()),
                     ("__default".into(), default_val),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }
             "FindIndex" => {
@@ -1868,7 +2154,7 @@ impl Interpreter {
                     .iter()
                     .zip(other.iter())
                     .map(|(a, b)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("first".into(), a.clone()),
                             ("second".into(), b.clone()),
                         ])
@@ -1895,7 +2181,7 @@ impl Interpreter {
                     .iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("index".into(), Value::Int(i as i64)),
                             ("value".into(), v.clone()),
                         ])
@@ -1953,11 +2239,11 @@ impl Interpreter {
                         }
                     })
                     .unwrap_or(Value::Unit);
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__value".into(), inner_value),
                     ("__predicate".into(), predicate),
                     ("throw".into(), throw_value),
-                    ("__type".into(), Value::Str("Result".into())),
+                    ("__type".into(), Value::str("Result".into())),
                 ]))))
             }
 
@@ -2034,14 +2320,14 @@ impl Interpreter {
                     .eval_mold_option(fields, "unm")?
                     .unwrap_or_else(|| type_default.clone());
 
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("id".into(), id),
                     ("task".into(), task),
                     ("sol".into(), sol.clone()),
                     ("unm".into(), unm.clone()),
                     ("__value".into(), sol),
                     ("__default".into(), unm),
-                    ("__type".into(), Value::Str("TODO".into())),
+                    ("__type".into(), Value::str("TODO".into())),
                 ]))))
             }
 
@@ -2065,11 +2351,11 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), inner_value),
                     ("__error".into(), Value::Unit),
-                    ("__type".into(), Value::Str("Gorillax".into())),
+                    ("__type".into(), Value::str("Gorillax".into())),
                 ]))))
             }
 
@@ -2106,23 +2392,23 @@ impl Interpreter {
                     }
                 };
                 match self.call_function_preserving_signals(&func, &[cage_value]) {
-                    Ok(Signal::Value(result)) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Value(result)) => Ok(Some(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), result),
                         ("__error".into(), Value::Unit),
-                        ("__type".into(), Value::Str("Gorillax".into())),
+                        ("__type".into(), Value::str("Gorillax".into())),
                     ])))),
-                    Ok(Signal::Throw(err)) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    Ok(Signal::Throw(err)) => Ok(Some(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Unit),
                         ("__error".into(), err),
-                        ("__type".into(), Value::Str("Gorillax".into())),
+                        ("__type".into(), Value::str("Gorillax".into())),
                     ])))),
                     Ok(Signal::Gorilla) => Ok(Some(Signal::Gorilla)),
                     Ok(Signal::TailCall(_)) => Err(RuntimeError {
                         message: "Cage function must not use tail recursion".into(),
                     }),
-                    Err(e) => Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                    Err(e) => Ok(Some(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(false)),
                         ("__value".into(), Value::Unit),
                         (
@@ -2133,7 +2419,7 @@ impl Interpreter {
                                 fields: Vec::new(),
                             }),
                         ),
-                        ("__type".into(), Value::Str("Gorillax".into())),
+                        ("__type".into(), Value::str("Gorillax".into())),
                     ])))),
                 }
             }
@@ -2297,16 +2583,16 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let result_val = match &input {
-                    Value::Int(n) => Value::Str(n.to_string()),
-                    Value::Float(f) => Value::Str(f.to_string()),
-                    Value::Bool(b) => Value::Str(b.to_string()),
+                    Value::Int(n) => Value::str(n.to_string()),
+                    Value::Float(f) => Value::str(f.to_string()),
+                    Value::Bool(b) => Value::str(b.to_string()),
                     Value::Str(s) => Value::Str(s.clone()),
-                    other => Value::Str(format!("{}", other)),
+                    other => Value::str(format!("{}", other)),
                 };
                 Ok(Some(Signal::Value(make_lax_value(
                     true,
                     result_val,
-                    Value::Str(String::new()),
+                    Value::str(String::new()),
                 ))))
             }
 
@@ -2445,8 +2731,8 @@ impl Interpreter {
                     .unwrap_or(0);
 
                 let bytes_opt: Option<Vec<u8>> = match input {
-                    Value::Bytes(v) => Some(v),
-                    Value::Str(s) => Some(s.into_bytes()),
+                    Value::Bytes(v) => Some(Value::bytes_take(v)),
+                    Value::Str(s) => Some(Value::str_take(s).into_bytes()),
                     Value::Int(len) => {
                         if len < 0 || !(0..=255).contains(&fill) {
                             None
@@ -2475,11 +2761,11 @@ impl Interpreter {
                     _ => None,
                 };
                 let has_value = bytes_opt.is_some();
-                let value = Value::Bytes(bytes_opt.unwrap_or_default());
+                let value = Value::bytes(bytes_opt.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(Vec::new()),
                 ))))
             }
 
@@ -2509,11 +2795,11 @@ impl Interpreter {
                     _ => None,
                 };
                 let has_value = out.is_some();
-                let value = Value::Str(out.unwrap_or_default());
+                let value = Value::str(out.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Str(String::new()),
+                    Value::str(String::new()),
                 ))))
             }
 
@@ -2551,17 +2837,250 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let bytes = if let Value::Str(s) = input {
-                    Some(s.into_bytes())
+                    Some(Value::str_take(s).into_bytes())
                 } else {
                     None
                 };
                 let has_value = bytes.is_some();
-                let value = Value::Bytes(bytes.unwrap_or_default());
+                let value = Value::bytes(bytes.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Bytes(Vec::new()),
+                    Value::bytes(Vec::new()),
                 ))))
+            }
+
+            // ── C26B-016 (Option B+): span-aware comparison molds ──
+            // Accepts a span pack `@(start: Int, len: Int)` + raw Bytes and
+            // provides zero-copy (byte-level) comparison / sub-span helpers
+            // without materializing a Str. Matches `docs/reference/net_api.md §4`.
+            // Parsing: span pack is resolved via fields "start" / "len"; out-of-bounds
+            // is treated as Bool(false) / empty span rather than runtime error,
+            // matching router-like tolerance semantics (hot path).
+            "SpanEquals" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "SpanEquals requires 3 arguments: SpanEquals[span, raw, needle]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
+                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanEquals: needle must be Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() && len == needle.len() {
+                            bytes[start..end] == needle[..]
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+            "SpanStartsWith" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "SpanStartsWith requires 3 arguments: SpanStartsWith[span, raw, prefix]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let prefix: Vec<u8> = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
+                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanStartsWith: prefix must be Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() && len >= prefix.len() {
+                            bytes[start..start + prefix.len()] == prefix[..]
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+            "SpanContains" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "SpanContains requires 3 arguments: SpanContains[span, raw, needle]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let needle: Vec<u8> = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s).into_bytes(),
+                    Signal::Value(Value::Bytes(b)) => Value::bytes_take(b),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanContains: needle must be Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() && !needle.is_empty() && len >= needle.len() {
+                            bytes[start..end]
+                                .windows(needle.len())
+                                .any(|w| w == needle.as_slice())
+                        } else if needle.is_empty() {
+                            // Empty needle is always contained (stdlib convention).
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                Ok(Some(Signal::Value(Value::Bool(result))))
+            }
+            // ── C26B-016 (@c.26, Option B+): StrOf mold ──
+            // `StrOf[span, raw]() -> Str` — cold-path materialization of a
+            // span pack into an owned `Str`. Unlike `SpanEquals` / `SpanStartsWith`
+            // (zero-copy hot-path comparisons), `StrOf` allocates a new Str and
+            // is intended for logging / JSON parsing / anywhere the user needs
+            // an owned string copy.
+            //
+            // Invalid UTF-8 span / OOB span → empty `Str` (tolerant semantics,
+            // consistent with Span* family). This differs from `Utf8Decode`
+            // which returns `Lax[Str]` — `StrOf` returns `Str` directly for
+            // convenience in cold-path use (see `docs/reference/net_api.md §4.1`).
+            //
+            // Native backend does not yet wire a dedicated runtime helper
+            // (`taida_net_StrOf`); users on native should use the equivalent
+            // `Utf8Decode[Slice[raw, span.start, span.start + span.len]]().getOrDefault("")`
+            // composition. Tracked in `.dev/C26_BLOCKERS.md::C26B-016 native strOf`.
+            "StrOf" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "StrOf requires 2 arguments: StrOf[span, raw]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let result = match (extract_span_pack(&span), raw_as_bytes(&raw)) {
+                    (Some((start, len)), Some(bytes)) => {
+                        let end = start.saturating_add(len);
+                        if end <= bytes.len() {
+                            // Valid span range: try UTF-8 decode. Invalid UTF-8
+                            // falls back to empty string (tolerant).
+                            std::str::from_utf8(&bytes[start..end])
+                                .map(|s| s.to_string())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    _ => String::new(),
+                };
+                Ok(Some(Signal::Value(Value::str(result))))
+            }
+
+            "SpanSlice" => {
+                if type_args.len() < 4 {
+                    return Err(RuntimeError {
+                        message: "SpanSlice requires 4 arguments: SpanSlice[span, raw, start, end]()"
+                            .into(),
+                    });
+                }
+                let span = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let _raw = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let sub_start = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanSlice: start must be Int, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let sub_end = match self.eval_expr(&type_args[3])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "SpanSlice: end must be Int, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let (base_start, base_len) = extract_span_pack(&span).unwrap_or((0, 0));
+                let (a, b) = clamp_slice_bounds(base_len, sub_start, sub_end);
+                let new_start = base_start.saturating_add(a);
+                let new_len = b.saturating_sub(a);
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("start".into(), Value::Int(new_start as i64)),
+                    ("len".into(), Value::Int(new_len as i64)),
+                ]))))
             }
 
             // Utf8Decode[bytes](): conversion to Lax[Str].
@@ -2571,16 +3090,16 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let out = if let Value::Bytes(bytes) = input {
-                    String::from_utf8(bytes).ok()
+                    String::from_utf8(Value::bytes_take(bytes)).ok()
                 } else {
                     None
                 };
                 let has_value = out.is_some();
-                let value = Value::Str(out.unwrap_or_default());
+                let value = Value::str(out.unwrap_or_default());
                 Ok(Some(Signal::Value(make_lax_value(
                     has_value,
                     value,
-                    Value::Str(String::new()),
+                    Value::str(String::new()),
                 ))))
             }
 
@@ -3060,14 +3579,14 @@ impl Interpreter {
                                 let schema = self.resolve_json_schema(&type_args[1])?;
                                 let default_val =
                                     crate::interpreter::json::default_for_schema(&schema);
-                                return Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                                return Ok(Some(Signal::Value(Value::pack(vec![
                                     ("hasValue".into(), Value::Bool(false)),
                                     ("__value".into(), default_val.clone()),
                                     ("__default".into(), default_val),
-                                    ("__type".into(), Value::Str("Lax".into())),
+                                    ("__type".into(), Value::str("Lax".into())),
                                     (
                                         "__error".into(),
-                                        Value::Str(format!("JSON parse error: {}", e)),
+                                        Value::str(format!("JSON parse error: {}", e)),
                                     ),
                                 ]))));
                             }
@@ -3089,11 +3608,11 @@ impl Interpreter {
                 let default_val = crate::interpreter::json::default_for_schema(&schema);
 
                 // Return as Lax (JSON parsing can fail)
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), typed_value),
                     ("__default".into(), default_val),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }
 
@@ -3510,7 +4029,7 @@ impl Interpreter {
                                 if let Some((_, Value::Str(t))) =
                                     fields.iter().find(|(n, _)| n == "__type")
                                 {
-                                    t == other || self.check_type_extends(t, other)
+                                    t.as_str() == other || self.check_type_extends(t, other)
                                 } else {
                                     false
                                 }

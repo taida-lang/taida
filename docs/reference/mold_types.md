@@ -714,7 +714,7 @@ Str[Int[3.0]()]() ]=> t  // 内側 Lax の full-form 表示:
 **既知の例外 (C23 時点、`tests/c23_str_parity.rs` でも明示的に skip 指定)**:
 
 - `Str[Gorillax[v]()]()` の WASM-wasi 出力は、WASM ランタイムが Gorillax の第 1 フィールドを `isOk` で保持している関係で Interpreter / JS / Native の `hasValue` と異なります（**C23B-004** として別トラック）。`.dev/C23_BLOCKERS.md` に詳細記録。
-- `Stream` 型は Native / WASM-wasi での lowering 未サポートのため、`Str[stream]()` は Interpreter + JS のみで parity を保証します（`tests/c23_str_parity.rs::STREAM_ONLY_FIXTURES`）。
+- `Stream` 型は C25B-001 Phase 3 で Native / WASM-wasi への lowering が land 済です（`@c.25.rc7`）。`tests/c23_str_parity.rs::STREAM_ONLY_FIXTURES` は空 (0 件) を維持しており、`Str[stream]()` は 4 バックエンド全てで parity を保証します。以前 RC2.x 系で存在していた Interpreter + JS 限定 parity 制約は C25 で解消されました。
 
 > **Note**: C23B-005 reopen + widen + C23B-006 (@c.23.rc6) で WASM の全 collection detector (`_looks_like_list` / `_is_wasm_set` / `_is_wasm_hashmap` / `_looks_like_pack`) を 8 バイト printable ASCII magic sentinel + 128-bit dual-magic positive identification に統一しました。List / ぶちパック / Set / HashMap の要素 / フィールド / 値スロットに **untagged な大きな Int 値** が入っていても (`@[73088]`, `hashMap().set("x", 73088)`, `setOf(@[73088])` 等) 4 バックエンド全てで byte-for-byte 一致を保証します。併せて `taida_hashmap_set_value_tag` / `taida_list_set_elem_tag` を heterogeneous downgrade 対応に強化し、タグ認識の高速パスを安全化しました。
 >

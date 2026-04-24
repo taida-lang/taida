@@ -30,6 +30,136 @@ use super::types::{
 use crate::net_surface::http_protocol_ordinal_to_wire;
 use crate::parser::Expr;
 
+/// C26B-022 Step 2 (wE Round 3, 2026-04-24): HTTP wire byte upper
+/// limits enforced at the parser boundary so that downstream Native
+/// codegen fixed-size stack buffers (`char method[16]` / `char path[2048]`
+/// / `char authority[256]`) can never silently truncate.
+///
+/// Option confirmation: **Step 3 Option B** (parser-level reject with
+/// `400 Bad Request`). Option A (dynamic buffers) was discarded at
+/// Phase 0 Design Lock because it conflicts with the clone-heavy
+/// abstraction direction of C26B-018/020/024.
+///
+/// These constants are the authoritative limits for 3-backend parity;
+/// the Native C codegen struct field sizes must match (see
+/// `src/codegen/native_runtime/net_h1_h2.c`). Interpreter enforces
+/// these here; any over-limit wire byte is rejected with HTTP 400
+/// before the handler is ever invoked.
+pub(crate) const HTTP_WIRE_MAX_METHOD_LEN: usize = 16;
+pub(crate) const HTTP_WIRE_MAX_PATH_LEN: usize = 2048;
+/// Authority (Host header value) wire-byte cap. Struct field size in
+/// `net_h1_h2.c` (`char authority[256]`) and `net_h3_quic.c` matches this
+/// value to guarantee no silent truncation on Native codegen.
+pub(crate) const HTTP_WIRE_MAX_AUTHORITY_LEN: usize = 256;
+
+/// Extract the `start` and `len` fields from a `@(start: Int, len: Int)`
+/// span pack. Returns `(0, 0)` if the shape does not match (conservative:
+/// zero-length never exceeds any limit, so malformed packs do not
+/// fail-fast here; the normal parse path handles them).
+fn span_start_len(v: &Value) -> (usize, usize) {
+    if let Value::BuchiPack(fields) = v {
+        let mut start = 0usize;
+        let mut len = 0usize;
+        for (k, vv) in fields.iter() {
+            if let Value::Int(n) = vv {
+                match k.as_str() {
+                    "start" => start = (*n).max(0) as usize,
+                    "len" => len = (*n).max(0) as usize,
+                    _ => {}
+                }
+            }
+        }
+        return (start, len);
+    }
+    (0, 0)
+}
+
+fn span_len(v: &Value) -> usize {
+    span_start_len(v).1
+}
+
+/// Compare a header name span against an ASCII-lowercase reference name
+/// (case-insensitive). Returns true on match; returns false on any bound
+/// violation so over-limit / malformed spans never claim to be "Host".
+fn span_equals_ascii_ci(raw: &[u8], start: usize, len: usize, reference: &[u8]) -> bool {
+    if len != reference.len() {
+        return false;
+    }
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    if end > raw.len() {
+        return false;
+    }
+    raw[start..end]
+        .iter()
+        .zip(reference.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// C26B-022 Step 2 (wJ Round 4, 2026-04-24 authority extension):
+/// Check if method / path / Host-header-value exceeds its wire-limit.
+///
+/// Returns `Some(&'static str)` with a short descriptor of the violating
+/// field when over-limit, `None` otherwise.
+///
+/// The `raw` buffer is required so that header name/value spans (which
+/// are zero-copy references into the HTTP request buffer) can be
+/// resolved to concrete byte slices. The `headers` field is iterated;
+/// for each entry whose `name` span case-insensitively equals `b"host"`,
+/// its `value` span length is compared against
+/// [`HTTP_WIRE_MAX_AUTHORITY_LEN`].
+///
+/// Host is the HTTP/1.1 equivalent of the H2/H3 `:authority` pseudo-
+/// header; the Native codegen struct field (`char authority[256]`) is
+/// populated from whichever is present, so enforcement on `Host` here
+/// keeps the 3-backend parity story consistent.
+pub(crate) fn check_http_wire_limits(
+    parsed_fields: &[(String, Value)],
+    raw: &[u8],
+) -> Option<&'static str> {
+    for (k, v) in parsed_fields {
+        match k.as_str() {
+            "method" if span_len(v) > HTTP_WIRE_MAX_METHOD_LEN => {
+                return Some("method");
+            }
+            "path" if span_len(v) > HTTP_WIRE_MAX_PATH_LEN => {
+                return Some("path");
+            }
+            "headers" => {
+                if let Value::List(items) = v {
+                    for header in items.iter() {
+                        if let Value::BuchiPack(hf) = header {
+                            // Resolve name + value spans from header pack
+                            let mut name_span: Option<&Value> = None;
+                            let mut value_span: Option<&Value> = None;
+                            for (hk, hv) in hf.iter() {
+                                match hk.as_str() {
+                                    "name" => name_span = Some(hv),
+                                    "value" => value_span = Some(hv),
+                                    _ => {}
+                                }
+                            }
+                            if let (Some(ns), Some(vs)) = (name_span, value_span) {
+                                let (n_start, n_len) = span_start_len(ns);
+                                if span_equals_ascii_ci(raw, n_start, n_len, b"host") {
+                                    let (_, v_len) = span_start_len(vs);
+                                    if v_len > HTTP_WIRE_MAX_AUTHORITY_LEN {
+                                        return Some("authority");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl Interpreter {
     // ── httpServe implementation ───────────────────────────────
     //
@@ -184,7 +314,7 @@ impl Interpreter {
                         if let Some((_, proto_val)) = fields.iter().find(|(k, _)| k == "protocol") {
                             match proto_val {
                                 Value::Str(proto) => {
-                                    requested_protocol = Some(proto.clone());
+                                    requested_protocol = Some(proto.as_string().clone());
                                 }
                                 Value::Int(ordinal) => {
                                     if let Some(protocol) = http_protocol_ordinal_to_wire(*ordinal)
@@ -228,8 +358,8 @@ impl Interpreter {
 
                         match (cert, key) {
                             (Some(Value::Str(c)), Some(Value::Str(k))) => {
-                                tls_cert_path = Some(c);
-                                tls_key_path = Some(k);
+                                tls_cert_path = Some(Value::str_take(c));
+                                tls_key_path = Some(Value::str_take(k));
                             }
                             (Some(Value::Str(_)), _) => {
                                 // NB5-16: Return Result failure(TlsError) for startup config errors
@@ -533,6 +663,39 @@ impl Interpreter {
                         // Set blocking timeout for body read (need full body)
                         let _ = conn.stream.set_read_timeout(Some(read_timeout));
 
+                        // ── C26B-022 Step 2 (wE Round 3 + wJ Round 4): ──
+                        // Enforce HTTP wire byte upper limits at the parser
+                        // boundary to prevent silent truncation when these
+                        // fields reach the Native codegen fixed-size stack
+                        // buffers (`char method[16]`, `char path[2048]`,
+                        // `char authority[256]`). Reject with 400 before
+                        // handler dispatch so that 3-backend parity is
+                        // preserved and no handler sees a truncated value.
+                        //
+                        // wJ Round 4 (2026-04-24): extended to cover
+                        // the Host header value (authority, 256 bytes),
+                        // which is the HTTP/1.1 equivalent of the H2/H3
+                        // `:authority` pseudo-header. The raw buffer
+                        // slice is passed through so that the zero-copy
+                        // header name span can be resolved to compare
+                        // case-insensitively against "host".
+                        //
+                        // Additive widening (§ 6.2): this adds a reject
+                        // path for previously-accepted oversized inputs
+                        // that would have hit silent truncation downstream.
+                        // No existing parity.rs assertion is altered.
+                        if let Some(field_name) =
+                            check_http_wire_limits(&parsed_fields, &conn.buf[..conn.total_read])
+                        {
+                            let _ = field_name; // kept for future logging
+                            let bad_request = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ = std::io::Write::write_all(&mut conn.stream, bad_request);
+                            request_count += 1;
+                            close_idx = processed_idx;
+                            let _ = conn.stream.set_read_timeout(Some(poll_timeout));
+                            break;
+                        }
+
                         let dispatch_result = self.dispatch_request(
                             conn,
                             &handler,
@@ -604,7 +767,7 @@ impl Interpreter {
         }
 
         // Server completed successfully
-        let result_inner = Value::BuchiPack(vec![
+        let result_inner = Value::pack(vec![
             ("ok".into(), Value::Bool(true)),
             ("requests".into(), Value::Int(request_count)),
         ]);
@@ -784,7 +947,7 @@ impl Interpreter {
 
             // Build request pack for handler (head only, body = empty span).
             let mut request_fields: Vec<(String, Value)> = Vec::new();
-            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+            request_fields.push(("raw".into(), Value::bytes(raw_bytes)));
 
             for key in &["method", "path", "query", "version", "headers"] {
                 if let Some(v) = get_field_value(&parsed_fields, key) {
@@ -798,7 +961,7 @@ impl Interpreter {
             request_fields.push(("contentLength".into(), Value::Int(content_length)));
             request_fields.push((
                 "remoteHost".into(),
-                Value::Str(conn.peer_addr.ip().to_string()),
+                Value::str(conn.peer_addr.ip().to_string()),
             ));
             request_fields.push((
                 "remotePort".into(),
@@ -809,7 +972,7 @@ impl Interpreter {
             // v4: sentinel to identify this request pack as body-streaming capable.
             request_fields.push((
                 "__body_stream".into(),
-                Value::Str("__v4_body_stream".into()),
+                Value::str("__v4_body_stream".into()),
             ));
             // NB4-7: Request-scoped token for identity verification.
             request_fields.push((
@@ -817,12 +980,12 @@ impl Interpreter {
                 Value::Int(body_state.request_token as i64),
             ));
 
-            let request_pack = Value::BuchiPack(request_fields);
+            let request_pack = Value::pack(request_fields);
 
             // Create writer BuchiPack with sentinel for identification.
-            let writer_pack = Value::BuchiPack(vec![(
+            let writer_pack = Value::pack(vec![(
                 "__writer_id".into(),
-                Value::Str("__v3_streaming_writer".into()),
+                Value::str("__v3_streaming_writer".into()),
             )]);
 
             // NET3-2 + NET4-1a: Install active_streaming_writer with body_state pointer.
@@ -913,10 +1076,10 @@ impl Interpreter {
                 let effective_response = if is_response_pack {
                     response_value
                 } else {
-                    Value::BuchiPack(vec![
+                    Value::pack(vec![
                         ("status".into(), Value::Int(200)),
                         ("headers".into(), Value::list(vec![])),
-                        ("body".into(), Value::Str(String::new())),
+                        ("body".into(), Value::str(String::new())),
                     ])
                 };
 
@@ -1129,7 +1292,7 @@ impl Interpreter {
 
             // ── Build request pack for handler ──
             let mut request_fields: Vec<(String, Value)> = Vec::new();
-            request_fields.push(("raw".into(), Value::Bytes(raw_bytes)));
+            request_fields.push(("raw".into(), Value::bytes(raw_bytes)));
 
             for key in &["method", "path", "query", "version", "headers"] {
                 if let Some(v) = get_field_value(&parsed_fields, key) {
@@ -1142,7 +1305,7 @@ impl Interpreter {
             request_fields.push(("contentLength".into(), Value::Int(final_content_length)));
             request_fields.push((
                 "remoteHost".into(),
-                Value::Str(conn.peer_addr.ip().to_string()),
+                Value::str(conn.peer_addr.ip().to_string()),
             ));
             request_fields.push((
                 "remotePort".into(),
@@ -1151,7 +1314,7 @@ impl Interpreter {
             request_fields.push(("keepAlive".into(), Value::Bool(keep_alive)));
             request_fields.push(("chunked".into(), Value::Bool(is_request_chunked)));
 
-            let request_pack = Value::BuchiPack(request_fields);
+            let request_pack = Value::pack(request_fields);
 
             let handler_result = self.call_function_with_values(handler, &[request_pack]);
 

@@ -1,5 +1,1059 @@
 # Changelog
 
+## @c.26 (in progress — gen-C stable, second candidate)
+
+**Fix-only RC cycle.** The label-less `@c.25` tag was **skipped**
+(see `docs/STABILITY.md` §1.3); the gen-C stable tag is now being
+pursued as `@c.26`. Intermediate tags are `@c.26.rcM`. No breaking
+changes land here — everything breaking is deferred to the D27
+generation (`.dev/D27_BLOCKERS.md`, formerly D26; the rename is
+documented in `docs/STABILITY.md` §1.2).
+
+The build-number rule is one-way: `@c.26.rcM` does **not**
+auto-promote to `@c.26`. The stable tag is a separate build with
+its own number.
+
+### In-scope (fix-only)
+
+All items below are **Must Fix** or **Critical** under the 2026-04-24
+Phase 0 Design Lock (`DEFERRED` / `Should Fix` / `CONDITIONAL` /
+`tentative` are retired). Live worklist: `.dev/C26_BLOCKERS.md`.
+
+**Status legend**: `[FIXED]` = landed on `feat/c26`; otherwise = open
+and owned by a later phase / worktree. A canonical snapshot lives at
+`docs/STABILITY.md §5.6` and is re-synced on each RC tag.
+
+#### Cluster 1 — NET stable viewpoint (Phase 1–6)
+
+- **C26B-001** `[FIXED]` — HTTP/2 parity across 3-backend
+  (interpreter / JS / native) reached the **10-case pin target** at
+  Round 3 / wE. Round 1 landed `test_net6_c26b001_h2_post_body_*`;
+  Round 2 Session 2 landed cases 2–4 (GET + query, status 404,
+  64 KiB large body); Round 3 / wE added the three method
+  variations (PUT / DELETE / PATCH via
+  `c26b001_r3_h2_method_variation_test`). Pin count: 7 new
+  `test_net6_c26b001_*` + 3 baseline h2 fixtures = 10. JS branch
+  rejects with `H2Unsupported` in every case. The `§5.1 → FIXED`
+  flip is held on the rest of Cluster 1 (C26B-002 TLS,
+  C26B-006 retry shim), but the test-pin target is met.
+- **C26B-002** `[FIXED during 2026-04-25 review]` — TLS
+  construction matrix pinned across 3-backend. See the
+  Round 11 wι review amendment below for the five new
+  `test_net6_1c_c26b002_{1..5}_*` cases in `tests/parity.rs`
+  (missing cert, key-only, plaintext fallback, invalid-PEM,
+  unknown-protocol-token). Live cert-rotation + ALPN matrix
+  coverage remains in the C26B-005 soak runbook because
+  those branches are runtime-dependent.
+- **C26B-003** `[FIXED]` — **Critical**. Port-bind race eradication
+  (inherited from C25B-002). Root cause fixed; 100 consecutive local
+  CI-equivalent runs pass with no retry-shim firing. Candidate
+  solution 1 (`0.0.0.0:0` bind + `getsockname()`) sufficed; the
+  D27-escalation checklist evaluated all-NO on the landed patch.
+- **C26B-004** `[FIXED]` — Throughput regression gate promoted from
+  `continue-on-error` to hard-fail on 10% regression against a
+  30-sample baseline (Round 2 / wB).
+- **C26B-005** — Scatter-gather 24-hour soak verification via a
+  manual runbook. `.dev/C26_SOAK_RUNBOOK.md` is **landed**
+  (2026-04-24, Round 2 / wA) with environment setup, tmux /
+  `systemd-run` session layout, per-30s RSS / fd / thread monitor,
+  valgrind (pre-soak 1 h) + heaptrack (3 × 1 h windows) leak
+  gates, throughput drift boundary, backend-specific tolerances,
+  and a REPORT.md template. The 24 h run itself is the stable-gate
+  blocker and is still pending.
+- **C26B-006** `[FIXED]` — HTTP parity retry shim retired at
+  Round 4 / wJ (`c3805ff`). With C26B-003's root-cause fix in
+  place, `tests/parity.rs` now binds to `0.0.0.0:0` and recovers
+  the concrete port via `getsockname()` without any retry
+  wrapper. No existing `parity.rs` assertion was rewritten — the
+  shim was already effectively a no-op after C26B-003.
+- **C26B-026** `[FIXED]` — Native h2 HPACK encode path now
+  preserves custom response headers (Round 2 / wC, fix in
+  `src/codegen/native_runtime/net_h1_h2.c::h2_extract_response_fields`).
+  Discovered as a sub-finding of C26B-001 Session 2 when the
+  multi-custom-header test dump showed that every
+  `handler`-returned `set-cookie` / `x-*` header was dropped on
+  the Native path. Root cause: the encoder treated
+  `taida_list_get(hdrs_val, j)` as a raw pack and looked up
+  `name` / `value` on the returned Lax wrapper instead of the
+  inner pack. Fixed to mirror the h1 encode path; the header cap
+  was raised to `H2_MAX_HEADERS = 128`. Regression pinned by
+  `test_net6_c26b026_h2_multiple_custom_headers_3backend_parity`.
+  `EXPECTED_TOTAL_LEN` resynced (982_976 → 983_593).
+
+WASM targets are explicitly out of scope for gen-C NET (3-backend
+fixed); the single exception is C26B-020 pillar 3 (a widening
+addition under §6.2).
+
+#### Cluster 2 — Security (Phase 7–8)
+
+- **C26B-007** — SEC-002 through SEC-010 localised fixes;
+  cargo-audit / cargo-deny promoted to hard-fail; cppcheck +
+  clang-tidy integration for C21–C24 runtime C code. Includes
+  sub-phase 7.4 **SEC-011**: Sigstore (cosign keyless) signing +
+  SLSA provenance attestation wired into the `taida publish`
+  workflow. Verify-on-install step added to `taida install`.
+  - Sub-phase 7.1 `[FIXED]` — SEC-002 / 003 / 005 / 007 / 008 /
+    009 / 010 localised fixes (see
+    `.dev/taida-logs/docs/archive/SECURITY_AUDIT.md` once owner
+    action lands). `.o` artefacts now land in `std::env::temp_dir()`
+    so the source tree stays clean even when cleanup is skipped on
+    panic (SEC-010).
+  - Sub-phase 7.2 `[FIXED]` — `.github/workflows/security.yml` had
+    `continue-on-error: true` stripped from the `cargo-audit` /
+    `cargo-deny` jobs; hard-fail is now the default gate. The
+    rationale for leaving `yanked` / `unmaintained` as warnings
+    (the fastrand 2.4.0 transitive yank requires a dependency
+    change that is scoped to a separate task) is pinned in
+    `deny.toml`.
+  - Sub-phase 7.3 `[FIXED]` — a `c-static-analysis` job was added
+    to `.github/workflows/security.yml` that assembles the
+    native-runtime C translation unit in `NATIVE_RUNTIME_C` order
+    (`core → os → tls → net_h1_h2 → net_h3_quic`) and runs
+    `gcc -Wall -Wextra -Wformat-security` + `cppcheck
+    --enable=warning,style,performance,portability
+    --error-exitcode=1`. The gcc warning baseline is pinned at
+    `78`; any increase hard-fails. The allow / fix-queue policy
+    lives at `.dev/C26_C_STATIC_ANALYSIS.md`.
+  - Sub-phase 7.4 (SEC-011) `[FIXED]` — Sigstore cosign keyless
+    signing + SLSA provenance attestation wired into the
+    `taida publish` workflow, with a verify-on-install step for
+    `taida install` (Round 2 / wB).
+- **C26B-008** `[CLOSED — not required at @c.26 stable]` —
+  Taida Lang has no confirmed install base as of `@c.26` cycle,
+  so GHSA publication + CVE request has no notification target
+  and would generate spurious disclosure noise. The underlying
+  fix shipped in `@c.15.rc3`
+  (`src/upgrade.rs::canonical_release_source_is_taida_lang_org`
+  regression pin). Advisory scaffold staged at Round 6 / wR
+  (`docs/advisory/` + `scripts/advisory/`) was removed at
+  Round 8 / wX2 (`62fd54d`); the draft is recoverable from git
+  history if an install base later emerges and the
+  pre-`@c.15.rc3` window is confirmed exploitable against real
+  users. Closure rationale: scope-out reclassification aligned
+  with the DEFERRED 全廃方針 (Phase 0 Design Lock) — the fix
+  exists, there is nothing to defer.
+
+#### Cluster 3 — Parser quality (Phase 9)
+
+- **C26B-009** `[FIXED]` — State-machine transition-graph
+  formalisation for `parse_error_ceiling` / `parse_cond_branch`
+  recovery paths landed at `.dev/C26_PARSER_FSM.md` (8 sections,
+  stable node IDs `CondBranch:*` / `EC:*` / `SYNC:*`, E0301 /
+  E0303 / C13B-010 / C12-4 cross-referenced). The `| _ |> <throw>`
+  arm-body throw propagation bug was already fixed at C25
+  commit `4696429`; regression pinned by
+  `tests/c25b_032_arm_body_throw_propagation.rs`.
+- **C26B-019** `[FIXED]` — Multi-line `TypeDef(field <= v, ...)`
+  constructor parse works end-to-end; `parse_arg_list` now calls
+  `skip_newlines()` at entry / after slot / after comma, and
+  `parse_primary_expr` calls it before the `TypeInst` lookahead.
+  The `taida check` vs `taida build` parser divergence turned out
+  to be shared-parser lookahead insufficiency (not a second parser
+  implementation) and is eliminated by the same fix. Widening per
+  §6.2. Docs example addendum is owned by C26B-013.
+
+#### Cluster 4 — Runtime perf / memory (Phase 10)
+
+**Common-abstraction decision LOCKED** (Round 3 / wG, 2026-04-24):
+all Phase 10 blockers (C26B-010 / 012 / 018 / 020 pillar 2 / 024)
+adopt the **Arc + try_unwrap COW family**
+(`.dev/C26_CLUSTER4_ABSTRACTION.md`, PROPOSED → LOCKED). Zero-copy
+slice views are subsumed as a specialisation of the Arc family;
+the arena option is D27-deferred. The lock itself landed with
+zero code — it is a gating artefact so follow-up sessions land
+3-backend simultaneously without breaking parity.
+
+- **C26B-010** `[FIXED]` — Memory-leak CI gate. `.github/workflows/memory.yml`
+  added at Round 4 / wM (`e444f81`): every-push valgrind smoke over
+  `examples/quality/c26_mem_smoke/{hello,list,string}_smoke.td` plus a
+  weekly heaptrack run, with reproduction helpers at `scripts/mem/`.
+  Peak-RSS drift against this baseline is contractual for the
+  `@c.26` gate; the 24 h soak (C26B-005) is orthogonal.
+- **2026-04-25 review correction** — the "agent-side FULLY READY"
+  wording is downgraded to **HOLD**. C26B-029 (CI false-green
+  holes) + C26B-030 (SEC-011 install-side verify wiring) +
+  C26B-002 (3-backend TLS construction pin) all FIXED during
+  the review follow-up. **C26B-005** (24 h soak PASS record)
+  remains the last REOPEN item and is a user-action blocker
+  on the `@c.26` tag; see the Round 11 wι review amendment.
+- **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
+  concurrent `ReadEvent()`) + BuchiPack interior Arc migration.
+  - BuchiPack `[FIXED]` at Round 6 / wQ (`6f72f7c`): `Value::BuchiPack`
+    migrated to `Arc<Vec<(String, Value)>>`. `Value::clone()` on a pack
+    is now an `Arc::clone()` (one atomic increment) vs field-by-field
+    deep clone. New helpers: `Value::pack(Vec<(String, Value)>)` and
+    `Value::pack_take(Arc<…>)` (try_unwrap fast path, clone fallback).
+    Pattern-match arms such as `Value::BuchiPack(fields)` continue to
+    yield `&Vec<(String, Value)>` via transparent `Arc` deref. Regression
+    guard: `tests/c26b_012_buchipack_arc_ptr_eq.rs` pins `Arc::ptr_eq`
+    invariants after `fields.clone()` / pack construction. Layout change
+    is internal — `EXPECTED_TOTAL_LEN` unchanged; D27 escalation
+    checklist: 3/3 NO.
+  - PENDING_BYTES FIFO (terminal addon concurrent `ReadEvent()`) —
+    **OPEN, user-side**. The FIFO lives in the `terminal` submodule
+    at `.dev/official-package-repos/terminal/`, which the language
+    agent is explicitly forbidden from touching; this half is owned
+    by the downstream addon author. The BuchiPack Arc migration
+    above removes the main interpreter-side deep-clone path on the
+    event-batch return value, so the FIFO work can land downstream
+    without re-visiting `Value` layout.
+- **C26B-018** — `Str` primitive super-linear paths resolved via
+  (A) char-index cache + (B) byte-level primitive + (C)
+  `StringRepeatJoin` mold. Option (D) `StringBuilder` is explicitly
+  **discarded** (conflicts with Taida's immutable-first philosophy
+  — not deferred, not revisited at D27).
+  - (B) + (C) `[FIXED]` at Round 4 / wK (`3e4c667`): byte-level
+    primitive paths (`src/interpreter/mold_eval.rs` +
+    `src/js/runtime/core.rs` + `src/codegen/native_runtime/core.c`)
+    and the `StringRepeatJoin` mold lowered across 3-backend,
+    pinned by `tests/c26b_018_byte_primitive.rs` and
+    `tests/c26b_018_repeat_join.rs`.
+  - (A) `Value::Str` Arc+COW foundation landed at Round 6 / wP
+    (`6cf6648`): `Value::Str` migrated to `Arc<String>`, so
+    `Value::clone()` on a string is now an `Arc::clone()` (atomic
+    refcount bump) vs an O(len) copy. New helpers:
+    `Value::str(String)` constructor and `Value::str_take(Arc<String>)`
+    (try_unwrap fast path, fallback to `(*arc).clone()`). Regression
+    guard: `tests/c26b_018_str_arc_ptr_eq.rs` pins `Arc::ptr_eq`
+    after `value.clone()` and after pass-through assignment.
+  - (A) char-index cache layer `[FIXED]` at Round 8 / wU
+    (`9e69f96`): `Arc<String>` is wrapped in a new
+    `StrValue { data: String, char_offsets: OnceLock<Vec<usize>> }`
+    carrier so `Value::Str(Arc<StrValue>)` now carries a lazily-
+    populated byte-offset table of length `char_count + 1`.
+    `Deref<Target = String>` + full trait forwarding (`PartialEq`,
+    `Eq`, `PartialOrd`, `Ord`, `Display`, `Hash`, `Default`,
+    `AsRef<str>`, `AsRef<OsStr>`, `Borrow<str>`, `From<String>`,
+    `From<&str>`) keep every existing byte-oriented call site working
+    through autoderef — including the addon ABI surface
+    (`s.as_ptr()` / `s.len()`). The hot super-linear paths are now
+    O(1) per call after the first touch:
+    `Slice[str]()` / `CharAt[str, idx]()` / `Str.length()` /
+    `Str.get(idx)` / `Str.indexOf(sub)` / `.lastIndexOf(sub)`
+    (the last two use binary search over the cache for a
+    byte-offset → char-index mapping). Lock-free `OnceLock` matches
+    Taida's immutable-first model; no mutable interior state
+    escapes. `idx.saturating_add(1)` defends the negative-index
+    Lax cast (`-1i64 as usize == usize::MAX`) so the `CharAt`
+    out-of-bounds path continues to return `None`. 13 unit tests
+    in `src/interpreter/value.rs::tests` pin ASCII + UTF-8 char
+    counting (`aあ🙂b` = 9 B / 4 chars), `cached_char_at` /
+    `cached_char_slice` / `cached_byte_to_char_index` round-trip,
+    `Arc` sharing of the cache across clones, and the
+    `Value::str_take` unique + shared paths. Option (D)
+    `StringBuilder` remains **discarded** (not deferred).
+- **C26B-020** — **Downstream-blocking hard blocker.** Three
+  pillars, all required for DONE:
+  1. `[FIXED]` `readBytesAt(path, offset, len) -> Bytes` API;
+     `readBytes` gets a runtime-configurable 64 MB ceiling. Landed
+     across 3-backend; scale test pins 1 GB file × 64 × 16 MB
+     chunked read in under 2 s.
+  2. `[FIXED]` `BytesCursorTake` zero-copy via `Arc<Vec<u8>>` +
+     offset/len view. Landed at Round 5 / wO (`f15c145`):
+     `Value::Bytes` migrated to `Arc<Vec<u8>>`;
+     `parse_bytes_cursor` returns `(Arc<Vec<u8>>, usize)`; each
+     `BytesCursorTake(size)` is now an `Arc::clone` (O(1)
+     refcount bump) rather than a full-buffer memcpy. New
+     helpers: `Value::bytes(Vec<u8>)` constructor and
+     `Value::bytes_take(Arc<Vec<u8>>)` (try_unwrap fast path,
+     clone fallback). Regression guards in
+     `tests/c26b_020_bytes_cursor_zero_copy.rs`: Arc::ptr_eq
+     invariant + 256 MB × 16 < 500 ms baseline +
+     (`TAIDA_BIG_BYTES=1`) 1 GB × 64 < 2 s acceptance.
+     `EXPECTED_TOTAL_LEN` is unchanged (Value layout is
+     internal). D27 escalation checklist: 3/3 NO.
+  3. `[FIXED]` `readBytesAt` + related molds lowered for
+     `wasm-wasi` / `wasm-full` at Round 3 / wI via a new
+     `src/codegen/runtime_wasi_io.c` (WASI preview1 `path_open` +
+     `fd_read`, 64 MB runtime-configurable ceiling preserved).
+     Regression guard: `tests/c26b_020_wasm_bytes_at.rs`. This is
+     the **only** wasm-scope addition in gen-C NET work.
+
+  All three pillars are now **FIXED**. The downstream `bonsai-wasm`
+  Phase 6 unblock is material; the end-to-end acceptance smoke
+  still runs against the stable gate.
+- **C26B-024** `[FIXED]` — Native list / `BuchiPack` clone-heavy
+  paths. **Step 2 + Step 3 Option A first pass** landed at Round 8
+  / wT (`81c4fc1`): a bounded per-thread freelist for 4-field Packs
+  (`taida_pack4_freelist_pop` / `taida_pack4_freelist_push` in
+  `src/codegen/native_runtime/core.c`, `__thread` storage, 32-entry
+  cap, full-cap fallback to `free()`). The profile-identified hot
+  path was `taida_lax_new` allocating a 4-field Pack (112 B) on
+  every `list.get(i) ]=> x`; allocator thrash dominated wall time
+  at `bench_router.td` N=1000 / M=5000 (sys/real = 80%). Freelist
+  dispatch in `taida_pack_new` / `taida_release` re-initialises
+  every slot on reuse, so no stale child leaks; bounded per-thread
+  storage prevents unbounded RSS growth; cross-thread release falls
+  through to `free()` (correct but without reuse win). Internal
+  micro-bench (Lax churn 200k wrappers, 3-run median):
+  `baseline real 0.510s / sys 0.412s / user 0.094s` →
+  `freelist real 0.295s / sys 0.240s / user 0.056s` — delta
+  `-42% / -42% / -38%`. Five 3-backend parity tests
+  (`tests/c26b_024_pack_freelist_parity.rs`: `lax_churn_int` /
+  `lax_churn_str` / `lax_oob_empty` / `freelist_bound` /
+  `mixed_type_lax`) exercise the optimised access pattern, the OOB
+  empty-Lax path, and 40-depth recursion that exceeds the
+  freelist cap. **Step 4 full acceptance** landed at Round 10 /
+  wε (`78a70f4` / merge `baff13d`), closing the Native ≤ JS × 2
+  hard-gate with the Native router-bench now at sys/real = 9 %
+  (down from 81 %) and Native / JS = 2.0× (down from 12.1×).
+  Measured on `examples/quality/c26_native_router_bench/router.td`
+  at N=200 routes × M=500 iterations (3-backend parity, Linux
+  x86_64, gcc):
+  ```
+  | Backend | real  | sys   | sys/real | vs JS |
+  |---------|------:|------:|---------:|------:|
+  | Native  | 0.34s | 0.03s | 9 %      | 2.0×  |
+  | JS      | 0.17s | 0.01s | 6 %      | 1.0×  |
+  ```
+  (baseline `@c.25.rc7` / wT Round 8: Native 2.05 s / sys 1.66 s /
+  12.1× JS / 81 % sys). The six-change runtime refactor lives in
+  `src/codegen/native_runtime/core.c` F1 and is superset-additive
+  over wT:
+  (1) thread-local bump arena (`TAIDA_ARENA_*`, 2 MiB chunks,
+  per-thread chain, 16 B aligned; allocations ≤ 1024 B take the
+  arena path, larger fall back to `malloc`; arena chunks reclaimed
+  at process exit — the Native codegen does not emit `taida_release`
+  for short-lived bindings, so the bump allocator is semantically
+  equivalent to `malloc` for this workload). Router-bench `malloc`
+  calls 2.97 M → ≈ 300 (**-99.99 %**).
+  (2) Tier-1 thread-local freelists for the residual `taida_release`
+  paths: cap=16 List freelist (`taida_list_freelist_{pop,push}`) +
+  3-bucket small-string freelist (≤ 32 B / ≤ 64 B / ≤ 128 B total
+  block size, `taida_str_bucket_for` / `taida_str_freelist_{pop,
+  push}`), hooked from `taida_list_new` / `taida_str_alloc` (alloc
+  side) and `taida_release` / `taida_str_release` (release side).
+  Arena-backed slabs bypass the freelist since `free()` on an arena
+  pointer is undefined behaviour.
+  (3) Heap-range tracker — `taida_safe_malloc` updates
+  `[taida_heap_min, taida_heap_max)` on every `malloc`;
+  `ptr_is_readable` fast-paths via O(1) range membership instead of
+  syscalling `mincore`.
+  (4) 64-entry `mincore`-page cache (`taida_mincore_cache`) for
+  pages that have already been verified as mapped; subsequent probes
+  on the same page skip the syscall. Wired into
+  `taida_ptr_is_readable` / `taida_is_string_value` /
+  `taida_read_cstr_len_safe`. Router-bench `mincore` syscalls
+  9.45 M → 20 (**-99.9998 %**).
+  (5) Arena-aware `list_push` migration: `realloc()` on an arena-
+  backed slab is UB, so when an arena-origin list grows past cap=16
+  we `malloc` the new capacity and `memcpy` header + elements; the
+  abandoned arena slot is reclaimed at process exit.
+  (6) Arena-skip guards in `taida_release` / `taida_str_release`
+  so `free()` is never called on an arena pointer.
+  Three new Round 10 parity tests
+  (`tests/c26b_024_router_bench_parity.rs`:
+  `router_bench_smoke_parity` / `list_push_arena_migration_parity`
+  / `small_string_churn_parity`) confirm bit-for-bit 3-backend
+  output under the workload that triggers arena allocation, list
+  push migration, and small-string churn; the five Round 8 wT
+  pack4 freelist tests remain green (arena-skip guard inserted).
+  The Round 8 / wT `EXPECTED_TOTAL_LEN` 998,598 → Round 10 / wε
+  **1,012,971** (F1 251,878 → **266,252**; F2 / other fragments /
+  interp / JS / wasm profiles all unchanged — F1 absorbs the full
+  arena / freelist / heap-range / mincore-cache / fast-path /
+  migration / guard delta). D27 escalation checklist: 3/3 NO —
+  public mold surface untouched, error contract unchanged, all 185
+  parity tests + 880+ total tests green (including C25 / C24 / C23
+  / C21 regression guards and all four wasm profiles; wasm profiles
+  are untouched by Round 10). Step 1 (CI perf regression gate
+  wiring against `bench_router.td`) is additive infrastructure
+  tracked separately under C26B-024 on `.dev/C26_BLOCKERS.md`;
+  the stable-gate acceptance numbers above are the contractual
+  baseline it will enforce once wired.
+
+#### Cluster 5 — Float parity (Phase 11)
+
+- **C26B-011** `[FIXED]` — NaN / ±Infinity / denormal parity across
+  3-backend (`Div` / `Mod` / math molds), `Div[1.0, 0.0]()` Lax
+  default rendering divergence resolved, and `Mul[1.5, 2.0]()`
+  native-build exit-code-1 isolated and fixed.
+  - Signed-zero `-0.0` runtime handling `[FIXED]` at Round 6 / wS
+    (`547972c`) across interpreter and native — `taida_float_to_str`
+    dispatches on `signbit` so `-0.0` renders as `"-0.0"` rather than
+    `"0.0"`.
+  - JS-codegen Float-literal rendering of `-0.0` `[FIXED]` at
+    Round 7 / wV-a (`d00e896`) — the final 3-backend divergence on
+    C26B-011 is now closed. Two fixes in
+    `src/js/runtime/core.rs`: (a) `__taida_float_render` probes
+    `Object.is(v, -0)` before `toFixed(1)` so signed zero surfaces
+    as `"-0.0"` (pure `(-0).toFixed(1)` drops the sign);
+    (b) `__taida_mul` stays on the Number multiplication path
+    when either operand is `-0` or when the Number-path product
+    itself is `-0` (BigInt has no `-0`, so the integer fast-path
+    would otherwise collapse the sign bit on `-1.0 * 0.0`).
+    `src/js/codegen.rs::Expr::FloatLit` adds defensive handling for
+    `-0.0` / NaN / ±Infinity literals (Rust `f64::to_string` emits
+    `"inf"` / `"-inf"` which are invalid JS `Number` literals; the
+    defensive path emits `(1/0)` / `(-1/0)` / `(0/0)` so the JS
+    backend remains safe for any float literal the interpreter
+    accepts). Regression guard:
+    `tests/c26b_011_signed_zero_parity.rs` (3-backend).
+
+#### Cluster 6 — Surface fixes (Phase 12) & docs (Phase 13)
+
+- **C26B-013** — Stability / CHANGELOG / `net_api.md` (new) /
+  Stream-lowering doc updates / 2nd-party inbox rule
+  (`.dev/C26_PROGRESS.md` § NEW-E).
+- **C26B-014** `[FIXED]` — Core-bundled packages (`taida-lang/os`,
+  `net`, `crypto`, `pool`, `js`) resolvable without an explicit
+  `packages.tdm` entry. **Option B pinned** (implementation brought
+  in line with docs — widening, not breaking). The interpreter
+  resolver now calls `CoreBundledProvider::materialize_core_bundled`
+  on `resolve_package_module` failure; the native backend's existing
+  `is_core_bundled_path` branch (C25B-030) covers the codegen side
+  with no changes. Regression guard:
+  `tests/c26b_014_core_bundled_importless.rs` (interpreter × 4 +
+  native × 2).
+- **C26B-015** `[FIXED]` — Native-backend path-traversal check no
+  longer rejects project-root-internal `..` imports; parity across
+  3-backend (root-escape is still rejected via the canonicalized
+  component walk).
+- **C26B-016** `[FIXED]` — `httpServe` handler `req` pack shape
+  pinned in `docs/reference/net_api.md` (new). **Option B+
+  complete**: the zero-copy span pack (`make_span`,
+  `src/interpreter/net_eval/helpers.rs:195-200`) is **retained**
+  for perf; ergonomics is widened via the full public mold family
+  — `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice`
+  landed at Round 2 / wD, and the cold-path materialiser
+  `StrOf(span, raw) -> Str` landed at Round 3 / wH as pure IR
+  composition (`src/codegen/lower_molds.rs::StrOf`,
+  `taida_pack_get` + `taida_slice_mold` + `taida_utf8_decode_mold`
+  + `taida_lax_get_or_default`, no new C runtime helpers).
+  Regression guard: `tests/c26b_016_strof_parity.rs` (3-backend).
+  Option A (auto-`Str` promotion of `req.method`) would break
+  `tests/parity.rs` fixtures and is **deferred to D27**.
+- **C26B-017** `[FIXED]` — Interpreter: partially-applied function
+  returned from an outer function no longer collapses to `@()`;
+  closure capture works across return boundaries (3-backend parity:
+  `makeAdder(10)(7) == 17`). Landed at Round 3 / wH. Regression
+  guard: `tests/c26b_017_partial_app_closure_capture.rs`.
+- **C26B-021** `[FIXED]` — `stdout` / `stderr` now line-buffered at
+  the C entry point via `setvbuf(_IOLBF, 0)`. **Option B pinned**
+  (per-call `fflush` is not adopted, because the per-call overhead
+  is higher than the one-shot entry-point setup).
+- **C26B-022** — HTTP wire parser enforces method 16 / path 2048 /
+  authority 256 byte ceilings; over-limit requests emit `400 Bad
+  Request`. **Step 3 Option B pinned**. `-Wformat-truncation` is
+  warning-as-error in CI.
+  - Step 2 (Interpreter h1 method + path) `[FIXED]` at Round 3 /
+    wE (`src/interpreter/net_eval/h1.rs`, constants
+    `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN =
+    2048`). The check runs after `parse_request_head` and before
+    `dispatch_request`, so over-limit inputs are rejected before
+    the handler is invoked. Additive widening per §6.2; no
+    existing assertion is altered.
+  - Authority (256) enforcement `[FIXED]` at Round 4 / wJ
+    (`c3805ff`) across h1 / h2 / h3
+    (`src/interpreter/net_eval/h1.rs`, `h2.rs`, `h3.rs`);
+    over-limit authorities return `400 Bad Request` symmetrically
+    with the method / path ceilings.
+  - **OPEN** residual: `-Wformat-truncation` promotion to
+    warning-as-error in CI.
+- **C26B-023** `[FIXED, docs-path]` — 2-arg `httpServe` handler
+  `req.body` empty-span caveat documented in
+  `docs/reference/net_api.md` (§3.2 / §8) at Round 3 / wH,
+  including the `readBody(req)` / `readBodyChunk(req)` /
+  `readBodyAll(req)` usage matrix, the `__body_stream` sentinel
+  design note, and the silent-breakage anti-pattern. Regression
+  guard: `tests/c26b_023_two_arg_handler_body.rs`. The runtime
+  warning emission for direct `req.body` slice in 2-arg handlers
+  is part of the diagnostic-code track and remains OPEN.
+- **C26B-025** `[FIXED]` — `taida publish` validates `packages.tdm`
+  self-identity (`<<<@version` vs `next_version`) at `plan_publish()`
+  and rejects a stale manifest before any tag is pushed. `--retag`,
+  `--force-version`, and `--label` all pass through the same check;
+  label addenda (manifest `a.7` + `--label rc3` → tag `a.7.rc3`) are
+  accepted as a legitimate match. The optional `--bump-manifest`
+  auto-rewrite is deferred to D27 (listed under
+  `.dev/D27_BLOCKERS.md`); the C26 cut rejects the stale case.
+  Regression guards:
+  `tests/c26b_025_publish_rejects_stale_manifest_self_identity.rs` +
+  `tests/c26b_025_publish_accepts_label_addendum.rs`.
+
+#### Cluster 7 — Stable GATE (Phase 14)
+
+- User-approved `@c.26` tag (agent must never cut `@c.26.rcM` /
+  `@c.26` tags). Promotion gate requires:
+  - All Critical / Must Fix closed.
+  - `cargo test --release` all-pass, 0 red, 0 SLOW warnings.
+  - 3-backend parity across all fixtures.
+  - CI 2C wall-clock median ≤ 8 minutes.
+  - Parallelism efficiency ≥ 80%.
+  - 24-hour soak test PASS (C26B-005).
+  - Downstream `bonsai-wasm` Phase 6 smoke (C26B-020 acceptance).
+  - `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete.
+  - Sigstore + SLSA-signed official addon release.
+
+### Round 1 – Round 10 — commits already on `feat/c26`
+
+Round 1 merge order: P3 (C26B-003) → P10 pillar 1 (C26B-020) →
+P11 (C26B-011) → P12 (C26B-014 / 015 / 021 / 025), then Phase 7
+sub-phases 7.1–7.3 (C26B-007) and Phase 9 (C26B-009 / 019) in
+parallel sessions.
+
+Round 2 additions: wA (soak runbook + docs amendment), wB
+(C26B-004 perf gate hard-fail + SEC-011 Sigstore / SLSA), wC
+(C26B-026 Native h2 HPACK custom-header fix), wD (C26B-016 Option
+B+ span-aware molds: `SpanEquals` / `SpanStartsWith` /
+`SpanContains` / `SpanSlice`).
+
+Round 3 additions: wE (C26B-001 h2 method PUT / DELETE / PATCH
+cases → 10-case pin target + C26B-022 Step 2 interp wire limits),
+wG (Cluster 4 common-abstraction LOCK decision, decide-only),
+wH (C26B-016 `StrOf` + C26B-017 partial-app closure capture +
+C26B-023 2-arg body docs), wI (C26B-020 pillar 3 wasm-wasi /
+wasm-full lowering).
+
+Round 4 additions: wJ (`c3805ff`, C26B-006 retry-shim removal +
+C26B-002 TLS observability surface tranche + C26B-022 authority
+byte ceiling across h1 / h2 / h3), wK (`3e4c667`, C26B-018 (B)
+byte-level primitive paths + (C) `StringRepeatJoin` mold
+3-backend), wM (`e444f81`, C26B-010 memory-leak CI gate —
+valgrind smoke on every push + weekly heaptrack, plus
+`scripts/mem/` helpers), wN (`a146b76`, docs-only re-sync of
+STABILITY / CHANGELOG / `net_api.md` to Round 3 FIXED set).
+
+Round 5 additions: wO (`853900f`, C26B-020 pillar 2 —
+`Value::Bytes` migrated to `Arc<Vec<u8>>` with
+`parse_bytes_cursor` returning `(Arc<Vec<u8>>, usize)` so every
+`BytesCursorTake(size)` becomes an `Arc::clone`; acceptance
+scales to 1 GB × 64 < 2 s under `TAIDA_BIG_BYTES=1`).
+
+Round 6 additions (all merged on `feat/c26`):
+
+- wR (`30c7283`, `a146b76` cascade) — amends STABILITY §5.5 / §5.6
+  and the CHANGELOG `@c.26` section to re-sync the FIXED set
+  through Round 5, and originally staged the C26B-008 GHSA
+  advisory template under `docs/advisory/`. The advisory scaffold
+  (`docs/advisory/` + `scripts/advisory/`) was subsequently
+  removed at Round 8 / wX2 (`62fd54d`) when C26B-008 was closed
+  as not required given the zero install base at `@c.26`
+  declaration; see the C26B-008 entry above for the closure
+  rationale.
+- wP (`6cf6648`, C26B-018 (A) foundation) — `Value::Str` migrated
+  to `Arc<String>`. Pattern arms `Value::Str(s)` now yield `s:
+  Arc<String>` which derefs transparently. `Value::clone()` on a
+  string is an `Arc::clone`. `Value::str()` / `Value::str_take()`
+  helpers added; all call sites updated. The char-index cache layer
+  was tracked as a wU-class follow-up at the time of this commit;
+  it subsequently landed at Round 8 / wU (`9e69f96`) — see the
+  Round 8 additions below and the C26B-018 (A) entry above.
+- wQ (`6f72f7c`, C26B-012 BuchiPack migration) — `Value::BuchiPack`
+  migrated to `Arc<Vec<(String, Value)>>`. Pattern arms
+  `Value::BuchiPack(fields)` now yield `fields:
+  Arc<Vec<(String, Value)>>`. New helpers `Value::pack()` /
+  `Value::pack_take()`. Write paths use `Arc::make_mut` or
+  `Arc::try_unwrap` COW. PENDING_BYTES FIFO remains OPEN, tracked
+  separately.
+- wS (`547972c`, C26B-022 Native authority + C26B-011 signed-zero
+  runtime + profiling defer) — lands the Native h2/h3 authority
+  byte-ceiling fixture, the runtime path for signed-zero `-0.0`
+  across interpreter and native (JS codegen rendering was PARTIAL
+  at this point; completed at Round 7 / wV-a, see below), and
+  defers the C26B-024 Native list/pack profile pass onto the new
+  Arc baseline.
+
+Parallel worktrees wP / wQ / wS operated on disjoint file sets
+(`Value` variants + isolated fixtures); the Round 6 `EXPECTED_TOTAL_LEN`
+rolled from 988,932 to 994,500 bytes driven by wS Native additions
+(wP / wQ are Rust-only, no C-fragment delta).
+
+Round 7 additions (all merged on `feat/c26`):
+
+- wV-a (`d00e896`, C26B-011 JS signed-zero codegen completion) —
+  closes the last 3-backend divergence on C26B-011. JS-side
+  `__taida_float_render` now probes `Object.is(v, -0)` before
+  `toFixed(1)` so signed zero renders as `"-0.0"`; `__taida_mul`
+  stays on the Number multiplication path when either operand
+  or the Number-path product is `-0` (the BigInt integer
+  fast-path has no `-0` and would otherwise collapse the sign).
+  `Expr::FloatLit` JS codegen adds a defensive `-0.0` / NaN /
+  ±Infinity literal emitter (`(1/0)` / `(-1/0)` / `(0/0)`) so
+  Rust `f64::to_string`'s `"inf"` / `"-inf"` tokens — which are
+  invalid JS `Number` literals — are never surfaced in generated
+  JS. Regression guard: `tests/c26b_011_signed_zero_parity.rs`.
+- wW (`feb29f4`, C26B-013 docs amendment for Round 6) — promotes
+  wP / wQ from OPEN to FIXED in STABILITY §5.6 and CHANGELOG
+  `@c.26`, and records wS signed-zero runtime + the then-pending
+  JS follow-up. Superseded by wZ (Round 8) for the JS-side FIXED
+  promotion; wW's text is a faithful snapshot of the Round 6
+  merged state at the time of commit.
+- wX (`eba5200`, Rust 1.93 clippy + fmt sweep) — folds two
+  pre-existing `collapsible_if` nests flagged by Rust 1.93's
+  stricter lint (`src/pkg/provider.rs:250` and
+  `src/pkg/publish.rs:463`) into `let-chain` form, and applies
+  `cargo fmt` across four files with incidental formatting drift.
+  No behaviour change; `-D warnings` stays green on the updated
+  toolchain.
+
+Round 7 worktrees wV-a / wW / wX are disjoint
+(`src/js/runtime/` + `src/js/codegen.rs` / docs-only /
+`src/pkg/` + formatter-only); the Round 7 `EXPECTED_TOTAL_LEN`
+is unchanged from Round 6 (no C-fragment delta).
+
+Round 8 additions (all merged on `feat/c26`):
+
+- wY (`af5c443`, test-doc clippy cleanup ahead of `@c.26` GATE)
+  — zero behaviour change. Addresses three pre-existing lint
+  categories confined to newly-added C26 test files:
+  `doc_list_item_overindented` (rustdoc, 3-space continuation
+  flattened to 2-space hanging indent in
+  `c26b_011` / `c26b_016` / `c26b_018` module docs);
+  `ptr_arg` (clippy, `&PathBuf` → `&Path` in `run_js` /
+  `run_native` / `build_native` test helpers where the buffer
+  is never mutated); `zombie_processes` (clippy false-positive
+  `#[allow]` on `spawn_and_wait_ready` in
+  `c26b_022_native_authority.rs` — every caller pairs spawn
+  with `drain_and_cleanup` which kills + `wait_with_output`s,
+  but the pattern is split across helpers so the lint can't see
+  the pairing). Test scope only — no `src/` changes, no
+  `EXPECTED_TOTAL_LEN` impact, no parity fixture altered, no
+  new assertion added or modified. D27 escalation checklist:
+  3/3 NO.
+- wZ (`ba720d3`, C26B-013 rolling docs amendment — Round 6 + 7
+  catch-up) — promotes C26B-011 to full `[FIXED]` in the
+  Cluster 5 entry above (the JS signed-zero path landed at
+  wV-a), adds Round 7 and Round 8 sections to this changelog,
+  and re-syncs STABILITY §5.6 and §5.5 to match. No code
+  change. wZ was authored before wT / wU / wX2 committed, so
+  its Round 8 subsection only pre-announced wY + itself; the
+  wδ rolling amendment below extends that narrative to cover
+  the remaining Round 8 landings without contradiction
+  (superset extension only).
+- wT (`81c4fc1`, C26B-024 Step 2 profiling + Step 3 Option A
+  first pass — thread-local 4-field Pack freelist) — the hottest
+  path in the Native runtime (`taida_lax_new` on every
+  `list.get(i) ]=> x`, 112 B Pack alloc) is fronted by a bounded
+  per-thread freelist (32 entries, `__thread` storage, falls
+  through to `free()` on cross-thread release or cap overflow).
+  Slot re-initialisation on reuse keeps the Lax wrapper
+  invariants intact. Native Lax-churn micro-bench shows
+  `sys/real -42%` on a 200k-wrapper workload (baseline real
+  0.510s / sys 0.412s → freelist real 0.295s / sys 0.240s).
+  Five new 3-backend parity tests in
+  `tests/c26b_024_pack_freelist_parity.rs` are all GREEN. Step 4
+  (`bench_router.td` hard-gate acceptance) + Step 1 (CI perf
+  gate wiring) were tracked separately at the time of the wT
+  commit — C26B-024 was marked **PARTIAL FIXED** in
+  `.dev/C26_BLOCKERS.md` *at this Round 8 snapshot*. Step 4 was
+  subsequently closed at Round 10 / wε (`78a70f4` / merge
+  `baff13d`) and the blocker is now FIXED; see the C26B-024
+  FIXED entry above and the Round 10 additions section below.
+  The Native-side `core.c` growth at this Round 8 / wT landing
+  drives `EXPECTED_TOTAL_LEN` 994,500 → 998,598
+  (`F1_LEN` 247,780 → 251,878; F2 / other fragments / interp /
+  JS / wasm profiles all unchanged at this point — the Round 10
+  / wε follow-up rolls both numbers to 1,012,971 / 266,252).
+  D27 escalation checklist: 3/3 NO — mold signatures, pinned
+  error strings, and existing assertions are all untouched; five
+  new parity tests are additive.
+- wU (`9e69f96`, C26B-018 (A) char-index cache layer) — closes
+  the last sub-task of the Cluster 4 Str super-linear fix and
+  promotes C26B-018 (A) from OPEN to **FIXED**. `Value::Str`
+  now carries
+  `Arc<StrValue { data: String, char_offsets: OnceLock<Vec<usize>> }>`;
+  the lazy offset table gives O(1) `Slice` / `CharAt` /
+  `Str.length()` / `Str.get(idx)` after first touch, and
+  binary search over the cache gives O(log n)
+  `Str.indexOf` / `.lastIndexOf` by mapping byte offsets back
+  to char indices. Deref + full trait forwarding
+  (`PartialEq` / `Eq` / `PartialOrd` / `Ord` / `Display` /
+  `Hash` / `Default` / `AsRef` / `Borrow` / `From`) preserves
+  every byte-oriented call site through autoderef, including
+  the addon ABI (`s.as_ptr()` / `s.len()`). Lock-free `OnceLock`
+  matches the immutable-first model; the negative-index Lax
+  cast is guarded by `idx.saturating_add(1)`. 13 unit tests in
+  `src/interpreter/value.rs::tests` pin ASCII + UTF-8 char
+  counting, cache round-trip, `Arc` sharing across clones, and
+  the `Value::str_take` unique + shared paths. D27 escalation
+  checklist: 3/3 NO — `Value::Str(Arc<StrValue>)` is an internal
+  layout change, `StrValue` Deref is transparent, and no mold
+  signature / pinned error string / existing assertion is
+  altered.
+- wX2 (`62fd54d`, C26B-008 CLOSED — advisory not required, zero
+  install base) — reclassifies C26B-008 as out-of-scope for
+  `@c.26` stable because Taida Lang has no confirmed install
+  base as of the cycle; GHSA + CVE publication has no
+  notification target and would generate spurious disclosure
+  noise. Underlying fix shipped in `@c.15.rc3`
+  (`canonical_release_source_is_taida_lang_org` regression
+  pin). The advisory scaffold staged at Round 6 / wR
+  (`docs/advisory/C25B-014-advisory.md` +
+  `docs/advisory/README.md` + `scripts/advisory/publish-advisory.sh`)
+  is removed here; the draft is recoverable from git history
+  if an install base later emerges and the pre-`@c.15.rc3`
+  window is confirmed exploitable against real users
+  (re-open conditions pinned in
+  `.dev/C26_BLOCKERS.md::C26B-008`). Rewritten pointer files:
+  `.github/SECURITY.md`, `CHANGELOG.md`, `docs/STABILITY.md`
+  §5.6. **This closure is a scope-out reclassification, not a
+  DEFER** — it is aligned with the DEFERRED 全廃方針 (Phase 0
+  Design Lock): either FIX now or escalate to D27, and a
+  scope-out for which there is no fix to defer is neither.
+
+### New blockers opened during Round 8 (both OPEN, fresh tracks)
+
+The Round 8 landings surfaced two pre-existing test failures
+that are orthogonal to wT / wU / wX2 and were already failing
+on `af5c443` (wY baseline):
+
+- **C26B-027** `[OPEN]` — `c25b_008_doc_examples_parse` parse
+  regression at `docs/reference/net_api.md:258` / `:273`
+  (introduced by Round 4 / wN net_api.md edit). Blocks the
+  @c.26 GATE `cargo test --release` all-pass audit. Docs-only
+  fix path (no `src/` change anticipated).
+- **C26B-028** `[OPEN]` — `init_release_workflow_symmetry::test_jobs_match_core_contract`
+  asymmetry: the test expects 4 jobs but `release.yml` grew
+  to 6 after SEC-011 Sigstore + SLSA landed in `6a3189f`
+  (Round 2 / wB). Either the test fixture or the canonical
+  contract list needs to absorb the two new jobs. Blocks
+  the @c.26 GATE workflow-symmetry audit.
+
+Both are tracked under C26B-027 / C26B-028 in
+`.dev/C26_BLOCKERS.md`; neither is introduced by wT / wU /
+wX2, so Round 8 proceeds without blocking on them.
+
+### wδ rolling amendment (Round 9, earlier in this CHANGELOG iteration)
+
+wδ (C26B-013 rolling docs amendment — Round 8 merge narrative)
+extends wZ's Round 8 subsection to cover wT + wU + wX2, flips
+the C26B-018 (A) status above to its merged FIXED state (and
+previously flipped C26B-024 to PARTIAL FIXED — the wθ rolling
+amendment below supersedes that to FIXED), and records the
+`EXPECTED_TOTAL_LEN` 994,500 → 998,598 delta driven by wT.
+C26B-027 / C26B-028 were opened as new OPEN tracks so the
+`@c.26` GATE audit trail stays complete. No code change; the
+wZ narrative is extended monotonically — no prior text is
+contradicted. D27 escalation checklist: 3/3 NO.
+
+### Round 9 additions (all merged on `feat/c26`)
+
+- **Round 9 / wα** (`7fd1500` fix → `e3aacd9` merge,
+  **C26B-027 `[FIXED]`**) — `c25b_008_doc_examples_parse` now
+  passes. The Round 4 / wN `net_api.md` edit had introduced two
+  code fences at `docs/reference/net_api.md:258` / `:273` that
+  referenced an undefined identifier; the fixtures were updated
+  to the intended form so the parse regression baseline is
+  restored. Docs-only path as anticipated; no `src/` change.
+  D27 escalation checklist: 3/3 NO — no mold signature / error
+  string / parity fixture touched.
+- **Round 9 / wβ** (`8fe8d49` fix → `83b5f8a` merge,
+  **C26B-028 `[FIXED]`**) — release-workflow symmetry restored.
+  The canonical-contract list in
+  `tests/init_release_workflow_symmetry.rs::test_jobs_match_core_contract`
+  now absorbs the two SEC-011 jobs that landed in `6a3189f`
+  (Round 2 / wB, Sigstore cosign + SLSA provenance), and the
+  **SEC-011 invariants are pinned** into the test: the `sign`
+  job depends on `build-release`, the `provenance` job depends
+  on `sign`, the verify-on-install step is present, and the
+  keyless-signing OIDC audience matches the `taida publish`
+  workflow. Any future release-workflow edit that breaks one of
+  those invariants now hard-fails the symmetry test rather than
+  silently drifting. D27 escalation checklist: 3/3 NO — the
+  SEC-011 surface was landed by Round 2 / wB; wβ adds the
+  regression guard only.
+- **Round 9 / wδ** (`e3cefc0` docs → `46210b5` merge,
+  C26B-013 rolling docs amendment) — the wδ section above;
+  docs-only catch-up for the Round 8 merge order.
+
+Round 9 closes the two blockers (C26B-027 / C26B-028) that
+Round 8 had opened. Round 9 `EXPECTED_TOTAL_LEN` is unchanged
+from Round 8 (998,598 B) — docs / tests only, no native-runtime
+C delta.
+
+### Round 10 additions (all merged on `feat/c26`)
+
+- **Round 10 / wε** (`78a70f4` perf → `baff13d` merge,
+  **C26B-024 Step 4 full acceptance**) — promotes C26B-024 from
+  `[PARTIAL FIXED]` to `[FIXED]`. The `bench_router.td` hard-gate
+  `Native ≤ JS × 2` with `sys/real ≤ 30 %` is now met
+  contractually: at N=200 × M=500 the Native path clocks
+  real 0.34 s / sys 0.03 s / sys-ratio 9 % / 2.0× JS (down from
+  real 2.05 s / sys 1.66 s / 81 % / 12.1× JS at the Round 8 wT
+  baseline). The six-change runtime refactor (thread-local bump
+  arena, tier-1 List + small-string freelists, heap-range
+  tracker, 64-entry `mincore`-page cache, arena-aware `list_push`
+  migration, arena-skip guards in `taida_release` /
+  `taida_str_release`) drives `malloc` calls 2.97 M → ≈ 300
+  (**-99.99 %**) and `mincore` syscalls 9.45 M → 20
+  (**-99.9998 %**) on the same workload. `EXPECTED_TOTAL_LEN`
+  998,598 → **1,012,971** (F1 251,878 → **266,252**); F2 / other
+  fragments / interpreter / JS / all four wasm profiles are
+  unchanged (F1 absorbs the full delta). Three new 3-backend
+  parity tests in `tests/c26b_024_router_bench_parity.rs`
+  (`router_bench_smoke_parity` / `list_push_arena_migration_parity`
+  / `small_string_churn_parity`) pin bit-for-bit output across
+  Interpreter / JS / Native under arena allocation, `list_push`
+  arena-to-malloc migration, and small-string freelist churn.
+  The five Round 8 / wT pack4 freelist tests stay green (the
+  arena-skip guard preserves their invariants). D27 escalation
+  checklist: 3/3 NO — public mold surface untouched, error
+  contract unchanged, all 185 parity tests + 880+ total tests
+  green (C25 / C24 / C23 / C21 regression guards and all four
+  wasm profiles included; wasm profiles are untouched by
+  Round 10). See the C26B-024 entry above for the full technical
+  narrative.
+
+Round 10 `EXPECTED_TOTAL_LEN` rolls from 998,598 B (Round 8
+wT) to **1,012,971 B**; F1 absorbs the full +14,373-byte delta.
+No other fragment, backend, or wasm profile is touched.
+
+### Round 11 additions (all merged on `feat/c26`)
+
+- **Round 11 / wη** (`4bc7369` ci → `5e03422` merge, **C26B-024
+  Step 1 CI perf regression gate wiring**) — closes the final
+  open Step of C26B-024. `.github/workflows/perf-router.yml`
+  (122 lines, new) runs the `bench_router.td` gate on every
+  PR / push / schedule / dispatch; the main branch auto-updates
+  `.github/bench-baselines/perf_router.json` (new, machine-readable
+  JSON with `native_js_ratio_max=3.0` / `sys_real_ratio_max=0.40`
+  / `min_samples_required=5`). `scripts/bench/perf_router_gate.py`
+  (200 lines) parses `PERF_ROUTER_*` emit lines + drives the
+  sample-count state machine + EWMA baseline update. The
+  opt-in `c26b_024_router_perf_gate` test is `#[ignore]`-gated;
+  none of the three existing Round 10 parity tests were
+  modified. Thresholds derived from local 16T measurements
+  (Native / JS = 1.97, sys / real = 8.7 %) with 1.5× / 4×
+  headroom for CI 2C variance (local ≠ CI lesson). Sampling
+  phase is warn-only by design; hard-fail starts at sample
+  count ≥ 5. Worktree contract was fully respected.
+- **Round 11 / wθ** (`e22ef29` docs → `fe6f526` merge, **C26B-013
+  rolling docs amendment — Round 9 + Round 10 narrative**) —
+  catch-up section above.
+- **Round 11 / wζ** (`4692fd8` in the `taida-lang/terminal`
+  submodule, **C26B-012 `PENDING_BYTES` FIFO FIXED**) —
+  landed outside the language repo because the change body is
+  entirely inside the `terminal` addon
+  (`.dev/official-package-repos/terminal/`). Replaces the old
+  `static PENDING_BYTES: Mutex<VecDeque<u8>>` with
+  `thread_local!(static PENDING_BYTES: RefCell<VecDeque<u8>>)`
+  (Case A from `.dev/C25B019_PENDING_BYTES_DESIGN.md`). Regression
+  guard: new `pending_bytes_queue_isolation_across_threads`
+  stress test pins cross-thread byte isolation (two OS threads
+  push distinct sequences, drain independently, no theft). The
+  `ReadEvent[]()` public signature is unchanged; the host-side
+  contract (always call from a dedicated blocking thread / single
+  OS thread per stdin stream) is documented in
+  `docs/guide/11_async.md` § `Async と addon の blocking I/O`.
+  The terminal submodule still needs `origin` push + PR merge +
+  `@a.x` release tag publish before downstream addon consumers
+  can pick it up — user action.
+
+### Round 11 wι review amendment (2026-04-25)
+
+A review on 2026-04-25 downgraded the previous "agent-side
+FULLY READY" wording to **HOLD**. Four items were surfaced:
+
+- **C26B-029** `[FIXED during review]` — CI perf gate
+  false-green hardening. `.github/workflows/bench.yml` had
+  `continue-on-error: true` plus `|| true` on the NET
+  throughput step; `scripts/bench/parse_net_throughput.py` could
+  not parse the `NET6-3b-3` `throughput=… total_bytes=… elapsed=…`
+  line format (treating missing samples as acceptable); and
+  `scripts/bench/perf_router_gate.py` returned exit 0 when its
+  `PERF_ROUTER_*` emit lines were absent. All three false-green
+  holes fixed in the same review session (commit `cfb8b0b`).
+- **C26B-030** `[FIXED during review follow-up]` — SEC-011
+  install-side verify wiring gap. Release-side Sigstore signing
+  + SLSA provenance shipped at Round 2 / wB, and
+  `scripts/release/verify-signatures.sh` existed; however the
+  actual `taida install` / `install.sh` consumption path did
+  not invoke the verifier. Closed by:
+  - **New `src/addon/signature_verify.rs`** module — resolves
+    a per-URL `VerifyPolicy` (`Disabled` / `BestEffort` /
+    `Required`), fetches `<artefact>.cosign.bundle` next to
+    the prebuild, shells out to `cosign verify-blob` under the
+    pinned identity regex (`^https://github.com/taida-lang/`)
+    and OIDC issuer (`https://token.actions.githubusercontent.com`).
+    `TAIDA_VERIFY_SIGNATURES` selects the policy; unset means
+    `BestEffort` for first-party URLs and `Disabled`
+    elsewhere. Integration tests inject a temporary fake `cosign`
+    executable into `PATH` to exercise both pass and fail paths
+    without needing the real binary on every CI runner; the
+    production verifier has no env-var bypass.
+  - **`src/pkg/resolver.rs::try_fetch_prebuild`** calls the
+    verifier after the SHA-256 check; failures map to
+    `PrebuildFailure::IntegrityMismatch` so the install
+    aborts on any signature rejection.
+  - **New `install.sh`** at repo root — the public installer.
+    Downloads `taida-<TAG>-<TRIPLE>.tar.gz`, the matching
+    `.cosign.bundle`, and `SHA256SUMS` + `SHA256SUMS.cosign.bundle`.
+    Enforces SHA-256 against the signed sums file then runs
+    `cosign verify-blob` on both the tarball and the sums.
+    `TAIDA_VERIFY_SIGNATURES=required` mode fails the install
+    if any bundle is missing or `cosign` is not on `PATH`.
+  - Regression guard: `tests/c26b_030_sec011_install_verify.rs`
+    (10 cases) pins the `Disabled` / `BestEffort` / `Required`
+    decision table + fake-ok / fake-fail / fake-missing-cosign
+    paths. Unit tests in the new module pin URL matcher
+    tightness and policy-resolution edge cases.
+- **C26B-002** `[REOPEN → FIXED during review follow-up]` —
+  TLS construction 3-backend parity pin. The existing
+  `test_net5_3b_tls_*` cases covered interpreter + JS only;
+  the 2026-04-25 review flagged the missing native branch.
+  Closed by five new 3-backend parity tests in `tests/parity.rs`
+  (`test_net6_1c_c26b002_{1..5}_*`) that cover the cert-missing,
+  key-only, plaintext-fallback, invalid-PEM-content, and
+  unknown-protocol-token permutations across interpreter / JS /
+  native. Live cert rotation + ALPN matrix remains in the
+  C26B-005 soak runbook (live TLS handshakes are runtime-
+  dependent; the construction-time contract being pinned here
+  is what `cargo test --release` can deterministically
+  reproduce).
+- **C26B-005** `[REOPEN]` — 24 h soak PASS evidence remains
+  open. Runbook landed at Round 2 / wA, but the 24 h run itself
+  is a user action and no PASS record currently lives in the
+  repo. The review amendment adds a new **fast-soak proxy**
+  (`scripts/soak/fast-soak-proxy.sh`, 30-min to 3-hour short
+  run) so developers can get a first-order leak / drift signal
+  during the iteration loop; a proxy PASS does **not** close
+  the C26B-005 acceptance (only a documented 24 h PASS does).
+  `.dev/C26_SOAK_RUNBOOK.md` gained § 0.1 (acceptance
+  ownership) and § 7.1 (fast-soak-proxy usage) to make the
+  split explicit.
+
+Review amendment `EXPECTED_TOTAL_LEN` unchanged (no `src/`
+C-fragment bytes moved; the SEC-011 wiring is pure Rust).
+All `cargo test --lib` (2539) + `cargo test --release --test parity`
+(667) pass under the review amendments.
+
+**Worktree contract — Round 10 post-mortem (1 line):** the
+Round 10 / wε integration session briefly wrote a partial-leak
+fragment outside its isolation worktree before being corrected;
+the final merged state on `feat/c26` is the clean one and no
+main-tree artefact persists. The wθ rolling amendment session
+(this commit) explicitly re-verifies the worktree isolation
+contract at entry and confines all edits to its own isolation
+prefix.
+
+### wθ rolling amendment (this commit)
+
+wθ (C26B-013 rolling docs amendment — Round 9 + Round 10 merge
+narrative) extends the Round 8 / wδ narrative to cover
+Round 9 (wα / wβ / wδ) and Round 10 (wε). Specifically:
+
+- Flips **C26B-024** above from `[PARTIAL FIXED]` to `[FIXED]`
+  by appending the Round 10 / wε Step 4 full-acceptance block
+  as a monotone superset over the Round 8 / wT narrative (no
+  prior text is contradicted; the Step 2 + Step 3 Option A
+  narrative is preserved verbatim and the Step 4 block
+  extends it with the final acceptance numbers and the
+  six-change runtime refactor detail).
+- Promotes **C26B-027** and **C26B-028** from the Round 8
+  OPEN list to FIXED via the Round 9 additions section above
+  (the "New blockers opened during Round 8" section stays as
+  the audit-trail record of their origin; the Round 9
+  additions section records their closure).
+- Records the `EXPECTED_TOTAL_LEN` 998,598 → **1,012,971**
+  delta driven by Round 10 / wε (F1 251,878 → **266,252**;
+  F2 / other fragments / interp / JS / wasm profiles
+  unchanged).
+- Adds an explicit **`@c.26` GATE-READY status marker**
+  (section below).
+
+No code change in this commit. The wδ narrative is extended
+monotonically — no prior text is contradicted (the Round 8 /
+wT Step 2 + Step 3 Option A achievement is preserved as the
+first half of the C26B-024 FIXED narrative, and the Round 10
+/ wε Step 4 is the second half). D27 escalation checklist:
+3/3 NO — no mold signature / pinned error string / existing
+parity assertion is altered by this docs amendment.
+
+### `@c.26` GATE status (agent side, 2026-04-25 review update)
+
+The previous wθ **GATE-READY** claim is downgraded to **HOLD**
+following the 2026-04-25 review. The OPEN / REOPEN residuals
+are now:
+
+- **C26B-002** `[FIXED during review follow-up]` — 3-backend
+  TLS construction parity pin (five new
+  `test_net6_1c_c26b002_{1..5}_*` cases in `tests/parity.rs`).
+- **C26B-005** `[REOPEN]` — 24 h soak PASS record remains a
+  user action; runbook + fast-soak proxy are both landed but
+  the PASS evidence lives outside the repo until the user
+  runs it.
+- **C26B-012** `PENDING_BYTES` FIFO — **user-side only** from
+  this repo's perspective. Agent-side work is closed (wζ
+  Round 11, commit `4692fd8` in the `terminal` submodule).
+  The submodule still needs upstream push / PR / release tag
+  before consumers see the fix.
+- **C26B-013** rolling amendment — this section + §5.6.1
+  (`docs/STABILITY.md`) + `.dev/C26_PROGRESS.md` tracker
+  stayed out of sync with Round 10 / 11 before the 2026-04-25
+  review; now re-synced under the Round 11 wι amendment.
+- **C26B-029** `[FIXED during review]` — CI perf gate
+  false-green hardening (two scripts + one workflow).
+- **C26B-030** `[FIXED during review follow-up]` — SEC-011
+  install-side cosign verify wiring (`src/addon/signature_verify.rs`
+  + resolver hook + public `install.sh`).
+
+The `@c.26` Phase 14 promotion gate itself remains a
+**user-approved tag**; the agent does not cut `@c.26.rcM` /
+`@c.26` under any condition. The stable-declaration gate
+requires (from §5.6 and §6.1):
+
+- All Critical / Must Fix closed **(agent side: DONE as of
+  wθ)** + C26B-012 FIFO (user side) closed.
+- `cargo test --release` all-pass, 0 red, 0 SLOW warnings.
+- 3-backend parity across all fixtures (all 185 parity tests
+  + 880+ total tests green as of Round 10 / wε).
+- CI 2C wall-clock median ≤ 8 minutes.
+- Parallelism efficiency ≥ 80 %.
+- 24-hour soak test PASS (C26B-005; runbook landed at
+  Round 2 / wA, the 24 h run itself is the manual user
+  action).
+- Downstream `bonsai-wasm` Phase 6 smoke (C26B-020
+  acceptance).
+- `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete
+  (Sub-phase 7.4 FIXED at Round 2 / wB; the SEC-011 workflow
+  invariants are pinned by the Round 9 / wβ symmetry test).
+- Sigstore + SLSA-signed official addon release (SEC-011
+  produced the publish-side signing and the install-side
+  verify; the first signed release itself is the user
+  action).
+
+### Docs / infrastructure landed alongside
+
+- `docs/STABILITY.md` — `Target: @c.26`, §1 `@c.25`-skip pin,
+  §1.2 D26→D27 rename (prose-only; the pinned runtime error string
+  keeps the legacy `D26` token for gen-C), §4.2 / §4.3 / §4.4
+  generational language clarified, §5.1 / §5.4 / §5.5 ownership
+  transferred to C26 blockers. §5.1 port-bind race marked FIXED,
+  §5.5 adds a `readBytesAt` addendum, §5.6 is the informational
+  C26 progress snapshot (non-contractual), re-synced through
+  Round 10 / wε (C26B-024 FIXED, C26B-027 + C26B-028 FIXED,
+  `@c.26` GATE-READY status marker added).
+- `.dev/C26_SOAK_RUNBOOK.md` — new (C26B-005 scaffolding, wA
+  Round 2).
+- `docs/reference/net_api.md` (new) — `httpServe` `req` pack shape
+  (1-arg / 2-arg table), span-aware mold reference, perf guidance
+  (hot path `SpanEquals`, cold path `strOf`).
+- `docs/reference/mold_types.md:717` — Stream lowering landed at
+  C25B-001 Phase 3; `STREAM_ONLY_FIXTURES` is empty (4-backend
+  parity now applies).
+- `docs/reference/addon_manifest.md` / `docs/guide/13_creating_addons.md`
+  — D26→D27 prose rename; the pinned runtime error string is
+  preserved and its `D26` token documented as a gen-C surface
+  artefact.
+- `src/js/runtime/core.rs:1100` — Stream-lowering comment updated
+  to reflect 4-backend parity.
+
+### Out-of-scope for C26 (deferred to D27)
+
+- Function-name capitalisation cleanup.
+- WASM backend for addons (`AddonBackend::Wasm`) — gen-D only.
+- Addon ABI v2 (`on_panic_cleanup`, termios-restore hook).
+- Diagnostic renumbering (`E1xxx` rename / retire).
+- `req.method` auto-`Str` promotion (C26B-016 Option A).
+- Rewriting the legacy `wasm planned for D26` error-string token
+  (pinned surface for gen-C).
+
+See `.dev/D27_BLOCKERS.md` and
+`MEMORY/project_d27_breaking_change_phase.md`.
+
+---
+
 ## @c.25.rc7 (2026-04-23)
 
 Quality-consolidation RC cycle. `stable` (label-less `@c.25`) is

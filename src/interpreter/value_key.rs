@@ -235,7 +235,7 @@ fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
             // hasher so that two packs with the same fields in different
             // order produce the same outer hash.
             let mut mix: u64 = 0;
-            for (name, val) in fields {
+            for (name, val) in fields.iter() {
                 let mut fh = DefaultHasher::new();
                 name.hash(&mut fh);
                 hash_value_into(val, &mut fh);
@@ -265,11 +265,11 @@ mod tests {
     fn value_key_basic_hashability() {
         assert!(ValueKey::new(&Value::Int(1)).is_some());
         assert!(ValueKey::new(&Value::Bool(true)).is_some());
-        assert!(ValueKey::new(&Value::Str("hi".into())).is_some());
+        assert!(ValueKey::new(&Value::str("hi".into())).is_some());
         assert!(ValueKey::new(&Value::Unit).is_some());
         assert!(ValueKey::new(&Value::Gorilla).is_some());
         assert!(ValueKey::new(&Value::EnumVal("X".into(), 2)).is_some());
-        assert!(ValueKey::new(&Value::Bytes(vec![1, 2, 3])).is_some());
+        assert!(ValueKey::new(&Value::bytes(vec![1, 2, 3])).is_some());
     }
 
     #[test]
@@ -287,23 +287,23 @@ mod tests {
 
     #[test]
     fn value_key_list_eligibility_is_recursive() {
-        let pure = Value::list(vec![Value::Int(1), Value::Str("a".into())]);
+        let pure = Value::list(vec![Value::Int(1), Value::str("a".into())]);
         assert!(ValueKey::new(&pure).is_some());
         let nested = Value::list(vec![Value::list(vec![
             Value::Int(1),
-            Value::Bytes(vec![5]),
+            Value::bytes(vec![5]),
         ])]);
         assert!(ValueKey::new(&nested).is_some());
     }
 
     #[test]
     fn value_key_buchi_pack_is_order_independent() {
-        let a = Value::BuchiPack(vec![
+        let a = Value::pack(vec![
             ("x".into(), Value::Int(1)),
-            ("y".into(), Value::Str("hi".into())),
+            ("y".into(), Value::str("hi".into())),
         ]);
-        let b = Value::BuchiPack(vec![
-            ("y".into(), Value::Str("hi".into())),
+        let b = Value::pack(vec![
+            ("y".into(), Value::str("hi".into())),
             ("x".into(), Value::Int(1)),
         ]);
         let ka = ValueKey::new(&a).unwrap();
@@ -328,8 +328,8 @@ mod tests {
             Value::Int(1),
             Value::Int(2),
             Value::Int(1), // duplicate
-            Value::Str("a".into()),
-            Value::Str("a".into()), // duplicate
+            Value::str("a".into()),
+            Value::str("a".into()), // duplicate
             Value::Bool(false),
         ];
         let mut set: HashSet<ValueKey> = HashSet::new();

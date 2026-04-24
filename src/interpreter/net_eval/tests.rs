@@ -82,7 +82,7 @@ fn test_sentinel_guard_passes_with_correct_sentinel() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     let args: Vec<Expr> = vec![];
     let result = interp.try_net_func("httpServe", &args);
     assert!(result.is_err());
@@ -94,7 +94,7 @@ fn test_sentinel_guard_with_alias() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("serve", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("serve", Value::str("__net_builtin_httpServe".into()));
     let args: Vec<Expr> = vec![];
     let result = interp.try_net_func("serve", &args);
     assert!(result.is_err());
@@ -106,7 +106,7 @@ fn test_sentinel_guard_blocks_wrong_sentinel() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__os_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__os_builtin_httpServe".into()));
     let args: Vec<Expr> = vec![];
     assert!(interp.try_net_func("httpServe", &args).unwrap().is_none());
 }
@@ -132,7 +132,7 @@ fn test_parse_complete_get() {
     // Result success: __type = "Result", throw = Unit
     assert!(matches!(
         fields.iter().find(|(k, _)| k == "__type"),
-        Some((_, Value::Str(s))) if s == "Result"
+        Some((_, Value::Str(s))) if s.as_str() == "Result"
     ));
     assert!(matches!(
         fields.iter().find(|(k, _)| k == "throw"),
@@ -249,21 +249,21 @@ fn test_parse_no_query() {
 
 #[test]
 fn test_encode_200_text() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("content-type".into())),
-                ("value".into(), Value::Str("text/plain".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("content-type".into())),
+                ("value".into(), Value::str("text/plain".into())),
             ])]),
         ),
-        ("body".into(), Value::Str("Hello".into())),
+        ("body".into(), Value::str("Hello".into())),
     ]);
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -275,15 +275,15 @@ fn test_encode_200_text() {
 
 #[test]
 fn test_encode_404_empty() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(404)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -293,15 +293,15 @@ fn test_encode_404_empty() {
 
 #[test]
 fn test_encode_binary_body() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Bytes(vec![0x00, 0xFF, 0x42])),
+        ("body".into(), Value::bytes(vec![0x00, 0xFF, 0x42])),
     ]);
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     assert!(bytes.ends_with(&[0x00, 0xFF, 0x42]));
@@ -309,21 +309,21 @@ fn test_encode_binary_body() {
 
 #[test]
 fn test_encode_user_content_length_preserved() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("Content-Length".into())),
-                ("value".into(), Value::Str("99".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("Content-Length".into())),
+                ("value".into(), Value::str("99".into())),
             ])]),
         ),
-        ("body".into(), Value::Str("Hi".into())),
+        ("body".into(), Value::str("Hi".into())),
     ]);
     let result = encode_response(&response);
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -552,9 +552,9 @@ fn test_parse_content_length_leading_zeros_over_max_safe() {
 
 #[test]
 fn test_encode_missing_status() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("Hello".into())),
+        ("body".into(), Value::str("Hello".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -563,10 +563,10 @@ fn test_encode_missing_status() {
 
 #[test]
 fn test_encode_wrong_type_status() {
-    let response = Value::BuchiPack(vec![
-        ("status".into(), Value::Str("200".into())),
+    let response = Value::pack(vec![
+        ("status".into(), Value::str("200".into())),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("Hello".into())),
+        ("body".into(), Value::str("Hello".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -575,10 +575,10 @@ fn test_encode_wrong_type_status() {
 
 #[test]
 fn test_encode_status_out_of_range() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(99)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("Hello".into())),
+        ("body".into(), Value::str("Hello".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -587,9 +587,9 @@ fn test_encode_status_out_of_range() {
 
 #[test]
 fn test_encode_missing_headers() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
-        ("body".into(), Value::Str("Hello".into())),
+        ("body".into(), Value::str("Hello".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -598,7 +598,7 @@ fn test_encode_missing_headers() {
 
 #[test]
 fn test_encode_missing_body() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
     ]);
@@ -609,16 +609,16 @@ fn test_encode_missing_body() {
 
 #[test]
 fn test_encode_crlf_in_header_name() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("Bad\r\nHeader".into())),
-                ("value".into(), Value::Str("ok".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("Bad\r\nHeader".into())),
+                ("value".into(), Value::str("ok".into())),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -627,16 +627,16 @@ fn test_encode_crlf_in_header_name() {
 
 #[test]
 fn test_encode_crlf_in_header_value() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("X-Test".into())),
-                ("value".into(), Value::Str("inject\r\nEvil: header".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("X-Test".into())),
+                ("value".into(), Value::str("inject\r\nEvil: header".into())),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -645,7 +645,7 @@ fn test_encode_crlf_in_header_value() {
 
 #[test]
 fn test_encode_wrong_type_body() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         ("headers".into(), Value::list(vec![])),
         ("body".into(), Value::Int(42)),
@@ -657,16 +657,16 @@ fn test_encode_wrong_type_body() {
 
 #[test]
 fn test_encode_header_name_not_str() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
+            Value::list(vec![Value::pack(vec![
                 ("name".into(), Value::Int(42)),
-                ("value".into(), Value::Str("ok".into())),
+                ("value".into(), Value::str("ok".into())),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -678,16 +678,16 @@ fn test_encode_header_name_not_str() {
 #[test]
 fn test_encode_header_name_exceeds_limit() {
     let long_name = "X".repeat(8193);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str(long_name)),
-                ("value".into(), Value::Str("ok".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str(long_name)),
+                ("value".into(), Value::str("ok".into())),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -701,16 +701,16 @@ fn test_encode_header_name_exceeds_limit() {
 #[test]
 fn test_encode_header_value_exceeds_limit() {
     let long_value = "V".repeat(65537);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("X-Data".into())),
-                ("value".into(), Value::Str(long_value)),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("X-Data".into())),
+                ("value".into(), Value::str(long_value)),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -724,16 +724,16 @@ fn test_encode_header_value_exceeds_limit() {
 #[test]
 fn test_encode_header_name_at_limit_ok() {
     let name = "X".repeat(8192);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str(name)),
-                ("value".into(), Value::Str("ok".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str(name)),
+                ("value".into(), Value::str("ok".into())),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
@@ -742,16 +742,16 @@ fn test_encode_header_name_at_limit_ok() {
 #[test]
 fn test_encode_header_value_at_limit_ok() {
     let value = "V".repeat(65536);
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("X-Data".into())),
-                ("value".into(), Value::Str(value)),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("X-Data".into())),
+                ("value".into(), Value::str(value)),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
@@ -761,16 +761,16 @@ fn test_encode_header_value_at_limit_ok() {
 
 #[test]
 fn test_encode_204_empty_body_ok() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(204)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -783,10 +783,10 @@ fn test_encode_204_empty_body_ok() {
 
 #[test]
 fn test_encode_204_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(204)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("oops".into())),
+        ("body".into(), Value::str("oops".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -795,10 +795,10 @@ fn test_encode_204_with_body_rejected() {
 
 #[test]
 fn test_encode_304_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(304)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("cached".into())),
+        ("body".into(), Value::str("cached".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -807,10 +807,10 @@ fn test_encode_304_with_body_rejected() {
 
 #[test]
 fn test_encode_205_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(205)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("data".into())),
+        ("body".into(), Value::str("data".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -819,16 +819,16 @@ fn test_encode_205_with_body_rejected() {
 
 #[test]
 fn test_encode_205_empty_body_ok() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(205)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -838,10 +838,10 @@ fn test_encode_205_empty_body_ok() {
 
 #[test]
 fn test_encode_1xx_with_body_rejected() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(100)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str("data".into())),
+        ("body".into(), Value::str("data".into())),
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
@@ -851,22 +851,22 @@ fn test_encode_1xx_with_body_rejected() {
 #[test]
 fn test_encode_204_content_length_stripped() {
     // User-provided Content-Length should be silently dropped for 204
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(204)),
         (
             "headers".into(),
-            Value::list(vec![Value::BuchiPack(vec![
-                ("name".into(), Value::Str("Content-Length".into())),
-                ("value".into(), Value::Str("0".into())),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("Content-Length".into())),
+                ("value".into(), Value::str("0".into())),
             ])]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -877,16 +877,16 @@ fn test_encode_204_content_length_stripped() {
 
 #[test]
 fn test_encode_429_reason_phrase() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(429)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -895,16 +895,16 @@ fn test_encode_429_reason_phrase() {
 
 #[test]
 fn test_encode_unknown_status_no_fake_reason() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(599)),
         ("headers".into(), Value::list(vec![])),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -929,7 +929,7 @@ fn test_make_fulfilled_async() {
 
 #[test]
 fn test_extract_result_value_success() {
-    let result = make_result_success(Value::BuchiPack(vec![("ok".into(), Value::Bool(true))]));
+    let result = make_result_success(Value::pack(vec![("ok".into(), Value::Bool(true))]));
     let inner = extract_result_value(&result);
     assert!(inner.is_some());
 }
@@ -946,7 +946,7 @@ fn test_get_field_helpers() {
     let fields = vec![
         ("complete".into(), Value::Bool(true)),
         ("count".into(), Value::Int(42)),
-        ("name".into(), Value::Str("test".into())),
+        ("name".into(), Value::str("test".into())),
     ];
     assert_eq!(get_field_bool(&fields, "complete"), Some(true));
     assert_eq!(get_field_int(&fields, "count"), Some(42));
@@ -1156,32 +1156,32 @@ fn test_parse_http_version_0_9_rejected() {
 
 #[test]
 fn test_encode_multiple_headers() {
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
             Value::list(vec![
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("Content-Type".into())),
-                    ("value".into(), Value::Str("application/json".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("Content-Type".into())),
+                    ("value".into(), Value::str("application/json".into())),
                 ]),
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("X-Request-Id".into())),
-                    ("value".into(), Value::Str("abc-123".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("X-Request-Id".into())),
+                    ("value".into(), Value::str("abc-123".into())),
                 ]),
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("Cache-Control".into())),
-                    ("value".into(), Value::Str("no-cache".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("Cache-Control".into())),
+                    ("value".into(), Value::str("no-cache".into())),
                 ]),
             ]),
         ),
-        ("body".into(), Value::Str("{\"ok\":true}".into())),
+        ("body".into(), Value::str("{\"ok\":true}".into())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1196,32 +1196,32 @@ fn test_encode_multiple_headers() {
 #[test]
 fn test_encode_multiple_headers_order_preserved() {
     // Headers should appear in the order provided by the user.
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
             Value::list(vec![
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("X-First".into())),
-                    ("value".into(), Value::Str("1".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("X-First".into())),
+                    ("value".into(), Value::str("1".into())),
                 ]),
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("X-Second".into())),
-                    ("value".into(), Value::Str("2".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("X-Second".into())),
+                    ("value".into(), Value::str("2".into())),
                 ]),
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("X-Third".into())),
-                    ("value".into(), Value::Str("3".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("X-Third".into())),
+                    ("value".into(), Value::str("3".into())),
                 ]),
             ]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1242,28 +1242,28 @@ fn test_encode_multiple_headers_order_preserved() {
 #[test]
 fn test_encode_duplicate_header_names_preserved() {
     // Multiple headers with the same name should all appear (e.g. Set-Cookie).
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
             "headers".into(),
             Value::list(vec![
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("Set-Cookie".into())),
-                    ("value".into(), Value::Str("a=1".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("Set-Cookie".into())),
+                    ("value".into(), Value::str("a=1".into())),
                 ]),
-                Value::BuchiPack(vec![
-                    ("name".into(), Value::Str("Set-Cookie".into())),
-                    ("value".into(), Value::Str("b=2".into())),
+                Value::pack(vec![
+                    ("name".into(), Value::str("Set-Cookie".into())),
+                    ("value".into(), Value::str("b=2".into())),
                 ]),
             ]),
         ),
-        ("body".into(), Value::Str(String::new())),
+        ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
     assert!(!is_result_failure(&result));
     let inner = extract_result_inner(&result);
     let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
@@ -1340,7 +1340,7 @@ fn test_http_serve_bind_failure_returns_fulfilled_async() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     let args = vec![
         Expr::IntLit(port as i64, dummy_span()),
         make_handler_expr("ok"),
@@ -1370,7 +1370,7 @@ fn test_http_serve_max_requests_1_self_terminates() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("Hello from Taida!"),
@@ -1442,7 +1442,7 @@ fn test_http_serve_request_pack_has_all_fields() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("ok"),
@@ -1498,7 +1498,7 @@ fn test_http_serve_max_requests_3() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("ok"),
@@ -1550,7 +1550,7 @@ fn test_http_serve_malformed_request_returns_400() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("ok"),
@@ -1591,7 +1591,7 @@ fn test_http_serve_missing_args() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     let result = interp.try_net_func("httpServe", &[]);
     assert!(result.is_err());
     assert!(
@@ -1607,7 +1607,7 @@ fn test_http_serve_missing_handler() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     let args = vec![Expr::IntLit(8080, dummy_span())];
     let result = interp.try_net_func("httpServe", &args);
     assert!(result.is_err());
@@ -1624,7 +1624,7 @@ fn test_http_serve_port_validation() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     let handler = make_handler_expr("ok");
     let args = vec![Expr::IntLit(99999, dummy_span()), handler];
     let result = interp.try_net_func("httpServe", &args);
@@ -1644,7 +1644,7 @@ fn test_http_serve_split_head() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("split-ok"),
@@ -1704,7 +1704,7 @@ fn test_http_serve_split_body() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("body-ok"),
@@ -1772,7 +1772,7 @@ fn test_http_serve_incomplete_body_returns_400() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("should-not-reach"),
@@ -1834,7 +1834,7 @@ fn test_http_serve_eof_during_head_does_not_count_request() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("idle-ok"),
@@ -1901,7 +1901,7 @@ fn test_http_serve_close_after_partial_head() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("should-not-reach"),
@@ -1964,7 +1964,7 @@ fn test_nb3_head_plus_body_exceeds_limit_returns_413() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("should not reach"),
@@ -2071,7 +2071,7 @@ fn test_nb3_head_plus_body_exactly_fits_returns_200() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("ok"),
@@ -2139,7 +2139,7 @@ fn test_nb28_timeout_closes_connection() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("timeout-ok"),
@@ -2286,7 +2286,7 @@ fn test_nb29_sentinel_shadow_by_unmold() {
     // Step 1: Set up sentinel (as if imported via >>> taida-lang/net)
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     // Verify sentinel is active
     let args: Vec<Expr> = vec![];
     let result = interp.try_net_func("httpServe", &args);
@@ -2314,44 +2314,44 @@ fn test_read_body_content_length() {
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\nhello".to_vec();
     let body_start = 35i64; // "hello" starts at offset 35
     let body_len = 5i64;
-    let req = Value::BuchiPack(vec![
-        ("raw".into(), Value::Bytes(raw)),
+    let req = Value::pack(vec![
+        ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(body_start)),
                 ("len".into(), Value::Int(body_len)),
             ]),
         ),
     ]);
     let result = eval_read_body(&req).unwrap();
-    assert_eq!(result, Value::Bytes(b"hello".to_vec()));
+    assert_eq!(result, Value::bytes(b"hello".to_vec()));
 }
 
 #[test]
 fn test_read_body_no_body() {
     // body.len == 0 should return empty Bytes
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec();
-    let req = Value::BuchiPack(vec![
-        ("raw".into(), Value::Bytes(raw)),
+    let req = Value::pack(vec![
+        ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(35)),
                 ("len".into(), Value::Int(0)),
             ]),
         ),
     ]);
     let result = eval_read_body(&req).unwrap();
-    assert_eq!(result, Value::Bytes(vec![]));
+    assert_eq!(result, Value::bytes(vec![]));
 }
 
 #[test]
 fn test_read_body_missing_raw() {
     // Request pack without 'raw' field should produce RuntimeError
-    let req = Value::BuchiPack(vec![(
+    let req = Value::pack(vec![(
         "body".into(),
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("start".into(), Value::Int(0)),
             ("len".into(), Value::Int(5)),
         ]),
@@ -2376,17 +2376,17 @@ fn test_read_body_not_buchipack() {
 fn test_keep_alive_http11_default() {
     // HTTP/1.1 without Connection header → keep-alive
     let raw = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)), // "Host"
                 ("len".into(), Value::Int(4)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(22)), // "localhost"
                 ("len".into(), Value::Int(9)),
             ]),
@@ -2400,33 +2400,33 @@ fn test_keep_alive_http11_connection_close() {
     // HTTP/1.1 with Connection: close → not keep-alive
     let raw = b"GET / HTTP/1.1\r\nConnection: close\r\nHost: localhost\r\n\r\n";
     let headers = vec![
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(16)),
                     ("len".into(), Value::Int(10)), // "Connection"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(28)),
                     ("len".into(), Value::Int(5)), // "close"
                 ]),
             ),
         ]),
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(35)),
                     ("len".into(), Value::Int(4)), // "Host"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(41)),
                     ("len".into(), Value::Int(9)), // "localhost"
                 ]),
@@ -2440,17 +2440,17 @@ fn test_keep_alive_http11_connection_close() {
 fn test_keep_alive_http10_default() {
     // HTTP/1.0 without Connection header → not keep-alive
     let raw = b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(4)), // "Host"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(22)),
                 ("len".into(), Value::Int(9)), // "localhost"
             ]),
@@ -2464,33 +2464,33 @@ fn test_keep_alive_http10_explicit() {
     // HTTP/1.0 with Connection: keep-alive → keep-alive
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive\r\nHost: localhost\r\n\r\n";
     let headers = vec![
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(16)),
                     ("len".into(), Value::Int(10)), // "Connection"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(28)),
                     ("len".into(), Value::Int(10)), // "keep-alive"
                 ]),
             ),
         ]),
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             (
                 "name".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(40)),
                     ("len".into(), Value::Int(4)), // "Host"
                 ]),
             ),
             (
                 "value".into(),
-                Value::BuchiPack(vec![
+                Value::pack(vec![
                     ("start".into(), Value::Int(46)),
                     ("len".into(), Value::Int(9)), // "localhost"
                 ]),
@@ -2504,17 +2504,17 @@ fn test_keep_alive_http10_explicit() {
 fn test_keep_alive_case_insensitive() {
     // Connection header name and value should be case-insensitive
     let raw = b"GET / HTTP/1.1\r\nCONNECTION: CLOSE\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)), // "CONNECTION"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(5)), // "CLOSE"
             ]),
@@ -2527,17 +2527,17 @@ fn test_keep_alive_case_insensitive() {
 fn test_keep_alive_token_list_close_with_upgrade() {
     // "Connection: close, upgrade" — HTTP/1.1 should NOT keep alive (close token present)
     let raw = b"GET / HTTP/1.1\r\nConnection: close, upgrade\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)), // "Connection"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(14)), // "close, upgrade"
             ]),
@@ -2550,17 +2550,17 @@ fn test_keep_alive_token_list_close_with_upgrade() {
 fn test_keep_alive_token_list_keep_alive_with_extra() {
     // "Connection: keep-alive, foo" — HTTP/1.0 should keep alive (keep-alive token present)
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive, foo\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)), // "Connection"
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(15)), // "keep-alive, foo"
             ]),
@@ -2573,17 +2573,17 @@ fn test_keep_alive_token_list_keep_alive_with_extra() {
 fn test_keep_alive_close_wins_over_keep_alive_same_header() {
     // "Connection: keep-alive, close" — close wins on both HTTP/1.0 and 1.1
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive, close\r\n\r\n";
-    let headers = vec![Value::BuchiPack(vec![
+    let headers = vec![Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(17)), // "keep-alive, close"
             ]),
@@ -2597,33 +2597,33 @@ fn test_keep_alive_close_wins_over_keep_alive_same_header() {
 fn test_keep_alive_close_wins_across_duplicate_headers() {
     // Two Connection headers: one says keep-alive, the other says close
     let raw = b"GET / HTTP/1.0\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n";
-    let h1 = Value::BuchiPack(vec![
+    let h1 = Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(16)),
                 ("len".into(), Value::Int(10)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(28)),
                 ("len".into(), Value::Int(10)), // "keep-alive"
             ]),
         ),
     ]);
-    let h2 = Value::BuchiPack(vec![
+    let h2 = Value::pack(vec![
         (
             "name".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(40)),
                 ("len".into(), Value::Int(10)),
             ]),
         ),
         (
             "value".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(52)),
                 ("len".into(), Value::Int(5)), // "close"
             ]),
@@ -2733,7 +2733,7 @@ fn test_keep_alive_two_requests_one_connection() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("keep-alive-ok"),
@@ -2807,7 +2807,7 @@ fn test_keep_alive_connection_close_terminates() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("close-ok"),
@@ -2867,7 +2867,7 @@ fn test_keep_alive_http10_explicit_keep_alive() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("http10-ka-ok"),
@@ -2943,7 +2943,7 @@ fn test_keep_alive_http10_default_close() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         // maxRequests=2 but HTTP/1.0 should close after 1
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
@@ -3022,7 +3022,7 @@ fn test_keep_alive_max_requests_across_connections() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("max-req-ok"),
@@ -3552,18 +3552,18 @@ fn test_read_body_chunked() {
     let body_start = head.len() as i64;
     let body_len = compacted_body.len() as i64;
 
-    let req = Value::BuchiPack(vec![
-        ("raw".into(), Value::Bytes(raw)),
+    let req = Value::pack(vec![
+        ("raw".into(), Value::bytes(raw)),
         (
             "body".into(),
-            Value::BuchiPack(vec![
+            Value::pack(vec![
                 ("start".into(), Value::Int(body_start)),
                 ("len".into(), Value::Int(body_len)),
             ]),
         ),
     ]);
     let result = eval_read_body(&req).unwrap();
-    assert_eq!(result, Value::Bytes(b"Wikipedia i".to_vec()));
+    assert_eq!(result, Value::bytes(b"Wikipedia i".to_vec()));
 }
 
 // ── httpServe integration test: chunked body (NET2-2i) ──
@@ -3581,7 +3581,7 @@ fn test_http_serve_chunked_body() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("chunked-echo"),
@@ -3632,7 +3632,7 @@ fn test_http_serve_rejects_cl_and_chunked() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("reject-test"),
@@ -3678,7 +3678,7 @@ fn test_http_serve_malformed_chunk() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("malformed-test"),
@@ -3724,7 +3724,7 @@ fn test_http_serve_chunked_then_normal_keep_alive() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("mixed-test"),
@@ -3788,7 +3788,7 @@ fn test_http_serve_chunked_large_body() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("large-chunked"),
@@ -3850,7 +3850,7 @@ fn test_concurrent_two_clients_both_get_responses() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("concurrent-ok"),
@@ -3931,7 +3931,7 @@ fn test_concurrent_max_connections_limit() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("limited-ok"),
@@ -4016,7 +4016,7 @@ fn test_concurrent_max_requests_across_connections() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("counted"),
@@ -4077,7 +4077,7 @@ fn test_concurrent_buffer_isolation() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("isolated"),
@@ -4144,7 +4144,7 @@ fn test_concurrent_max_connections_default() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         // No maxConnections arg — should default to 128
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
@@ -4193,7 +4193,7 @@ fn test_concurrent_keep_alive_with_multiple_connections() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("ka-concurrent"),
@@ -4264,7 +4264,7 @@ fn test_concurrent_chunked_body() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("chunked-concurrent"),
@@ -4333,7 +4333,7 @@ fn test_keep_alive_partial_timeout_returns_400() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("partial-timeout-test"),
@@ -4435,7 +4435,7 @@ fn test_slow_split_request_within_timeout_succeeds() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_handler_expr("slow-split-ok"),
@@ -4679,7 +4679,7 @@ fn test_v3_api_sentinel_with_import_errors_outside_handler() {
     for sym in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
         interp
             .env
-            .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
+            .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
     }
     let args: Vec<Expr> = vec![];
     // With sentinel but outside handler context, these should error
@@ -4827,7 +4827,7 @@ fn test_v3_two_arg_handler_one_shot_fallback() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_two_arg_handler_expr("fallback-ok"),
@@ -4907,7 +4907,7 @@ fn test_v3_two_arg_handler_no_return_fallback() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+            .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
             make_two_arg_noop_handler_expr(),
@@ -5086,11 +5086,11 @@ fn make_sse_event_call(event: &str, data: &str) -> Expr {
 fn setup_v3_sentinels(interp: &mut Interpreter) {
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     for sym in &["startResponse", "writeChunk", "endResponse", "sseEvent"] {
         interp
             .env
-            .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
+            .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
     }
 }
 
@@ -5325,7 +5325,7 @@ fn test_v3_write_chunk_bytes_fast_path() {
         // Pre-set the bytes data in the environment
         interp
             .env
-            .define_force("__test_bytes_data", Value::Bytes(bytes_data_clone));
+            .define_force("__test_bytes_data", Value::bytes(bytes_data_clone));
         interp.env.define_force("__handler", handler);
         let args = vec![
             Expr::IntLit(server_port as i64, dummy_span()),
@@ -6172,7 +6172,7 @@ fn test_v3_sse_event_outside_handler() {
     // Set sentinel but not inside handler
     interp
         .env
-        .define_force("sseEvent", Value::Str("__net_builtin_sseEvent".into()));
+        .define_force("sseEvent", Value::str("__net_builtin_sseEvent".into()));
     let args: Vec<Expr> = vec![
         Expr::StringLit("writer".into(), dummy_span()),
         Expr::StringLit("message".into(), dummy_span()),
@@ -6681,7 +6681,7 @@ fn test_ws_close_code_not_in_ws_state() {
     let mut interp = Interpreter::new();
     interp.env.define_force(
         "wsCloseCode",
-        Value::Str("__net_builtin_wsCloseCode".into()),
+        Value::str("__net_builtin_wsCloseCode".into()),
     );
     let args = vec![Expr::Ident("dummy".into(), dummy_span())];
     let result = interp.try_net_func("wsCloseCode", &args);
@@ -6700,7 +6700,7 @@ fn test_ws_close_dispatch_with_code_arg() {
         let mut interp = Interpreter::new();
         interp
             .env
-            .define_force("wsClose", Value::Str("__net_builtin_wsClose".into()));
+            .define_force("wsClose", Value::str("__net_builtin_wsClose".into()));
         let args = vec![
             Expr::Ident("dummy".into(), dummy_span()),
             Expr::IntLit(*code, dummy_span()),
@@ -6722,7 +6722,7 @@ fn test_http_serve_tls_arg_empty_pack_accepted() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
     interp.env.define_force("test_handler", Value::Int(42));
 
     let args = vec![
@@ -6750,7 +6750,7 @@ fn test_http_serve_tls_arg_non_pack_rejected() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
 
     // Define a dummy handler function.
     interp.env.define_force(
@@ -6796,7 +6796,7 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
     let mut interp = Interpreter::new();
     interp
         .env
-        .define_force("httpServe", Value::Str("__net_builtin_httpServe".into()));
+        .define_force("httpServe", Value::str("__net_builtin_httpServe".into()));
 
     interp.env.define_force(
         "test_handler",
@@ -6866,7 +6866,7 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
                         });
                     assert_eq!(
                         kind,
-                        Some(Value::Str("TlsError".into())),
+                        Some(Value::str("TlsError".into())),
                         "Should have TlsError kind"
                     );
                 }

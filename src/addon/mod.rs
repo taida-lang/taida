@@ -52,6 +52,13 @@ pub mod facade;
 // RC1.5: install-time pipeline
 pub mod host_target;
 pub mod prebuild_fetcher;
+// C26B-030 / SEC-011: install-side Sigstore cosign verification hook.
+// Pairs with `.github/workflows/release.yml`'s `sign` + `provenance`
+// jobs and `scripts/release/verify-signatures.sh` so the signature
+// the release workflow generates is actually consumed at install
+// time. Kept feature-flag-free so local/offline tests can exercise
+// `file://` bundle handling without the `community` HTTPS stack.
+pub mod signature_verify;
 pub mod url_template;
 
 // RC2.6 Phase 1: addon publish lockfile (native/addon.lock.toml).

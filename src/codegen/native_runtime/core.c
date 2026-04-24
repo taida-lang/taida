@@ -35,6 +35,14 @@ static inline void *taida_safe_malloc(size_t size, const char *label) {
     if (size == 0) size = 1;
     void *p = malloc(size);
     if (!p) { fprintf(stderr, "taida: out of memory (%s)\n", label); exit(1); }
+    // C26B-024 (Round 10 / wepsilon Step 4): track heap extent so
+    // taida_ptr_is_readable can skip mincore for heap pointers.
+    // (Inline expansion — heap_range globals declared later via __thread; we
+    // reference them via extern declared here to satisfy forward ordering.)
+    extern __thread uintptr_t taida_heap_min, taida_heap_max;
+    uintptr_t a = (uintptr_t)p;
+    if (a < taida_heap_min) taida_heap_min = a;
+    if (a + size > taida_heap_max) taida_heap_max = a + size;
     return p;
 }
 #define TAIDA_MALLOC(size, label) taida_safe_malloc((size), (label))
@@ -207,6 +215,206 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
     } while (!__atomic_compare_exchange_n(_hdr, &_old, _new, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)); \
 } while (0)
 
+// C26B-024 (Round 8 / wT): thread-local 4-field Pack freelist infrastructure.
+// Hoisted here (above `taida_release` definition) so the release path can
+// consult the freelist before falling through to free(). The commentary and
+// rationale live alongside `taida_pack_new` in the BuchiPack runtime section
+// below. See the note there for invariants and semantics.
+#define TAIDA_PACK_FREELIST_MAX 32
+#define TAIDA_PACK_FC_FOR_FREELIST 4  // Lax / Result shape; 14 slots * 8B = 112B
+
+static __thread taida_val *taida_pack4_freelist[TAIDA_PACK_FREELIST_MAX];
+static __thread int taida_pack4_freelist_count = 0;
+
+// Pop a pre-allocated 4-field pack from the per-thread freelist.
+// Returns NULL if the freelist is empty — caller must fall back to malloc.
+static inline taida_val *taida_pack4_freelist_pop(void) {
+    if (taida_pack4_freelist_count == 0) return NULL;
+    return taida_pack4_freelist[--taida_pack4_freelist_count];
+}
+
+// Push a released 4-field pack onto the per-thread freelist.
+// Returns 1 if reused, 0 if the freelist is full (caller must free()).
+// The pack is expected to already be logically dead (refcount 0,
+// children released). We do NOT zero the slots here — taida_pack_new
+// re-initialises every slot on reuse.
+static inline int taida_pack4_freelist_push(taida_val *obj) {
+    if (taida_pack4_freelist_count >= TAIDA_PACK_FREELIST_MAX) return 0;
+    taida_pack4_freelist[taida_pack4_freelist_count++] = obj;
+    return 1;
+}
+
+// C26B-024 (Round 10 / wepsilon Step 4): thread-local cap=16 List freelist.
+// taida_list_new() every call allocates (4+16)*8 = 160 bytes. In the router
+// bench, splitPath() fires 2 list_news per matchRoutes iteration (pattern +
+// path); pooling cap=16 slabs eliminates those malloc/free cycles for the
+// dominant "split then scan" pattern.
+//
+// Invariants: only cap==16 lists enter the pool (grown lists were realloc'd
+// so the original slab is already gone). Elements were already released by
+// taida_release before reaching the freelist push. refcount and length are
+// re-initialised on pop; elem_type_tag reset to UNKNOWN. Bounded at
+// TAIDA_LIST_FREELIST_MAX per thread. __thread storage.
+#define TAIDA_LIST_FREELIST_MAX 32
+#define TAIDA_LIST_INIT_CAP 16
+
+static __thread taida_val *taida_list_freelist[TAIDA_LIST_FREELIST_MAX];
+static __thread int taida_list_freelist_count = 0;
+
+static inline taida_val *taida_list_freelist_pop(void) {
+    if (taida_list_freelist_count == 0) return NULL;
+    return taida_list_freelist[--taida_list_freelist_count];
+}
+
+static inline int taida_list_freelist_push(taida_val *obj) {
+    if (taida_list_freelist_count >= TAIDA_LIST_FREELIST_MAX) return 0;
+    taida_list_freelist[taida_list_freelist_count++] = obj;
+    return 1;
+}
+
+// C26B-024 (Round 10 / wepsilon Step 4): thread-local small-string freelist.
+// Profiling bench_router.td @ routes=200 x iter=500 shows ~2.97M malloc
+// calls, of which ~1.88M are <=32B (str_alloc for short strings: digits,
+// single path segments, concat results). Bucket strategy: three size
+// classes (<=32B, <=64B, <=128B total). Bounded at TAIDA_STR_FREELIST_MAX
+// per bucket per thread. __thread storage. On alloc, consult matching
+// bucket; on release (rc drops to 0), push to matching bucket if not full.
+#define TAIDA_STR_FREELIST_MAX 32
+#define TAIDA_STR_BUCKET_COUNT 3
+
+static __thread taida_val *taida_str_freelist[TAIDA_STR_BUCKET_COUNT][TAIDA_STR_FREELIST_MAX];
+static __thread int taida_str_freelist_count[TAIDA_STR_BUCKET_COUNT] = {0};
+
+
+static inline int taida_str_bucket_for(size_t total) {
+    if (total <=  32) return 0;
+    if (total <=  64) return 1;
+    if (total <= 128) return 2;
+    return -1;
+}
+
+static inline taida_val *taida_str_freelist_pop(int bucket) {
+    if (bucket < 0 || bucket >= TAIDA_STR_BUCKET_COUNT) return NULL;
+    int n = taida_str_freelist_count[bucket];
+    if (n == 0) return NULL;
+    return taida_str_freelist[bucket][--taida_str_freelist_count[bucket]];
+}
+
+static inline int taida_str_freelist_push(int bucket, taida_val *hdr) {
+    if (bucket < 0 || bucket >= TAIDA_STR_BUCKET_COUNT) return 0;
+    int n = taida_str_freelist_count[bucket];
+    if (n >= TAIDA_STR_FREELIST_MAX) return 0;
+    taida_str_freelist[bucket][n] = hdr;
+    taida_str_freelist_count[bucket] = n + 1;
+    return 1;
+}
+
+// C26B-024 (Round 10 / wepsilon Step 4): thread-local bump arena for small
+// transient allocations. Profiling bench_router.td shows ~2.97M malloc
+// calls with 0 free()s (the Native codegen does not currently emit
+// taida_release IR instructions for short-lived bindings, so all
+// allocations leak to process exit -- the kernel reclaims on _exit).
+// This makes a bump arena semantically equivalent to malloc for the
+// bench_router.td workload.
+//
+// Per-thread chunk chain with 2 MiB chunks. 16-byte aligned carve-offs.
+// Allocations > TAIDA_ARENA_MAX_ALLOC fall back to malloc. Release paths
+// check taida_arena_contains() before free() since free() on an arena
+// pointer is undefined behaviour.
+// C26B-024 (Round 10 / wepsilon Step 4): thread-local heap-range tracker.
+// TAIDA_MALLOC updates this [min, max] range. taida_ptr_is_readable fast-
+// checks membership to skip mincore for heap pointers. The bound is
+// over-approximate (a pointer could be in the range but not actually a
+// live malloc block -- e.g. in a gap between small chunks), but this is
+// safe: the mincore fallback catches false positives. In practice the
+// heap extent grows contiguously, so the false-positive rate is minimal.
+__thread uintptr_t taida_heap_min = UINTPTR_MAX;
+__thread uintptr_t taida_heap_max = 0;
+
+// C26B-024 (Round 10 / wepsilon Step 4): small per-thread LRU-ish cache of
+// successful mincore probes. Caches pages that have been verified as mapped
+// so repeated probes on static-data pointers (e.g. __lax_type_str, __molten_type_str)
+// skip mincore. Capacity 16 pages is enough in practice since the static
+// string footprint is tiny.
+#define TAIDA_MINCORE_CACHE_SIZE 64
+__thread uintptr_t taida_mincore_cache[TAIDA_MINCORE_CACHE_SIZE];
+__thread int taida_mincore_cache_n = 0;
+
+static inline int taida_mincore_cache_hit(uintptr_t page) {
+    for (int i = 0; i < taida_mincore_cache_n; i++) {
+        if (taida_mincore_cache[i] == page) return 1;
+    }
+    return 0;
+}
+
+static inline void taida_mincore_cache_add(uintptr_t page) {
+    if (taida_mincore_cache_hit(page)) return;
+    if (taida_mincore_cache_n < TAIDA_MINCORE_CACHE_SIZE) {
+        taida_mincore_cache[taida_mincore_cache_n++] = page;
+    } else {
+        // Simple eviction: replace at index 0.
+        taida_mincore_cache[0] = page;
+    }
+}
+
+static inline void taida_heap_range_update(void *p, size_t size) {
+    uintptr_t a = (uintptr_t)p;
+    if (a < taida_heap_min) taida_heap_min = a;
+    if (a + size > taida_heap_max) taida_heap_max = a + size;
+}
+
+static inline int taida_heap_range_contains(uintptr_t a) {
+    return a >= taida_heap_min && a < taida_heap_max;
+}
+
+#define TAIDA_ARENA_CHUNK_SIZE (2 * 1024 * 1024)
+#define TAIDA_ARENA_MAX_ALLOC  1024
+#define TAIDA_ARENA_MAX_CHUNKS 128
+
+typedef struct taida_arena_chunk {
+    unsigned char *base;
+    size_t         offset;
+    size_t         size;
+} taida_arena_chunk_t;
+
+static __thread taida_arena_chunk_t taida_arena_chunks[TAIDA_ARENA_MAX_CHUNKS];
+static __thread int taida_arena_chunk_count = 0;
+static __thread int taida_arena_active_chunk = -1;
+
+static inline int taida_arena_contains(void *ptr) {
+    unsigned char *p = (unsigned char *)ptr;
+    for (int i = 0; i < taida_arena_chunk_count; i++) {
+        unsigned char *base = taida_arena_chunks[i].base;
+        if (p >= base && p < base + taida_arena_chunks[i].size) return 1;
+    }
+    return 0;
+}
+
+static void *taida_arena_alloc(size_t size) {
+    if (size == 0) size = 1;
+    if (size > TAIDA_ARENA_MAX_ALLOC) return NULL;
+    size_t aligned = (size + 15) & ~((size_t)15);
+    int ci = taida_arena_active_chunk;
+    if (ci >= 0) {
+        taida_arena_chunk_t *c = &taida_arena_chunks[ci];
+        if (c->offset + aligned <= c->size) {
+            void *p = c->base + c->offset;
+            c->offset += aligned;
+            return p;
+        }
+    }
+    if (taida_arena_chunk_count >= TAIDA_ARENA_MAX_CHUNKS) return NULL;
+    unsigned char *base = (unsigned char *)malloc(TAIDA_ARENA_CHUNK_SIZE);
+    if (!base) return NULL;
+    taida_arena_chunk_t *c = &taida_arena_chunks[taida_arena_chunk_count];
+    c->base = base;
+    c->offset = aligned;
+    c->size = TAIDA_ARENA_CHUNK_SIZE;
+    taida_arena_active_chunk = taida_arena_chunk_count;
+    taida_arena_chunk_count++;
+    return base;
+}
+
 extern taida_val _taida_main(void);
 static int taida_cli_argc = 0;
 static char **taida_cli_argv = NULL;
@@ -350,6 +558,10 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
+// C26B-011 (Phase 11): forward-declare `taida_float_to_str` so
+// `taida_debug_float` (defined early in the file) can route through
+// the same Rust-f64::Display formatter used everywhere else.
+taida_val taida_float_to_str(double a);
 // C23-2: generic Str[x]() entry — forward declare the stdout-display helper so
 // that `taida_str_mold_any` (defined near the other str-mold helpers up in the
 // file) can route through the full-form BuchiPack rendering used by stdout.
@@ -378,6 +590,8 @@ static taida_val _d2l(double v);
 // OS package forward declarations
 taida_val taida_os_read(taida_val path_ptr);
 taida_val taida_os_read_bytes(taida_val path_ptr);
+// C26B-020 柱 1: chunked file read for large files
+taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val len);
 taida_val taida_os_list_dir(taida_val path_ptr);
 taida_val taida_os_stat(taida_val path_ptr);
 taida_val taida_os_exists(taida_val path_ptr);
@@ -454,6 +668,12 @@ taida_val taida_codepoint_mold_str(taida_val value);
 taida_val taida_utf8_encode_mold(taida_val value);
 taida_val taida_utf8_decode_mold(taida_val value);
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end);
+// C26B-018 (B)(C): byte-level primitives + single-alloc repeat/join.
+taida_val taida_str_byte_at(const char* s, taida_val idx);
+taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_value);
+taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end);
+taida_val taida_str_byte_length(const char* s);
+taida_val taida_str_repeat_join(const char* s, taida_val n, const char* sep);
 // NB-14: Call-site arg tag propagation (Bool/Int disambiguation)
 void taida_push_call_tags(void);
 void taida_pop_call_tags(void);
@@ -575,7 +795,14 @@ taida_val taida_debug_int(taida_val value) {
 }
 
 taida_val taida_debug_float(double value) {
-    printf("%g\n", value);
+    // C26B-011 (Phase 11): route through `taida_float_to_str` so the
+    // output matches the interpreter's Rust-f64::Display contract —
+    // "X.0" for integer-valued floats, "NaN"/"inf"/"-inf" for IEEE 754
+    // specials, shortest round-trip form for everything else. The old
+    // `%g` dropped trailing ".0" and used "inf"/"-inf" without sign
+    // parity with `taida_float_to_str`.
+    const char *s = (const char *)taida_float_to_str(value);
+    if (s) printf("%s\n", s); else printf("0.0\n");
     return 0;
 }
 
@@ -617,6 +844,12 @@ taida_val taida_shift_l(taida_val x, taida_val n) {
 
 taida_val taida_shift_r(taida_val x, taida_val n) {
     if (n < 0 || n > 63) return taida_lax_empty(0);
+    // Deliberate arithmetic right shift on int64_t (sign-preserving).
+    // All mainstream targets (gcc, clang, msvc on x86-64/aarch64/arm64)
+    // implement signed `>>` as arithmetic shift, which is the contract
+    // surfaced to Taida users. The language spec leaves it
+    // implementation-defined, hence cppcheck's portability warning.
+    // cppcheck-suppress shiftTooManyBitsSigned
     int64_t shifted = ((int64_t)x) >> (unsigned int)n;
     return taida_lax_new((taida_val)shifted, 0);
 }
@@ -1253,6 +1486,39 @@ static inline taida_val taida_lax_tag_value_default(taida_val lax, taida_val tag
     return lax;
 }
 
+// C26B-011 (Phase 11): Float-hint variants. Called when the lowering
+// sees at least one Float operand on `Div[a, b]()` / `Mod[a, b]()`.
+// Arguments are IEEE 754 doubles; the result is a FLOAT-tagged Lax so
+// `taida_lax_to_string` / `__value` slot rendering goes through
+// `taida_float_to_str` (Rust-f64 parity: `.0`, `inf`/`-inf`/`NaN`).
+//
+// Division semantics mirror the interpreter (`src/interpreter/mold_eval.rs`
+// `Div` branch Float/Float case): b == 0.0 → Lax empty with default 0.0
+// (no NaN / Inf coercion — Taida's Div is Lax-safe). For non-zero b we
+// let the hardware produce `a / b` directly so special cases like
+// `Div[1.0, Infinity]()` → `Lax(0.0)` match Rust / C libm exactly.
+//
+// Placement note: must live AFTER `taida_lax_tag_value_default` is defined
+// (the helper is `static inline` so there is no forward declaration).
+taida_val taida_div_mold_f(double a, double b) {
+    if (b == 0.0) {
+        return taida_lax_tag_value_default(
+            taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    }
+    return taida_lax_tag_value_default(
+        taida_lax_new(_d2l(a / b), _d2l(0.0)), TAIDA_TAG_FLOAT);
+}
+taida_val taida_mod_mold_f(double a, double b) {
+    if (b == 0.0) {
+        return taida_lax_tag_value_default(
+            taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    }
+    // fmod(a, b): IEEE 754 remainder matching Rust's `%` operator on f64
+    // and interpreter's `a % b` on Value::Float. Preserves sign of `a`.
+    return taida_lax_tag_value_default(
+        taida_lax_new(_d2l(fmod(a, b)), _d2l(0.0)), TAIDA_TAG_FLOAT);
+}
+
 // Str[x]() — always succeeds
 taida_val taida_str_mold_int(taida_val v) {
     return taida_lax_tag_value_default(taida_lax_new(taida_str_from_int(v), (taida_val)""), TAIDA_TAG_STR);
@@ -1855,20 +2121,33 @@ taida_val taida_str_eq(taida_val a, taida_val b)  { return (a && b) ? (strcmp((c
 taida_val taida_str_neq(taida_val a, taida_val b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
 static int taida_is_string_value(taida_val v) {
     if (v == 0 || v == 1 || v < 4096) return 0;
-    // Check if 8-byte aligned (heap object) and has magic header
-    if ((v & 0x7) == 0) {
+    // C26B-024 (Round 10 / wepsilon Step 4): arena / heap-range / mincore-
+    // cache fast path. Checks the page this pointer lives on against the
+    // same fast-paths as taida_ptr_is_readable so string-equality hot
+    // paths in poly_eq don't syscall per compare.
+    uintptr_t page = (uintptr_t)v & ~((uintptr_t)4095);
+    int page_mapped;
+    if (taida_arena_contains((void *)(uintptr_t)v)
+        || taida_heap_range_contains((uintptr_t)v)
+        || taida_mincore_cache_hit(page)) {
+        page_mapped = 1;
+    } else {
         unsigned char vec = 0;
-        uintptr_t page = (uintptr_t)v & ~((uintptr_t)4095);
-        if (mincore((void*)page, 4096, &vec) == 0) {
-            taida_val first = ((taida_val*)v)[0];
-            if (taida_has_magic_header(first)) return 0;
+        if (mincore((void*)page, 4096, &vec) != 0) {
+            page_mapped = 0;
+        } else {
+            taida_mincore_cache_add(page);
+            page_mapped = 1;
         }
     }
-    // If not a heap object with magic header, try reading as string
-    // Use mincore to check page is mapped for the pointer itself
-    unsigned char vec = 0;
-    uintptr_t page = (uintptr_t)v & ~((uintptr_t)4095);
-    if (mincore((void*)page, 4096, &vec) != 0) return 0;
+    if (!page_mapped) return 0;
+    // Check if 8-byte aligned (heap object) and has magic header
+    if ((v & 0x7) == 0) {
+        taida_val first = ((taida_val*)v)[0];
+        if (taida_has_magic_header(first)) return 0;
+    }
+    // Not a heap object -> treat as raw char* string (already validated
+    // the page is mapped).
     return 1;
 }
 taida_val taida_poly_eq(taida_val a, taida_val b) {
@@ -2085,6 +2364,26 @@ taida_val taida_release(taida_ptr ptr) {
                     }
                 }
             }
+            // C26B-024 (Round 8 / wT + Round 10 / wepsilon): try the 4-field pack
+            // freelist before falling back to free(). Arena-backed packs are
+            // skipped so they don't end up being free()d later.
+            if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST) {
+                if (!taida_arena_contains(obj) && taida_pack4_freelist_push(obj)) {
+                    return 0;  // recycled — skip free()
+                }
+            }
+            // C26B-024 (Round 10 / wepsilon Step 4): try the cap=16 list freelist
+            // before falling back to free(). Arena-backed slabs are skipped
+            // since the freelist eventually free()s.
+            if (TAIDA_IS_LIST(ptr) && obj[1] == TAIDA_LIST_INIT_CAP) {
+                if (!taida_arena_contains(obj) && taida_list_freelist_push(obj)) {
+                    return 0;  // recycled -- skip free()
+                }
+            }
+            // Arena-backed: process exit reclaims; do not free().
+            if (taida_arena_contains(obj)) {
+                return 0;
+            }
             free(obj);
             return 0;
         }
@@ -2105,13 +2404,39 @@ taida_val taida_release(taida_ptr ptr) {
 // Returns pointer to the bytes area.  Caller must fill the bytes.
 static char* taida_str_alloc(size_t len) {
     // M-09: Guard against size_t overflow in header+len+NUL calculation.
-    // sizeof(taida_val)*2 = 16 on LP64, so len > SIZE_MAX - 17 would wrap.
     if (len > SIZE_MAX - (sizeof(taida_val) * 2 + 1)) {
         fprintf(stderr, "taida: string length overflow in taida_str_alloc: %zu\n", len);
         exit(1);
     }
-    taida_val *hdr = (taida_val*)TAIDA_MALLOC(sizeof(taida_val) * 2 + len + 1, "str_alloc");
-    hdr[0] = TAIDA_STR_MAGIC | 1;  // magic + refcount = 1
+    size_t total = sizeof(taida_val) * 2 + len + 1;
+    // C26B-024 (Round 10 / wepsilon Step 4): Tier 1 -- per-thread small-
+    // string freelist. Fires only when taida_str_release runs on this
+    // size-bucket.
+    int bucket = taida_str_bucket_for(total);
+    if (bucket >= 0) {
+        taida_val *cached = taida_str_freelist_pop(bucket);
+        if (cached) {
+            cached[0] = TAIDA_STR_MAGIC | 1;
+            cached[1] = (taida_val)len;
+            char *bytes = (char*)(cached + 2);
+            bytes[len] = '\0';
+            return bytes;
+        }
+    }
+    // Tier 2 -- thread-local bump arena. Absorbs the "allocate once, never
+    // release" pattern that dominates the router bench.
+    void *arena_mem = taida_arena_alloc(total);
+    if (arena_mem) {
+        taida_val *hdr = (taida_val*)arena_mem;
+        hdr[0] = TAIDA_STR_MAGIC | 1;
+        hdr[1] = (taida_val)len;
+        char *bytes = (char*)(hdr + 2);
+        bytes[len] = '\0';
+        return bytes;
+    }
+    // Tier 3 -- large string or arena exhausted: straight malloc.
+    taida_val *hdr = (taida_val*)TAIDA_MALLOC(total, "str_alloc");
+    hdr[0] = TAIDA_STR_MAGIC | 1;
     hdr[1] = (taida_val)len;
     char *bytes = (char*)(hdr + 2);
     bytes[len] = '\0';
@@ -2136,7 +2461,11 @@ void taida_str_retain(taida_val ptr) {
     if (ptr == 0) return;
     if (ptr > 0 && ptr < 4096) return;
     if (ptr < 0) return;
-    // Check hidden header at ptr - 16
+    // Check hidden header at ptr - 16. The guards above fully rule out
+    // null / reserved-low-page / negative ptr values; cppcheck's value
+    // analysis does not see the `ptr < 4096` lower bound as excluding
+    // ptr==0 from the arithmetic path.
+    // cppcheck-suppress nullPointerArithmeticRedundantCheck
     taida_val *hdr = ((taida_val*)ptr) - 2;
     if (!taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) return;
     taida_val tag = hdr[0];
@@ -2155,13 +2484,33 @@ static void taida_str_release(taida_val ptr) {
     if (ptr == 0) return;
     if (ptr > 0 && ptr < 4096) return;
     if (ptr < 0) return;
-    // Check hidden header at ptr - 16
+    // Check hidden header at ptr - 16. Same rationale as taida_str_retain:
+    // the preceding three guards fully exclude null / reserved / negative
+    // ptr from this arithmetic path.
+    // cppcheck-suppress nullPointerArithmeticRedundantCheck
     taida_val *hdr = ((taida_val*)ptr) - 2;
     if (!taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) return;
     taida_val tag = hdr[0];
     if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
         taida_val rc = tag & TAIDA_RC_MASK;
         if (rc <= 1) {
+            // C26B-024 (Round 10 / wepsilon Step 4): try the small-string
+            // bucketed freelist before free(). The bucket is derived from
+            // the stored length; since taida_str_alloc routes by the same
+            // (16 + len + 1) total, release and alloc map to the same bucket.
+            // Arena-backed headers are skipped since the freelist eventually
+            // free()s, and free() on an arena pointer is undefined.
+            size_t slen = (size_t)hdr[1];
+            size_t rel_total = sizeof(taida_val) * 2 + slen + 1;
+            int bucket = taida_str_bucket_for(rel_total);
+            if (bucket >= 0 && !taida_arena_contains(hdr)) {
+                if (taida_str_freelist_push(bucket, hdr)) {
+                    return;  // recycled -- skip free()
+                }
+            }
+            if (taida_arena_contains(hdr)) {
+                return;  // arena-backed: process exit reclaims
+            }
             free(hdr);  // Free the entire allocation (header + bytes)
         } else {
             hdr[0] = (tag & TAIDA_MAGIC_MASK) | (rc - 1);
@@ -2174,6 +2523,30 @@ static void taida_str_release(taida_val ptr) {
 // Pack layout (A-4b): [magic+rc, field_count, hash0, tag0, val0, hash1, tag1, val1, ...]
 // Stride = 3 per field: [hash, type_tag, value]
 
+// C26B-024 (Round 8 / wT): thread-local freelist for fixed-size packs.
+// The hottest path in the Native runtime is the Lax wrapper allocation
+// (`taida_lax_new` + `taida_lax_empty` — called on every `list.get(i)`,
+// every `.get(i) ]=> x`, and every `pack.field ]=> x`). Each Lax is a
+// 4-field pack (112 bytes: 2-slot header + 4*3 field slots * 8 bytes).
+// In bench_router.td @ N=1000 / M=5000 this dominates sys time (2m0s
+// of 2m31s wall = 80% sys). A bounded thread-local freelist lets the
+// hot loop reuse the same 32 buffers, converting malloc/free churn
+// into a stack pop/push.
+//
+// Invariants preserved:
+//   - All freelist entries have refcount 0 (already released).
+//   - Field count slots are re-initialised on every pack_new path, so
+//     reused buffers cannot leak stale children from a previous lease.
+//   - Bounded (max 32 per thread) — capped memory footprint.
+//   - Thread-local (__thread) — no atomic / lock overhead on the hot
+//     path. Each pthread worker (e.g. Async executor) owns its own
+//     freelist; cross-thread release falls through to free() which
+//     is correct semantics just without the reuse win.
+//
+// (Macros + static-storage definitions have been hoisted to the early
+// "Magic Numbers" section so `taida_release` at the top of this file
+// can consult the freelist before falling through to free().)
+
 taida_ptr taida_pack_new(taida_val field_count) {
     // M-01: Guard against negative field_count (taida_val is int64_t) and
     // overflow in the size calculation (2 + field_count * 3) * sizeof(taida_val).
@@ -2181,10 +2554,36 @@ taida_ptr taida_pack_new(taida_val field_count) {
         fprintf(stderr, "taida: invalid field_count %" PRId64 " in taida_pack_new\n", (int64_t)field_count);
         exit(1);
     }
+    // C26B-024 fast path: try the 4-field thread-local freelist before
+    // hitting malloc. Lax / Result / Gorillax short-form all use 4 fields,
+    // so this path covers the majority of hot-loop pack allocations.
+    if (field_count == TAIDA_PACK_FC_FOR_FREELIST) {
+        taida_val *cached = taida_pack4_freelist_pop();
+        if (cached) {
+            cached[0] = TAIDA_PACK_MAGIC | 1;  // magic + refcount = 1
+            cached[1] = field_count;
+            for (taida_val i = 0; i < field_count; i++) {
+                cached[2 + i * 3] = 0;     // hash
+                cached[2 + i * 3 + 1] = 0; // tag = INT (default)
+                cached[2 + i * 3 + 2] = 0; // value
+            }
+            return (taida_ptr)cached;
+        }
+    }
     size_t fc = (size_t)field_count;
     size_t slots = taida_safe_add(2, taida_safe_mul(fc, 3, "pack_new fields"), "pack_new header");
     size_t alloc_size = taida_safe_mul(slots, sizeof(taida_val), "pack_new bytes");
-    taida_val *pack = (taida_val*)TAIDA_MALLOC(alloc_size, "pack_new");
+    // C26B-024 (Round 10 / wepsilon Step 4): Tier 2 -- bump arena for
+    // transient pack allocations. Freelist tier above handles the case
+    // where taida_release runs; the arena absorbs the common case where
+    // the Native codegen never releases the pack (leak-to-exit semantics).
+    taida_val *pack;
+    void *arena_mem = taida_arena_alloc(alloc_size);
+    if (arena_mem) {
+        pack = (taida_val *)arena_mem;
+    } else {
+        pack = (taida_val*)TAIDA_MALLOC(alloc_size, "pack_new");
+    }
     pack[0] = TAIDA_PACK_MAGIC | 1;  // Magic + refcount
     pack[1] = field_count;
     // Initialize tag slots to TAIDA_TAG_INT (0) by default
@@ -2206,6 +2605,17 @@ taida_ptr taida_pack_set_tag(taida_ptr pack_ptr, taida_val index, taida_val tag)
     taida_val *pack = (taida_val*)pack_ptr;
     pack[2 + index * 3 + 1] = tag;
     return pack_ptr;
+}
+
+// C26B-011: positional tag getter (by slot index, not hash) — used by
+// Lax.toString() / Result.toString() short-form renderers so `__value` /
+// `__default` slots tagged FLOAT render via `taida_float_to_str`
+// (Rust-f64 parity: `0.0` / `inf` / `-inf` / `NaN`). Without this path
+// the short-form fell through to `taida_value_to_display_string(val)` →
+// untagged fallback → `%lld` rendering, dropping Float-origin `.0`.
+static taida_val taida_pack_get_tag_idx(taida_ptr pack_ptr, taida_val index) {
+    taida_val *pack = (taida_val*)pack_ptr;
+    return pack[2 + index * 3 + 1];
 }
 
 taida_val taida_pack_get(taida_ptr pack_ptr, taida_val field_hash) {
@@ -2508,11 +2918,31 @@ static void taida_list_elem_release(taida_val elem, taida_val elem_tag) {
 }
 
 taida_ptr taida_list_new(void) {
-    taida_val *list = (taida_val*)TAIDA_MALLOC((4 + 16) * sizeof(taida_val), "list_new");
-    list[0] = TAIDA_LIST_MAGIC | 1;   // Magic + refcount
-    list[1] = 16;  // capacity
-    list[2] = 0;   // length
-    list[3] = TAIDA_TAG_UNKNOWN;  // elem_type_tag (unknown until set)
+    // C26B-024 (Round 10 / wepsilon Step 4): Tier 1 -- per-thread cap=16
+    // freelist. Fires only when taida_release runs on a cap==16 list.
+    taida_val *cached = taida_list_freelist_pop();
+    if (cached) {
+        cached[0] = TAIDA_LIST_MAGIC | 1;
+        cached[1] = TAIDA_LIST_INIT_CAP;
+        cached[2] = 0;
+        cached[3] = TAIDA_TAG_UNKNOWN;
+        return (taida_ptr)cached;
+    }
+    // Tier 2 -- bump arena. If list_push later realloc()s past cap=16, the
+    // arena slot is abandoned (safe: arena keeps ownership until process
+    // exit).
+    size_t alloc_size = (4 + 16) * sizeof(taida_val);
+    taida_val *list;
+    void *arena_mem = taida_arena_alloc(alloc_size);
+    if (arena_mem) {
+        list = (taida_val *)arena_mem;
+    } else {
+        list = (taida_val*)TAIDA_MALLOC(alloc_size, "list_new");
+    }
+    list[0] = TAIDA_LIST_MAGIC | 1;
+    list[1] = 16;
+    list[2] = 0;
+    list[3] = TAIDA_TAG_UNKNOWN;
     return (taida_ptr)list;
 }
 
@@ -2547,8 +2977,20 @@ taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item) {
             exit(1);
         }
         size_t realloc_size = taida_safe_mul(taida_safe_add(4, (size_t)new_cap, "list_push slots"), sizeof(taida_val), "list_push bytes");
-        taida_val *tmp = (taida_val*)realloc(list, realloc_size);
-        if (!tmp) { fprintf(stderr, "taida: out of memory (taida_list_push)\n"); exit(1); }
+        taida_val *tmp;
+        // C26B-024 (Round 10 / wepsilon Step 4): arena-backed lists cannot be
+        // realloc()'d (realloc on an arena pointer is UB). Detect arena origin
+        // and malloc a fresh slab + memcpy instead. The abandoned arena slot
+        // is reclaimed at process exit.
+        if (taida_arena_contains(list)) {
+            tmp = (taida_val*)TAIDA_MALLOC(realloc_size, "list_push migrate");
+            // Copy header + current elements.
+            size_t copy_bytes = ((size_t)(4 + len)) * sizeof(taida_val);
+            memcpy(tmp, list, copy_bytes);
+        } else {
+            tmp = (taida_val*)realloc(list, realloc_size);
+            if (!tmp) { fprintf(stderr, "taida: out of memory (taida_list_push)\n"); exit(1); }
+        }
         list = tmp;
         list[0] = rc;       // preserve refcount
         list[1] = new_cap;
@@ -3047,6 +3489,74 @@ taida_val taida_str_repeat(const char* s, taida_val n) {
     char *r = taida_str_alloc(total);
     for (taida_val i = 0; i < n; i++) {
         memcpy(r + i * slen, s, slen);
+    }
+    return (taida_val)r;
+}
+
+// ── C26B-018 (B) byte-level primitives ──────────────────────────
+// These operate on the raw UTF-8 byte stream. They are additive
+// molds (§ 6.2 widening); existing CharAt/Slice/Length semantics
+// are unchanged.
+taida_val taida_str_byte_at(const char* s, taida_val idx) {
+    if (!s) return -1;
+    taida_val len = (taida_val)strlen(s);
+    if (idx < 0 || idx >= len) return -1;
+    return (taida_val)(unsigned char)s[idx];
+}
+taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_value) {
+    if (!s) return taida_lax_empty(default_value);
+    taida_val len = (taida_val)strlen(s);
+    if (idx < 0 || idx >= len) {
+        return taida_lax_empty(default_value);
+    }
+    taida_val b = (taida_val)(unsigned char)s[idx];
+    return taida_lax_new(b, default_value);
+}
+taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {
+    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    taida_val len = (taida_val)strlen(s);
+    if (start < 0) start = 0;
+    if (start > len) start = len;
+    if (end < 0) end = 0;
+    if (end > len) end = len;
+    if (end < start) { taida_val t = start; start = end; end = t; }
+    taida_val slen = end - start;
+    char *r = taida_str_alloc(slen);
+    memcpy(r, s + start, slen);
+    return (taida_val)r;
+}
+taida_val taida_str_byte_length(const char* s) {
+    if (!s) return 0;
+    return (taida_val)strlen(s);
+}
+// ── C26B-018 (C) StringRepeatJoin ───────────────────────────────
+// Single-allocation repeat + join. Computes total length up front
+// and allocates once.
+taida_val taida_str_repeat_join(const char* s, taida_val n, const char* sep) {
+    if (n <= 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    if (!s) s = "";
+    if (!sep) sep = "";
+    taida_val slen = (taida_val)strlen(s);
+    taida_val seplen = (taida_val)strlen(sep);
+    if (n == 1) {
+        char *r = taida_str_alloc(slen);
+        memcpy(r, s, slen);
+        return (taida_val)r;
+    }
+    // Overflow check: total = slen*n + seplen*(n-1)
+    if (slen > 0 && n > (taida_val)(((size_t)-1) / 4) / slen) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    if (seplen > 0 && (n - 1) > (taida_val)(((size_t)-1) / 4) / seplen) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    taida_val total = slen * n + seplen * (n - 1);
+    char *r = taida_str_alloc(total);
+    char *dst = r;
+    memcpy(dst, s, slen); dst += slen;
+    for (taida_val i = 1; i < n; i++) {
+        memcpy(dst, sep, seplen); dst += seplen;
+        memcpy(dst, s, slen); dst += slen;
     }
     return (taida_val)r;
 }
@@ -3887,7 +4397,16 @@ taida_val taida_float_to_str(double a) {
     char tmp[64];
     if (isnan(a)) { snprintf(tmp, sizeof(tmp), "NaN"); }
     else if (isinf(a)) { snprintf(tmp, sizeof(tmp), a < 0 ? "-inf" : "inf"); }
-    else if (a == 0.0) { snprintf(tmp, sizeof(tmp), "0.0"); }
+    else if (a == 0.0) {
+        // C26B-011 (wS Round 6, 2026-04-24): signed-zero parity. Rust
+        // f64::Display emits "-0" for a `-0.0`, and Taida's interpreter
+        // applies `format!("{:.1}", n)` because `(-0.0).floor() == -0.0`
+        // and `(-0.0).is_finite()` — yielding "-0.0". Previously Native
+        // ignored sign because `a == 0.0` matches both ±0.0. Use
+        // `signbit(a)` to distinguish the two IEEE-754 zeros and match
+        // interpreter output byte-for-byte.
+        snprintf(tmp, sizeof(tmp), signbit(a) ? "-0.0" : "0.0");
+    }
     else if (a == floor(a) && fabs(a) < 1e16) {
         // Integer-valued float in the exact range — always "X.0".
         snprintf(tmp, sizeof(tmp), "%.1f", a);
@@ -4575,6 +5094,25 @@ static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
     if (ptr & 0x7) return 0;
     if (bytes == 0) return 1;
 
+    // C26B-024 (Round 10 / wepsilon Step 4): arena-backed pointers are
+    // known to lie inside a live mmap'd region (the chunk malloc'd by
+    // taida_arena_alloc). Skip the expensive mincore() probe for them.
+    // Checking arena membership is O(chunk_count) = O(128) in the worst
+    // case, vs ~1us per mincore syscall. In the router bench this
+    // collapses ~9.5M mincore calls into a pointer-range compare.
+    if (taida_arena_contains((void *)(uintptr_t)ptr)) {
+        return 1;
+    }
+    // Check heap range (captured at TAIDA_MALLOC time). Safe over-approximation:
+    // a pointer within [heap_min, heap_max) is at worst inside an mmap'd region
+    // backing the heap, so mincore would return "mapped" anyway. We use the
+    // range test as a fast path to skip the syscall. False positives (pointer
+    // in-range but not a live allocation) are tolerated because callers later
+    // validate the magic-header tag.
+    if (taida_heap_range_contains((uintptr_t)ptr)) {
+        return 1;
+    }
+
     uintptr_t start = (uintptr_t)ptr;
     if (start > UINTPTR_MAX - (bytes - 1)) return 0;
     uintptr_t end = start + (bytes - 1);
@@ -4586,10 +5124,20 @@ static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
     uintptr_t page = start & ~page_mask;
     uintptr_t last_page = end & ~page_mask;
 
+    // C26B-024 (Round 10 / wepsilon Step 4): cache hit for a single-page probe
+    // (the common case for Taida heap-object checks with bytes <= page_size).
+    if (page == last_page && taida_mincore_cache_hit(page)) {
+        return 1;
+    }
+    // Multi-page probes: check each page against cache; only call mincore for
+    // uncached pages. Add all probed pages to cache on success.
     for (;;) {
-        unsigned char vec = 0;
-        if (mincore((void*)page, (size_t)page_size, &vec) != 0) {
-            return 0;
+        if (!taida_mincore_cache_hit(page)) {
+            unsigned char vec = 0;
+            if (mincore((void*)page, (size_t)page_size, &vec) != 0) {
+                return 0;
+            }
+            taida_mincore_cache_add(page);
         }
         if (page == last_page) break;
         if (page > UINTPTR_MAX - step) return 0;
@@ -4635,11 +5183,23 @@ static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_l
         uintptr_t addr = ptr + i;
         uintptr_t page = addr & ~page_mask;
         if (page != current_page) {
-            unsigned char vec = 0;
-            if (mincore((void*)page, (size_t)page_size, &vec) != 0) {
-                return 0;
+            // C26B-024 (Round 10 / wepsilon Step 4): fast-path via arena /
+            // heap-range / mincore cache before falling through to the
+            // mincore syscall. This is the dominant source of mincore
+            // invocations in bench_router.td (every taida_str_* call path
+            // that consults byte-length goes through here).
+            if (taida_arena_contains((void *)addr)
+                || taida_heap_range_contains(addr)
+                || taida_mincore_cache_hit(page)) {
+                current_page = page;
+            } else {
+                unsigned char vec = 0;
+                if (mincore((void*)page, (size_t)page_size, &vec) != 0) {
+                    return 0;
+                }
+                taida_mincore_cache_add(page);
+                current_page = page;
             }
-            current_page = page;
         }
         unsigned char ch = ((const unsigned char*)s)[i];
         if (ch == 0) {
@@ -5555,6 +6115,125 @@ taida_val taida_collection_size(taida_val ptr) {
     return ((taida_val*)ptr)[2];
 }
 
+// ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+// A span pack is `@(start: Int, len: Int)`, a view over a raw Bytes/Str.
+// Invalid spans (non-pack, missing fields, out-of-bounds) yield false /
+// empty sub-span; matches the interpreter's tolerant hot-path semantics.
+static int taida_net_span_extract(taida_val span, taida_val *out_start, taida_val *out_len) {
+    if (!taida_ptr_is_readable(span, 16)) return 0;
+    taida_val *pack = (taida_val*)span;
+    if ((pack[0] & TAIDA_MAGIC_MASK) != TAIDA_PACK_MAGIC) return 0;
+    taida_val hash_start = taida_str_hash((taida_val)"start");
+    taida_val hash_len = taida_str_hash((taida_val)"len");
+    taida_val start = taida_pack_get(span, hash_start);
+    taida_val len = taida_pack_get(span, hash_len);
+    if (start < 0 || len < 0) return 0;
+    if (out_start) *out_start = start;
+    if (out_len) *out_len = len;
+    return 1;
+}
+
+// Resolve raw (Bytes or Str) to a contiguous byte view. Returns 1 on success
+// with *out_buf pointing into the underlying storage and *out_buf_len set.
+// For Bytes we unpack via `bytes[2 + i]` into a scratch buffer (alloc then
+// let caller free); for Str we return the char* directly. To keep the
+// interface simple, we always materialize a temp `char*` for Bytes input.
+static int taida_net_raw_as_bytes(taida_val raw, const unsigned char **out_buf,
+                                   taida_val *out_len, unsigned char **out_owned) {
+    *out_owned = NULL;
+    if (TAIDA_IS_BYTES(raw)) {
+        taida_val *bytes = (taida_val*)raw;
+        taida_val len = bytes[1];
+        if (len < 0) return 0;
+        unsigned char *tmp = (unsigned char*)taida_str_alloc((size_t)len);
+        for (taida_val i = 0; i < len; i++) tmp[i] = (unsigned char)bytes[2 + i];
+        *out_buf = tmp;
+        *out_len = len;
+        *out_owned = tmp;
+        return 1;
+    }
+    if (taida_is_string_value(raw)) {
+        const char *s = (const char *)raw;
+        *out_buf = (const unsigned char *)s;
+        *out_len = (taida_val)strlen(s);
+        return 1;
+    }
+    return 0;
+}
+
+static int taida_net_needle_as_bytes(taida_val needle, const unsigned char **out_buf,
+                                      taida_val *out_len, unsigned char **out_owned) {
+    return taida_net_raw_as_bytes(needle, out_buf, out_len, out_owned);
+}
+
+taida_val taida_net_SpanEquals(taida_val span, taida_val raw, taida_val needle) {
+    taida_val start, len;
+    if (!taida_net_span_extract(span, &start, &len)) return 0;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) { return 0; }
+    taida_val result = 0;
+    if (start + len <= buf_len && len == nlen && memcmp(buf + start, nbuf, (size_t)len) == 0) {
+        result = 1;
+    }
+    return result;
+}
+
+taida_val taida_net_SpanStartsWith(taida_val span, taida_val raw, taida_val prefix) {
+    taida_val start, len;
+    if (!taida_net_span_extract(span, &start, &len)) return 0;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
+    const unsigned char *pbuf = NULL; taida_val plen = 0; unsigned char *own_p = NULL;
+    if (!taida_net_needle_as_bytes(prefix, &pbuf, &plen, &own_p)) return 0;
+    taida_val result = 0;
+    if (start + len <= buf_len && len >= plen && memcmp(buf + start, pbuf, (size_t)plen) == 0) {
+        result = 1;
+    }
+    return result;
+}
+
+taida_val taida_net_SpanContains(taida_val span, taida_val raw, taida_val needle) {
+    taida_val start, len;
+    if (!taida_net_span_extract(span, &start, &len)) return 0;
+    const unsigned char *buf = NULL; taida_val buf_len = 0; unsigned char *own_buf = NULL;
+    if (!taida_net_raw_as_bytes(raw, &buf, &buf_len, &own_buf)) return 0;
+    const unsigned char *nbuf = NULL; taida_val nlen = 0; unsigned char *own_n = NULL;
+    if (!taida_net_needle_as_bytes(needle, &nbuf, &nlen, &own_n)) return 0;
+    taida_val result = 0;
+    if (start + len > buf_len) { result = 0; }
+    else if (nlen == 0) { result = 1; }
+    else if (len < nlen) { result = 0; }
+    else {
+        for (taida_val i = 0; i + nlen <= len; i++) {
+            if (memcmp(buf + start + i, nbuf, (size_t)nlen) == 0) { result = 1; break; }
+        }
+    }
+    return result;
+}
+
+taida_val taida_net_SpanSlice(taida_val span, taida_val raw, taida_val sub_start, taida_val sub_end) {
+    (void)raw;
+    taida_val base_start = 0, base_len = 0;
+    taida_net_span_extract(span, &base_start, &base_len);
+    taida_val s = sub_start, e = sub_end;
+    if (s < 0) s = 0;
+    if (s > base_len) s = base_len;
+    if (e < s) e = s;
+    if (e > base_len) e = base_len;
+    taida_val new_start = base_start + s;
+    taida_val new_len = e - s;
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)"start"));
+    taida_pack_set(pack, 0, new_start);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_INT);
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)"len"));
+    taida_pack_set(pack, 1, new_len);
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_INT);
+    return pack;
+}
+
 // ── Error ceiling (setjmp/longjmp) ───────────────────────
 // Uses setjmp/longjmp for error catching. The key function is
 // taida_error_try_call which wraps setjmp and calls a function pointer.
@@ -6034,16 +6713,36 @@ taida_val taida_lax_flat_map(taida_val lax_ptr, taida_val fn_ptr) {
 }
 
 // Lax.toString() — "Lax(value)" or "Lax(default: value)"
+//
+// C26B-011 (Phase 11): honour the FLOAT tag on `__value` / `__default`
+// slots so Float-origin Lax renders `0.0` / `inf` / `-inf` / `NaN` to
+// match interpreter (Rust f64 Display) and JS (`__taida_float_render`).
+// Before this fix, `Div[1.0, 0.0]()` / `Div[1.0, 2.0]()` in native fell
+// through to `taida_value_to_display_string` which treated the f64 bit
+// pattern as an Int pointer and either rendered `0` (matching `b == 0`
+// short-circuit where the default was plain `0`) or lost the `.0`
+// entirely. `taida_float_to_str` already has NaN/Inf/denormal parity
+// with Rust — we just need to route FLOAT-tagged slots through it.
 taida_val taida_lax_to_string(taida_val lax_ptr) {
     taida_val val = taida_pack_get_idx(lax_ptr, 1);
     taida_val def = taida_pack_get_idx(lax_ptr, 2);
-    taida_val rendered = taida_pack_get_idx(lax_ptr, 0)
-        ? taida_value_to_display_string(val)
-        : taida_value_to_display_string(def);
+    int hasv = (int)taida_pack_get_idx(lax_ptr, 0);
+    taida_val slot_tag = taida_pack_get_tag_idx(lax_ptr, hasv ? 1 : 2);
+    taida_val rendered;
+    if (slot_tag == TAIDA_TAG_FLOAT) {
+        double d;
+        taida_val bits = hasv ? val : def;
+        memcpy(&d, &bits, sizeof(double));
+        rendered = taida_float_to_str(d);
+    } else {
+        rendered = hasv
+            ? taida_value_to_display_string(val)
+            : taida_value_to_display_string(def);
+    }
     const char *rs = (const char*)rendered;
     size_t need = strlen(rs) + 24;
     char *buf = taida_str_alloc(need);
-    if (taida_pack_get_idx(lax_ptr, 0)) {
+    if (hasv) {
         snprintf(buf, need + 1, "Lax(%s)", rs);
     } else {
         snprintf(buf, need + 1, "Lax(default: %s)", rs);
@@ -7508,8 +8207,14 @@ static json_val json_parse_number(const char **p) {
 }
 
 static json_val json_parse_array(const char **p) {
+    // Zero-init all scalar fields so the return-by-value copy is fully
+    // defined even on paths that do not populate int_val / float_val
+    // (callers branch on `type` before reading those, but cppcheck
+    // cannot prove that and flags uninitvar).
     json_val v;
     v.type = JSON_ARRAY;
+    v.int_val = 0;
+    v.float_val = 0.0;
     v.str_val = NULL; v.str_len = 0; v.obj = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.arr = (json_array*)TAIDA_MALLOC(sizeof(json_array), "json_array");
@@ -7537,8 +8242,11 @@ static json_val json_parse_array(const char **p) {
 }
 
 static json_val json_parse_object(const char **p) {
+    // Zero-init scalar fields; see json_parse_array for rationale.
     json_val v;
     v.type = JSON_OBJECT;
+    v.int_val = 0;
+    v.float_val = 0.0;
     v.str_val = NULL; v.str_len = 0; v.arr = NULL;
     // M-14: TAIDA_MALLOC ensures NULL check + OOM diagnostic.
     v.obj = (json_obj*)TAIDA_MALLOC(sizeof(json_obj), "json_obj");
@@ -9383,4 +10091,3 @@ taida_val taida_io_stdin_line(taida_val prompt_ptr) {
     free(buf);
     return result;
 }
-

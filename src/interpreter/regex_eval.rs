@@ -113,7 +113,7 @@ pub(crate) fn as_regex(val: &Value) -> Option<(String, String)> {
     };
     let is_regex = fields
         .iter()
-        .any(|(k, v)| k == "__type" && matches!(v, Value::Str(s) if s == REGEX_TYPE_TAG));
+        .any(|(k, v)| k == "__type" && matches!(v, Value::Str(s) if s.as_str() == REGEX_TYPE_TAG));
     if !is_regex {
         return None;
     }
@@ -121,7 +121,7 @@ pub(crate) fn as_regex(val: &Value) -> Option<(String, String)> {
         .iter()
         .find(|(k, _)| k == "pattern")
         .and_then(|(_, v)| match v {
-            Value::Str(s) => Some(s.clone()),
+            Value::Str(s) => Some(s.as_string().clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -129,7 +129,7 @@ pub(crate) fn as_regex(val: &Value) -> Option<(String, String)> {
         .iter()
         .find(|(k, _)| k == "flags")
         .and_then(|(_, v)| match v {
-            Value::Str(s) => Some(s.clone()),
+            Value::Str(s) => Some(s.as_string().clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -150,10 +150,10 @@ pub(crate) fn build_regex_value(pattern: &str, flags: &str) -> Result<Value, Str
     // runtime where `new RegExp(...)` at construction primes the
     // `__taida_regex_cache` on the first method call.
     cached_compile(pattern, flags)?;
-    Ok(Value::BuchiPack(vec![
-        ("pattern".into(), Value::Str(pattern.to_string())),
-        ("flags".into(), Value::Str(flags.to_string())),
-        ("__type".into(), Value::Str(REGEX_TYPE_TAG.into())),
+    Ok(Value::pack(vec![
+        ("pattern".into(), Value::str(pattern.to_string())),
+        ("flags".into(), Value::str(flags.to_string())),
+        ("__type".into(), Value::str(REGEX_TYPE_TAG.into())),
     ]))
 }
 
@@ -273,22 +273,22 @@ pub(crate) fn search_first(s: &str, pattern: &str, flags: &str) -> Result<i64, S
 /// while keeping the payload (`full`, `groups`, `start`) inspectable.
 pub(crate) fn build_match_value(m: Option<MatchResult>) -> Value {
     match m {
-        Some(m) => Value::BuchiPack(vec![
+        Some(m) => Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
-            ("full".into(), Value::Str(m.full)),
+            ("full".into(), Value::str(m.full)),
             (
                 "groups".into(),
-                Value::list(m.groups.into_iter().map(Value::Str).collect()),
+                Value::list(m.groups.into_iter().map(Value::str).collect()),
             ),
             ("start".into(), Value::Int(m.start)),
-            ("__type".into(), Value::Str("RegexMatch".into())),
+            ("__type".into(), Value::str("RegexMatch".into())),
         ]),
-        None => Value::BuchiPack(vec![
+        None => Value::pack(vec![
             ("hasValue".into(), Value::Bool(false)),
-            ("full".into(), Value::Str(String::new())),
+            ("full".into(), Value::str(String::new())),
             ("groups".into(), Value::list(Vec::new())),
             ("start".into(), Value::Int(-1)),
-            ("__type".into(), Value::Str("RegexMatch".into())),
+            ("__type".into(), Value::str("RegexMatch".into())),
         ]),
     }
 }
@@ -395,9 +395,9 @@ mod tests {
 
     #[test]
     fn test_as_regex_rejects_non_regex_buchipack() {
-        let lax = Value::BuchiPack(vec![
+        let lax = Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__type".into(), Value::str("Lax".into())),
         ]);
         assert!(as_regex(&lax).is_none());
     }
@@ -416,9 +416,8 @@ mod tests {
                     .any(|(k, v)| k == "hasValue" && matches!(v, Value::Bool(true)))
             );
             assert!(
-                fields
-                    .iter()
-                    .any(|(k, v)| k == "__type" && matches!(v, Value::Str(s) if s == "RegexMatch"))
+                fields.iter().any(|(k, v)| k == "__type"
+                    && matches!(v, Value::Str(s) if s.as_str() == "RegexMatch"))
             );
         } else {
             panic!("expected BuchiPack");

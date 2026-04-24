@@ -57,6 +57,24 @@ impl Interpreter {
                         }
                     }
                 }
+            } else if let Some(bundled) =
+                crate::pkg::provider::CoreBundledProvider::materialize_core_bundled(import_path)
+            {
+                // C26B-014: core-bundled packages (`taida-lang/os`,
+                // `taida-lang/net`, `taida-lang/crypto`, `taida-lang/js`,
+                // `taida-lang/pool`) can be imported without a
+                // packages.tdm declaration. `docs/reference/os_api.md`
+                // and `docs/guide/10_modules.md` promise both the
+                // imported and import-less call forms; this branch
+                // materializes the bundled stub on-demand so the
+                // runtime path agrees with the checker
+                // (`install_core_bundled_os_pins` in src/types/checker.rs).
+                // Option B (Design Lock 2026-04-24): implementation
+                // follows docs. Package imports into packages.tdm still
+                // work via the `resolve_package_module` branch above
+                // (deps-installed precedence preserved).
+                let bundled_dir = bundled.map_err(|e| RuntimeError { message: e })?;
+                bundled_dir.join("main.td")
             } else {
                 return Err(RuntimeError {
                     message: format!(
@@ -73,9 +91,16 @@ impl Interpreter {
         })?;
 
         // RCB-303: Reject imports that escape the project root (path traversal).
-        // Only check relative imports (`./` or `../`); absolute and package imports
-        // are either trusted paths or resolved through the package system.
-        if import_path.starts_with("./") || import_path.starts_with("../") {
+        // Relative imports (`./` or `../`) and absolute path imports (`/...`)
+        // are both sandboxed to the project root. Package imports are resolved
+        // through the package system and are trusted by construction.
+        // C26B-007 SEC-003: extend RCB-303 to cover absolute path imports so
+        // `>>> /etc/passwd.td` / `>>> /tmp/evil.td` cannot be used to probe
+        // the filesystem or leak file contents through parser error messages.
+        if import_path.starts_with("./")
+            || import_path.starts_with("../")
+            || import_path.starts_with('/')
+        {
             let project_root = self.find_project_root();
             if let Ok(root_canonical) = project_root.canonicalize()
                 && !canonical.starts_with(&root_canonical)
@@ -376,18 +401,18 @@ impl Interpreter {
                 if in_bundled("os") {
                     for sym in super::os_eval::OS_SYMBOLS {
                         self.env
-                            .define_force(sym, Value::Str(format!("__os_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__os_builtin_{}", sym)));
                     }
                 } else if in_bundled("crypto") {
                     {
                         let sym = "sha256";
                         self.env
-                            .define_force(sym, Value::Str(format!("__crypto_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__crypto_builtin_{}", sym)));
                     }
                 } else if in_bundled("net") {
                     for sym in super::net_eval::NET_SYMBOLS {
                         self.env
-                            .define_force(sym, Value::Str(format!("__net_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
                     }
                 } else if in_bundled("pool") {
                     for sym in [
@@ -398,7 +423,7 @@ impl Interpreter {
                         "poolHealth",
                     ] {
                         self.env
-                            .define_force(sym, Value::Str(format!("__pool_builtin_{}", sym)));
+                            .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
                     }
                 }
             }
@@ -772,7 +797,7 @@ impl Interpreter {
     ///      - an `addon.toml` `[functions]` entry.
     /// 5. Binds each requested symbol into the current env. Facade
     ///    exports are bound by value; addon functions are bound as
-    ///    sentinels `Value::Str("__taida_addon_call::<pkg>::<fn>")` that
+    ///    sentinels `Value::str("__taida_addon_call::<pkg>::<fn>")` that
     ///    `try_addon_func` (in `addon_eval.rs`) routes through
     ///    `LoadedAddon::call_function`.
     ///
@@ -845,7 +870,7 @@ impl Interpreter {
                 // (`__os_builtin_*`, `__net_builtin_*`, etc.) use
                 // single-segment underscore names, so collision is
                 // structurally impossible.
-                Value::Str(format!(
+                Value::str(format!(
                     "__taida_addon_call::{}::{}",
                     resolved.package_id, orig_name
                 ))
@@ -879,7 +904,7 @@ impl Interpreter {
     /// The facade file lives at `<pkg_dir>/taida/<stem>.td` where
     /// `<stem>` is the final `/`-segment of the package id. Inside the
     /// facade, every manifest `[functions]` entry is pre-bound as an
-    /// addon sentinel (`Value::Str(__taida_addon_call::<pkg>::<fn>)`)
+    /// addon sentinel (`Value::str(__taida_addon_call::<pkg>::<fn>)`)
     /// so the facade can assign `TerminalSize <= terminalSize` to
     /// rename the Rust function under a Taida-side name, or combine
     /// addon calls with pure-Taida companion values such as the
@@ -969,7 +994,7 @@ impl Interpreter {
         // addon calls with pure-Taida values (`KeyKind`, wrapper funcs).
         for fn_name in resolved.manifest.functions.keys() {
             let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, fn_name);
-            self.env.define_force(fn_name, Value::Str(sentinel));
+            self.env.define_force(fn_name, Value::str(sentinel));
         }
 
         let exec_result = self.eval_program(&program);

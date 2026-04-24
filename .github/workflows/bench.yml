@@ -1,25 +1,40 @@
 name: Bench
 
-# C25B-004 perf regression gate (@c.25.rc7).
+# C26B-004 perf regression gate (@c.26).
 #
-# Separate workflow from CI so bench noise does not block PR merges while
-# baselines are still stabilising. `continue-on-error` on the entire job
-# is intentional: until several weeks of main-baseline data accumulate,
-# bench output is informational.
+# Phase 4 hard-fail promotion: the criterion `perf_baseline` bench and
+# the RUN_BENCHMARKS=1 NET6-3b h2 throughput tests are now gated with
+# a +10% regression tolerance (see `scripts/bench/compare_baseline.py`).
+# Baseline is tracked in `.github/bench-baselines/perf_baseline.json`.
 #
-# The job re-runs on:
-#   - manual `workflow_dispatch` (for ad-hoc comparisons)
-#   - main push (to refresh the main baseline)
+# Gate state machine:
+#   - `pull_request`: runs the gate against the committed baseline.
+#     Benches whose baseline has fewer than `min_samples_required`
+#     (30) samples emit WARN but do not fail the job. Benches that
+#     have met the sample-count threshold and regress beyond
+#     tolerance fail the job hard.
+#   - `push` to main: runs the bench, updates the baseline JSON
+#     (EWMA median + increment sample_count), and commits the updated
+#     baseline back to main via the `update-baseline` job.
+#   - `schedule` / `workflow_dispatch`: same as PR (gate-only, no
+#     baseline update).
 #
-# A `pull_request` trigger is deliberately NOT added yet. Once the main
-# baseline is stable (tracked in `.dev/C25_CI_PROFILE.md`), a follow-up
-# change will add pull_request + upload-artifact diffing + 10%-regression
-# comment-on-pr. Adding it prematurely would spam PRs with
-# noise-dominated deltas.
+# Scope isolation: this workflow owns `.github/workflows/bench.yml`,
+# `scripts/bench/**`, and `.github/bench-baselines/**`. It does not
+# touch `.github/workflows/ci.yml`, `security.yml`, or `release.yml`.
+#
+# `continue-on-error` was removed as part of C26B-004 Phase 4 promotion.
+# Benches that were warn-only during C25 are hard-fail under @c.26.
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main, develop, feat/c26]
+  schedule:
+    # Nightly at 05:00 UTC to collect samples on a quiet schedule and
+    # catch slow drift between PRs.
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 env:
@@ -30,25 +45,80 @@ concurrency:
   group: bench-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   bench:
     name: Perf baselines
     runs-on: ubuntu-latest
-    # Informational until baselines stabilise (C25B-004 scaffold phase).
-    continue-on-error: true
-    timeout-minutes: 30
+    # C26B-004 hard-fail: removed `continue-on-error`. Warn-only
+    # suppression is now handled inside `compare_baseline.py` on a
+    # per-bench basis via `min_samples_required`.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup Python (for compare_baseline.py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Run perf_baseline bench
+        # --sample-size 20 keeps wall-clock < 10 min while preserving
+        # enough samples for criterion's bootstrap CI to tighten.
+        # Output is captured in bencher format for compare_baseline.py.
         run: |
-          # --sample-size 20 keeps wall-clock < 10 min while preserving
-          # enough samples for criterion's bootstrap CI to tighten.
-          cargo bench --bench perf_baseline -- --sample-size 20 --output-format bencher | tee bench-results.txt
+          set -euo pipefail
+          cargo bench --bench perf_baseline -- \
+              --sample-size 20 \
+              --output-format bencher \
+              | tee bench-results.txt
+          echo "bench-results.txt size: $(wc -l < bench-results.txt) lines"
+
+      - name: Run NET6-3b h2 throughput benchmarks
+        id: net_bench
+        # The three h2 benches are gated by RUN_BENCHMARKS=1. They
+        # must emit all three NET6-3b-{2,3,4} measurement lines.
+        # Missing curl --http2 or a skipped bench is a gate failure,
+        # not a silently green run.
+        env:
+          RUN_BENCHMARKS: "1"
+        run: |
+          set -euo pipefail
+          cargo test --release --test parity \
+              test_net6_3b_native_h2_32_request_throughput_benchmark \
+              test_net6_3b_native_h2_64kib_data_benchmark \
+              test_net6_3b_native_h2_32_stream_multiplex_benchmark \
+              -- --nocapture --test-threads=1 \
+              2>&1 | tee cargo-test-net.log
+
+      - name: Parse NET6-3b h2 benchmark lines into bencher format
+        run: |
+          python3 scripts/bench/parse_net_throughput.py \
+              --cargo-test-log cargo-test-net.log \
+              --output bench-results-net.txt
+          # Append NET benches to the criterion bencher output so the
+          # regression gate sees one combined result set.
+          if [ -s bench-results-net.txt ]; then
+              cat bench-results-net.txt >> bench-results.txt
+          fi
+
+      - name: Compare against baseline (regression gate)
+        # Hard-fail gate. Benches below the min-samples threshold in
+        # the baseline JSON emit WARN and do not trigger failure; see
+        # `compare_baseline.py` for the state machine.
+        run: |
+          python3 scripts/bench/compare_baseline.py \
+              --bencher-out bench-results.txt \
+              --baseline .github/bench-baselines/perf_baseline.json \
+              --tolerance-pct 10.0 \
+              --min-samples 30
+
       - name: Upload bench results
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,6 +126,55 @@ jobs:
           name: perf-baseline-${{ github.sha }}
           path: |
             bench-results.txt
+            bench-results-net.txt
+            cargo-test-net.log
             target/criterion/**/estimates.json
           if-no-files-found: warn
           retention-days: 30
+
+  # C26B-004: main-branch baseline collection job. Uses the bench run
+  # results from the `bench` job to advance the committed baseline JSON
+  # (EWMA median + increment sample_count) and commits the update back
+  # to main. PR runs skip this job via the `if:` guard.
+  update-baseline:
+    name: Update baseline (main only)
+    runs-on: ubuntu-latest
+    needs: bench
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need full history for the commit we push back.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download bench results
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-baseline-${{ github.sha }}
+          path: bench-artifacts
+      - name: Update baseline JSON
+        run: |
+          python3 scripts/bench/update_baseline.py \
+              --bencher-out bench-artifacts/bench-results.txt \
+              --baseline .github/bench-baselines/perf_baseline.json
+      - name: Commit baseline update
+        # Only commit if the baseline actually changed.
+        run: |
+          set -euo pipefail
+          if git diff --quiet .github/bench-baselines/perf_baseline.json; then
+              echo "baseline unchanged; nothing to commit"
+              exit 0
+          fi
+          git config user.name  "taida-bench-bot"
+          git config user.email "taida-bench-bot@users.noreply.github.com"
+          git add .github/bench-baselines/perf_baseline.json
+          git commit -m "chore(bench): C26B-004 update perf baseline (auto)
+
+sha: ${{ github.sha }}
+workflow: ${{ github.workflow }}
+run: ${{ github.run_id }}"
+          git push origin HEAD:main

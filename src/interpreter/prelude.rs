@@ -30,7 +30,7 @@ impl Interpreter {
             Value::Bool(_) => "Bool",
             Value::BuchiPack(fields) => {
                 // Check for __type field for typed BuchiPacks
-                for (name, v) in fields {
+                for (name, v) in fields.iter() {
                     if name == "__type"
                         && let Value::Str(s) = v
                     {
@@ -88,7 +88,7 @@ impl Interpreter {
         // We intentionally do not provide prelude-level sha256 compatibility.
         if matches!(
             self.env.get(name),
-            Some(Value::Str(tag)) if tag == "__crypto_builtin_sha256"
+            Some(Value::Str(tag)) if tag.as_str() == "__crypto_builtin_sha256"
         ) {
             if args.len() != 1 {
                 return Err(RuntimeError {
@@ -100,11 +100,11 @@ impl Interpreter {
                 other => return Ok(Some(other)),
             };
             let bytes: Vec<u8> = match val {
-                Value::Bytes(b) => b,
-                Value::Str(s) => s.into_bytes(),
+                Value::Bytes(b) => Value::bytes_take(b),
+                Value::Str(s) => Value::str_take(s).into_bytes(),
                 other => other.to_display_string().into_bytes(),
             };
-            return Ok(Some(Signal::Value(Value::Str(sha256_hex_bytes(&bytes)))));
+            return Ok(Some(Signal::Value(Value::str(sha256_hex_bytes(&bytes)))));
         }
 
         // taida-lang/pool runtime dispatch.
@@ -193,7 +193,7 @@ impl Interpreter {
                                 line.pop();
                             }
                         }
-                        Ok(Some(Signal::Value(Value::Str(line))))
+                        Ok(Some(Signal::Value(Value::str(line))))
                     }
                     // C20-3 (ROOT-9): previously threw IoError, but JS and
                     // Native silently returned "" on failure, breaking
@@ -201,7 +201,7 @@ impl Interpreter {
                     // (default-value guarantee). Callers that need
                     // error-awareness must switch to the new `stdinLine`
                     // API which returns `Async[Lax[Str]]`.
-                    Err(_) => Ok(Some(Signal::Value(Value::Str(String::new())))),
+                    Err(_) => Ok(Some(Signal::Value(Value::str(String::new())))),
                 }
             }
 
@@ -239,12 +239,12 @@ impl Interpreter {
                 };
                 let inner = match DefaultEditor::new() {
                     Ok(mut rl) => match rl.readline(&prompt) {
-                        Ok(line) => super::os_eval::make_lax_success_pub(Value::Str(line)),
+                        Ok(line) => super::os_eval::make_lax_success_pub(Value::str(line)),
                         Err(ReadlineError::Eof)
                         | Err(ReadlineError::Interrupted)
-                        | Err(_) => super::os_eval::make_lax_failure_pub(Value::Str(String::new())),
+                        | Err(_) => super::os_eval::make_lax_failure_pub(Value::str(String::new())),
                     },
-                    Err(_) => super::os_eval::make_lax_failure_pub(Value::Str(String::new())),
+                    Err(_) => super::os_eval::make_lax_failure_pub(Value::str(String::new())),
                 };
                 Ok(Some(Signal::Value(Value::Async(AsyncValue {
                     status: AsyncStatus::Fulfilled,
@@ -354,7 +354,7 @@ impl Interpreter {
                         &self.enum_defs,
                     ),
                 };
-                Ok(Some(Signal::Value(Value::Str(
+                Ok(Some(Signal::Value(Value::str(
                     serde_json::to_string(&json).unwrap_or_default(),
                 ))))
             }
@@ -385,7 +385,7 @@ impl Interpreter {
                         &self.enum_defs,
                     ),
                 };
-                Ok(Some(Signal::Value(Value::Str(
+                Ok(Some(Signal::Value(Value::str(
                     serde_json::to_string_pretty(&json).unwrap_or_default(),
                 ))))
             }
@@ -484,11 +484,11 @@ impl Interpreter {
                     Value::Unit
                 };
                 let default_value = Self::default_for_value(&val);
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("hasValue".into(), Value::Bool(true)),
                     ("__value".into(), val),
                     ("__default".into(), default_value),
-                    ("__type".into(), Value::Str("Lax".into())),
+                    ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }
 
@@ -527,9 +527,9 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let flags = if let Some(arg) = args.get(1) {
+                let flags: String = if let Some(arg) = args.get(1) {
                     match self.eval_expr(arg)? {
-                        Signal::Value(Value::Str(s)) => s,
+                        Signal::Value(Value::Str(s)) => Value::str_take(s),
                         Signal::Value(v) => {
                             return Err(RuntimeError {
                                 message: format!(
@@ -582,14 +582,14 @@ impl Interpreter {
                                     if fields.len() >= 2 {
                                         let key = fields[0].1.clone();
                                         let value = fields[1].1.clone();
-                                        entries.push(Value::BuchiPack(vec![
+                                        entries.push(Value::pack(vec![
                                             ("key".into(), key),
                                             ("value".into(), value),
                                         ]));
                                     }
                                 } else if let Value::List(pair) = item
                                     && pair.len() >= 2 {
-                                        entries.push(Value::BuchiPack(vec![
+                                        entries.push(Value::pack(vec![
                                             ("key".into(), pair[0].clone()),
                                             ("value".into(), pair[1].clone()),
                                         ]));
@@ -601,9 +601,9 @@ impl Interpreter {
                             // BuchiPack argument: each field becomes a key-value entry
                             // hashMap(@(a <= 1, b <= 2)) -> [{key: "a", value: 1}, {key: "b", value: 2}]
                             let mut entries = Vec::new();
-                            for (name, value) in &fields {
-                                entries.push(Value::BuchiPack(vec![
-                                    ("key".into(), Value::Str(name.clone())),
+                            for (name, value) in fields.iter() {
+                                entries.push(Value::pack(vec![
+                                    ("key".into(), Value::str(name.clone())),
                                     ("value".into(), value.clone()),
                                 ]));
                             }
@@ -615,9 +615,9 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(entries)),
-                    ("__type".into(), Value::Str("HashMap".into())),
+                    ("__type".into(), Value::str("HashMap".into())),
                 ]))))
             }
 
@@ -641,9 +641,9 @@ impl Interpreter {
                 } else {
                     Vec::new()
                 };
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__items".into(), Value::list(items)),
-                    ("__type".into(), Value::Str("Set".into())),
+                    ("__type".into(), Value::str("Set".into())),
                 ]))))
             }
 
@@ -657,7 +657,7 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                Ok(Some(Signal::Value(Value::Str(
+                Ok(Some(Signal::Value(Value::str(
                     Self::type_name_of(&val).to_string(),
                 ))))
             }
@@ -701,7 +701,7 @@ impl Interpreter {
                     .into_iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("index".into(), Value::Int(i as i64)),
                             ("value".into(), v),
                         ])
@@ -733,7 +733,7 @@ impl Interpreter {
                 let result: Vec<Value> = list_a
                     .into_iter()
                     .zip(list_b)
-                    .map(|(a, b)| Value::BuchiPack(vec![("first".into(), a), ("second".into(), b)]))
+                    .map(|(a, b)| Value::pack(vec![("first".into(), a), ("second".into(), b)]))
                     .collect();
                 Ok(Some(Signal::Value(Value::list(result))))
             }

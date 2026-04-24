@@ -99,10 +99,31 @@ echo ""
 # =========================================================================
 echo "=== Section 2: Type-Check Examples ==="
 
+# Server examples that block on accept() until a client connects —
+# running them through the interpreter in a smoke test would hang the
+# whole CI job indefinitely. Symmetric with the per-backend per-fixture
+# runners' skip lists (tests/wasm_wasi.rs::WASI_SKIP_STEMS,
+# tests/wasm_full.rs::FULL_SKIP_STEMS, tests/wasm_min.rs::WASM_MIN_SKIP_STEMS)
+# which already filter this fixture for the same reason. Type-checking
+# the source would be valuable but the current harness conflates the
+# two, so skip outright for now.
+TYPECHECK_SKIP_STEMS="net_http_hello"
+
 typecheck_pass=0
 typecheck_fail=0
 for td_file in "$PROJECT_DIR"/examples/*.td; do
   basename=$(basename "$td_file")
+  stem="${basename%.td}"
+  # Skip server examples that would block on accept().
+  skip_this=0
+  for s in $TYPECHECK_SKIP_STEMS; do
+    if [ "$stem" = "$s" ]; then skip_this=1; break; fi
+  done
+  if [ "$skip_this" = "1" ]; then
+    skip "typecheck: $basename (server blocks on accept() — listed in TYPECHECK_SKIP_STEMS)"
+    continue
+  fi
+
   # Run with type checking (default)
   if $TAIDA "$td_file" >/dev/null 2>&1; then
     typecheck_pass=$((typecheck_pass + 1))

@@ -106,7 +106,10 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "BitOr",
     "BitXor",
     "Bool_mold",
+    "ByteAt",
+    "ByteLength",
     "ByteSet",
+    "ByteSlice",
     "BytesCursorRemaining_mold",
     "BytesCursorTake_mold",
     "BytesCursorU8_mold",
@@ -175,11 +178,17 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Slice",
     "Some",
     "Sort",
+    "SpanContains",
+    "SpanEquals",
+    "SpanSlice",
+    "SpanStartsWith",
     "Split",
     "Sqrt",
     "StreamFrom",
     "Stream_mold",
     "Str_mold",
+    "StrOf",
+    "StringRepeatJoin",
     "Sum",
     "Take",
     "TakeWhile",
@@ -510,6 +519,18 @@ impl JsCodegen {
             // C21B-seed-04 re-fix: local identifiers bound to a
             // Float-origin RHS (or annotated `: Float`) propagate.
             Expr::Ident(name, _) => self.lookup_float_origin(name),
+            // C26B-011 (Phase 11): `Div[a, b]()` / `Mod[a, b]()` returns
+            // a Float-tagged Lax when either operand is Float-origin (the
+            // JS runtime `Div_mold` sets `__floatHint: true` in that
+            // path). When the result is unmolded into a scalar, the
+            // scalar carries Float origin so `debug(r) / stdout(r)` can
+            // dispatch to `__taida_debug_f` / `__taida_stdout_f` and
+            // render `0.0` / `inf` / `-inf` / `NaN` via
+            // `__taida_float_render`. Without this, `Div[1.0, 0.0]() ]=>
+            // r` drifts to `debug(r)` → `String(0)` → `"0"`.
+            Expr::MoldInst(name, type_args, _, _) if name == "Div" || name == "Mod" => {
+                type_args.iter().any(|a| self.is_float_origin_expr(a))
+            }
             _ => false,
         }
     }
@@ -572,6 +593,7 @@ impl JsCodegen {
                 | "nowMs"
                 | "sleep"
                 | "readBytes"
+                | "readBytesAt"
                 | "writeFile"
                 | "writeBytes"
                 | "appendFile"
@@ -2699,7 +2721,33 @@ impl JsCodegen {
                 Ok(())
             }
             Expr::FloatLit(val, _) => {
-                self.write(&val.to_string());
+                // C26B-011 / Round 7 wV-a: preserve IEEE-754 signed zero
+                // in JS Float literal codegen. Rust `f64::to_string()`
+                // renders -0.0 as "-0" (no decimal point, indistinguishable
+                // from integer -0), and also renders +0.0 as "0". When
+                // the literal is a Float-origin value (e.g. an `x: Float`
+                // binding or a `-0.0` source literal) we must emit JS that
+                // will compare equal to the interpreter / native Float
+                // value under `Object.is(...)`.
+                //
+                // Note: the arithmetic path (`-1.0 * 0.0`) is already
+                // parity-safe as of wS Round 6 (runtime `__taida_float_render`
+                // handles -0.0 via `Object.is`). This fix covers the
+                // pre-existing literal codegen divergence noted in
+                // `examples/quality/c26_float_edge/signed_zero_parity.td`.
+                if val.is_sign_negative() && *val == 0.0 {
+                    self.write("-0");
+                } else if val.is_nan() {
+                    self.write("(0/0)");
+                } else if val.is_infinite() {
+                    if val.is_sign_negative() {
+                        self.write("(-1/0)");
+                    } else {
+                        self.write("(1/0)");
+                    }
+                } else {
+                    self.write(&val.to_string());
+                }
                 Ok(())
             }
             Expr::StringLit(val, _) => {
@@ -2897,6 +2945,7 @@ impl JsCodegen {
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
                             "readBytes" => self.write("__taida_os_readBytes"),
+                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
                             "writeBytes" => self.write("__taida_os_writeBytes"),
                             "appendFile" => self.write("__taida_os_appendFile"),
@@ -2995,6 +3044,7 @@ impl JsCodegen {
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
                             "readBytes" => self.write("__taida_os_readBytes"),
+                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
                             "writeBytes" => self.write("__taida_os_writeBytes"),
                             "appendFile" => self.write("__taida_os_appendFile"),
@@ -3702,6 +3752,39 @@ impl JsCodegen {
                     self.write(" })");
                     return Ok(());
                 }
+                // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+                // SpanEquals / SpanStartsWith / SpanContains / SpanSlice — accept a
+                // span pack `@(start, len)` + raw (Bytes/Str) + needle, dispatch to
+                // the JS runtime helpers defined in `src/js/runtime/core.rs`.
+                // `StrOf[span, raw]()` is the cold-path counterpart (2-arg,
+                // returns Str via UTF-8 decode).
+                if name == "SpanEquals"
+                    || name == "SpanStartsWith"
+                    || name == "SpanContains"
+                    || name == "SpanSlice"
+                    || name == "StrOf"
+                {
+                    let required_arity = match name.as_str() {
+                        "SpanSlice" => 4,
+                        "StrOf" => 2,
+                        _ => 3,
+                    };
+                    if type_args.len() < required_arity {
+                        return Err(JsError {
+                            message: format!("{} requires {} arguments", name, required_arity),
+                        });
+                    }
+                    self.write(&format!("__taida_net_{}(", name));
+                    for (i, arg) in type_args.iter().take(required_arity).enumerate() {
+                        if i > 0 {
+                            self.write(", ");
+                        }
+                        self.gen_expr(arg)?;
+                    }
+                    self.write(")");
+                    return Ok(());
+                }
+
                 // Molten[]() → __taida_molten()
                 if name == "Molten" {
                     if !type_args.is_empty() {
@@ -4045,6 +4128,7 @@ impl JsCodegen {
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
                             "readBytes" => self.write("__taida_os_readBytes"),
+                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
                             "writeFile" => self.write("__taida_os_writeFile"),
                             "writeBytes" => self.write("__taida_os_writeBytes"),
                             "appendFile" => self.write("__taida_os_appendFile"),
@@ -4263,6 +4347,7 @@ impl JsCodegen {
                     "nowMs" => self.write("__taida_nowMs()"),
                     "sleep" => self.write("__taida_sleep(__p)"),
                     "readBytes" => self.write("__taida_os_readBytes(__p)"),
+                    "readBytesAt" => self.write("__taida_os_readBytesAt(__p)"),
                     "writeFile" => self.write("__taida_os_writeFile(__p)"),
                     "writeBytes" => self.write("__taida_os_writeBytes(__p)"),
                     "appendFile" => self.write("__taida_os_appendFile(__p)"),

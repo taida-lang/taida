@@ -48,7 +48,8 @@ impl Interpreter {
         match self.eval_expr(arg0)? {
             Signal::Value(Value::BuchiPack(fields)) => {
                 let is_valid = fields.iter().any(|(k, v)| {
-                    k == "__writer_id" && matches!(v, Value::Str(s) if s == "__v3_streaming_writer")
+                    k == "__writer_id"
+                        && matches!(v, Value::Str(s) if s.as_str() == "__v3_streaming_writer")
                 });
                 if !is_valid {
                     return Err(RuntimeError {
@@ -372,7 +373,7 @@ impl Interpreter {
         // Evaluate event name (arg 1).
         let event_name: String = if let Some(arg) = args.get(1) {
             match self.eval_expr(arg)? {
-                Signal::Value(Value::Str(s)) => s,
+                Signal::Value(Value::Str(s)) => Value::str_take(s),
                 Signal::Value(v) => {
                     return Err(RuntimeError {
                         message: format!("sseEvent: event must be Str, got {}", v),
@@ -389,7 +390,7 @@ impl Interpreter {
         // Evaluate data (arg 2).
         let data: String = if let Some(arg) = args.get(2) {
             match self.eval_expr(arg)? {
-                Signal::Value(Value::Str(s)) => s,
+                Signal::Value(Value::Str(s)) => Value::str_take(s),
                 Signal::Value(v) => {
                     return Err(RuntimeError {
                         message: format!("sseEvent: data must be Str, got {}", v),
@@ -563,21 +564,21 @@ impl Interpreter {
 
     /// Build a Lax[Bytes] with a value.
     pub(super) fn make_lax_bytes_value(data: Vec<u8>) -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(true)),
-            ("__value".into(), Value::Bytes(data)),
-            ("__default".into(), Value::Bytes(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__value".into(), Value::bytes(data)),
+            ("__default".into(), Value::bytes(vec![])),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
     /// Build a Lax[Bytes] empty (hasValue = false).
     pub(super) fn make_lax_bytes_empty() -> Value {
-        Value::BuchiPack(vec![
+        Value::pack(vec![
             ("hasValue".into(), Value::Bool(false)),
-            ("__value".into(), Value::Bytes(vec![])),
-            ("__default".into(), Value::Bytes(vec![])),
-            ("__type".into(), Value::Str("Lax".into())),
+            ("__value".into(), Value::bytes(vec![])),
+            ("__default".into(), Value::bytes(vec![])),
+            ("__type".into(), Value::str("Lax".into())),
         ])
     }
 
@@ -1017,7 +1018,7 @@ impl Interpreter {
 
         // If body is already fully read, return empty Bytes.
         if body.fully_read {
-            return Ok(Some(Signal::Value(Value::Bytes(vec![]))));
+            return Ok(Some(Signal::Value(Value::bytes(vec![]))));
         }
 
         // Aggregate all remaining body bytes.
@@ -1110,6 +1111,6 @@ impl Interpreter {
             body.fully_read = true;
         }
 
-        Ok(Some(Signal::Value(Value::Bytes(all_bytes))))
+        Ok(Some(Signal::Value(Value::bytes(all_bytes))))
     }
 }

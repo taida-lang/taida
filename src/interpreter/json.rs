@@ -16,7 +16,7 @@ use crate::parser::FieldDef;
 #[cfg(test)]
 pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
     match json {
-        serde_json::Value::Null => Value::Str(String::new()), // No null in Taida
+        serde_json::Value::Null => Value::str(String::new()), // No null in Taida
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -27,14 +27,14 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
                 Value::Int(0)
             }
         }
-        serde_json::Value::String(s) => Value::Str(s.clone()),
+        serde_json::Value::String(s) => Value::str(s.clone()),
         serde_json::Value::Array(arr) => Value::list(arr.iter().map(json_to_taida_value).collect()),
         serde_json::Value::Object(obj) => {
             let fields: Vec<(String, Value)> = obj
                 .iter()
                 .map(|(k, v)| (k.clone(), json_to_taida_value(v)))
                 .collect();
-            Value::BuchiPack(fields)
+            Value::pack(fields)
         }
     }
 }
@@ -56,14 +56,14 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
                 serde_json::Value::Null
             }
         }
-        Value::Str(s) => serde_json::Value::String(s.clone()),
+        Value::Str(s) => serde_json::Value::String(s.as_string().clone()),
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::List(items) => {
             serde_json::Value::Array(items.iter().map(taida_value_to_json).collect())
         }
         Value::BuchiPack(fields) => {
             let mut map = serde_json::Map::new();
-            for (field_name, field_val) in fields {
+            for (field_name, field_val) in fields.iter() {
                 // Skip __type field — it's internal metadata, not user data
                 if field_name == "__type" {
                     continue;
@@ -109,7 +109,7 @@ pub fn taida_value_to_json_with_enum_defs(
                 serde_json::Value::Null
             }
         }
-        Value::Str(s) => serde_json::Value::String(s.clone()),
+        Value::Str(s) => serde_json::Value::String(s.as_string().clone()),
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::List(items) => serde_json::Value::Array(
             items
@@ -119,7 +119,7 @@ pub fn taida_value_to_json_with_enum_defs(
         ),
         Value::BuchiPack(fields) => {
             let mut map = serde_json::Map::new();
-            for (field_name, field_val) in fields {
+            for (field_name, field_val) in fields.iter() {
                 if field_name == "__type" {
                     continue;
                 }
@@ -293,8 +293,8 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         };
                         fields.push((sf.name.clone(), value));
                     }
-                    fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-                    Value::BuchiPack(fields)
+                    fields.push(("__type".to_string(), Value::str(type_name.clone())));
+                    Value::pack(fields)
                 }
                 serde_json::Value::Null => {
                     // null -> all defaults
@@ -302,8 +302,8 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                     for sf in schema_fields {
                         fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
-                    fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-                    Value::BuchiPack(fields)
+                    fields.push(("__type".to_string(), Value::str(type_name.clone())));
+                    Value::pack(fields)
                 }
                 _ => {
                     // Non-object -> all defaults
@@ -311,8 +311,8 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                     for sf in schema_fields {
                         fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
-                    fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-                    Value::BuchiPack(fields)
+                    fields.push(("__type".to_string(), Value::str(type_name.clone())));
+                    Value::pack(fields)
                 }
             }
         }
@@ -363,8 +363,8 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
                 .iter()
                 .map(|f| (f.name.clone(), field_missing_default(&f.schema)))
                 .collect();
-            result_fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-            Value::BuchiPack(result_fields)
+            result_fields.push(("__type".to_string(), Value::str(type_name.clone())));
+            Value::pack(result_fields)
         }
         _ => default_for_schema(schema),
     }
@@ -379,11 +379,11 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
 /// `Int(0)` encodes the first variant's ordinal — Taida's "最初のバリアント = デフォルト"
 /// rule (`docs/guide/01_types.md:609`) is preserved as the Lax fallback.
 fn make_lax_enum_inline() -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".to_string(), Value::Bool(false)),
         ("__value".to_string(), Value::Int(0)),
         ("__default".to_string(), Value::Int(0)),
-        ("__type".to_string(), Value::Str("Lax".to_string())),
+        ("__type".to_string(), Value::str("Lax".to_string())),
     ])
 }
 
@@ -422,12 +422,12 @@ fn json_to_primitive(json: &serde_json::Value, prim: &PrimitiveType) -> Value {
             _ => Value::Float(0.0),
         },
         PrimitiveType::Str => match json {
-            serde_json::Value::String(s) => Value::Str(s.clone()),
-            serde_json::Value::Number(n) => Value::Str(format!("{}", n)),
-            serde_json::Value::Bool(b) => Value::Str(format!("{}", b)),
-            serde_json::Value::Null => Value::Str(String::new()),
+            serde_json::Value::String(s) => Value::str(s.clone()),
+            serde_json::Value::Number(n) => Value::str(format!("{}", n)),
+            serde_json::Value::Bool(b) => Value::str(format!("{}", b)),
+            serde_json::Value::Null => Value::str(String::new()),
             serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                Value::Str(serde_json::to_string(json).unwrap_or_default())
+                Value::str(serde_json::to_string(json).unwrap_or_default())
             }
         },
         PrimitiveType::Bool => match json {
@@ -445,15 +445,15 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
     match schema {
         JsonSchema::Primitive(PrimitiveType::Int) => Value::Int(0),
         JsonSchema::Primitive(PrimitiveType::Float) => Value::Float(0.0),
-        JsonSchema::Primitive(PrimitiveType::Str) => Value::Str(String::new()),
+        JsonSchema::Primitive(PrimitiveType::Str) => Value::str(String::new()),
         JsonSchema::Primitive(PrimitiveType::Bool) => Value::Bool(false),
         JsonSchema::TypeDef(type_name, fields) => {
             let mut result_fields: Vec<(String, Value)> = fields
                 .iter()
                 .map(|f| (f.name.clone(), default_for_schema(&f.schema)))
                 .collect();
-            result_fields.push(("__type".to_string(), Value::Str(type_name.clone())));
-            Value::BuchiPack(result_fields)
+            result_fields.push(("__type".to_string(), Value::str(type_name.clone())));
+            Value::pack(result_fields)
         }
         JsonSchema::List(_) => Value::list(Vec::new()),
         // C16: Enum default is the first variant's ordinal (= Int(0)).
@@ -475,10 +475,10 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
 pub fn stdlib_json_encode(args: &[Value]) -> Result<Value, String> {
     let val = args.first().unwrap_or(&Value::Unit);
     match val {
-        Value::Json(j) => Ok(Value::Str(serde_json::to_string(j).unwrap_or_default())),
+        Value::Json(j) => Ok(Value::str(serde_json::to_string(j).unwrap_or_default())),
         _ => {
             let json = taida_value_to_json(val);
-            Ok(Value::Str(serde_json::to_string(&json).unwrap_or_default()))
+            Ok(Value::str(serde_json::to_string(&json).unwrap_or_default()))
         }
     }
 }
@@ -489,7 +489,7 @@ pub fn stdlib_json_encode(args: &[Value]) -> Result<Value, String> {
 pub fn stdlib_json_pretty(args: &[Value]) -> Result<Value, String> {
     let val = args.first().unwrap_or(&Value::Unit);
     let json = taida_value_to_json(val);
-    Ok(Value::Str(
+    Ok(Value::str(
         serde_json::to_string_pretty(&json).unwrap_or_default(),
     ))
 }
@@ -500,8 +500,8 @@ mod tests {
 
     #[test]
     fn test_json_encode_buchi_pack() {
-        let pack = Value::BuchiPack(vec![
-            ("name".to_string(), Value::Str("Alice".to_string())),
+        let pack = Value::pack(vec![
+            ("name".to_string(), Value::str("Alice".to_string())),
             ("age".to_string(), Value::Int(30)),
         ]);
         let result = stdlib_json_encode(&[pack]).unwrap();
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_json_pretty() {
-        let pack = Value::BuchiPack(vec![("x".to_string(), Value::Int(1))]);
+        let pack = Value::pack(vec![("x".to_string(), Value::Int(1))]);
         let result = stdlib_json_pretty(&[pack]).unwrap();
         let Value::Str(s) = result else {
             unreachable!("Expected Str from json_pretty");
@@ -548,12 +548,12 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "name" && *v == Value::Str("Alice".to_string()))
+                .any(|(k, v)| k == "name" && *v == Value::str("Alice".to_string()))
         );
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "data" && *v == Value::Str(String::new()))
+                .any(|(k, v)| k == "data" && *v == Value::str(String::new()))
         );
     }
 
@@ -589,11 +589,11 @@ mod tests {
         let schema = JsonSchema::Primitive(PrimitiveType::Str);
         assert_eq!(
             json_to_typed_value(&serde_json::json!("hello"), &schema),
-            Value::Str("hello".to_string())
+            Value::str("hello".to_string())
         );
         assert_eq!(
             json_to_typed_value(&serde_json::json!(null), &schema),
-            Value::Str(String::new())
+            Value::str(String::new())
         );
     }
 
@@ -620,7 +620,7 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "name" && *v == Value::Str("Asuka".to_string()))
+                .any(|(k, v)| k == "name" && *v == Value::str("Asuka".to_string()))
         );
         assert!(
             fields
@@ -630,7 +630,7 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "__type" && *v == Value::Str("User".to_string()))
+                .any(|(k, v)| k == "__type" && *v == Value::str("User".to_string()))
         );
         // "extra" should NOT be present
         assert!(!fields.iter().any(|(k, _)| k == "extra"));
@@ -666,7 +666,7 @@ mod tests {
         );
         assert_eq!(
             fields.iter().find(|(k, _)| k == "email").unwrap().1,
-            Value::Str(String::new())
+            Value::str(String::new())
         );
     }
 
@@ -712,7 +712,7 @@ mod tests {
         };
         assert_eq!(
             fields.iter().find(|(k, _)| k == "name").unwrap().1,
-            Value::Str(String::new())
+            Value::str(String::new())
         );
         assert_eq!(
             fields.iter().find(|(k, _)| k == "age").unwrap().1,
@@ -760,7 +760,7 @@ mod tests {
         assert!(
             addr_fields
                 .iter()
-                .any(|(k, v)| k == "city" && *v == Value::Str("Tokyo-3".to_string()))
+                .any(|(k, v)| k == "city" && *v == Value::str("Tokyo-3".to_string()))
         );
     }
 
@@ -792,7 +792,7 @@ mod tests {
             assert!(
                 fields
                     .iter()
-                    .any(|(k, v)| k == "name" && *v == Value::Str("Asuka".to_string()))
+                    .any(|(k, v)| k == "name" && *v == Value::str("Asuka".to_string()))
             );
         }
     }
@@ -805,7 +805,7 @@ mod tests {
         );
         assert_eq!(
             default_for_schema(&JsonSchema::Primitive(PrimitiveType::Str)),
-            Value::Str(String::new())
+            Value::str(String::new())
         );
         assert_eq!(
             default_for_schema(&JsonSchema::List(Box::new(JsonSchema::Primitive(
@@ -850,7 +850,7 @@ mod tests {
         let tag = fields
             .iter()
             .find(|(k, _)| k == "__type")
-            .map(|(_, v)| v == &Value::Str("Lax".to_string()))
+            .map(|(_, v)| v == &Value::str("Lax".to_string()))
             .unwrap_or(false);
         has_value && inner_value && default && tag
     }
@@ -1074,7 +1074,7 @@ mod tests {
             "TypeDef default must embed Int(0) for Enum fields (not Lax)"
         );
         let name = &fields.iter().find(|(k, _)| k == "name").unwrap().1;
-        assert_eq!(name, &Value::Str(String::new()));
+        assert_eq!(name, &Value::str(String::new()));
     }
 
     #[test]

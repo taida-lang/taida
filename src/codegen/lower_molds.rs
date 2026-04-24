@@ -227,6 +227,197 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+            // Dispatches to the C runtime helpers in native_runtime/core.c.
+            // SpanEquals / SpanStartsWith / SpanContains → Bool (taida_val 0/1).
+            // SpanSlice → Pack (sub-span `@(start, len)`).
+            "SpanEquals" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "SpanEquals requires 3 arguments: SpanEquals[span, raw, needle]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let needle = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanEquals".to_string(),
+                    vec![span, raw, needle],
+                ));
+                Ok(result)
+            }
+            "SpanStartsWith" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "SpanStartsWith requires 3 arguments: SpanStartsWith[span, raw, prefix]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let prefix = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanStartsWith".to_string(),
+                    vec![span, raw, prefix],
+                ));
+                Ok(result)
+            }
+            "SpanContains" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "SpanContains requires 3 arguments: SpanContains[span, raw, needle]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let needle = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanContains".to_string(),
+                    vec![span, raw, needle],
+                ));
+                Ok(result)
+            }
+            "SpanSlice" => {
+                if type_args.len() < 4 {
+                    return Err(LowerError {
+                        message: "SpanSlice requires 4 arguments: SpanSlice[span, raw, start, end]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw = self.lower_expr(func, &type_args[1])?;
+                let sub_start = self.lower_expr(func, &type_args[2])?;
+                let sub_end = self.lower_expr(func, &type_args[3])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_net_SpanSlice".to_string(),
+                    vec![span, raw, sub_start, sub_end],
+                ));
+                Ok(result)
+            }
+            // ── C26B-016 (@c.26, Option B+): `StrOf[span, raw]() -> Str` ──
+            // Cold-path materialization of a span into an owned Str.
+            // This lowering is a **pure IR composition** using existing C
+            // runtime helpers — it deliberately does NOT add a new
+            // `taida_net_StrOf` runtime function (avoids core.c churn during
+            // Round 3 and coexists cleanly with the clone-heavy abstraction
+            // work in wG).
+            //
+            // IR sequence:
+            //   start = taida_pack_get(span, hash("start"))
+            //   len   = taida_pack_get(span, hash("len"))
+            //   end   = taida_int_add(start, len)
+            //   bytes = taida_slice_mold(raw, start, end)
+            //   lax   = taida_utf8_decode_mold(bytes)
+            //   str   = taida_lax_get_or_default(lax, "")
+            //
+            // This matches `StrOf` interpreter / JS semantics: invalid UTF-8
+            // or OOB span → empty string (tolerant; `taida_slice_mold` clamps
+            // end to buf_len, and `taida_utf8_decode_mold` returns an empty
+            // Lax on UTF-8 failure which `get_or_default("")` then materializes).
+            "StrOf" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "StrOf requires 2 arguments: StrOf[span, raw]()".into(),
+                    });
+                }
+                let span = self.lower_expr(func, &type_args[0])?;
+                let raw_is_str = self.expr_is_string_full(&type_args[1]);
+                let raw = self.lower_expr(func, &type_args[1])?;
+
+                // start = taida_pack_get(span, hash("start"))
+                let start_hash_var = func.alloc_var();
+                let start_hash = crate::codegen::lower::simple_hash("start") as i64;
+                func.push(IrInst::ConstInt(start_hash_var, start_hash));
+                let start_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    start_val,
+                    "taida_pack_get".to_string(),
+                    vec![span, start_hash_var],
+                ));
+
+                // len = taida_pack_get(span, hash("len"))
+                let len_hash_var = func.alloc_var();
+                let len_hash = crate::codegen::lower::simple_hash("len") as i64;
+                func.push(IrInst::ConstInt(len_hash_var, len_hash));
+                let len_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    len_val,
+                    "taida_pack_get".to_string(),
+                    vec![span, len_hash_var],
+                ));
+
+                // end = taida_int_add(start, len)
+                let end_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    end_val,
+                    "taida_int_add".to_string(),
+                    vec![start_val, len_val],
+                ));
+
+                // If raw is known at lower time to be a Str, convert to Bytes first
+                // so `taida_slice_mold` → Bytes (not character-based Str slice) and
+                // `taida_utf8_decode_mold` succeeds. When raw is Bytes (the common
+                // `req.raw` case), skip the conversion.
+                let raw_bytes = if raw_is_str {
+                    // enc_lax = taida_utf8_encode_mold(raw)
+                    let enc_lax = func.alloc_var();
+                    func.push(IrInst::Call(
+                        enc_lax,
+                        "taida_utf8_encode_mold".to_string(),
+                        vec![raw],
+                    ));
+                    // default for encode = empty bytes via ConstStr("") (runtime
+                    // permits using empty Str as Bytes fallback here because
+                    // taida_lax_get_or_default is type-polymorphic at C level)
+                    let empty_bytes_default = func.alloc_var();
+                    func.push(IrInst::ConstStr(empty_bytes_default, String::new()));
+                    // bytes = taida_lax_get_or_default(enc_lax, "")
+                    let bytes_from_str = func.alloc_var();
+                    func.push(IrInst::Call(
+                        bytes_from_str,
+                        "taida_lax_get_or_default".to_string(),
+                        vec![enc_lax, empty_bytes_default],
+                    ));
+                    bytes_from_str
+                } else {
+                    raw
+                };
+
+                // bytes = taida_slice_mold(rawBytes, start, end)
+                let bytes_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    bytes_val,
+                    "taida_slice_mold".to_string(),
+                    vec![raw_bytes, start_val, end_val],
+                ));
+
+                // lax = taida_utf8_decode_mold(bytes)
+                let lax_val = func.alloc_var();
+                func.push(IrInst::Call(
+                    lax_val,
+                    "taida_utf8_decode_mold".to_string(),
+                    vec![bytes_val],
+                ));
+
+                // default = "" (empty Str)
+                let default_val = func.alloc_var();
+                func.push(IrInst::ConstStr(default_val, String::new()));
+
+                // str = taida_lax_get_or_default(lax, "")
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_lax_get_or_default".to_string(),
+                    vec![lax_val, default_val],
+                ));
+                Ok(result)
+            }
             "Slice" => {
                 if type_args.is_empty() {
                     return Err(LowerError {
@@ -308,6 +499,95 @@ impl Lowering {
                     result,
                     "taida_str_repeat".to_string(),
                     vec![s, n],
+                ));
+                Ok(result)
+            }
+            // ── C26B-018 (B) byte-level primitives ──────────────────
+            "ByteAt" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "ByteAt requires 2 arguments: ByteAt[str, idx]()".into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let idx = self.lower_expr(func, &type_args[1])?;
+                let raw = func.alloc_var();
+                func.push(IrInst::Call(
+                    raw,
+                    "taida_str_byte_at".to_string(),
+                    vec![s, idx],
+                ));
+                // ByteAt returns Lax[Int] (has_value=false → default 0).
+                let default_val = func.alloc_var();
+                func.push(IrInst::ConstInt(default_val, 0));
+                // Sentinel: taida_str_byte_at returns -1 for OOB; we
+                // encode "hasValue" at the runtime layer (see
+                // taida_str_byte_at_lax helper below in core.c).
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_byte_at_lax".to_string(),
+                    vec![s, idx, default_val],
+                ));
+                // raw is unused on this path (dead-store elimination
+                // keeps it out of the final codegen); we compute it only
+                // to keep the variable-slot alloc pattern consistent
+                // with other byte-level molds in case future Int-tag
+                // projection wants a non-Lax fast path.
+                let _ = raw;
+                Ok(result)
+            }
+            "ByteSlice" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message:
+                            "ByteSlice requires 3 arguments: ByteSlice[str, start, end]()"
+                                .into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let start = self.lower_expr(func, &type_args[1])?;
+                let end = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_byte_slice".to_string(),
+                    vec![s, start, end],
+                ));
+                Ok(result)
+            }
+            "ByteLength" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: "ByteLength requires 1 argument: ByteLength[str]()".into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_byte_length".to_string(),
+                    vec![s],
+                ));
+                Ok(result)
+            }
+            // ── C26B-018 (C) StringRepeatJoin ───────────────────────
+            "StringRepeatJoin" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message:
+                            "StringRepeatJoin requires 3 arguments: StringRepeatJoin[str, n, sep]()"
+                                .into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let n = self.lower_expr(func, &type_args[1])?;
+                let sep = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_repeat_join".to_string(),
+                    vec![s, n, sep],
                 ));
                 Ok(result)
             }
@@ -1705,35 +1985,115 @@ impl Lowering {
             }
             "Div" => {
                 // Div[a, b]() -> taida_div_mold(a, b) -> returns Lax
+                //
+                // C26B-011 (Phase 11): if at least one operand is Float,
+                // dispatch to `taida_div_mold_f` so the returned Lax is
+                // tagged FLOAT (matches interpreter — which returns
+                // `Value::Float` in its Lax __value/__default, and JS
+                // which sets `__floatHint: true` on the Lax). Int args
+                // are widened to f64 via `taida_int_to_float` before the
+                // call; the Float-hint runtime uses hardware division
+                // so NaN / ±Infinity / denormal propagate per IEEE 754.
                 if type_args.len() < 2 {
                     return Err(LowerError {
                         message: "Div requires 2 type arguments".to_string(),
                     });
                 }
-                let a = self.lower_expr(func, &type_args[0])?;
-                let b = self.lower_expr(func, &type_args[1])?;
+                let a_raw = self.lower_expr(func, &type_args[0])?;
+                let b_raw = self.lower_expr(func, &type_args[1])?;
+                let a_is_float = self.expr_returns_float(&type_args[0]);
+                let b_is_float = self.expr_returns_float(&type_args[1]);
+                if a_is_float || b_is_float {
+                    let a = if a_is_float {
+                        a_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![a_raw],
+                        ));
+                        tmp
+                    };
+                    let b = if b_is_float {
+                        b_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![b_raw],
+                        ));
+                        tmp
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_div_mold_f".to_string(),
+                        vec![a, b],
+                    ));
+                    return Ok(result);
+                }
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
                     "taida_div_mold".to_string(),
-                    vec![a, b],
+                    vec![a_raw, b_raw],
                 ));
                 Ok(result)
             }
             "Mod" => {
                 // Mod[a, b]() -> taida_mod_mold(a, b) -> returns Lax
+                //
+                // C26B-011 (Phase 11): Float-hint dispatch — see the Div
+                // comment above. `fmod(a, b)` is used for the Float path
+                // to match Rust's `%` operator on f64 / interpreter
+                // `Value::Float % Value::Float`.
                 if type_args.len() < 2 {
                     return Err(LowerError {
                         message: "Mod requires 2 type arguments".to_string(),
                     });
                 }
-                let a = self.lower_expr(func, &type_args[0])?;
-                let b = self.lower_expr(func, &type_args[1])?;
+                let a_raw = self.lower_expr(func, &type_args[0])?;
+                let b_raw = self.lower_expr(func, &type_args[1])?;
+                let a_is_float = self.expr_returns_float(&type_args[0]);
+                let b_is_float = self.expr_returns_float(&type_args[1]);
+                if a_is_float || b_is_float {
+                    let a = if a_is_float {
+                        a_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![a_raw],
+                        ));
+                        tmp
+                    };
+                    let b = if b_is_float {
+                        b_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![b_raw],
+                        ));
+                        tmp
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_mod_mold_f".to_string(),
+                        vec![a, b],
+                    ));
+                    return Ok(result);
+                }
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
                     "taida_mod_mold".to_string(),
-                    vec![a, b],
+                    vec![a_raw, b_raw],
                 ));
                 Ok(result)
             }

@@ -467,9 +467,9 @@ impl Interpreter {
                 );
                 let _ = self.env.define(
                     &ed.name,
-                    Value::BuchiPack(vec![
-                        ("__type".to_string(), Value::Str("EnumDef".to_string())),
-                        ("__name".to_string(), Value::Str(ed.name.clone())),
+                    Value::pack(vec![
+                        ("__type".to_string(), Value::str("EnumDef".to_string())),
+                        ("__name".to_string(), Value::str(ed.name.clone())),
                     ]),
                 );
                 Ok(Signal::Value(Value::Unit))
@@ -494,9 +494,9 @@ impl Interpreter {
                 // マーカー値として __type: "TypeDef" の BuchiPack を使う
                 let _ = self.env.define(
                     &td.name,
-                    Value::BuchiPack(vec![
-                        ("__type".to_string(), Value::Str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::Str(td.name.clone())),
+                    Value::pack(vec![
+                        ("__type".to_string(), Value::str("TypeDef".to_string())),
+                        ("__name".to_string(), Value::str(td.name.clone())),
                     ]),
                 );
                 Ok(Signal::Value(Value::Unit))
@@ -601,9 +601,9 @@ impl Interpreter {
                 // InheritanceDef 名もシンボルとして環境に登録（<<< @(ChildType) で export 可能にする）
                 let _ = self.env.define(
                     &inh.child,
-                    Value::BuchiPack(vec![
-                        ("__type".to_string(), Value::Str("TypeDef".to_string())),
-                        ("__name".to_string(), Value::Str(inh.child.clone())),
+                    Value::pack(vec![
+                        ("__type".to_string(), Value::str("TypeDef".to_string())),
+                        ("__name".to_string(), Value::str(inh.child.clone())),
                     ]),
                 );
                 Ok(Signal::Value(Value::Unit))
@@ -808,7 +808,17 @@ impl Interpreter {
         match expr {
             // Function call in tail position — check for TCO opportunity
             Expr::FuncCall(callee, args, _) => {
-                if let Expr::Ident(name, _) = callee.as_ref() {
+                // C26B-017: A partial application `f(a, )` (with Hole args) is
+                // NOT a real function call — it returns a closure. Falling
+                // through to the TCO path would evaluate each Hole as
+                // `Value::Unit` and issue a spurious tail call to `f` with
+                // Unit-filled args, breaking closure capture (symptom:
+                // `Cannot add <n> and @()` when the partial is the last
+                // expression of a function body). Route partial applications
+                // to the normal evaluator so `eval_partial_application` can
+                // build the proper closure value.
+                let is_partial_application = args.iter().any(|a| matches!(a, Expr::Hole(_)));
+                if !is_partial_application && let Expr::Ident(name, _) = callee.as_ref() {
                     let is_self_call = self.active_function.as_deref() == Some(name);
                     // Check if the callee is a user-defined function (for mutual recursion).
                     // Only attempt mutual TCO when inside a function context AND the
@@ -876,11 +886,11 @@ impl Interpreter {
         match expr {
             Expr::IntLit(n, _) => Ok(Signal::Value(Value::Int(*n))),
             Expr::FloatLit(n, _) => Ok(Signal::Value(Value::Float(*n))),
-            Expr::StringLit(s, _) => Ok(Signal::Value(Value::Str(s.clone()))),
+            Expr::StringLit(s, _) => Ok(Signal::Value(Value::str(s.clone()))),
             Expr::TemplateLit(s, _) => {
                 // Template string interpolation: replace ${...} with evaluated values
                 let result = self.eval_template_string(s)?;
-                Ok(Signal::Value(Value::Str(result)))
+                Ok(Signal::Value(Value::str(result)))
             }
             Expr::BoolLit(b, _) => Ok(Signal::Value(Value::Bool(*b))),
             Expr::Gorilla(_) => Ok(Signal::Gorilla),
@@ -889,9 +899,9 @@ impl Interpreter {
             // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold_eval
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
-                    Ok(Signal::Value(Value::Str(format!("{}:{}", name, var))))
+                    Ok(Signal::Value(Value::str(format!("{}:{}", name, var))))
                 } else {
-                    Ok(Signal::Value(Value::Str(name.clone())))
+                    Ok(Signal::Value(Value::str(name.clone())))
                 }
             }
             Expr::Ident(name, _) => {
@@ -914,7 +924,7 @@ impl Interpreter {
                     };
                     result_fields.push((field.name.clone(), value));
                 }
-                Ok(Signal::Value(Value::BuchiPack(result_fields)))
+                Ok(Signal::Value(Value::pack(result_fields)))
             }
 
             Expr::ListLit(items, _) => {
@@ -1128,7 +1138,7 @@ impl Interpreter {
                 // The RC2 design uses mold syntax for effectful addon
                 // queries (`TerminalSize[]()`, `ReadKey[]()`). When a
                 // mold name is bound in the current env to an addon
-                // sentinel (`Value::Str("__taida_addon_call::...")`),
+                // sentinel (`Value::str("__taida_addon_call::...")`),
                 // we dispatch through the addon call path with the
                 // positional `type_args` as arguments and no named
                 // fields. This preserves the normal mold path for
@@ -1316,8 +1326,8 @@ impl Interpreter {
                 }
 
                 // Add a __type field to track the type
-                result_fields.push(("__type".to_string(), Value::Str(name.clone())));
-                let instance = Value::BuchiPack(result_fields.clone());
+                result_fields.push(("__type".to_string(), Value::str(name.clone())));
+                let instance = Value::pack(result_fields.clone());
 
                 // `solidify` overrides what Name[args]() evaluates to.
                 if let Some(ref func_def) = solidify_method {
@@ -1425,8 +1435,8 @@ impl Interpreter {
                 } else {
                     result_fields = provided_fields;
                 }
-                result_fields.push(("__type".to_string(), Value::Str(name.clone())));
-                Ok(Signal::Value(Value::BuchiPack(result_fields)))
+                result_fields.push(("__type".to_string(), Value::str(name.clone())));
+                Ok(Signal::Value(Value::pack(result_fields)))
             }
 
             Expr::Throw(inner, _) => {
@@ -1484,16 +1494,16 @@ impl Interpreter {
             TypeExpr::Named(name) => match name.as_str() {
                 "Int" | "Num" => Ok(Value::Int(0)),
                 "Float" => Ok(Value::Float(0.0)),
-                "Str" => Ok(Value::Str(String::new())),
-                "Bytes" => Ok(Value::Bytes(Vec::new())),
+                "Str" => Ok(Value::str(String::new())),
+                "Bytes" => Ok(Value::bytes(Vec::new())),
                 "Bool" => Ok(Value::Bool(false)),
                 "JSON" => Ok(Value::default_json()),
                 "Molten" => Ok(Value::default_molten()),
                 _ => {
                     if visiting.contains(name) {
-                        return Ok(Value::BuchiPack(vec![(
+                        return Ok(Value::pack(vec![(
                             "__type".to_string(),
-                            Value::Str(name.clone()),
+                            Value::str(name.clone()),
                         )]));
                     }
                     if let Some(type_fields) = self.type_defs.get(name).cloned() {
@@ -1504,8 +1514,8 @@ impl Interpreter {
                             fields.push((field_def.name.clone(), default_val));
                         }
                         visiting.remove(name);
-                        fields.push(("__type".to_string(), Value::Str(name.clone())));
-                        Ok(Value::BuchiPack(fields))
+                        fields.push(("__type".to_string(), Value::str(name.clone())));
+                        Ok(Value::pack(fields))
                     } else {
                         Ok(Value::Unit)
                     }
@@ -1518,7 +1528,7 @@ impl Interpreter {
                     let default_val = self.default_for_field_def(field_def, visiting)?;
                     result.push((field_def.name.clone(), default_val));
                 }
-                Ok(Value::BuchiPack(result))
+                Ok(Value::pack(result))
             }
             TypeExpr::Generic(name, args) => {
                 if name == "Lax" {
@@ -1527,11 +1537,11 @@ impl Interpreter {
                     } else {
                         Value::Unit
                     };
-                    return Ok(Value::BuchiPack(vec![
+                    return Ok(Value::pack(vec![
                         ("hasValue".to_string(), Value::Bool(false)),
                         ("__value".to_string(), inner.clone()),
                         ("__default".to_string(), inner),
-                        ("__type".to_string(), Value::Str("Lax".to_string())),
+                        ("__type".to_string(), Value::str("Lax".to_string())),
                     ]));
                 }
                 Ok(Value::Unit)

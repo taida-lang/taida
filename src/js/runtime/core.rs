@@ -48,9 +48,29 @@ function __taida_debug(...args) {
 // wrappers, etc.) fall through to the same formatting path as the
 // non-`_f` helpers so parity is preserved for mixed-type output.
 function __taida_float_render(v) {
-  if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v)) {
-    // Match Rust's `format!("{:.1}", n)` used by the interpreter.
-    return v.toFixed(1);
+  if (typeof v === 'number') {
+    // C26B-011 (Phase 11): IEEE 754 special values — match Rust's
+    // `f64::Display` (what the interpreter uses via `n.to_string()`):
+    //   NaN         → "NaN"
+    //   +Infinity   → "inf"
+    //   -Infinity   → "-inf"
+    // JS' default `String(v)` produces "NaN" (OK) but "Infinity" /
+    // "-Infinity" which drifts from interpreter and native. Native
+    // already routes through `taida_float_to_str` for the same mapping
+    // (see `src/codegen/native_runtime/core.c::taida_float_to_str`).
+    if (Number.isNaN(v)) return 'NaN';
+    if (v === Infinity) return 'inf';
+    if (v === -Infinity) return '-inf';
+    if (Number.isFinite(v) && Number.isInteger(v)) {
+      // C26B-011 / Round 7 wV-a: IEEE-754 signed zero. `Number.isInteger(-0)`
+      // is true, and `(-0).toFixed(1)` returns "0.0" (sign drops),
+      // diverging from the interpreter's `format!("{:.1}", -0.0)` which
+      // yields "-0.0". Detect the sign bit explicitly via `Object.is`
+      // before falling through to `.toFixed(1)`.
+      if (Object.is(v, -0)) return '-0.0';
+      // Match Rust's `format!("{:.1}", n)` used by the interpreter.
+      return v.toFixed(1);
+    }
   }
   return String(v);
 }
@@ -223,7 +243,19 @@ function __taida_sub(a, b) {
 }
 
 function __taida_mul(a, b) {
+  // C26B-011 / Round 7 wV-a: IEEE-754 signed-zero preservation for
+  // Float arithmetic. When either operand already carries the
+  // negative-zero sign bit, or when the Number-path product is -0
+  // (e.g. `-1 * 0 === -0`), routing through the BigInt fast-path
+  // would collapse the sign (BigInt has no -0). Stay on the Number
+  // multiplication path in those cases so `__taida_float_render`
+  // can observe the sign bit via `Object.is(v, -0)` and render
+  // "-0.0", matching the interpreter's `format!("{:.1}", -0.0)`.
   if (__taida_isIntNumber(a) && __taida_isIntNumber(b)) {
+    const prod = a * b;
+    if (Object.is(prod, -0) || Object.is(a, -0) || Object.is(b, -0)) {
+      return prod;
+    }
     return __taida_fromI64BigInt(__taida_toI64BigInt(a) * __taida_toI64BigInt(b));
   }
   return a * b;
@@ -868,29 +900,39 @@ function __taida_hasValue(val) {
   return fn;
 }
 
-function Lax(value, typedDefault) {
+function Lax(value, typedDefault, floatHint) {
   const _hasValue = value !== null && value !== undefined;
   const _default = _hasValue ? __taida_lax_default(value) : (typedDefault !== undefined ? typedDefault : 0);
   const _val = _hasValue ? value : _default;
-  return Object.freeze({
+  // C26B-011 (Phase 11): `floatHint` is forwarded by Float-origin mold
+  // callers (e.g. `Div_mold` for Float/Int mixed or Float/Float) so the
+  // short-form `.toString()` renders `__value` / `__default` via
+  // `__taida_float_render` (which handles `0.0`/`inf`/`-inf`/`NaN`).
+  // Without this the default `String(0.0)` collapses to `"0"` and the
+  // interpreter's `Lax(default: 0.0)` drifts.
+  const _floatHint = floatHint === true;
+  const pack = {
     __type: 'Lax',
     __value: _val,
     __default: _default,
     hasValue: __taida_hasValue(_hasValue),
     isEmpty() { return !_hasValue; },
     getOrDefault(def) { return _hasValue ? _val : def; },
-    map(fn) { return _hasValue ? Lax(fn(_val)) : this; },
+    map(fn) { return _hasValue ? Lax(fn(_val), undefined, _floatHint) : this; },
     flatMap(fn) {
       if (!_hasValue) return this;
       const result = fn(_val);
       if (result && result.__type === 'Lax') return result;
-      return Lax(result);
+      return Lax(result, undefined, _floatHint);
     },
     unmold() { return _hasValue ? _val : _default; },
     toString() {
-      return _hasValue ? 'Lax(' + String(_val) + ')' : 'Lax(default: ' + String(_default) + ')';
+      const fmt = _floatHint ? __taida_float_render : String;
+      return _hasValue ? 'Lax(' + fmt(_val) + ')' : 'Lax(default: ' + fmt(_default) + ')';
     },
-  });
+  };
+  if (_floatHint) pack.__floatHint = true;
+  return Object.freeze(pack);
 }
 
 function __taida_molten() {
@@ -973,21 +1015,29 @@ function Cage_mold(cageValue, cageFn) {
 }
 
 // ── Div/Mod Mold types (safe division returning Lax) ──
+//
+// C26B-011 (Phase 11): propagate `__floatHint` through to the returned
+// Lax so `.toString()` renders `0.0` / `inf` / `-inf` / `NaN` per Rust
+// f64 Display. Before this fix, `Div[1.0, 2.0]()` returned `Lax(0.5)`
+// (OK) but `Div[1.0, 0.0]()` returned `Lax(default: 0)` because the
+// default-only path called `Lax(null, def)` without a hint — the
+// fallback `String(0.0)` is `"0"` in JS, drifting from interpreter.
 function Div_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
+  const isFloat = !!(opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b)))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
-  if (b === 0) return Lax(null, def);
-  if (isFloat) return Lax(a / b);
+  if (b === 0) return Lax(null, def, isFloat);
+  if (isFloat) return Lax(a / b, undefined, true);
   const result = Number.isInteger(a) && Number.isInteger(b) ? Math.trunc(a / b) : a / b;
   const lax = Lax(result);
   return lax;
 }
 function Mod_mold(a, b, opts) {
   if (opts === undefined) opts = {};
-  const isFloat = opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b))));
+  const isFloat = !!(opts.__floatHint || (typeof a === 'number' && (!Number.isInteger(a) || (typeof b === 'number' && !Number.isInteger(b)))));
   const def = opts.default !== undefined ? opts.default : (isFloat ? 0.0 : 0);
-  if (b === 0) return Lax(null, def);
+  if (b === 0) return Lax(null, def, isFloat);
+  if (isFloat) return Lax(a % b, undefined, true);
   return Lax(a % b);
 }
 
@@ -1096,8 +1146,14 @@ function __taida_display_string(v) {
     // C23B-003 reopen — Stream: interpreter uses `Value::Stream` (not a
     // BuchiPack), so `to_display_string()` returns
     // `"Stream[completed: N items]"` / `"Stream[active]"`
-    // (`src/interpreter/value.rs:378-381`). Native/wasm don't support
-    // Stream lowering yet; parity is enforced only for interpreter+JS.
+    // (`src/interpreter/value.rs:378-381`). Stream lowering has landed
+    // on Native / WASM-wasi since C25B-001 Phase 3 (@c.25.rc7), so all
+    // 4 backends share this formatting contract. The JS runtime keeps
+    // using the `Value::Stream`-shaped object literal (__type /
+    // __status / __items) because the JS transpiler lowers Taida
+    // `Stream` values to this shape rather than a native Stream
+    // primitive — the shape is internal to the JS backend, not a
+    // surface concern.
     if (v.__type === 'Stream') {
       if (v.__status === 'active') return 'Stream[active]';
       const items = Array.isArray(v.__items) ? v.__items : [];
@@ -1709,6 +1765,55 @@ function Slice(val, optsOrStart, maybeEnd) {
 }
 function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
 function Repeat(str, n) { return typeof str === 'string' ? str.repeat(Math.max(0, n)) : ''; }
+// ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
+// These operate on the raw UTF-8 byte stream, not on JS UTF-16 code
+// units. The TextEncoder round-trip gives O(n) the first time but
+// V8 caches the result so repeated calls stay fast. Existing
+// `CharAt` / `Slice` / `.length()` are **unchanged** (UTF-16 surface).
+const __taida_enc = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+const __taida_dec = (typeof TextDecoder !== 'undefined') ? new TextDecoder('utf-8', { fatal: false }) : null;
+function __taida_bytes_of(s) {
+  if (typeof s !== 'string') return new Uint8Array(0);
+  if (__taida_enc) return __taida_enc.encode(s);
+  // Fallback: rough 1-byte-per-char mapping for ASCII-only envs.
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
+  return out;
+}
+function ByteAt(str, idx) {
+  const bytes = __taida_bytes_of(str);
+  if (idx < 0 || idx >= bytes.length) return Lax(null, 0);
+  return Lax(bytes[idx] | 0);
+}
+function ByteSlice(str, start, end) {
+  const bytes = __taida_bytes_of(str);
+  const len = bytes.length;
+  let s = Math.max(0, Math.min(len, start | 0));
+  let e = Math.max(0, Math.min(len, end | 0));
+  if (s > e) { const t = s; s = e; e = t; }
+  const slice = bytes.subarray(s, e);
+  if (__taida_dec) return __taida_dec.decode(slice);
+  // Fallback
+  let out = '';
+  for (let i = 0; i < slice.length; i++) out += String.fromCharCode(slice[i]);
+  return out;
+}
+function ByteLength(str) {
+  return __taida_bytes_of(str).length;
+}
+// ── C26B-018 (C) StringRepeatJoin ────────────────────────────
+// `StringRepeatJoin[str, n, sep]() -> Str` — single-allocation
+// repeat+join. n<=0 → "", n==1 → str (no sep), n>=2 → str+sep+...+str.
+function StringRepeatJoin(str, n, sep) {
+  if (typeof str !== 'string') str = '';
+  if (typeof sep !== 'string') sep = '';
+  n = n | 0;
+  if (n <= 0) return '';
+  if (n === 1) return str;
+  // String#repeat + join: V8 optimizes this into a single buffer.
+  if (sep === '') return str.repeat(n);
+  return new Array(n).fill(str).join(sep);
+}
 function Reverse(val) {
   if (typeof val === 'string') return val.split('').reverse().join('');
   if (Array.isArray(val)) { const copy = [...val]; copy.reverse(); return Object.freeze(copy); }

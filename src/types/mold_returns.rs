@@ -115,6 +115,11 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         // C21B-seed-07: `Bool[x]()` returns a Lax[Bool] pack.
         "Bool" => Pack,
         "TypeIs" | "TypeExtends" | "Exists" | "Contains" => Bool,
+        // C26B-016 (@c.26, Option B+): span-aware comparison molds.
+        // All three return `Bool` deterministically; their inputs are a span
+        // pack (`@(start: Int, len: Int)`) + raw Bytes/Str + a needle.
+        // `SpanSlice` is classified under Pack-returning molds below.
+        "SpanEquals" | "SpanStartsWith" | "SpanContains" => Bool,
 
         // ── Str-returning molds ─────────────────────────────────────
         // NB: B11-2f previously routed these through `convert_to_string`
@@ -131,6 +136,17 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         "Pad" | "PadLeft" | "PadRight" => Str,
         "Join" => Str,
         "ToFixed" | "ToRadix" => Str,
+        // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` materializes a
+        // span pack into an owned `Str` (cold-path counterpart to SpanEquals).
+        "StrOf" => Str,
+        // C26B-018 (B)(C): byte-level primitive + single-alloc repeat/join.
+        // `ByteSlice` / `StringRepeatJoin` return bare Str (fast-path, no Lax
+        // wrapper — OOB cases produce empty Str rather than Lax(missing) for
+        // hot-loop friendliness). `ByteLength` returns bare Int.
+        "ByteSlice" | "StringRepeatJoin" => Str,
+        "ByteLength" => Int,
+        // `ByteAt` returns `Lax[Int]` (Pack at runtime).
+        "ByteAt" => Pack,
         // CharAt returns `Lax[Str]` at the checker level (Pack at
         // runtime because Lax is a Pack). Treat as Pack for tag purposes.
         "CharAt" => Pack,
@@ -150,6 +166,8 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
         "Find" => Pack,                          // Lax[T]
         "ShiftL" | "ShiftR" | "ShiftRU" => Pack, // Lax[Int]
         "ByteSet" => Pack,                       // Lax[Bytes]
+        // C26B-016 (@c.26, Option B+): sub-span pack `@(start: Int, len: Int)`.
+        "SpanSlice" => Pack,
 
         // ── Dynamic (argument-dependent) ────────────────────────────
         // These molds' return kinds depend on argument types at the
@@ -199,6 +217,9 @@ mod tests {
             "Join",
             "ToFixed",
             "ToRadix",
+            // C26B-018 (B)(C): byte-level slice + single-alloc repeat/join.
+            "ByteSlice",
+            "StringRepeatJoin",
         ] {
             assert_eq!(mold_return_tag(name), Some(3), "{name} should be Str (3)");
         }
@@ -211,6 +232,27 @@ mod tests {
         for name in ["TypeIs", "TypeExtends", "Exists", "Contains"] {
             assert_eq!(mold_return_tag(name), Some(2), "{name} should be Bool (2)");
         }
+    }
+
+    #[test]
+    fn span_aware_molds_map_to_expected_tags() {
+        // C26B-016 (@c.26, Option B+): span-aware comparison molds return Bool,
+        // `SpanSlice` returns a Pack (sub-span `@(start, len)`).
+        for name in ["SpanEquals", "SpanStartsWith", "SpanContains"] {
+            assert_eq!(mold_return_tag(name), Some(2), "{name} should be Bool (2)");
+        }
+        assert_eq!(
+            mold_return_tag("SpanSlice"),
+            Some(4),
+            "SpanSlice should be Pack (4) — returns @(start, len) sub-span"
+        );
+        // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` materializes a
+        // span pack into an owned Str (Str tag = 3).
+        assert_eq!(
+            mold_return_tag("StrOf"),
+            Some(3),
+            "StrOf should be Str (3) — returns owned materialized string"
+        );
     }
 
     #[test]
@@ -231,6 +273,8 @@ mod tests {
             "BitOr",
             "BitXor",
             "BitNot",
+            // C26B-018 (B): `ByteLength` returns bare Int (bytes in UTF-8 encoding).
+            "ByteLength",
         ] {
             assert_eq!(mold_return_tag(name), Some(0), "{name} should be Int (0)");
         }
@@ -306,6 +350,8 @@ mod tests {
             "ShiftL",
             "ShiftR",
             "ByteSet",
+            // C26B-018 (B): `ByteAt` returns Lax[Int] (Pack at runtime).
+            "ByteAt",
         ] {
             assert_eq!(mold_return_tag(name), Some(4), "{name} should be Pack (4)");
         }

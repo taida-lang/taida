@@ -166,6 +166,13 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val, Val],
             returns: &[Ptr],
         },
+        // C26B-011 (Phase 11): Float-hint variants. Takes raw f64s so
+        // `Div[1.0, 0.0]()` / `Div[1.0, 2.0]()` produce FLOAT-tagged
+        // Lax (matches interpreter and JS `__floatHint: true` Lax).
+        "taida_div_mold_f" | "taida_mod_mold_f" => RuntimeAbi {
+            params: &[F64, F64],
+            returns: &[Ptr],
+        },
         "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Val],
@@ -434,6 +441,27 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_str_repeat" => RuntimeAbi {
             params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        // C26B-018 (B)(C): byte-level primitives + single-alloc repeat/join.
+        "taida_str_byte_at" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_str_byte_at_lax" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_byte_slice" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_str_byte_length" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Val],
+        },
+        "taida_str_repeat_join" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr],
             returns: &[Ptr],
         },
         "taida_str_reverse" => RuntimeAbi {
@@ -1335,6 +1363,26 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
+        // Span = pack ptr, raw = bytes/str ptr, needle/prefix = str/bytes ptr.
+        // Return: Bool (Val) or sub-span pack (Ptr).
+        "taida_net_SpanEquals" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_net_SpanStartsWith" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_net_SpanContains" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Val],
+        },
+        "taida_net_SpanSlice" => RuntimeAbi {
+            params: &[Ptr, Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+
         // ── JSON — Molten Iron ──
         "taida_json_schema_cast" => RuntimeAbi {
             params: &[Ptr, Ptr],
@@ -1509,6 +1557,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_os_read_bytes" => RuntimeAbi {
             params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // C26B-020 柱 1: readBytesAt(path, offset, len) -> Lax[Bytes]
+        "taida_os_read_bytes_at" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
             returns: &[Ptr],
         },
         "taida_os_list_dir" => RuntimeAbi {

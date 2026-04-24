@@ -171,7 +171,7 @@ impl Interpreter {
             }
         }
 
-        let result_inner = Value::BuchiPack(vec![
+        let result_inner = Value::pack(vec![
             ("ok".into(), Value::Bool(true)),
             ("requests".into(), Value::Int(total_request_count)),
         ]);
@@ -338,6 +338,21 @@ impl Interpreter {
                         }
                     };
 
+                // C26B-022 Step 2 (wJ Round 4, 2026-04-24): Enforce HTTP/2
+                // wire byte upper limits at the parser boundary so that
+                // downstream Native codegen fixed-size stack buffers cannot
+                // silently truncate. RST_STREAM with REFUSED_STREAM (0x7)
+                // when :method / :path / :authority exceeds its cap.
+                // Limits mirror the H1 path (16 / 2048 / 256 bytes) and
+                // the Native struct sizes in `net_h1_h2.c`.
+                if method.len() > super::h1::HTTP_WIRE_MAX_METHOD_LEN
+                    || path.len() > super::h1::HTTP_WIRE_MAX_PATH_LEN
+                    || authority.len() > super::h1::HTTP_WIRE_MAX_AUTHORITY_LEN
+                {
+                    let _ = send_rst_stream(stream, stream_id, 0x7); // REFUSED_STREAM
+                    continue;
+                }
+
                 // Parse query from path
                 let (path_part, query_part) = match path.find('?') {
                     Some(pos) => (&path[..pos], &path[pos + 1..]),
@@ -346,12 +361,12 @@ impl Interpreter {
 
                 // Build request pack for handler (h2 requests use 1-arg handler path).
                 let mut request_fields: Vec<(String, Value)> = vec![
-                    ("method".into(), Value::Str(method)),
-                    ("path".into(), Value::Str(path_part.to_string())),
-                    ("query".into(), Value::Str(query_part.to_string())),
+                    ("method".into(), Value::str(method)),
+                    ("path".into(), Value::str(path_part.to_string())),
+                    ("query".into(), Value::str(query_part.to_string())),
                     (
                         "version".into(),
-                        Value::BuchiPack(vec![
+                        Value::pack(vec![
                             ("major".into(), Value::Int(2)),
                             ("minor".into(), Value::Int(0)),
                         ]),
@@ -361,16 +376,16 @@ impl Interpreter {
                 // Convert h2 headers to the same format as h1
                 let mut header_values: Vec<Value> = Vec::new();
                 for (name, value) in &regular_headers {
-                    header_values.push(Value::BuchiPack(vec![
-                        ("name".into(), Value::Str(name.clone())),
-                        ("value".into(), Value::Str(value.clone())),
+                    header_values.push(Value::pack(vec![
+                        ("name".into(), Value::str(name.clone())),
+                        ("value".into(), Value::str(value.clone())),
                     ]));
                 }
                 // Add :authority as host header for compatibility
                 if !authority.is_empty() {
-                    header_values.push(Value::BuchiPack(vec![
-                        ("name".into(), Value::Str("host".into())),
-                        ("value".into(), Value::Str(authority.clone())),
+                    header_values.push(Value::pack(vec![
+                        ("name".into(), Value::str("host".into())),
+                        ("value".into(), Value::str(authority.clone())),
                     ]));
                 }
                 request_fields.push(("headers".into(), Value::list(header_values)));
@@ -380,14 +395,14 @@ impl Interpreter {
                 request_fields.push(("body".into(), make_span(0, raw_len)));
                 request_fields.push(("bodyOffset".into(), Value::Int(0)));
                 request_fields.push(("contentLength".into(), Value::Int(raw_len as i64)));
-                request_fields.push(("raw".into(), Value::Bytes(body)));
-                request_fields.push(("remoteHost".into(), Value::Str(peer_addr.ip().to_string())));
+                request_fields.push(("raw".into(), Value::bytes(body)));
+                request_fields.push(("remoteHost".into(), Value::str(peer_addr.ip().to_string())));
                 request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
                 request_fields.push(("keepAlive".into(), Value::Bool(true)));
                 request_fields.push(("chunked".into(), Value::Bool(false)));
-                request_fields.push(("protocol".into(), Value::Str("h2".into())));
+                request_fields.push(("protocol".into(), Value::str("h2".into())));
 
-                let request_pack = Value::BuchiPack(request_fields);
+                let request_pack = Value::pack(request_fields);
 
                 // Call handler with request pack (1-arg path for h2).
                 let handler_result = self.call_function_with_values(handler, &[request_pack]);

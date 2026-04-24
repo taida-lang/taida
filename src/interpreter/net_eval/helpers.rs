@@ -163,37 +163,37 @@ pub(crate) fn write_vectored_all(
 // ── Result helpers ──────────────────────────────────────────
 
 pub(crate) fn make_result_success(inner: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), Value::Unit),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
 pub(crate) fn make_result_failure_msg(kind: &str, message: impl Into<String>) -> Value {
     let message = message.into();
-    let inner = Value::BuchiPack(vec![
+    let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(-1)),
-        ("message".into(), Value::Str(message.clone())),
-        ("kind".into(), Value::Str(kind.to_string())),
+        ("message".into(), Value::str(message.clone())),
+        ("kind".into(), Value::str(kind.to_string())),
     ]);
     let error_val = Value::Error(ErrorValue {
         error_type: "HttpError".into(),
         message,
-        fields: vec![("kind".into(), Value::Str(kind.to_string()))],
+        fields: vec![("kind".into(), Value::str(kind.to_string()))],
     });
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
 pub(crate) fn make_span(start: usize, len: usize) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("start".into(), Value::Int(start as i64)),
         ("len".into(), Value::Int(len as i64)),
     ])
@@ -223,7 +223,9 @@ pub(crate) fn extract_result_value(result: &Value) -> Option<&Vec<(String, Value
         _ => return None,
     }
     match fields.iter().find(|(k, _)| k == "__value") {
-        Some((_, Value::BuchiPack(inner))) => Some(inner),
+        // C26B-012 wQ: `inner: &Arc<Vec<(String, Value)>>` — deref to
+        // `&Vec<(String, Value)>` to preserve the existing borrow return.
+        Some((_, Value::BuchiPack(inner))) => Some(inner.as_ref()),
         _ => None,
     }
 }
@@ -240,12 +242,17 @@ pub(crate) fn extract_result_value_owned(result: Value) -> Option<Vec<(String, V
         Some((_, Value::Unit)) => {}
         _ => return None,
     }
-    // Find and move __value out
-    for (k, v) in fields {
-        if k == "__value"
-            && let Value::BuchiPack(inner) = v
-        {
-            return Some(inner);
+    // Find and move __value out. With interior `Arc` on BuchiPack we must
+    // consume `fields` via `Value::pack_take` to preserve the owned return
+    // contract (`Option<Vec<(String, Value)>>`).
+    let mut owned = Value::pack_take(fields);
+    let idx = owned
+        .iter()
+        .position(|(k, v)| k == "__value" && matches!(v, Value::BuchiPack(_)));
+    if let Some(i) = idx {
+        let (_, v) = owned.swap_remove(i);
+        if let Value::BuchiPack(inner) = v {
+            return Some(Value::pack_take(inner));
         }
     }
     None
@@ -270,7 +277,7 @@ pub(crate) fn get_field_int(fields: &[(String, Value)], key: &str) -> Option<i64
 /// Get a Str field from a BuchiPack field list.
 pub(crate) fn get_field_str(fields: &[(String, Value)], key: &str) -> Option<String> {
     match fields.iter().find(|(k, _)| k == key) {
-        Some((_, Value::Str(s))) => Some(s.clone()),
+        Some((_, Value::Str(s))) => Some(s.as_string().clone()),
         _ => None,
     }
 }
@@ -331,7 +338,7 @@ pub(crate) fn build_parse_result(
     };
 
     // version
-    let version = Value::BuchiPack(vec![
+    let version = Value::pack(vec![
         ("major".into(), Value::Int(1)),
         ("minor".into(), Value::Int(req.version.unwrap_or(1) as i64)),
     ]);
@@ -350,7 +357,7 @@ pub(crate) fn build_parse_result(
         }
         let name_start = header.name.as_ptr() as usize - base;
         let value_start = header.value.as_ptr() as usize - base;
-        headers_list.push(Value::BuchiPack(vec![
+        headers_list.push(Value::pack(vec![
             ("name".into(), make_span(name_start, header.name.len())),
             ("value".into(), make_span(value_start, header.value.len())),
         ]));
@@ -423,7 +430,7 @@ pub(crate) fn build_parse_result(
         );
     }
 
-    let parsed = Value::BuchiPack(vec![
+    let parsed = Value::pack(vec![
         ("complete".into(), Value::Bool(complete)),
         ("consumed".into(), Value::Int(consumed as i64)),
         ("method".into(), method_span),
@@ -819,7 +826,7 @@ pub(crate) fn encode_response(response: &Value) -> Value {
         buf.extend_from_slice(&body_bytes);
     }
 
-    let result = Value::BuchiPack(vec![("bytes".into(), Value::Bytes(buf))]);
+    let result = Value::pack(vec![("bytes".into(), Value::bytes(buf))]);
     make_result_success(result)
 }
 
@@ -921,8 +928,8 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 ));
             }
         };
-        let name = match hf.iter().find(|(k, _)| k == "name") {
-            Some((_, Value::Str(s))) => s.clone(),
+        let name: String = match hf.iter().find(|(k, _)| k == "name") {
+            Some((_, Value::Str(s))) => s.as_string().clone(),
             _ => {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].name must be Str",
@@ -930,8 +937,8 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
                 ));
             }
         };
-        let value = match hf.iter().find(|(k, _)| k == "value") {
-            Some((_, Value::Str(s))) => s.clone(),
+        let value: String = match hf.iter().find(|(k, _)| k == "value") {
+            Some((_, Value::Str(s))) => s.as_string().clone(),
             _ => {
                 return Err(format!(
                     "httpEncodeResponse: headers[{}].value must be Str",
@@ -975,8 +982,8 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
     // memory; the 2-arg streaming path avoids this clone by writing chunks directly.
     // A future `Value::into_bytes()` consuming method could eliminate this clone, but
     // would require changes to the Value type across the codebase.
-    let body_bytes = match fields.iter().find(|(k, _)| k == "body") {
-        Some((_, Value::Bytes(b))) => b.clone(),
+    let body_bytes: Vec<u8> = match fields.iter().find(|(k, _)| k == "body") {
+        Some((_, Value::Bytes(b))) => (**b).clone(),
         Some((_, Value::Str(s))) => s.as_bytes().to_vec(),
         Some((_, v)) => {
             return Err(format!(
@@ -1033,7 +1040,7 @@ pub(crate) fn status_reason(code: i64) -> &'static str {
 pub(crate) fn is_body_stream_request(req: &Value) -> bool {
     if let Value::BuchiPack(fields) = req {
         fields.iter().any(|(k, v)| {
-            k == "__body_stream" && matches!(v, Value::Str(s) if s == "__v4_body_stream")
+            k == "__body_stream" && matches!(v, Value::Str(s) if s.as_str() == "__v4_body_stream")
         })
     } else {
         false
@@ -1044,7 +1051,7 @@ pub(crate) fn is_body_stream_request(req: &Value) -> bool {
 /// Returns None if the request is not a body-stream request or has no token.
 pub(crate) fn extract_body_token(req: &Value) -> Option<u64> {
     if let Value::BuchiPack(fields) = req {
-        for (k, v) in fields {
+        for (k, v) in fields.iter() {
             if k == "__body_token"
                 && let Value::Int(n) = v
             {
@@ -1096,10 +1103,10 @@ pub(crate) fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
 
     // Return body slice as Bytes
     if body_len == 0 {
-        Ok(Value::Bytes(vec![]))
+        Ok(Value::bytes(vec![]))
     } else {
         let end = body_start.saturating_add(body_len).min(raw.len());
         let start = body_start.min(end);
-        Ok(Value::Bytes(raw[start..end].to_vec()))
+        Ok(Value::bytes(raw[start..end].to_vec()))
     }
 }

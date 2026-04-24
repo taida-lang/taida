@@ -29,6 +29,7 @@ fn signal_name(sig: &Signal) -> &'static str {
 ///
 /// Binary file query function:
 ///   readBytes(path) -> Lax[Bytes]
+///   readBytesAt(path, offset, len) -> Lax[Bytes]  (C26B-020 柱 1, chunked)
 ///
 /// Dangerous side-effect functions (-> Gorillax):
 ///   run(program, args), execShell(command)
@@ -99,6 +100,11 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
     // The child inherits the parent's TTY so it can render TUIs like nvim / vim / less.
     "runInteractive",
     "execShellInteractive",
+    // ── C26B-020 柱 1: chunked / large-file bytes read ──
+    // readBytesAt(path, offset, len) -> Lax[Bytes]
+    // Addition (§ 6.2 widening) for @c.26 — enables downstream (bonsai-wasm
+    // GGUF dequant etc.) to stream files larger than MAX_READ_SIZE 64 MB.
+    "readBytesAt",
 ];
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -106,21 +112,21 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
 /// Create a Lax[T] success value: hasValue=true, __value=val, __default inferred.
 fn make_lax_success(val: Value) -> Value {
     let default_val = Interpreter::default_for_value(&val);
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__default".into(), default_val),
-        ("__type".into(), Value::Str("Lax".into())),
+        ("__type".into(), Value::str("Lax".into())),
     ])
 }
 
 /// Create a Lax[T] failure value: hasValue=false, __value=default, __default=default.
 fn make_lax_failure(default_val: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(false)),
         ("__value".into(), default_val.clone()),
         ("__default".into(), default_val),
-        ("__type".into(), Value::Str("Lax".into())),
+        ("__type".into(), Value::str("Lax".into())),
     ])
 }
 
@@ -139,11 +145,11 @@ pub(crate) fn make_lax_failure_pub(default_val: Value) -> Value {
 
 /// Create an os Result success value: @(ok=true, code=0, message="").
 fn make_result_success(inner: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), Value::Unit),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
@@ -152,43 +158,43 @@ fn make_result_failure(err: &std::io::Error) -> Value {
     let code = err.raw_os_error().unwrap_or(-1) as i64;
     let message = err.to_string();
     let kind = classify_io_error_kind(err).to_string();
-    let inner = Value::BuchiPack(vec![
+    let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(code)),
-        ("message".into(), Value::Str(message.clone())),
-        ("kind".into(), Value::Str(kind.clone())),
+        ("message".into(), Value::str(message.clone())),
+        ("kind".into(), Value::str(kind.clone())),
     ]);
     let error_val = make_io_error(err);
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
 /// Create an os Result failure value with explicit kind/message (non-OS errors).
 fn make_result_failure_with_kind(kind: &str, message: impl Into<String>) -> Value {
     let message = message.into();
-    let inner = Value::BuchiPack(vec![
+    let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
         ("code".into(), Value::Int(-1)),
-        ("message".into(), Value::Str(message.clone())),
-        ("kind".into(), Value::Str(kind.to_string())),
+        ("message".into(), Value::str(message.clone())),
+        ("kind".into(), Value::str(kind.to_string())),
     ]);
     let error_val = Value::Error(ErrorValue {
         error_type: "IoError".to_string(),
         message,
         fields: vec![
             ("code".into(), Value::Int(-1)),
-            ("kind".into(), Value::Str(kind.to_string())),
+            ("kind".into(), Value::str(kind.to_string())),
         ],
     });
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
         ("__predicate".into(), Value::Unit),
-        ("__type".into(), Value::Str("Result".into())),
+        ("__type".into(), Value::str("Result".into())),
     ])
 }
 
@@ -203,21 +209,21 @@ fn make_async_fulfilled(value: Value) -> Value {
 
 /// Create a Gorillax success value: hasValue=true, __value=val, __error=Unit.
 fn make_gorillax_success(val: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__error".into(), Value::Unit),
-        ("__type".into(), Value::Str("Gorillax".into())),
+        ("__type".into(), Value::str("Gorillax".into())),
     ])
 }
 
 /// Create a Gorillax failure value: hasValue=false, __error=err.
 fn make_gorillax_failure(err: Value) -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("hasValue".into(), Value::Bool(false)),
         ("__value".into(), Value::Unit),
         ("__error".into(), err),
-        ("__type".into(), Value::Str("Gorillax".into())),
+        ("__type".into(), Value::str("Gorillax".into())),
     ])
 }
 
@@ -230,7 +236,7 @@ fn make_io_error(err: &std::io::Error) -> Value {
         message,
         fields: vec![
             ("code".into(), Value::Int(code)),
-            ("kind".into(), Value::Str(kind)),
+            ("kind".into(), Value::str(kind)),
         ],
     })
 }
@@ -298,18 +304,18 @@ fn make_process_error(message: String, code: i64) -> Value {
 
 /// Build the standard success inner BuchiPack: @(ok=true, code=0, message="").
 fn ok_inner() -> Value {
-    Value::BuchiPack(vec![
+    Value::pack(vec![
         ("ok".into(), Value::Bool(true)),
         ("code".into(), Value::Int(0)),
-        ("message".into(), Value::Str(String::new())),
+        ("message".into(), Value::str(String::new())),
     ])
 }
 
 /// Build a process result inner BuchiPack: @(stdout, stderr, code).
 fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
-    Value::BuchiPack(vec![
-        ("stdout".into(), Value::Str(stdout)),
-        ("stderr".into(), Value::Str(stderr)),
+    Value::pack(vec![
+        ("stdout".into(), Value::str(stdout)),
+        ("stderr".into(), Value::str(stderr)),
         ("code".into(), Value::Int(code)),
     ])
 }
@@ -318,7 +324,7 @@ fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
 /// exec variants. Intentionally does **not** carry stdout / stderr fields
 /// (stdio is passthrough, nothing to capture).
 fn process_inner_code_only(code: i64) -> Value {
-    Value::BuchiPack(vec![("code".into(), Value::Int(code))])
+    Value::pack(vec![("code".into(), Value::Int(code))])
 }
 
 /// C19: Extract an exit code from a `std::process::ExitStatus`, following the
@@ -384,30 +390,30 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 fn make_http_response(status: i64, body: String, headers: Vec<(String, String)>) -> Value {
     let header_fields: Vec<(String, Value)> = headers
         .into_iter()
-        .map(|(k, v)| (k, Value::Str(v)))
+        .map(|(k, v)| (k, Value::str(v)))
         .collect();
-    let response = Value::BuchiPack(vec![
+    let response = Value::pack(vec![
         ("status".into(), Value::Int(status)),
-        ("body".into(), Value::Str(body)),
-        ("headers".into(), Value::BuchiPack(header_fields)),
+        ("body".into(), Value::str(body)),
+        ("headers".into(), Value::pack(header_fields)),
     ]);
     make_lax_success(response)
 }
 
 fn make_http_failure() -> Value {
-    let default_response = Value::BuchiPack(vec![
+    let default_response = Value::pack(vec![
         ("status".into(), Value::Int(0)),
-        ("body".into(), Value::Str(String::new())),
-        ("headers".into(), Value::BuchiPack(vec![])),
+        ("body".into(), Value::str(String::new())),
+        ("headers".into(), Value::pack(vec![])),
     ]);
     make_lax_failure(default_response)
 }
 
 fn make_udp_recv_default_payload() -> Value {
-    Value::BuchiPack(vec![
-        ("host".into(), Value::Str(String::new())),
+    Value::pack(vec![
+        ("host".into(), Value::str(String::new())),
         ("port".into(), Value::Int(0)),
-        ("data".into(), Value::Bytes(Vec::new())),
+        ("data".into(), Value::bytes(Vec::new())),
         ("truncated".into(), Value::Bool(false)),
     ])
 }
@@ -486,6 +492,12 @@ async fn http_request_async_via_curl(
     extra_headers: &[(String, String)],
     body: &str,
 ) -> Option<Value> {
+    // C26B-007 SEC-005: strip CR/LF from method / url before passing to curl
+    // for defense-in-depth; curl treats these as exec args so CRLF cannot
+    // inject HTTP headers via the command itself, but a malicious method
+    // like "GET\r\n" is still nonsensical and should be rejected upfront.
+    let safe_method = method.replace(['\r', '\n'], "");
+    let safe_url = url.replace(['\r', '\n'], "");
     let mut cmd = tokio::process::Command::new("curl");
     cmd.arg("-sS")
         .arg("-i")
@@ -495,8 +507,8 @@ async fn http_request_async_via_curl(
         .arg("--max-filesize")
         .arg("104857600") // 100 MB
         .arg("-X")
-        .arg(method)
-        .arg(url);
+        .arg(&safe_method)
+        .arg(&safe_url);
     for (k, v) in extra_headers {
         // RCB-304: Strip CR/LF from header values to prevent CRLF injection
         let safe_k = k.replace(['\r', '\n'], "");
@@ -541,10 +553,18 @@ async fn http_request_async(
         Err(_) => return make_http_failure(),
     };
 
+    // C26B-007 SEC-005: Strip CR/LF from method, path, host to prevent
+    // HTTP request smuggling via CRLF injection into the raw TCP request.
+    // Header values were already sanitised under RCB-304; method/path/host
+    // interpolation was the remaining gap.
+    let safe_method = method.replace(['\r', '\n'], "");
+    let safe_path = path.replace(['\r', '\n'], "");
+    let safe_host = host.replace(['\r', '\n'], "");
+
     // Build HTTP request
     let mut request = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
-        method, path, host
+        safe_method, safe_path, safe_host
     );
     if !body.is_empty() {
         request.push_str(&format!("Content-Length: {}\r\n", body.len()));
@@ -608,7 +628,7 @@ impl Interpreter {
                     });
                 }
                 let path = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("Read: path must be a string, got {}", v),
@@ -621,21 +641,21 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::Str(
+                            return Ok(Some(Signal::Value(make_lax_failure(Value::str(
                                 String::new(),
                             )))));
                         }
                     }
                     Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::Str(
+                        return Ok(Some(Signal::Value(make_lax_failure(Value::str(
                             String::new(),
                         )))));
                     }
                 }
 
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::Str(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Str(
+                    Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::str(content))))),
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::str(
                         String::new(),
                     ))))),
                 }
@@ -649,7 +669,7 @@ impl Interpreter {
                     });
                 }
                 let path = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("ListDir: path must be a string, got {}", v),
@@ -665,7 +685,7 @@ impl Interpreter {
                             if let Ok(e) = entry
                                 && let Some(name) = e.file_name().to_str()
                             {
-                                names.push(Value::Str(name.to_string()));
+                                names.push(Value::str(name.to_string()));
                             }
                         }
                         names.sort_by(|a, b| {
@@ -691,7 +711,7 @@ impl Interpreter {
                     });
                 }
                 let path = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("Stat: path must be a string, got {}", v),
@@ -700,9 +720,9 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
 
-                let default_stat = Value::BuchiPack(vec![
+                let default_stat = Value::pack(vec![
                     ("size".into(), Value::Int(0)),
-                    ("modified".into(), Value::Str(String::new())),
+                    ("modified".into(), Value::str(String::new())),
                     ("isDir".into(), Value::Bool(false)),
                 ]);
 
@@ -711,9 +731,9 @@ impl Interpreter {
                         let size = meta.len() as i64;
                         let modified = meta.modified().map(format_rfc3339_utc).unwrap_or_default();
                         let is_dir = meta.is_dir();
-                        let stat_pack = Value::BuchiPack(vec![
+                        let stat_pack = Value::pack(vec![
                             ("size".into(), Value::Int(size)),
-                            ("modified".into(), Value::Str(modified)),
+                            ("modified".into(), Value::str(modified)),
                             ("isDir".into(), Value::Bool(is_dir)),
                         ]);
                         Ok(Some(Signal::Value(make_lax_success(stat_pack))))
@@ -741,7 +761,7 @@ impl Interpreter {
                     });
                 }
                 let path = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("Exists: path must be a string, got {}", v),
@@ -768,7 +788,7 @@ impl Interpreter {
                     });
                 }
                 let name = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("EnvVar: name must be a string, got {}", v),
@@ -778,8 +798,8 @@ impl Interpreter {
                 };
 
                 match std::env::var(&name) {
-                    Ok(val) => Ok(Some(Signal::Value(make_lax_success(Value::Str(val))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Str(
+                    Ok(val) => Ok(Some(Signal::Value(make_lax_success(Value::str(val))))),
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::str(
                         String::new(),
                     ))))),
                 }
@@ -793,7 +813,7 @@ impl Interpreter {
                     });
                 }
                 let path = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("ReadAsync: path must be a string, got {}", v),
@@ -808,12 +828,12 @@ impl Interpreter {
                     let meta_result = tokio::fs::metadata(&path).await;
                     let result = match meta_result {
                         Ok(meta) if meta.len() > MAX_READ_SIZE => {
-                            Ok(make_lax_failure(Value::Str(String::new())))
+                            Ok(make_lax_failure(Value::str(String::new())))
                         }
-                        Err(_) => Ok(make_lax_failure(Value::Str(String::new()))),
+                        Err(_) => Ok(make_lax_failure(Value::str(String::new()))),
                         Ok(_) => match tokio::fs::read_to_string(&path).await {
-                            Ok(content) => Ok(make_lax_success(Value::Str(content))),
-                            Err(_) => Ok(make_lax_failure(Value::Str(String::new()))),
+                            Ok(content) => Ok(make_lax_success(Value::str(content))),
+                            Err(_) => Ok(make_lax_failure(Value::str(String::new()))),
                         },
                     };
                     let _ = tx.send(result);
@@ -834,7 +854,7 @@ impl Interpreter {
                     });
                 }
                 let url = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("HttpGet: url must be a string, got {}", v),
@@ -864,7 +884,7 @@ impl Interpreter {
                     });
                 }
                 let url = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("HttpPost: url must be a string, got {}", v),
@@ -873,7 +893,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let body = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("HttpPost: body must be a string, got {}", v),
@@ -903,7 +923,7 @@ impl Interpreter {
                     });
                 }
                 let method = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("HttpRequest: method must be a string, got {}", v),
@@ -912,7 +932,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let url = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("HttpRequest: url must be a string, got {}", v),
@@ -940,9 +960,9 @@ impl Interpreter {
                             //     valid wire header name in this shape.
                             match self.eval_expr(&field.value)? {
                                 Signal::Value(Value::BuchiPack(hfields)) => {
-                                    for (k, v) in &hfields {
+                                    for (k, v) in hfields.iter() {
                                         if let Value::Str(vs) = v {
-                                            extra_headers.push((k.clone(), vs.clone()));
+                                            extra_headers.push((k.clone(), vs.as_string().clone()));
                                         }
                                     }
                                 }
@@ -954,10 +974,10 @@ impl Interpreter {
                                             for (k, v) in rec.iter() {
                                                 match (k.as_str(), v) {
                                                     ("name", Value::Str(s)) => {
-                                                        name = Some(s.clone());
+                                                        name = Some(s.as_string().clone());
                                                     }
                                                     ("value", Value::Str(s)) => {
-                                                        val = Some(s.clone());
+                                                        val = Some(s.as_string().clone());
                                                     }
                                                     _ => {}
                                                 }
@@ -978,7 +998,7 @@ impl Interpreter {
                         }
                         "body" => {
                             if let Signal::Value(Value::Str(s)) = self.eval_expr(&field.value)? {
-                                body = s;
+                                body = Value::str_take(s);
                             }
                         }
                         _ => {}
@@ -1019,21 +1039,95 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
                                 Vec::new(),
                             )))));
                         }
                     }
                     Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                        return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
                             Vec::new(),
                         )))));
                     }
                 }
 
                 match std::fs::read(&path) {
-                    Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::Bytes(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::Bytes(
+                    Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::bytes(content))))),
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
+                        Vec::new(),
+                    ))))),
+                }
+            }
+
+            // ── C26B-020 柱 1: readBytesAt(path, offset, len) → Lax[Bytes] ──
+            //
+            // Chunked file read for large files (> 64 MB MAX_READ_SIZE).
+            //
+            // Semantics:
+            //   - offset < 0 or len < 0             → Lax failure, default Bytes[]
+            //   - path not found / IO error        → Lax failure, default Bytes[]
+            //   - offset >= file_size              → Lax success with empty Bytes
+            //   - offset + len > file_size         → Lax success with truncated
+            //                                         Bytes (bytes available from
+            //                                         offset to EOF). Final chunk
+            //                                         may be shorter than `len`.
+            //   - len == 0                         → Lax success with empty Bytes
+            //   - len > 64 MB chunk ceiling        → Lax failure, default Bytes[]
+            //
+            // The per-call chunk ceiling is intentionally kept at MAX_READ_SIZE
+            // so that a single readBytesAt call never allocates more than 64 MB
+            // even when called on a multi-GB file. Callers stream larger files
+            // by iterating (offset, len = chunk_size) pairs.
+            "readBytesAt" => {
+                let path = self.eval_os_str_arg(args, 0, "readBytesAt", "path")?;
+                let offset = self.eval_os_i64_arg(args, 1, "readBytesAt", "offset")?;
+                let len = self.eval_os_i64_arg(args, 2, "readBytesAt", "len")?;
+
+                if offset < 0 || len < 0 {
+                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
+                        Vec::new(),
+                    )))));
+                }
+                if (len as u64) > MAX_READ_SIZE {
+                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
+                        Vec::new(),
+                    )))));
+                }
+                if len == 0 {
+                    return Ok(Some(Signal::Value(make_lax_success(Value::bytes(
+                        Vec::new(),
+                    )))));
+                }
+
+                use std::io::{Read, Seek, SeekFrom};
+                match std::fs::File::open(&path) {
+                    Ok(mut f) => {
+                        if f.seek(SeekFrom::Start(offset as u64)).is_err() {
+                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
+                                Vec::new(),
+                            )))));
+                        }
+                        let mut buf = vec![0u8; len as usize];
+                        // read_exact would fail at EOF even for legitimate
+                        // partial tail reads; use a loop of read() that
+                        // tolerates short reads and stops on EOF so that
+                        // offset + len > file_size returns the available tail.
+                        let mut filled = 0usize;
+                        while filled < buf.len() {
+                            match f.read(&mut buf[filled..]) {
+                                Ok(0) => break, // EOF
+                                Ok(n) => filled += n,
+                                Err(_) => {
+                                    return Ok(Some(Signal::Value(make_lax_failure(
+                                        Value::bytes(Vec::new()),
+                                    ))));
+                                }
+                            }
+                        }
+                        buf.truncate(filled);
+                        Ok(Some(Signal::Value(make_lax_success(Value::bytes(buf)))))
+                    }
+                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
                         Vec::new(),
                     ))))),
                 }
@@ -1179,7 +1273,7 @@ impl Interpreter {
                             let mut strs = Vec::new();
                             for item in items.iter() {
                                 if let Value::Str(s) = item {
-                                    strs.push(s.clone());
+                                    strs.push(s.as_string().clone());
                                 } else {
                                     strs.push(item.to_display_string());
                                 }
@@ -1279,7 +1373,7 @@ impl Interpreter {
                             let mut strs = Vec::new();
                             for item in items.iter() {
                                 if let Value::Str(s) = item {
-                                    strs.push(s.clone());
+                                    strs.push(s.as_string().clone());
                                 } else {
                                     strs.push(item.to_display_string());
                                 }
@@ -1364,16 +1458,16 @@ impl Interpreter {
             "allEnv" => {
                 let entries: Vec<Value> = std::env::vars()
                     .map(|(k, v)| {
-                        Value::BuchiPack(vec![
-                            ("key".into(), Value::Str(k)),
-                            ("value".into(), Value::Str(v)),
+                        Value::pack(vec![
+                            ("key".into(), Value::str(k)),
+                            ("value".into(), Value::str(v)),
                         ])
                     })
                     .collect();
 
-                Ok(Some(Signal::Value(Value::BuchiPack(vec![
+                Ok(Some(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(entries)),
-                    ("__type".into(), Value::Str("HashMap".into())),
+                    ("__type".into(), Value::str("HashMap".into())),
                 ]))))
             }
 
@@ -1381,7 +1475,7 @@ impl Interpreter {
             "argv" => {
                 // Interpreter mode is typically: taida <script.td> [args...]
                 // Expose only user args to match JS/native runtime behavior.
-                let argv: Vec<Value> = std::env::args().skip(2).map(Value::Str).collect();
+                let argv: Vec<Value> = std::env::args().skip(2).map(Value::str).collect();
                 Ok(Some(Signal::Value(Value::list(argv))))
             }
 
@@ -1416,7 +1510,7 @@ impl Interpreter {
                             for addr in addrs {
                                 let ip = addr.ip().to_string();
                                 if seen.insert(ip.clone()) {
-                                    out.push(Value::Str(ip));
+                                    out.push(Value::str(ip));
                                 }
                             }
 
@@ -1429,8 +1523,7 @@ impl Interpreter {
                                 return;
                             }
 
-                            let inner =
-                                Value::BuchiPack(vec![("addresses".into(), Value::list(out))]);
+                            let inner = Value::pack(vec![("addresses".into(), Value::list(out))]);
                             let _ = tx.send(Ok(make_result_success(inner)));
                         }
                     }
@@ -1502,9 +1595,9 @@ impl Interpreter {
                                 }
                             }
 
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("socket".into(), Value::Int(socket_id)),
-                                ("host".into(), Value::Str(host)),
+                                ("host".into(), Value::str(host)),
                                 ("port".into(), Value::Int(port as i64)),
                             ]);
                             let _ = tx.send(Ok(make_result_success(inner)));
@@ -1578,7 +1671,7 @@ impl Interpreter {
                                     return;
                                 }
                             }
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("listener".into(), Value::Int(listener_id)),
                                 ("port".into(), Value::Int(port as i64)),
                             ]);
@@ -1641,9 +1734,9 @@ impl Interpreter {
                                 }
                             }
 
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("socket".into(), Value::Int(socket_id)),
-                                ("host".into(), Value::Str(peer_addr.ip().to_string())),
+                                ("host".into(), Value::str(peer_addr.ip().to_string())),
                                 ("port".into(), Value::Int(peer_addr.port() as i64)),
                             ]);
                             let _ = tx.send(Ok(make_result_success(inner)));
@@ -1701,7 +1794,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(())) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(data.len() as i64)),
                             ]);
@@ -1760,7 +1853,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(())) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(data.len() as i64)),
                             ]);
@@ -1801,7 +1894,7 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::Str(String::new()))));
+                        let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
                         return;
                     };
 
@@ -1815,14 +1908,14 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Str(String::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
                         }
                         Ok(Ok(n)) => {
                             let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                            let _ = tx.send(Ok(make_lax_success(Value::Str(data))));
+                            let _ = tx.send(Ok(make_lax_success(Value::str(data))));
                         }
                         Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Str(String::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
                         }
                     }
                 });
@@ -1867,7 +1960,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(())) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(data.len() as i64)),
                             ]);
@@ -1908,7 +2001,7 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         return;
                     };
 
@@ -1922,13 +2015,13 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         }
                         Ok(Ok(n)) => {
-                            let _ = tx.send(Ok(make_lax_success(Value::Bytes(buf[..n].to_vec()))));
+                            let _ = tx.send(Ok(make_lax_success(Value::bytes(buf[..n].to_vec()))));
                         }
                         Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         }
                     }
                 });
@@ -1979,7 +2072,7 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         return;
                     };
 
@@ -1993,10 +2086,10 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(_)) => {
-                            let _ = tx.send(Ok(make_lax_success(Value::Bytes(buf))));
+                            let _ = tx.send(Ok(make_lax_success(Value::bytes(buf))));
                         }
                         Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::Bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
                         }
                     }
                 });
@@ -2067,9 +2160,9 @@ impl Interpreter {
                                     return;
                                 }
                             }
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("socket".into(), Value::Int(socket_id)),
-                                ("host".into(), Value::Str(host)),
+                                ("host".into(), Value::str(host)),
                                 ("port".into(), Value::Int(port as i64)),
                             ]);
                             let _ = tx.send(Ok(make_result_success(inner)));
@@ -2132,7 +2225,7 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(bytes_sent)) => {
-                            let inner = Value::BuchiPack(vec![
+                            let inner = Value::pack(vec![
                                 ("ok".into(), Value::Bool(true)),
                                 ("bytesSent".into(), Value::Int(bytes_sent as i64)),
                             ]);
@@ -2185,10 +2278,10 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok((n, peer))) => {
-                            let payload = Value::BuchiPack(vec![
-                                ("host".into(), Value::Str(peer.ip().to_string())),
+                            let payload = Value::pack(vec![
+                                ("host".into(), Value::str(peer.ip().to_string())),
                                 ("port".into(), Value::Int(peer.port() as i64)),
-                                ("data".into(), Value::Bytes(buf[..n].to_vec())),
+                                ("data".into(), Value::bytes(buf[..n].to_vec())),
                                 ("truncated".into(), Value::Bool(false)),
                             ]);
                             let _ = tx.send(Ok(make_lax_success(payload)));
@@ -2398,7 +2491,7 @@ impl Interpreter {
                     })?
                     .insert(pool_id, state);
 
-                let inner = Value::BuchiPack(vec![("pool".into(), Value::Int(pool_id))]);
+                let inner = Value::pack(vec![("pool".into(), Value::Int(pool_id))]);
                 Ok(Some(Signal::Value(make_result_success(inner))))
             }
 
@@ -2463,7 +2556,7 @@ impl Interpreter {
                 };
                 state.in_use_tokens.insert(token);
 
-                let inner = Value::BuchiPack(vec![
+                let inner = Value::pack(vec![
                     ("resource".into(), resource),
                     ("token".into(), Value::Int(token)),
                 ]);
@@ -2531,7 +2624,7 @@ impl Interpreter {
                     reused = true;
                 }
 
-                let inner = Value::BuchiPack(vec![
+                let inner = Value::pack(vec![
                     ("ok".into(), Value::Bool(true)),
                     ("reused".into(), Value::Bool(reused)),
                 ]);
@@ -2557,7 +2650,7 @@ impl Interpreter {
                 state.idle.clear();
                 state.in_use_tokens.clear();
 
-                let inner = Value::BuchiPack(vec![("ok".into(), Value::Bool(true))]);
+                let inner = Value::pack(vec![("ok".into(), Value::Bool(true))]);
                 Ok(Some(Signal::Value(make_async_fulfilled(
                     make_result_success(inner),
                 ))))
@@ -2573,7 +2666,7 @@ impl Interpreter {
                         message: "poolHealth: unknown pool handle".to_string(),
                     });
                 };
-                let health = Value::BuchiPack(vec![
+                let health = Value::pack(vec![
                     ("open".into(), Value::Bool(state.open)),
                     ("idle".into(), Value::Int(state.idle.len() as i64)),
                     ("inUse".into(), Value::Int(state.in_use_tokens.len() as i64)),
@@ -2642,7 +2735,7 @@ impl Interpreter {
             message: format!("{}: missing argument '{}'", func_name, arg_name),
         })?;
         match self.eval_expr(arg)? {
-            Signal::Value(Value::Str(s)) => Ok(s),
+            Signal::Value(Value::Str(s)) => Ok(Value::str_take(s)),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be a string, got {}", func_name, arg_name, v),
             }),
@@ -2670,10 +2763,39 @@ impl Interpreter {
             message: format!("{}: missing argument '{}'", func_name, arg_name),
         })?;
         match self.eval_expr(arg)? {
-            Signal::Value(Value::Bytes(bytes)) => Ok(bytes),
-            Signal::Value(Value::Str(s)) => Ok(s.into_bytes()),
+            Signal::Value(Value::Bytes(bytes)) => Ok(Value::bytes_take(bytes)),
+            Signal::Value(Value::Str(s)) => Ok(Value::str_take(s).into_bytes()),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be Bytes, got {}", func_name, arg_name, v),
+            }),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal evaluating '{}': {}",
+                    func_name,
+                    arg_name,
+                    signal_name(&other)
+                ),
+            }),
+        }
+    }
+
+    /// Helper: evaluate an `Int` argument for os functions.
+    /// Used by readBytesAt (offset, len) — enforces Int type for callers that
+    /// legitimately need 64-bit file offsets.
+    fn eval_os_i64_arg(
+        &mut self,
+        args: &[Expr],
+        index: usize,
+        func_name: &str,
+        arg_name: &str,
+    ) -> Result<i64, RuntimeError> {
+        let arg = args.get(index).ok_or_else(|| RuntimeError {
+            message: format!("{}: missing argument '{}'", func_name, arg_name),
+        })?;
+        match self.eval_expr(arg)? {
+            Signal::Value(Value::Int(n)) => Ok(n),
+            Signal::Value(v) => Err(RuntimeError {
+                message: format!("{}: {} must be an Int, got {}", func_name, arg_name, v),
             }),
             other => Err(RuntimeError {
                 message: format!(
@@ -2729,7 +2851,7 @@ mod tests {
 
     fn lax_has_value(val: &Value) -> bool {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "hasValue"
                     && let Value::Bool(b) = v
                 {
@@ -2742,7 +2864,7 @@ mod tests {
 
     fn lax_value(val: &Value) -> &Value {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "__value" {
                     return v;
                 }
@@ -2753,7 +2875,7 @@ mod tests {
 
     fn result_is_success(val: &Value) -> bool {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "throw" {
                     return matches!(v, Value::Unit);
                 }
@@ -2764,7 +2886,7 @@ mod tests {
 
     fn result_inner(val: &Value) -> &Value {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == "__value" {
                     return v;
                 }
@@ -2775,7 +2897,7 @@ mod tests {
 
     fn pack_field<'a>(val: &'a Value, field: &str) -> &'a Value {
         if let Value::BuchiPack(fields) = val {
-            for (name, v) in fields {
+            for (name, v) in fields.iter() {
                 if name == field {
                     return v;
                 }
@@ -2788,14 +2910,14 @@ mod tests {
 
     #[test]
     fn test_make_lax_success() {
-        let val = make_lax_success(Value::Str("hello".into()));
+        let val = make_lax_success(Value::str("hello".into()));
         assert!(lax_has_value(&val));
         assert_eq!(lax_value(&val).to_display_string(), "hello");
     }
 
     #[test]
     fn test_make_lax_failure() {
-        let val = make_lax_failure(Value::Str(String::new()));
+        let val = make_lax_failure(Value::str(String::new()));
         assert!(!lax_has_value(&val));
     }
 
@@ -3503,9 +3625,11 @@ stdout(lax.hasValue)"#;
     #[test]
     fn test_os_symbols_count() {
         // C18 layout: 35 symbols. C19 appends 2 more (runInteractive,
-        // execShellInteractive) at the end. Total expected = 37.
-        assert_eq!(OS_SYMBOLS.len(), 37);
+        // execShellInteractive). C26B-020 柱 1 appends 1 more (readBytesAt).
+        // Total expected = 38.
+        assert_eq!(OS_SYMBOLS.len(), 38);
         assert!(OS_SYMBOLS.contains(&"readBytes"));
+        assert!(OS_SYMBOLS.contains(&"readBytesAt"));
         assert!(OS_SYMBOLS.contains(&"writeBytes"));
         assert!(OS_SYMBOLS.contains(&"argv"));
         assert!(OS_SYMBOLS.contains(&"ReadAsync"));
@@ -3769,7 +3893,7 @@ stdout(r.__value.code)"#;
             let status = pack_field(inner, "status");
             assert_eq!(*status, Value::Int(200));
             let body = pack_field(inner, "body");
-            assert_eq!(*body, Value::Str("hello".to_string()));
+            assert_eq!(*body, Value::str("hello".to_string()));
         } else {
             panic!("Expected BuchiPack");
         }

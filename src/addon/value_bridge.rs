@@ -561,7 +561,7 @@ pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, B
         }
         Value::BuchiPack(fields) => {
             let mut entries: Vec<TaidaAddonPackEntryV1> = Vec::with_capacity(fields.len());
-            for (name, val) in fields {
+            for (name, val) in fields.iter() {
                 let owned_name = match std::ffi::CString::new(name.as_str()) {
                     Ok(c) => c,
                     Err(_) => {
@@ -713,7 +713,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                 unsafe { core::slice::from_raw_parts(p.ptr, p.len) }
             };
             match core::str::from_utf8(bytes) {
-                Ok(s) => Ok(Value::Str(s.to_string())),
+                Ok(s) => Ok(Value::str(s.to_string())),
                 Err(_) => Err(BridgeError::InvalidStrEncoding),
             }
         }
@@ -731,7 +731,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                 // SAFETY: host-built slice.
                 unsafe { core::slice::from_raw_parts(p.ptr, p.len) }.to_vec()
             };
-            Ok(Value::Bytes(bytes))
+            Ok(Value::bytes(bytes))
         }
         Some(TaidaAddonValueTag::List) => {
             if v.payload.is_null() {
@@ -801,7 +801,7 @@ unsafe fn read_value_by_ref(v: &TaidaAddonValueV1) -> Result<Value, BridgeError>
                     fields.push((name, value));
                 }
             }
-            Ok(Value::BuchiPack(fields))
+            Ok(Value::pack(fields))
         }
     }
 }
@@ -859,8 +859,8 @@ mod tests {
 
     #[test]
     fn roundtrip_str() {
-        match roundtrip(Value::Str("こんにちは".to_string())) {
-            Value::Str(s) => assert_eq!(s, "こんにちは"),
+        match roundtrip(Value::str("こんにちは".to_string())) {
+            Value::Str(s) => assert_eq!(s.as_str(), "こんにちは"),
             other => panic!("expected Str, got {other:?}"),
         }
     }
@@ -868,8 +868,8 @@ mod tests {
     #[test]
     fn roundtrip_bytes() {
         let data = vec![0x00, 0xff, 0x7f, 0x80];
-        match roundtrip(Value::Bytes(data.clone())) {
-            Value::Bytes(b) => assert_eq!(b, data),
+        match roundtrip(Value::bytes(data.clone())) {
+            Value::Bytes(b) => assert_eq!(&**b, &data),
             other => panic!("expected Bytes, got {other:?}"),
         }
     }
@@ -886,7 +886,7 @@ mod tests {
     fn roundtrip_nested_list() {
         let value = Value::list(vec![
             Value::Int(1),
-            Value::Str("two".to_string()),
+            Value::str("two".to_string()),
             Value::list(vec![Value::Bool(true), Value::Float(3.5)]),
         ]);
         let back = roundtrip(value.clone());
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn roundtrip_empty_pack() {
-        match roundtrip(Value::BuchiPack(vec![])) {
+        match roundtrip(Value::pack(vec![])) {
             Value::BuchiPack(fields) => assert!(fields.is_empty()),
             other => panic!("expected BuchiPack, got {other:?}"),
         }
@@ -904,14 +904,14 @@ mod tests {
 
     #[test]
     fn roundtrip_pack_with_fields() {
-        let value = Value::BuchiPack(vec![
-            ("name".to_string(), Value::Str("Taida".to_string())),
+        let value = Value::pack(vec![
+            ("name".to_string(), Value::str("Taida".to_string())),
             ("version".to_string(), Value::Int(2)),
             (
                 "tags".to_string(),
                 Value::list(vec![
-                    Value::Str("alpha".to_string()),
-                    Value::Str("beta".to_string()),
+                    Value::str("alpha".to_string()),
+                    Value::str("beta".to_string()),
                 ]),
             ),
         ]);

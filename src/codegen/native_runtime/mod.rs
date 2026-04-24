@@ -336,7 +336,119 @@ mod tests {
         // core.c size moves from 393,260 to 395,155. Other fragments
         // (os / tls / net_h1_h2 / net_h3_quic) are unchanged. New
         // total: 974,273 → 976,168.
-        const EXPECTED_TOTAL_LEN: usize = 976_168;
+        //
+        // C26B-011 Phase 11 (2026-04-24): +3,834 bytes in core.c from
+        // the Float-origin parity work for `Div` / `Mod` / math molds.
+        //   - F1: +2,889 bytes (`taida_div_mold_f` + `taida_mod_mold_f`
+        //     placed after `taida_lax_tag_value_default` definition,
+        //     `taida_pack_get_tag_idx` positional getter near the
+        //     pack helpers, `taida_float_to_str` forward declaration
+        //     + doc comment, `taida_debug_float` rewrite to route
+        //     through `taida_float_to_str` for NaN/Inf/"X.0" parity).
+        //   - F2: +945 bytes (`taida_lax_to_string` now honours FLOAT
+        //     tag on `__value` / `__default` slots so Float-origin
+        //     `Lax(0.0)` doesn't render as `Lax(0)` via the untagged
+        //     `taida_value_to_display_string` fallback).
+        // C26B-020 柱 1 (@c.26): readBytesAt forward decl added to
+        // core.c (+140 bytes in F1, before the Error ceiling) and
+        // taida_os_read_bytes_at function body added to os.c
+        // (additive +2,135 bytes total, including the F1 forward decl).
+        // F1_LEN moves from 235,748 → +140 (P10) +2,889 (P11) → 238,777.
+        // F2_LEN moves from 159,407 → +945 (P11) → 160,352.
+        // C26B-021 (@c.26): +839 bytes in net_h3_quic.c for the
+        // `setvbuf(stdout/stderr, _IOLBF, 0)` stdout line-buffering fix
+        // at the top of main(). Does not affect core.c so F1_LEN /
+        // F2_LEN unchanged. Only the grand total shifts.
+        // C26B-026 (@c.26 Round 2, wC): +617 bytes in net_h1_h2.c to fix
+        // `h2_extract_response_fields` silently dropping custom response
+        // headers. Previously `taida_list_get` returned a Lax-wrapped
+        // entry and the "name" / "value" lookup on the wrapper returned 0,
+        // so every handler-returned header was filtered out before HPACK
+        // encoding (wire response ended up with only `:status` +
+        // `content-length`). Fix reads `hlist[4 + j]` directly to mirror
+        // the h1 encode path. Also raises the in-function header cap from
+        // 32 to H2_MAX_HEADERS (128) for parity with the HPACK block
+        // encoder which already allows 128. Does not affect core.c so
+        // F1_LEN / F2_LEN unchanged.
+        // Combined delta on top of 976,168:
+        //   +3,834 (C26B-011 core.c)
+        //   +2,135 (C26B-020 os.c + F1 forward decl)
+        //   +  839 (C26B-021 net_h3_quic.c)
+        //   +  617 (C26B-026 net_h1_h2.c)
+        // New total after Round 1: 976,168 + 7,425 = 983,593.
+        //
+        // C26B-016 (@c.26, Option B+, Round 2 wD): +5,339 bytes in core.c
+        // (F1) from the span-aware comparison mold helpers
+        // (`taida_net_span_extract`, `taida_net_raw_as_bytes`,
+        // `taida_net_needle_as_bytes`, `taida_net_SpanEquals` /
+        // `SpanStartsWith` / `SpanContains` / `SpanSlice`). All four public
+        // helpers are byte-level comparisons over a `@(start, len)` span
+        // pack view into a Bytes/Str raw buffer, matching interpreter +
+        // JS parity. Placed immediately before the `// ── Error ceiling`
+        // divider so F1 absorbs the full delta; F2 unchanged.
+        // C26B-026 (@c.26, Round 2 wC): +617 bytes in net_h1_h2.c for
+        // the HPACK custom header preservation fix (h2_extract_response_fields
+        // switched from Lax-wrapping taida_list_get() to hlist[4+j] raw
+        // inner pack access) + header_cap 32 → H2_MAX_HEADERS (128).
+        // Combined Round 1 + Round 2 delta on top of 976,168:
+        //   +3,834 (C26B-011 core.c)
+        //   +2,135 (C26B-020 os.c + F1 forward decl)
+        //   +  839 (C26B-021 net_h3_quic.c)
+        //   +5,339 (C26B-016 core.c F1 span mold helpers)
+        //   +  617 (C26B-026 net_h1_h2.c HPACK fix)
+        //   +3,153 (C26B-018 (B)(C) core.c F1 byte-level primitives
+        //            + StringRepeatJoin: forward decls + 5 fn impls)
+        // Round 6 (wS, 2026-04-24) adds:
+        //   +1,904 (C26B-022 Step 2 net_h1_h2.c: method 16 / path 2048 /
+        //            Host-value 256 wire-byte reject in
+        //            taida_net_http_parse_request_head; 400 Bad Request
+        //            parity with Interpreter h1 parser)
+        //   +  511 (C26B-011 core.c: signed-zero branch in
+        //            taida_float_to_str — emits "-0.0" when
+        //            signbit(a) != 0, matching Rust f64::Display +
+        //            interpreter `format!("{:.1}", -0.0)` output)
+        // New total: 992,085 + 1,904 + 511 = 994,500.
+        //
+        // Round 8 (wT, 2026-04-24) adds:
+        //   +4,098 (C26B-024 core.c: thread-local 4-field Pack freelist +
+        //            freelist-routed release path for Lax / Result /
+        //            Gorillax short-form pack allocations. Converts the
+        //            Lax malloc/free churn in the bench_router.td hot
+        //            loop into a stack pop/push. Bounded at 32 entries /
+        //            thread, fields re-initialised on reuse so no stale
+        //            child leak. Definitions hoisted to the Magic-Numbers
+        //            section so `taida_release` (earlier in the file) can
+        //            consult the freelist before free(). See
+        //            `taida_pack4_freelist_{pop,push}`.)
+        // New total: 994,500 + 4,098 = 998,598.
+        //
+        // Round 10 (wepsilon, 2026-04-24) adds:
+        //   +14,373 (C26B-024 core.c Step 4 — cumulative: Tier-1 freelists
+        //            (cap=16 List + 3-bucket small-string), Tier-2 bump
+        //            arena (2 MiB chunks, per-thread chain, 16 B aligned),
+        //            heap-range tracker (O(1) membership via
+        //            [heap_min, heap_max) window captured at TAIDA_MALLOC
+        //            time), 64-entry mincore-page cache (used by all
+        //            read-barrier paths: `taida_ptr_is_readable`,
+        //            `taida_is_string_value`, `taida_read_cstr_len_safe`),
+        //            arena-aware list_push migration (malloc+memcpy when a
+        //            growing list was arena-backed — realloc on arena is
+        //            UB), and arena-skip guards in every release path.
+        //            Net effect on bench_router.td N=200 × M=500:
+        //              - Wall time 2.05s -> 0.34s (-83%).
+        //              - Sys time 1.66s -> 0.03s (-98%).
+        //              - mincore syscalls 9.45M -> 20 (-99.9998%).
+        //              - malloc calls 2.97M -> ~300 (-99.99%).
+        //              - sys/real ratio 81% -> 9% (under 30% target).
+        //              - Native/JS ratio 12.1x -> 2.0x (target reached).
+        //            All additions live in F1 before the "Error ceiling"
+        //            marker. F2 unchanged.)
+        // New total: 998,598 + 14,373 = 1,012,971.
+        // CI red 2026-04-24 follow-up: +2,009 bytes from the cppcheck
+        // gate clean-up in a18e765 (json_val scalar init, stack
+        // H2/H3Header memset, hn/hv NULL-init split, inline-suppress
+        // comments at three call sites).
+        const EXPECTED_TOTAL_LEN: usize = 1_014_980;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -653,11 +765,87 @@ mod tests {
         //    C25 native_runtime drift.
         // C25B-025 Phase 5-I: F1 absorbs +1,895 bytes (math mold family)
         // inserted ahead of the "Error ceiling" marker. F2 unchanged.
-        const F1_LEN: usize = 235_748;
+        // C26B-011 Phase 11: F1 absorbs +2,889 bytes (Float-hint Div/Mod
+        // variants, `taida_pack_get_tag_idx` helper, `taida_float_to_str`
+        // forward declaration, `taida_debug_float` rewrite). F2 absorbs
+        // +945 bytes (`taida_lax_to_string` FLOAT-tag aware rendering).
+        // C26B-020 柱 1 (@c.26): F1 absorbs +140 bytes for the
+        // taida_os_read_bytes_at forward declaration. F2 unchanged.
+        // C26B-016 (@c.26, Option B+): F1 absorbs +5,339 bytes for the
+        // span-aware comparison mold helpers (`taida_net_span_extract`,
+        // `taida_net_raw_as_bytes`, `taida_net_needle_as_bytes`,
+        // `taida_net_SpanEquals` / `SpanStartsWith` / `SpanContains` /
+        // `SpanSlice`). All added immediately before the "Error ceiling"
+        // marker so F1 absorbs the full delta. F2 unchanged.
+        // F1_LEN moves: 238,777 + 5,339 = 244,116.
+        // C26B-018 (B)(C) (@c.26, wK Round 4): F1 absorbs +3,261 bytes
+        // for the byte-level primitives (`taida_str_byte_at`,
+        // `taida_str_byte_at_lax`, `taida_str_byte_slice`,
+        // `taida_str_byte_length`) and `taida_str_repeat_join` plus
+        // their 5 forward declarations. Functions were inserted
+        // immediately after `taida_str_repeat` — well before the
+        // "Error ceiling" marker — so F1 absorbs the full delta. F2
+        // unchanged.
+        // F1_LEN moves: 244,116 + 3,153 = 247,269.
+        // C26B-011 (@c.26, wS Round 6, 2026-04-24): F1 absorbs +511 bytes
+        // for the signed-zero branch in `taida_float_to_str` (emits
+        // "-0.0" when signbit(a) != 0). `taida_float_to_str` sits at
+        // line ~4007 — well before the "Error ceiling" marker — so F1
+        // absorbs the full delta. F2 unchanged.
+        // F1_LEN moves: 247,269 + 511 = 247,780.
+        // C26B-024 (@c.26, wT Round 8, 2026-04-24): F1 absorbs +4,098
+        // bytes for the thread-local 4-field Pack freelist. The helpers
+        // (`taida_pack4_freelist_{pop,push}`) + macros are hoisted to
+        // the Magic-Numbers section so `taida_release` can consult them;
+        // the fast-path branches in `taida_pack_new` / `taida_release`
+        // and the rationale comment also live in F1 — well before the
+        // "Error ceiling" marker. F2 unchanged.
+        // F1_LEN moves: 247,780 + 4,098 = 251,878.
+        // C26B-024 (@c.26, wepsilon Round 10 Step 4, 2026-04-24): F1
+        // absorbs +14,374 bytes for the cumulative wε Step 4 allocator +
+        // read-barrier rework:
+        //   - Tier-1 freelists: cap=16 List freelist + 3-bucket small-
+        //     string freelist (`TAIDA_LIST_FREELIST_MAX`,
+        //     `TAIDA_LIST_INIT_CAP`, `TAIDA_STR_FREELIST_MAX`,
+        //     `TAIDA_STR_BUCKET_COUNT`, `taida_list_freelist_{pop,push}`,
+        //     `taida_str_bucket_for`, `taida_str_freelist_{pop,push}`).
+        //   - Tier-2 bump arena (2 MiB chunks, per-thread chain, 16 B
+        //     aligned, max 128 chunks = 256 MiB/thread cap):
+        //     `TAIDA_ARENA_CHUNK_SIZE`, `TAIDA_ARENA_MAX_ALLOC`,
+        //     `TAIDA_ARENA_MAX_CHUNKS`, `taida_arena_chunk_t` +
+        //     `taida_arena_alloc`, `taida_arena_contains`.
+        //   - Heap-range tracker (O(1) membership via [heap_min,
+        //     heap_max) captured in `taida_safe_malloc`):
+        //     `taida_heap_min`, `taida_heap_max`, `taida_heap_range_update`,
+        //     `taida_heap_range_contains`.
+        //   - 64-entry mincore-page cache (`taida_mincore_cache`,
+        //     `taida_mincore_cache_hit`, `taida_mincore_cache_add`).
+        //   - Fast-path wiring in `taida_ptr_is_readable`,
+        //     `taida_is_string_value`, `taida_read_cstr_len_safe`
+        //     (arena → heap-range → cache → mincore fallback).
+        //   - `taida_str_alloc`, `taida_pack_new`, `taida_list_new`
+        //     route allocations through Tier-1 → Tier-2 → malloc.
+        //   - `taida_list_push` arena-aware migration on growth
+        //     (realloc on an arena pointer is UB; we malloc+memcpy).
+        //   - Arena-skip guards in `taida_release` and
+        //     `taida_str_release` before the freelist push and before
+        //     the free() call.
+        // All additions sit in the Magic-Numbers / allocator / read-
+        // barrier region which is entirely inside F1. F2 unchanged.
+        // F1_LEN moves: 251,878 + 14,374 = 266,252.
+        // 2026-04-24 cppcheck clean-up (a18e765):
+        //   F1 += 881 bytes (shift / retain / release inline-suppress
+        //     comments on lines 847, 2459, 2478 inside F1).
+        //   F2 += 409 bytes (json_parse_array / json_parse_object
+        //     scalar init + preceding comment on lines 8207, 8236
+        //     which sit in F2, past the "// ── Error ceiling" marker).
+        //   F1_LEN: 266,252 + 881 = 267,133.
+        //   F2_LEN: 160,351 + 409 = 160,760.
+        const F1_LEN: usize = 267_133;
         assert_eq!(
             CORE_SECTION.len(),
-            235_748 + 159_407,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 adjusted)"
+            267_133 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -672,11 +860,28 @@ mod tests {
         // offset 184,963 inside NET_H1_H2_SECTION must be the first byte
         // of the former fragment 6 (06_net_h2.inc.c), which historically
         // begins with "// ── Native HTTP/2 server".
-        const F5_LEN: usize = 184_963;
+        //
+        // C26B-026 (@c.26 Round 2, wC): fragment 6 (net_h2 server) gained
+        // +617 bytes for the HPACK custom header fix inside
+        // `h2_extract_response_fields` (Lax unwrap via raw `hlist[4+j]`
+        // + header_cap raised to H2_MAX_HEADERS). F5_LEN unchanged;
+        // fragment 6 baseline moves from 91,152 to 91,769.
+        // C26B-022 Step 2 (@c.26, wS Round 6, 2026-04-24): fragment 5
+        // (HTTP/1 parser + worker) absorbs +1,904 bytes for the
+        // parser-level wire-byte reject in
+        // `taida_net_http_parse_request_head` (method 16 / path 2048 /
+        // Host-value 256). Inserted entirely before the "// ── Native
+        // HTTP/2 server" divider, so F5 grows and F6 is unchanged.
+        // F5_LEN moves: 184,963 + 1,904 = 186,867.
+        // 2026-04-24 cppcheck clean-up (a18e765): the
+        // h2_send_response_headers memset + 4-line comment sits
+        // inside fragment 6 (HTTP/2 server), so F5_LEN is unchanged
+        // and F6 grows: 91,769 + 355 = 92,124.
+        const F5_LEN: usize = 186_867;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            184_963 + 91_152,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6"
+            186_867 + 92_124,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS adjusted; CI-red 2026-04-24 cppcheck clean-up adds 355 to F6)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];
