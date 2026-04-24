@@ -9,5 +9,5 @@
 //   10
 
 nums <= @[1, 2, 3, 4]
-total <= nums |> fold(0, |acc, n|> acc + n)
+Fold[nums, 0, _ acc x = acc + x]() ]=> total
 stdout(total)
