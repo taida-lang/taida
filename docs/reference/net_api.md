@@ -2,7 +2,9 @@
 
 > Core bundled package. `>>> taida-lang/net => @(...)` で import、または import 無しで直接呼び出し可能（両経路とも checker で同じ型 signature に pin されます）。
 
-ガイドは存在しません（`docs/guide/` 未作成）。3-backend (Interpreter / JS / Native) parity を GA 条件として C26 で仕上げ中です — `.dev/C26_BLOCKERS.md::C26B-001〜C26B-006` を参照。
+ガイドは存在しません（`docs/guide/` 未作成）。3-backend (Interpreter / JS / Native) parity を GA 条件として C26 で仕上げ中です — `.dev/C26_BLOCKERS.md::C26B-001〜C26B-006` + `C26B-026` を参照。
+
+> **C26 Round 3 land status (2026-04-24)**: HTTP/2 parity は 10-case 3-backend pin を達成 (C26B-001、Round 3 / wE)、Native h2 HPACK custom header preserve 済 (C26B-026、Round 2 / wC)、span-aware 比較 mold 全 5 種 (`SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` / `StrOf`) も 3-backend land 済 (C26B-016、Round 2 / wD + Round 3 / wH)。残 gating は C26B-002 TLS、C26B-006 retry shim 撤廃、C26B-022 authority/Native/h2/h3 上限、24 h soak 実施。詳細は § 7 table。
 
 ---
 
@@ -98,7 +100,19 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 
 ## 4. Span-aware 比較 mold (C26B-016, Option B+)
 
-> **Status**: C26B-016 で land 予定 (Must Fix、Phase 12)。以下は設計 pin。land 後に具体的な source reference を追記します。
+> **Status (2026-04-24, Round 3 完了)**: Option B+ の **全 5 mold が 3-backend 実装済**。Round 2 / wD で `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` が land、Round 3 / wH で cold-path materialiser `StrOf` が IR composition (新 C runtime helper なし) で land。Regression guard: `tests/c26b_016_strof_parity.rs`。
+
+### 4.0 API summary (full family)
+
+| mold | signature | path | 用途 |
+|------|-----------|------|------|
+| `SpanEquals` | `SpanEquals[span, raw, needle: Str]() -> Bool` | hot | router の method / path 一致判定 (memcmp 相当、zero allocation) |
+| `SpanStartsWith` | `SpanStartsWith[span, raw, prefix: Str]() -> Bool` | hot | router の prefix match (zero allocation) |
+| `SpanContains` | `SpanContains[span, raw, needle: Str]() -> Bool` | warm | header 値内の token 検索 (`Accept-Encoding: gzip` 等) |
+| `SpanSlice` | `SpanSlice[span, raw, start: Int, end: Int]() -> BuchiPack` | warm | 親 span 内での sub-span 抽出 (zero allocation、`@(start, len)` を返す) |
+| `StrOf` | `StrOf[span, raw]() -> Str` / `StrOf(span, raw) -> Str` | cold | span → `Str` 明示 materialize (log 出力 / JSON parse 前のみ使用) |
+
+> **Note on form**: `StrOf` は mold form (`StrOf[...]()`) と function-form (`StrOf(span, raw)`) の両方に対応しています。他の `Span*` family は hot path を意識して mold form 専用です。
 
 以下の public mold を `taida-lang/net` から公開します。3-backend (Interpreter / JS / Native) で parity 保証。
 
@@ -160,11 +174,11 @@ header 値の中に `needle` が含まれるか判定。`Accept-Encoding` 等の
 |------|----------|------|
 | router の method 分岐 (per request) | `SpanEquals` | hot path、allocation を避ける |
 | router の path prefix 判定 | `SpanStartsWith` | 同上 |
-| log 出力 / デバッグ (cold path) | `strOf` | 1 回だけ allocation、可読性重視 |
-| body parsing / JSON 解析 | `strOf(req.body, req.raw)` を JSON mold に渡す | 一度に allocate して再利用 |
-| query string 分解 | `SpanSlice` で分解 → 各 subspan に `strOf` | 不要な allocation を避ける |
+| log 出力 / デバッグ (cold path) | `StrOf` | 1 回だけ allocation、可読性重視 |
+| body parsing / JSON 解析 | `StrOf(req.body, req.raw)` を JSON mold に渡す | 一度に allocate して再利用 |
+| query string 分解 | `SpanSlice` で分解 → 各 subspan に `StrOf` | 不要な allocation を避ける |
 
-> **Note**: 上記は C26B-016 Option B+ で land 予定の API surface pin です。実装 land 時に `tests/parity_span_aware_mold.rs` (新規) で 3-backend parity を pin します。
+> **Note (2026-04-24 Round 3 完了)**: 上記 API family は C26B-016 Option B+ で **3-backend land 済**。`SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` は Round 2 / wD、`StrOf` は Round 3 / wH 着地。Regression guard は `tests/c26b_016_strof_parity.rs` (StrOf) と wD land の `tests/c26b_016_*_parity.rs` で複合 pin。Function-form `StrOf(span, raw)` は §4.1 参照。
 
 ---
 
@@ -178,7 +192,19 @@ request head (start line + header block、CRLFCRLF まで) を parse。返り値
 
 response を wire bytes に encode。詳細は C26B-022 (Step 3 Option B: parser 上限強制) 完了時に追記。
 
-> **C26B-022 Step 3 Option B (Must Fix)**: method 16 byte / path 2048 byte / authority 256 byte 超は parse / encode 双方で `400 Bad Request` を emit (runtime reject)。`-Wformat-truncation` warning-as-error を CI に組み込み、C wire buffer の snprintf truncation を防ぎます。
+### 5.3 HTTP wire-byte ceilings (C26B-022, Step 3 Option B)
+
+`httpServe` / `httpParseRequestHead` は attacker 制御可能な HTTP wire field に **parser 段階で上限**を設け、over-limit 時は `400 Bad Request` を emit してハンドラを呼ばずに接続を閉じます。上限は Native codegen の固定 size stack buffer と揃えてあり、silent truncation を防ぎます。
+
+| field | 上限 | 根拠 | Status |
+|-------|------|------|--------|
+| method | **16 byte** | `char method[16]` (Native `core.c`) | Interpreter h1 `[FIXED]` (Round 3 / wE); Native / h2 / h3 **OPEN** |
+| path | **2048 byte** | `char path[2048]` (Native) | Interpreter h1 `[FIXED]` (Round 3 / wE); Native / h2 / h3 **OPEN** |
+| authority | **256 byte** | `char authority[256]` (Host header) | **OPEN** (Interpreter含め未 land、wJ / wH 予定) |
+
+> **Implementation note (Round 3 / wE)**: Interpreter h1 path で `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入、`parse_request_head` 後・`dispatch_request` 前で enforcement。§ 6.2 additions (widening) 該当、既存 fixture / error 文字列は無変更。Authority 256 は Host header 検出が raw buffer traversal を必要とするため `helpers.rs` 側に land 予定。
+>
+> **CI gate**: `-Wformat-truncation` を warning-as-error promote する変更は `.github/workflows/ci.yml` 側の C26B-022 Step 3 の一部として Cluster 2 / 6 で扱います。
 
 ---
 
@@ -192,19 +218,22 @@ HTTP client。TLS 自動判定 (`https://` なら TLS)。詳細は C26B-002 FIXE
 
 ## 7. Known limitations & roadmap
 
-| 項目 | Blocker | Severity | Phase |
-|------|---------|----------|-------|
-| HTTP/2 parity (3-backend) | C26B-001 | Must Fix | 1 |
-| TLS 構成安定化 | C26B-002 | Must Fix | 2 |
-| port-bind race 根治 | C26B-003 | **Critical** | 3 |
-| throughput regression gate hard-fail | C26B-004 | Must Fix | 4 |
-| scatter-gather 24h soak | C26B-005 | Must Fix | 5 |
-| HTTP retry shim 撤廃 | C26B-006 | Must Fix | 6 |
-| HTTP wire parser 上限強制 | C26B-022 | Must Fix | 12 |
-| 2-arg body silent breakage | C26B-023 | Must Fix | 12 |
-| span-aware 比較 mold 公開 | C26B-016 | Must Fix | 12 |
+| 項目 | Blocker | Severity | Phase | Status |
+|------|---------|----------|-------|--------|
+| HTTP/2 parity (3-backend) | C26B-001 | Must Fix | 1 | `[FIXED]` 10-case pin (Round 3 / wE) |
+| Native h2 HPACK custom header preserve | C26B-026 | Must Fix | 1 | `[FIXED]` (Round 2 / wC) |
+| TLS 構成安定化 | C26B-002 | Must Fix | 2 | OPEN |
+| port-bind race 根治 | C26B-003 | **Critical** | 3 | `[FIXED]` (Round 1) |
+| throughput regression gate hard-fail | C26B-004 | Must Fix | 4 | `[FIXED]` (Round 2 / wB) |
+| scatter-gather 24h soak | C26B-005 | Must Fix | 5 | runbook `[FIXED]` / 24 h run pending |
+| HTTP retry shim 撤廃 | C26B-006 | Must Fix | 6 | OPEN (wJ 予定、C26B-003 FIXED 後) |
+| HTTP wire parser 上限強制 | C26B-022 | Must Fix | 12 | Interp h1 method+path `[FIXED]` (Round 3 / wE); authority / Native / h2 / h3 OPEN |
+| 2-arg body silent breakage — docs | C26B-023 | Must Fix | 12 | docs `[FIXED]` (Round 3 / wH) / runtime warning OPEN |
+| span-aware 比較 mold 公開 | C26B-016 | Must Fix | 12 | `[FIXED]` 全 5 mold (Round 2 / wD + Round 3 / wH) |
+| 部分適用 closure capture | C26B-017 | Must Fix | 12 | `[FIXED]` (Round 3 / wH) |
+| bytes I/O 3-backend + wasm-wasi | C26B-020 | Must Fix | 10 | 柱 1 + 柱 3 `[FIXED]` (Round 1 / Round 3 wI); 柱 2 OPEN |
 
-WASM バックエンドは gen-C では rejected、D27 送り (`docs/STABILITY.md` §1.2 / §4.2 / §5.2)。
+WASM バックエンドは gen-C では rejected、D27 送り (`docs/STABILITY.md` §1.2 / §4.2 / §5.2)。例外として C26B-020 柱 3 (`readBytesAt` の `wasm-wasi` / `wasm-full` lowering) のみ § 6.2 widening addition として land 済。
 
 ---
 
