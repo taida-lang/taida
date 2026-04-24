@@ -25,8 +25,17 @@ and owned by a later phase / worktree. A canonical snapshot lives at
 
 #### Cluster 1 — NET stable viewpoint (Phase 1–6)
 
-- **C26B-001** — HTTP/2 parity across 3-backend (interpreter / JS /
-  native). `@c.25.rc7` shipped with partial pin only.
+- **C26B-001** `[FIXED]` — HTTP/2 parity across 3-backend
+  (interpreter / JS / native) reached the **10-case pin target** at
+  Round 3 / wE. Round 1 landed `test_net6_c26b001_h2_post_body_*`;
+  Round 2 Session 2 landed cases 2–4 (GET + query, status 404,
+  64 KiB large body); Round 3 / wE added the three method
+  variations (PUT / DELETE / PATCH via
+  `c26b001_r3_h2_method_variation_test`). Pin count: 7 new
+  `test_net6_c26b001_*` + 3 baseline h2 fixtures = 10. JS branch
+  rejects with `H2Unsupported` in every case. The `§5.1 → FIXED`
+  flip is held on the rest of Cluster 1 (C26B-002 TLS,
+  C26B-006 retry shim), but the test-pin target is met.
 - **C26B-002** — TLS construction (cert chains, ALPN, verification
   modes) locked across 3-backend.
 - **C26B-003** `[FIXED]` — **Critical**. Port-bind race eradication
@@ -34,9 +43,9 @@ and owned by a later phase / worktree. A canonical snapshot lives at
   CI-equivalent runs pass with no retry-shim firing. Candidate
   solution 1 (`0.0.0.0:0` bind + `getsockname()`) sufficed; the
   D27-escalation checklist evaluated all-NO on the landed patch.
-- **C26B-004** — Throughput regression gate promoted from
+- **C26B-004** `[FIXED]` — Throughput regression gate promoted from
   `continue-on-error` to hard-fail on 10% regression against a
-  30-sample baseline.
+  30-sample baseline (Round 2 / wB).
 - **C26B-005** — Scatter-gather 24-hour soak verification via a
   manual runbook. `.dev/C26_SOAK_RUNBOOK.md` is **landed**
   (2026-04-24, Round 2 / wA) with environment setup, tmux /
@@ -46,7 +55,21 @@ and owned by a later phase / worktree. A canonical snapshot lives at
   and a REPORT.md template. The 24 h run itself is the stable-gate
   blocker and is still pending.
 - **C26B-006** — HTTP parity retry shim retired once C26B-003 roots
-  out the underlying port-bind race.
+  out the underlying port-bind race (staged for the wJ NET-rest
+  worktree; C26B-003 being FIXED makes the shim safe to remove).
+- **C26B-026** `[FIXED]` — Native h2 HPACK encode path now
+  preserves custom response headers (Round 2 / wC, fix in
+  `src/codegen/native_runtime/net_h1_h2.c::h2_extract_response_fields`).
+  Discovered as a sub-finding of C26B-001 Session 2 when the
+  multi-custom-header test dump showed that every
+  `handler`-returned `set-cookie` / `x-*` header was dropped on
+  the Native path. Root cause: the encoder treated
+  `taida_list_get(hdrs_val, j)` as a raw pack and looked up
+  `name` / `value` on the returned Lax wrapper instead of the
+  inner pack. Fixed to mirror the h1 encode path; the header cap
+  was raised to `H2_MAX_HEADERS = 128`. Regression pinned by
+  `test_net6_c26b026_h2_multiple_custom_headers_3backend_parity`.
+  `EXPECTED_TOTAL_LEN` resynced (982_976 → 983_593).
 
 WASM targets are explicitly out of scope for gen-C NET (3-backend
 fixed); the single exception is C26B-020 pillar 3 (a widening
@@ -82,8 +105,10 @@ addition under §6.2).
     --error-exitcode=1`. The gcc warning baseline is pinned at
     `78`; any increase hard-fails. The allow / fix-queue policy
     lives at `.dev/C26_C_STATIC_ANALYSIS.md`.
-  - Sub-phase 7.4 (SEC-011) — still **OPEN**, owned by worktree
-    `taida-wB`.
+  - Sub-phase 7.4 (SEC-011) `[FIXED]` — Sigstore cosign keyless
+    signing + SLSA provenance attestation wired into the
+    `taida publish` workflow, with a verify-on-install step for
+    `taida install` (Round 2 / wB).
 - **C26B-008** — C25B-014 advisory publication + CVE request
   (owner action).
 
@@ -108,10 +133,14 @@ addition under §6.2).
 
 #### Cluster 4 — Runtime perf / memory (Phase 10)
 
-Gated on a **common abstraction decision** (Arc + try_unwrap COW /
-arena / zero-copy slice view) landed in `src/interpreter/value.rs`
-before any implementation work. No implementation lands until the
-abstraction is pinned.
+**Common-abstraction decision LOCKED** (Round 3 / wG, 2026-04-24):
+all Phase 10 blockers (C26B-010 / 012 / 018 / 020 pillar 2 / 024)
+adopt the **Arc + try_unwrap COW family**
+(`.dev/C26_CLUSTER4_ABSTRACTION.md`, PROPOSED → LOCKED). Zero-copy
+slice views are subsumed as a specialisation of the Arc family;
+the arena option is D27-deferred. The lock itself landed with
+zero code — it is a gating artefact so follow-up sessions land
+3-backend simultaneously without breaking parity.
 
 - **C26B-010** — valgrind + peak-RSS + coverage integration.
 - **C26B-012** — `PENDING_BYTES` FIFO ordering (terminal addon
@@ -128,14 +157,18 @@ abstraction is pinned.
      across 3-backend; scale test pins 1 GB file × 64 × 16 MB
      chunked read in under 2 s.
   2. `BytesCursorTake` zero-copy via `Arc<[u8]>` + offset/len view.
-  3. `BytesCursor` + related molds (`readBytesAt`,
-     `BytesCursorTake`, `BytesCursorAdvance`,
-     `BytesCursorRemaining`) lowered for `wasm-wasi` / `wasm-edge`
-     / `wasm-full`. This is the **only** wasm-scope addition in
-     gen-C NET work.
+     Gated on the Cluster 4 common-abstraction lock (Arc +
+     try_unwrap COW family, `.dev/C26_CLUSTER4_ABSTRACTION.md`,
+     LOCKED at wG Round 3). **OPEN**.
+  3. `[FIXED]` `readBytesAt` + related molds lowered for
+     `wasm-wasi` / `wasm-full` at Round 3 / wI via a new
+     `src/codegen/runtime_wasi_io.c` (WASI preview1 `path_open` +
+     `fd_read`, 64 MB runtime-configurable ceiling preserved).
+     Regression guard: `tests/c26b_020_wasm_bytes_at.rs`. This is
+     the **only** wasm-scope addition in gen-C NET work.
 
-  Pillars 2 and 3 are still **OPEN** and gated on the Cluster 4
-  common-abstraction decision. Part-land cannot flip C26B-020 to
+  Pillar 2 remains **OPEN** against the locked Arc-COW abstraction;
+  part-land of pillars 1 + 3 cannot flip C26B-020 as a whole to
   DONE.
 - **C26B-024** — Native list / `BuchiPack` clone-heavy paths fixed;
   `bench_router.td` hard-gates `Native ≤ JS × 2` with `sys/real
@@ -167,18 +200,25 @@ abstraction is pinned.
   longer rejects project-root-internal `..` imports; parity across
   3-backend (root-escape is still rejected via the canonicalized
   component walk).
-- **C26B-016** — `httpServe` handler `req` pack shape pinned in
-  `docs/reference/net_api.md` (new). **Option B+ pinned**: the
-  zero-copy span pack (`make_span`,
+- **C26B-016** `[FIXED]` — `httpServe` handler `req` pack shape
+  pinned in `docs/reference/net_api.md` (new). **Option B+
+  complete**: the zero-copy span pack (`make_span`,
   `src/interpreter/net_eval/helpers.rs:195-200`) is **retained**
-  for perf; ergonomics is widened via new public molds
-  `strOf` / `SpanEquals` / `SpanStartsWith` / `SpanSlice` /
-  `SpanContains`. Option A (auto-`Str` promotion of `req.method`)
-  would break `tests/parity.rs` fixtures and is **deferred to D27**.
-- **C26B-017** — Interpreter: partially-applied function returned
-  from an outer function no longer collapses to `@()`; closure
-  capture works across return boundaries (3-backend parity:
-  `makeAdder(10)(7) == 17`).
+  for perf; ergonomics is widened via the full public mold family
+  — `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice`
+  landed at Round 2 / wD, and the cold-path materialiser
+  `StrOf(span, raw) -> Str` landed at Round 3 / wH as pure IR
+  composition (`src/codegen/lower_molds.rs::StrOf`,
+  `taida_pack_get` + `taida_slice_mold` + `taida_utf8_decode_mold`
+  + `taida_lax_get_or_default`, no new C runtime helpers).
+  Regression guard: `tests/c26b_016_strof_parity.rs` (3-backend).
+  Option A (auto-`Str` promotion of `req.method`) would break
+  `tests/parity.rs` fixtures and is **deferred to D27**.
+- **C26B-017** `[FIXED]` — Interpreter: partially-applied function
+  returned from an outer function no longer collapses to `@()`;
+  closure capture works across return boundaries (3-backend parity:
+  `makeAdder(10)(7) == 17`). Landed at Round 3 / wH. Regression
+  guard: `tests/c26b_017_partial_app_closure_capture.rs`.
 - **C26B-021** `[FIXED]` — `stdout` / `stderr` now line-buffered at
   the C entry point via `setvbuf(_IOLBF, 0)`. **Option B pinned**
   (per-call `fflush` is not adopted, because the per-call overhead
@@ -187,9 +227,23 @@ abstraction is pinned.
   authority 256 byte ceilings; over-limit requests emit `400 Bad
   Request`. **Step 3 Option B pinned**. `-Wformat-truncation` is
   warning-as-error in CI.
-- **C26B-023** — 2-arg `httpServe` handler: `req.body` empty-span
-  edge case emits a runtime warning; `readBody(req)` /
-  `readBodyChunk` / `readBodyAll` usage pinned in `net_api.md`.
+  - Step 2 (Interpreter h1 method + path) `[FIXED]` at Round 3 /
+    wE (`src/interpreter/net_eval/h1.rs`, constants
+    `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN =
+    2048`). The check runs after `parse_request_head` and before
+    `dispatch_request`, so over-limit inputs are rejected before
+    the handler is invoked. Additive widening per §6.2; no
+    existing assertion is altered. Authority (256) + Native / h2
+    / h3 parser-side enforcement remain **OPEN**.
+- **C26B-023** `[FIXED, docs-path]` — 2-arg `httpServe` handler
+  `req.body` empty-span caveat documented in
+  `docs/reference/net_api.md` (§3.2 / §8) at Round 3 / wH,
+  including the `readBody(req)` / `readBodyChunk(req)` /
+  `readBodyAll(req)` usage matrix, the `__body_stream` sentinel
+  design note, and the silent-breakage anti-pattern. Regression
+  guard: `tests/c26b_023_two_arg_handler_body.rs`. The runtime
+  warning emission for direct `req.body` slice in 2-arg handlers
+  is part of the diagnostic-code track and remains OPEN.
 - **C26B-025** `[FIXED]` — `taida publish` validates `packages.tdm`
   self-identity (`<<<@version` vs `next_version`) at `plan_publish()`
   and rejects a stale manifest before any tag is pushed. `--retag`,
@@ -216,15 +270,29 @@ abstraction is pinned.
   - `SECURITY_AUDIT.md` open = 0; SEC-011 recorded complete.
   - Sigstore + SLSA-signed official addon release.
 
-### Round 1 + wA Round 2 — commits already on `feat/c26`
+### Round 1 + Round 2 + Round 3 — commits already on `feat/c26`
 
-Merge order: P3 (C26B-003) → P10 pillar 1 (C26B-020) → P11
-(C26B-011) → P12 (C26B-014 / 015 / 021 / 025), then Phase 7
+Round 1 merge order: P3 (C26B-003) → P10 pillar 1 (C26B-020) →
+P11 (C26B-011) → P12 (C26B-014 / 015 / 021 / 025), then Phase 7
 sub-phases 7.1–7.3 (C26B-007) and Phase 9 (C26B-009 / 019) in
-parallel sessions. The wA Round 2 worktree adds the
-`.dev/C26_SOAK_RUNBOOK.md` runbook (C26B-005 scaffolding) and
-syncs `docs/STABILITY.md` / this `CHANGELOG.md` to the landed
-FIXED set.
+parallel sessions.
+
+Round 2 additions: wA (soak runbook + docs amendment), wB
+(C26B-004 perf gate hard-fail + SEC-011 Sigstore / SLSA), wC
+(C26B-026 Native h2 HPACK custom-header fix), wD (C26B-016 Option
+B+ span-aware molds: `SpanEquals` / `SpanStartsWith` /
+`SpanContains` / `SpanSlice`).
+
+Round 3 additions: wE (C26B-001 h2 method PUT / DELETE / PATCH
+cases → 10-case pin target + C26B-022 Step 2 interp wire limits),
+wG (Cluster 4 common-abstraction LOCK decision, decide-only),
+wH (C26B-016 `StrOf` + C26B-017 partial-app closure capture +
+C26B-023 2-arg body docs), wI (C26B-020 pillar 3 wasm-wasi /
+wasm-full lowering).
+
+Round 4 / wN — this session — is a docs-only amendment (STABILITY
+§5.1 / §5.5 / §5.6 + CHANGELOG + `net_api.md`) that re-syncs the
+FIXED set to the landed commits above.
 
 ### Docs / infrastructure landed alongside
 
