@@ -198,7 +198,7 @@ impl Interpreter {
                     .find(|(n, _)| n == "message")
                     .and_then(|(_, v)| {
                         if let Value::Str(s) = v {
-                            Some((**s).clone())
+                            Some(s.as_string().clone())
                         } else {
                             None
                         }
@@ -209,7 +209,7 @@ impl Interpreter {
                             .find(|(n, _)| n == "__type")
                             .and_then(|(_, v)| {
                                 if let Value::Str(s) = v {
-                                    Some((**s).clone())
+                                    Some(s.as_string().clone())
                                 } else {
                                     None
                                 }
@@ -217,7 +217,7 @@ impl Interpreter {
                     })
                     .unwrap_or_else(|| throw_val.to_display_string())
             }
-            Value::Str(s) => (**s).clone(),
+            Value::Str(s) => s.as_string().clone(),
             other => other.to_display_string(),
         }
     }
@@ -1163,15 +1163,26 @@ impl Interpreter {
     /// String methods (auto-mold Str).
     /// Only state-check methods remain. Operations moved to molds:
     /// Upper[], Lower[], Trim[], Split[], Replace[], Slice[], CharAt[], Repeat[], Reverse[], Pad[]
+    ///
+    /// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache dispatch
+    ///
+    /// The receiver is `&StrValue` (instead of `&str`) so that `length`,
+    /// `get`, `indexOf`, and `lastIndexOf` can hit the shared char-offset
+    /// cache (`OnceLock<Vec<usize>>`) for O(1) behaviour after first
+    /// touch. Byte-oriented methods (`contains`, `startsWith`, `endsWith`,
+    /// `replace*`, `split`, `toString`, `trim*`, `upper*`, etc.) continue
+    /// to operate on the raw `&str` view via `s.as_str()` / `s.deref()`
+    /// and remain byte-linear — which is already optimal for those.
     pub(crate) fn eval_str_method(
         &self,
-        s: &str,
+        s: &crate::interpreter::value::StrValue,
         method: &str,
         args: &[Value],
     ) -> Result<Signal, RuntimeError> {
         match method {
             // State checks (remain as methods)
-            "length" => Ok(Signal::Value(Value::Int(s.chars().count() as i64))),
+            // C26B-018 (A) wU: O(1) char count via cache.
+            "length" => Ok(Signal::Value(Value::Int(s.cached_char_count() as i64))),
             "contains" => {
                 let substr = args
                     .first()
@@ -1198,10 +1209,13 @@ impl Interpreter {
                     .first()
                     .map(|v| v.to_display_string())
                     .unwrap_or_default();
-                // Convert byte offset to character offset for consistency with length()/get()
+                // C26B-018 (A) wU: O(log n) byte-offset → char-index via
+                // cache binary search (was O(n) chars().count() scan).
                 let idx = s
+                    .as_str()
                     .find(&substr)
-                    .map(|byte_pos| s[..byte_pos].chars().count() as i64)
+                    .and_then(|byte_pos| s.cached_byte_to_char_index(byte_pos))
+                    .map(|i| i as i64)
                     .unwrap_or(-1);
                 Ok(Signal::Value(Value::Int(idx)))
             }
@@ -1210,10 +1224,13 @@ impl Interpreter {
                     .first()
                     .map(|v| v.to_display_string())
                     .unwrap_or_default();
-                // Convert byte offset to character offset for consistency with length()/get()
+                // C26B-018 (A) wU: O(log n) byte-offset → char-index via
+                // cache binary search.
                 let idx = s
+                    .as_str()
                     .rfind(&substr)
-                    .map(|byte_pos| s[..byte_pos].chars().count() as i64)
+                    .and_then(|byte_pos| s.cached_byte_to_char_index(byte_pos))
+                    .map(|i| i as i64)
                     .unwrap_or(-1);
                 Ok(Signal::Value(Value::Int(idx)))
             }
@@ -1223,14 +1240,16 @@ impl Interpreter {
                     Some(Value::Int(n)) => *n,
                     _ => 0,
                 };
-                let char_len = s.chars().count();
-                if idx >= 0 && (idx as usize) < char_len {
-                    // SAFETY: bounds checked above — idx is in [0, char_len)
-                    let ch = s
-                        .chars()
-                        .nth(idx as usize)
-                        .expect("bounds checked above")
-                        .to_string();
+                // C26B-018 (A) wU: O(1) char-indexed access via cache.
+                if idx < 0 {
+                    return Ok(Signal::Value(Value::pack(vec![
+                        ("hasValue".into(), Value::Bool(false)),
+                        ("__value".into(), Value::str(String::new())),
+                        ("__default".into(), Value::str(String::new())),
+                        ("__type".into(), Value::str("Lax".into())),
+                    ])));
+                }
+                if let Some(ch) = s.cached_char_at(idx as usize) {
                     Ok(Signal::Value(Value::pack(vec![
                         ("hasValue".into(), Value::Bool(true)),
                         ("__value".into(), Value::str(ch)),
@@ -1258,7 +1277,7 @@ impl Interpreter {
                         .get(1)
                         .map(|v| v.to_display_string())
                         .unwrap_or_default();
-                    match super::regex_eval::replace_first(s, &pat, &flags, &replacement) {
+                    match super::regex_eval::replace_first(s.as_str(), &pat, &flags, &replacement) {
                         Ok(out) => return Ok(Signal::Value(Value::str(out))),
                         Err(msg) => return Err(RuntimeError { message: msg }),
                     }
@@ -1287,7 +1306,7 @@ impl Interpreter {
                         .get(1)
                         .map(|v| v.to_display_string())
                         .unwrap_or_default();
-                    match super::regex_eval::replace_all(s, &pat, &flags, &replacement) {
+                    match super::regex_eval::replace_all(s.as_str(), &pat, &flags, &replacement) {
                         Ok(out) => return Ok(Signal::Value(Value::str(out))),
                         Err(msg) => return Err(RuntimeError { message: msg }),
                     }
@@ -1308,7 +1327,7 @@ impl Interpreter {
             }
             "split" => {
                 if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
-                    match super::regex_eval::split(s, &pat, &flags) {
+                    match super::regex_eval::split(s.as_str(), &pat, &flags) {
                         Ok(parts) => {
                             return Ok(Signal::Value(Value::list(
                                 parts.into_iter().map(Value::str).collect(),
@@ -1346,7 +1365,7 @@ impl Interpreter {
                     .ok_or_else(|| RuntimeError {
                         message: "str.match(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
                     })?;
-                match super::regex_eval::match_first(s, &pat, &flags) {
+                match super::regex_eval::match_first(s.as_str(), &pat, &flags) {
                     Ok(m) => Ok(Signal::Value(super::regex_eval::build_match_value(m))),
                     Err(msg) => Err(RuntimeError { message: msg }),
                 }
@@ -1358,7 +1377,7 @@ impl Interpreter {
                     .ok_or_else(|| RuntimeError {
                         message: "str.search(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
                     })?;
-                match super::regex_eval::search_first(s, &pat, &flags) {
+                match super::regex_eval::search_first(s.as_str(), &pat, &flags) {
                     Ok(idx) => Ok(Signal::Value(Value::Int(idx))),
                     Err(msg) => Err(RuntimeError { message: msg }),
                 }

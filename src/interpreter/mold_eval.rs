@@ -434,7 +434,11 @@ impl Interpreter {
                 };
                 match val {
                     Value::Str(s) => {
-                        let char_count = s.chars().count();
+                        // C26B-018 (A) wU: O(1) char count after cache
+                        // initialization (first touch is still O(n) to build
+                        // the offset table, but subsequent `Slice` calls on
+                        // the same `Arc<StrValue>` reuse it via `OnceLock`).
+                        let char_count = s.cached_char_count();
                         let end = if type_args.len() >= 3 {
                             match self.eval_expr(&type_args[2])? {
                                 Signal::Value(Value::Int(n)) => n,
@@ -447,11 +451,8 @@ impl Interpreter {
                         };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(char_count, start, end);
-                        let result: String = s
-                            .chars()
-                            .skip(clamped_start)
-                            .take(clamped_end.saturating_sub(clamped_start))
-                            .collect();
+                        // C26B-018 (A) wU: O(1) char → byte offset via cache.
+                        let result = s.cached_char_slice(clamped_start, clamped_end);
                         Ok(Some(Signal::Value(Value::str(result))))
                     }
                     Value::Bytes(bytes) => {
@@ -500,9 +501,13 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                match s.chars().nth(idx) {
-                    Some(c) => {
-                        let value = Value::str(c.to_string());
+                // C26B-018 (A) wU: O(1) char-indexed access via
+                // `StrValue::cached_char_at` (first call builds the offset
+                // table, subsequent calls on shared `Arc<StrValue>` hit
+                // the `OnceLock` and return in O(1)).
+                match s.cached_char_at(idx) {
+                    Some(ch) => {
+                        let value = Value::str(ch);
                         Ok(Some(Signal::Value(make_lax_value(
                             true,
                             value,
@@ -804,7 +809,7 @@ impl Interpreter {
                     .eval_mold_option(fields, "side")?
                     .and_then(|v| {
                         if let Value::Str(s) = v {
-                            Some((*s).clone())
+                            Some(s.as_string().clone())
                         } else {
                             None
                         }
@@ -814,7 +819,7 @@ impl Interpreter {
                     .eval_mold_option(fields, "char")?
                     .and_then(|v| {
                         if let Value::Str(s) = v {
-                            Some((*s).clone())
+                            Some(s.as_string().clone())
                         } else {
                             None
                         }
