@@ -359,12 +359,24 @@ mod tests {
         // `setvbuf(stdout/stderr, _IOLBF, 0)` stdout line-buffering fix
         // at the top of main(). Does not affect core.c so F1_LEN /
         // F2_LEN unchanged. Only the grand total shifts.
+        // C26B-026 (@c.26 Round 2, wC): +617 bytes in net_h1_h2.c to fix
+        // `h2_extract_response_fields` silently dropping custom response
+        // headers. Previously `taida_list_get` returned a Lax-wrapped
+        // entry and the "name" / "value" lookup on the wrapper returned 0,
+        // so every handler-returned header was filtered out before HPACK
+        // encoding (wire response ended up with only `:status` +
+        // `content-length`). Fix reads `hlist[4 + j]` directly to mirror
+        // the h1 encode path. Also raises the in-function header cap from
+        // 32 to H2_MAX_HEADERS (128) for parity with the HPACK block
+        // encoder which already allows 128. Does not affect core.c so
+        // F1_LEN / F2_LEN unchanged.
         // Combined delta on top of 976,168:
         //   +3,834 (C26B-011 core.c)
         //   +2,135 (C26B-020 os.c + F1 forward decl)
         //   +  839 (C26B-021 net_h3_quic.c)
-        // New total: 976,168 + 6,808 = 982,976.
-        const EXPECTED_TOTAL_LEN: usize = 982_976;
+        //   +  617 (C26B-026 net_h1_h2.c)
+        // New total: 976,168 + 7,425 = 983,593.
+        const EXPECTED_TOTAL_LEN: usize = 983_593;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -706,10 +718,16 @@ mod tests {
         // offset 184,963 inside NET_H1_H2_SECTION must be the first byte
         // of the former fragment 6 (06_net_h2.inc.c), which historically
         // begins with "// ── Native HTTP/2 server".
+        //
+        // C26B-026 (@c.26 Round 2, wC): fragment 6 (net_h2 server) gained
+        // +617 bytes for the HPACK custom header fix inside
+        // `h2_extract_response_fields` (Lax unwrap via raw `hlist[4+j]`
+        // + header_cap raised to H2_MAX_HEADERS). F5_LEN unchanged;
+        // fragment 6 baseline moves from 91,152 to 91,769.
         const F5_LEN: usize = 184_963;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            184_963 + 91_152,
+            184_963 + 91_769,
             "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
