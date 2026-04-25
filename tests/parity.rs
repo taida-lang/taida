@@ -36804,3 +36804,70 @@ stdout(v7.toString())
 "#;
     assert_backend_parity_for_source(src, "c27b021_bitwise_basic");
 }
+
+// ===========================================================================
+// C27B-021 wD Round 1 review fix — numeric (debug-rendered) Float Mod
+// parity for interp / native / js. The wasm-wasi / wasm-full leg of the
+// same hot points lives in tests/c27b_021_wasm_arith_parity.rs (under
+// `c27b_021_wd_*_4backend_numeric_parity`).
+//
+// Critical 1 root cause was an overflow / precision bug in
+// `taida_mod_mold_f` inside src/codegen/runtime_wasi_io.c. Critical 2
+// was that the existing C27B-021 parity tests only checked
+// `c.hasValue.toString()` and never compared the numeric Lax payload.
+// These tests close that gap on the non-wasm legs, and `debug(r)` is
+// the proven canonical Float Lax formatter (cf. C26B-011's
+// examples/quality/c26_float_edge/div_mod_float.td).
+// ===========================================================================
+
+#[test]
+fn c27b_021_wd_mod_overflow_large_three_backend_numeric_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mod[1.0e20, 7.0]() ]=> r
+debug(r)
+"#;
+    assert_backend_parity_for_source(src, "c27b021_wd_mod_overflow_large");
+}
+
+#[test]
+fn c27b_021_wd_mod_precision_pi_three_backend_numeric_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mod[1000000.5, 3.14159265]() ]=> r
+debug(r)
+"#;
+    assert_backend_parity_for_source(src, "c27b021_wd_mod_precision_pi");
+}
+
+#[test]
+fn c27b_021_wd_mod_signed_zero_three_backend_numeric_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mod[-0.0, 1.0]() ]=> r
+debug(r)
+"#;
+    assert_backend_parity_for_source(src, "c27b021_wd_mod_signed_zero");
+}
+
+#[test]
+fn c27b_021_wd_div_basic_value_three_backend_numeric_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Div[1.0, 3.0]() ]=> r
+debug(r)
+"#;
+    assert_backend_parity_for_source(src, "c27b021_wd_div_basic_value");
+}
