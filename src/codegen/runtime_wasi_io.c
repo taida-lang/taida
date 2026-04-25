@@ -1507,7 +1507,48 @@ int64_t taida_mod_mold_f(int64_t a_bits, int64_t b_bits) {
     double a = _wi_to_double(a_bits);
     double b = _wi_to_double(b_bits);
     if (b == 0.0) return _wi_float_lax_empty();
-    if (!_wi_is_finite(a) || !_wi_is_finite(b)) return _wi_float_lax_empty();
+    /* D28B-009 (2026-04-26, wD Round 1): NaN / Inf semantics aligned to
+     * libc fmod (= native runtime via core.c::taida_mod_mold_f).
+     *
+     * Previous behaviour silently returned Lax-empty for any non-finite
+     * input, which broke 4-backend parity for `Mod[NaN, 3.0]` (native
+     * produced NaN-tagged Lax, wasi produced Lax-empty default 0.0) and
+     * for `Mod[1.5, +Inf]` (native produced 1.5, wasi produced 0.0).
+     *
+     *  - fmod(NaN, b) = NaN
+     *  - fmod(a,   NaN) = NaN
+     *  - fmod(±Inf, finite) = NaN  (cannot produce a meaningful remainder)
+     *  - fmod(finite, ±Inf) = finite (preserves sign of dividend)
+     *
+     * The b==0 case stays as Lax-empty (existing C26B-011 contract,
+     * pinned by `c27b_021_div_float_zero_three_backend_parity`).
+     */
+    /* NaN propagation: any NaN input -> NaN-valued Lax. */
+    if (a != a || b != b) {
+        /* IEEE-754 canonical positive NaN bit-pattern (matches `0.0/0.0`
+         * on the native backend after the wasi fmt_g sign fix). */
+        union { double d; int64_t l; } nu;
+        nu.d = 0.0; nu.d = nu.d / nu.d; /* generate canonical NaN */
+        return _wi_float_lax_new(nu.l);
+    }
+    int a_finite = _wi_is_finite(a);
+    int b_finite = _wi_is_finite(b);
+    if (!a_finite && !b_finite) {
+        /* fmod(±Inf, ±Inf) = NaN */
+        union { double d; int64_t l; } nu;
+        nu.d = 0.0; nu.d = nu.d / nu.d;
+        return _wi_float_lax_new(nu.l);
+    }
+    if (!a_finite) {
+        /* fmod(±Inf, finite) = NaN */
+        union { double d; int64_t l; } nu;
+        nu.d = 0.0; nu.d = nu.d / nu.d;
+        return _wi_float_lax_new(nu.l);
+    }
+    if (!b_finite) {
+        /* fmod(finite, ±Inf) = finite (preserves sign of dividend). */
+        return _wi_float_lax_new(a_bits);
+    }
     /* Preserve sign of `a` (IEEE 754 fmod sign rule). */
     int sign_a = (a < 0.0) || (a == 0.0 && _wi_d2l(a) < 0);
     double aa = sign_a ? -a : a;
@@ -1563,4 +1604,78 @@ int64_t taida_polymorphic_length_bytes_aware(int64_t ptr) {
         return taida_bytes_len(ptr);
     }
     return taida_polymorphic_length(ptr);
+}
+
+/* =========================================================================
+ * D28B-009 (2026-04-26, wD Round 1): NaN-canonical Float renderer
+ *
+ * `runtime_core_wasm/01_core.inc.c::fmt_g` (FROZEN, used by both
+ * `taida_debug_float` and `taida_float_to_str`) extracts the f64 sign
+ * bit BEFORE the NaN check, so any NaN with sign-bit set renders as
+ * `-NaN`. Native and JS backends always render NaN without sign,
+ * matching Rust's `f64::Display`. `Sqrt[-1.0]()` plus other operations
+ * routinely surface negative NaNs, breaking 4-backend parity on
+ * wasm-wasi (and wasm-full, which links rt_wasi).
+ *
+ * These two overrides reimplement the renderer with the canonical
+ * order: NaN check first, sign extraction afterwards. They also share
+ * the integer / fixed-form / shortest-round-trip branches with the
+ * core implementation so finite-value rendering remains bit-identical.
+ *
+ * The generated C `#define`s `taida_debug_float` ->
+ * `taida_debug_float_d28b009` and `taida_float_to_str` ->
+ * `taida_float_to_str_d28b009` for the Wasi and Full profiles (see
+ * `emit_wasm_c.rs::emit_c`).
+ * ========================================================================= */
+
+/* fd_write to stdout (fd=1). Self-contained because core_wasm's
+ * `write_stdout` is `static`. */
+static void _wi_write_stdout(const char *buf, int32_t len) {
+    wasi_ciovec iov;
+    iov.buf = (int32_t)(intptr_t)buf;
+    iov.len = len;
+    int32_t nwritten = 0;
+    (void)__wasi_fd_write((wasi_fd)1, &iov, 1, &nwritten);
+}
+
+/* Forward declarations into runtime_core_wasm.c. The core
+ * implementations correctly handle every finite / signed-zero / ±Inf
+ * value (including the 17-significant-digit shortest round-trip path
+ * — see core's `fmt_g` and `_fmt_fixed_sig`). The only bug they have
+ * is that the sign bit is stripped BEFORE the NaN check, so a NaN
+ * with the sign bit set renders as "-NaN".
+ *
+ * These overrides intercept the call only for NaN inputs and forward
+ * everything else to the core implementation, so we keep all the
+ * carefully-tuned precision / round-trip / signed-zero / fmod-style
+ * Inf branches without re-deriving them.
+ */
+extern int64_t taida_debug_float(int64_t val);
+extern int64_t taida_float_to_str(int64_t val);
+
+/* Override for `taida_debug_float` — activated by the generated C
+ * `#define` for Wasi / Full profiles. NaN renders as canonical "NaN"
+ * matching Rust `f64::Display`, native, and JS. */
+int64_t taida_debug_float_d28b009(int64_t val) {
+    double d = _wi_to_double(val);
+    if (d != d) {
+        /* Bypass core's `fmt_g`, whose sign-bit-first ordering would
+         * emit "-NaN" for any negative NaN bit-pattern. */
+        _wi_write_stdout("NaN", 3);
+        _wi_write_stdout("\n", 1);
+        return 0;
+    }
+    return taida_debug_float(val);
+}
+
+/* Override for `taida_float_to_str` — same NaN-first contract. */
+int64_t taida_float_to_str_d28b009(int64_t val) {
+    double d = _wi_to_double(val);
+    if (d != d) {
+        char *buf = (char *)wasm_alloc(4);
+        if (!buf) return 0;
+        buf[0] = 'N'; buf[1] = 'a'; buf[2] = 'N'; buf[3] = '\0';
+        return (int64_t)(intptr_t)buf;
+    }
+    return taida_float_to_str(val);
 }

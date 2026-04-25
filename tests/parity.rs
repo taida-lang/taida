@@ -37319,3 +37319,91 @@ stdout(r.requests)
         interp_occ, native_occ
     );
 }
+
+// ===========================================================================
+// D28B-009 (2026-04-26, wD Round 1) — Float edge case 3-backend parity
+// (interpreter / native / JS).  The 4-backend variant lives in
+// tests/d28b_009_float_edge_parity.rs which adds wasm-wasi and wasm-full
+// regression guards on top of these same fixtures.
+//
+// Background: the C26B-011 work pinned the same NaN / ±Inf / signed-
+// zero contract for 3 backends but explicitly excluded wasm. D28 stable
+// initial release demands 4-backend parity, so the wasm gap was closed
+// in wD Round 1 by:
+//   1. taida_mod_mold_f (runtime_wasi_io.c) -- libc fmod parity for
+//      NaN / ±Inf inputs (NaN propagates, Mod[finite, ±Inf] = finite).
+//   2. taida_debug_float_d28b009 / taida_float_to_str_d28b009
+//      (runtime_wasi_io.c) -- canonical NaN render (no sign bit) so
+//      `Sqrt[-1.0]` produced "NaN" instead of "-NaN".
+// These three tests catch any regression to the 3-backend (non-wasm)
+// part of that contract; the 4-backend pin lives in the dedicated test
+// file so the CI matrix can express "wasm is allowed to skip if
+// wasmtime is missing" without affecting the always-required path.
+// ===========================================================================
+
+#[test]
+fn d28b_009_nan_propagation_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Sqrt[-1.0]() ]=> nan
+debug(nan)
+Div[nan, 2.0] ]=> nan_div
+debug(nan_div)
+Mod[nan, 3.0] ]=> nan_mod
+debug(nan_mod)
+nan_plus <= nan + 1.0
+debug(nan_plus)
+nan_mul <= nan * 2.0
+debug(nan_mul)
+nan_sub <= nan - 1.0
+debug(nan_sub)
+"#;
+    assert_backend_parity_for_source(src, "d28b009_nan_propagation");
+}
+
+#[test]
+fn d28b_009_inf_arithmetic_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Div[1e308, 1e-308] ]=> big
+debug(big)
+Div[-1e308, 1e-308] ]=> negbig
+debug(negbig)
+Mod[1.5, big] ]=> m_pos
+debug(m_pos)
+Mod[2.5, negbig] ]=> m_neg
+debug(m_neg)
+plus_inf <= big + 1.0
+debug(plus_inf)
+minus_inf <= negbig - 1.0
+debug(minus_inf)
+"#;
+    assert_backend_parity_for_source(src, "d28b009_inf_arithmetic");
+}
+
+#[test]
+fn d28b_009_denormal_compare_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+tiny <= Div[1.0e-300, 1.0e24]()
+stdout(tiny.hasValue.toString())
+tiny2 <= Div[2.0e-300, 1.0e24]()
+stdout(tiny2.hasValue.toString())
+zero_q <= Div[0.0, 1.0e10]()
+stdout(zero_q.hasValue.toString())
+zero_div <= Div[5.0e-300, 0.0]()
+stdout(zero_div.hasValue.toString())
+m1 <= Mod[1.0, 0.5]()
+stdout(m1.hasValue.toString())
+"#;
+    assert_backend_parity_for_source(src, "d28b009_denormal_compare");
+}
