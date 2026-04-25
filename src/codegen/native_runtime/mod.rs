@@ -448,7 +448,22 @@ mod tests {
         // gate clean-up in a18e765 (json_val scalar init, stack
         // H2/H3Header memset, hn/hv NULL-init split, inline-suppress
         // comments at three call sites).
-        const EXPECTED_TOTAL_LEN: usize = 1_014_980;
+        //
+        // C27B-014 (@c.27 Round 1, wA): +1,386 bytes total for the
+        // opt-in port announcement (`TAIDA_NET_ANNOUNCE_PORT=1` →
+        // `printf("listening on 127.0.0.1:%u\n", ntohs(bound.sin_port))`)
+        // wired into both native server bind paths so the soak-proxy
+        // shell wrapper can read OS-assigned ports for the port=0 flow.
+        //   +765 bytes in net_h3_quic.c (h1 serve, after listen() ok,
+        //         getsockname + announce block).
+        //   +621 bytes in net_h1_h2.c   (h2 serve, after listen() ok,
+        //         same block — slightly shorter comment header).
+        // Default-off so production stdout surface is unchanged. Mirrors
+        // the interpreter (`src/interpreter/net_eval/h1.rs`) and JS
+        // (`src/js/runtime/net.rs`) implementations for 3-backend parity.
+        // F1_LEN / F2_LEN constants unchanged (the new blocks live in
+        // the net fragments, not in core.c).
+        const EXPECTED_TOTAL_LEN: usize = 1_016_366;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -877,11 +892,16 @@ mod tests {
         // h2_send_response_headers memset + 4-line comment sits
         // inside fragment 6 (HTTP/2 server), so F5_LEN is unchanged
         // and F6 grows: 91,769 + 355 = 92,124.
+        // C27B-014 (@c.27 Round 1, wA): the opt-in port announcement
+        // block (TAIDA_NET_ANNOUNCE_PORT=1 → printf "listening on …"
+        // post-listen) sits inside fragment 6 (HTTP/2 server), placed
+        // immediately after the `listen()` success branch. F5_LEN is
+        // unchanged; F6 grows: 92,124 + 621 = 92,745.
         const F5_LEN: usize = 186_867;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            186_867 + 92_124,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS adjusted; CI-red 2026-04-24 cppcheck clean-up adds 355 to F6)"
+            186_867 + 92_745,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 adjusted; CI-red 2026-04-24 cppcheck clean-up adds 355 to F6, C27B-014 adds 621 to F6)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

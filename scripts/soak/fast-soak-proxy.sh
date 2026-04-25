@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# C26B-005 fast-soak proxy.
+# C26B-005 / C27B-015 / C27B-017 fast-soak proxy.
 #
 # This is a **proxy** for the 24h NET scatter-gather soak test pinned
 # at `.dev/C26_SOAK_RUNBOOK.md`. The real acceptance is the full 24h
@@ -12,12 +12,40 @@
 # Usage:
 #   ./scripts/soak/fast-soak-proxy.sh [--duration-min N] [--backend interp|js|native]
 #
+# Backend dispatch (C27B-015):
+#   --backend interp  → target/release/taida <fixture>           (port 18081)
+#   --backend js      → taida build --target js --run + node     (port 18082)
+#   --backend native  → taida build --target native --run        (port 18083)
+#
+# Each backend uses a distinct port so all three can be launched in
+# parallel from three terminals (or three CI shards) without bind
+# contention. CSV / log / projection paths are per-invocation
+# tempdirs, so parallel runs do not clobber each other.
+#
+# A backend's exit code is independent — JS / native build failures
+# cannot be hidden by a successful interpreter run, because each
+# invocation starts at most one server process.
+#
+# Optional env vars:
+#   TAIDA_NET_ANNOUNCE_PORT=1  Forwarded to the spawned server. Causes
+#                              `httpServe` to print one stdout line of
+#                              the form `listening on 127.0.0.1:NNNNN`
+#                              before the first accept(). Default OFF
+#                              (production stdout surface unchanged).
+#                              Enable when you want to read the bound
+#                              port back from the script's `LOG`.
+#                              See `.dev/C27_BLOCKERS.md::C27B-014`.
+#
+# CI smoke (C27B-017): `.github/workflows/soak-smoke.yml` runs this
+# script with `--duration-min 1 --backend interp`. The job fails
+# fast on parse errors, bind failures, and missing VERDICT lines.
+#
 # The script:
 #   1. Builds a release binary.
 #   2. Launches `examples/quality/c26_soak_fixture/main.td` (a
-#      `httpServe` scatter-gather loop) on port 0.
-#   3. Reads the chosen port from the server's stdout.
-#   4. Runs `wrk` or a curl loop against the server for N minutes.
+#      `httpServe` scatter-gather loop) on the per-backend port.
+#   3. Probes the port via /dev/tcp until ready.
+#   4. Runs a curl loop against the server for N minutes.
 #   5. Samples RSS + fd count every 30s into a CSV.
 #   6. Extrapolates a 24h projection (linear fit) and flags drift
 #      above 10% / hour as a FAIL signal.
@@ -36,7 +64,11 @@ while [ $# -gt 0 ]; do
         --duration-min) DURATION_MIN="$2"; shift 2 ;;
         --backend) BACKEND="$2"; shift 2 ;;
         -h|--help)
-            sed -n '1,30p' "$0" | sed 's/^# \{0,1\}//'
+            # Print the leading docblock (file header through the end of
+            # the descriptive comments). C27B-015: the docblock now spans
+            # past line 30 because of the multi-backend / env-var notes,
+            # so widen the slice to cover the full header.
+            sed -n '1,60p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;

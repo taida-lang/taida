@@ -6117,6 +6117,20 @@ static H2ServeResult taida_net_h2_serve(int port, taida_val handler, int handler
         close(sockfd); taida_ossl.SSL_CTX_free(ssl_ctx); return fail_result;
     }
 
+    // C27B-014: opt-in port announcement (h2 path). Same env var name
+    // and surface format as h1 / interpreter / JS. Default OFF.
+    {
+        const char *announce = getenv("TAIDA_NET_ANNOUNCE_PORT");
+        if (announce && announce[0] == '1' && announce[1] == '\0') {
+            struct sockaddr_in bound_addr;
+            socklen_t bound_len = sizeof(bound_addr);
+            if (getsockname(sockfd, (struct sockaddr*)&bound_addr, &bound_len) == 0) {
+                printf("listening on 127.0.0.1:%u\n", (unsigned int)ntohs(bound_addr.sin_port));
+                fflush(stdout);
+            }
+        }
+    }
+
     int64_t request_count = 0;
     int64_t connection_count = 0;
     signal(SIGPIPE, SIG_IGN);
