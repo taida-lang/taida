@@ -1463,16 +1463,80 @@ int64_t taida_div_mold_f(int64_t a_bits, int64_t b_bits) {
     return _wi_float_lax_new(_wi_d2l(a / b));
 }
 
-/* fmod via repeated truncated-quotient subtraction (no libc in wasm
- * freestanding -- mirrors core_wasm::taida_float_mod_mold's approach). */
+/* C27B-021 wD review fix (Critical 1): exact IEEE-754 fmod.
+ *
+ * The previous single-pass `(int64_t)q; a - (double)qi * b` lost
+ * precision in two ways:
+ *   1. `(int64_t)q` saturates when |q| > INT64_MAX (i64.trunc_sat_f64_s
+ *      on wasm), so for |a/b| > 9.22e18 the quotient is clamped and the
+ *      subtraction yields a silent wrong answer. Empirically
+ *      `Mod[1.0e20, 7.0]()` returned `0` instead of `2.0`.
+ *   2. Even when |q| < 2^53, `(double)qi * b` rounds to f64 once the
+ *      product no longer fits in 53 bits of mantissa, so a single-pass
+ *      subtraction loses the last digits. Empirically
+ *      `Mod[1000000.5, 3.14159265]()` returned `0.14357849990483373`
+ *      instead of `0.14357849993359384`.
+ *
+ * Replacement is the textbook "scale-and-subtract" fmod (see e.g.
+ * MUSL libc): preserve the sign of `a`, compute `|a| - n*|b|` by
+ * repeatedly scaling |b| up to the largest power-of-two multiple
+ * that still does not exceed |a|, subtracting, and halving back.
+ * Each iteration is exact in f64 (subtraction of like-exponent
+ * numbers loses no bits below the leading bit), and the loop
+ * terminates after at most ~ceil(log2(|a/b|)) iterations.
+ *
+ * Special cases (mirrors interpreter `f64::%` on Float / native libm
+ * fmod):
+ *   - b == 0.0          -> Lax empty (existing C26B-011 semantics)
+ *   - a is NaN / Inf    -> Lax empty (cannot produce a meaningful
+ *                         finite remainder; matches C26B-011's
+ *                         "Lax-safe over silent NaN propagation")
+ *   - b is NaN / Inf    -> Lax empty
+ *   - |a| < |b|         -> result == a   (preserves sign, including
+ *                         signed zero)
+ */
+static int _wi_is_finite(double x) {
+    /* True iff x is neither NaN nor +/-Inf. NaN: x != x. Inf: |x| ==
+     * +Inf, detected by checking the f64 exponent field is not all-1s. */
+    union { double d; int64_t l; } u; u.d = x;
+    int64_t exp = (u.l >> 52) & 0x7FF;
+    return exp != 0x7FF;
+}
+
 int64_t taida_mod_mold_f(int64_t a_bits, int64_t b_bits) {
     double a = _wi_to_double(a_bits);
     double b = _wi_to_double(b_bits);
     if (b == 0.0) return _wi_float_lax_empty();
-    /* Truncate-toward-zero quotient (matches Rust's `%` on f64 / native fmod). */
-    double q = a / b;
-    int64_t qi = (int64_t)q;
-    double result = a - (double)qi * b;
+    if (!_wi_is_finite(a) || !_wi_is_finite(b)) return _wi_float_lax_empty();
+    /* Preserve sign of `a` (IEEE 754 fmod sign rule). */
+    int sign_a = (a < 0.0) || (a == 0.0 && _wi_d2l(a) < 0);
+    double aa = sign_a ? -a : a;
+    double bb = (b < 0.0) ? -b : b;
+    if (aa < bb) {
+        /* |a| < |b|: remainder is a itself (preserves signed zero). */
+        return _wi_float_lax_new(_wi_d2l(a));
+    }
+    /* Scale bb upward by powers of 2 until 2*bb > aa. Bound the loop
+     * by the f64 exponent range (1075 = 1023 bias + 52 mantissa) so a
+     * pathological input cannot spin forever. */
+    double scaled = bb;
+    int up = 0;
+    while (scaled <= aa * 0.5 && up < 1075) {
+        scaled *= 2.0;
+        up++;
+    }
+    /* Subtract `scaled` (or `scaled/2`, etc.) whenever it fits.  Each
+     * subtraction is exact because aa and scaled are aligned at this
+     * point (scaled <= aa < 2*scaled). */
+    while (up >= 0) {
+        if (aa >= scaled) {
+            aa -= scaled;
+        }
+        scaled *= 0.5;
+        up--;
+    }
+    /* aa now holds |a| mod |b| in [0, |b|).  Reapply sign of a. */
+    double result = sign_a ? -aa : aa;
     return _wi_float_lax_new(_wi_d2l(result));
 }
 
