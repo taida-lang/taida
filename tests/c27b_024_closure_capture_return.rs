@@ -37,9 +37,43 @@
 //! and Native backends. This file lives independently of
 //! `c26b_017_partial_app_closure_capture.rs` so that the C27 GATE evidence
 //! references a C27-suffixed regression file (per Phase 14 GATE evidence
-//! template), and so that the broader scenario coverage (pipeline / pack
-//! field) is durable should the future runtime overhaul touch the partial
-//! application machinery again.
+//! template), and so that the broader scenario coverage (cond branch / pack
+//! field projection) is durable should the future runtime overhaul touch the
+//! partial application machinery again.
+//!
+//! # Empirical guard-revert verification (2026-04-25, wG Round 1 fix)
+//!
+//! Round 1 wG review (FIX_REQUIRED) flagged that the original Case 4
+//! (`runPipeline base input = input => add(base, _)`) and Case 5
+//! (`makeBag base = Bag(label <= ..., op <= add(base, ))`) did NOT exercise
+//! the `eval_expr_tail` `is_partial_application` guard at
+//! `src/interpreter/eval.rs:820-821`, because the tail expression in those
+//! cases was a `Pipeline` (Case 4) or a Pack constructor (Case 5) — neither
+//! enters the `Expr::FuncCall` arm of `eval_expr_tail` where the guard sits.
+//! The reviewer confirmed empirically that reverting the 4-line guard caused
+//! Cases 1/2/3 to FAIL but Cases 4/5 to PASS, defeating the regression-guard
+//! intent.
+//!
+//! Cases 4 and 5 were re-designed so that the partial application **is** the
+//! tail expression of a function body, but in distinct syntactic surroundings
+//! that broaden the regression coverage:
+//!
+//!   * Case 4 places the partial inside a `| cond |> body` arm, so
+//!     `eval_expr_tail` recurses through `Expr::CondBranch` into each arm
+//!     body and re-enters the `Expr::FuncCall` arm with Hole args present.
+//!   * Case 5 places the partial in a function whose captured value is
+//!     read from a Pack field (`b.base`) rather than from a plain
+//!     parameter, ensuring the closure-capture path works when the bound
+//!     argument originates from a Pack projection.
+//!
+//! Both rewritten cases were verified empirically (2026-04-25): with the
+//! 4-line guard at `eval.rs:820-821` reverted (line 820 dropped, line 821
+//! simplified to the bare `let Expr::Ident` match), the Interpreter emits
+//! `Cannot add 50 and @()` for Case 4 and `Cannot add 30 and @()` for
+//! Case 5 — the same `Cannot add <n> and @()` symptom that originally
+//! reported HI-005. With the guard restored, all five cases pass on
+//! Interpreter / JS / Native. Net effect: all 5 cases now RED-on-revert,
+//! GREEN-on-restore — the regression guard is honest.
 
 mod common;
 
@@ -231,45 +265,58 @@ stdout(nestedAdd(5))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Case 4: pipeline 経由 — the partial application is composed via a pipeline
-// step at the call site (`input => add(base, _)`). This validates that the
-// closure capture works when the partial is constructed inside a pipeline
-// expression, not just as a bare function-body return value.
+// Case 4: cond-branch tail — the partial application sits inside a
+// `| cond |> body` arm whose body is the tail expression of the function.
+// `eval_expr_tail` recurses through `Expr::CondBranch` into each arm body
+// and re-enters the `Expr::FuncCall` arm; the guard at
+// `src/interpreter/eval.rs:820-821` must fire for the arm body
+// `add(n, )` (Hole arg) to avoid the spurious tail call. Without the
+// guard, the Interpreter emits `Cannot add 50 and @()` (verified
+// empirically on 2026-04-25, see file-level comment).
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-fn c27b_024_pipeline_partial_parity() {
+fn c27b_024_cond_branch_partial_tail_parity() {
     let source = r#"
 add x: Int y: Int = x + y => :Int
 
-runPipeline base: Int input: Int =
-  input => add(base, _)
-=> :Int
+makeCondAdder n: Int flag: Bool =
+  | flag |> add(n, )
+  | _ |> add(0, )
+=> :Int => :Int
 
-stdout(runPipeline(50, 8))
+f <= makeCondAdder(50, true)
+stdout(f(8))
 "#;
-    parity_assert("pipeline_partial", source, "58");
+    parity_assert("cond_branch_partial", source, "58");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Case 5: pack field 内 closure — a partial application is stored in a Pack
-// field with declared function type `Int => :Int`, then retrieved and invoked
-// through the field accessor. This covers the user-facing Hono-inspired
-// middleware pattern (HI-005 root use-case): handler closures persisted in
-// context Packs and dispatched by field name.
+// Case 5: Pack-field captured base — the function body's tail expression is
+// `add(b.base, )`, where the captured value is the projection of a Pack
+// field rather than a plain parameter. This covers the Hono-inspired
+// middleware pattern (HI-005 root use-case): a closure that captures
+// configuration values from a context Pack and is returned as a handler.
+// `eval_expr_tail` enters the `Expr::FuncCall` arm with `b.base` as the
+// (non-Hole) first argument and `Expr::Hole(_)` as the second; the guard
+// must fire so that the partial closure is built rather than the trampoline
+// being re-targeted with `Value::Unit` for the Hole. Without the guard,
+// the Interpreter emits `Cannot add 30 and @()` (verified empirically on
+// 2026-04-25, see file-level comment).
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-fn c27b_024_pack_field_closure_parity() {
+fn c27b_024_pack_field_base_partial_tail_parity() {
     let source = r#"
 add x: Int y: Int = x + y => :Int
 
-Bag = @(label: Str, op: Int => :Int)
+Bag = @(base: Int)
 
-makeBag base: Int =
-  Bag(label <= "shift", op <= add(base, ))
-=> :Bag
+opFromBag b: Bag =
+  add(b.base, )
+=> :Int => :Int
 
-b <= makeBag(30)
-stdout(b.op(12))
+bag <= Bag(base <= 30)
+op <= opFromBag(bag)
+stdout(op(12))
 "#;
-    parity_assert("pack_field_closure", source, "42");
+    parity_assert("pack_field_base_partial", source, "42");
 }
