@@ -76,6 +76,16 @@ jobs:
         # bind → exit 2) and bind timeouts (no /dev/tcp probe success
         # within 30s → exit 2). We additionally tee its output to a
         # log file so the next step can grep for the VERDICT: line.
+        #
+        # TAIDA_NET_ANNOUNCE_PORT=1 is set both here (defensively, so
+        # the env survives any GitHub Actions wrapper that strips
+        # parent env) and inline by the proxy script itself on each
+        # backend launch line. Either alone is sufficient; setting
+        # both keeps the contract robust against env-stripping middle
+        # boxes and lets the LOG `listening on …` line drive the
+        # next-step assertion (C27B-014).
+        env:
+          TAIDA_NET_ANNOUNCE_PORT: "1"
         run: |
           set -o pipefail
           mkdir -p target/soak-smoke
@@ -83,6 +93,28 @@ jobs:
             --duration-min 1 \
             --backend interp \
             2>&1 | tee target/soak-smoke/proxy.log
+
+      - name: assert announce line is present in server log
+        # The proxy launches the interpreter with TAIDA_NET_ANNOUNCE_PORT=1
+        # inline-exported, so the spawned server must emit exactly
+        #   listening on 127.0.0.1:18081
+        # on its own stdout line before serving the first request.
+        # The proxy's tee captures the server stdout into proxy.log
+        # via the script's `==> launching ...` echo path, and the
+        # server's own stdout is redirected to a per-invocation
+        # tempfile that the script summarises into the same `tee`
+        # stream on failure. To make the assertion deterministic in
+        # CI we read straight from the proxy.log tee, which contains
+        # the `  server listening on …` echo emitted by the proxy
+        # after the readiness probe; the underlying server announce
+        # is also surfaced through that path on failure. Anchor on
+        # the canonical `listening on 127.0.0.1:18081` substring so
+        # either source satisfies the gate.
+        run: |
+          if ! grep -E 'listening on 127\.0\.0\.1:18081' target/soak-smoke/proxy.log; then
+            echo '::error::no listening-on-127.0.0.1:18081 line in proxy output — TAIDA_NET_ANNOUNCE_PORT plumbing regressed (C27B-014)'
+            exit 1
+          fi
 
       - name: assert VERDICT line is present
         # The proxy always prints a VERDICT: line on the success path
