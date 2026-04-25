@@ -904,6 +904,12 @@ fn js_skip_list() -> Vec<&'static str> {
         "wasm_wasi_write_failure_shape", // wasm-wasi specific (shape validation)
         "net_http_hello",                // server example, requires dedicated loopback test harness
         "net_http_parse_encode",         // net package example, requires project root + deps
+        "net_ws_echo",                   // D28B-017 WS server example (port 8082), requires WS client harness
+        "net_sse_broadcaster",           // D28B-017 SSE server example (port 8081), requires SSE client harness
+        "net_http_client",               // D28B-017 HTTP client example, requires URL argv fixture
+        "terminal_line_editor",          // D28B-018 interactive terminal addon example, requires raw-mode harness
+        "terminal_spinner",              // D28B-018 interactive terminal addon example, time-bound harness
+        "terminal_mouse",                // D28B-018 interactive terminal addon example, requires mouse capture harness
         "addon_echo", // RC1 Phase 4 addon-backed example, exercised by addon_package_integration.rs
         "addon_terminal", // RC1.5-4 addon-backed example, exercised by addon_terminal_install_e2e.rs
     ]
@@ -920,6 +926,12 @@ fn interpreter_skip_list() -> Vec<&'static str> {
         "transpile_npm",         // npm: imports only work in JS transpiler
         "net_http_hello",        // server example, requires dedicated loopback test harness
         "net_http_parse_encode", // net package example, requires project root + deps
+        "net_ws_echo",           // D28B-017 WS server example, requires WS client harness
+        "net_sse_broadcaster",   // D28B-017 SSE server example, requires SSE client harness
+        "net_http_client",       // D28B-017 HTTP client example, requires URL argv fixture
+        "terminal_line_editor",  // D28B-018 interactive terminal addon example, requires raw-mode harness
+        "terminal_spinner",      // D28B-018 interactive terminal addon example, time-bound harness
+        "terminal_mouse",        // D28B-018 interactive terminal addon example, requires mouse capture harness
         "addon_echo", // RC1 Phase 4 addon-backed example, requires .taida/deps/ setup; exercised by addon_package_integration.rs
         "addon_terminal", // RC1.5-4 addon-backed example, requires .taida/deps/ setup; exercised by addon_terminal_install_e2e.rs
     ]
