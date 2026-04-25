@@ -463,7 +463,45 @@ mod tests {
         // (`src/js/runtime/net.rs`) implementations for 3-backend parity.
         // F1_LEN / F2_LEN constants unchanged (the new blocks live in
         // the net fragments, not in core.c).
-        const EXPECTED_TOTAL_LEN: usize = 1_016_366;
+        //
+        // C27B-018 + C27B-028 paired-fix (@c.27 Round 2, wH): the
+        // small-string freelist now stores actual aligned data-area
+        // capacity in hdr[1] on push and verifies it on pop, so arena-
+        // backed strings can safely be recycled (Option A) without
+        // exposing the latent bucket-vs-aligned-size mismatch (which
+        // also hid a pre-existing malloc-path bug). The pack4 / cap=16
+        // list freelists drop their `!taida_arena_contains(obj)` guards
+        // for the same reason; both pools are exact-size so size
+        // mismatch is not possible (only str had bucketed multiplexing).
+        // All bytes sit inside core.c F1, well before the "Error
+        // ceiling" F1/F2 divider.
+        //   core.c F1 delta: +2,073 (str alloc/release capacity stamp
+        //                    + retry loop) +659 (pack/list arena guard
+        //                    removal + comment expansion) = +2,732.
+        //   F1_LEN: 267,133 + 2,732 = 269,865. F2 unchanged.
+        //
+        // C27B-026 Step 3 Option B (@c.27 Round 2, wH): the
+        // h{2,3}_extract_request_fields rewrites combine the new
+        // H{2,3}_REQ_ERR_PSEUDO_TOO_LONG cap check + the snprintf →
+        // bounded memcpy conversion into a single H{2,3}_COPY_PSEUDO
+        // macro defined at file scope. The macro form is the only
+        // rewrite gcc can prove safe (it cannot follow a runtime
+        // length pre-check inside snprintf), and keeping the macro
+        // outside the function body lets both
+        // test_nb7_10_h3_request_validation_scheme_required (60-line
+        // scan window) and the H2 reference selftest (80-line window
+        // in tests/parity.rs) continue to find the
+        // saw_scheme / EMPTY_PSEUDO checks within reach.
+        //
+        //   Total delta:
+        //     core.c F1     : +2,732 (str/pack/list freelist cap)
+        //                   + +535   (extend buckets to 6: max 1024 B)
+        //                            = +3,267
+        //     net_h1_h2 F6  : +620   (H2_COPY_PSEUDO + cap check)
+        //     net_h3_quic   : +815   (H3_COPY_PSEUDO + cap check)
+        //                     -------- + -------- + -------- = +4,702
+        //   Total : 1,016,366 + 4,702 = 1,021,068.
+        const EXPECTED_TOTAL_LEN: usize = 1_021_068;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -856,10 +894,25 @@ mod tests {
         //     which sit in F2, past the "// ── Error ceiling" marker).
         //   F1_LEN: 266,252 + 881 = 267,133.
         //   F2_LEN: 160,351 + 409 = 160,760.
-        const F1_LEN: usize = 267_133;
+        // C27B-018 + C27B-028 paired-fix (@c.27 Round 2, wH):
+        //   +2,073 bytes in core.c F1 for the small-string freelist
+        //          capacity check + retry loop in taida_str_alloc and
+        //          the capacity stamp in taida_str_release.
+        //   +659  bytes for removing the `!taida_arena_contains(obj)`
+        //          guards on the pack4 / cap=16 list freelists +
+        //          expanded explanatory comments.
+        //   +535  bytes for extending bucket coverage from {32, 64,
+        //          128} to {32, 64, 128, 256, 512, 1024} so 512 B
+        //          response bodies (the soak fixture pattern) flow
+        //          through the freelist instead of leaking through
+        //          the arena.
+        // All inside the Magic-Numbers / allocator / read-barrier
+        // region (F1), F2 unchanged.
+        // F1_LEN: 267,133 + 2,732 + 535 = 270,400.
+        const F1_LEN: usize = 270_400;
         assert_eq!(
             CORE_SECTION.len(),
-            267_133 + 160_760,
+            270_400 + 160_760,
             "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -897,11 +950,20 @@ mod tests {
         // post-listen) sits inside fragment 6 (HTTP/2 server), placed
         // immediately after the `listen()` success branch. F5_LEN is
         // unchanged; F6 grows: 92,124 + 621 = 92,745.
+        // C27B-026 Step 3 Option B (@c.27 Round 2, wH): the
+        // h2_extract_request_fields rewrite combines the new
+        // H2_REQ_ERR_PSEUDO_TOO_LONG cap check + the snprintf → bounded
+        // memcpy conversion into a single H2_COPY_PSEUDO macro defined
+        // at file scope. The macro definition + four use sites + new
+        // error_reason + commentary net to +620 bytes inside fragment 6
+        // (the macro form keeps the function body within the 80-line
+        // scan window of NB7-10 selftest). F5_LEN unchanged; F6 grows:
+        //   92,745 + 620 = 93,365.
         const F5_LEN: usize = 186_867;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            186_867 + 92_745,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 adjusted; CI-red 2026-04-24 cppcheck clean-up adds 355 to F6, C27B-014 adds 621 to F6)"
+            186_867 + 93_365,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 adjusted)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];
