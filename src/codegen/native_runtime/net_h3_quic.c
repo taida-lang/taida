@@ -3400,6 +3400,22 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
         return taida_async_resolved(taida_net_result_fail("BindError", errbuf));
     }
 
+    // C27B-014: opt-in port announcement for soak proxy / runbook.
+    // Default OFF (env unset). When TAIDA_NET_ANNOUNCE_PORT=1, resolve
+    // the actual bound port via getsockname (handles port=0) and emit
+    // a single stdout line. 3-backend parity with interpreter / JS.
+    {
+        const char *announce = getenv("TAIDA_NET_ANNOUNCE_PORT");
+        if (announce && announce[0] == '1' && announce[1] == '\0') {
+            struct sockaddr_in bound_addr;
+            socklen_t bound_len = sizeof(bound_addr);
+            if (getsockname(sockfd, (struct sockaddr*)&bound_addr, &bound_len) == 0) {
+                printf("listening on 127.0.0.1:%u\n", (unsigned int)ntohs(bound_addr.sin_port));
+                fflush(stdout);
+            }
+        }
+    }
+
     // NET2-5c: Create thread pool
     // Number of worker threads = min(maxConnections, 16) to avoid thread explosion.
     // Each worker handles one connection at a time with keep-alive loop.
