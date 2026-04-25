@@ -47,7 +47,7 @@
 mod common;
 
 use common::{normalize, taida_bin};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

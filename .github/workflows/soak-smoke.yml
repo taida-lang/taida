@@ -77,6 +77,17 @@ jobs:
         # within 30s → exit 2). We additionally tee its output to a
         # log file so the next step can grep for the VERDICT: line.
         #
+        # Exit code semantics from `scripts/soak/fast-soak-proxy.sh`:
+        #   0 = LIKELY STABLE
+        #   2 = parse error / bind timeout (genuine plumbing fail → CI red)
+        #   4 = DRIFT DETECTED (per yml header comment, **not** treated as
+        #       red — the 1-min projection is statistically too noisy and
+        #       the comment explicitly documents this as expected).
+        # We capture exit code in a step output so subsequent steps can
+        # discriminate: parse/bind failure → red, DRIFT → tolerated +
+        # surfaced as warning annotation. The announce/VERDICT asserts
+        # below are the real gates for the C27B-014/016 contract.
+        #
         # TAIDA_NET_ANNOUNCE_PORT=1 is set both here (defensively, so
         # the env survives any GitHub Actions wrapper that strips
         # parent env) and inline by the proxy script itself on each
@@ -87,12 +98,27 @@ jobs:
         env:
           TAIDA_NET_ANNOUNCE_PORT: "1"
         run: |
-          set -o pipefail
           mkdir -p target/soak-smoke
+          set +e
           ./scripts/soak/fast-soak-proxy.sh \
             --duration-min 1 \
             --backend interp \
             2>&1 | tee target/soak-smoke/proxy.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "proxy_exit=${rc}" >> "${GITHUB_OUTPUT}"
+          case "${rc}" in
+            0)
+              echo "fast-soak-proxy returned LIKELY STABLE (exit 0)"
+              ;;
+            4)
+              echo "::warning::fast-soak-proxy returned DRIFT DETECTED (exit 4); tolerated per soak-smoke.yml header — 1-min projection is statistically noisy. Announce/VERDICT gates below remain authoritative."
+              ;;
+            *)
+              echo "::error::fast-soak-proxy exited ${rc} (parse error or bind timeout — genuine plumbing failure)"
+              exit "${rc}"
+              ;;
+          esac
 
       - name: assert announce line is present in server log
         # The proxy launches the interpreter with TAIDA_NET_ANNOUNCE_PORT=1

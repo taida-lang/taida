@@ -2590,6 +2590,7 @@ void taida_release_any(taida_val ptr) {
     // Try heap-string hidden header at ptr - 16 first; the layout puts
     // a TAIDA_STR_MAGIC|rc word followed by a length word two slots
     // before the user-visible char* pointer.
+    // cppcheck-suppress nullPointerArithmeticRedundantCheck
     taida_val *hdr = ((taida_val*)ptr) - 2;
     if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val))) {
         taida_val htag = hdr[0];

@@ -517,14 +517,14 @@ impl Interpreter {
         // value) on a single stdout line so shell wrappers can `read` it.
         // 3-backend parity: same env var name, same surface format on
         // interpreter / native / JS. See `.dev/C27_BLOCKERS.md::C27B-014`.
-        if std::env::var("TAIDA_NET_ANNOUNCE_PORT").as_deref() == Ok("1") {
-            if let Ok(local) = listener.local_addr() {
-                use std::io::Write;
-                let stdout = std::io::stdout();
-                let mut out = stdout.lock();
-                let _ = writeln!(out, "listening on {}:{}", local.ip(), local.port());
-                let _ = out.flush();
-            }
+        if std::env::var("TAIDA_NET_ANNOUNCE_PORT").as_deref() == Ok("1")
+            && let Ok(local) = listener.local_addr()
+        {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let _ = writeln!(out, "listening on {}:{}", local.ip(), local.port());
+            let _ = out.flush();
         }
 
         let read_timeout = std::time::Duration::from_millis(timeout_ms);

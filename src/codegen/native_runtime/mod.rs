@@ -509,7 +509,7 @@ mod tests {
         //   function-end Release path is unreachable.
         //   Externally linkable (non-`static`) so emitted user code in
         //   `_entry.c` can reference the helper.
-        const EXPECTED_TOTAL_LEN: usize = 1_022_472;
+        const EXPECTED_TOTAL_LEN: usize = 1_022_533;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -923,11 +923,11 @@ mod tests {
         //   Externally linkable (non-`static`) so emitted user code in
         //   `_entry.c` can reference the helper.
         // F1_LEN: 270,400 + 1,404 = 271,804.
-        const F1_LEN: usize = 271_804;
+        const F1_LEN: usize = 271_865;
         assert_eq!(
             CORE_SECTION.len(),
-            271_804 + 160_760,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2)"
+            271_865 + 160_760,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];

@@ -102,9 +102,7 @@ fn write_main(dir: &std::path::Path, source: &str) -> PathBuf {
     let manifest = dir.join("taida.toml");
     fs::write(
         &manifest,
-        format!(
-            "[package]\nname = \"c27b027_test\"\nversion = \"0.0.1\"\n\n[dependencies]\n\"taida-lang/net\" = \"workspace\"\n",
-        ),
+        "[package]\nname = \"c27b027_test\"\nversion = \"0.0.1\"\n\n[dependencies]\n\"taida-lang/net\" = \"workspace\"\n",
     )
     .expect("write manifest");
     let main = dir.join("main.td");
