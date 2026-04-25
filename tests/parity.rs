@@ -36741,3 +36741,66 @@ stdout(r.requests)
         server_stdout
     );
 }
+
+// ===========================================================================
+// C27B-021 (2026-04-25): 3-backend parity smoke for Float Div / Mod and
+// the bitwise / shift surface. The wasm-wasi / wasm-full leg lives in
+// `tests/c27b_021_wasm_arith_parity.rs`. This entry guards against
+// regressions on the interpreter / JS / native backends in the same
+// CI pass that catches NET surface drift.
+// ===========================================================================
+
+#[test]
+fn c27b_021_div_float_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+a <= 3.0
+b <= 2.0
+c <= Div[a, b]()
+stdout(c.hasValue.toString())
+"#;
+    assert_backend_parity_for_source(src, "c27b021_div_float_basic");
+}
+
+#[test]
+fn c27b_021_div_float_zero_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+a <= 1.0
+b <= 0.0
+c <= Div[a, b]()
+stdout(c.hasValue.toString())
+"#;
+    assert_backend_parity_for_source(src, "c27b021_div_float_zero_lax_empty");
+}
+
+#[test]
+fn c27b_021_bitwise_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+v1 <= BitAnd[5, 3]()
+v2 <= BitOr[5, 2]()
+v3 <= BitXor[5, 6]()
+v4 <= BitNot[0]()
+v5 <= ShiftL[1, 3]().getOrDefault(0)
+v6 <= ShiftR[16, 2]().getOrDefault(0)
+v7 <= ShiftRU[16, 2]().getOrDefault(0)
+stdout(v1.toString())
+stdout(v2.toString())
+stdout(v3.toString())
+stdout(v4.toString())
+stdout(v5.toString())
+stdout(v6.toString())
+stdout(v7.toString())
+"#;
+    assert_backend_parity_for_source(src, "c27b021_bitwise_basic");
+}
