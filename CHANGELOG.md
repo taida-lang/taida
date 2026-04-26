@@ -1,21 +1,19 @@
 # Changelog
 
 <!--
-  Template for the gen-D stable initial release entry.
-  Heading literal `@d.X` and `YYYY-MM-DD` are placeholders; the
-  release-cutting user replaces X with the final build number and
-  the date with the tag-push day at Phase 12 GATE. The §1-§9
-  structure is fixed (Phase 0 Lock, D28B-022); only the section
-  bodies fill in concrete verdicts.
+  Phase 12 GATE finalisation (2026-04-27): X = 28, date = 2026-04-27.
+  The §1-§9 structure (Phase 0 Lock, D28B-022) is preserved.
+  Tag push remains user-driven; this draft is staged for user
+  approval before `@d.28` is cut.
 -->
 
-## @d.X — Stable initial release (YYYY-MM-DD)
+## @d.28 — Stable initial release (2026-04-27)
 
-> **Status: PLACEHOLDER.** This entry is a template invested ahead
-> of the Phase 12 GATE. The version literal `@d.X`, the date, and
-> every `<TBD>` placeholder below are filled in only after user
-> approval at the GATE. Until then the entry is informational and
-> must not be interpreted as a released stable tag.
+> **Status: FINALIZED at Phase 12 GATE (2026-04-27).** Version
+> literal `@d.28`, date `2026-04-27`, and every concrete verdict
+> below are pinned for user approval ahead of tag push. The gen-D
+> stable tag itself is cut by the user; until then this entry is
+> the authoritative draft.
 
 ### §1 Stable initial release
 
@@ -29,13 +27,13 @@ documented in `docs/STABILITY.md`.
 - Predecessor RC chain: `@c.25.rc7` → C26 / C27 fix-only RC cycle
   series (label-less `@c.26` / `@c.27` were skipped per
   `docs/STABILITY.md` §1.3 / §5.6).
-- Build number: `X = <TBD>` (CI build counter, fixed only at tag
-  push).
+- Build number: `X = 28` (assigned at Phase 12 GATE on
+  2026-04-27).
 - Tag scope: 4-backend parity (Interpreter / JS / Native /
   wasm-wasi). wasm-edge / wasm-full are widening additions with
   no regressions. wasm-min remains the floor.
 
-### §2 Breaking changes from `@c.27` to `@d.X`
+### §2 Breaking changes from `@c.27` to `@d.28`
 
 The gen increment from C → D is the explicit signal that this
 release contains breaking changes. All renames are mechanical and
@@ -140,7 +138,7 @@ breaking-change manifest).
   `compare_baseline.py --tolerance-pct 10.0 --min-samples 30`.
   Per-bench WARN suppression covers the initial 30-sample
   collection window. `STABILITY § 5.1 throughput` is FIXED at
-  `@d.X`.
+  `@d.28`.
 - **Native runtime path leak** (D28B-012): FIXED. Six hypotheses
   were considered; the truth was that the per-thread bump arena
   in `src/codegen/native_runtime/core.c` was not being rewound at
@@ -200,7 +198,7 @@ breaking-change manifest).
   `"supported: interpreter, native"` prefix is preserved verbatim
   for tooling that matches on it). cdylib loading on the
   wasm-full backend reuses the host's native loader at
-  `@d.X`; a wasm-side dispatcher inside the wasm sandbox is a
+  `@d.28`; a wasm-side dispatcher inside the wasm sandbox is a
   post-stable improvement. `WasmMin` / `WasmWasi` / `WasmEdge`
   remain rejected — only `WasmFull` is widened. Pinned by
   `tests/d28b_010_wasm_full_addon.rs` (8 cases).
@@ -246,7 +244,7 @@ breaking-change manifest).
   otherwise. Trigger remains weekly cron + `workflow_dispatch`
   (PR triggers retain the ~3× instrumented-build slowdown
   trade-off the Phase 0 Design Lock recorded against them).
-- `STABILITY § 5.5 Memory` is FIXED at `@d.X` and lists all four
+- `STABILITY § 5.5 Memory` is FIXED at `@d.28` and lists all four
   gates with their tolerance / sample / scope settings.
 
 ### §7 Sustained soak verification (3h primary, 24h optional extended)
@@ -311,16 +309,51 @@ breaking-change manifest).
   priority) and are excluded from the CI lint hard-fail. A
   future fixture-naming sweep is a candidate post-stable item.
 - **Public addons `taida-lang/{os,net,terminal}` lint pass
-  verification**: the addons live in submodules outside the
-  D28 worktree scope; verifying lint cleanliness against the
-  E1801..E1809 band is scheduled as a Phase 12 GATE / post-
-  stable user activity.
+  verification** (Phase 12 GATE 2026-04-27 sweep):
+    - `taida-lang/os` and `taida-lang/net` are **core-bundled**
+      (Rust runtime in `src/interpreter/{os_eval,net_eval}/` +
+      JS runtime embedding in `src/js/runtime/{os,net}*.rs` +
+      provider stubs in `src/pkg/provider.rs`); they have **no
+      `.td` surface source** and are therefore outside the
+      E1801..E1809 lint band by construction. Their public
+      symbol shapes are pinned via signatures in
+      `src/types/checker.rs` and `docs/reference/{os_api,
+      net_api}.md`, both of which already conform to the
+      D28B-001 naming-rule lock.
+    - `taida-lang/terminal` (the only externally-published
+      addon, source at `.dev/official-package-repos/terminal/
+      taida/`) was lint-swept against E1801..E1809 on
+      2026-04-27 and surfaces **153 diagnostics** (E1802 × 82
+      function-camelCase violations, E1804 × 19 variable-non-
+      function-snake_case violations, E1808 × 52 buchi-pack-
+      non-function-field-snake_case violations across
+      `terminal.td`, `widgets.td`, `width.td`). Its
+      `native/addon.toml` predates D28B-021 and **does not
+      declare a `targets` field**, which the loader interprets
+      as the implicit `targets = ["native"]` per the FIXED
+      compatibility contract (§5). Resolution is scheduled in
+      the **TM track b-generation release** of
+      `taida-lang/terminal` (`@b.X`, succeeding the `@a.1`
+      initial release), an independent breaking-change track
+      that brings the addon to full E1801..E1809 compliance
+      and adds an explicit `targets` declaration. The TM b-gen
+      track runs on the `taida-lang/terminal` repository
+      lifecycle and is decoupled from the gen-D stable tag of
+      the language core; no `@d.28` stable surface depends on
+      it.
 
 ### §9 Acknowledgements
 
-`<TBD: contributor list, soak runners, reviewers, and addon
-ecosystem maintainers who participated in the gen-D stable
-qualification track>`
+The gen-D stable qualification track was driven by the user
+(shijimic) and Claude Code agent runs across the C24 / C25 /
+C26 / C27 fix-only RC cycle series and the D28 stable
+confirmation track. Soak runners, reviewers, and addon
+ecosystem maintainers are identified by their git commit
+authorship across the `feat/d28` branch (37 commits ahead of
+`main` at tag-push time). Phase 12 GATE finalisation
+(2026-04-27) consolidated the §1-§8 verdicts above into the
+`@d.28` draft entry; the user retains the right to expand
+this section before tag push.
 
 ---
 
