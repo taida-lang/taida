@@ -331,7 +331,31 @@ jobs:
           "
           GENERATED=$(gh api "repos/${REPO}/releases/generate-notes" \
             -f tag_name="${RELEASE_TAG}" -q '.body')
-          gh release create "${RELEASE_TAG}" dist/* \
-            --repo "${REPO}" \
-            --title "${RELEASE_TAG}" \
-            --notes "${HEADER}${GENERATED}"
+          NOTES="${HEADER}${GENERATED}"
+
+          # D29B-013 / Lock-I: idempotent release dispatcher.
+          #
+          # `gh release create` hard-fails with `release already exists`
+          # when its tag is already published, which broke the `@d.28`
+          # release run (manual `gh release delete` + rerun was required).
+          # Stable-cycle re-runs (asset-only fixes, signature retries,
+          # SHA256SUMS regen) must complete without manual operator
+          # intervention, so we branch on existence:
+          #   * exists  → upload assets with --clobber + edit notes
+          #   * absent  → create as before
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            echo "release ${RELEASE_TAG} already exists; updating assets and notes"
+            gh release upload "${RELEASE_TAG}" dist/* \
+              --repo "${REPO}" \
+              --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${REPO}" \
+              --title "${RELEASE_TAG}" \
+              --notes "${NOTES}"
+          else
+            echo "release ${RELEASE_TAG} does not exist; creating"
+            gh release create "${RELEASE_TAG}" dist/* \
+              --repo "${REPO}" \
+              --title "${RELEASE_TAG}" \
+              --notes "${NOTES}"
+          fi
