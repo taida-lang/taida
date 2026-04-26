@@ -161,6 +161,21 @@ fn d28b_007_upgrade_rewrites_schema_field_def() {
     let _ = std::fs::remove_file(&td);
 }
 
+/// Acceptance 6b: same-file field access follows a renamed field. This is
+/// a best-effort single-file migration rule: once `@(callSign <= "...")`
+/// establishes `callSign -> call_sign`, reads like `pilot.callSign` are
+/// rewritten to keep the upgraded file internally consistent.
+#[test]
+fn d28b_007_upgrade_rewrites_same_file_field_access() {
+    let (after, rewrites) = taida::upgrade_d28::upgrade_source(
+        "pilot <= @(name <= \"Asuka\", callSign <= \"Eva-02\")\nstdout(pilot.callSign)\n",
+    );
+    assert_eq!(rewrites, 2, "got: {}", after);
+    assert!(after.contains("call_sign <= \"Eva-02\""), "got: {}", after);
+    assert!(after.contains("pilot.call_sign"), "got: {}", after);
+    assert!(!after.contains("callSign"), "got: {}", after);
+}
+
 /// Acceptance 7: --dry-run reports rewrites but does not modify the
 /// file. Exit code is 0 (success) regardless of whether rewrites would
 /// apply (--dry-run is informational).

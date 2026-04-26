@@ -545,6 +545,12 @@ const WASI_SKIP_STEMS: &[&str] = &[
     "wasm_wasi_write_failure_shape", // needs --dir
     "wasm_edge_env",                 // wasm-edge profile, needs taida_host imports
     "net_http_hello",                // server blocks on httpServe waiting for connections
+    "net_ws_echo",                   // D28B-017 WS server example, requires WS client harness
+    "net_sse_broadcaster",           // D28B-017 SSE server example, requires SSE client harness
+    "net_http_client",               // D28B-017 HTTP client example, requires URL argv fixture
+    "terminal_line_editor", // D28B-018 interactive terminal addon example, requires raw-mode harness
+    "terminal_spinner",     // D28B-018 interactive terminal addon example, time-bound harness
+    "terminal_mouse", // D28B-018 interactive terminal addon example, requires mouse capture harness
 ];
 
 /// Examples that wasm-wasi cannot compile (unsupported features).
@@ -697,8 +703,8 @@ fn wasm_wasi_parity_allowlist_guard() {
         - WASI_EXPECTED_NATIVE_FAIL.len()
         - WASI_EXPECTED_PARITY_DIFF.len();
 
-    // Historical target count (WC-4 through C13-1): 71
-    // If the fixture set changes and parity improves, update here deliberately.
+    // Historical target count (WC-4 through C13-1): 71. D28 adds six
+    // harness-dependent examples, all intentionally skipped here.
     assert_eq!(
         expected_parity_ok,
         71,

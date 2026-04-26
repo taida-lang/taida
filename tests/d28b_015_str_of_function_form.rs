@@ -242,3 +242,25 @@ fn d28b_015_strof_oob_span_4backend_parity() {
 fn d28b_015_strof_mold_function_equivalence_4backend() {
     check_4backend("mold_function_equivalence");
 }
+
+/// Arity must be exact at the interpreter builtin layer. The type checker
+/// catches this in normal CLI runs, but direct interpreter evaluation and
+/// `--no-check` must not silently ignore extra arguments because native
+/// lowering rejects `args.len() != 2`.
+#[test]
+fn d28b_015_strof_extra_arg_rejected_by_interpreter_builtin() {
+    let source = r#"span <= @(start <= 0, len <= 1)
+stdout(strOf(span, "GET", "ignored"))
+"#;
+    let (program, parse_errors) = taida::parser::parse(source);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    let mut interp = taida::interpreter::Interpreter::new();
+    let err = interp
+        .eval_program(&program)
+        .expect_err("strOf with extra args must fail at runtime");
+    let stderr = err.to_string();
+    assert!(
+        stderr.contains("strOf requires exactly 2 arguments"),
+        "expected exact-arity diagnostic, got {stderr}"
+    );
+}

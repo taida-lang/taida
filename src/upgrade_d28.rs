@@ -436,6 +436,8 @@ fn apply_rewrites(source: &str, mut rewrites: Vec<Rewrite>) -> (String, usize) {
     // Sort by start desc so byte-offset shifting after a replacement does
     // not invalidate earlier (lower-indexed) rewrite positions.
     rewrites.sort_by(|a, b| b.start.cmp(&a.start));
+    rewrites
+        .dedup_by(|a, b| a.start == b.start && a.end == b.end && a.replacement == b.replacement);
 
     // Convert char offsets to byte offsets via the source's `char_indices`.
     // Build a forward lookup table once.
@@ -536,6 +538,14 @@ impl<'a> FieldAccessRewriter<'a> {
         let bs = self.byte_at(span_start_char);
         let be = self.byte_at(span_end_char);
         let region = &self.source[bs..be];
+        if region == field_name {
+            self.rewrites.push(Rewrite {
+                start: span_start_char,
+                end: span_end_char,
+                replacement: new_name,
+            });
+            return;
+        }
         // Find the LAST occurrence of `.<field_name>` in the region —
         // for chained accesses (`a.b.c.callSign`) this targets the
         // outermost `.callSign`. Other matches are nested FieldAccess
@@ -802,6 +812,74 @@ fn rewrite_template_strings(
     out
 }
 
+/// Best-effort same-file field-access rewrite for code expressions such as
+/// `pilot.callSign`. This complements the AST visitor because some call-site
+/// shapes keep field reads inside parser nodes that do not expose a
+/// `FieldAccess` expression to this rewriter. The scan skips comments and
+/// ordinary/template string literal bodies; template interpolation references
+/// are handled by [`rewrite_template_strings`].
+fn rewrite_code_field_accesses(
+    source: &str,
+    renamed_fields: &std::collections::HashSet<String>,
+) -> Vec<Rewrite> {
+    let mut out = Vec::new();
+    if renamed_fields.is_empty() {
+        return out;
+    }
+
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let mut in_string = None::<u8>;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(quote) = in_string {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'"' || b == b'\'' || b == b'`' {
+            in_string = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b'.' {
+            for old_name in renamed_fields {
+                let name_start = i + 1;
+                let name_end = name_start + old_name.len();
+                if name_end > bytes.len() {
+                    continue;
+                }
+                if &source[name_start..name_end] != old_name {
+                    continue;
+                }
+                let next = bytes.get(name_end).copied().unwrap_or(0);
+                if next.is_ascii_alphanumeric() || next == b'_' {
+                    continue;
+                }
+                out.push(Rewrite {
+                    start: source[..name_start].chars().count(),
+                    end: source[..name_end].chars().count(),
+                    replacement: camel_to_snake(old_name),
+                });
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Public entry: rewrite a single Taida source string. Returns the new
 /// source and the number of rewrites applied. Used by both the CLI and
 /// the regression tests so the function is pure / deterministic.
@@ -822,6 +900,7 @@ pub fn upgrade_source(source: &str) -> (String, usize) {
         let mut access_rewriter = FieldAccessRewriter::new(source, &renamed);
         access_rewriter.visit_program(&program);
         all_rewrites.extend(access_rewriter.rewrites);
+        all_rewrites.extend(rewrite_code_field_accesses(source, &renamed));
 
         // Third pass: rewrite template-string interpolation references.
         all_rewrites.extend(rewrite_template_strings(source, &renamed));
@@ -965,11 +1044,10 @@ stdout(pilot.callSign)
         let (out, n) = upgrade_source(src);
         // Field with non-function string value should rename.
         assert!(out.contains("call_sign <= \"Eva-02\""), "got: {}", out);
-        // Note: the field-access `pilot.callSign` is NOT auto-renamed
-        // (would require type-aware rename of read sites; current scope
-        // is the literal field declaration only). This is acknowledged in
-        // the module docstring.
-        assert_eq!(n, 1);
+        // Same-file field accesses are renamed in lockstep once a literal
+        // field declaration established the old -> new mapping.
+        assert!(out.contains("pilot.call_sign"), "got: {}", out);
+        assert_eq!(n, 2);
     }
 
     #[test]

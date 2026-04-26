@@ -784,9 +784,12 @@ impl Interpreter {
             //   - try UTF-8 decode the slice; invalid UTF-8 → empty Str
             //   - non-pack span / non-Bytes/Str raw → empty Str (tolerant)
             "strOf" => {
-                if args.len() < 2 {
+                if args.len() != 2 {
                     return Err(RuntimeError {
-                        message: "strOf requires 2 arguments: strOf(span, raw)".into(),
+                        message: format!(
+                            "strOf requires exactly 2 arguments: strOf(span, raw), got {}",
+                            args.len()
+                        ),
                     });
                 }
                 let span = match self.eval_expr(&args[0])? {
