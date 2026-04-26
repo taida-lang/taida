@@ -274,7 +274,7 @@ staff <= pilots.merge(updated)
 Set もイミュータブルです。変更操作は新しい Set を返します。
 
 ```taida
-pilotNames <= setOf(@["Misato", "Ritsuko", "Shinji"])
+pilot_names <= setOf(@["Misato", "Ritsuko", "Shinji"])
 ```
 
 | メソッド | 戻り値 | 説明 |

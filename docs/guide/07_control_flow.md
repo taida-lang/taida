@@ -181,7 +181,7 @@ processStaff staff =
 launchEva pilot eva =
   | !pilot.active |> ><           // 非アクティブパイロットは起動不可です
   | eva.power < 0 |> ><           // 電力不正は致命的です
-  | pilot.syncRate < 10 |>
+  | pilot.sync_rate < 10 |>
     @(success <= false, reason <= "Sync rate too low")
   | _ |>
     result <= activateEva(pilot, eva)

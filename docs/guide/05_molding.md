@@ -324,7 +324,7 @@ Sort と Unique はオプション設定で挙動を制御できます:
 // Sort: デフォルトは昇順
 Sort[@[3, 1, 2]]()                                // @[1, 2, 3]
 Sort[@[3, 1, 2]](reverse <= true)                 // @[3, 2, 1]
-Sort[pilots](by <= _ p = p.syncRate)               // キー関数ソート
+Sort[pilots](by <= _ p = p.sync_rate)               // キー関数ソート
 Sort[pilots](by <= _ p = p.name, reverse <= true)  // キー関数降順
 
 // Unique: デフォルトは値の等価比較
@@ -337,9 +337,9 @@ Unique[items](by <= _ x = x.id)                    // idフィールドで重複
 ```taida
 // パイロットデータの処理
 pilots <= @[
-  @(name <= "Shinji", syncRate <= 95, active <= true),
-  @(name <= "Asuka", syncRate <= 41, active <= true),
-  @(name <= "Rei", syncRate <= 65, active <= false)
+  @(name <= "Shinji", sync_rate <= 95, active <= true),
+  @(name <= "Asuka", sync_rate <= 41, active <= true),
+  @(name <= "Rei", sync_rate <= 65, active <= false)
 ]
 
 // フィルタ → マップ
@@ -350,7 +350,7 @@ pilots => Filter[_, _ p = p.active]() => Map[_, _ p = p.name]() => activeNames
 Fold[orders, 0, _ total order = total + (order.quantity * order.price)]() ]=> totalRevenue
 
 // ソートとフィルタの組み合わせ
-pilots => Filter[_, _ p = p.active]() => Sort[_](by <= _ p = p.syncRate, reverse <= true) => topPilots
+pilots => Filter[_, _ p = p.active]() => Sort[_](by <= _ p = p.sync_rate, reverse <= true) => topPilots
 ```
 
 ---

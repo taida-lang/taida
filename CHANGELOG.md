@@ -41,74 +41,236 @@ The gen increment from C → D is the explicit signal that this
 release contains breaking changes. All renames are mechanical and
 covered by `taida upgrade --d28`.
 
-- Naming-rule normalisation (D28B-007 / D28B-008): symbols that
-  violated the 7-category naming rules locked at Phase 0
-  (`docs/reference/naming_conventions.md`) were renamed. Mold-form
-  (PascalCase) and function-form (camelCase) names continue to
-  coexist where both are rule-compliant.
-- `<TBD: list of renamed symbols, including `strOf` function-form
-  reaffirmation per D28B-015>`
-- `<TBD: addon manifest `targets` contract surfacing per D28B-021,
-  including the `["native"]` default-inject contract>`
-- `<TBD: any further breaking surface changes landed in Round 3 wJ
-  / wK or Round 4 wL>`
+- **Naming-rule lock and rule-violator normalisation** (D28B-001 /
+  D28B-007 / D28B-008): the seven naming categories (class-like /
+  mold / schema PascalCase, function camelCase, buchi-pack field
+  with function-value camelCase / non-function-value snake_case,
+  variable holding function value camelCase / variable holding
+  non-function value snake_case, constant SCREAMING_SNAKE_CASE,
+  error variant PascalCase) and the type-variable convention
+  (single capital letter `T` / `U` / `E` / `K` / `V` / `P` / `R`)
+  are pinned for the gen-D generation. Symbols that violated the
+  locked rules were renamed:
+    - buchi-pack non-function-value fields (`callSign`,
+      `syncRate`, `updatedBy`, `withNull`, `listRaw`, `nestedRaw`,
+      `badResult`, `multiRaw`, `rawResponse`, `totalCount`,
+      `requestData`, `bytesLax`, `parseResult`, `encodeResult`,
+      `finalClear`, `newItem`, `doneCount`, `pendingCount`,
+      `pendingTodo`, `firstOne`, `sortedDesc`, `pilotNames`,
+      `pilotScores`, `daysLeft`) -> snake_case.
+    - schema fields and variables holding non-function values
+      (`pilotCall`, `pilotData`, `rateValue`, `asyncValue`)
+      -> snake_case.
+    - codegen-test fixture function `pi_step` -> `piStep`
+      (function names are camelCase).
+    - mold-form / function-form coexistence (D28B-015): both
+      `StrOf[span, raw]()` and `strOf(span, raw)` are valid;
+      they occupy different naming categories. The function-form
+      `strOf` is now a first-class prelude function with 4-backend
+      lowering (interpreter / JS / native; wasm-full compiles but
+      shares the pre-existing `taida_pack_get` runtime gap that
+      also affects the mold-form — deferred to post-stable).
+- **Lint hard-fail (E1801..E1809)** (D28B-008): the E18xx
+  diagnostic-code band is reserved for naming-rule lints and is
+  enforced as a CI hard-fail on the curated user-facing scope.
+  Tooling that previously assumed the E18xx band was unused must
+  be updated. E1805 (constant SCREAMING_SNAKE_CASE) is reserved
+  pending usage tracking — currently AST-only detection is
+  impractical and is deferred to post-stable.
+- **Addon manifest `targets` field** (D28B-021): the manifest
+  schema is widened with a new `targets` field. Manifests that
+  omit `targets` are treated bit-identically to manifests that
+  declare `targets = ["native"]` (the loader injects the default
+  explicitly rather than silently falling through). Unknown
+  target strings are rejected at load time with `[E2001] unknown
+  addon target` / `[E2002] addon manifest targets must be a list
+  of strings`. The `["native"]` default itself is part of the
+  surface contract for gen-D and may be changed only at the next
+  generation bump.
 
 The single source of truth for breaking-change policy is
-`docs/STABILITY.md` §6.
+`docs/STABILITY.md` §6 (especially §6.5 gen-D rationale and
+breaking-change manifest).
 
 ### §3 Migration guide
 
-- Run `taida upgrade --d28` against your project root to apply the
-  rename rewrites. The tool is single-direction; commit a clean
-  state before invoking it.
-- Manual review checklist: `<TBD: explicit checklist items not
-  covered by the rewriter>`
-- Addon authors: see `docs/reference/addon_manifest.md` for the
-  `targets` field contract pinned by D28B-021.
+1. Commit a clean tree.
+2. Run `taida upgrade --d28 <PATH>` against your project root.
+   The tool is single-direction (no inverse rewriter is provided);
+   it walks `.td` and `.tdm` files and applies the buchi-pack /
+   schema-field / template-string rename map in three idempotent
+   passes (collect rewrites, propagate field reads, retokenise
+   template-string interpolations). `--dry-run` prints the diff
+   without writing; `--check` exits non-zero if any rewrites
+   would be applied (suitable for CI assertions).
+3. Manual review checklist (items outside the rewriter's scope):
+    - Free identifiers used in dynamic addon `Lookup[...]` calls
+      that resolve at runtime — the rewriter emits a
+      `taida upgrade --d28: residual references` warning when it
+      sees such names; review them by hand.
+    - Documentation prose (`docs/`, README files) that names the
+      old fields in narrative text — the rewriter only touches
+      Taida source, not Markdown.
+    - User-defined helpers whose names violate the locked rules
+      (`taida lint <PATH>` will surface them as E1801..E1809).
+4. Addon authors: see `docs/reference/addon_manifest.md` for the
+   `targets` field contract pinned by D28B-021. Manifests that
+   already work continue to work without modification because of
+   the bit-identical default-inject contract.
+5. Operators that consume `taida` CLI output: the new
+   diagnostic-code band E18xx and the `[E2001]` / `[E2002]` codes
+   may surface in CI logs that previously matched only E1xxx
+   (xxx ≤ 1799) tokens.
 
 ### §4 NET stabilisation
 
-- HTTP/2 4-backend parity (D28B-002): `<TBD>`
-- Throughput regression hard-fail gate (D28B-005 + D28B-013):
-  `<TBD>`
-- Scatter-gather + 24h soak verification (D28B-006 + D28B-014):
-  `<TBD>`
-- TLS configuration (D28B-003): observation only, no active scope.
-- Port-bind race (D28B-004): closed in C27 (C27B-003 FIXED).
-- Native runtime path leak audit (D28B-012): `<TBD>`
+- **HTTP/2 4-backend parity** (D28B-002): FIXED. 11 new parity
+  cases (`d28b002_1_*` .. `d28b002_11_*`) pin HEAD / OPTIONS /
+  empty-body / multi-custom-headers / 201-Created / 500 /
+  long-path / long-header / UTF-8 body / empty-headers-list and
+  the wasm-{min,wasi,edge,full} compile-time reject of
+  `httpServe(protocol="h2")`. The h2 server worker also
+  received an arena-reset twin of the wF h1 fix (paired with
+  the per-stream `taida_release` repair), reducing the steady-
+  state h2 RSS drift from 2,486 KiB / 1k req to 2.4 KiB / 1k req
+  (~1,000× improvement, 24h projection ~3.5 MiB).
+- **Throughput regression hard-fail gate** (D28B-005 / D28B-013):
+  FIXED. `bench.yml` runs the three NET6-3b throughput benchmarks
+  + the criterion `perf_baseline` suite as hard-fail gates with
+  `compare_baseline.py --tolerance-pct 10.0 --min-samples 30`.
+  Per-bench WARN suppression covers the initial 30-sample
+  collection window. `STABILITY § 5.1 throughput` is FIXED at
+  `@d.X`.
+- **Native runtime path leak** (D28B-012): FIXED. Six hypotheses
+  were considered; the truth was that the per-thread bump arena
+  in `src/codegen/native_runtime/core.c` was not being rewound at
+  HTTP/1.1 request boundaries (`16 worker threads × 256 MiB cap
+  = 4 GiB plateau`). New helper `taida_arena_request_reset()`
+  drains the per-thread freelists, frees `arena_chunks[1..]`, and
+  rewinds `arena_chunks[0].offset = 0`; the helper is invoked at
+  each keep-alive iteration boundary and at `conn_done` in
+  `net_worker_thread`. Result: the 4.7 GiB / h pre-fix drift
+  collapsed to 0.89 MiB / h on a 30-min smoke (~5,400×
+  improvement); the 4 GiB plateau is gone. The h2 server got the
+  paired fix above.
+- **Scatter-gather + 24h soak verification** (D28B-006 +
+  D28B-014): D28B-006 FIXED + D28B-014 PARTIAL. The 24h runbook
+  (`.dev/D28_SOAK_RUNBOOK.md`), the detached-run automation
+  wrapper (`scripts/soak/run_24h_soak.sh`), and the
+  scatter-gather smoke regression test all landed; the actual
+  24h × 4-backend × 1-pass execution is user-actionable and is
+  closed at the Phase 12 GATE on user-supplied PASS records.
+- **TLS configuration** (D28B-003): OBSERVATION only. No active
+  scope — verdict inherited from the C26 / C27 cycles. The
+  three-way TLS-config parity test remains green.
+- **Port-bind race** (D28B-004): DROPPED. C27B-003 closed the
+  race; D28 has no work to do.
 
 ### §5 Addon ecosystem
 
-- Manifest `targets` field contract (D28B-021): default
-  `["native"]` is loader-injected explicitly; missing-`targets`
-  and explicit-`["native"]` are bit-identical at every observable
-  surface; default changes after stable are admissible only across
-  generations (`docs/STABILITY.md` §1.2 / §6).
-- WASM addon dispatcher (D28B-010): **post-stable**. Deferred to
-  D29 / E gen widening. See `.dev/FUTURE_BLOCKERS.md`.
-- Bundled package surfaces: `taida-lang/os`, `taida-lang/net`,
-  `taida-lang/terminal` (see `docs/guide/14_os_package.md`,
-  `docs/guide/15_net_package.md`, `docs/guide/16_terminal_package.md`).
+- **Manifest `targets` field contract** (D28B-021): FIXED. The
+  loader explicitly injects `targets = ["native"]` when the field
+  is absent. Missing-`targets` manifests and explicit-
+  `["native"]` manifests are bit-identical at every observable
+  surface (md5 of compiled artefact, error messages, exit codes).
+  Unknown target strings are rejected with `[E2001]`; non-list
+  / non-string `targets` values are rejected with `[E2002]`.
+  Default changes after stable are admissible only at the next
+  generation bump (`docs/STABILITY.md` §1.2 / §6.5.3).
+- **WASM addon dispatcher** (D28B-010): POST-STABLE. Deferred to
+  the gen-D widening track or to gen-E. Tracked as
+  POST-STABLE-001 in `.dev/FUTURE_BLOCKERS.md`. The Phase 0
+  Design Lock confirmed that the existing addon ecosystem
+  (Native + Interpreter targets) is sufficient for `@d.X`.
+- **Bundled package surfaces**: `taida-lang/os`,
+  `taida-lang/net`, `taida-lang/terminal` are documented in
+  `docs/guide/14_os_package.md`, `docs/guide/15_net_package.md`
+  (new in D28, ~10 sections), `docs/guide/16_terminal_package.md`
+  (new in D28, 8 sections); `docs/reference/{os_api,net_api}.md`
+  carry the canonical signatures. New examples
+  (`examples/{net_ws_echo,net_sse_broadcaster,net_http_client,
+  terminal_line_editor,terminal_spinner,terminal_mouse}.td`) all
+  pass `taida check` on the supported backends.
 
 ### §6 Memory and performance hard-fail gates
 
-- Memory hard-fail gates (D28B-013): `<TBD>`
-- Throughput baseline + percentage-drop gate (D28B-005 + D28B-013):
-  `<TBD>`
-- Coverage / RSS / FD / thread / unbounded-allocator gates:
-  `<TBD>`
+- **Memory definite-leak gate** (D28B-013 #1): FIXED. `memory.yml`
+  valgrind-smoke runs `examples/quality/c26_mem_smoke/*.td` with
+  `--errors-for-leak-kinds=definite --error-exitcode=1` on PR +
+  push triggers as a hard-fail. heaptrack is visibility-only
+  (weekly cron).
+- **Peak RSS gate** (D28B-013 #2): FIXED (new gate). `bench.yml`
+  runs `scripts/perf/measure_peak_rss.sh` against the three
+  fixtures `examples/quality/d28_perf_smoke/peak_rss_{arith,
+  list,string}.td` (interpreter floor / List+BuchiPack COW
+  path / Str primitive 4096-iter Repeat path), converts
+  `/usr/bin/time -v` "Maximum resident set size" into the
+  bencher format, and fails the build if the
+  +10% / 30-sample-EWMA-window threshold is breached. The
+  baseline JSON is `scripts/perf/peak_rss_baseline.json`
+  (zero-init at land; populates over the first 30 main-push
+  builds).
+- **Throughput regression gate** (D28B-005 + D28B-013): see §4.
+- **Coverage gate** (D28B-013 #3): FIXED. `coverage.yml` removed
+  `continue-on-error: true`; the embedded summariser asserts
+  `src/interpreter/` line ≥ 80% / branch ≥ 70% and exits
+  non-zero with a `D28B-013 coverage gate FAILED` sentinel
+  otherwise. Trigger remains weekly cron + `workflow_dispatch`
+  (PR triggers retain the ~3× instrumented-build slowdown
+  trade-off the Phase 0 Design Lock recorded against them).
+- `STABILITY § 5.5 Memory` is FIXED at `@d.X` and lists all four
+  gates with their tolerance / sample / scope settings.
 
 ### §7 24h soak verification
 
-- 24h scatter-gather soak runbook: `<TBD: pass / artefact link>`
-- 30-min fast-soak-proxy 4-backend smoke: `<TBD>`
+- **24h scatter-gather soak runbook** (`.dev/D28_SOAK_RUNBOOK.md`):
+  derived from `.dev/C26_SOAK_RUNBOOK.md`, extended to 4-backend
+  acceptance and pinned against the wF arena-reset baseline.
+  Acceptance ownership is split between agent (runbook +
+  automation maintenance, detached-run wrapper) and user (final
+  PASS record approval, tag push). `<TBD: PASS record link or
+  Phase 12 GATE artefact reference>`
+- **30-min fast-soak-proxy 4-backend smoke**: post-fix native
+  baseline shows RSS 5,108 KiB → 5,556 KiB on a 30-min smoke
+  (rate 911 KiB / h; samples 2..60 are bit-identical at
+  5,556 KiB; the proxy's `DRIFT DETECTED` verdict is an artefact
+  of its cold-start projection model). `<TBD: 4-backend smoke
+  evidence linkage at Phase 12 GATE>`
 
 ### §8 Known gaps
 
-- POST-STABLE-001: WASM addon dispatcher (D28B-010) — D29 / E gen
-  widening.
-- `<TBD: any Should Fix items deferred to post-stable per the
-  3-point post-stable check>`
+- **POST-STABLE-001**: WASM addon dispatcher (D28B-010) deferred
+  to gen-D widening or gen-E (`.dev/FUTURE_BLOCKERS.md`).
+- **wasm-full `strOf` runtime gap**: `taida_pack_get` ->
+  `taida_slice_mold` chain in the wasm runtime returns the
+  underlying integer field for span-pack inputs rather than
+  performing the UTF-8 slice-decode. The same gap affects the
+  mold-form `StrOf[span, raw]()`; it is not a `strOf`-specific
+  regression introduced by D28B-015 — the function-form
+  inherited the existing wasm runtime limitation. Resolution is
+  deferred to a post-stable wasm-runtime improvement track
+  (D29 widening or gen-E).
+- **E1805 (constant SCREAMING_SNAKE_CASE lint)**: reserved.
+  AST-only detection cannot distinguish constants from variables
+  reliably; activation requires usage-tracking infrastructure
+  that has been deferred to post-stable.
+- **E1809 source-aware detection precision**: the current
+  heuristic flags `=> Type` (return-type `:` marker omission) on
+  parser interpretations of the form `body => Int` as
+  reverse-assignment with a PascalCase target. Complex bodies may
+  yield false positives / negatives; refining this is a parser
+  AST-source-range extension scheduled post-stable.
+- **`examples/compile_*.td` and `examples/quality/` lint scope**:
+  these directories intentionally contain edge-case identifier
+  shapes (e.g. snake_case function names that test tag
+  propagation, PascalCase function names that test resolution
+  priority) and are excluded from the CI lint hard-fail. A
+  future fixture-naming sweep is a candidate post-stable item.
+- **Public addons `taida-lang/{os,net,terminal}` lint pass
+  verification**: the addons live in submodules outside the
+  D28 worktree scope; verifying lint cleanliness against the
+  E1801..E1809 band is scheduled as a Phase 12 GATE / post-
+  stable user activity.
 
 ### §9 Acknowledgements
 
