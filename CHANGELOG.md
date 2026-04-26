@@ -154,10 +154,13 @@ breaking-change manifest).
   improvement); the 4 GiB plateau is gone. The h2 server got the
   paired fix above.
 - **Scatter-gather + 3h sustained soak verification** (D28B-006 +
-  D28B-014): D28B-006 FIXED + D28B-014 PARTIAL (3h sustained
-  acceptance, D28 Round 2 review 縮約 — 旧 24h は industry SLA
-  convention 由来の holdover で技術的合理性なしとして廃止、
-  `.dev/C26_PROGRESS.md` L195 の auto-decider verdict と整合).
+  D28B-014): **D28B-006 FIXED + D28B-014 FIXED** (2026-04-26
+  22:56 JST、3-backend × 3h sustained × 1 周 PASS record 投入。
+  3h sustained acceptance, D28 Round 2 review 縮約 — 旧 24h は
+  industry SLA convention 由来の holdover で技術的合理性なし
+  として廃止、`.dev/C26_PROGRESS.md` L195 の auto-decider verdict
+  と整合; wasm-wasi は `[E1612]` httpServe 未サポートで scope 外、
+  `.dev/FUTURE_BLOCKERS.md::POST-STABLE-002` で post-stable 追跡).
   The 3h sustained runbook
   (`.dev/D28_SOAK_RUNBOOK.md`), the detached-run automation
   wrapper (`scripts/soak/run-24h-soak.sh` — script name is legacy,
@@ -265,14 +268,20 @@ breaking-change manifest).
   supplement (`run-24h-soak.sh --duration-hr 24`) but are not
   acceptance conditions. Acceptance ownership is split between agent (runbook
   + automation maintenance, detached-run wrapper) and user
-  (final PASS record approval, tag push). `<TBD: PASS record link
-  or Phase 12 GATE artefact reference>`
-- **30-min fast-soak-proxy 3-backend smoke**: post-fix native
-  baseline shows RSS 5,108 KiB → 5,556 KiB on a 30-min smoke
-  (rate 911 KiB / h; samples 2..60 are bit-identical at
-  5,556 KiB; the proxy's `DRIFT DETECTED` verdict is an artefact
-  of its cold-start projection model). `<TBD: 3-backend smoke
-  evidence linkage at Phase 12 GATE>`
+  (final PASS record approval, tag push). **PASS record (3h
+  sustained × 3-backend × 1 周)**: `~/soak-logs/d28-2026-04-26/
+  REPORT.md` (2026-04-26 19:56-22:56 JST、interp ratio 1.000 +
+  js ratio 1.218 + native ratio 1.000、全 backend last 30min
+  range ≤ 52 KiB plateau、native は wF baseline 5,556 KiB ±0.2%
+  に収束)。
+- **3h sustained 3-backend full-run baseline**: native steady-
+  state at 5,568 KiB across 240 consecutive samples (1h-3h
+  bit-identical), js V8 heap plateau at 98,008 KiB (warmup
+  S-curve cold 51 → 80 → 98 MiB then range 52 KiB / 30 min),
+  interp Rust allocator settling at 7,976 KiB after 30min then
+  bit-identical 150 samples. `taida_arena_request_reset` (D28B-
+  012 wF fix) maintains 4.7 GiB/h pre-fix → 0 KiB/h post-fix
+  improvement across the full 3h window.
 
 ### §8 Known gaps
 
