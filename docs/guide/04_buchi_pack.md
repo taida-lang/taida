@@ -40,11 +40,11 @@ rei <= Pilot(name <= "Rei", age <= 14, active <= true)
 ### フィールドアクセス
 
 ```taida
-pilot <= @(name <= "Shinji", age <= 14, callSign <= "Ikari")
+pilot <= @(name <= "Shinji", age <= 14, call_sign <= "Ikari")
 
 pilotName <= pilot.name      // "Shinji"
 pilotAge <= pilot.age        // 14
-pilotCall <= pilot.callSign  // "Ikari"
+pilot_call <= pilot.call_sign  // "Ikari"
 ```
 
 ### 存在しないフィールド
@@ -53,14 +53,14 @@ pilotCall <= pilot.callSign  // "Ikari"
 
 ```taida
 pilot <= @(name <= "Rei")
-syncRate <= pilot.syncRate  // コンパイルエラー: フィールド 'syncRate' は存在しません
+sync_rate <= pilot.sync_rate  // コンパイルエラー: フィールド 'sync_rate' は存在しません
 ```
 
 型で定義されたフィールドはデフォルト値を持ちます:
 
 ```taida
-Pilot = @(name: Str, callSign: Str, age: Int)
-rei <= Pilot(name <= "Rei")  // callSign = "", age = 0
+Pilot = @(name: Str, call_sign: Str, age: Int)
+rei <= Pilot(name <= "Rei")  // call_sign = "", age = 0
 ```
 
 ---
@@ -252,13 +252,13 @@ conn <= connect(options)  // パラメータが自動展開されます
 ぶちパック内にモールディング型を格納できます:
 
 ```taida
-pilotData <= @(
+pilot_data <= @(
   name <= "Asuka",
-  syncRate <= Div[780, 10]()
+  sync_rate <= Div[780, 10]()
 )
 
 // ]=> でアンモールディング
-pilotData.syncRate ]=> rateValue  // 78
+pilot_data.sync_rate ]=> rate_value  // 78
 ```
 
 モールディング型の詳細は [モールディング型](05_molding.md) を参照してください。

@@ -878,7 +878,13 @@ const WASM_MIN_EXPECTED_PARITY_DIFF: &[&str] = &[];
 /// runner still feeding the fixture into `run_interpreter()` which blocks on
 /// `httpServe(...)` until the nextest 600s timeout fires.
 const WASM_MIN_SKIP_STEMS: &[&str] = &[
-    "net_http_hello", // server blocks on httpServe waiting for connections
+    "net_http_hello",       // server blocks on httpServe waiting for connections
+    "net_ws_echo",          // D28B-017 WS server example, blocks on accept (sym. with WASI/FULL)
+    "net_sse_broadcaster",  // D28B-017 SSE server example, blocks on accept (sym. with WASI/FULL)
+    "net_http_client",      // D28B-017 HTTP client example, requires URL argv fixture
+    "terminal_line_editor", // D28B-018 interactive terminal example, requires raw-mode harness
+    "terminal_spinner",     // D28B-018 interactive terminal example, time-bound harness
+    "terminal_mouse",       // D28B-018 interactive terminal example, requires mouse capture
 ];
 
 fn run_wasm_min_parity_fixture(stem: &str) {

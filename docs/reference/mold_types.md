@@ -448,7 +448,7 @@ Sum[@[]]()                    // 0
 ```taida
 Sort[@[3, 1, 2]]()                              // @[1, 2, 3]
 Sort[@[3, 1, 2]](reverse <= true)               // @[3, 2, 1]
-Sort[pilots](by <= _ p = p.syncRate)             // キー関数ソート
+Sort[pilots](by <= _ p = p.sync_rate)             // キー関数ソート
 Sort[pilots](by <= _ p = p.name, reverse <= true)  // キー関数降順
 ```
 

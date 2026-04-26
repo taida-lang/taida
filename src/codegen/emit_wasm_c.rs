@@ -357,6 +357,19 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
             "#define taida_polymorphic_length taida_polymorphic_length_bytes_aware"
         )
         .unwrap();
+
+        // D28B-009 (2026-04-26, wD Round 1): redirect float renderer so
+        // NaN renders as canonical "NaN" without sign, matching Rust
+        // f64::Display (interpreter), native `taida_float_to_str`, and
+        // JS `__taida_float_render`. The core implementation in
+        // runtime_core_wasm/01_core.inc.c::fmt_g extracts the sign bit
+        // BEFORE the NaN check, so any NaN with sign-bit set (e.g. the
+        // result of `Sqrt[-1.0]()`) renders as "-NaN", breaking 4-backend
+        // parity. The override `taida_debug_float_d28b009` /
+        // `taida_float_to_str_d28b009` lives in runtime_wasi_io.c and is
+        // linked by both Wasi and Full profiles.
+        writeln!(c, "#define taida_debug_float taida_debug_float_d28b009").unwrap();
+        writeln!(c, "#define taida_float_to_str taida_float_to_str_d28b009").unwrap();
     }
 
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)

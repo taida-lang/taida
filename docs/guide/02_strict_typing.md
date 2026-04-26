@@ -143,15 +143,15 @@ lax.hasValue  // false (空リスト)
 
 ```taida
 // スキーマを定義します
-Pilot = @(name: Str, age: Int, syncRate: Int)
+Pilot = @(name: Str, age: Int, sync_rate: Int)
 
 // JSON[生データ, スキーマ]() で鋳造します
-raw <= '{"name": "Shinji", "age": 14, "syncRate": 78}'
+raw <= '{"name": "Shinji", "age": 14, "sync_rate": 78}'
 JSON[raw, Pilot]() ]=> pilot
 
 pilot.name      // "Shinji"
 pilot.age       // 14
-pilot.syncRate  // 78
+pilot.sync_rate  // 78
 ```
 
 ### スキーマなしはエラーです
@@ -257,7 +257,7 @@ JSON['{}', Pilot]() ]=> pilot  // 全フィールドがデフォルト値
 ```taida
 // 存在しないフィールドへのアクセス
 pilot <= @(name <= "Asuka")
-callSign <= pilot.callSign  // コンパイルエラー: フィールド 'callSign' は存在しません
+call_sign <= pilot.call_sign  // コンパイルエラー: フィールド 'call_sign' は存在しません
 
 // 型不一致
 add x: Int y: Int = x + y => :Int

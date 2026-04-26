@@ -4121,6 +4121,23 @@ static void *net_worker_thread(void *arg) {
                 }
             }
 
+            /* D28B-012 (Round 2 wF): per-request arena boundary.
+             *
+             * Every per-request taida_val (request pack, response pack,
+             * span packs, body string, parse_inner subgraph) has been
+             * released to refcount 0 above. Their arena-backed slots
+             * are logically dead but the bump arena offset has not
+             * rewound — that is the 4 GB plateau / 4.7 GB/h drift root
+             * cause D28B-012 escalates from C27B-029.
+             *
+             * `buf` (the per-connection scratch buffer at line 3568) is
+             * TAIDA_MALLOC-backed, not arena, so the buffer advance
+             * above is unaffected by this reset. The pool->handler
+             * closure was created on the main thread (separate __thread
+             * arena) and is also unaffected. No live taida_val
+             * references this thread's arena across this boundary. */
+            taida_arena_request_reset();
+
             // Close if not keep-alive or limit reached
             if (!keep_alive || limit_hit) break;
         }
@@ -4137,6 +4154,17 @@ static void *net_worker_thread(void *arg) {
         buf = NULL;
         total_read = 0;
         buf_cap = 8192;
+
+        /* D28B-012 (Round 2 wF): connection-boundary arena reset.
+         *
+         * Catches the early-exit paths (head_malformed, EOF before
+         * head, body parse error, WebSocket close, request limit
+         * exhausted on a partial connection) where the per-iteration
+         * reset above could not fire. Idempotent if already drained:
+         * the freelist drain loops exit immediately on count==0 and
+         * the chunk-keep-one-rewind path is a no-op when chunk[0] is
+         * already at offset 0. */
+        taida_arena_request_reset();
 
         // Re-allocate buffer for next connection
         // (will be done at top of next keep-alive loop iteration)
@@ -6006,12 +6034,56 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                 int has_body = resp.ok && resp.body && resp.body_len > 0 && !no_body;
 
                 if (!has_body) {
+                    /* D28B-025: RFC 9113 §8.1.1 + RFC 9110 §6.4 forbid
+                     * content-length / transfer-encoding on no-body
+                     * responses (1xx / 204 / 205 / 304). Strip them
+                     * before HPACK encode if a user handler set them.
+                     * h1 path has the same protection at no_body status
+                     * codes; h2 was missing the symmetric guard prior
+                     * to D28B-025. Use a filtered copy so the original
+                     * `resp.headers` (owned by the response pack) is
+                     * untouched and freed correctly by the caller. */
+                    H2Header *send_hdrs = resp.headers;
+                    int send_count = resp.header_count;
+                    H2Header *filtered = NULL;
+                    if (no_body && resp.header_count > 0) {
+                        int needs_strip = 0;
+                        for (int hi = 0; hi < resp.header_count; hi++) {
+                            if (strcasecmp(resp.headers[hi].name, "content-length") == 0 ||
+                                strcasecmp(resp.headers[hi].name, "transfer-encoding") == 0) {
+                                needs_strip = 1; break;
+                            }
+                        }
+                        if (needs_strip) {
+                            filtered = (H2Header*)TAIDA_MALLOC(
+                                sizeof(H2Header) * (size_t)resp.header_count,
+                                "h2_resp_hdrs_strip"
+                            );
+                            if (filtered) {
+                                int fc = 0;
+                                for (int hi = 0; hi < resp.header_count; hi++) {
+                                    if (strcasecmp(resp.headers[hi].name, "content-length") != 0 &&
+                                        strcasecmp(resp.headers[hi].name, "transfer-encoding") != 0) {
+                                        filtered[fc++] = resp.headers[hi];
+                                    }
+                                }
+                                send_hdrs = filtered;
+                                send_count = fc;
+                            }
+                            /* On allocation failure, fall back to the
+                             * original headers — the protocol-correct
+                             * outcome is still better than dropping the
+                             * request, and OOM is already a degraded
+                             * mode. */
+                        }
+                    }
                     h2_send_response_headers(
                         client_fd, &conn.encoder_dyn,
                         (uint32_t)completed_stream_id, resp.status,
-                        resp.headers, resp.header_count,
+                        send_hdrs, send_count,
                         1 /*end_stream*/, conn.peer_max_frame_size
                     );
+                    if (filtered) free(filtered);
                 } else {
                     // Add content-length if not present
                     int has_cl = 0;
@@ -6062,8 +6134,56 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
 
                 h2_response_fields_free(&resp);
 
+                /* D28B-002 (Round 2 wG): release request + response packs.
+                 *
+                 * h2_extract_response_fields() above copied every field
+                 * we still need into malloc-backed buffers in `resp`,
+                 * and h2_response_fields_free(&resp) just released
+                 * those copies. The taida_val req_pack and response
+                 * were leaked at the refcount level pre-wG -- their
+                 * arena-backed slots stayed reachable forever via the
+                 * orphaned refcount, even though no code dereferenced
+                 * them after this point. Drive the refcounts to 0 so
+                 * the arena reset below has the same safety footing
+                 * as the h1 worker's per-iteration reset. */
+                taida_release(req_pack);
+                taida_release(response);
+
                 s->state = H2_STREAM_CLOSED;
                 h2_conn_remove_closed_streams(&conn);
+
+                /* D28B-002 (Round 2 wG): per-stream arena boundary.
+                 *
+                 * Every per-request taida_val (the 14-field request
+                 * pack, header 2-field packs, body Bytes, str_new_copy
+                 * strings for method / path / query / authority / peer
+                 * host / protocol, plus the handler-returned response
+                 * pack) has had its refcount driven to 0 just above.
+                 * Their arena-backed slots are logically dead but the
+                 * bump arena offset has not rewound -- this is the h2
+                 * twin of D28B-012 (4 GB plateau / 4.7 GB/h drift on
+                 * the h1 worker), measured at ~2.5 MiB / 1k req on
+                 * the h2 path before this fix.
+                 *
+                 * Safety: H2Conn (heap-malloc'd at L5635), the
+                 * encoder/decoder HPACK dyn tables (strdup-backed),
+                 * surviving H2Stream entries (request_headers /
+                 * request_body all TAIDA_MALLOC'd), and the handler
+                 * closure (lives on this same main thread but is
+                 * refcount-tracked, not arena-bound) are all
+                 * unaffected by an arena reset. The connection's
+                 * scratch buffers (continuation_buf etc.) are
+                 * realloc-backed.
+                 *
+                 * Single-thread caveat: taida_net_h2_serve runs on
+                 * the application's main thread (no worker pool, no
+                 * pthread_create here), so this resets the same
+                 * __thread arena that the h1 worker thread version
+                 * resets. wF (D28B-012 fix) installed the helper as
+                 * `static` in core.c so this file already has access
+                 * to it through the build's translation-unit
+                 * concatenation (mod.rs F0_LEN..F6_LEN). */
+                taida_arena_request_reset();
             }
         }
     }
@@ -6075,6 +6195,19 @@ h2_conn_done:
     h2_conn_free(&conn);
     #undef conn
     free(connp);
+
+    /* D28B-002 (Round 2 wG): connection-boundary arena reset.
+     *
+     * Catches the early-exit paths inside the frame loop (preface
+     * mismatch, h2_send_server_settings failure, frame read errors,
+     * GOAWAY exits, HPACK decode errors, h2_continuation_append
+     * overflow, oversized header list) where the per-stream reset
+     * could not fire because the loop bailed before reaching the
+     * `completed_stream_id` block. Idempotent if already drained
+     * (the freelist drain loops exit on count == 0 and the
+     * keep-chunk[0]-rewind path is a no-op when chunk[0] is at
+     * offset 0). */
+    taida_arena_request_reset();
 }
 
 typedef struct { int64_t requests; } H2ServeResult;
