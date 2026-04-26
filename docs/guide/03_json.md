@@ -122,11 +122,11 @@ pilot.address.city    // "Tokyo-3"
 配列の JSON は `@[TypeDef]` をスキーマとして渡します。
 
 ```taida
-Pilot = @(name: Str, syncRate: Int)
+Pilot = @(name: Str, sync_rate: Int)
 
-raw <= '[{"name": "Asuka", "syncRate": 95}, {"name": "Shinji", "syncRate": 41}]'
+raw <= '[{"name": "Asuka", "sync_rate": 95}, {"name": "Shinji", "sync_rate": 41}]'
 JSON[raw, @[Pilot]]() ]=> pilots
-// pilots: @[@(name <= "Asuka", syncRate <= 95), @(name <= "Shinji", syncRate <= 41)]
+// pilots: @[@(name <= "Asuka", sync_rate <= 95), @(name <= "Shinji", sync_rate <= 41)]
 ```
 
 ### プリミティブ型への直接変換
@@ -277,13 +277,13 @@ JSON[raw, Pilot]() ]=> pilot
 配列の場合、各要素に個別にスキーママッチングが適用されます。
 
 ```taida
-Pilot = @(name: Str, syncRate: Int)
+Pilot = @(name: Str, sync_rate: Int)
 
-raw <= '[{"name": "Rei", "syncRate": 95}, {"name": "Shinji"}]'
+raw <= '[{"name": "Rei", "sync_rate": 95}, {"name": "Shinji"}]'
 JSON[raw, @[Pilot]]() ]=> pilots
 // pilots: @[
-//   @(name <= "Rei", syncRate <= 95),
-//   @(name <= "Shinji", syncRate <= 0)  // syncRate 欠落 → デフォルト値
+//   @(name <= "Rei", sync_rate <= 95),
+//   @(name <= "Shinji", sync_rate <= 0)  // sync_rate 欠落 → デフォルト値
 // ]
 ```
 
