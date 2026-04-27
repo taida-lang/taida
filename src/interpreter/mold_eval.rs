@@ -485,8 +485,21 @@ impl Interpreter {
                         };
                         let (clamped_start, clamped_end) =
                             clamp_slice_bounds(bytes.len(), start, end);
-                        let result = bytes[clamped_start..clamped_end].to_vec();
-                        Ok(Some(Signal::Value(Value::bytes(result))))
+                        // D29B-004 / Track-ε: zero-copy view sharing the
+                        // underlying buf Arc. Result is `Arc::ptr_eq` to
+                        // the source's buf Arc — the per-request body
+                        // memcpy in the 1-arg handler hot path
+                        // (`body <= Slice[req.raw, b.start, b.start+b.len]`)
+                        // is eliminated. Pre-Track-ε path (commented for
+                        // delta evidence): `bytes[clamped_start..clamped_end].to_vec()`
+                        // → `Value::bytes(result)` (1 alloc + memcpy/req).
+                        let new_offset = bytes.offset + clamped_start;
+                        let new_len = clamped_end - clamped_start;
+                        Ok(Some(Signal::Value(Value::bytes_view(
+                            Arc::clone(&bytes.buf),
+                            new_offset,
+                            new_len,
+                        ))))
                     }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }
