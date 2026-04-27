@@ -109,11 +109,16 @@ jobs:
           RUN_BENCHMARKS: "1"
         run: |
           set -euo pipefail
-          cargo test --release --test parity \
+          # cargo test accepts only one TESTNAME positional; multiple
+          # filters must go after `--` (passed to libtest). The earlier
+          # form ran fine on older cargo but the latest treats the
+          # extra TESTNAMEs as unexpected arguments. Move all three
+          # filters past `--` so libtest substring-matches each.
+          cargo test --release --test parity -- \
               test_net6_3b_native_h2_32_request_throughput_benchmark \
               test_net6_3b_native_h2_64kib_data_benchmark \
               test_net6_3b_native_h2_32_stream_multiplex_benchmark \
-              -- --nocapture --test-threads=1 \
+              --nocapture --test-threads=1 \
               2>&1 | tee cargo-test-net.log
 
       - name: Parse NET6-3b h2 benchmark lines into bencher format

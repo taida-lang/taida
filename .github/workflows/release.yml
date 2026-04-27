@@ -245,7 +245,7 @@ jobs:
               echo "::endgroup::"
           done
           echo "Signed artefacts:"
-          ls -la *.cosign.bundle
+          ls -la ./*.cosign.bundle
       - name: Compute artefact digests (for SLSA subjects)
         id: digest
         working-directory: dist
