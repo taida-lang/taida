@@ -76,7 +76,11 @@ pub struct RopeBuffer {
 }
 
 impl RopeBuffer {
-    /// Construct a fresh rope seeded from `initial`.
+    /// Construct a fresh rope seeded from `initial`. Distinct from
+    /// `std::str::FromStr::from_str` (different return shape) — clippy
+    /// warns about confusion, but we keep this name for symmetry with
+    /// `GapBuffer::from_str`. Allow attribute applied locally.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(initial: &str) -> Self {
         RopeBuffer {
             buf: GapBuffer::from_str(initial),

@@ -48,8 +48,7 @@ pub struct GapBuffer {
 impl GapBuffer {
     /// Construct an empty `GapBuffer` with default gap capacity.
     pub fn new() -> Self {
-        let mut buf = Vec::with_capacity(DEFAULT_GAP);
-        buf.resize(DEFAULT_GAP, 0);
+        let buf = vec![0u8; DEFAULT_GAP];
         GapBuffer {
             buf,
             gap_start: 0,
@@ -142,15 +141,20 @@ impl GapBuffer {
             return;
         }
         // Grow geometrically; cap minimum new gap at MIN_GAP_AFTER_MOVE * 2.
-        let extra = cmp::max(needed - current_gap, self.buf.len() / 2 + MIN_GAP_AFTER_MOVE);
+        let extra = cmp::max(
+            needed - current_gap,
+            self.buf.len() / 2 + MIN_GAP_AFTER_MOVE,
+        );
         let trailing_len = self.buf.len() - self.gap_end;
         let old_len = self.buf.len();
         self.buf.resize(old_len + extra, 0);
         // Shift the trailing region right by `extra` bytes.
         // copy_within with overlapping regions is safe (Rust spec).
         let new_buf_len = self.buf.len();
-        self.buf
-            .copy_within(self.gap_end..self.gap_end + trailing_len, new_buf_len - trailing_len);
+        self.buf.copy_within(
+            self.gap_end..self.gap_end + trailing_len,
+            new_buf_len - trailing_len,
+        );
         self.gap_end += extra;
     }
 
@@ -311,7 +315,7 @@ mod tests {
         let mut g = GapBuffer::from_str("");
         let mut reference = String::new();
         for i in 0..500 {
-            let ch = char::from((b'a' + (i % 26) as u8) as char as u8) as char;
+            let ch = (b'a' + (i % 26) as u8) as char;
             g.insert_at_byte(i, &ch.to_string());
             reference.push(ch);
         }
@@ -349,9 +353,9 @@ mod tests {
             (0, 0, "abc"),
             (0, 3, "def"),
             (0, 0, "X"),
-            (1, 4, ""),  // delete 1 byte at offset 4
+            (1, 4, ""), // delete 1 byte at offset 4
             (0, 2, "YYY"),
-            (1, 0, ""),  // delete 1 byte at offset 0
+            (1, 0, ""), // delete 1 byte at offset 0
         ];
         for (op, pos, s) in ops {
             match op {

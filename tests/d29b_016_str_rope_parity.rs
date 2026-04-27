@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use taida::interpreter::value::{StrValue, Value, STR_ROPE_PROMOTION_THRESHOLD};
+use taida::interpreter::value::{STR_ROPE_PROMOTION_THRESHOLD, StrValue, Value};
 
 /// Build a `StrValue` of `n` ASCII bytes (cycling through 'a'..='z').
 fn make_flat_string(n: usize) -> StrValue {
@@ -39,7 +39,10 @@ fn concat_below_threshold_stays_flat() {
     let b = StrValue::new(" world".to_string());
     let c = a.concat_with(&b);
     assert_eq!(c.as_str(), "hello world");
-    assert!(!c.is_rope(), "expected Flat below threshold (combined len 11)");
+    assert!(
+        !c.is_rope(),
+        "expected Flat below threshold (combined len 11)"
+    );
 }
 
 /// Phase 10-B: concat at exactly the threshold promotes to Rope.
@@ -49,7 +52,11 @@ fn concat_at_threshold_promotes_to_rope() {
     let b = make_flat_string(STR_ROPE_PROMOTION_THRESHOLD / 2);
     let c = a.concat_with(&b);
     assert_eq!(c.as_str().len(), STR_ROPE_PROMOTION_THRESHOLD);
-    assert!(c.is_rope(), "expected Rope at threshold ({} bytes)", STR_ROPE_PROMOTION_THRESHOLD);
+    assert!(
+        c.is_rope(),
+        "expected Rope at threshold ({} bytes)",
+        STR_ROPE_PROMOTION_THRESHOLD
+    );
 }
 
 /// Phase 10-B: concat above the threshold promotes to Rope.
@@ -141,7 +148,10 @@ fn microbench_n500_under_100us_per_keystroke() {
     // (mirrors a real LineEditor session that has accumulated text).
     let prefill = make_flat_string(1100);
     state = state.concat_with(&prefill);
-    assert!(state.is_rope(), "prefill should put the buffer in Rope path");
+    assert!(
+        state.is_rope(),
+        "prefill should put the buffer in Rope path"
+    );
 
     let start = Instant::now();
     for i in 0..N {
