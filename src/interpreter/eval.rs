@@ -182,6 +182,23 @@ pub struct Interpreter {
     /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
     /// stack-local variables in dispatch_request that outlive the handler call.
     pub(crate) active_streaming_writer: Option<super::net_eval::ActiveStreamingWriter>,
+    /// E30B-007 / Lock-G: Context for the addon facade currently being loaded.
+    ///
+    /// When `load_addon_facade` is evaluating a `<pkg>/taida/<stem>.td` file,
+    /// this field holds `Some((package_id, function_arities))` so that the
+    /// `RustAddon["fn"](arity <= N)` expression form can:
+    ///
+    /// 1. Resolve to the canonical addon sentinel
+    ///    `Value::str("__taida_addon_call::<package_id>::<fn>")` (matching
+    ///    today's `define_force` pre-injection contract).
+    /// 2. Validate the declared `arity` field against the manifest
+    ///    `[functions]` table and reject drift with `[E1412]`.
+    ///
+    /// Outside facade execution this is `None` and a `RustAddon[...]`
+    /// expression falls through to the generic `MoldInst` path (the
+    /// checker will surface a `[E1412]` "context" diagnostic in a later
+    /// sub-step; the interpreter contract here is purely runtime).
+    pub(crate) loading_addon_facade_ctx: Option<(String, std::collections::BTreeMap<String, u32>)>,
 }
 
 impl Interpreter {
@@ -235,6 +252,7 @@ impl Interpreter {
             type_parents: HashMap::new(),
             call_depth: 0,
             active_streaming_writer: None,
+            loading_addon_facade_ctx: None,
         }
     }
 
@@ -1134,7 +1152,24 @@ impl Interpreter {
                 Ok(Signal::Value(current))
             }
 
-            Expr::MoldInst(name, type_args, fields, _) => {
+            Expr::MoldInst(name, type_args, fields, span) => {
+                // E30B-007 / Lock-G: explicit addon-binding form
+                // `RustAddon["fn"](arity <= N)`. Inside an addon facade
+                // load context (`loading_addon_facade_ctx`) this expression
+                // resolves to the addon sentinel string; the `arity <= N`
+                // metadata is validated against the manifest `[functions]`
+                // table and any drift is rejected as `[E1412]`.
+                //
+                // Outside facade context the form is a structural error
+                // (binding only makes sense in a facade). The interpreter
+                // surfaces a `[E1412]` runtime error here as a defensive
+                // diagnostic; the checker surfacing of this code at compile
+                // time lands in sub-step B-5 once the terminal addon
+                // submodule has been migrated by the TM track.
+                if name == "RustAddon" {
+                    return self.eval_rust_addon_binding(type_args, fields, span);
+                }
+
                 // Check for new operation mold types (str, num, list with fields support)
                 if let Some(result) = self.try_operation_mold(name, type_args, fields)? {
                     return Ok(result);
@@ -2322,6 +2357,132 @@ impl Interpreter {
         }
 
         Ok(result)
+    }
+
+    /// E30B-007 / Lock-G: evaluate the explicit addon-binding form
+    /// `RustAddon["fn"](arity <= N)`.
+    ///
+    /// Contract:
+    /// - `type_args` must contain exactly one entry, a `StringLit` with
+    ///   the addon function name. Anything else → `[E1412]`.
+    /// - `fields` must contain exactly one entry, name `arity`, with an
+    ///   `IntLit` value. Anything else → `[E1412]`.
+    /// - Must execute inside an addon facade load context
+    ///   (`loading_addon_facade_ctx == Some(_)`). Otherwise → `[E1412]`.
+    /// - The function name must exist in the surrounding addon's
+    ///   manifest `[functions]` table and the declared arity must match
+    ///   the manifest arity. Otherwise → `[E1412]` drift error.
+    /// - On success, returns `Value::str("__taida_addon_call::<pkg>::<fn>")`
+    ///   so the binding is structurally identical to today's pre-injected
+    ///   addon sentinel (the addon dispatch path in `MoldInst` /
+    ///   `try_addon_func` uses the sentinel string verbatim).
+    fn eval_rust_addon_binding(
+        &mut self,
+        type_args: &[crate::parser::Expr],
+        fields: &[crate::parser::BuchiField],
+        _span: &crate::lexer::Span,
+    ) -> Result<Signal, RuntimeError> {
+        use crate::parser::Expr;
+
+        // Surface form: exactly one type-arg = string literal.
+        if type_args.len() != 1 {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"fn\"] expects exactly one string \
+                     literal inside the brackets (got {})",
+                    type_args.len()
+                ),
+            });
+        }
+        let fn_name = match &type_args[0] {
+            Expr::StringLit(s, _) => s.clone(),
+            other => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"fn\"] requires a string literal; \
+                         got {:?}",
+                        other
+                    ),
+                });
+            }
+        };
+
+        // Surface form: exactly one field `arity <= IntLit`.
+        if fields.len() != 1 {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"{}\"](arity <= N) expects exactly \
+                     one `arity` field (got {})",
+                    fn_name,
+                    fields.len()
+                ),
+            });
+        }
+        if fields[0].name != "arity" {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"{}\"] expects field name `arity`, got `{}`",
+                    fn_name, fields[0].name
+                ),
+            });
+        }
+        let arity_decl: u32 = match &fields[0].value {
+            Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+            other => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"{}\"](arity <= N) requires a \
+                         non-negative integer literal; got {:?}",
+                        fn_name, other
+                    ),
+                });
+            }
+        };
+
+        // Must execute inside an addon facade load context.
+        let (pkg_id, manifest_arities) = match &self.loading_addon_facade_ctx {
+            Some(ctx) => ctx.clone(),
+            None => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"{}\"] binding may only appear \
+                         inside an addon facade (`<pkg>/taida/<stem>.td`). \
+                         This is the explicit-binding form locked by E30 \
+                         Lock-G; user-side code cannot construct addon \
+                         sentinels directly.",
+                        fn_name
+                    ),
+                });
+            }
+        };
+
+        // Function must exist + arity must match manifest entry.
+        let manifest_arity = match manifest_arities.get(&fn_name) {
+            Some(a) => *a,
+            None => {
+                return Err(RuntimeError {
+                    message: format!(
+                        "[E1412] RustAddon[\"{}\"]: function not declared in \
+                         addon manifest `[functions]` for package '{}'.",
+                        fn_name, pkg_id
+                    ),
+                });
+            }
+        };
+        if arity_decl != manifest_arity {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1412] RustAddon[\"{}\"](arity <= {}) drifts from \
+                     addon manifest declared arity {} for package '{}'. \
+                     Update the facade binding or the manifest entry.",
+                    fn_name, arity_decl, manifest_arity, pkg_id
+                ),
+            });
+        }
+
+        // Success: same sentinel string the legacy pre-inject path produces.
+        let sentinel = format!("__taida_addon_call::{}::{}", pkg_id, fn_name);
+        Ok(Signal::Value(Value::str(sentinel)))
     }
 }
 

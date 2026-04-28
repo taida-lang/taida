@@ -215,6 +215,19 @@ size <= terminalSize()
 
 `native/addon.toml` の `[functions]` テーブルと `RustAddon[...]` binding の **drift check** が `taida check` / CI で必須になります (Lock-G)。
 
+> **進捗 note (E30 Phase 7 sub-track B、2026-04-28)**
+>
+> sub-step B-2 (本セッション) で **explicit binding surface** が land しました。
+>
+> - parser: `RustAddon["fn"](arity <= N)` が既存の `MoldInst` シェイプとして parse されるため、AST 拡張は不要 (parser probe `test_e30b_007_rust_addon_binding_*` で pin)
+> - Interpreter: facade load context (`Interpreter::loading_addon_facade_ctx`) を導入し、`MoldInst("RustAddon", ...)` を addon sentinel `__taida_addon_call::<pkg>::<fn>` に解決 (`eval_rust_addon_binding`)
+> - native / wasm-full codegen: `src/addon/facade.rs::load_facade_summary` が explicit binding を `local_aliases` に集約 (drift check + manifest fn 存在確認を summary 側で完結) するため、native / wasm-full の lowering 経路は **無変更** で legacy alias と同じパスを通る
+> - 新診断コード `[E1412]` (RustAddon binding 違反、`docs/reference/diagnostic_codes.md` E14xx 帯) を予約・発火
+> - **legacy implicit pre-inject は当面残置** (sub-step B-5 で TM track と協調して撤廃予定、`taida-lang/terminal` 23 sentinel の migration は TM track 責務)
+> - `taida check` での checker hard-fail diagnostic も sub-step B-5 送り
+>
+> 利用側 (`>>> taida-lang/terminal => @(...)`) のコードはこの sub-step では変更不要です。新 binding 形式を facade 側で採用するかは addon 著者の判断で、legacy alias (`TerminalSize <= terminalSize`) と explicit binding (`TerminalSize <= RustAddon["terminalSize"](arity <= 0)`) は同じ sentinel に解決され 4-backend で同一挙動になります。
+
 ---
 
 ## 移行手順

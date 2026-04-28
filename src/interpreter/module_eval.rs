@@ -983,15 +983,28 @@ impl Interpreter {
         let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
         let prev_type_defs = self.type_defs.clone();
         let prev_type_methods = self.type_methods.clone();
+        // E30B-007 / Lock-G: stash the previous facade context (if any) so
+        // nested facade loads (currently disallowed but defensively handled)
+        // restore correctly. The new context exposes the package id + arity
+        // map to `RustAddon["fn"](arity <= N)` evaluation inside the facade.
+        let prev_addon_facade_ctx = self.loading_addon_facade_ctx.take();
 
         self.current_file = Some(canonical.clone());
         self.loading_modules.insert(canonical.clone());
         self.env = Environment::new();
+        self.loading_addon_facade_ctx = Some((
+            resolved.package_id.clone(),
+            resolved.manifest.functions.clone(),
+        ));
 
-        // Pre-inject every manifest `[functions]` entry as an addon
-        // sentinel. The facade can bind these to uppercase Taida names
-        // (`TerminalSize <= terminalSize`) or reference them to combine
-        // addon calls with pure-Taida values (`KeyKind`, wrapper funcs).
+        // Legacy implicit pre-inject (Lock-G Sub-G4): pre-bind every
+        // manifest `[functions]` entry as an addon sentinel so existing
+        // facades that reference bare lowercase names continue to work
+        // while the ecosystem migrates to explicit `RustAddon[...]`
+        // bindings. Removal of this path is deferred to sub-step B-5
+        // (TM-track coordinated session) per the Phase 7 sub-track B
+        // plan; for now both surfaces co-exist and produce identical
+        // sentinel values, so behaviour is unchanged for legacy facades.
         for fn_name in resolved.manifest.functions.keys() {
             let sentinel = format!("__taida_addon_call::{}::{}", resolved.package_id, fn_name);
             self.env.define_force(fn_name, Value::str(sentinel));
@@ -1010,6 +1023,7 @@ impl Interpreter {
         self.module_exported_symbols = prev_exported_symbols;
         self.type_defs = prev_type_defs;
         self.type_methods = prev_type_methods;
+        self.loading_addon_facade_ctx = prev_addon_facade_ctx;
 
         if let Err(e) = exec_result {
             return Err(RuntimeError {

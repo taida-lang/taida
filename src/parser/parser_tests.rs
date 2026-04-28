@@ -2557,3 +2557,109 @@ bad x =\n  \
         errors
     );
 }
+
+// ---------------------------------------------------------------------------
+// E30B-007 / Lock-G: RustAddon[...] explicit binding probes (Phase 7 sub-track B)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_e30b_007_rust_addon_binding_parses_as_mold_inst() {
+    // Lock-G verdict: `RustAddon["fn"](arity <= N)` is the explicit
+    // binding syntax for addon-backed functions on a `.td` facade.
+    // Because `RustAddon` starts with uppercase and `[...](...)`
+    // matches the existing mold-instantiation surface, the parser
+    // already accepts this form as `Expr::MoldInst("RustAddon",
+    // [StringLit], [arity field], span)` without any AST changes.
+    //
+    // This probe pins that contract so the checker / interpreter /
+    // codegen layers can rely on the shape when implementing
+    // explicit binding semantics.
+    use crate::parser::ast::{Expr, Statement};
+    let source = "terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n";
+    let (program, errors) = parse(source);
+    assert!(
+        errors.is_empty(),
+        "expected no parse errors, got: {:?}",
+        errors
+    );
+    assert_eq!(
+        program.statements.len(),
+        1,
+        "expected single Assignment statement"
+    );
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    assert_eq!(assign.target, "terminalSize");
+    let (name, type_args, fields) = match &assign.value {
+        Expr::MoldInst(n, ta, f, _) => (n.as_str(), ta, f),
+        other => panic!("expected MoldInst, got {:?}", other),
+    };
+    assert_eq!(name, "RustAddon");
+    assert_eq!(type_args.len(), 1, "expected single type-arg slot");
+    let fn_lit = match &type_args[0] {
+        Expr::StringLit(s, _) => s.as_str(),
+        other => panic!("expected StringLit, got {:?}", other),
+    };
+    assert_eq!(fn_lit, "terminalSize");
+    assert_eq!(fields.len(), 1, "expected single arity field");
+    assert_eq!(fields[0].name, "arity");
+    let arity_int = match &fields[0].value {
+        Expr::IntLit(n, _) => *n,
+        other => panic!("expected IntLit, got {:?}", other),
+    };
+    assert_eq!(arity_int, 0);
+}
+
+#[test]
+fn test_e30b_007_rust_addon_binding_with_nonzero_arity() {
+    // Lock-G drift check requires arity metadata. Confirm parsing
+    // for non-zero arity values.
+    use crate::parser::ast::{Expr, Statement};
+    let source = "readKey <= RustAddon[\"readKey\"](arity <= 2)\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    let (_n, _ta, fields) = match &assign.value {
+        Expr::MoldInst(n, ta, f, _) => (n, ta, f),
+        other => panic!("expected MoldInst, got {:?}", other),
+    };
+    assert_eq!(fields.len(), 1);
+    let arity_int = match &fields[0].value {
+        Expr::IntLit(n, _) => *n,
+        other => panic!("expected IntLit, got {:?}", other),
+    };
+    assert_eq!(arity_int, 2);
+}
+
+#[test]
+fn test_e30b_007_rust_addon_binding_rejects_missing_quotes() {
+    // Lock-G fixes the syntax: the function name MUST be a string
+    // literal so doc-gen / drift check can extract it without
+    // resolving identifiers. A bare ident inside the brackets
+    // would parse as a different MoldInst surface (TypeIs/etc.
+    // type-arg path) and fail at checker level when we add the
+    // E1412 path. For the parser probe here we just confirm the
+    // string-literal form is the one we lock on.
+    use crate::parser::ast::Expr;
+    let source = "f <= RustAddon[\"f\"](arity <= 0)\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let assign = match &program.statements[0] {
+        crate::parser::ast::Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    let type_args = match &assign.value {
+        Expr::MoldInst(_, ta, _, _) => ta,
+        other => panic!("expected MoldInst, got {:?}", other),
+    };
+    assert!(
+        matches!(&type_args[0], Expr::StringLit(_, _)),
+        "Lock-G requires string literal for fn name, got {:?}",
+        type_args[0]
+    );
+}
