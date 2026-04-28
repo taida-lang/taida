@@ -38398,3 +38398,91 @@ fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
 // Lock-Phase6 verdicts (sub-Lock A..E) are recorded in
 // `.dev/D29_SESSION_PLANS/Phase-6_2026-04-27-0937_track-eta_sub-Lock.md` and
 // the FIXED status flip is recorded in `.dev/D29_BLOCKERS.md`.
+
+// ===========================================================================
+// E30B-002 / E30 Phase 4: declare-only function field parity across backends.
+//
+// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// `transform: T => :T`) are permitted in all class-like variants (TypeDef
+// / Mold / Inheritance / Error). Phase 4 (E30B-002) excludes them from the
+// required-positional `[]` set and from the extra-type-arg binding-target
+// count. Phase 6 (E30B-004) will replace the `Value::Unit` runtime
+// placeholder with an automatically-generated `defaultFn`; these tests
+// deliberately do not call any declare-only fn field so they remain
+// parity-safe both before and after Phase 6.
+//
+// 4-backend coverage:
+//   - Interpreter (reference): `assert_backend_parity_for_source`
+//   - Native: `assert_backend_parity_for_source`
+//   - JS: `assert_backend_parity_for_source` (skips when node missing)
+//   - wasm-wasi: covered by the existing wasm regression guard
+//     (`cargo test --test wasm_min` / `wasm_wasi`); Phase 4 introduces no
+//     new wasm-specific surface (checker-only change), so the existing
+//     baseline is the parity pin.
+// ===========================================================================
+
+#[test]
+fn e30b_002_typedef_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Pilot = @(name: Str, greet: Str => :Str)
+p <= Pilot(name <= "Rei")
+stdout(p.name)
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_typedef_declare_only");
+}
+
+#[test]
+fn e30b_002_mold_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)
+f <= Foo[1, "x"]()
+stdout(f.name)
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_mold_declare_only");
+}
+
+#[test]
+fn e30b_002_error_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Error => NotFound = @(
+  msg: Str,
+  recovery: Unit => :Unit
+)
+err <= NotFound(msg <= "missing")
+stdout(err.msg)
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_error_declare_only");
+}
+
+#[test]
+fn e30b_002_inheritance_declare_only_fn_field_three_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc unavailable");
+        return;
+    }
+    let src = r#"
+Mold[T] => Container[T] = @(item: T)
+
+Container[T] => Greeter[T] = @(
+  greet: T => :T
+)
+g <= Greeter[7, 42]()
+stdout(g.item.toString())
+"#;
+    assert_backend_parity_for_source(src, "e30b_002_inheritance_declare_only");
+}

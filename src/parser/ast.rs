@@ -235,6 +235,34 @@ pub struct FieldDef {
     pub span: Span,
 }
 
+impl FieldDef {
+    /// E30 Phase 4 / E30B-002: declare-only function field detection.
+    ///
+    /// A declare-only function field is a field declared with a function type
+    /// annotation (e.g. `greet: Str => :Str`) but **without** a method body
+    /// (`is_method == false`) and **without** an explicit default value
+    /// (`default_value.is_none()`). Such a field is effectively an interface
+    /// member: the type is fixed by the declaration, but the value is supplied
+    /// either at instantiation time (via `(name <= ...)`) or, after Phase 6
+    /// (E30B-004), by an automatically-generated `defaultFn`.
+    ///
+    /// Phase 4 (E30B-002) extends declare-only function field acceptance from
+    /// the class-like (TypeDef / `BuchiPack` kind) variant to the Mold and
+    /// Inheritance (Error) variants. The checker uses this helper to exclude
+    /// declare-only function fields from the "required positional `[]`
+    /// argument" set in `validate_custom_mold_inst_bindings` and from the
+    /// extra-type-arg binding-target count in
+    /// `validate_mold_extension_bindings`. Phase 6 will replace the runtime
+    /// `Value::Unit` placeholder (interpreter `default_for_type_expr`) with a
+    /// proper `defaultFn` value while keeping this helper unchanged.
+    pub fn is_declare_only_fn_field(&self) -> bool {
+        if self.is_method || self.default_value.is_some() {
+            return false;
+        }
+        matches!(self.type_annotation, Some(TypeExpr::Function(_, _)))
+    }
+}
+
 /// Type expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {

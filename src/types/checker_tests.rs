@@ -4476,3 +4476,131 @@ fn test_c19b_002_error_inheriting_named_type_type_access_ok() {
         errors
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// E30 Phase 4 / E30B-002: declare-only function field acceptance for
+// Mold and Inheritance (Error) variants.
+//
+// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// `transform: T => :T`) are permitted in all class-like variants, not
+// just the BuchiPack (TypeDef) kind. They are excluded from the
+// required-positional `[]` set and from the extra-type-arg binding
+// target count, mirroring the existing TypeDef behaviour. Phase 6
+// (E30B-004) will replace the runtime `Value::Unit` placeholder with
+// an automatically-generated `defaultFn` while keeping these checker
+// invariants intact.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Mold variant accepts a declare-only function field at definition.
+#[test]
+fn test_e30b_002_mold_with_declare_only_fn_field_check_passes() {
+    let source = r#"Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Mold definition with declare-only fn field must check clean, got: {:?}",
+        errors
+    );
+}
+
+/// Mold instantiation must NOT count the declare-only function field
+/// as a required positional `[]` argument. Before Phase 4 the user
+/// would see `[E1402] requires 3 positional [] argument(s)` because
+/// `transform` was treated as required. After Phase 4 only the regular
+/// fields (`filling` + `name`) are required positional.
+#[test]
+fn test_e30b_002_mold_with_declare_only_fn_field_instantiate_no_e1402() {
+    let source = r#"Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)
+f <= Foo[1, "x"]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Mold instantiation with declare-only fn field omitted must produce no errors, got: {:?}",
+        errors
+    );
+}
+
+/// Mold instantiation may also override the declare-only function
+/// field via a named `()` option (treated as optional). The override
+/// must NOT trigger `[E1406] undefined option`.
+#[test]
+fn test_e30b_002_mold_declare_only_fn_field_override_via_named_option_ok() {
+    let source = r#"Mold[T] => Foo[T] = @(
+  name: Str,
+  transform: T => :T
+)
+f <= Foo[1, "x"](transform <= _ x = x)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Mold instantiation with explicit override of declare-only fn field must produce no errors, got: {:?}",
+        errors
+    );
+}
+
+/// Error-inheritance variant accepts a declare-only function field
+/// (recovery hook). Instantiation only requires the regular fields.
+#[test]
+fn test_e30b_002_error_with_declare_only_fn_field_instantiate_ok() {
+    let source = r#"Error => NotFound = @(
+  msg: Str,
+  recovery: Unit => :Unit
+)
+err <= NotFound(msg <= "missing")"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Error variant with declare-only fn field instantiation must produce no errors, got: {:?}",
+        errors
+    );
+}
+
+/// Mold-derived inheritance variant accepts a declare-only function
+/// field on the child header. Only the regular parent fields remain
+/// required for `[]` positional binding (the declare-only fn field
+/// `greet` is excluded from the required-positional count). Here we
+/// pass `filling` (`7`) and the inherited `item` (`42`) — without
+/// Phase 4 the user would also need to supply a third `[]` arg for
+/// `greet`, which is wrong for an interface declaration.
+#[test]
+fn test_e30b_002_inheritance_with_declare_only_fn_field_instantiate_ok() {
+    let source = r#"Mold[T] => Container[T] = @(item: T)
+
+Container[T] => Greeter[T] = @(
+  greet: T => :T
+)
+g <= Greeter[7, 42]()"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "Inheritance variant with declare-only fn field must accept instantiation with only filling+inherited fields, got: {:?}",
+        errors
+    );
+}
+
+/// Regression guard: a Mold definition with **only** a declare-only
+/// function field still surfaces unbound type-parameter errors when
+/// the type-arg count exceeds the parent + non-fn-field count. Phase 4
+/// must not silently consume the extra type-arg with the declare-only
+/// fn field (see `validate_mold_extension_bindings`).
+#[test]
+fn test_e30b_002_mold_extension_bindings_ignore_declare_only_fn_field() {
+    let source = r#"Mold[T] => Broken[T, U] = @(
+  greet: T => :T
+)"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1401]")
+                && e.message.contains("unbound type parameter(s): U")),
+        "Phase 4 must keep [E1401] firing when extra type-arg has no non-fn-field binding target, got: {:?}",
+        errors
+    );
+}

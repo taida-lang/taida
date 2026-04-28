@@ -546,6 +546,16 @@ impl TypeChecker {
         fields: &[FieldDef],
         inherited_field_names: &HashSet<String>,
     ) {
+        // (E30 Phase 4 / E30B-002) declare-only function fields are NOT
+        // counted as positional binding targets for additional child-side
+        // header type-args. They are interface members whose values are
+        // supplied at instantiation time or, after Phase 6 (E30B-004), by an
+        // automatically-generated `defaultFn`. Counting them here would
+        // (a) silently consume a child-side type-arg slot that the user
+        // intended to bind to a regular new field, and (b) suppress the
+        // `[E1401]` "unbound type parameter" diagnostic that surfaces this
+        // mistake. See `FieldDef::is_declare_only_fn_field` and the Phase 4
+        // plan in `.dev/E30_SESSION_PLANS/Phase-4_*.md`.
         let positional_field_count = fields
             .iter()
             .filter(|f| {
@@ -553,6 +563,7 @@ impl TypeChecker {
                     && f.default_value.is_none()
                     && f.name != "filling"
                     && !inherited_field_names.contains(&f.name)
+                    && !f.is_declare_only_fn_field()
             })
             .count();
 
@@ -2289,14 +2300,28 @@ impl TypeChecker {
             None => return,
         };
 
+        // (E30 Phase 4 / E30B-002) declare-only function fields are excluded
+        // from the required-positional `[]` set: they are interface members
+        // (`fn: A => :B` form, no body, no default) whose values are filled in
+        // at instantiation time via `()` (override) or, after Phase 6, by an
+        // automatically-generated `defaultFn`. They are also classified as
+        // "optional" so that explicit `(transform <= ...)` overrides in `()`
+        // are accepted (no `[E1406]` "undefined option"). Phase 6 (E30B-004)
+        // will keep this classification while adding the auto-generated
+        // defaultFn that replaces the current `Value::Unit` placeholder.
         let required_fields: Vec<String> = mold_fields
             .iter()
-            .filter(|f| !f.is_method && f.default_value.is_none() && f.name != "filling")
+            .filter(|f| {
+                !f.is_method
+                    && f.default_value.is_none()
+                    && f.name != "filling"
+                    && !f.is_declare_only_fn_field()
+            })
             .map(|f| f.name.clone())
             .collect();
         let optional_fields: Vec<String> = mold_fields
             .iter()
-            .filter(|f| !f.is_method && f.default_value.is_some())
+            .filter(|f| !f.is_method && (f.default_value.is_some() || f.is_declare_only_fn_field()))
             .map(|f| f.name.clone())
             .collect();
 
