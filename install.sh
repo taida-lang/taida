@@ -32,8 +32,9 @@ set -euo pipefail
 
 TAIDA_REPO="${TAIDA_REPO:-taida-lang/taida}"
 TAIDA_VERSION="${TAIDA_VERSION:-latest}"
-TAIDA_VERIFY_SIGNATURES="${TAIDA_VERIFY_SIGNATURES:-best-effort}"
+TAIDA_VERIFY_SIGNATURES="${TAIDA_VERIFY_SIGNATURES:-required}"
 TAIDA_INSTALL_PREFIX="${TAIDA_INSTALL_PREFIX:-$HOME/.taida}"
+TAIDA_COSIGN_IDENTITY_REGEXP='^https://github.com/taida-lang/taida/\.github/workflows/.+@refs/tags/.+$'
 
 usage() {
     cat <<EOF
@@ -47,8 +48,8 @@ Environment variables:
   TAIDA_INSTALL_PREFIX       Install root. Default: \$HOME/.taida
   TAIDA_VERIFY_SIGNATURES    Signature policy:
                                off           — skip cosign entirely (not recommended)
-                               best-effort   — warn on missing cosign / bundle (default)
-                               required      — fail hard on any gap (CI-grade)
+                               best-effort   — warn on missing cosign / bundle
+                               required      — fail hard on any gap (default, CI-grade)
 EOF
 }
 
@@ -149,7 +150,7 @@ NOCOSIGN
         else
             if cosign verify-blob \
                     --bundle "${ASSET}.cosign.bundle" \
-                    --certificate-identity-regexp "^https://github.com/${TAIDA_REPO}/" \
+                    --certificate-identity-regexp "${TAIDA_COSIGN_IDENTITY_REGEXP}" \
                     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
                     "${ASSET}" >/dev/null 2>&1
             then
@@ -160,7 +161,7 @@ NOCOSIGN
             fi
             if cosign verify-blob \
                     --bundle SHA256SUMS.cosign.bundle \
-                    --certificate-identity-regexp "^https://github.com/${TAIDA_REPO}/" \
+                    --certificate-identity-regexp "${TAIDA_COSIGN_IDENTITY_REGEXP}" \
                     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
                     SHA256SUMS >/dev/null 2>&1
             then

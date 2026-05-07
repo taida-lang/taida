@@ -12,7 +12,9 @@
 
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
-use super::helpers::{build_streaming_head, get_field_str, write_all_retry, write_vectored_all};
+use super::helpers::{
+    build_streaming_head, parse_chunk_size_hex_bytes, write_all_retry, write_vectored_all,
+};
 use super::types::{
     ActiveStreamingWriter, BodyEncoding, ChunkedDecoderState, ConnStream, RequestBodyState,
     StreamingWriter, WriterState,
@@ -163,18 +165,7 @@ impl Interpreter {
         // Arg 2: headers (List of @(name, value), default @[])
         let headers: Vec<(String, String)> = if let Some(arg) = args.get(2) {
             match self.eval_expr(arg)? {
-                Signal::Value(Value::List(items)) => {
-                    let mut out = Vec::new();
-                    for item in items.iter() {
-                        if let Value::BuchiPack(fields) = item {
-                            let name = get_field_str(fields, "name").unwrap_or_default();
-                            let value = get_field_str(fields, "value").unwrap_or_default();
-                            out.push((name, value));
-                        }
-                    }
-                    out
-                }
-                Signal::Value(_) => Vec::new(),
+                Signal::Value(headers_value) => extract_start_response_headers(&headers_value)?,
                 other => return Ok(Some(other)),
             }
         } else {
@@ -798,13 +789,20 @@ impl Interpreter {
     /// until we see an empty line (just CRLF), which marks the end of
     /// the chunked message. This prevents leftover trailer bytes from
     /// corrupting the next request on a keep-alive connection.
+    ///
+    /// Bounded by `MAX_TRAILER_COUNT` lines and `MAX_TRAILER_BYTES` total
+    /// byte length so a trailer flood is treated as malformed framing and
+    /// surfaces an error to the caller (which then aborts the connection
+    /// rather than continuing on keep-alive). Parity with the eager
+    /// `chunked_body_complete` policy and the 3-backend cap contract
+    /// documented in `docs/reference/net_api.md` §5.4.
     pub(super) fn drain_chunked_trailers(
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
     ) -> Result<(), RuntimeError> {
-        // Read lines until we get an empty line (just whitespace/CRLF).
-        // Safety limit: at most 64 trailer lines to prevent infinite loops.
-        for _ in 0..64 {
+        use super::helpers::{MAX_TRAILER_BYTES, MAX_TRAILER_COUNT};
+        let mut total_bytes: usize = 0;
+        for _ in 0..MAX_TRAILER_COUNT {
             let line = Self::read_line_from_body(body, stream)?;
             // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
             if line.is_empty() {
@@ -818,13 +816,32 @@ impl Interpreter {
                 // Final empty line found; trailers fully consumed.
                 return Ok(());
             }
-            // Non-empty line: a trailer header. Continue reading.
+            // Trailer line bytes count toward the total cap (excluding CRLF).
+            let trim_len = trimmed.len();
+            total_bytes = total_bytes
+                .checked_add(trim_len)
+                .ok_or_else(|| RuntimeError {
+                    message: "chunked body error: trailer byte total overflow".into(),
+                })?;
+            if total_bytes > MAX_TRAILER_BYTES {
+                return Err(RuntimeError {
+                    message: "chunked body error: trailer block exceeds byte cap".into(),
+                });
+            }
         }
-        // Too many trailer lines; treat as consumed (close will handle cleanup).
-        Ok(())
+        // More than MAX_TRAILER_COUNT trailers: smuggling guard. Reject
+        // (matches eager-path Malformed semantics) instead of pretending
+        // the framing finished cleanly.
+        Err(RuntimeError {
+            message: "chunked body error: too many trailer lines".into(),
+        })
     }
 
-    /// Read a line (up to CRLF) from leftover buffer then stream.
+    /// Read a line (up to CRLF) from leftover buffer then stream, bounded by
+    /// `MAX_CHUNK_LINE_BYTES` so a chunk-ext flood at the streaming path
+    /// cannot DoS the decoder. Returns `Err` when the per-line cap is hit
+    /// before a CRLF is observed; callers translate that into a connection
+    /// abort (parity with the eager `chunked_body_complete` policy).
     ///
     /// NB5-21: After leftover is exhausted, reads in 64-byte chunks from the
     /// stream instead of byte-by-byte. Excess bytes beyond the LF are pushed
@@ -841,10 +858,16 @@ impl Interpreter {
         body: &mut RequestBodyState,
         stream: &mut ConnStream,
     ) -> Result<Vec<u8>, RuntimeError> {
+        use super::helpers::MAX_CHUNK_LINE_BYTES;
         let mut line = Vec::new();
 
         // First consume from leftover.
         while body.has_leftover() {
+            if line.len() >= MAX_CHUNK_LINE_BYTES {
+                return Err(RuntimeError {
+                    message: "chunked body error: chunk-size line exceeds byte cap".into(),
+                });
+            }
             let b = body.leftover[body.leftover_pos];
             body.leftover_pos += 1;
             line.push(b);
@@ -861,6 +884,12 @@ impl Interpreter {
                 Ok(n) => {
                     // Scan the chunk for LF.
                     if let Some(lf_pos) = chunk_buf[..n].iter().position(|&b| b == b'\n') {
+                        if line.len() + lf_pos + 1 > MAX_CHUNK_LINE_BYTES {
+                            return Err(RuntimeError {
+                                message: "chunked body error: chunk-size line exceeds byte cap"
+                                    .into(),
+                            });
+                        }
                         // Include everything up to and including the LF.
                         line.extend_from_slice(&chunk_buf[..=lf_pos]);
                         // NB6-8: Push excess bytes back into leftover using in-place
@@ -875,7 +904,14 @@ impl Interpreter {
                         }
                         break;
                     } else {
-                        // No LF in this chunk — append all and continue reading.
+                        // No LF in this chunk — append all and continue reading,
+                        // unless we would cross the cap.
+                        if line.len() + n > MAX_CHUNK_LINE_BYTES {
+                            return Err(RuntimeError {
+                                message: "chunked body error: chunk-size line exceeds byte cap"
+                                    .into(),
+                            });
+                        }
                         line.extend_from_slice(&chunk_buf[..n]);
                     }
                 }
@@ -911,30 +947,29 @@ impl Interpreter {
     }
 
     /// NB6-7: Parse hex chunk size directly from byte slice.
-    /// Strips any chunk-extension after ';' and trims whitespace.
+    ///
+    /// Strips the trailing CRLF terminator and the chunk-extension after `;`.
+    /// E32B-053: per RFC 7230 §4.1, no OWS is allowed within `chunk-size`, so
+    /// the hex slice is forwarded to `parse_chunk_size_hex_bytes` without any
+    /// internal trim — any whitespace yields a malformed-chunk diagnostic.
     #[inline]
     pub(super) fn parse_chunk_size_bytes(line: &[u8]) -> Option<usize> {
-        let trimmed = Self::trim_bytes(line);
-        // Strip chunk-extension after ';'
-        let hex_part = match trimmed.iter().position(|&b| b == b';') {
-            Some(pos) => Self::trim_bytes(&trimmed[..pos]),
-            None => trimmed,
+        let mut end = line.len();
+        if end > 0 && line[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > 0 && line[end - 1] == b'\r' {
+            end -= 1;
+        }
+        let stripped = &line[..end];
+        let hex_part = match stripped.iter().position(|&b| b == b';') {
+            Some(pos) => &stripped[..pos],
+            None => stripped,
         };
         if hex_part.is_empty() {
             return None;
         }
-        // Parse hex digits directly from bytes.
-        let mut result: usize = 0;
-        for &b in hex_part {
-            let digit = match b {
-                b'0'..=b'9' => (b - b'0') as usize,
-                b'a'..=b'f' => (b - b'a' + 10) as usize,
-                b'A'..=b'F' => (b - b'A' + 10) as usize,
-                _ => return None,
-            };
-            result = result.checked_mul(16)?.checked_add(digit)?;
-        }
-        Some(result)
+        parse_chunk_size_hex_bytes(hex_part).ok()
     }
 
     /// Read up to `count` bytes from leftover buffer then stream.
@@ -1128,4 +1163,45 @@ impl Interpreter {
 
         Ok(Some(Signal::Value(Value::bytes(all_bytes))))
     }
+}
+
+fn extract_start_response_headers(value: &Value) -> Result<Vec<(String, String)>, RuntimeError> {
+    let items = match value {
+        Value::List(items) => items,
+        other => {
+            return Err(RuntimeError {
+                message: format!("startResponse: headers must be a List, got {}", other),
+            });
+        }
+    };
+
+    let mut out = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let fields = match item {
+            Value::BuchiPack(fields) => fields,
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("startResponse: headers[{}] must be @(name, value)", i),
+                });
+            }
+        };
+        let name = match fields.iter().find(|(k, _)| k == "name") {
+            Some((_, Value::Str(s))) => s.as_string().clone(),
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("startResponse: headers[{}].name must be Str", i),
+                });
+            }
+        };
+        let value = match fields.iter().find(|(k, _)| k == "value") {
+            Some((_, Value::Str(s))) => s.as_string().clone(),
+            _ => {
+                return Err(RuntimeError {
+                    message: format!("startResponse: headers[{}].value must be Str", i),
+                });
+            }
+        };
+        out.push((name, value));
+    }
+    Ok(out)
 }

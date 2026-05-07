@@ -7,7 +7,8 @@
 //! - Resolves the best matching version based on CLI filters.
 //! - Downloads the platform-appropriate **archive** asset
 //!   (`taida-<tag>-<target>.tar.gz` on Unix, `.zip` on Windows).
-//! - Verifies SHA-256 integrity against the shared `SHA256SUMS` file.
+//! - Verifies the shared `SHA256SUMS` file with Sigstore cosign.
+//! - Verifies SHA-256 integrity against the release-signed `SHA256SUMS` file.
 //! - Extracts the `taida` binary from the archive.
 //! - Replaces the current executable via rename.
 //!
@@ -30,6 +31,9 @@
 //! ```
 
 use crate::addon::host_target::{self, HostTarget};
+use crate::addon::signature_verify::{
+    VerifyError, VerifyOutcome, VerifyPolicy, bundle_path_for, verify_artifact_with_identity,
+};
 use crate::crypto;
 
 /// A parsed Taida version tag.
@@ -194,9 +198,21 @@ pub fn resolve_version(
     }
 }
 
-/// GitHub API base URL. Respects `TAIDA_GITHUB_API_URL` for testing.
-fn api_url() -> String {
-    std::env::var("TAIDA_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
+const GITHUB_API_URL: &str = "https://api.github.com";
+
+/// Certificate identity accepted for the self-upgrade trust root.
+///
+/// Unlike source-package verification, self-upgrade is only allowed to trust
+/// the canonical `taida-lang/taida` release workflow for a tagged release.
+pub const UPGRADE_COSIGN_IDENTITY_REGEXP: &str =
+    r"^https://github.com/taida-lang/taida/\.github/workflows/.+@refs/tags/.+$";
+
+/// GitHub API base URL for `taida upgrade`.
+///
+/// Production code never reads `TAIDA_GITHUB_API_URL`: the self-replacing
+/// upgrade path must not be redirected by ambient environment variables.
+pub fn api_url() -> &'static str {
+    GITHUB_API_URL
 }
 
 /// Build a blocking reqwest client without authentication.
@@ -212,7 +228,12 @@ fn make_public_client() -> Result<reqwest::blocking::Client, String> {
             headers
         })
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))
+        .map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to build HTTP client: {}",
+                e
+            )
+        })
 }
 
 /// Fetch all release tag names from the GitHub repository.
@@ -229,24 +250,32 @@ pub fn fetch_release_tags(owner: &str, repo: &str) -> Result<Vec<String>, String
             "{}/repos/{}/{}/releases?per_page=100&page={}",
             base, owner, repo, page
         );
-        let resp = client
-            .get(&url)
-            .send()
-            .map_err(|e| format!("failed to fetch releases: {}", e))?;
+        let resp = client.get(&url).send().map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to fetch releases: {}",
+                e
+            )
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            return Err(format!("GitHub API error (HTTP {}): {}", status, body));
+            return Err(format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] GitHub API error (HTTP {}): {}",
+                status, body
+            ));
         }
 
-        let json: serde_json::Value = resp
-            .json()
-            .map_err(|e| format!("failed to parse releases JSON: {}", e))?;
+        let json: serde_json::Value = resp.json().map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to parse releases JSON: {}",
+                e
+            )
+        })?;
 
-        let arr = json
-            .as_array()
-            .ok_or_else(|| "releases response is not an array".to_string())?;
+        let arr = json.as_array().ok_or_else(|| {
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] releases response is not an array".to_string()
+        })?;
 
         if arr.is_empty() {
             break;
@@ -279,23 +308,28 @@ pub fn find_asset_url(
     let base = api_url();
     let url = format!("{}/repos/{}/{}/releases/tags/{}", base, owner, repo, tag);
 
-    let resp = client
-        .get(&url)
-        .send()
-        .map_err(|e| format!("failed to fetch release {}: {}", tag, e))?;
+    let resp = client.get(&url).send().map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to fetch release {}: {}",
+            tag, e
+        )
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         return Err(format!(
-            "failed to get release {} (HTTP {}): {}",
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to get release {} (HTTP {}): {}",
             tag, status, body
         ));
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .map_err(|e| format!("failed to parse release JSON: {}", e))?;
+    let json: serde_json::Value = resp.json().map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to parse release JSON: {}",
+            e
+        )
+    })?;
 
     let assets = json["assets"]
         .as_array()
@@ -305,6 +339,16 @@ pub fn find_asset_url(
         if asset["name"].as_str() == Some(asset_name)
             && let Some(url) = asset["browser_download_url"].as_str()
         {
+            // Defense-in-depth: reject non-https release asset metadata
+            // before the URL ever reaches `download_bytes`. The GitHub API
+            // contract uses https exclusively; anything else is a supply-chain
+            // signal.
+            if !url.starts_with("https://") {
+                return Err(format!(
+                    "[E32K1_UPGRADE_NON_HTTPS_URL] release asset '{}' has non-https URL: {}",
+                    asset_name, url
+                ));
+            }
             return Ok(url.to_string());
         }
     }
@@ -315,38 +359,100 @@ pub fn find_asset_url(
     ))
 }
 
-/// Download a binary from URL and verify its SHA-256 hash.
-pub fn download_and_verify(url: &str, expected_sha256: Option<&str>) -> Result<Vec<u8>, String> {
+/// Download bytes from URL.
+///
+/// Production callers MUST receive only `https://` URLs. The
+/// `browser_download_url` field of the GitHub Releases API is the sole
+/// production input; if the metadata is tampered with to inject a
+/// `file://` URL, defense-in-depth must reject the URL **before** the
+/// download path is touched. Test fixtures that need to load fixture
+/// bytes from disk go through `download_bytes_for_test` instead.
+pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "[E32K1_UPGRADE_NON_HTTPS_URL] non-https URL rejected by self-upgrade: {}",
+            url
+        ));
+    }
+    download_bytes_https(url)
+}
+
+/// Test-only entry point that allows `file://` and `https://` URLs.
+///
+/// Production code MUST NOT call this. The symbol is linked only when
+/// `cfg(test)` (library unit tests) or `feature = "test-utils"`
+/// (integration tests opting in) holds — release binaries never see
+/// the helper at all, so a downstream depending on the `taida` crate
+/// cannot reach it.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub fn download_bytes_for_test(url: &str) -> Result<Vec<u8>, String> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path)
+            .map_err(|e| format!("[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed: {}", e));
+    }
+    download_bytes_https(url)
+}
+
+fn download_bytes_https(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("taida-upgrade")
         .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to build HTTP client: {}",
+                e
+            )
+        })?;
 
     let resp = client
         .get(url)
         .send()
-        .map_err(|e| format!("download failed: {}", e))?;
+        .map_err(|e| format!("[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(format!("download failed (HTTP {})", status));
+        return Err(format!(
+            "[E32K1_UPGRADE_DOWNLOAD_FAILED] download failed (HTTP {})",
+            status
+        ));
     }
 
     let bytes = resp
         .bytes()
-        .map_err(|e| format!("failed to read download body: {}", e))?
+        .map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_DOWNLOAD_FAILED] failed to read download body: {}",
+                e
+            )
+        })?
         .to_vec();
 
-    if let Some(expected) = expected_sha256 {
-        let actual = crypto::sha256_hex_bytes(&bytes);
-        if actual != expected {
-            return Err(format!(
-                "SHA-256 mismatch: expected {}, got {}",
-                expected, actual
-            ));
-        }
+    Ok(bytes)
+}
+
+/// Verify already-downloaded bytes against a mandatory SHA-256 hex digest.
+pub fn verify_sha256_bytes(bytes: &[u8], expected_sha256: &str) -> Result<(), String> {
+    let expected = expected_sha256.trim();
+    if expected.is_empty() {
+        return Err("[E32K1_UPGRADE_NO_SHA256SUMS] release SHA256SUMS entry is empty".to_string());
     }
 
+    let actual = crypto::sha256_hex_bytes(bytes);
+    if actual != expected {
+        return Err(format!(
+            "[E32K1_UPGRADE_SHA256_MISMATCH] SHA-256 mismatch: expected {}, got {}",
+            expected, actual
+        ));
+    }
+
+    Ok(())
+}
+
+/// Download a release artifact and verify its mandatory SHA-256 hash.
+pub fn download_and_verify(url: &str, expected_sha256: &str) -> Result<Vec<u8>, String> {
+    let bytes = download_bytes(url)?;
+    verify_sha256_bytes(&bytes, expected_sha256)?;
     Ok(bytes)
 }
 
@@ -421,6 +527,400 @@ pub fn lookup_sha256(sha256sums: &str, target_filename: &str) -> Option<String> 
         }
     }
     None
+}
+
+/// Look up the mandatory SHA-256 entry for a release archive.
+pub fn expected_sha256_for_archive(
+    sha256sums: &str,
+    target_filename: &str,
+) -> Result<String, String> {
+    lookup_sha256(sha256sums, target_filename).ok_or_else(|| {
+        format!(
+            "[E32K1_UPGRADE_NO_SHA256SUMS] release SHA256SUMS does not list {}",
+            target_filename
+        )
+    })
+}
+
+#[derive(Debug)]
+struct TempDownloadedFile {
+    path: std::path::PathBuf,
+}
+
+struct UpgradeCacheDir {
+    path: std::path::PathBuf,
+    #[cfg(unix)]
+    dir: std::fs::File,
+}
+
+/// Stage upgrade artifacts under `~/.taida/cache/upgrade/` with
+/// mode 0700 instead of `std::env::temp_dir()`.
+///
+/// `/tmp/taida_upgrade_<pid>_<nanos>_*` is predictable enough that a local
+/// attacker can pre-place a symlink at the target path; the previous
+/// implementation called `std::fs::write` (which follows symlinks) and
+/// would then clobber arbitrary files when `taida upgrade` ran as root.
+/// A user-private cache directory + `O_NOFOLLOW | O_EXCL` open closes that
+/// hole.
+fn upgrade_cache_dir() -> Result<UpgradeCacheDir, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| {
+            "[E32K1_UPGRADE_STAGE_FAILED] HOME / USERPROFILE is not set; cannot resolve upgrade cache dir"
+                .to_string()
+        })?;
+    if home.is_empty() {
+        return Err("[E32K1_UPGRADE_STAGE_FAILED] HOME / USERPROFILE is empty".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        upgrade_cache_dir_unix(std::path::PathBuf::from(home))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let dir = std::path::PathBuf::from(home)
+            .join(".taida")
+            .join("cache")
+            .join("upgrade");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to create upgrade cache dir {}: {}",
+                dir.display(),
+                e
+            )
+        })?;
+        Ok(UpgradeCacheDir { path: dir })
+    }
+}
+
+#[cfg(unix)]
+fn upgrade_cache_dir_unix(home: std::path::PathBuf) -> Result<UpgradeCacheDir, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn cstring_path(path: &std::path::Path) -> Result<CString, String> {
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] path {} contains an interior NUL byte",
+                path.display()
+            )
+        })
+    }
+
+    fn cstring_component(component: &str) -> Result<CString, String> {
+        CString::new(component.as_bytes()).map_err(|_| {
+            format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] path component {} contains an interior NUL byte",
+                component
+            )
+        })
+    }
+
+    fn open_home_dir(path: &std::path::Path) -> Result<std::fs::File, String> {
+        let c_path = cstring_path(path)?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `c_path` is a valid NUL-terminated path. `open` returns a
+        // fresh fd on success, which is immediately owned by `File`.
+        let fd = unsafe { libc::open(c_path.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to open HOME {} without following symlinks: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `fd` was returned by `open` and is uniquely owned here.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        validate_open_dir(&file, path, false)?;
+        Ok(file)
+    }
+
+    fn validate_open_dir(
+        dir: &std::fs::File,
+        display_path: &std::path::Path,
+        tighten_mode: bool,
+    ) -> Result<(), String> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `stat` points to valid writable memory and `dir` is open.
+        let rc = unsafe { libc::fstat(dir.as_raw_fd(), stat.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to inspect directory {}: {}",
+                display_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `fstat` succeeded and initialized `stat`.
+        let stat = unsafe { stat.assume_init() };
+        if (stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache path {} is not a directory",
+                display_path.display()
+            ));
+        }
+        // SAFETY: geteuid never fails on Unix.
+        let euid = unsafe { libc::geteuid() };
+        if stat.st_uid != euid {
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache path {} is owned by uid {} but the current effective uid is {}; refuse to use it",
+                display_path.display(),
+                stat.st_uid,
+                euid
+            ));
+        }
+        if tighten_mode {
+            let mode_bits = stat.st_mode & 0o777;
+            // SAFETY: `dir` is an owned directory fd; fchmod changes only
+            // this already-open directory, not a path that can be swapped.
+            let rc = unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) };
+            if rc != 0 {
+                return Err(format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] upgrade cache path {} has mode {:o} and fchmod 0700 failed: {}",
+                    display_path.display(),
+                    mode_bits,
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        // HOME itself is not chmod'ed or rejected for group/world mode bits:
+        // for compatibility we require only an owned, non-symlink directory
+        // as the trust root, then force 0700 on the managed cache children.
+        Ok(())
+    }
+
+    fn open_or_create_child_dir(
+        parent: &std::fs::File,
+        parent_path: &std::path::Path,
+        component: &str,
+    ) -> Result<std::fs::File, String> {
+        let c_component = cstring_component(component)?;
+        let child_path = parent_path.join(component);
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `parent` is an open directory fd and `c_component` is a
+        // valid single path component. `O_NOFOLLOW` rejects symlink leaves.
+        let mut fd = unsafe { libc::openat(parent.as_raw_fd(), c_component.as_ptr(), flags) };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ENOENT) {
+                return Err(format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to open upgrade cache path {} without following symlinks: {}",
+                    child_path.display(),
+                    err
+                ));
+            }
+            // SAFETY: mkdirat receives a valid parent dirfd and component.
+            let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), c_component.as_ptr(), 0o700) };
+            if rc != 0 {
+                let mkdir_err = std::io::Error::last_os_error();
+                if mkdir_err.raw_os_error() != Some(libc::EEXIST) {
+                    return Err(format!(
+                        "[E32K1_UPGRADE_STAGE_FAILED] failed to create upgrade cache path {}: {}",
+                        child_path.display(),
+                        mkdir_err
+                    ));
+                }
+            }
+            // SAFETY: same arguments as above; retry after successful mkdir
+            // or an EEXIST race.
+            fd = unsafe { libc::openat(parent.as_raw_fd(), c_component.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to reopen upgrade cache path {} without following symlinks: {}",
+                    child_path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        // SAFETY: `fd` is a fresh fd returned by openat.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        validate_open_dir(&file, &child_path, true)?;
+        Ok(file)
+    }
+
+    let home_dir = open_home_dir(&home)?;
+    let taida_dir = open_or_create_child_dir(&home_dir, &home, ".taida")?;
+    let taida_path = home.join(".taida");
+    let cache_dir = open_or_create_child_dir(&taida_dir, &taida_path, "cache")?;
+    let cache_path = taida_path.join("cache");
+    let upgrade_dir = open_or_create_child_dir(&cache_dir, &cache_path, "upgrade")?;
+    let upgrade_path = cache_path.join("upgrade");
+
+    Ok(UpgradeCacheDir {
+        path: upgrade_path,
+        dir: upgrade_dir,
+    })
+}
+
+#[cfg(unix)]
+fn create_upgrade_staging_file(
+    dir: &std::fs::File,
+    filename: &str,
+    label: &str,
+) -> Result<std::fs::File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let c_filename = CString::new(filename.as_bytes()).map_err(|_| {
+        format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] staging filename for {} contains an interior NUL byte",
+            label
+        )
+    })?;
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is the already-validated cache dirfd and `c_filename`
+    // is a single generated filename. O_EXCL + O_NOFOLLOW fail closed on
+    // pre-placed files or symlinks.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c_filename.as_ptr(), flags, 0o600) };
+    if fd < 0 {
+        return Err(format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
+            label,
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `fd` is a fresh fd returned by openat.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+impl TempDownloadedFile {
+    fn new(label: &str, bytes: &[u8]) -> Result<Self, String> {
+        let dir = upgrade_cache_dir()?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| {
+                format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] system clock error while staging upgrade artifact: {}",
+                    e
+                )
+            })?
+            .as_nanos();
+        let filename = format!("taida_upgrade_{}_{}_{}", std::process::id(), nanos, label);
+        let path = dir.path.join(&filename);
+        #[cfg(unix)]
+        let mut file = create_upgrade_staging_file(&dir.dir, &filename, label)?;
+        #[cfg(not(unix))]
+        let mut file = {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            opts.open(&path).map_err(|e| {
+                format!(
+                    "[E32K1_UPGRADE_STAGE_FAILED] failed to stage {} for verification: {}",
+                    label, e
+                )
+            })?
+        };
+        use std::io::Write;
+        if let Err(e) = file.write_all(bytes) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "[E32K1_UPGRADE_STAGE_FAILED] failed to write {} for verification: {}",
+                label, e
+            ));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempDownloadedFile {
+    fn drop(&mut self) {
+        let bundle = bundle_path_for(&self.path);
+        let _ = std::fs::remove_file(&bundle);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Atomically create `path` and write `bytes` into it with the same
+/// `O_NOFOLLOW | O_EXCL` + mode 0600 hardening as `TempDownloadedFile`.
+/// Crate-internal: only the addon signature verifier's bundle staging
+/// path consumes this — every staging file in the upgrade pipeline is
+/// opened the same way, so a pre-placed symlink at any staging path
+/// makes the call fail closed instead of clobbering its target.
+/// Removes a partial file if the write fails midway.
+pub(crate) fn write_staged_file_at(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let mut file = opts.open(path).map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to create staging file {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    use std::io::Write;
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "[E32K1_UPGRADE_STAGE_FAILED] failed to write staging file {}: {}",
+            path.display(),
+            e
+        ));
+    }
+    Ok(())
+}
+
+fn upgrade_cosign_error(err: VerifyError) -> String {
+    match err {
+        VerifyError::CosignUnavailable => {
+            "[E32K1_COSIGN_MISSING] taida upgrade requires cosign on PATH to verify SHA256SUMS"
+                .to_string()
+        }
+        VerifyError::BundleMissing(detail) => format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_MISSING] SHA256SUMS cosign bundle is required: {}",
+            detail
+        ),
+        VerifyError::SignatureRejected { stderr } => format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_REJECTED] cosign rejected SHA256SUMS: {}",
+            stderr.trim()
+        ),
+        VerifyError::InvocationError(detail) => format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR] SHA256SUMS cosign verification failed: {}",
+            detail
+        ),
+    }
+}
+
+/// Download `SHA256SUMS`, verify its cosign bundle, then return the text.
+pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, String> {
+    // Production rejects every non-https scheme; in-process unit tests stage
+    // `file://` fixtures via `download_bytes_for_test`. The boundary is
+    // tight: only this call site swaps; the public `download_bytes` remains
+    // https-only.
+    #[cfg(not(test))]
+    let bytes = download_bytes(sha256sums_url)?;
+    #[cfg(test)]
+    let bytes = download_bytes_for_test(sha256sums_url)?;
+    let staged = TempDownloadedFile::new("SHA256SUMS", &bytes)?;
+    let outcome = verify_artifact_with_identity(
+        &staged.path,
+        sha256sums_url,
+        VerifyPolicy::Required,
+        UPGRADE_COSIGN_IDENTITY_REGEXP,
+    )
+    .map_err(upgrade_cosign_error)?;
+
+    if !matches!(outcome, VerifyOutcome::Verified) {
+        return Err(format!(
+            "[E32K1_UPGRADE_SHA256SUMS_COSIGN_ERROR] SHA256SUMS verification did not complete: {}",
+            outcome
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|e| {
+        format!(
+            "[E32K1_UPGRADE_SHA256SUMS_INVALID_ENCODING] invalid SHA256SUMS encoding: {}",
+            e
+        )
+    })
 }
 
 /// Replace the current executable with the new binary.
@@ -530,39 +1030,19 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
                 let download_url =
                     find_asset_url(TAIDA_OWNER, TAIDA_REPO, &version.tag, &archive_name)?;
 
-                // Fetch SHA256SUMS and look up our archive's hash
-                let expected_sha = match find_asset_url(
-                    TAIDA_OWNER,
-                    TAIDA_REPO,
-                    &version.tag,
-                    "SHA256SUMS",
-                ) {
-                    Ok(sha_url) => {
-                        let sha_bytes = download_and_verify(&sha_url, None)?;
-                        let sha_text = String::from_utf8(sha_bytes)
-                            .map_err(|e| format!("invalid SHA256SUMS encoding: {}", e))?;
-                        match lookup_sha256(&sha_text, &archive_name) {
-                            Some(hash) => Some(hash),
-                            None => {
-                                eprintln!(
-                                    "Warning: {} not found in SHA256SUMS. Skipping verification.",
-                                    archive_name
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        eprintln!(
-                            "Warning: SHA256SUMS not found for {}. Skipping verification.",
-                            version.tag
-                        );
-                        None
-                    }
-                };
+                // Fetch release-signed SHA256SUMS and look up our archive's hash.
+                let sha_url = find_asset_url(TAIDA_OWNER, TAIDA_REPO, &version.tag, "SHA256SUMS")
+                    .map_err(|e| {
+                    format!(
+                        "[E32K1_UPGRADE_NO_SHA256SUMS] release {} must publish SHA256SUMS: {}",
+                        version.tag, e
+                    )
+                })?;
+                let sha_text = download_verified_sha256sums(&sha_url)?;
+                let expected_sha = expected_sha256_for_archive(&sha_text, &archive_name)?;
 
-                // Download archive with optional integrity check
-                let archive_bytes = download_and_verify(&download_url, expected_sha.as_deref())?;
+                // Download archive with mandatory integrity check.
+                let archive_bytes = download_and_verify(&download_url, &expected_sha)?;
 
                 // Extract binary from archive
                 let archive_base = archive_name
@@ -597,6 +1077,254 @@ pub fn run(config: UpgradeConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn download_bytes_for_test_err_carries_code_prefix() {
+        // Library-internal pin for the file-not-found error contract.
+        // Mirrors the integration test gated behind `feature = "test-utils"`
+        // so default `cargo test` keeps the contract checked even when
+        // the helper is invisible to integration tests.
+        let err = download_bytes_for_test("file:///nonexistent/path/that/should/not/exist")
+            .expect_err("missing file must fail");
+        assert!(
+            err.contains("[E32K1_UPGRADE_DOWNLOAD_FAILED]"),
+            "download_bytes_for_test error must carry [E32K1_UPGRADE_DOWNLOAD_FAILED]: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_staged_file_at_rejects_pre_placed_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("write_staged_dir_{}_{}", std::process::id(), nanos));
+        fs::create_dir_all(&dir).unwrap();
+
+        let outside = std::env::temp_dir().join(format!(
+            "write_staged_victim_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::write(&outside, b"victim_original").unwrap();
+
+        let target = dir.join("bundle.cosign.bundle");
+        symlink(&outside, &target).unwrap();
+
+        let err = write_staged_file_at(&target, b"attacker_payload")
+            .expect_err("write_staged_file_at must reject pre-placed symlinks");
+        assert!(
+            err.contains("[E32K1_UPGRADE_STAGE_FAILED]"),
+            "error must be tagged: {err}"
+        );
+
+        let after = fs::read_to_string(&outside).expect("victim must still exist");
+        assert_eq!(
+            after, "victim_original",
+            "victim file must not be overwritten through symlinked staging"
+        );
+
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_downloaded_file_tightens_loose_cache_dir_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Pre-create the cache dir under a redirected HOME with 0o755 so
+        // that upgrade_cache_dir() must reseat it to 0o700 before any
+        // staging file is opened. Drives the real chmod path through
+        // TempDownloadedFile::new instead of source-pinning the helper.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_home = std::env::temp_dir().join(format!(
+            "cache_dir_mode_home_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&tmp_home).unwrap();
+        let cache_dir = tmp_home.join(".taida").join("cache").join("upgrade");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        with_env_guard(|| {
+            unsafe {
+                std::env::set_var("HOME", &tmp_home);
+            }
+            let staged = TempDownloadedFile::new("probe", b"payload")
+                .expect("staging under tightened cache dir must succeed");
+            // Drop staged so the file is removed by Drop impl.
+            drop(staged);
+        });
+
+        let mode = fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+        let _ = fs::remove_dir_all(&tmp_home);
+
+        assert_eq!(
+            mode, 0o700,
+            "upgrade_cache_dir must tighten a 0755 cache dir to 0700"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_downloaded_file_rejects_symlinked_cache_parent() {
+        use std::os::unix::fs::symlink;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp_home = std::env::temp_dir().join(format!(
+            "cache_dir_parent_home_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "cache_dir_parent_outside_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&tmp_home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, tmp_home.join(".taida")).unwrap();
+
+        let err = with_env_guard(|| {
+            unsafe {
+                std::env::set_var("HOME", &tmp_home);
+            }
+            TempDownloadedFile::new("probe", b"payload")
+                .expect_err("symlinked .taida parent must be rejected")
+        });
+
+        assert!(
+            err.contains("[E32K1_UPGRADE_STAGE_FAILED]"),
+            "error must be tagged: {err}"
+        );
+        assert!(
+            !outside.join("cache").join("upgrade").exists(),
+            "dirfd traversal must not follow a symlinked cache parent"
+        );
+
+        let _ = fs::remove_file(tmp_home.join(".taida"));
+        let _ = fs::remove_dir_all(&tmp_home);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    fn with_env_guard<R, F: FnOnce() -> R>(f: F) -> R {
+        // Serialise against every other env-touching test in this crate.
+        // The local Mutex used to live here; sharing the crate-wide
+        // `env_test_lock` (also held by auth/token.rs, pkg/provider.rs,
+        // addon/prebuild_fetcher.rs) prevents `cargo test`'s thread
+        // pool from racing HOME / PATH / TAIDA_* across modules.
+        let _guard = match crate::util::env_test_lock().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let prev_path = std::env::var("PATH").ok();
+        let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_user_profile = std::env::var("USERPROFILE").ok();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match prev_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            match prev_api {
+                Some(url) => std::env::set_var("TAIDA_GITHUB_API_URL", url),
+                None => std::env::remove_var("TAIDA_GITHUB_API_URL"),
+            }
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_user_profile {
+                Some(u) => std::env::set_var("USERPROFILE", u),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "e32b014_upgrade_{}_{}_{}",
+                std::process::id(),
+                nanos,
+                label
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn install_fake_cosign(dir: &Path, log: &Path) {
+        let bin = dir.join("fake-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let cosign = bin.join("cosign");
+        fs::write(
+            &cosign,
+            format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "version" ]; then
+  exit 0
+fi
+if [ "${{1:-}}" = "verify-blob" ]; then
+  printf '%s\n' "$*" >> '{}'
+  exit 0
+fi
+echo "unexpected fake cosign invocation: $*" >&2
+exit 2
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&cosign).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&cosign, perms).unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        }
+    }
 
     // ── Canonical release source (security) ──
 
@@ -617,6 +1345,66 @@ mod tests {
             "upgrade source must be the canonical org, not a personal fork"
         );
         assert_eq!(TAIDA_REPO, "taida");
+    }
+
+    #[test]
+    fn e32b014_api_url_ignores_env_override() {
+        with_env_guard(|| {
+            unsafe {
+                std::env::set_var("TAIDA_GITHUB_API_URL", "http://127.0.0.1:9998");
+            }
+            assert_eq!(api_url(), "https://api.github.com");
+        });
+    }
+
+    #[test]
+    fn e32b014_missing_sha256sums_entry_is_hard_fail() {
+        let err = expected_sha256_for_archive("abc123  other.tar.gz\n", "taida-@e.1-x.tar.gz")
+            .expect_err("missing archive line must fail closed");
+        assert!(
+            err.contains("[E32K1_UPGRADE_NO_SHA256SUMS]") && err.contains("taida-@e.1-x.tar.gz"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn e32b014_sha256sums_requires_cosign_bundle() {
+        let td = TestDir::new("missing_bundle");
+        let sums = td.path().join("SHA256SUMS");
+        fs::write(&sums, "abc123  taida-@e.1-x.tar.gz\n").unwrap();
+
+        let err = download_verified_sha256sums(&format!("file://{}", sums.display()))
+            .expect_err("SHA256SUMS without a cosign bundle must fail");
+        assert!(
+            err.contains("[E32K1_UPGRADE_SHA256SUMS_COSIGN_MISSING]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn e32b014_sha256sums_cosign_uses_taida_release_identity() {
+        with_env_guard(|| {
+            let td = TestDir::new("identity");
+            let sums = td.path().join("SHA256SUMS");
+            let bundle = td.path().join("SHA256SUMS.cosign.bundle");
+            let log = td.path().join("cosign.log");
+            fs::write(&sums, "abc123  taida-@e.1-x.tar.gz\n").unwrap();
+            fs::write(&bundle, "fake bundle").unwrap();
+            install_fake_cosign(td.path(), &log);
+
+            let text = download_verified_sha256sums(&format!("file://{}", sums.display()))
+                .expect("fake cosign should verify SHA256SUMS");
+            assert!(text.contains("taida-@e.1-x.tar.gz"));
+
+            let log_text = fs::read_to_string(log).unwrap();
+            assert!(
+                log_text.contains("--certificate-identity-regexp")
+                    && log_text.contains(UPGRADE_COSIGN_IDENTITY_REGEXP)
+                    && log_text.contains("--certificate-oidc-issuer")
+                    && log_text.contains("https://token.actions.githubusercontent.com"),
+                "cosign invocation must pin taida-lang/taida workflow identity, got: {log_text}"
+            );
+        });
     }
 
     // ── TaidaVersion::parse ──
@@ -921,5 +1709,7 @@ def456  taida-@b.11-aarch64-apple-darwin.tar.gz\n";
         let actual_sha = crypto::sha256_hex_bytes(data);
         let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
         assert_ne!(actual_sha, wrong_sha);
+        let err = verify_sha256_bytes(data, wrong_sha).unwrap_err();
+        assert!(err.contains("[E32K1_UPGRADE_SHA256_MISMATCH]"));
     }
 }

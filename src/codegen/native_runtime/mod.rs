@@ -685,7 +685,44 @@ mod tests {
         //   Track-θ delta-only: +910 bytes.
         // TIER 4 統合 (β-2 + θ land 後 merge resolve, 2026-04-27):
         //   EXPECTED_TOTAL_LEN: 1,061,751 (canonical post-review) + 14,738 (β-2) + 910 (θ) = 1,077,399
-        const EXPECTED_TOTAL_LEN: usize = 1_077_399;
+        // E32B-027 (2026-05-05): Native streaming response headers now
+        //   reject CR/LF in name/value on the same path as the existing
+        //   reserved-header guard. The helper expansion lands in
+        //   net_h1_h2.c: +665 bytes.
+        // E32B-027 follow-up (2026-05-05): the same streaming header path
+        //   now rejects shape mismatches and 8192/65536 byte overflows before
+        //   staging headers. net_h1_h2.c adds +1,114 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,077,399 + 665 + 1,114 = 1,079,178.
+        // E32B-028 (2026-05-05): Native readBodyChunk/readBodyAll chunk-size
+        //   parsing now rejects >15 hex digits before strtoul, matching the
+        //   eager parser and JS/Interpreter policy. net_h1_h2.c adds +408 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,079,178 + 408 = 1,079,586.
+        // E32B-029 (2026-05-05): WebSocket validation adds control-frame caps
+        //   and helperizes strict UTF-8 validation, shrinking net_h1_h2.c by
+        //   382 bytes. EXPECTED_TOTAL_LEN: 1,079,586 - 382 = 1,079,204.
+        // E32B-022 (Lock-N) (2026-05-05): Lax[Int]-returning siblings of
+        //   the legacy `-1`-sentinel index/find helpers add four polymorphic
+        //   wrappers + two pack constructors to core.c: +2,783 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,079,204 + 2,783 = 1,081,987.
+        // Chunk-line + trailer DoS guard land (2026-05-07): chunk-size line
+        //   1 MiB cap on taida_net_chunked_body_complete (which previously
+        //   walked the buffer unbounded), trailer count + byte caps shared
+        //   with Interpreter / JS, and three TAIDA_NET_MAX_* constants.
+        //   net_h1_h2.c delta: +24,912 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,081,987 + 24,912 = 1,106,899.
+        // Streaming chunk-line / trailer DoS guard follow-up (2026-05-07
+        //   Codex review batch): taida_net4_read_line returns ssize_t (-1 on
+        //   per-line cap exceeded), taida_net4_drain_chunked_trailers gains
+        //   line-count + total-byte caps with reject semantics, and the five
+        //   readBodyChunk / readBodyAll callers translate the new error
+        //   return into abort_connection. net_h1_h2.c delta: +2,714 bytes.
+        //   EXPECTED_TOTAL_LEN: 1,106,899 + 2,714 = 1,109,613.
+        // E33B-003 Cat B (2026-05-07): JS / Native parity for runtime-built
+        //   `Error.kind` field-lift. core.c gains the
+        //   `taida_make_error_with_kind` helper (+1,541 bytes); net_h1_h2.c's
+        //   `taida_net_result_fail` switches to it (+210 bytes).
+        //   EXPECTED_TOTAL_LEN: 1,109,613 + 1,751 = 1,111,364.
+        const EXPECTED_TOTAL_LEN: usize = 1_111_364;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1180,11 +1217,32 @@ mod tests {
         //   Net delta on core.c TIER 4 land: +10,562 (F1 +9,328 + F2 +1,234).
         //   Per-track total (β + ε + η + review + β-2 + θ) on F1 = 19,829
         //     (6,407 + 803 + 3,216 + 75 + 8,418 + 910), on F2 = 1,234.
-        const F1_LEN: usize = 296_940;
+        // E32B-022 (Lock-N) (2026-05-05): Lax[Int]-returning siblings of the
+        //   legacy `-1`-sentinel `*indexOf*` / `search` / `FindIndex`
+        //   helpers add four polymorphic wrappers + two pack constructors
+        //   inside the polymorphic helpers block (F1). Track delta: F1 +2,783.
+        //   F1_LEN: 296,940 + 2,783 = 299,723.
+        // Sentinel recalibration (2026-05-07 chunked DoS guard batch
+        //   follow-up): the F1 region grew by +3,503 bytes after E32B-022
+        //   land via subsequent in-tree edits that did not bump this
+        //   sentinel. The new boundary is the byte offset of
+        //   `// ── Error ceiling` inside core.c (verified via `grep -bo`,
+        //   which yields 303,226). F2_LEN is unchanged at 161,994 because
+        //   F2 starts at exactly that offset and ends at CORE_SECTION.len()
+        //   (= 465,220).
+        //   F1_LEN: 299,723 + 3,503 = 303,226.
+        // E33B-003 Cat B (2026-05-07): added `taida_make_error_with_kind`
+        //   helper inside the polymorphic-helpers block (F1) to surface
+        //   the `kind` field at the top level of Native Error packs. This
+        //   is the JS-runtime parity counterpart of the
+        //   `__TaidaError`-constructor field-lift change. F1 grew by
+        //   +1,541 bytes (`grep -bo` 303,226 → 304,767). F2 unchanged.
+        //   F1_LEN: 303,226 + 1,541 = 304,767.
+        const F1_LEN: usize = 304_767;
         assert_eq!(
             CORE_SECTION.len(),
-            296_940 + 161_994,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block)"
+            304_767 + 161_994,
+            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1309,11 +1367,41 @@ mod tests {
         //   * H2 build_request_pack arena/body CONTIG producer flip (both
         //     branches: arena-backed and body-only fall-back).
         //   F6_LEN: 105,361 + 715 = 106,076.
-        const F5_LEN: usize = 197_060;
+        // E32B-027 (2026-05-05): streaming header CR/LF guard lands before
+        //   the HTTP/2 divider. F5 grows by 666 bytes; the merged source
+        //   drops one trailing blank byte after F6, so F6 length is 106,075.
+        //   F5_LEN: 197,060 + 666 = 197,726.
+        // E32B-027 follow-up (2026-05-05): streaming header shape/Str and
+        //   8192/65536 byte limit guards also land before the HTTP/2 divider.
+        //   F5 grows by +1,114 bytes. F5_LEN: 197,726 + 1,114 = 198,840.
+        // E32B-028 (2026-05-05): readBodyChunk/readBodyAll oversized chunk-size
+        //   guards land before the HTTP/2 divider. F5 grows by +408 bytes.
+        //   F5_LEN: 198,840 + 408 = 199,248.
+        // E32B-029 (2026-05-05): WebSocket control-frame caps and shared
+        //   strict UTF-8 validation land before the HTTP/2 divider. F5 shrinks
+        //   by 382 bytes. F5_LEN: 199,248 - 382 = 198,866.
+        // Sentinel recalibration (2026-05-07 chunked DoS guard batch +
+        //   streaming follow-up): F5 grew by +24,123 bytes through the
+        //   chunked DoS guard land (TAIDA_NET_MAX_* constants,
+        //   chunked_body_complete cap, eager trailer cap) plus the streaming
+        //   follow-up (taida_net4_read_line ssize_t return, drain trailers
+        //   reject, callers updated). All edits sit before the HTTP/2
+        //   divider; F6 is unchanged. The boundary anchor is the byte
+        //   offset of `// ── Native HTTP/2 server` (verified via `grep -bo`,
+        //   which yields 222,989).
+        //   F5_LEN: 198,866 + 24,123 = 222,989. F6_LEN unchanged at 106,075.
+        // E33B-003 Cat B (2026-05-07): net_h1_h2.c's
+        //   `taida_net_result_fail` switched from `taida_make_error` to the
+        //   new `taida_make_error_with_kind` helper to expose the `kind`
+        //   field at top level on the throw side. The change is +210
+        //   bytes (additional comment + extended call). All edits sit
+        //   before the HTTP/2 divider; F6 unchanged.
+        //   F5_LEN: 222,989 + 210 = 223,199.
+        const F5_LEN: usize = 223_199;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            197_060 + 106_076,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted)"
+            223_199 + 106_075,
+            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted; E33B-003 Cat B adds 210 to F5 for taida_net_result_fail switching to taida_make_error_with_kind)"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

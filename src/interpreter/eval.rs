@@ -343,10 +343,53 @@ impl Interpreter {
             Signal::Throw(err) => {
                 // Gorilla ceiling: unhandled error terminates program
                 Err(RuntimeError {
-                    message: format!("Unhandled error: {}", err),
+                    message: format!("Unhandled error: {}", Self::format_unhandled_error(&err)),
                 })
             }
             Signal::Gorilla => Ok(Value::Gorilla),
+        }
+    }
+
+    fn format_unhandled_error(err: &Value) -> String {
+        fn str_field<'a>(fields: &'a [(String, Value)], name: &str) -> Option<&'a str> {
+            fields.iter().find_map(|(field, value)| {
+                if field == name
+                    && let Value::Str(s) = value
+                {
+                    return Some(s.as_str());
+                }
+                None
+            })
+        }
+
+        match err {
+            Value::Error(e) => {
+                let error_type = if e.error_type.is_empty() {
+                    "AnonymousError"
+                } else {
+                    e.error_type.as_str()
+                };
+                let message = if e.message.is_empty() {
+                    "Unknown"
+                } else {
+                    e.message.as_str()
+                };
+                format!("Error[{}]: {}", error_type, message)
+            }
+            Value::BuchiPack(fields) => {
+                // `str_field` returns `Some("")` for an empty string literal;
+                // filter those so empty `type <= ""` / `message <= ""` get
+                // the same AnonymousError / Unknown treatment as missing fields.
+                let error_type = str_field(fields, "type")
+                    .or_else(|| str_field(fields, "__type"))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("AnonymousError");
+                let message = str_field(fields, "message")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Unknown");
+                format!("Error[{}]: {}", error_type, message)
+            }
+            other => other.to_display_string(),
         }
     }
 
@@ -1073,6 +1116,14 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(other),
                 };
+                if field.starts_with("__") {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            field
+                        ),
+                    });
+                }
                 match &obj_val {
                     Value::BuchiPack(fields) => {
                         if let Some((_, val)) = fields.iter().find(|(n, _)| n == field) {

@@ -122,7 +122,9 @@ fn dep_decl_identity(dep: &Dependency, declared_from_root: &Path) -> String {
             let canonical = joined.canonicalize().unwrap_or(joined);
             format!("path:{}", canonical.display())
         }
-        Dependency::Registry { org, name, version } => {
+        Dependency::Registry {
+            org, name, version, ..
+        } => {
             format!("registry:{}/{}@{}", org, name, version)
         }
     }
@@ -265,6 +267,7 @@ fn resolve_deps_inner(
                 org,
                 name: dep_name,
                 version,
+                integrity,
             } if !version.contains('.') && locked_versions.contains_key(&name) => {
                 let locked_ver = &locked_versions[&name];
                 // Only pin if the locked version belongs to the same generation
@@ -273,6 +276,7 @@ fn resolve_deps_inner(
                         org: org.clone(),
                         name: dep_name.clone(),
                         version: locked_ver.clone(),
+                        integrity: integrity.clone(),
                     }
                 } else {
                     dep
@@ -1159,10 +1163,12 @@ pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(),
     let lockfile = Lockfile::from_resolved(&result.packages);
 
     // Check if lockfile is already up to date
-    if let Ok(Some(existing)) = Lockfile::read(&lock_path)
-        && existing.is_up_to_date(&result.packages)
-    {
-        return Ok(()); // Already up to date, skip write
+    match Lockfile::read(&lock_path) {
+        Ok(Some(existing)) if existing.is_up_to_date(&result.packages) => {
+            return Ok(()); // Already up to date, skip write
+        }
+        Ok(_) => {}
+        Err(e) => return Err(e),
     }
 
     lockfile.write(&lock_path)
@@ -1182,6 +1188,11 @@ pub fn write_lockfile_with_addons(
             .map_err(|e| format!("Cannot create .taida/ directory: {}", e))?;
     }
     let mut lockfile = Lockfile::from_resolved(&result.packages);
+
+    // Never silently overwrite legacy or malformed lockfiles. v1/fnv1a must go
+    // through `taida ingot migrate-lockfile` so the user sees the trust-boundary
+    // change explicitly.
+    Lockfile::read(&lock_path)?;
 
     // Attach addon info
     for (pkg_name, addon) in addons {
@@ -1707,6 +1718,7 @@ mod tests {
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -1747,6 +1759,7 @@ mod tests {
                         org: "nonexistent-org-xyz".to_string(),
                         name: "http".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -1794,6 +1807,7 @@ mod tests {
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -2001,6 +2015,7 @@ deps <= @(
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a.1".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -2054,6 +2069,7 @@ deps <= @(
                         org: "taida-lang".to_string(),
                         name: "os".to_string(),
                         version: "a".to_string(),
+                        integrity: None,
                     },
                 );
                 deps
@@ -2064,12 +2080,14 @@ deps <= @(
 
         // Lockfile records os@a.1 (exact version)
         let lockfile = Lockfile {
-            version: 1,
+            version: 2,
             packages: vec![LockedPackage {
                 name: "os".to_string(),
                 version: "a.1".to_string(),
                 source: "bundled".to_string(),
-                integrity: "fnv1a:0000000000000002".to_string(),
+                integrity:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+                        .to_string(),
                 addon: None,
             }],
         };
@@ -2567,7 +2585,9 @@ deps <= @(
                     name: "http".to_string(),
                 },
                 path: PathBuf::from("/tmp/test/a1"),
-                integrity: "fnv1a:0000000000000001".to_string(),
+                integrity:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                        .to_string(),
             },
             ResolvedPackage {
                 name: "alice/http@b.12".to_string(),
@@ -2577,7 +2597,9 @@ deps <= @(
                     name: "http".to_string(),
                 },
                 path: PathBuf::from("/tmp/test/b12"),
-                integrity: "fnv1a:0000000000000002".to_string(),
+                integrity:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+                        .to_string(),
             },
         ];
 
@@ -2647,14 +2669,18 @@ deps <= @(
                     version: "a.1".to_string(),
                     source: PackageSource::Path("./pkg_v1".to_string()),
                     path: pkg_dir_v1.canonicalize().unwrap_or(pkg_dir_v1),
-                    integrity: "fnv1a:0000000000000001".to_string(),
+                    integrity:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                            .to_string(),
                 },
                 ResolvedPackage {
                     name: "mylib@b.1".to_string(),
                     version: "b.1".to_string(),
                     source: PackageSource::Path("./pkg_v2".to_string()),
                     path: pkg_dir_v2.canonicalize().unwrap_or(pkg_dir_v2),
-                    integrity: "fnv1a:0000000000000002".to_string(),
+                    integrity:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+                            .to_string(),
                 },
             ],
             errors: Vec::new(),

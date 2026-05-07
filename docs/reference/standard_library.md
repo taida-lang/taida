@@ -6,8 +6,8 @@ Taida は**プリリュード**と**ビルトイン型**で構成されていま
 
 > **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
-操作系の処理はモールドとして提供されます。詳細は `reference/class_like_types.md` を参照してください。
-メソッドは状態チェックとモナディック操作に限定されています。詳細は `reference/standard_methods.md` を参照してください。
+操作系の処理はモールドとして提供されます。詳細は [`docs/reference/class_like_types.md`](./class_like_types.md) を参照してください。
+メソッドは状態チェックとモナディック操作に限定されています。詳細は [`docs/reference/standard_methods.md`](./standard_methods.md) を参照してください。
 
 ---
 
@@ -74,6 +74,24 @@ CLI モード（`taida <file>`）とは別に、REPL および Rust 側の in-pr
 `debug` の stream mode 出力先は **stdout** です（stderr ではありません）。JS バックエンド（`console.log`）・Native バックエンド（`printf`）と一致させることで 3 バックエンドパリティを保証しています。
 
 パイプ合成時の挙動: `taida script.td | head -N` のように下流 reader が先に stdout を閉じると、後続の `stdout()` 呼び出しは `EPIPE` を黙って吸収して 0 バイトを返すだけで、プロセスは exit 0 で終了します（`ripgrep` / `bat` と同じ一般的な CLI 規約）。
+
+#### `nowMs()` の 4-backend 契約
+
+`nowMs()` は **Unix epoch（1970-01-01T00:00:00Z）からの経過ミリ秒数**を `Int` で返します。4 バックエンド (Interpreter / JS / Native / wasm) いずれも同じ wall-clock 契約に従います。
+
+| Backend | 内部実装 | 解像度 | 同期源 |
+|---|---|---|---|
+| Interpreter | Rust `SystemTime::now()` | OS 依存 (Linux: ナノ秒) | OS wall clock |
+| JS | `Date.now()` | ミリ秒 | Host wall clock |
+| Native | `clock_gettime(CLOCK_REALTIME)` | OS 依存 (Linux: ナノ秒) | OS wall clock |
+| wasm-* | host が提供する WASI clock (`clock_time_get(realtime)`) | host 依存 | Host wall clock |
+
+契約の本質:
+
+- **wall-clock であり、単調時計ではない**。NTP 補正やユーザによる時刻変更でジャンプ・巻き戻りが発生する。
+- **同一プロセス内で `nowMs() <= a; nowMs() <= b` としても `b >= a` は保証されない**（極めて稀ではあるが、wall-clock 巻き戻り時に `b < a` が起きうる）。
+- 厳密な経過時間測定（タイムアウト・レート制御・パフォーマンス計測）には差分を取り、許容誤差を併用する。
+- 単調保証が必要な path 用の `monoMs()` は post-stable additive 候補として予約 (`docs/STABILITY.md` 参照)。E32 stable では `nowMs()` のみ。
 
 ### JSON シリアライズ
 
@@ -173,13 +191,13 @@ clone せず view として保持する zero-copy primitive です。span を
 
 - **mold form** `StrOf[span, raw]() -> Str` (3-backend parity 保証、
   詳細は [`docs/reference/net_api.md §4.1`](./net_api.md))
-- **function form** `strOf(span, raw) -> Str` (D28B-015 で追加、
-  4-backend parity: interpreter / JS / native / wasm-full の中で
-  3-backend 完全 GREEN、wasm-full は compile-only pin。
-  mold form と意味論的に等価で、`callSign(req).path` 等の関数呼び出し
-  式チェーンで「`StrOf[...]()` の括弧二重」を避けたいときに使う):
+- **function form** `strOf(span, raw) -> Str` (gen-D 追加。
+  4 バックエンドのうち interpreter / JS / native は 3 バックエンドの
+  完全パリティ、wasm-full はコンパイルのみ確認。mold 形と意味的に等価で、
+  `callSign(req).path` のような関数呼び出し式チェーンで `StrOf[...]()`
+  の括弧の二重を避けたいときに使う):
 
-```taida
+```taida fragment
 // mold form と function form は同じ結果を返す
 str_a <= strOf(req.path, req.bytes)
 str_b <= StrOf[req.path, req.bytes]()
@@ -224,7 +242,7 @@ validateAge age: Int =
 | `Gorillax[value]()` | 値を Gorillax で包む | `Gorillax[42]()` |
 | `Cage[molten, fn]()` | Molten 専用。fn(molten) を実行し Gorillax で包む | `Cage[lodash, _ lo = lo.sum(items)]()` |
 
-```taida
+```taida fragment
 // Cage で溶鉄に操作 → Gorillax で受け取る
 Cage[externalLib, _ lib = lib.process(data)] => result
 result ]=> value         // 成功 → 値, 失敗 → ゴリラ
@@ -266,7 +284,7 @@ pilots <= hashMap()
 | `.isEmpty()` | `Bool` | 空かどうか |
 | `.toString()` | `Str` | 文字列表現 |
 
-```taida
+```taida fragment
 // get は Lax を返します
 pilots.get("Misato").hasValue  // true
 pilots.get("Gendo").hasValue   // false

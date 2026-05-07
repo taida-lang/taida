@@ -137,17 +137,20 @@ fn validate_net_http_api_for_wasm(
 /// polymorphic dispatchers. PHILOSOPHY I forbids silent-undefined paths, so
 /// we reject the Regex surface at compile time instead.
 ///
-/// Detected by the presence of any of the three Regex-specific runtime
+/// Detected by the presence of any of the four Regex-specific runtime
 /// helpers in the collected `needed_funcs` set:
 ///
 /// - `taida_regex_new` — emitted for `Regex(pattern, flags?)`
 /// - `taida_str_match_regex` — emitted for `str.match(re)`
 /// - `taida_str_search_regex` — emitted for `str.search(re)`
+/// - `taida_str_search_regex_lax` — emitted for `str.searchLax(re)`
 ///
 /// `str.replace(Regex(...), ...)` / `str.replaceAll(Regex(...), ...)` go
 /// through the `_poly` dispatchers which are safe for plain-Str callers; the
 /// `Regex(...)` construction on the arg side already emits `taida_regex_new`,
-/// so those cases are caught transitively.
+/// so those cases are caught transitively. `searchLax` is listed explicitly
+/// (defense-in-depth) so a future overload taking a non-`Regex`
+/// argument cannot silently bypass the diagnostic.
 fn validate_regex_api_for_wasm(
     needed_funcs: &HashSet<String>,
     profile: WasmProfile,
@@ -156,6 +159,7 @@ fn validate_regex_api_for_wasm(
         ("taida_regex_new", "Regex"),
         ("taida_str_match_regex", "Str.match"),
         ("taida_str_search_regex", "Str.search"),
+        ("taida_str_search_regex_lax", "Str.searchLax"),
     ];
 
     for &(runtime_name, api_name) in REGEX_FUNCS {
@@ -836,6 +840,14 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_search_regex" => {
             "int64_t taida_str_search_regex(int64_t s, int64_t regex);".to_string()
         }
+        // E32B-022 (Lock-N): Lax[Int]-returning sibling. wasm has only a
+        // stub regex implementation, so the function exists for surface
+        // parity. `validate_regex_api_for_wasm` rejects this helper directly
+        // (E32B-070 hardening) — the diagnostic no longer relies on the
+        // transitive `taida_regex_new` chain.
+        "taida_str_search_regex_lax" => {
+            "int64_t taida_str_search_regex_lax(int64_t s, int64_t regex);".to_string()
+        }
         "taida_regex_new" => {
             "int64_t taida_regex_new(int64_t pattern, int64_t flags);".to_string()
         }
@@ -913,7 +925,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_fold" | "taida_list_foldr" => {
             format!("int64_t {}(int64_t list, int64_t init, int64_t fn_ptr);", name)
         }
-        "taida_list_find" | "taida_list_find_index" => {
+        "taida_list_find" | "taida_list_find_index" | "taida_list_find_index_lax" => {
             format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
         }
         "taida_list_take_while" | "taida_list_drop_while"
@@ -1056,7 +1068,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_read_cstr_len_safe" => "int64_t taida_read_cstr_len_safe(int64_t ptr, int64_t max);".to_string(),
         // WC-6e: Polymorphic extensions (all profiles — implemented in runtime_core_wasm.c)
         "taida_polymorphic_contains" | "taida_polymorphic_get_or_default"
-        | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of" => {
+        | "taida_polymorphic_index_of" | "taida_polymorphic_last_index_of"
+        | "taida_polymorphic_index_of_lax" | "taida_polymorphic_last_index_of_lax" => {
             format!("int64_t {}(int64_t ptr, int64_t item);", name)
         }
         "taida_polymorphic_has_value" => "int64_t taida_polymorphic_has_value(int64_t ptr);".to_string(),

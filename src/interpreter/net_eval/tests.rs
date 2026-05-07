@@ -622,7 +622,12 @@ fn test_encode_crlf_in_header_name() {
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
-    assert!(get_failure_message(&result).contains("CR/LF"));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("RFC 7230 token grammar"),
+        "expected RFC 7230 token grammar rejection for CR/LF in name, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -640,7 +645,12 @@ fn test_encode_crlf_in_header_value() {
     ]);
     let result = encode_response(&response);
     assert!(is_result_failure(&result));
-    assert!(get_failure_message(&result).contains("CR/LF"));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("RFC 7230 field-value grammar"),
+        "expected RFC 7230 field-value grammar rejection for CR/LF in value, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -1240,8 +1250,12 @@ fn test_encode_multiple_headers_order_preserved() {
 }
 
 #[test]
-fn test_encode_duplicate_header_names_preserved() {
-    // Multiple headers with the same name should all appear (e.g. Set-Cookie).
+fn test_encode_duplicate_set_cookie_rejected() {
+    // Set-Cookie is now runtime-reserved. Multiple Set-Cookie headers
+    // (or a single one) must be rejected at httpEncodeResponse — the
+    // attacker bypass is that name="Set-Cookie" with attacker-controlled
+    // value forwards arbitrary cookies, which the future cookie API will
+    // own instead.
     let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
@@ -1260,16 +1274,36 @@ fn test_encode_duplicate_header_names_preserved() {
         ("body".into(), Value::str(String::new())),
     ]);
     let result = encode_response(&response);
-    assert!(!is_result_failure(&result));
-    let inner = extract_result_inner(&result);
-    let bytes = match inner.iter().find(|(k, _)| k == "bytes") {
-        Some((_, Value::Bytes(b))) => b.as_slice().to_vec(),
-        _ => panic!("no bytes"),
-    };
-    let text = String::from_utf8(bytes).unwrap();
-    assert!(text.contains("Set-Cookie: a=1\r\n"));
-    assert!(text.contains("Set-Cookie: b=2\r\n"));
-    assert_eq!(text.matches("Set-Cookie").count(), 2);
+    assert!(is_result_failure(&result));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("'Set-Cookie' is reserved by the runtime"),
+        "{}",
+        msg
+    );
+}
+
+#[test]
+fn test_encode_transfer_encoding_rejected() {
+    let response = Value::pack(vec![
+        ("status".into(), Value::Int(200)),
+        (
+            "headers".into(),
+            Value::list(vec![Value::pack(vec![
+                ("name".into(), Value::str("Transfer-Encoding".into())),
+                ("value".into(), Value::str("chunked".into())),
+            ])]),
+        ),
+        ("body".into(), Value::str(String::new())),
+    ]);
+    let result = encode_response(&response);
+    assert!(is_result_failure(&result));
+    let msg = get_failure_message(&result);
+    assert!(
+        msg.contains("'Transfer-Encoding' is runtime-managed"),
+        "{}",
+        msg
+    );
 }
 
 // ── httpServe integration tests ──
@@ -3285,6 +3319,232 @@ fn test_chunked_compact_empty_chunk_size() {
     assert!(result.unwrap_err().contains("empty chunk-size"));
 }
 
+#[test]
+fn test_e32b028_chunked_compact_rejects_oversized_chunk_size() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b"FFFFFFFFFFFFFFFF\r\nx\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b028_chunked_body_complete_rejects_oversized_chunk_size() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b"FFFFFFFFFFFFFFFF\r\nx\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("invalid chunk-size"))
+    );
+}
+
+#[test]
+fn test_e32b028_chunk_size_parser_accepts_15_hex_digits() {
+    assert_eq!(
+        parse_chunk_size_hex_bytes(b"FFFFFFFFFFFFFFF").unwrap(),
+        0x0FFF_FFFF_FFFF_FFFFusize
+    );
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_accepts_leading_zeros_within_cap() {
+    // Leading-zero policy: 15-digit cap is enforced on literal byte length,
+    // independent of magnitude. 14 leading zeros + one hex digit = 15 chars
+    // and decodes to magnitude 1.
+    assert_eq!(
+        parse_chunk_size_hex_bytes(b"000000000000001").unwrap(),
+        1usize
+    );
+}
+
+// E32B-051: chunk-ext flooding past the 1 MiB per-line cap must be rejected
+// as malformed (not "incomplete"). The previous implementation walked the
+// full buffer to look for CRLF and would silently DoS the eager decoder.
+#[test]
+fn test_e32b051_chunk_size_line_exceeds_byte_cap_eager_compact() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    // `1;` followed by 1 MiB + 1 of `a=b;` padding so the chunk-size line
+    // strictly exceeds the cap.
+    let mut chunked_body: Vec<u8> = b"1;".to_vec();
+    chunked_body.extend(std::iter::repeat_n(b'a', 1_048_576));
+    chunked_body.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(
+        result.is_err(),
+        "compact must reject oversized chunk-size line"
+    );
+}
+
+#[test]
+fn test_e32b051_chunk_size_line_exceeds_byte_cap_body_complete() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"1;".to_vec();
+    chunked_body.extend(std::iter::repeat_n(b'a', 1_048_576));
+    chunked_body.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(&result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("chunk-size line exceeds byte cap")),
+        "body_complete must classify oversized chunk-size line as malformed, got {:?}",
+        result
+    );
+}
+
+// E32B-052: trailer count flood past the 64-line cap must be rejected as
+// malformed by both the eager compact decoder and the readiness checker.
+#[test]
+fn test_e32b052_trailer_count_flood_eager_compact() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
+    for i in 0..200 {
+        let line = format!("X-T-{}: 1\r\n", i);
+        chunked_body.extend_from_slice(line.as_bytes());
+    }
+    chunked_body.extend_from_slice(b"\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(
+        result.is_err()
+            && result
+                .as_ref()
+                .err()
+                .unwrap()
+                .contains("too many trailer lines"),
+        "compact must reject 200-trailer flood with 'too many trailer lines', got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_e32b052_trailer_count_flood_body_complete() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
+    for i in 0..200 {
+        let line = format!("X-T-{}: 1\r\n", i);
+        chunked_body.extend_from_slice(line.as_bytes());
+    }
+    chunked_body.extend_from_slice(b"\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(&result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("too many trailer lines")),
+        "body_complete must classify a 200-trailer flood as malformed, got {:?}",
+        result
+    );
+}
+
+// E32B-052: trailer byte total flood past the 8 KiB cap must be rejected as
+// malformed even when the line count is well under the 64-line cap.
+#[test]
+fn test_e32b052_trailer_bytes_flood_body_complete() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let mut chunked_body: Vec<u8> = b"5\r\nhello\r\n0\r\n".to_vec();
+    let padding: String = "a".repeat(500);
+    for i in 0..32 {
+        let line = format!("X-T-{}: {}\r\n", i, padding);
+        chunked_body.extend_from_slice(line.as_bytes());
+    }
+    chunked_body.extend_from_slice(b"\r\n");
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(&chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(&result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("trailer block exceeds byte cap")),
+        "body_complete must reject 16 KiB of trailer bytes as malformed, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_leading_zero_overflowing_cap() {
+    // 16 hex digits even though magnitude is 1 → exceeds 15-digit cap.
+    let err = parse_chunk_size_hex_bytes(b"0000000000000001").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_leading_space() {
+    let err = parse_chunk_size_hex_bytes(b" 1A").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_trailing_space() {
+    let err = parse_chunk_size_hex_bytes(b"1A ").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunk_size_parser_rejects_internal_whitespace() {
+    let err = parse_chunk_size_hex_bytes(b"1\tA").unwrap_err();
+    assert!(err.contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunked_compact_rejects_ows_around_chunk_size() {
+    // SP before chunk-size hex must be rejected per RFC 7230 §4.1.
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b" a\r\n0123456789\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_in_place_compact(&mut buf, body_offset);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("invalid chunk-size"));
+}
+
+#[test]
+fn test_e32b053_chunked_body_complete_rejects_ows_around_chunk_size() {
+    let head = b"GET / HTTP/1.1\r\n\r\n";
+    let chunked_body = b"a \r\n0123456789\r\n0\r\n\r\n";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(head);
+    buf.extend_from_slice(chunked_body);
+    let body_offset = head.len();
+
+    let result = chunked_body_complete(&buf, body_offset);
+    assert!(
+        matches!(result, Err(ChunkedBodyError::Malformed(msg)) if msg.contains("invalid chunk-size"))
+    );
+}
+
 // ── parse_request_head: Transfer-Encoding detection (NET2-2a) ──
 
 #[test]
@@ -4620,6 +4880,64 @@ fn test_reserved_header_content_length_rejected() {
 }
 
 #[test]
+fn test_streaming_header_crlf_name_rejected() {
+    let headers = vec![("X-Ok\r\nX-Injected".to_string(), "value".to_string())];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].name") && msg.contains("RFC 7230 token grammar"),
+        "error should mention RFC 7230 token grammar violation in header name: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_streaming_header_crlf_value_rejected() {
+    let headers = vec![("X-Ok".to_string(), "value\r\nX-Injected: yes".to_string())];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].value") && msg.contains("RFC 7230 field-value grammar"),
+        "error should mention RFC 7230 field-value grammar violation in header value: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_streaming_header_name_too_long_rejected() {
+    let headers = vec![(
+        "x".repeat(STREAMING_HEADER_NAME_MAX_BYTES + 1),
+        "value".to_string(),
+    )];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].name exceeds 8192 bytes"),
+        "error should mention header name byte limit: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_streaming_header_value_too_long_rejected() {
+    let headers = vec![(
+        "X-Ok".to_string(),
+        "x".repeat(STREAMING_HEADER_VALUE_MAX_BYTES + 1),
+    )];
+    let result = StreamingWriter::validate_reserved_headers(&headers);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("headers[0].value exceeds 65536 bytes"),
+        "error should mention header value byte limit: {}",
+        msg
+    );
+}
+
+#[test]
 fn test_reserved_header_transfer_encoding_rejected() {
     let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
     let result = StreamingWriter::validate_reserved_headers(&headers);
@@ -4657,6 +4975,92 @@ fn test_non_reserved_headers_allowed() {
 fn test_empty_headers_allowed() {
     let headers: Vec<(String, String)> = vec![];
     assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+}
+
+#[test]
+fn rfc7230_header_name_with_colon_rejected() {
+    let headers = vec![("X:Y".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_name_with_nul_rejected() {
+    let headers = vec![("X-Test\x00".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_value_with_nul_rejected() {
+    let headers = vec![("X-Test".to_string(), "v\x00ok".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 field-value grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_name_with_space_rejected() {
+    let headers = vec![("X Test".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_name_with_tab_rejected() {
+    let headers = vec![("X\tTest".to_string(), "v".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 token grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_value_with_control_byte_rejected() {
+    let headers = vec![("X-Test".to_string(), "v\x01\x02".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 field-value grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_value_with_del_rejected() {
+    let headers = vec![("X-Test".to_string(), "v\x7F".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("RFC 7230 field-value grammar"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_underscore_in_name_rejected() {
+    let headers = vec![("Content_Length".to_string(), "10".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(
+        err.contains("'_'") && err.contains("reverse proxies"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn rfc7230_header_set_cookie_reserved() {
+    let headers = vec![("Set-Cookie".to_string(), "session=evil".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("Set-Cookie"), "{}", err);
+}
+
+#[test]
+fn rfc7230_header_obs_text_value_allowed() {
+    let headers = vec![("X-Test".to_string(), "v\u{0080}\u{00FF}".to_string())];
+    assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+}
+
+#[test]
+fn rfc7230_header_value_with_tab_allowed() {
+    let headers = vec![("X-Test".to_string(), "v\tt".to_string())];
+    assert!(StreamingWriter::validate_reserved_headers(&headers).is_ok());
+}
+
+#[test]
+fn rfc7230_header_empty_name_rejected() {
+    let headers = vec![(String::new(), "value".to_string())];
+    let err = StreamingWriter::validate_reserved_headers(&headers).unwrap_err();
+    assert!(err.contains("name is empty"), "{}", err);
 }
 
 // NET3-1f: Bodyless status validation

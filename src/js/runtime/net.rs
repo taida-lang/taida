@@ -124,7 +124,10 @@ function __taida_net_result_ok(inner) {
 // Helper: create net Result failure with kind/message
 function __taida_net_result_fail(kind, message) {
   const inner = Object.freeze({ ok: false, code: -1, message: message, kind: kind });
-  const errVal = { __type: 'HttpError', type: 'HttpError', message: message, fields: { kind: kind } };
+  // E33B-003 Cat B: surface `kind` at top-level so user code reading
+  // `err.kind` (after `|==` catch) matches Interpreter / Native parity.
+  // Keep `fields.kind` populated for legacy `err.fields.kind` callers.
+  const errVal = { __type: 'HttpError', type: 'HttpError', message: message, kind: kind, fields: { kind: kind } };
   return __taida_result_create(inner, errVal, null);
 }
 
@@ -393,19 +396,55 @@ function __taida_net_httpEncodeResponse(response) {
     if (typeof value !== 'string') {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value must be Str');
     }
-    // NB-7: Enforce header name/value length limits in UTF-8 bytes (parity with Interpreter/Native)
+    // Length limits (parity with Interpreter/Native).
     if (Buffer.byteLength(name, 'utf-8') > 8192) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name exceeds 8192 bytes');
     }
     if (Buffer.byteLength(value, 'utf-8') > 65536) {
       return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value exceeds 65536 bytes');
     }
-    // Reject CRLF in header name/value
-    if (name.includes('\r') || name.includes('\n')) {
-      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name contains CR/LF');
+    // RFC 7230 token + field-value grammar (parity with the streaming validator).
+    if (name.length === 0) {
+      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].name is empty');
     }
-    if (value.includes('\r') || value.includes('\n')) {
-      return __taida_net_result_fail('EncodeError', 'httpEncodeResponse: headers[' + i + '].value contains CR/LF');
+    {
+      const nameBuf = Buffer.from(name, 'utf-8');
+      for (let k = 0; k < nameBuf.length; k++) {
+        const b = nameBuf[k];
+        if (!__taida_net_isRfc7230TokenByte(b)) {
+          return __taida_net_result_fail('EncodeError',
+            'httpEncodeResponse: headers[' + i + '].name contains a byte outside RFC 7230 token grammar (0x' +
+            b.toString(16).toUpperCase().padStart(2, '0') + ')');
+        }
+      }
+      if (nameBuf.includes(0x5F)) {
+        return __taida_net_result_fail('EncodeError',
+          "httpEncodeResponse: headers[" + i + "].name contains '_' which reverse proxies normalise inconsistently");
+      }
+    }
+    {
+      const valueBuf = Buffer.from(value, 'utf-8');
+      for (let k = 0; k < valueBuf.length; k++) {
+        const b = valueBuf[k];
+        if (!__taida_net_isRfc7230FieldValueByte(b)) {
+          return __taida_net_result_fail('EncodeError',
+            'httpEncodeResponse: headers[' + i + '].value contains a byte outside RFC 7230 field-value grammar (0x' +
+            b.toString(16).toUpperCase().padStart(2, '0') + ')');
+        }
+      }
+    }
+    {
+      const lower = name.toLowerCase();
+      if (lower === 'transfer-encoding') {
+        return __taida_net_result_fail('EncodeError',
+          "httpEncodeResponse: headers[" + i + "].name 'Transfer-Encoding' is runtime-managed");
+      }
+      if (lower === 'set-cookie') {
+        return __taida_net_result_fail('EncodeError',
+          "httpEncodeResponse: headers[" + i + "].name 'Set-Cookie' is reserved by the runtime");
+      }
+      // Content-Length: legacy behaviour — handler-supplied value flows
+      // through and the encoder coalesces with its own auto-append.
     }
     headerPairs.push([name, value]);
   }
@@ -487,15 +526,32 @@ function __taida_net_encodeResponseScatter(response) {
     if (!h || typeof h !== 'object') return null;
     const name = h.name, value = h.value;
     if (typeof name !== 'string' || typeof value !== 'string') return null;
-    // NB-7: Enforce header name/value length limits (parity with public encoder)
     if (Buffer.byteLength(name, 'utf-8') > 8192) return null;
     if (Buffer.byteLength(value, 'utf-8') > 65536) return null;
-    // Reject CRLF in header name/value to prevent response splitting
-    if (name.includes('\r') || name.includes('\n')) return null;
-    if (value.includes('\r') || value.includes('\n')) return null;
-    if (noBody && name.toLowerCase() === 'content-length') continue;
+    if (name.length === 0) return null;
+    // RFC 7230 token + field-value grammar (parity with public encoder
+    // and streaming validator). Without this the scatter path forwarded
+    // ':' / NUL / SP / HTAB / control / DEL / underscore / Set-Cookie
+    // straight onto the wire.
+    {
+      const nameBuf = Buffer.from(name, 'utf-8');
+      for (let k = 0; k < nameBuf.length; k++) {
+        if (!__taida_net_isRfc7230TokenByte(nameBuf[k])) return null;
+      }
+      if (nameBuf.includes(0x5F)) return null; // underscore in name
+      const valueBuf = Buffer.from(value, 'utf-8');
+      for (let k = 0; k < valueBuf.length; k++) {
+        if (!__taida_net_isRfc7230FieldValueByte(valueBuf[k])) return null;
+      }
+    }
+    const lower = name.toLowerCase();
+    if (lower === 'transfer-encoding') return null;
+    if (lower === 'set-cookie') return null;
+    if (lower === 'content-length') {
+      if (noBody) continue;
+      hasContentLength = true;
+    }
     head += name + ': ' + value + '\r\n';
-    if (name.toLowerCase() === 'content-length') hasContentLength = true;
   }
   if (!noBody && !hasContentLength) {
     head += 'Content-Length: ' + bodyBytes.length + '\r\n';
@@ -503,6 +559,14 @@ function __taida_net_encodeResponseScatter(response) {
   head += '\r\n';
   return { head: Buffer.from(head, 'latin1'), body: bodyBytes };
 }
+
+// E32B-051 / E32B-052: per-line and trailer-block caps shared with
+// Interpreter (helpers.rs::MAX_CHUNK_LINE_BYTES / MAX_TRAILER_COUNT /
+// MAX_TRAILER_BYTES) and Native (net_h1_h2.c TAIDA_NET_MAX_*). Documented in
+// docs/reference/net_api.md §5.4.
+const __TAIDA_NET_MAX_CHUNK_LINE_BYTES = 1048576;
+const __TAIDA_NET_MAX_TRAILER_COUNT = 64;
+const __TAIDA_NET_MAX_TRAILER_BYTES = 8192;
 
 // NET2-4b: Chunked Transfer Encoding in-place compaction (JS)
 // Mirrors Interpreter's chunked_in_place_compact algorithm.
@@ -513,8 +577,18 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
   let readPos = 0;
   let writePos = 0;
 
+  // Cap per-line CRLF scan at __TAIDA_NET_MAX_CHUNK_LINE_BYTES bytes (parity
+  // with Native `taida_net_find_crlf(_, cap)` and Interpreter
+  // `find_crlf_capped(_, cap)`). Both Rust and C scan exactly `cap` total
+  // bytes (i+1 < cap), so the JS scan must use `start + cap - 1` as the
+  // exclusive upper bound to match. Off-by-one between backends would let
+  // attackers tune chunk-line length to exploit the most-permissive backend.
   function findCRLF(start) {
-    for (let i = start; i < dataLen - 1; i++) {
+    const end = Math.min(
+      dataLen - 1,
+      start + __TAIDA_NET_MAX_CHUNK_LINE_BYTES - 1
+    );
+    for (let i = start; i < end; i++) {
       if (buf[bodyOffset + i] === 13 && buf[bodyOffset + i + 1] === 10) return i;
     }
     return -1;
@@ -530,16 +604,17 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
     for (let i = readPos; i < crlfPos; i++) {
       if (buf[bodyOffset + i] === 0x3B) { hexEnd = i; break; } // ';'
     }
-    // Trim ASCII whitespace from hex part
+    // E32B-053: per RFC 7230 §4.1 chunk-size MUST NOT contain OWS.
+    // No SP/HT trim — strict hex validation below rejects any whitespace.
     let hexStart = readPos;
-    while (hexStart < hexEnd && (buf[bodyOffset + hexStart] === 0x20 || buf[bodyOffset + hexStart] === 0x09)) hexStart++;
-    while (hexEnd > hexStart && (buf[bodyOffset + hexEnd - 1] === 0x20 || buf[bodyOffset + hexEnd - 1] === 0x09)) hexEnd--;
 
     if (hexStart >= hexEnd) return null; // empty chunk-size
 
     const hexStr = buf.toString('latin1', bodyOffset + hexStart, bodyOffset + hexEnd);
     if (!/^[0-9a-fA-F]+$/.test(hexStr)) return null; // strict hex validation
-    // NB2-4: Reject oversized chunk-size (parity with body_complete)
+    // NB2-4: Reject oversized chunk-size (parity with body_complete).
+    // Leading-zero policy: 15-digit cap is enforced on the literal hex
+    // length so leading zeros count toward the cap.
     if (hexStr.length > 15) return null; // malformed: oversized chunk-size
     const chunkSize = parseInt(hexStr, 16);
     if (isNaN(chunkSize) || chunkSize < 0 || !Number.isSafeInteger(chunkSize)) return null; // invalid hex
@@ -549,16 +624,24 @@ function __taida_net_chunkedInPlaceCompact(buf, bodyOffset) {
 
     // Terminator chunk (size == 0)
     if (chunkSize === 0) {
-      // Skip optional trailer headers until final CRLF
+      // Skip optional trailer headers until final CRLF, bounded by line
+      // count + total bytes (E32B-052) and per-line length (E32B-051).
+      let trailerCount = 0;
+      let trailerBytes = 0;
       for (;;) {
         if (readPos + 2 > dataLen) return null; // malformed: missing final CRLF
         if (buf[bodyOffset + readPos] === 13 && buf[bodyOffset + readPos + 1] === 10) {
           readPos += 2;
           return { bodyLen: writePos, wireConsumed: readPos };
         }
+        if (trailerCount >= __TAIDA_NET_MAX_TRAILER_COUNT) return null; // too many trailers
         // Skip trailer line
         const trlf = findCRLF(readPos);
         if (trlf < 0) return null; // malformed: incomplete trailer
+        const lineLen = trlf - readPos;
+        trailerBytes += lineLen;
+        if (trailerBytes > __TAIDA_NET_MAX_TRAILER_BYTES) return null; // trailer block too large
+        trailerCount++;
         readPos = trlf + 2;
       }
     }
@@ -589,27 +672,39 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
   for (;;) {
     if (readPos >= dataLen) return -1; // need more data
 
-    // Find CRLF after chunk-size
+    // Find CRLF after chunk-size, capped at MAX_CHUNK_LINE_BYTES so a chunk
+    // -ext flood is treated as malformed rather than "incomplete" (E32B-051).
+    // Off-by-one parity with Rust/C: we scan `cap` bytes total, i.e. up to
+    // absolute index `readPos + cap - 1` inclusive, hence `i < readPos + cap - 1`.
     let crlfPos = -1;
-    for (let i = readPos; i < dataLen - 1; i++) {
+    const scanWindow = Math.min(
+      dataLen - 1,
+      readPos + __TAIDA_NET_MAX_CHUNK_LINE_BYTES - 1
+    );
+    for (let i = readPos; i < scanWindow; i++) {
       if (buf[bodyOffset + i] === 13 && buf[bodyOffset + i + 1] === 10) { crlfPos = i; break; }
     }
-    if (crlfPos < 0) return -1; // need more data
+    if (crlfPos < 0) {
+      const remaining = dataLen - readPos;
+      if (remaining >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) return -2; // malformed
+      return -1; // need more data
+    }
 
     // Parse chunk-size hex
     let hexEnd = crlfPos;
     for (let i = readPos; i < crlfPos; i++) {
       if (buf[bodyOffset + i] === 0x3B) { hexEnd = i; break; }
     }
+    // E32B-053: no OWS trim; whitespace inside chunk-size is rejected by
+    // the strict hex regex below, matching Interpreter / Native parity.
     let hexStart = readPos;
-    while (hexStart < hexEnd && (buf[bodyOffset + hexStart] === 0x20 || buf[bodyOffset + hexStart] === 0x09)) hexStart++;
-    while (hexEnd > hexStart && (buf[bodyOffset + hexEnd - 1] === 0x20 || buf[bodyOffset + hexEnd - 1] === 0x09)) hexEnd--;
     if (hexStart >= hexEnd) return -2; // malformed: empty chunk-size
 
     const hexStr = buf.toString('latin1', bodyOffset + hexStart, bodyOffset + hexEnd);
-    if (!/^[0-9a-fA-F]+$/.test(hexStr)) return -2; // strict hex validation
+    if (!/^[0-9a-fA-F]+$/.test(hexStr)) return -2; // strict hex validation (rejects OWS)
     // NB2-4: Reject oversized chunk-size that would exceed safe integer range.
-    // Prevents JS parseInt wrapping to Infinity / imprecise float for huge hex values.
+    // Leading-zero policy: 15-digit cap is enforced on literal hex length;
+    // leading zeros count toward the cap so `00...01` (16 digits) is rejected.
     if (hexStr.length > 15) return -2; // malformed: oversized chunk-size
     const chunkSize = parseInt(hexStr, 16);
     if (isNaN(chunkSize) || chunkSize < 0 || !Number.isSafeInteger(chunkSize)) return -2; // malformed
@@ -617,17 +712,33 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
     readPos = crlfPos + 2;
 
     if (chunkSize === 0) {
-      // Skip trailers
+      // Skip trailers, bounded by line count + total bytes (E32B-052) and
+      // per-line length (E32B-051). Hitting a cap is treated as malformed.
+      let trailerCount = 0;
+      let trailerBytes = 0;
       for (;;) {
         if (readPos + 2 > dataLen) return -1;
         if (buf[bodyOffset + readPos] === 13 && buf[bodyOffset + readPos + 1] === 10) {
           return readPos + 2; // complete
         }
+        if (trailerCount >= __TAIDA_NET_MAX_TRAILER_COUNT) return -2;
         let trlf = -1;
-        for (let i = readPos; i < dataLen - 1; i++) {
+        const tWindow = Math.min(
+          dataLen - 1,
+          readPos + __TAIDA_NET_MAX_CHUNK_LINE_BYTES - 1
+        );
+        for (let i = readPos; i < tWindow; i++) {
           if (buf[bodyOffset + i] === 13 && buf[bodyOffset + i + 1] === 10) { trlf = i; break; }
         }
-        if (trlf < 0) return -1;
+        if (trlf < 0) {
+          const tRemaining = dataLen - readPos;
+          if (tRemaining >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) return -2;
+          return -1;
+        }
+        const lineLen = trlf - readPos;
+        trailerBytes += lineLen;
+        if (trailerBytes > __TAIDA_NET_MAX_TRAILER_BYTES) return -2;
+        trailerCount++;
         readPos = trlf + 2;
       }
     }
@@ -1878,19 +1989,86 @@ function __taida_net_buildStreamingHead(status, headers) {
   return head;
 }
 
-// Validate that headers don't contain reserved names for streaming path.
-function __taida_net_validateReservedHeaders(headers) {
+// RFC 7230 §3.2.6 token grammar — used by both streaming + eager validators.
+function __taida_net_isRfc7230TokenByte(b) {
+  return (
+    (b >= 0x30 && b <= 0x39) || // 0-9
+    (b >= 0x41 && b <= 0x5A) || // A-Z
+    (b >= 0x61 && b <= 0x7A) || // a-z
+    b === 0x21 || b === 0x23 || b === 0x24 || b === 0x25 || b === 0x26 ||
+    b === 0x27 || b === 0x2A || b === 0x2B || b === 0x2D || b === 0x2E ||
+    b === 0x5E || b === 0x5F || b === 0x60 || b === 0x7C || b === 0x7E
+  );
+}
+
+// RFC 7230 §3.2 field-value byte = HTAB / SP / VCHAR / obs-text.
+function __taida_net_isRfc7230FieldValueByte(b) {
+  return b === 0x09 || (b >= 0x20 && b <= 0x7E) || (b >= 0x80 && b <= 0xFF);
+}
+
+// Validate user headers for the streaming path.
+function __taida_net_validateStreamingHeaders(headers) {
   for (let i = 0; i < headers.length; i++) {
-    const name = (headers[i].name || '').toLowerCase();
-    if (name === 'content-length') {
+    const h = headers[i];
+    if (!h || typeof h !== 'object' || Array.isArray(h)) {
+      throw new __NativeError('startResponse: headers[' + i + '] must be @(name, value)');
+    }
+    const name = h.name;
+    const value = h.value;
+    if (typeof name !== 'string') {
+      throw new __NativeError('startResponse: headers[' + i + '].name must be Str');
+    }
+    if (typeof value !== 'string') {
+      throw new __NativeError('startResponse: headers[' + i + '].value must be Str');
+    }
+    if (Buffer.byteLength(name, 'utf-8') > 8192) {
+      throw new __NativeError('startResponse: headers[' + i + '].name exceeds 8192 bytes');
+    }
+    if (Buffer.byteLength(value, 'utf-8') > 65536) {
+      throw new __NativeError('startResponse: headers[' + i + '].value exceeds 65536 bytes');
+    }
+    if (name.length === 0) {
+      throw new __NativeError('startResponse: headers[' + i + '].name is empty');
+    }
+    const nameBuf = Buffer.from(name, 'utf-8');
+    for (let k = 0; k < nameBuf.length; k++) {
+      const b = nameBuf[k];
+      if (!__taida_net_isRfc7230TokenByte(b)) {
+        throw new __NativeError(
+          'startResponse: headers[' + i + '].name contains a byte outside RFC 7230 token grammar (0x' +
+          b.toString(16).toUpperCase().padStart(2, '0') + ')');
+      }
+    }
+    if (nameBuf.includes(0x5F /* '_' */)) {
+      throw new __NativeError(
+        "startResponse: headers[" + i + "].name contains '_' which reverse proxies normalise inconsistently");
+    }
+    const valueBuf = Buffer.from(value, 'utf-8');
+    for (let k = 0; k < valueBuf.length; k++) {
+      const b = valueBuf[k];
+      if (!__taida_net_isRfc7230FieldValueByte(b)) {
+        throw new __NativeError(
+          'startResponse: headers[' + i + '].value contains a byte outside RFC 7230 field-value grammar (0x' +
+          b.toString(16).toUpperCase().padStart(2, '0') + ')');
+      }
+    }
+
+    const lower = name.toLowerCase();
+    if (lower === 'content-length') {
       throw new __NativeError(
         "startResponse: 'Content-Length' is not allowed in streaming response headers. " +
         'The runtime manages Content-Length/Transfer-Encoding for streaming responses.');
     }
-    if (name === 'transfer-encoding') {
+    if (lower === 'transfer-encoding') {
       throw new __NativeError(
         "startResponse: 'Transfer-Encoding' is not allowed in streaming response headers. " +
         'The runtime manages Transfer-Encoding for streaming responses.');
+    }
+    if (lower === 'set-cookie') {
+      throw new __NativeError(
+        "startResponse: 'Set-Cookie' is reserved by the runtime; " +
+        'handler-supplied Set-Cookie headers would let attacker-influenced names ' +
+        '(forwarded via untrusted input) inject cookies.');
     }
   }
 }
@@ -1932,10 +2110,17 @@ function __taida_net_startResponse(writer, status, headers) {
   }
 
   // Default headers = []
-  const h = Array.isArray(headers) ? headers : [];
+  let h;
+  if (arguments.length < 3 || typeof headers === 'undefined') {
+    h = [];
+  } else if (Array.isArray(headers)) {
+    h = headers;
+  } else {
+    throw new __NativeError('startResponse: headers must be a List, got ' + String(headers));
+  }
 
-  // Validate reserved headers
-  __taida_net_validateReservedHeaders(h);
+  // Validate streaming response headers
+  __taida_net_validateStreamingHeaders(h);
 
   writer._pendingStatus = s;
   writer._pendingHeaders = h;
@@ -2321,14 +2506,22 @@ function __taida_net_readBodyBytes(writer, count) {
   return Buffer.concat(parts);
 }
 
-// Read a line (up to LF) from leftover buffer, then socket.
-// Returns string (synchronous).
+// Read a line (up to LF) from leftover buffer, then socket. Bounded by
+// __TAIDA_NET_MAX_CHUNK_LINE_BYTES so a streaming chunk-ext flood is treated
+// as malformed framing (parity with eager body_complete cap).
+// Returns string (synchronous). Throws __NativeError when the cap is hit
+// before LF (smuggling vector).
 function __taida_net_readLineFromBody(writer) {
   const bs = writer._bodyState;
   const lineParts = [];
 
   // First drain from leftover.
   while (bs.leftoverPos < bs.leftover.length) {
+    if (lineParts.length >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) {
+      throw new __NativeError(
+        'chunked body error: chunk-size line exceeds byte cap'
+      );
+    }
     const b = bs.leftover[bs.leftoverPos];
     bs.leftoverPos++;
     lineParts.push(b);
@@ -2339,6 +2532,11 @@ function __taida_net_readLineFromBody(writer) {
 
   // Then read from socket byte-by-byte until LF.
   while (true) {
+    if (lineParts.length >= __TAIDA_NET_MAX_CHUNK_LINE_BYTES) {
+      throw new __NativeError(
+        'chunked body error: chunk-size line exceeds byte cap'
+      );
+    }
     const b = __taida_net_readOneByte(writer);
     if (b < 0) break; // EOF
     lineParts.push(b);
@@ -2348,16 +2546,29 @@ function __taida_net_readLineFromBody(writer) {
   return Buffer.from(lineParts).toString();
 }
 
-// Drain chunked trailers after terminal chunk (NB4-8 parity).
+// Drain chunked trailers after terminal chunk. Bounded by line count and
+// total trailer-byte length to keep parity with the eager-path cap policy
+// in docs/reference/net_api.md §5.4. Both caps trigger __NativeError so the
+// caller (readBodyChunk / readBodyAll) aborts the connection rather than
+// continuing on keep-alive.
 function __taida_net_drainChunkedTrailers(writer) {
-  for (let i = 0; i < 64; i++) {
+  let totalBytes = 0;
+  for (let i = 0; i < __TAIDA_NET_MAX_TRAILER_COUNT; i++) {
     const line = __taida_net_readLineFromBody(writer);
     // NB4-18: EOF (0 raw bytes) != valid empty line ("\r\n").
     if (line.length === 0) {
       throw new __NativeError('chunked body error: missing final CRLF after terminal chunk');
     }
-    if (line.trim() === '') return;
+    const trimmed = line.trim();
+    if (trimmed === '') return;
+    totalBytes += trimmed.length;
+    if (totalBytes > __TAIDA_NET_MAX_TRAILER_BYTES) {
+      throw new __NativeError('chunked body error: trailer block exceeds byte cap');
+    }
   }
+  // Smuggling guard: more than the count cap of trailer lines without
+  // observing the final empty line.
+  throw new __NativeError('chunked body error: too many trailer lines');
 }
 
 // NET4-3a: readBodyChunk(req) -> Lax[Bytes]
@@ -2419,11 +2630,22 @@ function __taida_net_readBodyChunkChunkedSync(writer) {
 
       case 'waitSize': {
         const line = __taida_net_readLineFromBody(writer);
-        const trimmed = line.trim();
-        if (trimmed === '') continue;
-        const hexStr = trimmed.split(';')[0].trim();
-        // NB4-18: Strict hex-only parse. Reject partial parse like '1g'.
+        // E32B-053: strip only the trailing CRLF terminator, then reject any
+        // OWS within chunk-size via the strict hex regex below. RFC 7230 §4.1.
+        let stripped = line;
+        if (stripped.endsWith('\n')) stripped = stripped.slice(0, -1);
+        if (stripped.endsWith('\r')) stripped = stripped.slice(0, -1);
+        if (stripped === '') continue; // CRLF-only — try again
+        const semi = stripped.indexOf(';');
+        const hexStr = semi >= 0 ? stripped.slice(0, semi) : stripped;
+        // Strict hex-only parse. Rejects OWS (SP/HT/CR/LF) and partial parse
+        // like '1g' uniformly.
         if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
+          throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
+        }
+        // Leading-zero policy: 15-digit cap on literal length, parity with
+        // Interpreter / Native eager and streaming paths.
+        if (hexStr.length > 15) {
           throw new __NativeError('readBodyChunk: invalid chunk-size \'' + hexStr + '\' in chunked body');
         }
         const chunkSize = parseInt(hexStr, 16);
@@ -2581,11 +2803,19 @@ function __taida_net_readBodyAllImpl(writer) {
           break;
         case 'waitSize': {
           const line = __taida_net_readLineFromBody(writer);
-          const trimmed = line.trim();
-          if (trimmed === '') continue;
-          const hexStr = trimmed.split(';')[0].trim();
-          // NB4-18: Strict hex-only parse (parity with readBodyChunk).
+          // E32B-053: only strip the trailing CRLF terminator, then reject
+          // OWS within chunk-size via the strict hex regex below.
+          let stripped = line;
+          if (stripped.endsWith('\n')) stripped = stripped.slice(0, -1);
+          if (stripped.endsWith('\r')) stripped = stripped.slice(0, -1);
+          if (stripped === '') continue;
+          const semi = stripped.indexOf(';');
+          const hexStr = semi >= 0 ? stripped.slice(0, semi) : stripped;
+          // Strict hex-only parse (parity with readBodyChunk + eager paths).
           if (!/^[0-9a-fA-F]+$/.test(hexStr)) {
+            throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
+          }
+          if (hexStr.length > 15) {
             throw new __NativeError('readBodyAll: invalid chunk-size \'' + hexStr + '\' in chunked body');
           }
           const chunkSize = parseInt(hexStr, 16);
@@ -2665,6 +2895,17 @@ function __taida_net_readBodyAllImpl(writer) {
 // RFC 6455 magic GUID.
 const __WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const __WS_MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MiB
+const __WS_CONTROL_MAX_PAYLOAD = 125;
+
+function __taida_net_isWsControlOpcode(opcode) {
+  return opcode === 0x8 || opcode === 0x9 || opcode === 0xA;
+}
+
+function __taida_net_isStrictUtf8(buf) {
+  const decoded = buf.toString('utf8');
+  const reencoded = Buffer.from(decoded, 'utf8');
+  return reencoded.length === buf.length && reencoded.equals(buf);
+}
 
 // Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (NET4-3b).
 function __taida_net_computeWsAccept(key) {
@@ -2677,7 +2918,8 @@ function __taida_net_computeWsAccept(key) {
 
 // Write a WebSocket frame to the socket (NET4-3c).
 // Server-to-client: FIN=1, MASK=0.
-// Uses cork/uncork to coalesce header + payload (no Buffer.concat).
+// Uses synchronous fd writes for plaintext; close frames are written atomically
+// so error paths do not tear header and status code apart.
 function __taida_net_writeWsFrame(sock, opcode, payload) {
   const payloadLen = payload ? payload.length : 0;
   // Build frame header on stack (max 10 bytes).
@@ -2716,8 +2958,12 @@ function __taida_net_writeWsFrame(sock, opcode, payload) {
   } else {
     const fd = sock._handle ? sock._handle.fd : -1;
     if (fd >= 0 && __taida_fs) {
-      __taida_net_fdWriteAll(fd, header);
-      if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
+      if (opcode === 0x8 && payloadLen > 0) {
+        __taida_net_fdWriteAll(fd, Buffer.concat([header, payload]));
+      } else {
+        __taida_net_fdWriteAll(fd, header);
+        if (payloadLen > 0) __taida_net_fdWriteAll(fd, payload);
+      }
     } else {
       // Fallback: vectored write via cork/uncork.
       sock.cork();
@@ -2882,6 +3128,10 @@ function __taida_net_readWsFrame(sock) {
   // Oversized payload check.
   if (payloadLen > __WS_MAX_PAYLOAD) {
     return { error: 'payload too large (' + payloadLen + ' bytes, max ' + __WS_MAX_PAYLOAD + ' bytes)' };
+  }
+
+  if (__taida_net_isWsControlOpcode(opcode) && payloadLen > __WS_CONTROL_MAX_PAYLOAD) {
+    return { error: 'control frame payload too large (' + payloadLen + ' bytes, max ' + __WS_CONTROL_MAX_PAYLOAD + ' bytes)' };
   }
 
   // Read masking key.
@@ -3280,10 +3530,7 @@ function __taida_net_wsReceive(ws) {
         if (cp.length > 2) {
           try {
             const reason = cp.slice(2);
-            // Check for invalid UTF-8 sequences by round-tripping.
-            const decoded = reason.toString('utf8');
-            const reencoded = Buffer.from(decoded, 'utf8');
-            if (reencoded.length !== reason.length || !reencoded.equals(reason)) {
+            if (!__taida_net_isStrictUtf8(reason)) {
               __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEA])); // 1002
               writer._wsClosed = true;
               throw new __NativeError('wsReceive: protocol error: invalid UTF-8 in close reason');
@@ -3318,6 +3565,11 @@ function __taida_net_wsReceive(ws) {
     let dataVal;
     if (frame.opcode === 0x1) {
       // Text: return the payload as Str in data field for parity with interpreter.
+      if (!__taida_net_isStrictUtf8(frame.payload)) {
+        __taida_net_writeWsFrame(sock, 0x8, Buffer.from([0x03, 0xEF])); // 1007
+        writer._wsClosed = true;
+        throw new __NativeError('wsReceive: invalid UTF-8 in text frame');
+      }
       dataVal = frame.payload.toString('utf8');
     } else {
       dataVal = new Uint8Array(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);

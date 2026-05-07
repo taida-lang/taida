@@ -138,6 +138,7 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Filter",
     "Find",
     "FindIndex",
+    "FindIndexLax",
     "Flatten",
     "Float_mold",
     "Float_mold_f",
@@ -3190,6 +3191,7 @@ impl JsCodegen {
                     || method == "split"
                     || method == "match"
                     || method == "search"
+                    || method == "searchLax"
                 {
                     let helper = match method.as_str() {
                         "replace" => "__taida_str_replace",
@@ -3197,6 +3199,10 @@ impl JsCodegen {
                         "split" => "__taida_str_split",
                         "match" => "__taida_str_match",
                         "search" => "__taida_str_search",
+                        // E32B-022 (Lock-N): `searchLax` is a Lax[Int]
+                        // sibling of `search`; the runtime helper handles
+                        // the Regex argument dispatch.
+                        "searchLax" => "__taida_str_search_lax",
                         _ => unreachable!(),
                     };
                     self.write(&format!("{}(", helper));
@@ -3228,6 +3234,14 @@ impl JsCodegen {
                 Ok(())
             }
             Expr::FieldAccess(obj, field, _) => {
+                if field.starts_with("__") {
+                    return Err(JsError {
+                        message: format!(
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            field
+                        ),
+                    });
+                }
                 self.gen_expr(obj)?;
                 // F-59 fix: Lax/Gorillax hasValue is a callable function in JS runtime.
                 // When accessed as a property (field access), emit as function call
@@ -4883,7 +4897,7 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 
 /// Compute relative path from `base` directory to `target` file.
 /// C27B-022: Walk up from `start_dir` looking for project-root markers
-/// (`packages.tdm`, `taida.toml`, `.taida`, `.git`). Mirrors the marker
+/// (`packages.tdm`, `taida.toml`, `.git`). Mirrors the marker
 /// set used by `interpreter::module_eval::find_project_root` and
 /// `codegen::driver::find_project_root` so the JS path-traversal guard
 /// agrees with Native / Interpreter on what counts as the project
@@ -4893,7 +4907,6 @@ fn js_find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
     loop {
         if dir.join("packages.tdm").exists()
             || dir.join("taida.toml").exists()
-            || dir.join(".taida").exists()
             || dir.join(".git").exists()
         {
             return dir;

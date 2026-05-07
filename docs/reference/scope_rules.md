@@ -9,6 +9,24 @@ Taida Langには2種類のスコープがあります。
 | モジュールスコープ | ファイルのトップレベルで定義されたシンボル |
 | 関数スコープ | 関数内で定義されたシンボル |
 
+### プロジェクトルートと import 境界
+
+`>>> ./module.td`、`>>> ../module.td`、`>>> /absolute/module.td` の
+ような filesystem import は、実行中ソースから親方向に探索した
+プロジェクトルートを境界にします。プロジェクトルート marker は
+`packages.tdm`、`taida.toml`、`.git/` のいずれかです。
+
+`.taida/` は依存・ビルド出力・ユーザーキャッシュなどの状態置き場であり、
+プロジェクトルート marker ではありません。特に `~/.taida/` はグローバル
+ユーザー状態なので、`$HOME` 全体を Taida project として広げる理由には
+なりません。
+
+マーカーが見つからない単独ソースでは、そのソースのあるディレクトリ
+だけを fallback の境界として扱います。絶対パスの import や `..`
+を含む import がその境界の外へ出る場合、Interpreter / JS / Native /
+WASM ビルドのいずれも、共通のパストラバーサル拒否診断で reject
+します。
+
 ---
 
 ## モジュールスコープ
@@ -118,7 +136,7 @@ processValue value: Int =
 
 分岐の戻り値として受け取ります。
 
-```taida
+```taida fragment
 processValue value: Int =
   // 分岐全体の結果を result に代入
   result <= (
@@ -161,7 +179,7 @@ processData data: Data =
 
 同一スコープ内での同名変数の再定義（シャドウイング）は禁止されています。
 
-```taida
+```taida fragment
 // NG: 同一スコープでの再定義
 x <= 10
 x <= 20  // コンパイルエラー: 'x' は既に定義されています
@@ -195,7 +213,7 @@ result <= x  // 10
 
 Taida Langではすべての変数はイミュータブルです。一度定義した変数に再代入することはできません。
 
-```taida
+```taida fragment
 // NG: 再代入
 counter <= 0
 counter <= counter + 1  // コンパイルエラー

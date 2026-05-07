@@ -849,13 +849,14 @@ fn traversal_rejection_path(path: &Path) -> Option<String> {
     Some(stripped.to_string())
 }
 
-/// RCB-103: Find project root by walking up from the given directory.
+/// Find project root by walking up from the given directory. `.taida/` is
+/// state/config storage, not a project-root marker; otherwise `~/.taida`
+/// can make `$HOME` look like the active project root.
 fn find_project_root(start_dir: &Path) -> PathBuf {
     let mut dir = start_dir.to_path_buf();
     loop {
         if dir.join("packages.tdm").exists()
             || dir.join("taida.toml").exists()
-            || dir.join(".taida").exists()
             || dir.join(".git").exists()
         {
             return dir;
@@ -2184,6 +2185,83 @@ mod tests {
         assert!(
             result.is_none(),
             "which_command should return None for nonexistent binaries"
+        );
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            Self {
+                path: unique_test_dir(name),
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "e32b-017-{}-{}-{}",
+            name,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn test_find_project_root_accepts_supported_markers() {
+        for marker in ["packages.tdm", "taida.toml", ".git"] {
+            let root = TestDir::new(marker.trim_start_matches('.'));
+            let nested = root.path().join("src").join("deep");
+            std::fs::create_dir_all(&nested).expect("create nested project dir");
+
+            let marker_path = root.path().join(marker);
+            if marker == ".git" {
+                std::fs::create_dir_all(&marker_path).expect("create .git marker");
+            } else {
+                std::fs::write(&marker_path, "").expect("write project marker");
+            }
+
+            assert_eq!(
+                find_project_root(&nested),
+                root.path(),
+                "{} should be treated as a project-root marker",
+                marker
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_project_root_ignores_home_taida() {
+        let home = TestDir::new("home-taida");
+        let nested = home.path().join("workspace").join("demo").join("src");
+        std::fs::create_dir_all(home.path().join(".taida")).expect("create home .taida");
+        std::fs::create_dir_all(&nested).expect("create nested source dir");
+
+        assert_eq!(
+            find_project_root(&nested),
+            nested,
+            ".taida alone must not make an ancestor directory the project root"
+        );
+        assert_ne!(
+            find_project_root(&nested),
+            home.path(),
+            "a HOME-like directory with only .taida must not become the project root"
         );
     }
 

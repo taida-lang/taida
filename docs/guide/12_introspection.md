@@ -61,21 +61,21 @@ input => Trim[_]() => Upper[_]() => result
 
 ### 3. 型階層グラフ
 
-`Mold[T] =>` や `Error =>` による継承関係を追跡します。
+クラスライク型の継承関係を追跡します。`Mold[T] =>` 系と `Error =>` 系、構造ベースの `Parent => Child` 系はすべて単一の `ClassLikeType` ノードと `Inheritance` エッジで表現されます。基底種別の情報は metadata `parent_lineage` (`"none"` / `"mold"` / `"error"` / `"named"`) で区別します。
 
 ```
-Staff
+Staff (parent_lineage: "none")
   +-- Commander
   +-- Operator
 
 Mold[T]
-  +-- Result[T, P]
-  +-- Lax[T]
-  +-- Async[T]
+  +-- Result[T, P]   (parent_lineage: "mold")
+  +-- Lax[T]         (parent_lineage: "mold")
+  +-- Async[T]       (parent_lineage: "mold")
 
 Error
-  +-- ValidationError
-  +-- NetworkError
+  +-- ValidationError  (parent_lineage: "error")
+  +-- NetworkError     (parent_lineage: "error")
 ```
 
 ### 4. エラー境界グラフ
@@ -274,7 +274,7 @@ scores => Filter[_, _ x = x > 80]() => debug => Map[_, _ x = x * 2]() => result
 
 `debug(value)` は渡された値をそのまま返すため、パイプラインを切断せずに観測地点を挟めます。単独で値を print したいときや、ラベル付きで `[label] Type: repr` 形式を出したいときは以下を使います。
 
-```taida
+```taida fragment
 debug("ping")                 // "ping" を出力
 debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)" を出力
 ```

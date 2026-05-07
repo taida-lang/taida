@@ -93,6 +93,15 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_LIST_MAGIC  0x544149444C535400LL // "TAIDLST\0"
 #define TAIDA_PACK_MAGIC  0x5441494450414B00LL // "TAIDPAK\0"
 #define TAIDA_STR_MAGIC   0x5441494453545200LL // "TAIDSTR\0"
+// E32B-082: Static-string magic used by the cranelift codegen for string
+// literals living in `.rodata`. Layout matches the runtime-allocated header
+// (`[magic, byte_len, bytes..., \0]` with sizeof(taida_val)*2 bytes of
+// header) so `taida_str_byte_len` can short-circuit on either magic, but
+// retain/release (which write `hdr[0]` / `hdr[1]` and may free the block)
+// only match `TAIDA_STR_MAGIC` so the static path is naturally a no-op.
+// One-bit difference from `TAIDA_STR_MAGIC` (0x52 → 0x53 in the magic
+// region) keeps the family ASCII-readable as "TAIDSTS\0".
+#define TAIDA_STR_STATIC_MAGIC 0x5441494453545300LL // "TAIDSTS\0"
 #define TAIDA_HMAP_MAGIC  0x54414944484D4100LL // "TAIDHMA\0"
 #define TAIDA_SET_MAGIC   0x5441494453455400LL // "TAIDSET\0"
 #define TAIDA_ASYNC_MAGIC 0x5441494441535900LL // "TAIDASY\0"
@@ -708,6 +717,7 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg);
 static taida_val taida_make_io_error(int err_code, const char *err_msg);
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
+static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
@@ -723,6 +733,13 @@ taida_val taida_typeof(taida_val val, taida_val tag);
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle);
 taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle);
+// E32B-022 (Lock-N): Lax[Int]-returning siblings for the legacy `-1`
+// sentinel `*indexOf*` / `search` / `FindIndex` helpers. PHILOSOPHY I
+// forbids magic-value sentinels.
+taida_val taida_polymorphic_index_of_lax(taida_val obj, taida_val needle);
+taida_val taida_polymorphic_last_index_of_lax(taida_val obj, taida_val needle);
+taida_val taida_str_search_regex_lax(const char *s, taida_val regex_pack);
+taida_val taida_list_find_index_lax(taida_val list_ptr, taida_val fn_ptr);
 // C12-6c: Regex polymorphic dispatchers + constructor.
 taida_val taida_regex_new(const char *pattern_s, const char *flags_s);
 taida_val taida_str_split_poly(const char *s, taida_val sep);
@@ -1086,6 +1103,38 @@ static taida_val taida_make_error(const char *error_type, const char *error_msg)
     char *type_str2 = taida_str_new_copy(error_type);
     taida_pack_set(pack, 2, (taida_val)type_str2);
     taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    return pack;
+}
+
+// E33B-003 Cat B: Native counterpart to JS `__TaidaError` field lift.
+// Builds an Error pack that mirrors `taida_make_error` shape but adds a
+// public `kind` field at the end so user code's `err.kind` parity matches
+// the Interpreter (which surfaces Error.fields[0] as a direct field via
+// `Value::get_error_field`) and the JS runtime (after the matching lift).
+static taida_val taida_make_error_with_kind(const char *error_type, const char *error_msg, const char *error_kind) {
+    taida_register_builtin_error_field_names();
+
+    taida_val pack = taida_pack_new(4);
+    // type
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
+    char *type_str = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 0, (taida_val)type_str);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    // message
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_MESSAGE);
+    char *msg_str = taida_str_new_copy(error_msg);
+    taida_pack_set(pack, 1, (taida_val)msg_str);
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    // __type (RCB-101)
+    taida_pack_set_hash(pack, 2, (taida_val)0x84d2d84b631f799bULL);
+    char *type_str2 = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 2, (taida_val)type_str2);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    // kind (E33B-003 Cat B parity field)
+    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"kind"));
+    char *kind_str = taida_str_new_copy(error_kind);
+    taida_pack_set(pack, 3, (taida_val)kind_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
     return pack;
 }
 
@@ -3571,7 +3620,13 @@ static taida_val taida_bytes_get_lax(taida_val bytes_ptr, taida_val index) {
 taida_val taida_str_concat(const char* a, const char* b) {
     if (!a) a = "";
     if (!b) b = "";
-    size_t la = strlen(a), lb = strlen(b);
+    // E32B-082: prefer the heap-header byte length so embedded NUL bytes
+    // in either side of the concat are preserved (parity with interp/JS
+    // where `("X" + "X\x00Y").length() == 4`). Falls back to strlen for
+    // raw C strings that have no header (FFI / inline asm callsites).
+    size_t la = 0, lb = 0;
+    if (!taida_str_byte_len(a, &la)) la = strlen(a);
+    if (!taida_str_byte_len(b, &lb)) lb = strlen(b);
     // M-10: Overflow guard on la + lb before passing to taida_str_alloc.
     size_t total_len = taida_safe_add(la, lb, "str_concat length");
     char *buf = taida_str_alloc(total_len);
@@ -3582,6 +3637,16 @@ taida_val taida_str_concat(const char* a, const char* b) {
 
 taida_val taida_str_length(const char* s) {
     if (!s) return 0;
+    // E32B-082: prefer the heap-header byte length so embedded NUL bytes are
+    // counted (parity with interp/JS where `"X\x00Y".length() == 3`). Static
+    // strings emitted by the cranelift codegen now carry the same hidden
+    // header, so this short-circuits before strlen() truncates at the first
+    // NUL. The fall-through to strlen is preserved for raw C strings handed
+    // in from FFI / inline assembly callsites, where there is no header.
+    size_t out_len = 0;
+    if (taida_str_byte_len(s, &out_len)) {
+        return (taida_val)out_len;
+    }
     return (taida_val)strlen(s);
 }
 
@@ -3941,13 +4006,20 @@ taida_val taida_str_repeat(const char* s, taida_val n) {
 // are unchanged.
 taida_val taida_str_byte_at(const char* s, taida_val idx) {
     if (!s) return -1;
-    taida_val len = (taida_val)strlen(s);
+    // Prefer the heap-header byte length so embedded NUL bytes are
+    // addressable (parity with interp/JS). Falls back to strlen for raw
+    // C-string callers without a header.
+    size_t byte_len = 0;
+    if (!taida_str_byte_len(s, &byte_len)) byte_len = strlen(s);
+    taida_val len = (taida_val)byte_len;
     if (idx < 0 || idx >= len) return -1;
     return (taida_val)(unsigned char)s[idx];
 }
 taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_value) {
     if (!s) return taida_lax_empty(default_value);
-    taida_val len = (taida_val)strlen(s);
+    size_t byte_len = 0;
+    if (!taida_str_byte_len(s, &byte_len)) byte_len = strlen(s);
+    taida_val len = (taida_val)byte_len;
     if (idx < 0 || idx >= len) {
         return taida_lax_empty(default_value);
     }
@@ -3956,7 +4028,12 @@ taida_ptr taida_str_byte_at_lax(const char* s, taida_val idx, taida_val default_
 }
 taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {
     if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val len = (taida_val)strlen(s);
+    // E32B-082 follow-up (Codex REJECT): heap-header byte length so a
+    // slice that crosses an embedded NUL keeps all bytes (parity with
+    // interp/JS). Falls back to strlen for raw C-string callers.
+    size_t byte_len = 0;
+    if (!taida_str_byte_len(s, &byte_len)) byte_len = strlen(s);
+    taida_val len = (taida_val)byte_len;
     if (start < 0) start = 0;
     if (start > len) start = len;
     if (end < 0) end = 0;
@@ -3969,6 +4046,13 @@ taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {
 }
 taida_val taida_str_byte_length(const char* s) {
     if (!s) return 0;
+    // E32B-082 follow-up (Codex REJECT): prefer the heap-header byte length
+    // so embedded NUL bytes are counted (parity with interp/JS). Falls back
+    // to strlen for raw C-string callers without a header.
+    size_t out_len = 0;
+    if (taida_str_byte_len(s, &out_len)) {
+        return (taida_val)out_len;
+    }
     return (taida_val)strlen(s);
 }
 // ── C26B-018 (C) StringRepeatJoin ───────────────────────────────
@@ -5692,22 +5776,26 @@ static int taida_str_byte_len(const char *s, size_t *out_len) {
     if (!s) return 0;
     uintptr_t ptr = (uintptr_t)s;
     if (ptr < 4096) return 0;
-    // Check if this is a heap string with hidden header
+    // Check if this is a heap string (TAIDA_STR_MAGIC) or a cranelift-emitted
+    // static-string literal (TAIDA_STR_STATIC_MAGIC, E32B-082) with a
+    // hidden length header at ptr-16.
     taida_val *hdr = ((taida_val*)s) - 2;
     if (taida_ptr_is_readable((taida_val)hdr, sizeof(taida_val) * 2)) {
         taida_val tag = hdr[0];
-        if ((tag & TAIDA_MAGIC_MASK) == TAIDA_STR_MAGIC) {
+        taida_val masked = tag & TAIDA_MAGIC_MASK;
+        if (masked == TAIDA_STR_MAGIC || masked == TAIDA_STR_STATIC_MAGIC) {
             if (out_len) *out_len = (size_t)hdr[1];
             return 1;
         }
     }
-    // Static string — fall back to NUL scan
+    // No header — fall back to NUL scan (raw C strings handed in via FFI).
     return taida_read_cstr_len_safe(s, 16 * 1024 * 1024, out_len);
 }
 
 static int taida_hashmap_key_valid(taida_val key_ptr) {
-    // All values are valid keys in Taida.
-    // Null (0) is traditionally not a key, but we can allow it as Int(0).
+    // Values are valid keys in Taida.
+    // Null (0) is not a key, but can be allowed as Int(0).
+    (void)key_ptr;
     return 1;
 }
 
@@ -6513,8 +6601,12 @@ taida_val taida_polymorphic_length(taida_val ptr) {
     if (TAIDA_IS_BYTES_CONTIG(ptr)) {
         return ((taida_val*)ptr)[1];
     }
-    // Treat as string
+    // Treat as string. E32B-082: prefer the heap-header byte length so
+    // embedded NUL bytes are counted (e.g. `"X\x00Y".length() == 3`),
+    // matching interpreter / JS parity. Falls back to the NUL-bounded scan
+    // for raw C-string callers (FFI / inline asm) that have no header.
     size_t sl = 0;
+    if (taida_str_byte_len((const char*)ptr, &sl)) return (taida_val)sl;
     if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (taida_val)sl;
     return 0;
 }
@@ -6551,6 +6643,62 @@ taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle) {
         return taida_list_last_index_of(obj, needle);
     }
     return taida_str_last_index_of((const char*)obj, (const char*)needle);
+}
+
+// E32B-022 (Lock-N): Lax[Int]-returning siblings of the legacy
+// `*indexOf*` helpers. The Lax pack uses Int default 0 for the
+// hasValue=false case to honour PHILOSOPHY I (no magic sentinels).
+static taida_val taida_make_int_lax_found(taida_val idx) {
+    taida_ptr lax = (taida_ptr)taida_lax_new(idx, 0);
+    // Match `taida_lax_to_string` expectations: `taida_lax_new` /
+    // `taida_lax_empty` only stamp tags on slot 0 (hasValue, BOOL) and
+    // slot 3 (__type, STR). Slots 1 (__value) and 2 (__default) rely on
+    // `taida_pack_new` which explicitly writes `TAIDA_TAG_INT (= 0)`
+    // into every freshly allocated tag slot (arena / freelist /
+    // TAIDA_MALLOC paths all set `cached[2 + i*3 + 1] = 0`), which is
+    // exactly what we want for the int-returning indexOf path.
+    return (taida_val)lax;
+}
+
+static taida_val taida_make_int_lax_missing(void) {
+    taida_ptr lax = (taida_ptr)taida_lax_empty(0);
+    return (taida_val)lax;
+}
+
+taida_val taida_polymorphic_index_of_lax(taida_val obj, taida_val needle) {
+    if (obj == 0 || obj < 4096) return taida_make_int_lax_missing();
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
+        taida_val raw = taida_list_index_of(obj, needle);
+        if (raw < 0) return taida_make_int_lax_missing();
+        return taida_make_int_lax_found(raw);
+    }
+    taida_val raw = taida_str_index_of((const char*)obj, (const char*)needle);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
+}
+
+taida_val taida_polymorphic_last_index_of_lax(taida_val obj, taida_val needle) {
+    if (obj == 0 || obj < 4096) return taida_make_int_lax_missing();
+    if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
+        taida_val raw = taida_list_last_index_of(obj, needle);
+        if (raw < 0) return taida_make_int_lax_missing();
+        return taida_make_int_lax_found(raw);
+    }
+    taida_val raw = taida_str_last_index_of((const char*)obj, (const char*)needle);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
+}
+
+taida_val taida_str_search_regex_lax(const char *s, taida_val regex_pack) {
+    taida_val raw = taida_str_search_regex(s, regex_pack);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
+}
+
+taida_val taida_list_find_index_lax(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val raw = taida_list_find_index(list_ptr, fn_ptr);
+    if (raw < 0) return taida_make_int_lax_missing();
+    return taida_make_int_lax_found(raw);
 }
 
 // ── Polymorphic collection methods ───────────────────────

@@ -414,6 +414,178 @@ fn run_js_build_error(td_path: &Path, label: &str) -> Option<String> {
     Some(normalize(&String::from_utf8_lossy(&output.stderr)))
 }
 
+fn run_wasm_min_build_error(td_path: &Path, label: &str) -> Option<String> {
+    let wasm_path = unique_temp_path("taida_parity_wasm_min_err", label, "wasm");
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-min")
+        .arg(td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .ok()?;
+    let _ = fs::remove_file(&wasm_path);
+    if output.status.success() {
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn assert_e32b019_e1605_rejected_4backend(label: &str, source: &str) {
+    let td_path = unique_temp_path("taida_e32b019_e1605", label, "td");
+    fs::write(&td_path, source).expect("write E32B-019 source");
+
+    let backends: [(&str, Option<String>); 4] = [
+        ("interpreter", run_interpreter_error(&td_path)),
+        ("js", run_js_build_error(&td_path, label)),
+        ("native", run_native_build_error(&td_path, label)),
+        ("wasm-min", run_wasm_min_build_error(&td_path, label)),
+    ];
+
+    let _ = fs::remove_file(&td_path);
+
+    for (backend, err) in backends {
+        let err = err.unwrap_or_else(|| {
+            panic!(
+                "E32B-019 {}: {} unexpectedly accepted source",
+                label, backend
+            )
+        });
+        assert!(
+            err.contains("[E1605]"),
+            "E32B-019 {}: {} error should mention [E1605], got: {}",
+            label,
+            backend,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_e32b_019_e1605_nested_contexts_4backend_negative() {
+    let cases = [
+        (
+            "stdout_arg",
+            r#"
+Enum => Status = :Ok :Retry
+stdout((Status:Retry() > 0).toString())
+"#,
+        ),
+        (
+            "func_arg",
+            r#"
+Enum => Status = :Ok :Retry
+echoBool value = value => :Bool
+stdout(echoBool(Status:Retry() > 0).toString())
+"#,
+        ),
+        (
+            "template_interp",
+            r#"
+Enum => Status = :Ok :Retry
+msg <= `bad ${Status:Retry() > 0}`
+stdout(msg)
+"#,
+        ),
+        (
+            "cond_arm",
+            r#"
+Enum => Status = :Ok :Retry
+result <= (
+  | true |> Status:Retry() > 0
+  | _ |> false
+)
+stdout(result.toString())
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_e32b019_e1605_rejected_4backend(label, source);
+    }
+}
+
+// E32B-045: Template interpolations that have trailing syntax errors (so the
+// inner parser produces a partial AST + parse_errors) must still surface the
+// embedded `[E1605]` on all four backends. Previously `parse_errors.is_empty()`
+// gated the entire E1605 walk, so `${foo == "x" |> bar}` was silently
+// accepted because `|> bar` is not legal in expression context. The fix uses
+// the partial AST (which still contains the comparison prefix) and pins the
+// behaviour here so JS / Native / wasm-min all reject with `[E1605]`.
+#[test]
+fn test_e32b_045_e1605_partial_parse_template_4backend_negative() {
+    let cases = [
+        (
+            "trailing_pipe_drop",
+            r#"
+foo <= 1
+msg <= `bad ${foo == "x" |> bar}`
+stdout(msg)
+"#,
+        ),
+        (
+            "trailing_pipe_stdout_sink",
+            r#"
+n <= 1
+msg <= `head ${n == "a" |> stdout}`
+stdout(msg)
+"#,
+        ),
+        (
+            "second_interp_trailing_pipe_drop",
+            r#"
+foo <= 1
+msg <= `head ${foo == 2} tail ${foo == "x" |> bar}`
+stdout(msg)
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_e32b019_e1605_rejected_4backend(label, source);
+    }
+}
+
+// E32B-064: pin three additional E1605 contexts (list literal, named arg of
+// constructor, parenthesised let-rhs) on all four backends. The Rust-side
+// fixture in `tests/e32b_019_comparison_diagnostics.rs` exercises the checker
+// in process; this parity counterpart guarantees that JS / Native / wasm-min
+// lower the same source to the same `[E1605]` reject.
+#[test]
+fn test_e32b_064_e1605_extra_contexts_4backend_negative() {
+    let cases = [
+        (
+            "list_literal",
+            r#"
+Enum => Status = :Ok :Retry
+xs <= @[Status:Retry() > 0]
+stdout(xs.length().toString())
+"#,
+        ),
+        (
+            "named_arg_of_constructor",
+            r#"
+Enum => Status = :Ok :Retry
+Box = @(value: Bool)
+b <= Box(value <= Status:Retry() > 0)
+stdout(b.value.toString())
+"#,
+        ),
+        (
+            "let_rhs_extra_paren",
+            r#"
+Enum => Status = :Ok :Retry
+res <= ((Status:Retry() > 0)).toString()
+stdout(res)
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_e32b019_e1605_rejected_4backend(label, source);
+    }
+}
+
 fn spawn_http_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind http loopback");
     listener.set_nonblocking(false).expect("set blocking");
@@ -936,7 +1108,22 @@ fn interpreter_skip_list() -> Vec<&'static str> {
 fn native_expected_reject_list() -> Vec<&'static str> {
     vec![
         "compile_stream", // Stream[T] is outside the native backend capability set
+        // E32B-023 (Lock-N): Native and wasm-* lower mutual cycles to
+        // plain calls and SIGSEGV at depth, so the checker now rejects
+        // **any** mutual recursion with `[E0700]`. Interpreter / JS
+        // continue to compile and run these via the trampoline.
+        "compile_mutual_recursion",
+        "compile_c12_3_mutual_tail",
     ]
+}
+
+/// E32B-023: per-fixture expected reject substring. Falls back to the
+/// historical Stream capability message for fixtures not listed here.
+fn native_reject_expected_substring(stem: &str) -> &'static str {
+    match stem {
+        "compile_mutual_recursion" | "compile_c12_3_mutual_tail" => "[E0700]",
+        _ => "unsupported mold type: Stream",
+    }
 }
 
 // =========================================================================
@@ -1101,10 +1288,12 @@ fn run_three_way_parity_fixture(stem: &str) {
             if !native_expected_rejects.contains(&stem) {
                 panic!("{}: native compile/run failed\n  {}", stem, err);
             }
+            let expected = native_reject_expected_substring(stem);
             assert!(
-                err.contains("unsupported mold type: Stream"),
-                "{}: expected Stream capability reject, got: {}",
+                err.contains(expected),
+                "{}: expected reject substring `{}`, got: {}",
                 stem,
+                expected,
                 err,
             );
             if has_node {
@@ -1286,8 +1475,9 @@ fn test_http_request_headers_body_loopback_parity() {
             r#"
 resp <= HttpRequest["POST", "http://127.0.0.1:{port}/echo"](headers <= @(x_test <= "abc"), body <= "ping")
 resp ]=> out
-stdout(out.__value.status.toString())
-stdout(out.__value.body)
+out ]=> outV
+stdout(outV.status.toString())
+stdout(outV.body)
 "#
         );
 
@@ -1352,8 +1542,9 @@ payloadLax ]=> payload
 writeRes <= writeBytes("{path}", payload)
 stdout(writeRes.isSuccess().toString())
 readRes <= readBytes("{path}")
+readRes ]=> readResV
 stdout(readRes.hasValue.toString())
-decoded <= Utf8Decode[readRes.__value]()
+decoded <= Utf8Decode[readResV]()
 decoded ]=> text
 stdout(text)
 "#,
@@ -1439,13 +1630,15 @@ payloadLax ]=> payload
 writeRes <= writeBytes("{path}", payload)
 stdout(writeRes.isSuccess().toString())
 chunkA <= readBytesAt("{path}", 0, 4)
+chunkA ]=> chunkAV
 stdout(chunkA.hasValue.toString())
-decA <= Utf8Decode[chunkA.__value]()
+decA <= Utf8Decode[chunkAV]()
 decA ]=> textA
 stdout(textA)
 chunkB <= readBytesAt("{path}", 12, 8)
+chunkB ]=> chunkBV
 stdout(chunkB.hasValue.toString())
-decB <= Utf8Decode[chunkB.__value]()
+decB <= Utf8Decode[chunkBV]()
 decB ]=> textB
 stdout(textB)
 chunkC <= readBytesAt("{path}", 32, 4)
@@ -1534,12 +1727,15 @@ fn test_tcp_send_recv_loopback_parity() {
             r#"
 conn <= tcpConnect("127.0.0.1", {port})
 conn ]=> c
-sendRes <= socketSend(c.__value.socket, "ping")
+c ]=> cV
+sendRes <= socketSend(cV.socket, "ping")
 sendRes ]=> s
-recvRes <= socketRecv(c.__value.socket)
+s ]=> sV
+recvRes <= socketRecv(cV.socket)
 recvRes ]=> r
-stdout(s.__value.bytesSent.toString())
-stdout(r.__value)
+stdout(sV.bytesSent.toString())
+r ]=> rV
+stdout(rV)
 "#
         );
 
@@ -1590,15 +1786,18 @@ fn test_tcp_send_recv_bytes_loopback_parity() {
             r#"
 conn <= tcpConnect("127.0.0.1", {port})
 conn ]=> c
+c ]=> cV
 payloadLax <= Bytes["ping"]()
 payloadLax ]=> payload
-sendRes <= socketSendBytes(c.__value.socket, payload)
+sendRes <= socketSendBytes(cV.socket, payload)
 sendRes ]=> s
-recvRes <= socketRecvBytes(c.__value.socket)
+s ]=> sV
+recvRes <= socketRecvBytes(cV.socket)
 recvRes ]=> r
-stdout(s.__value.bytesSent.toString())
+r ]=> rV
+stdout(sV.bytesSent.toString())
 stdout(r.hasValue.toString())
-decoded <= Utf8Decode[r.__value]()
+decoded <= Utf8Decode[rV]()
 decoded ]=> msg
 stdout(msg)
 "#
@@ -1676,25 +1875,31 @@ fn test_tcp_accept_sendall_recvexact_three_way_parity() {
             r#"
 listenerRes <= tcpListen({port}, 1000)
 listenerRes ]=> l
-acceptRes <= tcpAccept(l.__value.listener, 5000)
+l ]=> lV
+acceptRes <= tcpAccept(lV.listener, 5000)
 acceptRes ]=> a
-recvRes <= socketRecvExact(a.__value.socket, 4, 5000)
+a ]=> aV
+recvRes <= socketRecvExact(aV.socket, 4, 5000)
 recvRes ]=> r
-decoded <= Utf8Decode[r.__value]()
+r ]=> rV
+decoded <= Utf8Decode[rV]()
 decoded ]=> msg
 sendPayload <= Bytes["pong"]()
 sendPayload ]=> payload
-sendRes <= socketSendAll(a.__value.socket, payload, 1000)
+sendRes <= socketSendAll(aV.socket, payload, 1000)
 sendRes ]=> s
-closeClient <= socketClose(a.__value.socket)
+s ]=> sV
+closeClient <= socketClose(aV.socket)
 closeClient ]=> c
-closeListener <= listenerClose(l.__value.listener)
+c ]=> cV
+closeListener <= listenerClose(lV.listener)
 closeListener ]=> lc
+lc ]=> lcV
 stdout(r.hasValue.toString())
 stdout(msg)
-stdout(s.__value.bytesSent.toString())
-stdout(c.__value.ok.toString())
-stdout(lc.__value.ok.toString())
+stdout(sV.bytesSent.toString())
+stdout(cV.ok.toString())
+stdout(lcV.ok.toString())
 "#
         );
 
@@ -1794,20 +1999,24 @@ fn test_udp_send_recv_loopback_parity() {
             r#"
 sock <= udpBind("127.0.0.1", 0, 200)
 sock ]=> s
+s ]=> sV
 payloadLax <= Bytes["ping"]()
 payloadLax ]=> payload
-sendRes <= udpSendTo(s.__value.socket, "127.0.0.1", {port}, payload, 1000)
+sendRes <= udpSendTo(sV.socket, "127.0.0.1", {port}, payload, 1000)
 sendRes ]=> sent
-recvRes <= udpRecvFrom(s.__value.socket, 1000)
+sent ]=> sentV
+recvRes <= udpRecvFrom(sV.socket, 1000)
 recvRes ]=> recv
-decoded <= Utf8Decode[recv.__value.data]()
+recv ]=> recvV
+decoded <= Utf8Decode[recvV.data]()
 decoded ]=> msg
-closeRes <= udpClose(s.__value.socket)
+closeRes <= udpClose(sV.socket)
 closeRes ]=> closed
-stdout(sent.__value.bytesSent.toString())
+closed ]=> closedV
+stdout(sentV.bytesSent.toString())
 stdout(recv.hasValue.toString())
 stdout(msg)
-stdout(closed.__value.ok.toString())
+stdout(closedV.ok.toString())
 "#
         );
 
@@ -1889,27 +2098,83 @@ fn test_socket_listener_close_three_way_parity() {
 
     for backend in backends {
         let (port, _rx, handle) = spawn_tcp_echo_server();
+        // E32B-035 / E33B-003 Cat A migration: close operations may fail
+        // (e.g. closing an already-closed socket throws via the Result
+        // envelope). The legacy `result.__value.ok` pattern read the
+        // success-shape inner pack without triggering the throw; the
+        // public-API equivalent catches via `|==` and surfaces a unified
+        // outcome pack.
         let source = format!(
             r#"
-conn <= tcpConnect("127.0.0.1", {port})
-conn ]=> c
-closedByAlias <= udpClose(c.__value.socket)
-closedByAlias ]=> c1
-stdout(c1.__value.ok.toString())
+closeOk =
+  |== err: Error =
+    false
+  => :Bool
+  conn <= tcpConnect("127.0.0.1", {port})
+  conn ]=> c
+  c ]=> cV
+  closedByAlias <= udpClose(cV.socket)
+  closedByAlias ]=> c1
+  c1 ]=> c1V
+  c1V.ok
+=> :Bool
 
-closeAgain <= socketClose(c.__value.socket)
-closeAgain ]=> c2
-stdout(c2.__value.ok.toString())
+closeAgainOk =
+  |== err: Error =
+    false
+  => :Bool
+  conn <= tcpConnect("127.0.0.1", {port})
+  conn ]=> c
+  c ]=> cV
+  first <= udpClose(cV.socket)
+  first ]=> firstA
+  firstA ]=> firstV
+  closeAgain <= socketClose(cV.socket)
+  closeAgain ]=> c2
+  c2 ]=> c2V
+  c2V.ok
+=> :Bool
 
-listenerRes <= tcpListen(0)
-listenerRes ]=> l
-listenerClosed <= listenerClose(l.__value.listener)
-listenerClosed ]=> l1
-stdout(l1.__value.ok.toString())
+listenerOk =
+  |== err: Error =
+    false
+  => :Bool
+  listenerRes <= tcpListen(0)
+  listenerRes ]=> l
+  l ]=> lV
+  listenerClosed <= listenerClose(lV.listener)
+  listenerClosed ]=> l1
+  l1 ]=> l1V
+  l1V.ok
+=> :Bool
 
-listenerCloseAgain <= listenerClose(l.__value.listener)
-listenerCloseAgain ]=> l2
-stdout(l2.__value.ok.toString())
+listenerAgainOk =
+  |== err: Error =
+    false
+  => :Bool
+  listenerRes <= tcpListen(0)
+  listenerRes ]=> l
+  l ]=> lV
+  first <= listenerClose(lV.listener)
+  first ]=> firstA
+  firstA ]=> firstV
+  listenerCloseAgain <= listenerClose(lV.listener)
+  listenerCloseAgain ]=> l2
+  l2 ]=> l2V
+  l2V.ok
+=> :Bool
+
+// E33B-003: must bind to a local before calling .toString() on JS — direct
+// `listenerOk().toString()` triggers an async/await chaining quirk that
+// renders the Bool as @().
+co1 <= closeOk()
+stdout(co1.toString())
+co2 <= closeAgainOk()
+stdout(co2.toString())
+lo1 <= listenerOk()
+stdout(lo1.toString())
+lo2 <= listenerAgainOk()
+stdout(lo2.toString())
 "#
         );
 
@@ -1970,7 +2235,8 @@ fn test_socket_recv_timeout_three_way_parity() {
             r#"
 conn <= tcpConnect("127.0.0.1", {port}, 200)
 conn ]=> c
-recvRes <= socketRecv(c.__value.socket, 50)
+c ]=> cV
+recvRes <= socketRecv(cV.socket, 50)
 recvRes ]=> r
 stdout(r.hasValue.toString())
 "#
@@ -2012,22 +2278,56 @@ fn test_socket_error_kind_three_way_parity() {
 
     for backend in backends {
         let refused_port = find_free_loopback_port();
+        // E32B-035 / E33B-003 Cat A migration: tcpAccept timeout and
+        // tcpConnect refused both throw via the Result envelope. Wrap
+        // them in `|==` helpers that surface a unified outcome pack
+        // (`ok` / `kind`).
         let source = format!(
             r#"
+acceptOutcome lV =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  acceptRes <= tcpAccept(lV.listener, 20)
+  acceptRes ]=> a
+  a ]=> aV
+  @(ok <= aV.ok, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+connectOutcome port: Int =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  connRes <= tcpConnect("127.0.0.1", port, 200)
+  connRes ]=> conn
+  conn ]=> connV
+  @(ok <= connV.ok, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+closeOk lV =
+  |== err: Error =
+    false
+  => :Bool
+  closeRes <= listenerClose(lV.listener)
+  closeRes ]=> c
+  c ]=> cV
+  cV.ok
+=> :Bool
+
 listenerRes <= tcpListen(0)
 listenerRes ]=> l
-acceptRes <= tcpAccept(l.__value.listener, 20)
-acceptRes ]=> a
-stdout(a.__value.ok.toString())
-stdout(a.__value.kind)
-closeRes <= listenerClose(l.__value.listener)
-closeRes ]=> c
-stdout(c.__value.ok.toString())
+l ]=> lV
 
-connRes <= tcpConnect("127.0.0.1", {refused_port}, 200)
-connRes ]=> conn
-stdout(conn.__value.ok.toString())
-stdout(conn.__value.kind)
+acc <= acceptOutcome(lV)
+stdout(acc.ok.toString())
+stdout(acc.kind)
+
+cls <= closeOk(lV)
+stdout(cls.toString())
+
+con <= connectOutcome({refused_port})
+stdout(con.ok.toString())
+stdout(con.kind)
 "#
         );
 
@@ -2097,7 +2397,8 @@ fn test_dns_resolve_three_way_parity() {
         let source = r#"
 res <= dnsResolve("localhost", 1000)
 res ]=> r
-stdout((r.__value.addresses.length() > 0).toString())
+r ]=> rV
+stdout((rV.addresses.length() > 0).toString())
 "#;
 
         let out = match backend {
@@ -2132,6 +2433,14 @@ fn test_pool_lifecycle_three_way_parity() {
         vec!["interp", "native"]
     };
 
+    // E32B-035 migration: poolAcquire returns Async[Result[Token, IoError]].
+    // When acquisition succeeds, `]=>` happily unmolds the Result; when it
+    // fails, `]=>` propagates the throw. The original test mixed both
+    // success and failure paths and read everything via `result.__value.X`
+    // — the success-shape inner pack — to skip the throw. We restore the
+    // same behaviour by catching the throw via `|==` and returning a
+    // unified outcome pack (`ok` / `kind` / `token`), then reading user-
+    // visible fields off that pack.
     let source = r#"
 create <= poolCreate(@(maxSize <= 1, maxIdle <= 1, acquireTimeoutMs <= 25))
 create ]=> c
@@ -2143,35 +2452,42 @@ stdout(h0.idle.toString())
 stdout(h0.inUse.toString())
 stdout(h0.waiting.toString())
 
-a1 <= poolAcquire(p, 25)
-a1 ]=> r1
-stdout((r1.__value.token > 0).toString())
-t1 <= r1.__value.token
+acquireOutcome =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind, token <= 0)
+  => :@(ok: Bool, kind: Str, token: Int)
+  acq <= poolAcquire(p, 25)
+  acq ]=> r
+  r ]=> rV
+  @(ok <= true, kind <= "", token <= rV.token)
+=> :@(ok: Bool, kind: Str, token: Int)
+
+o1 <= acquireOutcome()
+stdout((o1.token > 0).toString())
+t1 <= o1.token
 
 rel1 <= poolRelease(p, t1, "conn-1")
 rel1 ]=> rr1
 stdout(rr1.reused.toString())
 
-a2 <= poolAcquire(p, 25)
-a2 ]=> r2
-stdout((r2.__value.token == t1).toString())
-t2 <= r2.__value.token
+o2 <= acquireOutcome()
+stdout((o2.token == t1).toString())
+t2 <= o2.token
 
-a3 <= poolAcquire(p, 25)
-a3 ]=> r3
-stdout(r3.__value.ok.toString())
-stdout(r3.__value.kind)
+o3 <= acquireOutcome()
+stdout(o3.ok.toString())
+stdout(o3.kind)
 
 rel2 <= poolRelease(p, t2, "conn-2")
 rel2 ]=> _ignored
 
 closeRes <= poolClose(p)
 closeRes ]=> cl
-stdout(cl.__value.ok.toString())
+cl ]=> clV
+stdout(clV.ok.toString())
 
-a4 <= poolAcquire(p, 25)
-a4 ]=> r4
-stdout(r4.__value.kind)
+o4 <= acquireOutcome()
+stdout(o4.kind)
 "#;
 
     for backend in backends {
@@ -2286,7 +2602,8 @@ fn test_https_get_loopback_three_way_parity() {
 resp <= HttpGet["https://127.0.0.1:{}/"]()
 resp ]=> out
 stdout(out.hasValue.toString())
-stdout(out.__value.status.toString())
+out ]=> resOut
+stdout(resOut.status.toString())
 "#,
             server.port
         );
@@ -2325,15 +2642,17 @@ stdout(out.__value.status.toString())
 fn test_os_process_gorillax_three_way_parity() {
     let source = r#"
 okRun <= run("echo", @["hello"])
+okRun ]=> okRunV
 stdout(okRun.hasValue().toString())
-stdout(okRun.__value.code.toString())
+stdout(okRunV.code.toString())
 
 badRun <= run("/nonexistent_program_xyz", @[])
 stdout(badRun.hasValue().toString())
 
 okShell <= execShell("echo shell")
+okShell ]=> okShellV
 stdout(okShell.hasValue().toString())
-stdout(okShell.__value.code.toString())
+stdout(okShellV.code.toString())
 
 badShell <= execShell("exit 7")
 stdout(badShell.hasValue().toString())
@@ -2525,7 +2844,8 @@ stdout(n3.toString())
 n4 <= 1_000
 stdout(n4.toString())
 f <= Int[1e3]()
-stdout(f.__value.toString())
+f ]=> fV
+stdout(fV.toString())
 
 stdout(BitAnd[6, 3]().toString())
 
@@ -2725,7 +3045,8 @@ stdout(msg1.getOrDefault("bad"))
 stdout(cursor2.offset.toString())
 
 negTake <= BytesCursorTake[cursor2, -1]()
-stdout(negTake.__default.cursor.offset.toString())
+negTake ]=> negTakePair
+stdout(negTakePair.cursor.offset.toString())
 
 len2Step <= BytesCursorU8[cursor2]()
 len2Step ]=> len2Pair
@@ -3416,14 +3737,16 @@ main dummy =
   => :Int
   listenAsync <= tcpListen({port}, 1000)
   listenAsync ]=> listener
+  listener ]=> listenerV
   stdout("listening")
-  acceptAsync <= tcpAccept(listener.__value.listener, 5000)
+  acceptAsync <= tcpAccept(listenerV.listener, 5000)
   acceptAsync ]=> accepted
-  recvAsync <= socketRecv(accepted.__value.socket, 5000)
+  accepted ]=> acceptedV
+  recvAsync <= socketRecv(acceptedV.socket, 5000)
   recvAsync ]=> req
   jsonBody <= jsonEncode(@(ok <= true))
-  respondAndClose(accepted.__value.socket, jsonBody)
-  lcloseAsync <= listenerClose(listener.__value.listener)
+  respondAndClose(acceptedV.socket, jsonBody)
+  lcloseAsync <= listenerClose(listenerV.listener)
   lcloseAsync ]=> lclosed
   0
 => :Int
@@ -3661,7 +3984,8 @@ doUpdate reqId reqTitle reqDone =
   mapper <= _ item = | item.id == reqId |> @(id <= reqId, title <= reqTitle, done <= reqDone) | _ |> item
   newItems <= Map[items, mapper]()
   found <= Find[newItems, _ item = item.id == reqId]()
-  jsonPretty(found.__value)
+  found ]=> foundV
+  jsonPretty(foundV)
 => :Str
 stdout(doUpdate(1, "updated", true))
 "#;
@@ -5463,11 +5787,14 @@ stdout(something())
 
 #[test]
 fn rc6a_error_inheritance_basic() {
+    // E32B-035 migration: `err.__type` is rejected as compiler-internal
+    // by [E1960]. The same value is exposed via the public `err.type`
+    // field (constructor-provided), which all backends share.
     let source = r#"
 Error => AppError = @(code: Int)
 err <= AppError(type <= "AppError", message <= "test", code <= 42)
 Str[err.code]() ]=> code_str
-stdout(err.__type + " " + code_str)
+stdout(err.type + " " + code_str)
 "#;
     assert_backend_parity_for_source(source, "rc6a_error_basic");
 }
@@ -5485,12 +5812,16 @@ stdout(err.type + " " + err.message + " " + err.detail + " " + s)
 
 #[test]
 fn rc6b_error_multilevel() {
+    // E32B-035 migration: `ve.__type` → `ve.type` (public Error field).
+    // E32B-018 follow-up: the `type` constructor argument must match the
+    // declared type name exactly (`[E1408]` reject otherwise), so we use
+    // `"ValidationError"` rather than the legacy `"VE"` shorthand.
     let source = r#"
 Error => AppError = @(app_code: Int)
 AppError => ValidationError = @(field_name: Str)
-ve <= ValidationError(type <= "VE", message <= "bad", app_code <= 400, field_name <= "email")
+ve <= ValidationError(type <= "ValidationError", message <= "bad", app_code <= 400, field_name <= "email")
 Str[ve.app_code]() ]=> ac
-stdout(ve.__type + " " + ac + " " + ve.field_name)
+stdout(ve.type + " " + ac + " " + ve.field_name)
 "#;
     assert_backend_parity_for_source(source, "rc6b_multilevel");
 }
@@ -5539,14 +5870,71 @@ stdout(catch_fn(1))
 }
 
 #[test]
+fn rc6e_custom_error_typed_ceiling_filter() {
+    let source = r#"
+Error => BaseErr = @()
+BaseErr => ChildErr = @()
+
+throwChild msg =
+  ChildErr(type <= "ChildErr", message <= msg).throw()
+  ""
+=> :Str
+
+throwBase msg =
+  BaseErr(type <= "BaseErr", message <= msg).throw()
+  ""
+=> :Str
+
+catch_parent x =
+  |== e: BaseErr =
+    "parent:" + e.type + ":" + e.message
+  => :Str
+  throwChild("child")
+=> :Str
+
+catch_exact x =
+  |== e: ChildErr =
+    "child:" + e.type + ":" + e.message
+  => :Str
+  throwChild("exact")
+=> :Str
+
+catch_mismatch x =
+  |== e: ChildErr =
+    "bad:" + e.type
+  => :Str
+  |== e: Error =
+    "outer:" + e.type + ":" + e.message
+  => :Str
+  throwBase("base")
+=> :Str
+
+stdout(catch_parent(0))
+stdout(catch_exact(0))
+stdout(catch_mismatch(0))
+"#;
+    assert_backend_parity_for_source(source, "rc6e_custom_error_typed_ceiling_filter");
+    let out = run_interpreter_src(source, "rc6e_custom_error_typed_ceiling_filter_expected")
+        .expect("interpreter failed for rc6e expected output");
+    assert_eq!(
+        out.trim(),
+        "parent:ChildErr:child\nchild:ChildErr:exact\nouter:BaseErr:base"
+    );
+}
+
+#[test]
 fn rc6f_custom_inheritance_basic() {
+    // E32B-035 migration: non-Error custom molds expose no public type
+    // accessor (`__type` is rejected by [E1960]). This parity test only
+    // checks that the 3 backends agree on the printout, so substituting
+    // the literal mold name is safe — every backend prints the same.
     let source = r#"
 Vehicle = @(name: Str, speed: Int)
 Vehicle => Car = @(doors: Int)
 car <= Car(name <= "Sedan", speed <= 120, doors <= 4)
 Str[car.speed]() ]=> sp
 Str[car.doors]() ]=> dr
-stdout(car.__type + " " + car.name + " " + sp + " " + dr)
+stdout("Car" + " " + car.name + " " + sp + " " + dr)
 "#;
     assert_backend_parity_for_source(source, "rc6f_custom_basic");
 }
@@ -5566,6 +5954,7 @@ stdout(bike.name + " " + sp + " " + pd)
 
 #[test]
 fn rc6h_custom_multilevel() {
+    // E32B-035 migration: same as rc6f — substitute literal mold name.
     let source = r#"
 Shape = @(color: Str)
 Shape => Polygon = @(sides: Int)
@@ -5574,7 +5963,7 @@ rect <= Rectangle(color <= "blue", sides <= 4, width <= 10, height <= 5)
 Str[rect.sides]() ]=> s
 Str[rect.width]() ]=> w
 Str[rect.height]() ]=> h
-stdout(rect.__type + " " + rect.color + " " + s + " " + w + " " + h)
+stdout("Rectangle" + " " + rect.color + " " + s + " " + w + " " + h)
 "#;
     assert_backend_parity_for_source(source, "rc6h_multilevel");
 }
@@ -5593,6 +5982,7 @@ stdout(describe(car))
 
 #[test]
 fn rc6k_multiple_children_same_parent() {
+    // E32B-035 migration: same as rc6f — substitute literal mold names.
     let source = r#"
 Animal = @(species: Str, legs: Int)
 Animal => Dog = @(breed: Str)
@@ -5600,7 +5990,7 @@ Animal => Cat = @(indoor: Bool)
 dog <= Dog(species <= "Canine", legs <= 4, breed <= "Shiba")
 cat <= Cat(species <= "Feline", legs <= 4, indoor <= true)
 Str[cat.indoor]() ]=> ci
-stdout(dog.__type + "=" + dog.breed + " " + cat.__type + "=" + ci)
+stdout("Dog" + "=" + dog.breed + " " + "Cat" + "=" + ci)
 "#;
     assert_backend_parity_for_source(source, "rc6k_multi_children");
 }
@@ -6013,15 +6403,25 @@ fn test_net_parse_request_head_invalid_version_parity() {
     }
 
     // "HTTX/1.1" is not valid HTTP version — both backends should return failure
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
-
-bytesLax <= Bytes["GET / HTTX/1.1\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
-
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 // Both backends should reject: ok=false, kind=ParseError
-stdout(result.__value.ok)
-stdout(result.__value.kind)
+
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, ok <= false)
+  => :@(kind: Str, ok: Bool)
+
+  bytesLax <= Bytes["GET / HTTX/1.1\r\nHost: localhost\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, ok <= resultV.ok)
+=> :@(kind: Str, ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok)
+stdout(outcome.kind)
 "#;
 
     let dir = setup_net_project(source, "parse_badver");
@@ -6050,15 +6450,25 @@ fn test_net_parse_request_head_invalid_content_length_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
-
-bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
-
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 // Both backends should reject: ok=false, kind=ParseError
-stdout(result.__value.ok)
-stdout(result.__value.kind)
+
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, ok <= false)
+  => :@(kind: Str, ok: Bool)
+
+  bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, ok <= resultV.ok)
+=> :@(kind: Str, ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok)
+stdout(outcome.kind)
 "#;
 
     let dir = setup_net_project(source, "parse_badcl");
@@ -6093,9 +6503,10 @@ fn test_net_parse_request_head_content_length_max_safe_integer_parity() {
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740991\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
+result ]=> resultV
 
 // success: __value is the parsed request pack directly
-stdout(result.__value.contentLength)
+stdout(resultV.contentLength)
 "#;
 
     let dir = setup_net_project(source_accept, "parse_maxsafe_accept");
@@ -6115,14 +6526,24 @@ stdout(result.__value.contentLength)
     );
 
     // Test 2: MAX_SAFE_INTEGER + 1 should be rejected
-    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source_reject = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740992\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, ok <= false)
+  => :@(kind: Str, ok: Bool)
 
-stdout(result.__value.ok)
-stdout(result.__value.kind)
+  bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740992\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, ok <= resultV.ok)
+=> :@(kind: Str, ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok)
+stdout(outcome.kind)
 "#;
 
     let dir2 = setup_net_project(source_reject, "parse_maxsafe_reject");
@@ -6494,16 +6915,26 @@ stdout(encoded.bytes.length())
 /// NET-4d: malformed Content-Length parity (Interpreter vs Native)
 #[test]
 fn test_net_parse_request_head_invalid_content_length_native_parity() {
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
-
-bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
-
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 // Both backends should reject with kind=ParseError
-// (avoid result.__value.ok — native Bool display limitation)
-stdout(result.__value.kind)
-stdout(result.__value.message.length())
+// (avoid resultV.ok — native Bool display limitation)
+
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
+
+  bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message.length())
 "#;
 
     let dir = setup_net_project(source, "native_parse_badcl");
@@ -6687,14 +7118,24 @@ stdout(r.requests)
 #[test]
 fn test_net_parse_malformed_http_version_native_parity() {
     // "HTTP/a.b" has non-digit major/minor — both backends must reject as malformed
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-stdout(result.__value.kind)
-stdout(result.__value.message.length())
+  bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message.length())
 "#;
 
     let dir = setup_net_project(source, "native_parse_badver_ab");
@@ -6718,14 +7159,24 @@ stdout(result.__value.message.length())
 /// NET-4 review F1: HTTP version with extra digits "HTTP/12.34" must be rejected (Interpreter vs Native)
 #[test]
 fn test_net_parse_multi_digit_http_version_native_parity() {
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-stdout(result.__value.kind)
-stdout(result.__value.message.length())
+  bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message.length())
 "#;
 
     let dir = setup_net_project(source, "native_parse_badver_1234");
@@ -6750,12 +7201,22 @@ stdout(result.__value.message.length())
 /// NET-4 review F3: httpEncodeResponse with non-Str body must return EncodeError (Interpreter vs Native)
 #[test]
 fn test_net_encode_response_invalid_body_native_parity() {
-    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+    let source = r#"
+>>> taida-lang/net => @(httpEncodeResponse)
 
-resp <= @(status <= 200, headers <= @[], body <= 1)
-result <= httpEncodeResponse(resp)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  resp <= @(status <= 200, headers <= @[], body <= 1)
+  result <= httpEncodeResponse(resp)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir = setup_net_project(source, "native_encode_bad_body");
@@ -6818,13 +7279,23 @@ fn test_net_parse_malformed_version_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir = setup_net_project(source, "3way_parse_badver");
@@ -6980,13 +7451,23 @@ fn test_net5a_parse_invalid_content_length_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5abc\r\n\r\nhello"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir = setup_net_project(source, "5a_parse_badcl");
@@ -7026,8 +7507,9 @@ fn test_net5a_parse_content_length_max_safe_integer_3way_parity() {
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740991\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
+result ]=> resultV
 
-stdout(result.__value.contentLength)
+stdout(resultV.contentLength)
 "#;
 
     let dir = setup_net_project(source_accept, "5a_maxsafe_accept");
@@ -7053,13 +7535,23 @@ stdout(result.__value.contentLength)
     );
 
     // Reject: 9007199254740992
-    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source_reject = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740992\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9007199254740992\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir2 = setup_net_project(source_reject, "5a_maxsafe_reject");
@@ -7096,8 +7588,9 @@ fn test_nb20_content_length_leading_zeros_3way_parity() {
 bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 00000000000000005\r\n\r\nhello"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
+result ]=> resultV
 
-stdout(result.__value.contentLength)
+stdout(resultV.contentLength)
 "#;
 
     let dir = setup_net_project(source_accept, "nb20_lz_accept");
@@ -7130,8 +7623,9 @@ stdout(result.__value.contentLength)
 bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0042\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
+result ]=> resultV
 
-stdout(result.__value.contentLength)
+stdout(resultV.contentLength)
 "#;
 
     let dir2 = setup_net_project(source_0042, "nb20_lz_0042");
@@ -7162,8 +7656,9 @@ stdout(result.__value.contentLength)
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 00000000000000000\r\n\r\n"]()
 bytesLax ]=> bytes
 result <= httpParseRequestHead(bytes)
+result ]=> resultV
 
-stdout(result.__value.contentLength)
+stdout(resultV.contentLength)
 "#;
 
     let dir3 = setup_net_project(source_allzeros, "nb20_lz_allzeros");
@@ -7191,13 +7686,23 @@ stdout(result.__value.contentLength)
     );
 
     // Test 4: leading zeros + value > MAX_SAFE_INTEGER must still be rejected
-    let source_reject = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source_reject = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 009007199254740992\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 009007199254740992\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir4 = setup_net_project(source_reject, "nb20_lz_over_max");
@@ -7231,13 +7736,23 @@ fn test_net5a_parse_malformed_version_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  bytesLax <= Bytes["GET / HTTP/a.b\r\nHost: localhost\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir = setup_net_project(source, "5a_badver_ab");
@@ -7271,13 +7786,23 @@ fn test_net5a_parse_multi_digit_version_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  bytesLax <= Bytes["GET / HTTP/12.34\r\nHost: localhost\r\n\r\n"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir = setup_net_project(source, "5a_badver_1234");
@@ -7510,14 +8035,24 @@ fn test_net2_parse_cl_te_mutual_exclusion_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpParseRequestHead)
+    let source = r#"
+>>> taida-lang/net => @(httpParseRequestHead)
 
-bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello"]()
-bytesLax ]=> bytes
-result <= httpParseRequestHead(bytes)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-stdout(result.__value.kind)
-stdout(result.__value.message.length())
+  bytesLax <= Bytes["POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello"]()
+  bytesLax ]=> bytes
+  result <= httpParseRequestHead(bytes)
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message.length())
 "#;
 
     let dir = setup_net_project(source, "net2_cl_te_reject");
@@ -7655,12 +8190,22 @@ fn test_net5b_encode_invalid_body_3way_parity() {
         return;
     }
 
-    let source = r#">>> taida-lang/net => @(httpEncodeResponse)
+    let source = r#"
+>>> taida-lang/net => @(httpEncodeResponse)
 
-resp <= @(status <= 200, headers <= @[], body <= 1)
-result <= httpEncodeResponse(resp)
+parseAttempt =
+  |== err: Error =
+    err.kind
+  => :Str
 
-stdout(result.__value.kind)
+  resp <= @(status <= 200, headers <= @[], body <= 1)
+  result <= httpEncodeResponse(resp)
+  result ]=> resultV
+
+  resultV.kind
+=> :Str
+
+stdout(parseAttempt())
 "#;
 
     let dir = setup_net_project(source, "5b_encode_bad_body");
@@ -8683,13 +9228,24 @@ fn test_nb31_http_serve_int_handler_js_native_parity() {
 
     // Variable-path: bad <= 1000000; httpServe(0, bad, ...)
     // This exercises the int_vars → callable_type_tag path in lower.rs.
+    // E32B-035 / E33B-003 Cat A migration: |== wrap to surface err.kind.
     let source = r#">>> taida-lang/net => @(httpServe)
 
 bad <= 1000000
-asyncResult <= httpServe(0, bad, 1, 1000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
-stdout(result.__value.kind)
+
+attempt =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  result ]=> v
+  @(ok <= true, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+outcome <= attempt()
+stdout(outcome.ok.toString())
+stdout(outcome.kind)
 "#;
 
     let dir = setup_net_project(source, "nb31_int_handler");
@@ -8790,13 +9346,26 @@ fn test_nb31_http_serve_arithmetic_int_handler_parity() {
         return;
     }
 
+    // E32B-035 migration: `result.__value.ok/.kind` is rejected by [E1960].
+    // Catch via `|==` to surface the user-visible error message and kind.
+    // The runtime stamps `kind` on the Error fields (e.g. "TypeError" for
+    // a non-callable handler), so we read `err.kind` directly.
     let source = r#">>> taida-lang/net => @(httpServe)
 
 bad <= 999999 + 1
-asyncResult <= httpServe(0, bad, 1, 1000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
-stdout(result.__value.kind)
+attempt =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  result ]=> v
+  @(ok <= true, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+outcome <= attempt()
+stdout(outcome.ok.toString())
+stdout(outcome.kind)
 "#;
 
     let dir = setup_net_project(source, "nb31_arith");
@@ -8843,14 +9412,27 @@ fn test_nb31_http_serve_func_return_int_handler_parity() {
         return;
     }
 
+    // E32B-035 / E33B-003 Cat A migration: catch the throw via `|==` so
+    // user code can read `err.kind` (lifted to top-level on all 3 backends
+    // by the E33B-003 Cat B runtime fix).
     let source = r#">>> taida-lang/net => @(httpServe)
 
 mk n = n + 1 => :Int
-bad <= mk(999999)
-asyncResult <= httpServe(0, bad, 1, 1000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
-stdout(result.__value.kind)
+
+attempt =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  bad <= mk(999999)
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  result ]=> v
+  @(ok <= true, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+outcome <= attempt()
+stdout(outcome.ok.toString())
+stdout(outcome.kind)
 "#;
 
     let dir = setup_net_project(source, "nb31_func_ret");
@@ -8897,15 +9479,22 @@ fn test_nb31_http_serve_typed_param_int_handler_parity() {
         return;
     }
 
+    // E32B-035 / E33B-003 Cat A migration: |== wrap to surface err.kind.
     let source = r#">>> taida-lang/net => @(httpServe)
 
 wrap bad: Int =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
   asyncResult <= httpServe(0, bad, 1, 1000)
   asyncResult ]=> result
-  stdout(result.__value.ok.toString())
-  stdout(result.__value.kind)
+  result ]=> v
+  @(ok <= true, kind <= "")
+=> :@(ok: Bool, kind: Str)
 
-wrap(1000000)
+outcome <= wrap(1000000)
+stdout(outcome.ok.toString())
+stdout(outcome.kind)
 "#;
 
     let dir = setup_net_project(source, "nb31_typed_param");
@@ -8948,13 +9537,25 @@ wrap(1000000)
 /// Reproduction: `encodeWrap s = @(status <= s, ...)` called with `encodeWrap(true)`.
 #[test]
 fn test_nb14_dynamic_bool_status_native_parity() {
+    // E32B-035 migration: `result.__value.message` is rejected by [E1960].
+    // The runtime now propagates the throw set on the Result envelope, so we
+    // wrap the call in a function with `|==` to catch and surface the
+    // user-visible error message.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 encodeWrap s =
   @(status <= s, headers <= @[], body <= "ok")
 
-result <= httpEncodeResponse(encodeWrap(true))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse(encodeWrap(true))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb14_bool_status");
@@ -8981,13 +9582,23 @@ stdout(result.__value.message)
 /// must produce "body must be Bytes or Str, got true" in Native (not "got 1").
 #[test]
 fn test_nb21_dynamic_bool_body_native_parity() {
+    // E32B-035 migration: catch the throw via `|==` instead of reading
+    // `result.__value.message` (rejected by [E1960]).
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 encodeWrap x =
   @(status <= 200, headers <= @[], body <= x)
 
-result <= httpEncodeResponse(encodeWrap(true))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse(encodeWrap(true))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb21_bool_body");
@@ -9014,14 +9625,23 @@ stdout(result.__value.message)
 /// call's tag frame. Both Interpreter and Native should say "got true".
 #[test]
 fn test_nb14_nested_call_bool_status_parity() {
+    // E32B-035 migration: same `|==` pattern as the dynamic variant.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 idBool x = x => :Bool
 encodeWrap s =
   @(status <= s, headers <= @[], body <= "ok")
 
-result <= httpEncodeResponse(encodeWrap(idBool(true)))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse(encodeWrap(idBool(true)))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb14_nested_status");
@@ -9049,14 +9669,23 @@ stdout(result.__value.message)
 /// must preserve Bool tag through nested call chain.
 #[test]
 fn test_nb21_nested_call_bool_body_parity() {
+    // E32B-035 migration: same `|==` pattern.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 idBool x = x => :Bool
 encodeWrap x =
   @(status <= 200, headers <= @[], body <= x)
 
-result <= httpEncodeResponse(encodeWrap(idBool(true)))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse(encodeWrap(idBool(true)))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb21_nested_body");
@@ -9084,6 +9713,7 @@ stdout(result.__value.message)
 /// remain UNKNOWN, not default to INT.
 #[test]
 fn test_nb14_mixed_arg_bool_status_parity() {
+    // E32B-035 migration: same `|==` pattern.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 id x =
@@ -9092,8 +9722,16 @@ id x =
 encodeWrap a b =
   @(status <= b, headers <= @[], body <= "ok")
 
-result <= httpEncodeResponse(encodeWrap(true, id(true)))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse(encodeWrap(true, id(true)))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb14_mixed_arg_status");
@@ -9121,6 +9759,7 @@ stdout(result.__value.message)
 /// `id` function. The unset tag slot must not collapse to INT.
 #[test]
 fn test_nb21_mixed_arg_bool_body_parity() {
+    // E32B-035 migration: same `|==` pattern.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 id x =
@@ -9129,8 +9768,16 @@ id x =
 encodeWrap a b =
   @(status <= 200, headers <= @[], body <= b)
 
-result <= httpEncodeResponse(encodeWrap(true, id(true)))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse(encodeWrap(true, id(true)))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb21_mixed_arg_body");
@@ -9158,13 +9805,22 @@ stdout(result.__value.message)
 /// propagate return_tag from id(true) into the IIFE's arg tag slot.
 #[test]
 fn test_nb14_iife_bool_status_parity() {
+    // E32B-035 migration: same `|==` pattern.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 id x =
   x
 
-result <= httpEncodeResponse((_ b = @(status <= b, headers <= @[], body <= "ok"))(id(true)))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse((_ b = @(status <= b, headers <= @[], body <= "ok"))(id(true)))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb14_iife_status");
@@ -9190,13 +9846,22 @@ stdout(result.__value.message)
 /// NB-21 IIFE: (_ b = @(status <= 200, ..., body <= b))(id(true)) — body path.
 #[test]
 fn test_nb21_iife_bool_body_parity() {
+    // E32B-035 migration: same `|==` pattern.
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 
 id x =
   x
 
-result <= httpEncodeResponse((_ b = @(status <= 200, headers <= @[], body <= b))(id(true)))
-stdout(result.__value.message)
+attempt =
+  |== err: Error =
+    err.message
+  => :Str
+  result <= httpEncodeResponse((_ b = @(status <= 200, headers <= @[], body <= b))(id(true)))
+  result ]=> v
+  ""
+=> :Str
+
+stdout(attempt())
 "#;
 
     let dir = setup_net_project(source, "nb21_iife_body");
@@ -13581,7 +14246,13 @@ stdout(r.requests)
 }
 
 /// NET3-6e: reserved header (Content-Length) rejected on native backend.
-/// Native exits with non-zero code and prints error to stderr.
+///
+/// E33B-003: prior to the E32B-079/E32B-080 connection-abort hardening
+/// the runtime invoked `exit(1)` on a reserved-header reject. The new
+/// statelessly-close-connection contract terminates the offending
+/// connection without aborting the process, so the assertion now pins
+/// the user-observable invariant: the response on the wire must not
+/// contain the post-reject `writeChunk` body.
 #[test]
 fn test_net3_6e_reserved_header_content_length_rejected_native() {
     let port = find_free_loopback_port();
@@ -13625,26 +14296,39 @@ stdout(r.requests)
         .spawn()
         .expect("spawn native binary");
 
-    // Wait for server to be ready, then send request to trigger the handler
+    // Wait for server to be ready, then send request and read response.
     let mut triggered = false;
+    let mut response_bytes: Vec<u8> = Vec::new();
     for _ in 0..80 {
         thread::sleep(Duration::from_millis(100));
         let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
             Ok(s) => s,
             Err(_) => continue,
         };
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
         stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
         let mut stream = stream;
         let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        let _ = std::io::Write::write_all(&mut stream, request);
+        if std::io::Write::write_all(&mut stream, request).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response_bytes.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
         triggered = true;
         break;
     }
 
     let _ = fs::remove_file(&bin_path);
+    let _ = child.kill();
+    let _ = child.wait();
 
     if !triggered {
-        let _ = child.kill();
         cleanup_net_project(&dir);
         panic!(
             "NET3-6e native CL: server did not accept connection on port {}",
@@ -13652,20 +14336,13 @@ stdout(r.requests)
         );
     }
 
-    // Wait for process to exit (it should exit(1) after reserved header rejection)
-    let output = child.wait_with_output().expect("wait for native process");
     cleanup_net_project(&dir);
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let response = String::from_utf8_lossy(&response_bytes);
     assert!(
-        !output.status.success(),
-        "NET3-6e native CL: process should exit with non-zero status, got: {:?}",
-        output.status,
-    );
-    assert!(
-        stderr.contains("Content-Length"),
-        "NET3-6e native CL: stderr should mention Content-Length, got: {:?}",
-        stderr,
+        !response.contains("should-not-reach"),
+        "NET3-6e native CL: writeChunk after reserved Content-Length must be aborted before reaching the wire, got response: {:?}",
+        response,
     );
 }
 
@@ -13708,32 +14385,45 @@ stdout(r.requests)
         panic!("NET3-6e native TE: compile failed: {}", stderr);
     }
 
+    // E33B-003: same connection-abort migration as the CL variant.
     let mut child = Command::new(&bin_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn native binary");
 
-    // Wait for server to be ready, then send request to trigger the handler
     let mut triggered = false;
+    let mut response_bytes: Vec<u8> = Vec::new();
     for _ in 0..80 {
         thread::sleep(Duration::from_millis(100));
         let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
             Ok(s) => s,
             Err(_) => continue,
         };
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
         stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
         let mut stream = stream;
         let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        let _ = std::io::Write::write_all(&mut stream, request);
+        if std::io::Write::write_all(&mut stream, request).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response_bytes.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
         triggered = true;
         break;
     }
 
     let _ = fs::remove_file(&bin_path);
+    let _ = child.kill();
+    let _ = child.wait();
 
     if !triggered {
-        let _ = child.kill();
         cleanup_net_project(&dir);
         panic!(
             "NET3-6e native TE: server did not accept connection on port {}",
@@ -13741,21 +14431,224 @@ stdout(r.requests)
         );
     }
 
-    // Wait for process to exit (it should exit(1) after reserved header rejection)
-    let output = child.wait_with_output().expect("wait for native process");
     cleanup_net_project(&dir);
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let response = String::from_utf8_lossy(&response_bytes);
     assert!(
-        !output.status.success(),
-        "NET3-6e native TE: process should exit with non-zero status, got: {:?}",
-        output.status,
+        !response.contains("should-not-reach"),
+        "NET3-6e native TE: writeChunk after reserved Transfer-Encoding must be aborted before reaching the wire, got response: {:?}",
+        response,
     );
+}
+
+fn e32b_027_start_response_rejection_source(port: u16, headers_expr: &str) -> String {
+    format!(
+        r#">>> taida-lang/net => @(httpServe, startResponse, writeChunk, endResponse)
+
+handler req writer =
+  startResponse(writer, 200, {headers_expr})
+  writeChunk(writer, "should-not-reach")
+  endResponse(writer)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#,
+        port = port,
+        headers_expr = headers_expr
+    )
+}
+
+fn e32b_027_assert_native_start_response_rejects(
+    source: &str,
+    label: &str,
+    port: u16,
+    _expected: &str,
+) {
+    // E33B-003: same connection-abort migration as the NET3-6e helper.
+    // Pre-E32B-079 the runtime called `exit(1)` on header rejection; the
+    // hardening batch moved to a stateless `abort_connection` so the
+    // process exits 0 when the request limit is reached. The user-
+    // observable invariant is that the rejected `writeChunk` body never
+    // reaches the client.
+    let dir = setup_net_project(source, &format!("e32b027_{}_{}", label, port));
+    let td_path = dir.join("main.td");
+    let bin_path = unique_temp_path("taida_e32b027_native", label, "bin");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg("native")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("compile native");
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        cleanup_net_project(&dir);
+        let _ = fs::remove_file(&bin_path);
+        panic!("E32B-027 native {}: compile failed: {}", label, stderr);
+    }
+
+    let mut child = Command::new(&bin_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn native binary");
+
+    let mut triggered = false;
+    let mut response_bytes: Vec<u8> = Vec::new();
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        if std::io::Write::write_all(&mut stream, request).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response_bytes.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        triggered = true;
+        break;
+    }
+
+    let _ = fs::remove_file(&bin_path);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if !triggered {
+        cleanup_net_project(&dir);
+        panic!(
+            "E32B-027 native {}: server did not accept connection on port {}",
+            label, port
+        );
+    }
+
+    cleanup_net_project(&dir);
+
+    let response = String::from_utf8_lossy(&response_bytes);
     assert!(
-        stderr.contains("Transfer-Encoding"),
-        "NET3-6e native TE: stderr should mention Transfer-Encoding, got: {:?}",
-        stderr,
+        !response.contains("should-not-reach"),
+        "E32B-027 native {}: writeChunk after malformed header rejection must be aborted before reaching the wire, got response: {:?}",
+        label,
+        response,
     );
+}
+
+/// E32B-027: unsafe streaming headers are rejected on Interpreter and JS.
+#[test]
+fn test_e32b_027_streaming_header_negative_interp_js() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let cases = [
+        (
+            "crlf_name",
+            r#"@[@(name <= "Bad\r\nName", value <= "ok")]"#,
+            "CR/LF",
+        ),
+        (
+            "name_too_long",
+            r#"@[@(name <= Repeat["x", 8193](), value <= "ok")]"#,
+            "exceeds 8192",
+        ),
+        (
+            "value_too_long",
+            r#"@[@(name <= "X-Ok", value <= Repeat["x", 65537]())]"#,
+            "exceeds 65536",
+        ),
+        ("headers_not_list", "42", "headers must be a List"),
+        ("item_not_pack", r#"@["bad"]"#, "must be @(name, value)"),
+        (
+            "name_not_str",
+            r#"@[@(name <= 1, value <= "ok")]"#,
+            "name must be Str",
+        ),
+        (
+            "value_not_str",
+            r#"@[@(name <= "X-Ok", value <= 1)]"#,
+            "value must be Str",
+        ),
+    ];
+
+    for (label, headers_expr, expected) in cases {
+        for backend in &["interp", "js"] {
+            let port = find_free_loopback_port();
+            let source = e32b_027_start_response_rejection_source(port, headers_expr);
+            let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            let (resp, _stdout) = spawn_and_request_v3(&source, backend, port, request);
+
+            assert!(
+                resp.contains("500") || resp.contains(expected),
+                "E32B-027 {} {}: startResponse should reject {:?}, got: {:?}",
+                backend,
+                label,
+                expected,
+                resp
+            );
+            assert!(
+                !resp.contains("should-not-reach"),
+                "E32B-027 {} {}: writeChunk after rejection should not execute, got: {:?}",
+                backend,
+                label,
+                resp
+            );
+        }
+    }
+}
+
+/// E32B-027: unsafe streaming headers are rejected on Native.
+#[test]
+fn test_e32b_027_streaming_header_negative_native() {
+    let cases = [
+        (
+            "crlf_name",
+            r#"@[@(name <= "Bad\r\nName", value <= "ok")]"#,
+            "CR/LF",
+        ),
+        (
+            "name_too_long",
+            r#"@[@(name <= Repeat["x", 8193](), value <= "ok")]"#,
+            "exceeds 8192",
+        ),
+        (
+            "value_too_long",
+            r#"@[@(name <= "X-Ok", value <= Repeat["x", 65537]())]"#,
+            "exceeds 65536",
+        ),
+        ("headers_not_list", "42", "headers must be a List"),
+        ("item_not_pack", r#"@["bad"]"#, "must be @(name, value)"),
+        (
+            "name_not_str",
+            r#"@[@(name <= 1, value <= "ok")]"#,
+            "name must be Str",
+        ),
+        (
+            "value_not_str",
+            r#"@[@(name <= "X-Ok", value <= 1)]"#,
+            "value must be Str",
+        ),
+    ];
+
+    for (label, headers_expr, expected) in cases {
+        let port = find_free_loopback_port();
+        let source = e32b_027_start_response_rejection_source(port, headers_expr);
+        e32b_027_assert_native_start_response_rejects(&source, label, port, expected);
+    }
 }
 
 /// NET3-6e: double endResponse is idempotent (no error, no crash).
@@ -15262,9 +16155,10 @@ fn test_net4_read_body_chunk_content_length_interp() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
+  chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunk.hasValue.toString())
-  writeChunk(writer, chunk.__value)
+  writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
 
@@ -15366,10 +16260,11 @@ fn test_net4_read_body_chunk_chunked_te_interp() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
+  chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
   writeChunk(writer, chunk.hasValue.toString())
   writeChunk(writer, "|")
-  writeChunk(writer, chunk.__value)
+  writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
 
@@ -15920,19 +16815,32 @@ stdout(r.ok)
 fn test_net4_ws_upgrade_and_echo_text_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
-  wsClose(ws)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    msg <= wsReceive(ws)
+    msg ]=> msgV
+    wsSend(ws, msgV.data)
+    wsClose(ws)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -16084,18 +16992,29 @@ stdout(result.__value.ok.toString())
 fn test_net4_ws_upgrade_failure_no_wire_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
-  endResponse(writer)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+    writeChunk(writer, upgrade.hasValue.toString())
+    endResponse(writer)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -16178,19 +17097,31 @@ stdout(result.__value.ok.toString())
 fn test_net4_ws_upgrade_blocks_http_streaming_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, writeChunk, wsClose)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, writeChunk, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  // This should fail: cannot use writeChunk after WebSocket upgrade.
-  writeChunk(writer, "should fail")
-  wsClose(ws)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    // This should fail: cannot use writeChunk after WebSocket upgrade.
+    writeChunk(writer, "should fail")
+    wsClose(ws)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -16265,18 +17196,29 @@ stdout(result.__value.ok.toString())
 fn test_net4_ws_upgrade_rejects_post_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, startResponse, writeChunk, endResponse)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
-  endResponse(writer)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
+    writeChunk(writer, upgrade.hasValue.toString())
+    endResponse(writer)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -16375,19 +17317,32 @@ stdout(result.__value.ok.toString())
 fn test_net4_ws_ping_pong_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
-  wsClose(ws)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    msg <= wsReceive(ws)
+    msg ]=> msgV
+    wsSend(ws, msgV.data)
+    wsClose(ws)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -16537,17 +17492,29 @@ stdout(result.__value.ok.toString())
 fn test_net4_ws_auto_close_on_return_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsSend(ws, "goodbye")
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsSend(ws, "goodbye")
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -16826,8 +17793,9 @@ fn test_net4_read_body_chunk_cl_interp_js_parity() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
+  chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.__value)
+  writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
 
@@ -17035,19 +18003,32 @@ fn test_net4_ws_echo_text_interp_js_parity() {
     for backend in &["interp", "js"] {
         let port = find_free_loopback_port();
         let source = format!(
-            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
+            r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
-  wsClose(ws)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    msg <= wsReceive(ws)
+    msg ]=> msgV
+    wsSend(ws, msgV.data)
+    wsClose(ws)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
             port = port
         );
@@ -17416,8 +18397,9 @@ fn test_net4_read_body_chunk_cl_3way_parity() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
+  chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.__value)
+  writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
 
@@ -17624,9 +18606,11 @@ fn test_net4_ws_echo_text_3way_parity() {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> upgradeV
+  ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> msgV
+  wsSend(ws, msgV.data)
   wsClose(ws)
 => :Unit
 
@@ -18320,9 +19304,11 @@ fn test_net4_5e_ws_counts_toward_max_requests_interp() {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> upgradeV
+  ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> msgV
+  wsSend(ws, msgV.data)
   wsClose(ws)
 => :Unit
 
@@ -18826,7 +19812,8 @@ fn test_net4_nb19_client_close_reply_3way_parity() {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> upgradeV
+  ws <= upgradeV.ws
   msg <= wsReceive(ws)
   stdout(msg.hasValue.toString())
 => :Unit
@@ -19900,8 +20887,9 @@ fn test_nb5_11_tls_read_body_chunk_cl_interp_js_parity() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
+  chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.__value)
+  writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
 
@@ -20210,8 +21198,9 @@ fn test_nb5_12_tls_ws_upgrade_js_known_limitation() {
 
 handler req writer =
   ws <= wsUpgrade(req, writer)
-  wsSend(ws.__value.ws, "echo")
-  wsClose(ws.__value.ws)
+  ws ]=> wsV
+  wsSend(wsV.ws, "echo")
+  wsClose(wsV.ws)
 => :Unit
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "{cert}", key <= "{key}"))
@@ -20338,9 +21327,11 @@ fn test_nb5_12_tls_ws_interp_works() {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> upgradeV
+  ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> msgV
+  wsSend(ws, msgV.data)
   wsClose(ws)
 => :Unit
 
@@ -21214,9 +22205,11 @@ fn test_nb5_14_tls_ws_upgrade_native_interp_parity() {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> upgradeV
+  ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> msgV
+  wsSend(ws, msgV.data)
   wsClose(ws)
 => :Unit
 
@@ -21356,9 +22349,11 @@ fn test_nb5_14_tls_ws_frame_echo_native_interp_parity() {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
+  upgrade ]=> upgradeV
+  ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  wsSend(ws, msg.__value.data)
+  msg ]=> msgV
+  wsSend(ws, msgV.data)
   wsClose(ws)
 => :Unit
 
@@ -21516,19 +22511,31 @@ fn test_net5_5a_ws_close_code_1000_interp() {
 
     // Handler: wsUpgrade, then wsReceive (blocking until close), then wsCloseCode, then stdout.
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsReceive, wsCloseCode)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsReceive, wsCloseCode)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  msg <= wsReceive(ws)
-  code <= wsCloseCode(ws)
-  stdout(code)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({}, handler, 1, 5000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    msg <= wsReceive(ws)
+    code <= wsCloseCode(ws)
+    stdout(code)
+  => :Unit
+
+  asyncResult <= httpServe({}, handler, 1, 5000)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port
     );
@@ -21622,19 +22629,31 @@ fn test_net5_5a_ws_close_code_initial_zero_interp() {
 
     // Handler: wsUpgrade, check wsCloseCode (should be 0), then wsClose.
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsCloseCode, wsClose)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsCloseCode, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  code <= wsCloseCode(ws)
-  stdout(code)
-  wsClose(ws)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({}, handler, 1, 5000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    code <= wsCloseCode(ws)
+    stdout(code)
+    wsClose(ws)
+  => :Unit
+
+  asyncResult <= httpServe({}, handler, 1, 5000)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port
     );
@@ -21699,18 +22718,30 @@ fn test_net5_5a_ws_close_reserved_codes_interp() {
         // If wsClose succeeds (bug), stdout gets "ok". If it errors (correct), stdout is empty
         // from the handler. The outer code still prints the server result.
         let source = format!(
-            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
+            r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsClose(ws, {code})
-  stdout("ok")
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1, 5000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsClose(ws, {code})
+    stdout("ok")
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1, 5000)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
             code = reserved_code,
             port = port
@@ -21773,18 +22804,30 @@ fn test_net5_5a_ws_close_out_of_range_interp() {
         let port = find_free_loopback_port();
 
         let source = format!(
-            r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
+            r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsClose(ws, {code})
-  stdout("ok")
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1, 5000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsClose(ws, {code})
+    stdout("ok")
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1, 5000)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
             code = bad_code,
             port = port
@@ -21845,14 +22888,26 @@ fn test_net5_5a_tls_cert_only_no_key_3way_parity() {
         return;
     }
 
+    // E33B-003 Cat A: `serverResult ]=> serverResultV` triggers the
+    // throw on a Result with bad-tls failure. Catch via `|==` and
+    // surface ok=false to keep the user-observable assertion identical.
     let source = r#">>> taida-lang/net => @(httpServe)
 
 handler req =
   @(status <= 200, headers <= @[], body <= "ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-httpServe(0, handler, 1, 1000, 1, @(cert <= "missing_cert.pem")) ]=> serverResult
-stdout(serverResult.__value.ok)
+attempt =
+  |== err: Error =
+    false
+  => :Bool
+  httpServe(0, handler, 1, 1000, 1, @(cert <= "missing_cert.pem")) ]=> serverResult
+  serverResult ]=> serverResultV
+  serverResultV.ok
+=> :Bool
+
+ok <= attempt()
+stdout(ok.toString())
 "#;
 
     let dir_i = setup_net_project(source, "net5_5a_certonly_i");
@@ -21917,7 +22972,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 httpServe(0, handler, 1, 1000, 1, 42) ]=> serverResult
-stdout(serverResult.__value.ok)
+serverResult ]=> serverResultV
+stdout(serverResultV.ok)
 "#;
 
     let dir_i = setup_net_project(source, "nb5_16_nonpack_i");
@@ -21991,7 +23047,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 httpServe({port}, handler, 2, 3000, 4, @(cert <= "{cert}", key <= "{key}")) ]=> serverResult
-stdout(serverResult.__value.ok)
+serverResult ]=> serverResultV
+stdout(serverResultV.ok)
 "#,
         port = port,
         cert = cert_path.display(),
@@ -22075,7 +23132,8 @@ handler req writer =
   stdout(code)
 
 httpServe(8080, handler, 1, 1000) ]=> serverResult
-stdout(serverResult.__value.ok)
+serverResult ]=> serverResultV
+stdout(serverResultV.ok)
 "#;
 
     for profile in &["wasm-min", "wasm-wasi", "wasm-edge", "wasm-full"] {
@@ -22186,7 +23244,8 @@ handler req writer =
   stdout(code)
 
 httpServe(8080, handler, 1, 1000) ]=> serverResult
-stdout(serverResult.__value.ok)
+serverResult ]=> serverResultV
+stdout(serverResultV.ok)
 "#,
         ),
         (
@@ -22197,7 +23256,8 @@ handler req writer =
   startResponse(writer, 200, @[])
 
 httpServe(8080, handler, 1, 1000) ]=> serverResult
-stdout(serverResult.__value.ok)
+serverResult ]=> serverResultV
+stdout(serverResultV.ok)
 "#,
         ),
         (
@@ -22208,7 +23268,8 @@ handler req writer =
   sseEvent(writer, "data", "hello")
 
 httpServe(8080, handler, 1, 1000) ]=> serverResult
-stdout(serverResult.__value.ok)
+serverResult ]=> serverResultV
+stdout(serverResultV.ok)
 "#,
         ),
     ];
@@ -27852,16 +28913,27 @@ fn test_nb7_6_h3_with_cert_key_returns_backend_contract_not_tls_error() {
     // tries to load them before checking h3, it will return TlsError.
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "should-not-reach")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_nb7_cert.pem", key <= "/nonexistent_nb7_key.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
-stdout(result.throw.message)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "should-not-reach")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_nb7_cert.pem", key <= "/nonexistent_nb7_key.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message)
 "#,
             port = port
         )
@@ -28003,15 +29075,26 @@ fn test_nb7_8_h3_error_kind_verification_3way() {
     {
         let source_template = |port: u16| {
             format!(
-                r#">>> taida-lang/net => @(httpServe)
+                r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "should-not-reach")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "should-not-reach")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
                 port = port
             )
@@ -28098,15 +29181,26 @@ stdout(result.__value.kind)
     {
         let source_template = |port: u16| {
             format!(
-                r#">>> taida-lang/net => @(httpServe)
+                r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "should-not-reach")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h4"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "should-not-reach")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h4"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
                 port = port
             )
@@ -28331,15 +29425,26 @@ stdout(result.throw.message)
 fn test_net7_2a_native_h3_dispatches_to_serve_path() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -28399,16 +29504,27 @@ stdout(result.__value.kind)
 fn test_net7_3a_interpreter_h3_dispatches_to_serve_path() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
-stdout(result.throw.message)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message)
 "#,
         port = port
     );
@@ -28450,15 +29566,26 @@ fn test_net7_2a_js_h3_still_unsupported() {
     }
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -28495,15 +29622,26 @@ stdout(result.__value.kind)
 fn test_net7_2a_h3_without_cert_key_still_protocol_error() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -28616,15 +29754,26 @@ stdout(result.throw.message)
 fn test_net7_2c_native_h3_binary_links_correctly() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-link-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/test.pem", key <= "/tmp/test.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-link-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/test.pem", key <= "/tmp/test.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -28675,15 +29824,26 @@ stdout(result.__value.kind)
 fn test_nb7_9_qpack_literal_name_roundtrip() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nb7-9-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb79.pem", key <= "/tmp/nb79.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nb7-9-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb79.pem", key <= "/tmp/nb79.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -28904,15 +30064,26 @@ fn test_nb7_10_h3_request_validation_selftest_coverage() {
 fn test_nb7_10_h3_request_validation_runtime() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nb7-10-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb710.pem", key <= "/tmp/nb710.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nb7-10-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb710.pem", key <= "/tmp/nb710.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -29039,15 +30210,26 @@ fn test_nb7_11_qpack_selftest_expects_overflow_error() {
 fn test_nb7_11_qpack_overflow_runtime() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nb7-11-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb711.pem", key <= "/tmp/nb711.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nb7-11-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/tmp/nb711.pem", key <= "/tmp/nb711.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -29102,15 +30284,26 @@ stdout(result.__value.kind)
 fn test_net7_3a_interpreter_native_h3_error_kind_parity() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-parity-test")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-parity-test")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -29185,15 +30378,26 @@ stdout(result.__value.kind)
 fn test_net7_3a_interpreter_h3_selftest_passes() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-selftest")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-selftest")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -29271,17 +30475,28 @@ stdout(result.throw.message)
 fn test_nb7_12_h3_transport_pending_message_parity() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nb7-12")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nb7-12")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent_cert.pem", key <= "/nonexistent_key.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 stdout("---MSG---")
-stdout(result.throw.message)
+stdout(outcome.message)
 "#,
             port = port
         )
@@ -29373,15 +30588,26 @@ fn test_nb7_13_h3_transport_pending_source_parity() {
 fn test_net7_3b_h3_no_cert_protocol_error_parity() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-nocert")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-nocert")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -29448,16 +30674,27 @@ stdout(result.__value.kind)
 fn test_net7_3b_unknown_protocol_supported_values_parity() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-unknown")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h4"))
-asyncResult ]=> result
-stdout(result.__value.kind)
-stdout(result.throw.message)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-unknown")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h4"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message)
 "#,
             port = port
         )
@@ -29541,15 +30778,26 @@ fn test_net7_3b_js_h3_still_unsupported_after_phase3() {
 
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-js-check")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-js-check")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
         port = port
     );
@@ -29808,16 +31056,27 @@ fn test_net7_4a_js_h2_still_unsupported_after_phase3() {
 
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe)
+        r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nope")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind, message <= err.message)
+  => :@(kind: Str, message: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h2"))
-asyncResult ]=> result
-stdout(result.__value.kind)
-stdout(result.throw.message)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nope")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h2"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind, message <= resultV.message)
+=> :@(kind: Str, message: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
+stdout(outcome.message)
 "#,
         port = port
     );
@@ -30022,15 +31281,26 @@ fn test_net7_4b_js_h3_kind_regardless_of_cert_key() {
 
     let source_with_cert = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nope")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nope")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -30038,15 +31308,26 @@ stdout(result.__value.kind)
 
     let source_without_cert = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "nope")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "nope")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -30126,15 +31407,26 @@ fn test_net7_4b_h3_3backend_divergence_documented() {
 
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "h3-divergence")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "h3-divergence")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/nonexistent.pem", key <= "/nonexistent.pem", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -30812,15 +32104,26 @@ fn test_net7_10c_idle_timeout_default_parity() {
 fn test_net7_10c_h3_selftest_both_backends_pass() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "ok")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/no/cert", key <= "/no/key", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "ok")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/no/cert", key <= "/no/key", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -31207,15 +32510,26 @@ fn test_net7_10d_decode_block_dynamic_integration() {
 fn test_net7_10d_native_dynamic_selftest() {
     let source_template = |port: u16| {
         format!(
-            r#">>> taida-lang/net => @(httpServe)
+            r#"
+>>> taida-lang/net => @(httpServe)
 
-handler req =
-  @(status <= 200, headers <= @[], body <= "ok")
-=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+parseAttempt =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
 
-asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/no/cert", key <= "/no/key", protocol <= "h3"))
-asyncResult ]=> result
-stdout(result.__value.kind)
+  handler req =
+    @(status <= 200, headers <= @[], body <= "ok")
+  => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+  asyncResult <= httpServe({port}, handler, 1, 5000, 128, @(cert <= "/no/cert", key <= "/no/key", protocol <= "h3"))
+  asyncResult ]=> result
+  result ]=> resultV
+  @(kind <= resultV.kind)
+=> :@(kind: Str)
+
+outcome <= parseAttempt()
+stdout(outcome.kind)
 "#,
             port = port
         )
@@ -33097,9 +34411,12 @@ stdout((n.toString() == Str[n]().getOrDefault("")).toString())
 // continues to compile and run correctly on all three backends.
 // ────────────────────────────────────────────────────────────────
 
-/// C12-3d: tail-only mutual recursion passes the new check and produces
-/// identical output on all three backends. This is the positive case —
-/// isEven / isOdd with calls in tail position.
+/// C12-3d (updated for E32B-023): tail-only mutual recursion now passes
+/// **only on Interpreter / JS**, where the runtime trampoline handles
+/// arbitrary depth. The Native and wasm-* backends reject the same
+/// program with `[E0700]` because they lower mutual cycles to plain
+/// call instructions (see `test_e32b_023_native_mutual_recursion_rejected`
+/// below for the negative parity).
 #[test]
 fn test_c12_3_tail_mutual_recursion_parity() {
     let source = r#"isEven n =
@@ -33114,10 +34431,17 @@ stdout(isEven(0))
 stdout(isEven(4))
 stdout(isOdd(7))
 "#;
-    assert_backend_parity_for_source(source, "c12_3_tail_mutual_recursion");
-    let out = run_interpreter_src(source, "c12_3_tail_mutual_recursion_expected")
-        .expect("interpreter output should exist");
-    assert_eq!(out, "1\n1\n1");
+    let interp = run_interpreter_src(source, "c12_3_tail_mutual_recursion")
+        .expect("interpreter must accept tail-only mutual recursion");
+    assert_eq!(interp, "1\n1\n1");
+    if node_available() {
+        let js = run_js_src(source, "c12_3_tail_mutual_recursion")
+            .expect("js must accept tail-only mutual recursion");
+        assert_eq!(
+            interp, js,
+            "interpreter/js mismatch for tail mutual recursion"
+        );
+    }
 }
 
 /// C12-3d: non-tail mutual recursion must be rejected by all three
@@ -35075,17 +36399,29 @@ fn test_c12b_041_ws_auto_close_regression_10x_interp() {
             last_attempt = attempt;
             let port = find_free_loopback_port();
             let source = format!(
-                r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+                r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsSend(ws, "goodbye")
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsSend(ws, "goodbye")
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
                 port = port
             );
@@ -35165,18 +36501,30 @@ stdout(result.__value.ok.toString())
 fn test_c12b_041_ws_explicit_close_teardown_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsClose)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsSend(ws, "bye")
-  wsClose(ws)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsSend(ws, "bye")
+    wsClose(ws)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -35217,17 +36565,29 @@ stdout(result.__value.ok.toString())
 fn test_c12b_041_ws_send_then_return_shortest_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsSend)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsSend(ws, "x")
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsSend(ws, "x")
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -35264,17 +36624,29 @@ stdout(result.__value.ok.toString())
 fn test_c12b_041_ws_error_path_1011_teardown_interp() {
     let port = find_free_loopback_port();
     let source = format!(
-        r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
+        r#"
+>>> taida-lang/net => @(httpServe, wsUpgrade, wsClose)
 
-handler req writer =
-  upgrade <= wsUpgrade(req, writer)
-  ws <= upgrade.__value.ws
-  wsClose(ws, 1004)
-=> :Unit
+parseAttempt =
+  |== err: Error =
+    @(ok <= false)
+  => :@(ok: Bool)
 
-asyncResult <= httpServe({port}, handler, 1, 5000)
-asyncResult ]=> result
-stdout(result.__value.ok.toString())
+  handler req writer =
+    upgrade <= wsUpgrade(req, writer)
+    upgrade ]=> upgradeV
+    ws <= upgradeV.ws
+    wsClose(ws, 1004)
+  => :Unit
+
+  asyncResult <= httpServe({port}, handler, 1, 5000)
+  asyncResult ]=> result
+  result ]=> resultV
+  @(ok <= resultV.ok)
+=> :@(ok: Bool)
+
+outcome <= parseAttempt()
+stdout(outcome.ok.toString())
 "#,
         port = port
     );
@@ -38582,4 +39954,562 @@ stdout(b.label)
         assert_eq!(interp, js);
     }
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ── E32B-022 (Lock-N): Lax[Int]-returning index methods ────────
+//
+// Pin the 3-backend parity (Interpreter / Native / JS) of the additive
+// `*Lax` siblings that replace the legacy `-1` sentinel methods. The
+// `-1` siblings stay around as deprecated and are NOT removed in E32 —
+// pinning their continued existence is left to the existing `indexOf`
+// tests above. Each new pin asserts:
+//   - hasValue=true path returns Lax(<idx>) for found elements
+//   - hasValue=false path returns Lax(default: 0) for missing — the
+//     `__default` is `0` (Int's default) and never the legacy `-1`
+//   - the toString() and getOrDefault() shapes match across backends
+#[test]
+fn e32b_022_string_index_of_lax_4backend_parity() {
+    let source = r#"
+"hello".indexOfLax("ll") ]=> i
+stdout("found:" + i.toString())
+"hello".indexOfLax("xyz") ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + "hello".indexOfLax("xyz").hasValue.toString())
+stdout("missing_def:" + "hello".indexOfLax("xyz").getOrDefault(7).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_string_index_of_lax");
+}
+
+#[test]
+fn e32b_022_string_last_index_of_lax_4backend_parity() {
+    let source = r#"
+"hello world hello".lastIndexOfLax("hello") ]=> i
+stdout("found:" + i.toString())
+"hello".lastIndexOfLax("xyz") ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + "hello".lastIndexOfLax("xyz").hasValue.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_string_last_index_of_lax");
+}
+
+#[test]
+fn e32b_022_list_index_of_lax_4backend_parity() {
+    let source = r#"
+@[10, 20, 30].indexOfLax(20) ]=> i
+stdout("found:" + i.toString())
+@[10, 20, 30].indexOfLax(99) ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + @[10, 20, 30].indexOfLax(99).hasValue.toString())
+stdout("missing_def:" + @[10, 20, 30].indexOfLax(99).getOrDefault(42).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_list_index_of_lax");
+}
+
+#[test]
+fn e32b_022_list_last_index_of_lax_4backend_parity() {
+    let source = r#"
+@[10, 20, 30, 20].lastIndexOfLax(20) ]=> i
+stdout("found:" + i.toString())
+@[10, 20, 30].lastIndexOfLax(99) ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + @[10, 20, 30].lastIndexOfLax(99).hasValue.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_list_last_index_of_lax");
+}
+
+#[test]
+fn e32b_022_find_index_lax_4backend_parity() {
+    let source = r#"
+isEven n =
+  Mod[n, 2]() ]=> rem
+  rem == 0
+=> :Bool
+
+allOdd n =
+  false
+=> :Bool
+
+FindIndexLax[@[1, 2, 3, 4], isEven]() ]=> i
+stdout("found:" + i.toString())
+FindIndexLax[@[1, 2, 3, 4], allOdd]() ]=> j
+stdout("missing:" + j.toString())
+stdout("missing_hv:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().hasValue.toString())
+stdout("found_def:" + FindIndexLax[@[1, 2, 3, 4], isEven]().getOrDefault(99).toString())
+stdout("missing_def:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().getOrDefault(99).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_find_index_lax");
+}
+
+#[test]
+fn e32b_022_legacy_sentinels_still_return_minus_one() {
+    // The deprecation strategy keeps the legacy `-1` sentinel methods
+    // around through gen-E so existing programs do not break. Pin that
+    // they still emit `-1` on no-match across the 3 backends.
+    let source = r#"
+stdout("str:" + "hello".indexOf("xyz").toString())
+stdout("str_last:" + "hello".lastIndexOf("xyz").toString())
+stdout("list:" + @[1, 2, 3].indexOf(99).toString())
+stdout("list_last:" + @[1, 2, 3].lastIndexOf(99).toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_legacy_sentinels_minus_one");
+}
+
+// E32B-071: `*Lax` long-form (`@(hasValue <= ..., __value <= ..., __default <=
+// ..., __type <= "Lax")`) raw-pack output must be identical across backends
+// regardless of whether the value is consumed via direct method call
+// (`stdout(xs.indexOfLax(...))`) or routed through a let binding
+// (`let_value <= xs.indexOfLax(...); stdout(let_value)`). The previous
+// E32B-022 batch only pinned the direct path, leaving the let-binding path
+// vulnerable to a tag-propagation regression where a Pack tag would silently
+// reshape the long-form for `let_value`.
+#[test]
+fn e32b_071_lax_long_form_let_binding_4backend_parity() {
+    let source = r#"
+xs <= @[10, 20, 30]
+stdout(xs.indexOfLax(20))
+let_value <= xs.indexOfLax(20)
+stdout(let_value)
+stdout(xs.indexOfLax(99))
+let_miss <= xs.indexOfLax(99)
+stdout(let_miss)
+"#;
+    assert_backend_parity_for_source(source, "e32b_071_lax_long_form_let_binding");
+}
+
+#[test]
+fn e32b_071_lax_long_form_string_let_binding_4backend_parity() {
+    // Method receivers other than list bindings (here: a Str literal that is
+    // routed through a `let` binding before it reaches stdout) must round-trip
+    // through the same long-form pack so the field shape stays stable across
+    // backends regardless of binding shape.
+    let source = r#"
+greet <= "hello"
+stdout(greet.indexOfLax("ll"))
+direct_value <= greet.indexOfLax("ll")
+stdout(direct_value)
+stdout(greet.indexOfLax("zzz"))
+miss_value <= greet.indexOfLax("zzz")
+stdout(miss_value)
+"#;
+    assert_backend_parity_for_source(source, "e32b_071_lax_long_form_string_let_binding");
+}
+
+#[test]
+fn e32b_022_search_lax_3backend_parity() {
+    // searchLax is the regex-based sibling of `search`. Like `search`,
+    // wasm has only a stub regex implementation — pinning the parity to
+    // Interpreter / Native / JS via `assert_backend_parity_for_source`
+    // covers the surface contract.
+    let source = r#"
+"hello world".searchLax(Regex("w[a-z]+")) ]=> idx
+stdout("found:" + idx.toString())
+"hello world".searchLax(Regex("zz+")) ]=> idx2
+stdout("missing:" + idx2.toString())
+stdout("missing_hv:" + "hello world".searchLax(Regex("zz+")).hasValue.toString())
+stdout("found_hv:" + "hello world".searchLax(Regex("w[a-z]+")).hasValue.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_022_search_lax");
+}
+
+// ── E32B-021 (Lock-M): Lax/Result.getOrDefault arg-type integrity ────
+//
+// PHILOSOPHY I — silent type drift via `Lax[Str].getOrDefault(99)` was
+// the original PoC. The type-checker now strictly checks the `default`
+// arg type against the receiver's inner T (Type::Generic("Lax", [T])).
+// Pin both the positive-path 3-backend parity and the negative-path
+// `[E1508]` rejection across all 3 backends.
+#[test]
+fn e32b_021_lax_get_or_default_typed_positive_3backend_parity() {
+    // Bool default is covered by `e32b_030_lax_bool_get_or_default_3backend_parity`
+    // (E32B-030, 2026-05-05). The lower-side `expr_is_bool` rule for
+    // `getOrDefault(<bool default>)` now keeps Native parity with
+    // Interpreter / JS by routing `.toString()` through
+    // `taida_str_from_bool` instead of `taida_polymorphic_to_string`.
+    let source = r#"
+empty: @[Str] <= @[]
+val <= empty.first().getOrDefault("missing")
+stdout("str_default:" + val)
+
+nums: @[Int] <= @[]
+n <= nums.first().getOrDefault(42)
+stdout("int_default:" + n.toString())
+
+filled: @[Str] <= @["only"]
+keep <= filled.first().getOrDefault("ignored")
+stdout("filled_str:" + keep)
+"#;
+    assert_backend_parity_for_source(source, "e32b_021_lax_get_or_default_typed_positive");
+}
+
+#[test]
+fn e32b_021_lax_get_or_default_type_mismatch_rejected_3backend() {
+    // `Lax[Str].getOrDefault(99)` previously type-checked silently and
+    // broke at runtime ("Cannot add ..." errors). After E32B-021 the
+    // arg type must equal T; mismatched types are rejected at compile
+    // time via [E1508] across all 3 backends.
+    let source = r#"
+empty: @[Str] <= @[]
+val <= empty.first().getOrDefault(99)
+stdout(val)
+"#;
+    assert_backends_reject_source(source, "e32b_021_lax_get_or_default_type_mismatch");
+}
+
+#[test]
+fn e32b_021_result_get_or_default_typed_positive_3backend_parity() {
+    let source = r#"
+n <= 7
+res <= Result[n, _ x = x > 0]()
+val <= res.getOrDefault(42)
+stdout("ok_default:" + val.toString())
+
+bad <= -3
+err <= Result[bad, _ x = x > 0]()
+val2 <= err.getOrDefault(42)
+stdout("err_default:" + val2.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_021_result_get_or_default_typed_positive");
+}
+
+#[test]
+fn e32b_021_result_get_or_default_type_mismatch_rejected_3backend() {
+    let source = r#"
+n <= 7
+res <= Result[n, _ x = x > 0]()
+val <= res.getOrDefault("oops")
+stdout(val)
+"#;
+    assert_backends_reject_source(source, "e32b_021_result_get_or_default_type_mismatch");
+}
+
+// ── E32B-030: Native Lax[Bool].getOrDefault parity gap ───────────────
+//
+// E32B-021 deliberately omitted the Bool positive path because Native
+// rendered the underlying tag (`0`/`1`) instead of `false`/`true` when a
+// `Lax[Bool].__value` was returned via `getOrDefault`. The lower-side
+// fix (E32B-030, 2026-05-05) extends `expr_is_bool` so that
+// `getOrDefault(<bool default>)` is recognised as a Bool-returning
+// MethodCall — relying on E32B-021's `[E1508]` arg-type integrity to
+// ensure the default's type matches the receiver's inner T. This routes
+// `b.toString()` through `taida_str_from_bool` and restores parity with
+// Interpreter / JS.
+#[test]
+fn e32b_030_lax_bool_get_or_default_3backend_parity() {
+    let source = r#"
+empty: @[Bool] <= @[]
+b <= empty.first().getOrDefault(false)
+stdout("bool:" + b.toString())
+
+filled: @[Bool] <= @[true]
+b2 <= filled.first().getOrDefault(false)
+stdout("filled:" + b2.toString())
+
+mixed: @[Bool] <= @[false, true]
+b3 <= mixed.last().getOrDefault(false)
+stdout("last:" + b3.toString())
+
+direct <= true
+b4 <= empty.first().getOrDefault(direct)
+stdout("var_default:" + b4.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_030_lax_bool_get_or_default");
+    let out = run_interpreter_src(source, "e32b_030_lax_bool_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "bool:false\nfilled:true\nlast:true\nvar_default:true");
+}
+
+// ── E32B-025 (Lock-N): Div / Mod negative-number truncation contract ─
+//
+// `docs/reference/operators.md` and `docs/guide/05_molding.md` lock the
+// 4-backend contract that `Div` / `Mod` truncate toward zero (the C99 /
+// Rust integer convention), not Python-floor. Without an explicit pin
+// the contract drifts silently — AI-generated implementations often
+// default to Python-style floor for `%`, which would flip the sign of
+// `Mod[-7, 2]()` from `-1` to `1`. Pin all three sign combinations
+// across Interpreter / JS / Native to guarantee `q = trunc(a/b)` and
+// `r = a - q*b` everywhere.
+#[test]
+fn e32b_025_div_mod_negative_truncation_3backend_parity() {
+    let source = r#"
+Div[-7, 2]() ]=> q1
+stdout("q_neg_a:" + q1.toString())
+Mod[-7, 2]() ]=> r1
+stdout("r_neg_a:" + r1.toString())
+
+Div[7, -2]() ]=> q2
+stdout("q_neg_b:" + q2.toString())
+Mod[7, -2]() ]=> r2
+stdout("r_neg_b:" + r2.toString())
+
+Div[-7, -2]() ]=> q3
+stdout("q_neg_both:" + q3.toString())
+Mod[-7, -2]() ]=> r3
+stdout("r_neg_both:" + r3.toString())
+
+Div[0, -3]() ]=> q4
+stdout("q_zero:" + q4.toString())
+Mod[0, -3]() ]=> r4
+stdout("r_zero:" + r4.toString())
+"#;
+    assert_backend_parity_for_source(source, "e32b_025_div_mod_negative_truncation");
+    let out = run_interpreter_src(source, "e32b_025_div_mod_negative_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(
+        out,
+        "q_neg_a:-3\nr_neg_a:-1\nq_neg_b:-3\nr_neg_b:1\nq_neg_both:3\nr_neg_both:-1\nq_zero:0\nr_zero:0"
+    );
+}
+
+// ── E32B-023 (Lock-N): Native + wasm mutual-recursion reject ─────────
+//
+// Phase 0 verdict: option (c). Backends that lower mutual cycles to
+// plain call instructions (Native + wasm-*) used to silently segfault
+// on deep mutual recursion (PoC: `compile_mutual_recursion.td`'s
+// `isEven(2_000_000)` SIGSEGVed under Native). The fix promotes that
+// silent crash to a compile-time `[E0700]` so 3-backend parity stays
+// honest: Interpreter / JS still accept the trampoline-friendly tail
+// mutual recursion (`test_c12_3_tail_mutual_recursion_parity`), and
+// the native lowering targets reject the same program before they can
+// reach the segfault path.
+#[test]
+fn test_e32b_023_native_mutual_recursion_rejected() {
+    let source = r#"isEven n =
+  | n == 0 |> 1
+  | _ |> isOdd(n - 1)
+
+isOdd n =
+  | n == 0 |> 0
+  | _ |> isEven(n - 1)
+
+stdout(isEven(50000))
+"#;
+
+    // Interpreter / JS continue to accept tail-only mutual recursion.
+    let interp = run_interpreter_src(source, "e32b_023_native_mutual_recursion_rejected")
+        .expect("interpreter must accept tail-only mutual recursion at 50k depth");
+    assert_eq!(interp, "1");
+    if node_available() {
+        let js = run_js_src(source, "e32b_023_native_mutual_recursion_rejected")
+            .expect("js must accept tail-only mutual recursion at 50k depth");
+        assert_eq!(
+            interp, js,
+            "interpreter/js mismatch for E32B-023 deep mutual recursion"
+        );
+    }
+
+    // Native must reject with `[E0700]` before it can lower the
+    // program. The error is surfaced via the build subcommand because
+    // the type-checker runs once we know the compile target.
+    let tmp = unique_temp_path("taida_parity_e32b_023", "native", "td");
+    fs::write(&tmp, source).expect("failed to write E32B-023 source");
+    let native_err = run_native_build_error(&tmp, "e32b_023_native_mutual_recursion_rejected")
+        .expect("native build must fail for E32B-023 mutual recursion");
+    assert!(
+        native_err.contains("[E0700]"),
+        "native rejection must cite [E0700], got: {}",
+        native_err
+    );
+    assert!(
+        native_err.contains("Mutual recursion"),
+        "native rejection must explain mutual recursion, got: {}",
+        native_err
+    );
+
+    // wasm-min covers the wasm lowering pipeline (the same checker runs
+    // for every wasm-* profile via `set_compile_target`, so wasm-min is
+    // sufficient as the canonical wasm reject pin without paying the
+    // wasm-full link cost).
+    let wasm_err = run_wasm_min_build_error(&tmp, "e32b_023_wasm_mutual_recursion_rejected")
+        .expect("wasm-min build must fail for E32B-023 mutual recursion");
+    assert!(
+        wasm_err.contains("[E0700]"),
+        "wasm-min rejection must cite [E0700], got: {}",
+        wasm_err
+    );
+
+    let _ = fs::remove_file(&tmp);
+}
+
+// E32B-046: pin the `[E0700]` diagnostic anchor to the user-facing function
+// definition. Earlier code emitted "line 1, column 1" when the cycle entry
+// was further down the file; the Native checker now anchors the finding at
+// the first cycle-participant's `FuncDef::span`. Use a 3-function cycle whose
+// first function intentionally sits past the file start so a regression that
+// resets the anchor to (1, 1) is caught.
+#[test]
+fn test_e32b_046_native_mutual_recursion_anchor_points_at_user_func() {
+    // Compute the expected line dynamically from the fixture so tweaking
+    // the preamble (e.g. adding another comment) does not silently break
+    // the regression check.
+    let source = r#"
+// leading comment so the user functions never start at line 1.
+// keep this preamble multi-line so a regression that anchors to
+// the beginning of the file is visible.
+
+a n =
+  | n == 0 |> 1
+  | _ |> b(n - 1)
+
+b n =
+  | n == 0 |> 1
+  | _ |> c(n - 1)
+
+c n =
+  | n == 0 |> 1
+  | _ |> a(n - 1)
+
+stdout(a(10))
+"#;
+
+    let entry_line = source
+        .lines()
+        .position(|l| l.starts_with("a n ="))
+        .map(|idx| idx + 1)
+        .expect("fixture must contain `a n =` somewhere; otherwise the anchor regression makes no sense");
+    let expected_anchor = format!("line {entry_line}");
+
+    let tmp = unique_temp_path("taida_parity_e32b_046", "anchor", "td");
+    fs::write(&tmp, source).expect("failed to write E32B-046 source");
+    let native_err = run_native_build_error(&tmp, "e32b_046_native_anchor")
+        .expect("native build must fail for the 3-function cycle");
+    assert!(
+        native_err.contains("[E0700]"),
+        "diagnostic must carry [E0700], got: {native_err}"
+    );
+    assert!(
+        native_err.contains(&expected_anchor),
+        "diagnostic must anchor at the user-defined function `a` on {expected_anchor}, got: {native_err}"
+    );
+    assert!(
+        !native_err.contains("line 1, column 1"),
+        "diagnostic must not collapse to (1,1) when the cycle entry sits past line 1: {native_err}"
+    );
+
+    let wasm_err = run_wasm_min_build_error(&tmp, "e32b_046_wasm_anchor")
+        .expect("wasm-min build must fail for the same cycle");
+    assert!(
+        wasm_err.contains("[E0700]") && wasm_err.contains(&expected_anchor),
+        "wasm-min anchor must match native anchor at {expected_anchor}, got: {wasm_err}"
+    );
+
+    let _ = fs::remove_file(&tmp);
+}
+
+// ── E32B-020 (Lock-M): closed-constructor validation ─────────────────
+//
+// Phase 0 verdict: anonymous `@(...)` keeps its open shape; named
+// `Name(field <= value, ...)` is closed. Typo'd field names, duplicate
+// field assignments, and mismatched value types previously fell through
+// the type checker silently — `Pilot(typo_age <= 14)` would simply drop
+// `typo_age` and leave the declared `age` at its default (0). Lock-M
+// promotes those silent breakages to compile errors so AI typos surface
+// before runtime.
+#[test]
+fn test_e32b_020_constructor_rejects_undefined_field() {
+    let source = r#"
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", typo_age <= 14)
+stdout(p.name)
+"#;
+    assert_backends_reject_source(source, "e32b_020_undefined_field");
+}
+
+#[test]
+fn test_e32b_020_constructor_rejects_duplicate_field() {
+    let source = r#"
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", name <= "Asuka", age <= 14)
+stdout(p.name)
+"#;
+    assert_backends_reject_source(source, "e32b_020_duplicate_field");
+}
+
+#[test]
+fn test_e32b_020_constructor_rejects_type_mismatch() {
+    let source = r#"
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", age <= "fourteen")
+stdout(p.age.toString())
+"#;
+    assert_backends_reject_source(source, "e32b_020_type_mismatch");
+}
+
+#[test]
+fn test_e32b_020_constructor_rejects_method_field_passing() {
+    let source = r#"
+Pilot = @(
+  name: Str
+  intro =
+    "I'm " + name
+  => :Str
+)
+g <= Pilot(name <= "Rei", intro <= "fake")
+stdout(g.intro())
+"#;
+    assert_backends_reject_source(source, "e32b_020_method_field");
+}
+
+#[test]
+fn test_e32b_020_error_constructor_rejects_typo() {
+    let source = r#"
+Error => MyError = @(field: Str, message: Str)
+err <= MyError(feild <= "email", message <= "oops")
+stdout(err.field)
+"#;
+    assert_backends_reject_source(source, "e32b_020_error_typo");
+}
+
+#[test]
+fn test_e32b_020_variable_type_field_rejected() {
+    // E32B-058: `[E1408]` Error `type` reject must apply to non-literal RHS as
+    // well — a variable that happens to hold the matching string is still
+    // rejected because the validator only accepts a string literal.
+    let source = r#"
+Error => MyError = @(field: Str, message: Str)
+name <= "MyError"
+err <= MyError(type <= name, field <= "f", message <= "oops")
+stdout(err.message)
+"#;
+    assert_backends_reject_source(source, "e32b_020_variable_type_field_rejected");
+}
+
+#[test]
+fn test_e32b_020_expr_type_field_rejected() {
+    // E32B-058: a string-concatenation expression that produces the matching
+    // type name is rejected for the same reason — only a literal is accepted.
+    let source = r#"
+Error => MyError = @(field: Str, message: Str)
+err <= MyError(type <= "My" + "Error", field <= "f", message <= "oops")
+stdout(err.message)
+"#;
+    assert_backends_reject_source(source, "e32b_020_expr_type_field_rejected");
+}
+
+#[test]
+fn test_e32b_020_constructor_positive_3backend_parity() {
+    // Anonymous `@(...)` keeps open shape. Named TypeInst with
+    // declared fields and Error inheritance round-trip the contract:
+    // omitted fields fall back to their declared default, and the
+    // legacy `type <= "Same"` literal on Error subclasses is accepted
+    // for backward compatibility.
+    let source = r#"
+anon <= @(x <= 1, y <= "extra", z <= true)
+stdout("anon_x:" + anon.x.toString())
+
+Pilot = @(name: Str, age: Int)
+p <= Pilot(name <= "Rei", age <= 14)
+stdout("p_name:" + p.name)
+stdout("p_age:" + p.age.toString())
+
+q <= Pilot(name <= "Asuka")
+stdout("q_age:" + q.age.toString())
+
+Error => MyError = @(field: Str, message: Str)
+ok <= MyError(type <= "MyError", field <= "name", message <= "oops")
+stdout("err_msg:" + ok.message)
+"#;
+    assert_backend_parity_for_source(source, "e32b_020_constructor_positive");
+    let out = run_interpreter_src(source, "e32b_020_constructor_positive_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "anon_x:1\np_name:Rei\np_age:14\nq_age:0\nerr_msg:oops");
 }

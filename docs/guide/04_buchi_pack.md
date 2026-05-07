@@ -2,7 +2,7 @@
 
 > **PHILOSOPHY.md -- II.** だいじなものはふくろにしまっておきましょう
 
-> **本章は E30 (gen-E 破壊的変更) で再構成されました。** 型定義 (`Pilot = @(...)`) と継承 (`Pilot => NervStaff = @(...)`) は **クラスライク型の単一概念** に統合され、[クラスライク型定義](04_class_like.md) で説明されます。本章では値リテラル `@(...)` / `@[...]` を中心に扱います。旧構文からの移行は [migration_e30.md](migration_e30.md) を参照してください。
+> 型定義 (`Pilot = @(...)`) と継承 (`Pilot => NervStaff = @(...)`) は **クラスライク型の単一概念** に統合されており、[クラスライク型定義](04_class_like.md) で説明します。本章では値リテラル `@(...)` / `@[...]` を中心に扱います。
 
 ---
 
@@ -40,7 +40,7 @@ pilot_call <= pilot.call_sign  // "Ikari"
 
 存在しないフィールドにアクセスするとコンパイルエラーになります:
 
-```taida
+```taida fragment
 pilot <= @(name <= "Rei")
 sync_rate <= pilot.sync_rate  // コンパイルエラー: フィールド 'sync_rate' は存在しません
 ```
@@ -139,7 +139,7 @@ pi <= mathUtils.PI             // 3.14159
 
 ## 関数への名前付き引数
 
-```taida
+```taida fragment
 connect host: Str port: Int timeout: Int =
   // 接続処理
 => :Connection

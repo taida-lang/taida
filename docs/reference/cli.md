@@ -35,6 +35,16 @@ taida --no-check <FILE>
 - `--version` / `-V`: バージョンを表示します。
 - `--no-check`: `taida`, `taida <FILE>`, `taida build` でのみ意味を持ちます。`taida way` 配下では拒否されます。
 
+### プロジェクトルート解決
+
+`taida` / `taida build` / `taida way` / `taida ingot` などサブコマンドは、引数で渡された `<PATH>` から親方向に **プロジェクトルートマーカー** を探索して解決します。受理されるマーカーは次の 3 種だけです:
+
+- `packages.tdm` (パッケージマニフェスト)
+- `taida.toml` (将来予約)
+- `.git/` (git リポジトリルート)
+
+**E32 移行ノート**: `@e.32` で **`.taida` ディレクトリをプロジェクトルートマーカーから外しました**。E31 までは `~/.taida` を持つホームディレクトリ直下で `taida ./script.td` を実行すると `$HOME` がルートと誤判定されることがありましたが、E32 以降は `packages.tdm` / `taida.toml` / `.git` が無いディレクトリは「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとしてフォールバックします。`.taida/` は依然としてビルドキャッシュ (`build/`, `deps/`, `taida.lock`) の格納先ですが、ルート判定の trigger にはなりません。`packages.tdm` を持たない単発スクリプト実行で従来挙動が必要な場合は、明示的に空の `packages.tdm` を置いてください (詳細は `docs/guide/10_modules.md` の「packages.tdm」セクションを参照)。
+
 ---
 
 ## 公開トップレベルコマンド
@@ -75,6 +85,10 @@ taida --no-check <FILE>
 
 ## `taida build`
 
+`taida build` には **単一ターゲットビルド** と **ディスクリプタビルド** の 2 つのモードがあります。第一位置引数を unit 名や plan 名として再利用しないことで、両モードの曖昧さを排除します。
+
+### 単一ターゲットビルド (既存互換)
+
 ```bash
 taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 ```
@@ -94,6 +108,44 @@ taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--di
 - 旧 `--target <target>` / `--target=<target>` フラグは `@e.X` で削除され、`[E1700]` + exit 2 になります。
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。
 - `--diag-format jsonl` を指定するとコンパイル診断を `taida.diagnostic.v1` JSONL 形式で出力します。
+
+### ディスクリプタビルド
+
+```bash
+taida build <PATH> --unit <NAME> [--run-hooks]
+taida build <PATH> --plan <NAME> [--run-hooks]
+taida build <PATH> --all-units [--run-hooks]
+taida --no-check build <PATH> --unit <NAME>
+taida --no-check build <PATH> --plan <NAME>
+taida --no-check build <PATH> --all-units
+```
+
+| 形 | 意味 |
+|----|------|
+| `--unit <NAME>` | `<PATH>` 内で export された `BuildUnit` のうち `name == <NAME>` のものだけをビルド |
+| `--plan <NAME>` | `<PATH>` 内で export された `BuildPlan` のうち `name == <NAME>` をビルド |
+| `--all-units` | `<PATH>` 内で export された全 `BuildUnit` をビルド (単独 export と `BuildPlan` 経由のどちらも対象) |
+| `--run-hooks` | ディスクリプタに接続された `BuildHook.before` を実行 |
+
+ディスクリプタビルドは、`taida-lang/build` パッケージのディスクリプタ (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) をランタイム値としてではなく **ビルドディスクリプタ** として扱います。ビルド成功時は `.taida/build/` にターゲット別成果物、静的アセット、hook ログ、`artifact-map.json` をトランザクション単位でコミットします。詳細は `docs/reference/build_descriptors.md` を参照してください。
+
+`--no-check` はディスクリプタファイルの parse とディスクリプタ抽出には影響しません。`--unit` / `--plan` / `--all-units` のいずれでも、選択された `BuildUnit` と依存 `BuildUnit` の子ビルドへ伝播し、単一ターゲットビルドと同じように各エントリソースの型検査をスキップします。
+
+#### 禁止される組み合わせ (`E1900〜E1909`)
+
+| 組み合わせ | 結果 |
+|------------|------|
+| 位置引数の `<target>` と `--unit` / `--plan` / `--all-units` の併用 | `[E1900]` で拒否 |
+| `--unit` と `--plan` の併用 | `[E1901]` で拒否 |
+| `--unit` と `--all-units` の併用 | `[E1901]` で拒否 |
+| `--plan` と `--all-units` の併用 | `[E1901]` で拒否 |
+| `--unit` / `--plan` / `--all-units` と `--entry` の併用 | `[E1900]` で拒否 |
+| `--unit` / `--plan` / `--all-units` 無しで `--run-hooks` を指定 | `[E1900]` で拒否 |
+| `--unit` / `--plan` / `--all-units` を指定したが `<PATH>` に export 済みディスクリプタが無い | `[E1902]` でビルドを中断 |
+| `--unit <NAME>` を指定したが該当する `BuildUnit` が無い | `[E1903]` でビルドを中断 (候補名一覧を表示) |
+| `--plan <NAME>` を指定したが該当する `BuildPlan` が無い | `[E1904]` でビルドを中断 |
+
+`<PATH>` の解釈は単一ターゲットビルドと共通です。第一位置引数はビルドルートのソースパス (ファイル / ディレクトリ / プロジェクトルート) であり、unit 名や plan 名として解釈しません。
 
 WASM SIMD (`simd128`) 有効化ポリシー:
 
@@ -187,7 +239,8 @@ taida init [--target rust-addon] [DIR]
 
 ```bash
 taida ingot [--help]
-taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build]
+taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
+taida ingot migrate-lockfile
 taida ingot deps
 taida ingot update [--allow-local-addon-build]
 taida ingot publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
@@ -213,11 +266,17 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 | `--force-refresh` | `~/.taida/store/` の該当パッケージを破棄して再展開 |
 | `--no-remote-check` | リモート確認をスキップ |
 | `--allow-local-addon-build` | prebuild 不在時にローカルの `cargo build` へフォールバック |
+| `--frozen` | `.taida/taida.lock` の `(name, version, integrity)` triple と解決結果が一致しない場合に失敗 |
 
 挙動:
 - 解決できた依存をインストールし、`.taida/taida.lock` を生成または更新します。
+- 通常の `install` でも既存 lockfile と解決結果の triple mismatch は `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` で拒否します。依存更新は `taida ingot update`、旧 lockfile 変換は `taida ingot migrate-lockfile` を使います。
 - アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256 検証付きで prebuild を取得します。
 - アドオンキャッシュは `~/.taida/addon-cache/` に置かれます。
+
+### `ingot migrate-lockfile`
+
+`.taida/taida.lock` schema v1 / `fnv1a:` integrity を、installed `.taida/deps` tree から再計算した schema v2 / `sha256:` integrity に書き換えます。通常の `install` は v1 / `fnv1a:` を `[E32K2_LOCKFILE_V1_REJECTED]` で拒否します。migration 中に installed dependency が見つからない場合は `[E32K2_LOCKFILE_MIGRATE_FAIL]` で停止します。
 
 ストア sidecar と stale 検知:
 
@@ -344,3 +403,31 @@ Taida 本体のセルフアップデート専用コマンドです。旧 AST 書
 | `--version <VERSION>` | 特定のバージョンに固定 |
 
 `--gen` と `--label` は併用できます。`--version` は `--gen` / `--label` とは排他です。
+
+`taida upgrade` は自己置換を行うため、release provenance は hard-fail 契約です。Release asset に
+`SHA256SUMS` が存在しない場合、または対象 archive の行が存在しない場合は `[E32K1_UPGRADE_NO_SHA256SUMS]`
+で停止します。`SHA256SUMS` は cosign keyless verification で `taida-lang/taida` の release workflow
+identity に pin され、検証後に archive bytes の SHA-256 と照合されます。`TAIDA_GITHUB_API_URL` は
+production upgrade path では読まれず、release metadata の取得先は `https://api.github.com` 固定です。
+
+production upgrade path はダウンロード URL について `https://` 以外の scheme を `[E32K1_UPGRADE_NON_HTTPS_URL]`
+で hard-fail します。release metadata 改竄経由で `file://` などの URL が渡される攻撃を防ぐ defense-in-depth
+ガードであり、テスト経路だけが `download_bytes_for_test` ヘルパーを通じて `file://` を受け付けます。
+
+ダウンロードした archive / `SHA256SUMS` / cosign bundle のステージング先は `~/.taida/cache/upgrade/`
+(ディレクトリ mode `0700`) に固定されます。Unix では `HOME` から `~/.taida/cache/upgrade/`
+までを `O_NOFOLLOW` 付きの dirfd traversal で開き、管理下の各ディレクトリを開いた fd に対して
+owner / mode 検査します。各ファイルも cache dirfd から `O_NOFOLLOW | O_EXCL` で原子作成され、
+`/tmp` 配下の予測可能パスは使いません。アップグレードを開始する直前に cache ディレクトリ経路も
+検査され、symlink・他 UID 所有・group / world bits 立ちのいずれかに該当する場合は
+`[E32K1_UPGRADE_STAGE_FAILED]` で hard-fail します。
+
+`sudo` で `taida upgrade` を実行する場合、`HOME` を共有書き込み可能ディレクトリに上書きしないでください。
+cache ディレクトリは `HOME` (Windows では `USERPROFILE`) を起点に解決されます。Unix では
+`HOME` 自体も現在の実効 UID 所有の symlink でないディレクトリであることを確認します。
+検証ツールは staged file のパスを再度開くため、同じ UID で `HOME` 配下を書き換えられるプロセスは
+信頼境界内として扱います。共有書き込み可能な `HOME` は指定しないでください。
+
+`install.sh` の `TAIDA_VERIFY_SIGNATURES` 既定値は `required` です。`taida upgrade` の cosign 必須
+契約と `install.sh` の trust model はここで一致し、明示的に `TAIDA_VERIFY_SIGNATURES=best-effort` /
+`off` を指定したオペレーターだけが緩いモードに落ちます。

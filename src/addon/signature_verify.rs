@@ -128,10 +128,22 @@ pub enum VerifyOutcome {
     Skipped,
     /// Policy was [`VerifyPolicy::BestEffort`] and no bundle was
     /// found (or `cosign` was missing). A warning was emitted to
-    /// the caller; the install should proceed.
+    /// the caller; the install should proceed. First-party source
+    /// tarball verification uses [`VerifyPolicy::Required`], so that
+    /// path fails closed instead of returning this outcome.
     Warned(String),
     /// `cosign verify-blob` (or the test stub) returned success.
     Verified,
+}
+
+impl std::fmt::Display for VerifyOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Skipped => write!(f, "skipped (verification policy disabled)"),
+            Self::Warned(detail) => write!(f, "warned: {detail}"),
+            Self::Verified => write!(f, "verified"),
+        }
+    }
 }
 
 /// Reason a verification failed when the policy demanded success.
@@ -212,7 +224,7 @@ pub fn fetch_bundle(src_url: &str, dest: &Path) -> Result<bool, VerifyError> {
     if let Some(path) = src_url.strip_prefix("file://") {
         match std::fs::read(path) {
             Ok(data) => {
-                std::fs::write(dest, data).map_err(|e| {
+                crate::upgrade::write_staged_file_at(dest, &data).map_err(|e| {
                     VerifyError::InvocationError(format!("cannot write bundle to {dest:?}: {e}"))
                 })?;
                 Ok(true)
@@ -256,7 +268,7 @@ fn fetch_bundle_https(src_url: &str, dest: &Path) -> Result<bool, VerifyError> {
     let bytes = resp
         .bytes()
         .map_err(|e| VerifyError::InvocationError(format!("bundle body read failed: {e}")))?;
-    std::fs::write(dest, &bytes).map_err(|e| {
+    crate::upgrade::write_staged_file_at(dest, &bytes).map_err(|e| {
         VerifyError::InvocationError(format!("cannot write bundle to {dest:?}: {e}"))
     })?;
     Ok(true)
@@ -274,10 +286,12 @@ fn fetch_bundle_https(_src_url: &str, _dest: &Path) -> Result<bool, VerifyError>
 
 // ── cosign invocation ───────────────────────────────────────────
 
-/// Identity regex the release workflow signs under. Mirrors
-/// `scripts/release/verify-signatures.sh::COSIGN_IDENTITY_REGEXP`
-/// default.
-const COSIGN_IDENTITY_REGEXP: &str = "^https://github.com/taida-lang/";
+/// Default identity regex accepted by addon/source-package verification.
+///
+/// First-party packages may live in any `taida-lang/*` repository, so this
+/// default intentionally remains broader than the self-upgrade path. Callers
+/// with a narrower trust root should use [`verify_artifact_with_identity`].
+pub const DEFAULT_COSIGN_IDENTITY_REGEXP: &str = "^https://github.com/taida-lang/";
 /// OIDC issuer used by GitHub Actions workflows — pinned literal.
 const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
@@ -287,6 +301,19 @@ const COSIGN_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 /// Production flow never honours a test bypass environment variable:
 /// it always resolves and executes `cosign` from `PATH`.
 pub fn run_cosign_verify(artifact: &Path, bundle_path: &Path) -> Result<(), VerifyError> {
+    run_cosign_verify_with_identity(artifact, bundle_path, DEFAULT_COSIGN_IDENTITY_REGEXP)
+}
+
+/// Run `cosign verify-blob` with an explicit certificate identity regex.
+///
+/// This is used by `taida upgrade`, whose self-replacement trust root is the
+/// single canonical `taida-lang/taida` release workflow, while addon/source
+/// package verification keeps the broader first-party default above.
+pub fn run_cosign_verify_with_identity(
+    artifact: &Path,
+    bundle_path: &Path,
+    identity_regexp: &str,
+) -> Result<(), VerifyError> {
     // Detect cosign availability explicitly so the `Required`-policy
     // error path can surface `CosignUnavailable` distinctly from
     // `SignatureRejected`.
@@ -301,7 +328,7 @@ pub fn run_cosign_verify(artifact: &Path, bundle_path: &Path) -> Result<(), Veri
         .arg("--bundle")
         .arg(bundle_path)
         .arg("--certificate-identity-regexp")
-        .arg(COSIGN_IDENTITY_REGEXP)
+        .arg(identity_regexp)
         .arg("--certificate-oidc-issuer")
         .arg(COSIGN_OIDC_ISSUER)
         .arg(artifact)
@@ -329,6 +356,21 @@ pub fn verify_artifact(
     artifact: &Path,
     artifact_url: &str,
     policy: VerifyPolicy,
+) -> Result<VerifyOutcome, VerifyError> {
+    verify_artifact_with_identity(
+        artifact,
+        artifact_url,
+        policy,
+        DEFAULT_COSIGN_IDENTITY_REGEXP,
+    )
+}
+
+/// End-to-end verification with an explicit certificate identity regex.
+pub fn verify_artifact_with_identity(
+    artifact: &Path,
+    artifact_url: &str,
+    policy: VerifyPolicy,
+    identity_regexp: &str,
 ) -> Result<VerifyOutcome, VerifyError> {
     if matches!(policy, VerifyPolicy::Disabled) {
         return Ok(VerifyOutcome::Skipped);
@@ -360,7 +402,7 @@ pub fn verify_artifact(
         }
     }
 
-    match run_cosign_verify(artifact, &bundle_path) {
+    match run_cosign_verify_with_identity(artifact, &bundle_path, identity_regexp) {
         Ok(()) => Ok(VerifyOutcome::Verified),
         Err(VerifyError::CosignUnavailable) => match policy {
             VerifyPolicy::Required => Err(VerifyError::CosignUnavailable),
@@ -383,9 +425,7 @@ pub fn verify_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::MutexGuard;
 
     #[test]
     fn official_url_detection() {
@@ -472,7 +512,11 @@ mod tests {
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let lock = match ENV_LOCK.lock() {
+            // Use the crate-wide env_test_lock so this serialises
+            // against pkg::store::tests, upgrade::tests, auth::token::tests,
+            // pkg::github_release::tests, etc. — every other suite that
+            // touches process env vars during cargo test.
+            let lock = match crate::util::env_test_lock().lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
@@ -490,7 +534,7 @@ mod tests {
         }
 
         fn unset(key: &'static str) -> Self {
-            let lock = match ENV_LOCK.lock() {
+            let lock = match crate::util::env_test_lock().lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };

@@ -13,6 +13,9 @@ use crate::net_surface::NET_RUNTIME_BUILTIN_NAMES;
 /// (status_code, headers, body_bytes)
 pub(super) type ResponseFields = (i64, Vec<(String, String)>, Vec<u8>);
 
+pub(crate) const STREAMING_HEADER_NAME_MAX_BYTES: usize = 8192;
+pub(crate) const STREAMING_HEADER_VALUE_MAX_BYTES: usize = 65536;
+
 /// All symbols exported by the net package.
 /// HTTP v1 (3) + HTTP v2 (1) + HTTP v3 (4) + HTTP v4 (6) + v5 (1) = 15 symbols.
 pub(crate) const NET_SYMBOLS: &[&str] = &NET_RUNTIME_BUILTIN_NAMES;
@@ -76,10 +79,54 @@ impl StreamingWriter {
         matches!(status, 100..=199 | 204 | 205 | 304)
     }
 
-    /// Validate that user-supplied headers do not contain reserved headers
-    /// for the streaming path (Content-Length, Transfer-Encoding).
+    /// Validate that user-supplied headers are safe for the streaming path.
+    ///
+    /// Enforces RFC 7230/9110 grammar — name is restricted to the token set,
+    /// value to vchar/obs-text/HTAB/SP, both reject NUL and control bytes.
+    /// Underscore in the name is rejected to prevent CL.CL request smuggling
+    /// against reverse proxies that vary on `underscores_in_headers`.
+    /// `set-cookie` joins `content-length` / `transfer-encoding` in the
+    /// runtime-managed reserved set.
     pub(crate) fn validate_reserved_headers(headers: &[(String, String)]) -> Result<(), String> {
-        for (name, _) in headers {
+        for (i, (name, value)) in headers.iter().enumerate() {
+            if name.len() > STREAMING_HEADER_NAME_MAX_BYTES {
+                return Err(format!(
+                    "startResponse: headers[{}].name exceeds {} bytes",
+                    i, STREAMING_HEADER_NAME_MAX_BYTES
+                ));
+            }
+            if value.len() > STREAMING_HEADER_VALUE_MAX_BYTES {
+                return Err(format!(
+                    "startResponse: headers[{}].value exceeds {} bytes",
+                    i, STREAMING_HEADER_VALUE_MAX_BYTES
+                ));
+            }
+            if name.is_empty() {
+                return Err(format!("startResponse: headers[{}].name is empty", i));
+            }
+            for &b in name.as_bytes() {
+                if !is_rfc7230_token_byte(b) {
+                    return Err(format!(
+                        "startResponse: headers[{}].name contains a byte outside RFC 7230 token grammar (0x{:02X})",
+                        i, b
+                    ));
+                }
+            }
+            if name.as_bytes().contains(&b'_') {
+                return Err(format!(
+                    "startResponse: headers[{}].name contains '_' which reverse proxies normalise inconsistently",
+                    i
+                ));
+            }
+            for &b in value.as_bytes() {
+                if !is_rfc7230_field_value_byte(b) {
+                    return Err(format!(
+                        "startResponse: headers[{}].value contains a byte outside RFC 7230 field-value grammar (0x{:02X})",
+                        i, b
+                    ));
+                }
+            }
+
             let lower = name.to_ascii_lowercase();
             if lower == "content-length" {
                 return Err(
@@ -95,9 +142,37 @@ impl StreamingWriter {
                         .to_string(),
                 );
             }
+            if lower == "set-cookie" {
+                return Err("startResponse: 'Set-Cookie' is reserved by the runtime; \
+                     handler-supplied Set-Cookie headers would let attacker-influenced names \
+                     (forwarded via untrusted input) inject cookies. Use a future cookie API."
+                    .to_string());
+            }
         }
         Ok(())
     }
+}
+
+/// RFC 7230 §3.2.6 token = 1*tchar.
+/// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." / "^"
+///       / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+/// Underscore is allowed by RFC but reserved/rejected separately by the
+/// caller because reverse proxies vary on `underscores_in_headers`.
+pub(crate) fn is_rfc7230_token_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+'
+        | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+    )
+}
+
+/// RFC 7230 §3.2 field-value byte = HTAB / SP / VCHAR / obs-text.
+/// HTAB = 0x09, SP = 0x20, VCHAR = 0x21..=0x7E, obs-text = 0x80..=0xFF.
+/// All other bytes (NUL, CR, LF, other 0x01..=0x1F controls, DEL = 0x7F)
+/// are rejected to prevent header smuggling and SSE-style injection.
+pub(crate) fn is_rfc7230_field_value_byte(b: u8) -> bool {
+    b == b'\t' || (0x20..=0x7E).contains(&b) || (0x80..=0xFF).contains(&b)
 }
 
 /// Active streaming writer context, stored on the Interpreter during 2-arg handler execution.

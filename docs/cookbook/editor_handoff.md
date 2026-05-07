@@ -26,13 +26,14 @@ r       <= runInteractive(editor, @[path])
 | !r.hasValue |>
   bytes <= stderr("editor failed: " + r.__error.message)
   ><
-| r.__value.code != 0 |>
+r ]=> proc
+| proc.code != 0 |>
   bytes <= stderr("editor exited non-zero")
   ><
 
 // 4) 編集後の内容を読む
 edited <= Read[path]()
-| edited.hasValue |> stdout(edited.__value)
+| edited.hasValue |> stdout(edited.getOrDefault(""))
 | _               |> stderr("read back failed")
 
 // 5) 一時ファイルを片付ける
@@ -53,8 +54,8 @@ pickEditor =
   editor <= EnvVar["EDITOR"]()
   // C20 / E0303: 複数行の rhs 多アーム条件は丸括弧で包む。
   picked <= (
-    | visual.hasValue |> visual.__value
-    | editor.hasValue |> editor.__value
+    | visual.hasValue |> visual.getOrDefault("")
+    | editor.hasValue |> editor.getOrDefault("")
     | _                 |> "nvim"
   )
   picked
@@ -82,7 +83,9 @@ r <= runInteractive(editor, @[path])
 RawModeEnter[]()            // TUI モードに復帰
 stdout(AltScreenEnter())
 
-| r.hasValue && r.__value.code == 0 |> reloadBuffer(path)
+| r.hasValue |>
+    r ]=> proc
+    | proc.code == 0 |> reloadBuffer(path)
 ```
 
 `AltScreenEnter` / `AltScreenLeave` は ANSI エスケープ文字列を返す関数で、`stdout(...)` に渡して端末へ書き出します。`RawModeEnter` / `RawModeLeave` はモールドとして呼び出し、実際のモード切替を副作用で行います。
@@ -107,7 +110,8 @@ stdout(AltScreenEnter())
   bytes <= stderr("editor failed: " + r.__error.message)
   ><
 
-code <= r.__value.code
+r ]=> proc
+code <= proc.code
 | code == 0 |> stdout("accepted: " + path)
 | _ |>
   bytes <= stderr("edit cancelled")
@@ -131,9 +135,9 @@ after  <= Read[path]().getOrDefault("")
 
 ---
 
-## 5. エディタ起動前の対話プロンプト（C20-2 以降）
+## 5. エディタ起動前の対話プロンプト
 
-`runInteractive` / `execShellInteractive` に渡す前の「どのファイルを編集しますか？」「コミットメッセージのドラフトを書きますか？」のようなプロンプトは、`stdinLine` を使って UTF-8-aware に受け取ると日本語 / 中国語 / 絵文字入力が編集中に壊れません。従来の `stdin` は kernel cooked mode のため Backspace が 1 バイト単位で働き、multibyte 文字が途中まで残る不具合 (ROOT-7) がありました。
+`runInteractive` / `execShellInteractive` に渡す前の「どのファイルを編集しますか？」「コミットメッセージのドラフトを書きますか？」のようなプロンプトは、`stdinLine` を使って UTF-8 を意識した形で受け取ると、日本語・中国語・絵文字の入力が編集中に壊れません。旧来の `stdin` はカーネルの cooked モードで動くため、Backspace が 1 バイト単位で働き、マルチバイト文字が途中まで残ることがありました。
 
 ```taida
 >>> taida-lang/os => @(runInteractive, writeFile, Read, EnvVar)

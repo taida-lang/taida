@@ -49,9 +49,9 @@ use std::collections::{HashMap, HashSet};
 /// and IR ops — never through the AST `Expr::BuchiPack` /
 /// `Expr::TypeInst` paths this check guards.
 ///
-/// NOTE: field **reads** (`value.__type`) remain allowed for
-/// introspection (see `examples/quality/rc6a_error_inheritance.td`);
-/// only write-side assignments in pack literals are rejected.
+/// Field **reads** (`value.__type`, `lax.__value`, etc.) are rejected too.
+/// Compiler-generated packs may still carry these internal fields, but
+/// user-facing access must go through unmolding / public methods.
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
 const MAX_CALL_ARGUMENTS: usize = 256;
 
@@ -150,6 +150,10 @@ pub struct TypeChecker {
     /// Whether we are currently inside a pipeline expression.
     /// Used to allow `_` (Placeholder) in pipeline context while rejecting it elsewhere.
     in_pipeline: bool,
+    /// True while the comparison-diagnostic walker is speculatively inferring
+    /// a subtree. Main inference paths use this to avoid recursively
+    /// re-starting the same E1605-only walk from nested containers.
+    in_comparison_error_walk: bool,
     /// Source file path — used for resolving import paths to validate export symbols.
     source_file: Option<std::path::PathBuf>,
     /// Compile target for backend-aware diagnostics.
@@ -189,6 +193,21 @@ impl CompileTarget {
         )
     }
 
+    /// Native and wasm targets that lower through the
+    /// C / wasm-C runtime use regular call instructions for mutual
+    /// recursion (no trampoline). Deep mutual cycles therefore overflow
+    /// the OS stack at runtime instead of falling back to bounded
+    /// iteration. The checker uses this predicate to gate the
+    /// `[E0700]` mutual-recursion reject so Interpreter / JS programs
+    /// continue to compile while Native and wasm-* programs hard-fail
+    /// before they reach the segfault path.
+    pub(crate) fn is_native_lowering(self) -> bool {
+        matches!(
+            self,
+            Self::Native | Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
+        )
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Neutral => "neutral",
@@ -220,6 +239,7 @@ impl TypeChecker {
             mold_header_specs: HashMap::new(),
             declared_header_arities: HashMap::new(),
             in_pipeline: false,
+            in_comparison_error_walk: false,
             source_file: None,
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
@@ -1471,13 +1491,13 @@ impl TypeChecker {
     }
 
     /// Find project root by walking up from the given directory.
-    /// Looks for `packages.tdm`, `taida.toml`, `.taida`, or `.git`.
+    /// `.taida/` is state/config storage, not a project-root marker; otherwise
+    /// `~/.taida` can make `$HOME` look like the active project root.
     fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
         let mut dir = start_dir.to_path_buf();
         loop {
             if dir.join("packages.tdm").exists()
                 || dir.join("taida.toml").exists()
-                || dir.join(".taida").exists()
                 || dir.join(".git").exists()
             {
                 return dir;
@@ -1491,6 +1511,12 @@ impl TypeChecker {
 
     fn define_var(&mut self, name: &str, ty: Type) {
         self.define_var_with_span(name, ty, None);
+    }
+
+    fn define_var_silent(&mut self, name: &str, ty: Type) {
+        if let Some(scope) = self.scope_stack.last_mut() {
+            scope.insert(name.to_string(), ty);
+        }
     }
 
     /// Define a variable with a span for duplicate detection.
@@ -1764,14 +1790,26 @@ impl TypeChecker {
 
         // The file path is informational for the verify layer; type errors
         // carry their own spans so we pass a neutral marker here.
-        let findings = crate::graph::verify::run_check(
-            "mutual-recursion",
-            program,
-            self.source_file
-                .as_deref()
-                .and_then(|p| p.to_str())
-                .unwrap_or("<program>"),
-        );
+        let file = self
+            .source_file
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .unwrap_or("<program>");
+
+        // Always run the cross-backend non-tail mutual recursion check.
+        // E32B-023 (Lock-N): when the active compile target lowers through
+        // the C / wasm-C runtime (Native or wasm-*), additionally reject
+        // *any* mutual cycle (tail or non-tail) with `[E0700]` because
+        // those backends lack the trampoline that Interpreter / JS use.
+        let mut findings = crate::graph::verify::run_check("mutual-recursion", program, file);
+        if self.compile_target.is_native_lowering() {
+            findings.extend(crate::graph::verify::run_check(
+                "mutual-recursion-native",
+                program,
+                file,
+            ));
+        }
+
         for f in findings {
             if !matches!(f.severity, crate::graph::verify::Severity::Error) {
                 continue;
@@ -1882,6 +1920,16 @@ impl TypeChecker {
                         .collect();
                     self.registry.register_type(&td.name, fields);
                     self.declared_header_arities.insert(td.name.clone(), 0);
+                    // E32B-020 (Lock-M): record the FieldDef list so the
+                    // closed-constructor validator can distinguish data
+                    // fields, method fields, and declare-only function
+                    // fields when checking `Name(field <= value, ...)`
+                    // call sites. Without this entry, BuchiPack-style
+                    // TypeDefs fall through validation and silently
+                    // accept undefined fields / type mismatches at
+                    // runtime.
+                    self.mold_field_defs
+                        .insert(td.name.clone(), td.fields.clone());
                 }
                 ClassLikeKind::Mold { .. } => {
                     let md = cl;
@@ -2057,6 +2105,25 @@ impl TypeChecker {
                                 header_args: child_header.clone(),
                             },
                         );
+                        self.mold_field_defs
+                            .insert(inh_child.clone(), merged_field_defs);
+                    } else {
+                        // E32B-020 (Lock-M): non-mold inheritance (the
+                        // common Error path: `Error => MyError = @(...)`)
+                        // also needs a `mold_field_defs` entry so the
+                        // closed-constructor validator can see the
+                        // merged parent + child field list. Without
+                        // this, `MyError(feild <= "...")` typos would
+                        // fall through unchecked because the parent has
+                        // no header args and we'd otherwise skip the
+                        // mold-style registration above.
+                        let parent_field_defs = self
+                            .mold_field_defs
+                            .get(inh_parent)
+                            .cloned()
+                            .unwrap_or_default();
+                        let merged_field_defs =
+                            Self::merge_field_defs(&parent_field_defs, &inh.fields);
                         self.mold_field_defs
                             .insert(inh_child.clone(), merged_field_defs);
                     }
@@ -3126,6 +3193,304 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    // ── Comparison diagnostics in skipped expression contexts ──
+    //
+    // Some containers know their own type without fully inferring children
+    // (for example builtin function args, method args with `Unknown`
+    // parameters, lambdas passed as values, and TemplateLit raw strings).
+    // The old implementation ran a whole-program fourth pass with its own
+    // scope reconstruction.  That both re-inferred nested expressions and
+    // could drift from the main pass.  This walker is started from main
+    // inference paths that may skip child expressions or treat their argument
+    // signature as Unknown, and records only `[E1605]` diagnostics from those
+    // speculative walks.
+    fn run_comparison_error_walk(&mut self, expr: &Expr) {
+        if self.in_comparison_error_walk {
+            return;
+        }
+        self.in_comparison_error_walk = true;
+        self.check_comparison_errors_in_expr(expr);
+        self.in_comparison_error_walk = false;
+    }
+
+    fn check_comparison_errors_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::BinaryOp(_, _, _, _) => {
+                let _ = self.infer_expr_type_recording_only_e1605(expr);
+            }
+            Expr::UnaryOp(_, inner, _) | Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                self.check_comparison_errors_in_expr(inner);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_comparison_errors_in_expr(callee);
+                for arg in args {
+                    self.check_comparison_errors_in_expr(arg);
+                }
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_comparison_errors_in_expr(obj);
+                for arg in args {
+                    self.check_comparison_errors_in_expr(arg);
+                }
+            }
+            Expr::FieldAccess(obj, _, _) => self.check_comparison_errors_in_expr(obj),
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    self.check_comparison_errors_in_expr(&field.value);
+                }
+            }
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for item in items {
+                    self.check_comparison_errors_in_expr(item);
+                }
+            }
+            Expr::MoldInst(_, type_args, fields, _) => {
+                for arg in type_args {
+                    self.check_comparison_errors_in_expr(arg);
+                }
+                for field in fields {
+                    self.check_comparison_errors_in_expr(&field.value);
+                }
+            }
+            Expr::CondBranch(_, _) => {
+                let _ = self.infer_expr_type_recording_only_e1605(expr);
+            }
+            Expr::Lambda(params, body, _) => {
+                self.push_scope();
+                for param in params {
+                    if let Some(default_value) = &param.default_value {
+                        self.check_comparison_errors_in_expr(default_value);
+                    }
+                    let ty = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|ty| self.registry.resolve_type(ty))
+                        .unwrap_or(Type::Unknown);
+                    self.define_var_silent(&param.name, ty);
+                }
+                self.check_comparison_errors_in_expr(body);
+                self.pop_scope();
+            }
+            Expr::TemplateLit(template, span) => {
+                self.check_comparison_errors_in_template(template, span)
+            }
+            Expr::IntLit(_, _)
+            | Expr::FloatLit(_, _)
+            | Expr::StringLit(_, _)
+            | Expr::BoolLit(_, _)
+            | Expr::Gorilla(_)
+            | Expr::Ident(_, _)
+            | Expr::Placeholder(_)
+            | Expr::Hole(_)
+            | Expr::EnumVariant(_, _, _)
+            | Expr::TypeLiteral(_, _, _) => {}
+        }
+    }
+
+    fn check_comparison_errors_in_template(&mut self, template: &str, span: &Span) {
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                i += 2;
+                let start = i;
+                let mut depth = 1;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '{' {
+                        depth += 1;
+                    }
+                    if chars[i] == '}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
+                }
+                let expr_str: String = chars[start..i].iter().collect();
+                let trimmed = expr_str.trim();
+                if let Some(parsed_expr) = Self::parse_template_interpolation_expr(trimmed) {
+                    let error_count = self.errors.len();
+                    self.check_comparison_errors_in_expr(&parsed_expr);
+                    for err in &mut self.errors[error_count..] {
+                        if err.message.contains("[E1605]") {
+                            err.span = span.clone();
+                        }
+                    }
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // E32B-045: When the interpolation source has trailing syntax errors
+    // (e.g. `foo == "x" |> bar` — `|>` is not valid in expression context),
+    // the parser still produces a partial AST for the prefix that *did*
+    // parse cleanly (`foo == "x"`). Earlier code dropped the partial AST
+    // whenever `parse_errors` was non-empty, which silently hid `[E1605]`
+    // detection on any comparison sitting inside such an interpolation.
+    // We now accept the partial AST and let `check_comparison_errors_in_expr`
+    // walk it as a best-effort diagnosis: comparison prefixes that *did*
+    // parse get diagnosed, and downstream `Type::Unknown` guards keep
+    // false positives away on the missing pieces. This is a diagnostic
+    // policy rather than a soundness proof — the goal is to refuse to
+    // miss `[E1605]` just because a tail of the interpolation failed to
+    // tokenize, not to claim soundness in the presence of arbitrary
+    // partial trees.
+    fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
+        fn parse_expr(source: &str) -> Option<Expr> {
+            let (program, _parse_errors) = crate::parser::parse(source);
+            if let Some(Statement::Expr(parsed_expr)) = program.statements.first() {
+                return Some(parsed_expr.clone());
+            }
+            None
+        }
+
+        parse_expr(source).or_else(|| parse_expr(&format!("({source})")))
+    }
+
+    fn infer_expr_type_recording_only_e1605(&mut self, expr: &Expr) -> Type {
+        let error_count = self.errors.len();
+        let ty = self.infer_expr_type(expr);
+        let mut retained = Vec::new();
+        for err in self.errors.drain(error_count..) {
+            if err.message.contains("[E1605]") {
+                retained.push(err);
+            }
+        }
+        self.errors.extend(retained);
+        ty
+    }
+
+    fn func_call_args_need_comparison_walk(&self, func: &Expr, args: &[Expr]) -> bool {
+        fn args_with_unknown_expected_need_walk(args: &[Expr], params: &[Type]) -> bool {
+            args.iter().enumerate().any(|(i, arg)| {
+                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                    return false;
+                }
+                params
+                    .get(i)
+                    .is_none_or(|expected| matches!(expected, Type::Unknown))
+            })
+        }
+
+        let Expr::Ident(name, _) = func else {
+            return true;
+        };
+
+        if self.generic_func_defs.contains_key(name) {
+            // Generic function dispatch infers every provided argument while
+            // binding type parameters, so an additional E1605 walk would only
+            // duplicate that work.
+            return false;
+        }
+        if let Some(param_types) = self.func_param_types.get(name) {
+            return args_with_unknown_expected_need_walk(args, param_types);
+        }
+        if self.func_types.contains_key(name) {
+            return true;
+        }
+        if let Some(Type::Function(params, _)) = self.lookup_var(name) {
+            return args_with_unknown_expected_need_walk(args, &params);
+        }
+        if let Some(Type::Named(var_name)) = self.lookup_var(name)
+            && let Some(Type::Function(params, _)) = self.type_param_function_constraint(&var_name)
+        {
+            return args_with_unknown_expected_need_walk(args, &params);
+        }
+        true
+    }
+
+    // The two complex `if` guards under each `BinOp` arm cover several
+    // distinct fall-through cases; collapsing them into match-arm guards
+    // pushes long boolean expressions next to the pattern and hurts
+    // readability without changing semantics.
+    #[allow(clippy::collapsible_match)]
+    fn emit_comparison_mismatch_if_needed(
+        &mut self,
+        left_type: &Type,
+        op: &BinOp,
+        right_type: &Type,
+        span: &Span,
+    ) {
+        let left_is_numeric_var =
+            matches!(left_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let right_is_numeric_var =
+            matches!(right_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let left_is_numeric_ext = left_type.is_numeric() || left_is_numeric_var;
+        let right_is_numeric_ext = right_type.is_numeric() || right_is_numeric_var;
+
+        match op {
+            BinOp::Eq | BinOp::NotEq => {
+                if left_type != &Type::Unknown
+                    && right_type != &Type::Unknown
+                    && !Self::contains_unknown(left_type)
+                    && !Self::contains_unknown(right_type)
+                    && left_type != right_type
+                    && !(left_type.is_numeric() && right_type.is_numeric())
+                    && !(left_is_numeric_ext && right_is_numeric_ext)
+                    && !self.registry.is_subtype_of(left_type, right_type)
+                    && !self.registry.is_subtype_of(right_type, left_type)
+                {
+                    self.push_e1605_once(
+                        span,
+                        format!(
+                            "[E1605] Cannot compare {} with {} using {:?}. \
+                             Hint: Both operands should be of compatible types.",
+                            left_type, right_type, op
+                        ),
+                    );
+                }
+            }
+            BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
+                if left_type != &Type::Unknown
+                    && right_type != &Type::Unknown
+                    && !Self::contains_unknown(left_type)
+                    && !Self::contains_unknown(right_type)
+                {
+                    let both_numeric = left_type.is_numeric() && right_type.is_numeric();
+                    let both_str =
+                        matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
+                    let same_enum = match (left_type, right_type) {
+                        (Type::Named(a), Type::Named(b)) => a == b && self.registry.is_enum_type(a),
+                        _ => false,
+                    };
+                    let both_numeric_ext = left_is_numeric_ext && right_is_numeric_ext;
+                    let valid = both_numeric || both_numeric_ext || both_str || same_enum;
+                    if !valid {
+                        self.push_e1605_once(
+                            span,
+                            format!(
+                                "[E1605] Cannot compare {} with {} using {:?}. \
+                                 Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                                 For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
+                                left_type, right_type, op
+                            ),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_e1605_once(&mut self, span: &Span, message: String) {
+        if self
+            .errors
+            .iter()
+            .any(|err| err.span == *span && err.message.contains("[E1605]"))
+        {
+            return;
+        }
+        self.errors.push(TypeError {
+            message,
+            span: span.clone(),
+        });
+    }
+
     /// Type-check a statement (second pass).
     fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
@@ -3474,7 +3839,10 @@ defaulted fields must be provided via `()`",
             Expr::IntLit(_, _) => Type::Int,
             Expr::FloatLit(_, _) => Type::Float,
             Expr::StringLit(_, _) => Type::Str,
-            Expr::TemplateLit(_, _) => Type::Str,
+            Expr::TemplateLit(template, span) => {
+                self.check_comparison_errors_in_template(template, span);
+                Type::Str
+            }
             Expr::BoolLit(_, _) => Type::Bool,
             Expr::Gorilla(_) => Type::Unit,
             Expr::Placeholder(_) => Type::Unknown,
@@ -3660,29 +4028,7 @@ defaulted fields must be provided via `()`",
                     }
                     BinOp::Eq | BinOp::NotEq => {
                         // FL-4: Equality operators allow any types but warn on incompatible comparisons
-                        if left_type != Type::Unknown
-                            && right_type != Type::Unknown
-                            && !Self::contains_unknown(&left_type)
-                            && !Self::contains_unknown(&right_type)
-                            && left_type != right_type
-                            && !(left_type.is_numeric() && right_type.is_numeric())
-                            // D28B-024: equality between generic numeric
-                            // type variables (or such a variable and a
-                            // concrete numeric primitive) is allowed.
-                            && !(left_is_numeric_ext && right_is_numeric_ext)
-                            // Allow structurally compatible types (e.g. BuchiPack subtypes)
-                            && !self.registry.is_subtype_of(&left_type, &right_type)
-                            && !self.registry.is_subtype_of(&right_type, &left_type)
-                        {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1605] Cannot compare {} with {} using {:?}. \
-                                     Hint: Both operands should be of compatible types.",
-                                    left_type, right_type, op
-                                ),
-                                span: span.clone(),
-                            });
-                        }
+                        self.emit_comparison_mismatch_if_needed(&left_type, op, &right_type, span);
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
@@ -3695,37 +4041,7 @@ defaulted fields must be provided via `()`",
                         // the Int explicitly (added in C18-3). The declared
                         // order of an Enum is therefore semantic; see
                         // `docs/guide/01_types.md` for the author contract.
-                        if left_type != Type::Unknown
-                            && right_type != Type::Unknown
-                            && !Self::contains_unknown(&left_type)
-                            && !Self::contains_unknown(&right_type)
-                        {
-                            let both_numeric = left_type.is_numeric() && right_type.is_numeric();
-                            let both_str =
-                                matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
-                            let same_enum = match (&left_type, &right_type) {
-                                (Type::Named(a), Type::Named(b)) => {
-                                    a == b && self.registry.is_enum_type(a)
-                                }
-                                _ => false,
-                            };
-                            // D28B-024: ordering between generic numeric
-                            // type variables (or such a variable and a
-                            // concrete numeric primitive) is allowed.
-                            let both_numeric_ext = left_is_numeric_ext && right_is_numeric_ext;
-                            let valid = both_numeric || both_numeric_ext || both_str || same_enum;
-                            if !valid {
-                                self.errors.push(TypeError {
-                                    message: format!(
-                                        "[E1605] Cannot compare {} with {} using {:?}. \
-                                         Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
-                                         For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
-                                        left_type, right_type, op
-                                    ),
-                                    span: span.clone(),
-                                });
-                            }
-                        }
+                        self.emit_comparison_mismatch_if_needed(&left_type, op, &right_type, span);
                         Type::Bool
                     }
                     BinOp::And | BinOp::Or => {
@@ -3812,6 +4128,16 @@ defaulted fields must be provided via `()`",
                                      Hint: Remove the `_` and leave the argument position empty.".to_string(),
                                 span: ph_span.clone(),
                             });
+                        }
+                    }
+                }
+                if !self.in_comparison_error_walk
+                    && self.func_call_args_need_comparison_walk(func, args)
+                {
+                    self.run_comparison_error_walk(func);
+                    for arg in args {
+                        if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                            self.run_comparison_error_walk(arg);
                         }
                     }
                 }
@@ -4389,6 +4715,13 @@ defaulted fields must be provided via `()`",
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                if !self.in_comparison_error_walk {
+                    for arg in args {
+                        if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                            self.run_comparison_error_walk(arg);
+                        }
+                    }
+                }
                 // E1508: Method call argument count and type checking
                 self.check_method_args(&obj_type, method, args, span);
                 self.infer_method_return_type(&obj_type, method)
@@ -4396,6 +4729,18 @@ defaulted fields must be provided via `()`",
 
             Expr::FieldAccess(obj, field, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                if field.starts_with(RESERVED_INTERNAL_FIELD_PREFIX) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. \
+                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax, \
+                             or an official introspection API instead.",
+                            field
+                        ),
+                        span: span.clone(),
+                    });
+                    return Type::Unknown;
+                }
                 match &obj_type {
                     Type::BuchiPack(fields) => {
                         if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
@@ -4416,15 +4761,6 @@ defaulted fields must be provided via `()`",
                         if let Some(fields) = self.registry.get_type_fields(type_name) {
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
                                 ty.clone()
-                            } else if field.starts_with("__") {
-                                // C19B-002: skip compiler-internal `__*` fields
-                                // (`__type`, `__value`, `__error`, `__default`,
-                                // etc.). Error-derived packs surface these at
-                                // runtime even when they aren't in the user's
-                                // explicit field list, and flagging them here
-                                // would regress existing patterns like
-                                // `err.__type` on Error-inheriting named types.
-                                Type::Unknown
                             } else {
                                 // FL-2: Report undefined field access on Named types
                                 self.errors.push(TypeError {
@@ -4441,25 +4777,15 @@ defaulted fields must be provided via `()`",
                             Type::Unknown
                         }
                     }
-                    // C19B-002: Gorillax / RelaxedGorillax `__value` / `__error`
-                    // dot-access. When the Gorillax is parameterized — e.g.
-                    // `runInteractive` → `Gorillax[@(code: Int)]` — accessing
-                    // `.__value` must yield the inner BuchiPack so that a
-                    // further `.stdout` / `.bogus` access is rejected by the
-                    // BuchiPack branch above.
-                    //
-                    // `hasValue` is always Bool. `__error` is deliberately
-                    // returned as Unknown because the error inner shape
-                    // (IoError / ProcessError) is heterogeneous and not pinned
-                    // by this checker; falling back to Unknown keeps existing
-                    // `r.__error.code` / `.kind` callers compiling.
+                    // E32B-018: internal `__*` envelope slots are rejected
+                    // above before type-specific dispatch. Public `hasValue`
+                    // remains available.
                     Type::Generic(name, args)
                         if name == "Gorillax" || name == "RelaxedGorillax" =>
                     {
                         match field.as_str() {
-                            "__value" => args.first().cloned().unwrap_or(Type::Unknown),
                             "hasValue" => Type::Bool,
-                            "__error" | "throw" | "__type" => Type::Unknown,
+                            "throw" => Type::Unknown,
                             _ => {
                                 // Only surface an error for fields that are
                                 // clearly not Gorillax envelope slots. Unknown
@@ -4517,6 +4843,14 @@ defaulted fields must be provided via `()`",
             }
 
             Expr::MoldInst(name, type_args, fields, mold_span) => {
+                if !self.in_comparison_error_walk {
+                    for arg in type_args {
+                        self.run_comparison_error_walk(arg);
+                    }
+                    for field in fields {
+                        self.run_comparison_error_walk(&field.value);
+                    }
+                }
                 // C-5e: Reject Mold[_]() direct binding outside pipeline.
                 // In pipeline (`data => Trim[_]()`), `_` refers to the pipe value — allowed.
                 if !self.in_pipeline {
@@ -4785,6 +5119,9 @@ defaulted fields must be provided via `()`",
                     "Sum" => Type::Num,
                     "Find" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
                     "FindIndex" | "Count" => Type::Int,
+                    // E32B-022 (Lock-N): Lax[Int]-returning replacement for
+                    // the legacy `-1`-sentinel `FindIndex`.
+                    "FindIndexLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
                     // Gorillax[value]() returns Gorillax[T]
                     "Gorillax" => {
                         let inner = type_args
@@ -4974,8 +5311,187 @@ defaulted fields must be provided via `()`",
                 }
             }
 
-            Expr::TypeInst(name, _, _) => Type::Named(name.clone()),
+            Expr::TypeInst(name, fields, span) => {
+                self.validate_type_inst_constructor(name, fields, span);
+                Type::Named(name.clone())
+            }
             Expr::Throw(_, _) => Type::Unknown,
+        }
+    }
+
+    /// Closed-constructor validation for class-like
+    /// `Name(field <= value, ...)` instantiations.
+    ///
+    /// Anonymous packs (`@(...)`) keep their open / structural shape and
+    /// are intentionally left untouched by this validator. Named
+    /// constructors backed by a `mold_field_defs[name]` declaration are
+    /// promoted to closed form here:
+    ///
+    /// 1. Duplicate field names → `[E1404]` (single appearance per call).
+    /// 2. Undeclared field names → `[E1406]` (the typo path that
+    ///    previously fell back to a default value at runtime — e.g.
+    ///    `Pilot(typo_age <= 14)` silently dropping the typo and giving
+    ///    `age = 0`).
+    /// 3. Method fields (`is_method = true`) cannot be passed as
+    ///    constructor arguments — methods are part of the type's
+    ///    behaviour, not its data — `[E1407]`.
+    /// 4. Declared field value type must be compatible with the field's
+    ///    declared type → `[E1506]` (existing arg-type code).
+    /// 5. Error-derived types' `type` field is auto-set to the concrete
+    ///    type name. Passing `type <= "Same"` is allowed (idempotent
+    ///    legacy aid); any other literal / non-literal value is rejected
+    ///    via `[E1408]` so `type` cannot be spoofed.
+    /// 6. Omitted fields are NOT rejected — the value is filled by the
+    ///    declared default / by the `defaultFn` synthesised in E30B-004
+    ///    for declare-only function fields. This honours the "every type
+    ///    has a default" PHILOSOPHY without forcing every constructor
+    ///    call site to enumerate every field.
+    fn validate_type_inst_constructor(&mut self, name: &str, fields: &[BuchiField], _span: &Span) {
+        let Some(field_defs) = self.mold_field_defs.get(name).cloned() else {
+            // Name is not a registered class-like / mold-like type
+            // declaration (e.g. an Enum variant call, a stale name, a
+            // user-defined function call, etc.). Defer to other paths
+            // for those — this validator is scoped strictly to the
+            // closed-constructor surface for known types.
+            return;
+        };
+
+        let is_error_type = self.registry.is_error_type(name);
+        // Build lookup tables once. Method names are pulled from
+        // `mold_field_defs` (which carries `is_method`), data names
+        // additionally include inherited fields from
+        // `registry.type_defs` (which contains parent-merged fields,
+        // including built-in Error parent fields like `type` /
+        // `message`). Without this fallback, `MyError(message <= ...)`
+        // would be rejected as undefined because the AST-level
+        // `mold_field_defs` only carries the *declared* extras.
+        let inherited_field_types: std::collections::HashMap<String, Type> = self
+            .registry
+            .get_type_fields(name)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let declared_data: std::collections::HashMap<&str, &FieldDef> = field_defs
+            .iter()
+            .filter(|f| !f.is_method)
+            .map(|f| (f.name.as_str(), f))
+            .collect();
+        let declared_methods: std::collections::HashSet<&str> = field_defs
+            .iter()
+            .filter(|f| f.is_method)
+            .map(|f| f.name.as_str())
+            .collect();
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for field in fields {
+            // (a) duplicate detection
+            if !seen.insert(field.name.clone()) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1404] Constructor '{}' has duplicate field '{}'. \
+                         Hint: pass each field at most once in a `Name(...)` constructor call.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            // `__`-prefix is already handled by `check_mold_errors_in_expr`
+            // (`[E1617]`); skip here so we don't double-report.
+            if field.name.starts_with(RESERVED_INTERNAL_FIELD_PREFIX) {
+                continue;
+            }
+
+            // (b) method field cannot be passed
+            if declared_methods.contains(field.name.as_str()) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1407] Constructor '{}' cannot accept method field '{}' as a value. \
+                         Hint: methods are part of the type's behaviour and are defined in the \
+                         type declaration, not assigned per-instance.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            // (c) undeclared field
+            let declared_opt = declared_data.get(field.name.as_str()).copied();
+            let inherited_ty = inherited_field_types.get(field.name.as_str()).cloned();
+
+            // Error-derived types: `type` is the auto-set inheritance tag.
+            // The base `Error` parent merges `type: Str` into the field map,
+            // so `inherited_field_types` always contains it for Error
+            // subclasses. Without this hoisted check the validator below
+            // would happily accept `MyError(type <= someVar)` (variable
+            // bypass) or `MyError(type <= "Other")` because the field is
+            // not "undeclared". Per E32B-058 the validator must always
+            // require a string literal whose value matches the type name.
+            if is_error_type && field.name == "type" {
+                if let Expr::StringLit(value, _) = &field.value
+                    && value == name
+                {
+                    // idempotent legacy literal — allowed
+                } else {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1408] Error constructor '{}' auto-sets the `type` field. \
+                             The `type` argument must be a string literal whose value exactly matches the type name (\"{}\"); \
+                             variables, expressions, and any other string value are rejected. \
+                             Hint: drop the `type` argument or pass the matching string literal `type <= \"{}\"`.",
+                            name, name, name
+                        ),
+                        span: field.span.clone(),
+                    });
+                }
+                continue;
+            }
+
+            if declared_opt.is_none() && inherited_ty.is_none() {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1406] Constructor '{}' has no field named '{}'. \
+                         Hint: check the type declaration; only declared data fields can be passed \
+                         as `Name(field <= value, ...)`.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            // (d) value type compatibility against declared / inherited type
+            let expected_ty = if let Some(declared) = declared_opt {
+                declared
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| self.registry.resolve_type(ta))
+                    .unwrap_or(Type::Unknown)
+            } else {
+                inherited_ty.unwrap_or(Type::Unknown)
+            };
+            if matches!(expected_ty, Type::Unknown) {
+                continue;
+            }
+            let actual_ty = self.infer_expr_type(&field.value);
+            if matches!(actual_ty, Type::Unknown) {
+                continue;
+            }
+            if Self::contains_unknown(&actual_ty) || Self::contains_unknown(&expected_ty) {
+                continue;
+            }
+            if !self.registry.is_subtype_of(&actual_ty, &expected_ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Constructor '{}' field '{}' has type {}, expected {}. \
+                         Hint: pass a value of the declared field type, or use an explicit conversion mold.",
+                        name, field.name, actual_ty, expected_ty
+                    ),
+                    span: field.span.clone(),
+                });
+            }
         }
     }
 
