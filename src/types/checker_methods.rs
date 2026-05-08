@@ -643,6 +643,19 @@ impl TypeChecker {
                 if let Some(fields) = self.registry.get_type_fields(type_name) {
                     // Check if method name matches a field (could be a method field)
                     if let Some((_, ty)) = fields.iter().find(|(n, _)| n == method) {
+                        // E34 Phase 2 (Lock-B=C) fix: when the matched
+                        // field is a function type (e.g.
+                        // `Predicate = @(check: Int => :Bool)`), the
+                        // method-call result is the function's declared
+                        // return type, not the function type itself.
+                        // The legacy codegen relied on the declared
+                        // return via expr_is_bool's pack-field arm; the
+                        // typed-table path needs the same answer or it
+                        // records `Type::Function(...)` and Bool
+                        // detection collapses to false.
+                        if let Type::Function(_, ret) = ty {
+                            return (**ret).clone();
+                        }
                         ty.clone()
                     } else {
                         // toString is available on all types

@@ -60,15 +60,23 @@ impl Lowering {
     /// delete the legacy bool_vars / bool_returning_funcs / allow-list
     /// machinery entirely.
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
-        // E34 Phase 2 (Lock-B=C): when the type-checker recorded a
-        // decision for this expression, it wins outright — both
-        // directions (Bool / non-Bool). This closes the false-positive
-        // path where the allow-list matched a method name on a pack
-        // whose field returned a non-Bool, and the false-negative path
-        // where a cross-module Bool fn never landed in the local
-        // bool_returning_funcs registry.
+        // E34 Phase 2 (Lock-B=C): the type-checker's Typed HIR side
+        // table is authoritative when it has a concrete decision.
+        //   - Type::Bool: definitive yes (closes the cross-module
+        //     false-negative gap).
+        //   - any other concrete type: definitive no (closes the
+        //     pack-field-shadowing false-positive gap).
+        //   - Type::Unknown: the checker had no insight (e.g. molds
+        //     like SpanEquals / Exists that have no checker arm yet,
+        //     or expressions through generics that didn't fully
+        //     resolve). Fall through to the legacy heuristics so
+        //     existing parity tests stay green.
         if let Some(ty) = self.typed_expr_table.lookup(expr) {
-            return matches!(ty, crate::types::Type::Bool);
+            match ty {
+                crate::types::Type::Bool => return true,
+                crate::types::Type::Unknown => {}
+                _ => return false,
+            }
         }
         match expr {
             Expr::BoolLit(_, _) => true,
@@ -86,6 +94,14 @@ impl Lowering {
                 )
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
+            // E34 Phase 2 (Lock-B=C): the type-checker decides Bool method
+            // calls when a typed entry exists (top-of-function short-circuit).
+            // The legacy heuristics below survive as a fallback for
+            // synthesised expressions the checker never observed (e.g.
+            // mold lowering inserts a `someExpr.toString()` call where the
+            // receiver was constructed in lowering itself, leaving no
+            // ExprId for the table to key on). The allow-list still
+            // matches, but only when the typed table has nothing to say.
             Expr::MethodCall(obj, method, args, _) => {
                 if matches!(
                     method.as_str(),
@@ -113,27 +129,9 @@ impl Lowering {
                 ) {
                     return true;
                 }
-                // E32B-030: `Lax[T] / Result[T,_] / Async[T] .getOrDefault(default)`
-                // returns the inner T. Since E32B-021's type-checker `[E1508]` now
-                // requires `default` to match T at compile time, the static type
-                // of the default arg is a sound proxy for the result type. Without
-                // this rule, `Lax[Bool].getOrDefault(false).toString()` falls
-                // through to `taida_polymorphic_to_string`, which only sees a
-                // raw i64 and renders Bool values as `0`/`1` on Native — breaking
-                // 3-backend parity that Interpreter / JS already satisfy.
                 if method == "getOrDefault" && args.len() == 1 && self.expr_is_bool(&args[0]) {
                     return true;
                 }
-                // E30 Phase 8 / E30B-011: pack field call whose declared
-                // return type is :Bool (e.g. `Predicate = @(check: Int => :Bool)`
-                // and `b <= p.check(0)`). The default value of `check` is the
-                // synthetic defaultFn returning `false`; without recognising
-                // the Bool return here, `b.toString()` would fall into
-                // `taida_polymorphic_to_string` which only sees a raw i64
-                // and renders "0". By detecting the Bool return type from
-                // the receiver's class-like annotation, we route to
-                // `taida_str_from_bool` and produce the parity-correct
-                // "false".
                 if let Some(type_name) = self.infer_type_name(obj)
                     && let Some(field_types) = self.type_field_types.get(&type_name)
                 {
@@ -150,7 +148,11 @@ impl Lowering {
                 false
             }
             Expr::FuncCall(callee, _, _) => {
-                // Detect bool-returning user-defined functions
+                // E34 Phase 2: typed table wins above; this fallback only
+                // helps synthesised FuncCalls that the type-checker never
+                // saw. Local-only Bool fn detection survives so mold and
+                // facade-emitted call sites that bypass the AST still get
+                // the right tag.
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     self.bool_returning_funcs.contains(name.as_str())
                 } else {
