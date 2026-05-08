@@ -220,10 +220,18 @@ impl TypeChecker {
 
         // errorInfo intentionally uses an explicit allow-list. Accepting any
         // `(type, message)` shaped pack would reintroduce duck typing here.
+        // E34 Phase 3 (Lock-D=B'): Lax / Result / Async are admitted as part
+        // of the canonical ErrorInfo carrier unification — every error-bag
+        // type now answers `errorInfo() -> Lax[ErrorInfo]`.
         if method == "errorInfo"
             && !matches!(
                 obj_type,
-                Type::Generic(name, _) if name == "Gorillax" || name == "RelaxedGorillax"
+                Type::Generic(name, _)
+                    if name == "Gorillax"
+                        || name == "RelaxedGorillax"
+                        || name == "Lax"
+                        || name == "Result"
+                        || name == "Async"
             )
             && !matches!(obj_type, Type::Error(_))
             && !matches!(obj_type, Type::Unknown | Type::Any)
@@ -231,7 +239,7 @@ impl TypeChecker {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1509] Unknown method 'errorInfo' on type {}. \
-                     Hint: errorInfo() is only available on Gorillax, RelaxedGorillax, and Error values.",
+                     Hint: errorInfo() is available on Lax, Result, Async, Gorillax, RelaxedGorillax, and Error values.",
                     obj_type
                 ),
                 span: span.clone(),
@@ -592,6 +600,11 @@ impl TypeChecker {
                 "map" | "flatMap" | "mapError" => obj_type.clone(),
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
                 "getOrThrow" => args.first().cloned().unwrap_or(Type::Unknown),
+                // E34 Phase 3 (Lock-D=B'): canonical Lax[ErrorInfo].
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
@@ -628,6 +641,11 @@ impl TypeChecker {
                 "isPending" | "isFulfilled" | "isRejected" => Type::Bool,
                 "map" => obj_type.clone(),
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
+                // E34 Phase 3 (Lock-D=B'): canonical Lax[ErrorInfo].
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
