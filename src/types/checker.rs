@@ -1151,6 +1151,18 @@ impl TypeChecker {
         )
     }
 
+    fn js_rilla_constructor_signature(name: &str) -> Option<(usize, &'static str)> {
+        match name {
+            "JSGet" => Some((2, "JSGet[path, Out]()")),
+            "JSCall" => Some((3, "JSCall[path, args, Out]()")),
+            "JSNew" => Some((3, "JSNew[path, args, Out]()")),
+            "JSSet" => Some((2, "JSSet[path, value]()")),
+            "JSBind" => Some((1, "JSBind[path]()")),
+            "JSSpread" => Some((1, "JSSpread[source]()")),
+            _ => None,
+        }
+    }
+
     fn is_cage_rilla_child(name: &str) -> bool {
         matches!(name, "JSRilla" | "FileRilla" | "BuildRilla")
     }
@@ -1164,15 +1176,21 @@ impl TypeChecker {
             return None;
         };
         match name.as_str() {
-            "JSGet" => type_args.get(1).map(|out| CageRunnerType {
+            "JSGet" if type_args.len() == 2 => type_args.get(1).map(|out| CageRunnerType {
                 branch: CageBranch::Js,
                 output: self.type_arg_expr_to_type(out),
             }),
-            "JSCall" | "JSNew" => type_args.get(2).map(|out| CageRunnerType {
+            "JSCall" | "JSNew" if type_args.len() == 3 => {
+                type_args.get(2).map(|out| CageRunnerType {
+                    branch: CageBranch::Js,
+                    output: self.type_arg_expr_to_type(out),
+                })
+            }
+            "JSSet" if type_args.len() == 2 => Some(CageRunnerType {
                 branch: CageBranch::Js,
-                output: self.type_arg_expr_to_type(out),
+                output: Type::Molten,
             }),
-            "JSSet" | "JSBind" | "JSSpread" => Some(CageRunnerType {
+            "JSBind" | "JSSpread" if type_args.len() == 1 => Some(CageRunnerType {
                 branch: CageBranch::Js,
                 output: Type::Molten,
             }),
@@ -1271,6 +1289,20 @@ impl TypeChecker {
                 None
             }
             Expr::MoldInst(name, type_args, _, runner_span) => {
+                if let Some((expected, signature)) = Self::js_rilla_constructor_signature(name)
+                    && type_args.len() != expected
+                {
+                    self.push_cage_error(
+                        "[E1517]",
+                        runner_span,
+                        format!(
+                            "[E1517] {} requires {} `[]` type argument(s): `{}`. \
+                             Hint: pass the descriptor directly as `Cage[subject, {}]()`.",
+                            name, expected, signature, signature
+                        ),
+                    );
+                    return None;
+                }
                 if Self::is_cage_rilla_child(name) && type_args.len() != 1 {
                     self.push_cage_error(
                         "[E1516]",
@@ -5445,6 +5477,18 @@ defaulted fields must be provided via `()`",
                     // check_mold_errors_in_expr(), not here, to ensure it
                     // fires regardless of expression context.
                     "TypeExtends" => Type::Bool,
+                    "TypeName" => {
+                        if type_args.len() != 1 {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1507] TypeName requires exactly 1 argument: TypeName[value](), got {}.",
+                                    type_args.len()
+                                ),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        Type::Str
+                    }
                     "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" | "JSRilla"
                     | "FileRilla" | "BuildRilla" | "CageRilla" => self
                         .cage_runner_type(expr)

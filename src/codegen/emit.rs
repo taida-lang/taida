@@ -1233,6 +1233,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        "taida_error_info" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
 
         // ── 型変換モールド (Str/Int/Float/Bool) — 全て Lax (Ptr) を返す ──
         "taida_str_mold_int" => RuntimeAbi {
@@ -1528,6 +1532,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         // typeof prelude
         "taida_typeof" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_type_name" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Ptr],
         },

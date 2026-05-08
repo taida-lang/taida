@@ -64,6 +64,32 @@ mod tests {
     }
 
     #[test]
+    fn test_typename_mold_reports_value_identity() {
+        let source = r#"Enum => Status = :Ok :Fail
+AppError = @(message: Str)
+stdout(TypeName[42]())
+stdout(TypeName[AppError(message <= "x")]())
+TypeName[Status:Fail()]()"#;
+        let (program, parse_errors) = crate::parser::parse(source);
+        assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+        let mut interpreter = Interpreter::new();
+        let result = interpreter.eval_program(&program).unwrap();
+        assert_eq!(interpreter.output, vec!["Int", "AppError"]);
+        assert_eq!(result, Value::str("Fail".to_string()));
+    }
+
+    #[test]
+    fn test_plain_typedef_error_info_is_not_runtime_method() {
+        let result = eval(
+            r#"Cat = @(name: Str)
+Cat(name <= "Tama").errorInfo()"#,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Unknown method 'errorInfo'"), "Got: {}", err);
+    }
+
+    #[test]
     fn test_eval_div_mold() {
         // Div[10, 3]() returns Lax with hasValue=true, value=3
         let result = eval_ok("result <= Div[10, 3]()");
@@ -1668,6 +1694,30 @@ check(1)"#;
     // ── Molten type tests ──────────────────────────────
 
     #[test]
+    fn test_jsget_js_backend_only_error() {
+        let result = eval("x <= JSGet[@[\"x\"], Int]()");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("JSGet is only available in the JS transpiler backend"),
+            "Got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_jscall_js_backend_only_error() {
+        let result = eval("x <= JSCall[@[], @[], Int]()");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("JSCall is only available in the JS transpiler backend"),
+            "Got: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_jsnew_js_backend_only_error() {
         let result = eval("x <= JSNew[\"Date\"]()");
         assert!(result.is_err());
@@ -1880,6 +1930,44 @@ c.hasValue()"#;
         interpreter.env.define_force("m", Value::Molten);
         let result = interpreter.eval_program(&program).unwrap();
         assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_gorillax_error_info_exposes_failure_details() {
+        let source = r#"Error => TestError = @(message: Str)
+failing x =
+  TestError(message <= "cage fail").throw()
+=> :Molten
+Cage[m, failing]() => c
+c.errorInfo() ]=> info
+info.message"#;
+        let (program, parse_errors) = crate::parser::parse(source);
+        assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+        let mut interpreter = Interpreter::new();
+        interpreter.env.define_force("m", Value::Molten);
+        let result = interpreter.eval_program(&program).unwrap();
+        assert_eq!(result, Value::str("cage fail".to_string()));
+    }
+
+    #[test]
+    fn test_relaxed_gorillax_error_info_from_caught_error() {
+        let source = r#"Error => TestError = @(message: Str)
+failing x =
+  TestError(message <= "cage fail").throw()
+=> :Molten
+|== error: Error =
+  error.errorInfo() ]=> info
+  info.type
+=> :Str
+Cage[m, failing]() => c
+c.relax() ]=> value
+"unreachable""#;
+        let (program, parse_errors) = crate::parser::parse(source);
+        assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+        let mut interpreter = Interpreter::new();
+        interpreter.env.define_force("m", Value::Molten);
+        let result = interpreter.eval_program(&program).unwrap();
+        assert_eq!(result, Value::str("RelaxedGorillaEscaped".to_string()));
     }
 
     // ── Molten negative tests ──────────────────────────

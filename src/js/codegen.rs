@@ -2752,6 +2752,75 @@ impl JsCodegen {
         Ok(())
     }
 
+    fn gen_js_rilla_descriptor(&mut self, name: &str, type_args: &[Expr]) -> Result<bool, JsError> {
+        match name {
+            "JSGet" => {
+                if type_args.len() != 2 {
+                    return Err(JsError {
+                        message: "JSGet requires 2 type arguments: JSGet[path, Out]()".to_string(),
+                    });
+                }
+                self.write("__taida_js_get_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(")");
+                Ok(true)
+            }
+            "JSCall" => {
+                if type_args.len() != 3 {
+                    return Err(JsError {
+                        message: "JSCall requires 3 type arguments: JSCall[path, args, Out]()"
+                            .to_string(),
+                    });
+                }
+                self.write("__taida_js_call_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(", ");
+                self.gen_expr(&type_args[1])?;
+                self.write(")");
+                Ok(true)
+            }
+            "JSNew" if type_args.len() == 3 => {
+                self.write("__taida_js_new_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(", ");
+                self.gen_expr(&type_args[1])?;
+                self.write(")");
+                Ok(true)
+            }
+            "JSNew" => Ok(false),
+            "JSSet" if type_args.len() == 2 => {
+                self.write("__taida_js_set_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(", ");
+                self.gen_expr(&type_args[1])?;
+                self.write(")");
+                Ok(true)
+            }
+            "JSSet" => Ok(false),
+            "JSBind" if type_args.len() == 1 => {
+                self.write("__taida_js_bind_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(")");
+                Ok(true)
+            }
+            "JSBind" => Ok(false),
+            "JSSpread" if type_args.len() == 1 => {
+                self.write("__taida_js_spread_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(")");
+                Ok(true)
+            }
+            "JSSpread" => Ok(false),
+            "JSRilla" | "FileRilla" | "BuildRilla" | "CageRilla" => Err(JsError {
+                message: format!(
+                    "{} is an abstract CageRilla descriptor. Use JSGet/JSCall/JSNew/JSSet/JSBind/JSSpread.",
+                    name
+                ),
+            }),
+            _ => Ok(false),
+        }
+    }
+
     fn gen_expr(&mut self, expr: &Expr) -> Result<(), JsError> {
         match expr {
             Expr::IntLit(val, _) => {
@@ -3288,6 +3357,21 @@ impl JsCodegen {
             Expr::MoldInst(name, type_args, fields, _) => {
                 // B5: MoldInst → function call with type args
 
+                if name == "TypeName" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: format!(
+                                "TypeName requires 1 argument: TypeName[value](), got {}",
+                                type_args.len()
+                            ),
+                        });
+                    }
+                    self.write("__taida_typename(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
+
                 // C18-3: Ordinal[<enum_value>]() → strict Enum → Int.
                 //
                 // C18B-005 fix: call `__taida_enumOrdinalStrict` (not the
@@ -3478,6 +3562,10 @@ impl JsCodegen {
                         }
                     };
                     self.write(if result { "true" } else { "false" });
+                    return Ok(());
+                }
+
+                if self.gen_js_rilla_descriptor(name, type_args)? {
                     return Ok(());
                 }
 
@@ -5453,6 +5541,52 @@ waitWithTimeout p =
         assert!(
             js.contains("new Hono()"),
             "JSNew should still generate new: got {}",
+            js
+        );
+    }
+
+    #[test]
+    fn test_js_codegen_cagerilla_descriptors_lower_to_runners() {
+        let js = transpile(
+            r#"
+target = 1
+Cage[target, JSGet[@["value"], Int]()]()
+Cage[target, JSCall[@[], @["e33.txt"], Str]()]()
+Cage[target, JSNew[@["Router"], @[], Molten]()]()
+Cage[target, JSSet[@["port"], 3000]()]()
+Cage[target, JSBind[@["handle"]]()]()
+Cage[target, JSSpread[@[1]]()]()
+"#,
+        )
+        .unwrap();
+        assert!(
+            js.contains("__taida_js_get_runner(Object.freeze([\"value\"]))"),
+            "JSGet descriptor should lower to runner: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_js_call_runner(Object.freeze([]), Object.freeze([\"e33.txt\"]))"),
+            "JSCall descriptor should lower to runner: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_js_new_runner(Object.freeze([\"Router\"]), Object.freeze([]))"),
+            "JSNew descriptor should lower to runner: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_js_set_runner(Object.freeze([\"port\"]), 3000)"),
+            "JSSet descriptor should lower to runner: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_js_bind_runner(Object.freeze([\"handle\"]))"),
+            "JSBind descriptor should lower to runner: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_js_spread_runner(Object.freeze([1]))"),
+            "JSSpread descriptor should lower to runner: got {}",
             js
         );
     }

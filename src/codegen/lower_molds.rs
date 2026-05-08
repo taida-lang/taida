@@ -2898,8 +2898,36 @@ impl Lowering {
                 Ok(result)
             }
 
+            "TypeName" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!(
+                            "TypeName requires 1 argument: TypeName[value](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let arg = &type_args[0];
+                if let Expr::EnumVariant(_, variant_name, _) = arg {
+                    let result = func.alloc_var();
+                    func.push(IrInst::ConstStr(result, variant_name.clone()));
+                    return Ok(result);
+                }
+                let arg_var = self.lower_expr(func, arg)?;
+                let tag = self.expr_type_tag(arg);
+                let tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(tag_var, tag));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_type_name".to_string(),
+                    vec![arg_var, tag_var],
+                ));
+                Ok(result)
+            }
+
             // JS-only molds -- error in native backend
-            "JSNew" | "JSSet" | "JSBind" | "JSSpread" => Err(LowerError {
+            "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" => Err(LowerError {
                 message: format!(
                     "{} is only available in the JS transpiler backend.",
                     type_name

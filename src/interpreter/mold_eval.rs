@@ -4210,9 +4210,31 @@ impl Interpreter {
                 Ok(Some(Signal::Value(Value::Bool(result))))
             }
 
+            "TypeName" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "TypeName requires 1 argument: TypeName[value](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::str(self.value_type_name(&val)))))
+            }
+
             // ── JS-backend-only mold types ──────────────────────
             // These molds operate on Molten values and are only available
             // in the JS transpiler backend.
+            "JSGet" => Err(RuntimeError {
+                message: "JSGet is only available in the JS transpiler backend".to_string(),
+            }),
+            "JSCall" => Err(RuntimeError {
+                message: "JSCall is only available in the JS transpiler backend".to_string(),
+            }),
             "JSNew" => Err(RuntimeError {
                 message: "JSNew is only available in the JS transpiler backend".to_string(),
             }),

@@ -4781,6 +4781,24 @@ stdout(total.toString())
 }
 
 #[test]
+fn test_typename_and_error_info_type_check() {
+    let source = r#"
+Thing = @(name: Str)
+typeName <= TypeName[Thing(name <= "box")]()
+>>> npm:lodash => @(lodash)
+result <= Cage[lodash, JSCall[@["sum"], @[@[1, 2]], Int]()]()
+result.errorInfo() ]=> info
+stdout(typeName + ":" + info.message)
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "TypeName and Gorillax.errorInfo should type-check, got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_cage_rejects_direct_function_runner() {
     let source = r#"
 >>> npm:lib => @(lib)
@@ -4816,6 +4834,22 @@ result <= Cage[lib, JSRilla[JS, Int]()]()
     assert!(
         errors.iter().any(|e| e.message.contains("[E1516]")),
         "JSRilla[JS, Int] must emit [E1516], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_cage_rejects_js_descriptor_wrong_arity() {
+    let source = r#"
+>>> npm:lib => @(lib)
+result <= Cage[lib, JSSet[@["x"], 1, 2]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1517]") && e.message.contains("JSSet requires 2")),
+        "JSSet with extra runner arguments must emit arity-specific [E1517], got: {:?}",
         errors
     );
 }
