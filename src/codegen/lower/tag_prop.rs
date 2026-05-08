@@ -42,38 +42,34 @@ impl Lowering {
     pub(super) const TAG_FRAME_SIZE: usize = 256;
 
     /// 式が bool 値を返すかどうかを判定
-    //
-    // Neither sound nor complete. The rule set is syntax-driven and does
-    // not consult the type checker, so two failure modes coexist:
-    //
-    // FALSE POSITIVE (treats non-Bool as Bool)
-    //   The MethodCall arm matches a hard-coded allow-list of method
-    //   names (`hasValue`, `isEmpty`, `contains`, `has`, `startsWith`,
-    //   …) and returns `true` *before* it inspects the receiver type.
-    //   A user-defined pack field that shadows one of those names is
-    //   misclassified. Example: `Box = @(has: Int => :Int)` followed by
-    //   `box.has(0).toString()` makes Native call
-    //   `taida_str_from_bool(0)` and emit "false", while Interp and JS
-    //   render the underlying Int. The allow-list rule was added when
-    //   only built-in receivers (`Lax`, `Result`, lists, strings, etc.)
-    //   carried these names; widening the surface to user packs has
-    //   reintroduced the gap.
-    //
-    // FALSE NEGATIVE (misses an actual Bool)
-    //   Cross-module Bool fns that never landed in `bool_returning_funcs`
-    //   during the local pre-pass slip through. Example: a `:Bool`
-    //   function imported via `>>>` and passed to
-    //   `lax.getOrDefault(importedFn(x))` falls back to
-    //   `taida_polymorphic_to_string` and prints "1" / "0" on Native.
-    //
-    // SAFETY DOMAIN
-    //   This helper is sound *only* when restricted to receiver kinds
-    //   that the type system also constrains. A complete fix routes
-    //   through `infer_type_name(obj)` / the checker before consulting
-    //   the allow-list, but that requires the lower phase to have full
-    //   type info, which is post-stable scope. Until then, callers must
-    //   treat both `true` and `false` returns as advisory.
+    ///
+    /// E34 Phase 2 (Lock-B=C): the type-checker's Typed HIR side table
+    /// is the source of truth. When `typed_expr_table.is_bool(expr)`
+    /// returns `true` the answer is final. The legacy syntax-driven
+    /// fallback below only runs when the table has no entry for this
+    /// expression, which happens in two paths:
+    ///
+    ///   1. Lowering of synthesised expressions (e.g. defaultFn
+    ///      inserted by mold/pack lowering) that the type-checker
+    ///      never observed.
+    ///   2. Tests / dependency-module compilations that bypass
+    ///      `set_typed_expr_table`, leaving the table empty.
+    ///
+    /// Both fall-through cases are honoured for now to keep the
+    /// migration green; Phase 2.3〜2.5 narrow the fallback to nil and
+    /// delete the legacy bool_vars / bool_returning_funcs / allow-list
+    /// machinery entirely.
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
+        // E34 Phase 2 (Lock-B=C): when the type-checker recorded a
+        // decision for this expression, it wins outright — both
+        // directions (Bool / non-Bool). This closes the false-positive
+        // path where the allow-list matched a method name on a pack
+        // whose field returned a non-Bool, and the false-negative path
+        // where a cross-module Bool fn never landed in the local
+        // bool_returning_funcs registry.
+        if let Some(ty) = self.typed_expr_table.lookup(expr) {
+            return matches!(ty, crate::types::Type::Bool);
+        }
         match expr {
             Expr::BoolLit(_, _) => true,
             Expr::Ident(name, _) => self.bool_vars.contains(name),
