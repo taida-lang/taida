@@ -460,9 +460,7 @@ stdout(bv.toString())
 
 c <= TODO[Stub["User data TBD"]]()
 c ]=> cv
-g <= Cage[cv, _ m = 1]()
-g ]=> gv
-stdout(gv.toString())
+stdout(TypeName[cv]())
 "#;
     assert_native_matches_interpreter(source, "native_todo_stub_unmold");
 }

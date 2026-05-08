@@ -77,7 +77,7 @@ impl Interpreter {
                         None
                     }
                 })
-                .unwrap_or_else(|| "BuchiPack".to_string()),
+                .unwrap_or_default(),
             Value::Error(err) => {
                 if err.error_type.is_empty() {
                     "Error".to_string()

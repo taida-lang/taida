@@ -717,6 +717,7 @@ TypeName[3.14]()                                                     // "Float"
 TypeName[AppError(type <= "AppError", message <= "")]()              // "AppError"
 TypeName[DbError(type <= "DbError", message <= "", ...)]()           // "DbError"  (継承位置名)
 TypeName[Status:Ok()]()                                              // "Ok"        (variant 名)
+TypeName[@(a <= 1)]()                                                // ""          (plain buchi-pack)
 
 // パイプライン互換
 err => TypeName[_]() => name

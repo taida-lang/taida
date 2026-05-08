@@ -1850,19 +1850,7 @@ impl TypeChecker {
     /// `.taida/` is state/config storage, not a project-root marker; otherwise
     /// `~/.taida` can make `$HOME` look like the active project root.
     fn find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
-        let mut dir = start_dir.to_path_buf();
-        loop {
-            if dir.join("packages.tdm").exists()
-                || dir.join("taida.toml").exists()
-                || dir.join(".git").exists()
-            {
-                return dir;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        start_dir.to_path_buf()
+        crate::project_root::find_project_root(start_dir)
     }
 
     fn define_var(&mut self, name: &str, ty: Type) {

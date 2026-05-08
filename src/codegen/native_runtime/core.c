@@ -626,7 +626,6 @@ taida_ptr taida_gorillax_new(taida_val value);
 taida_ptr taida_molten_new(void);
 taida_ptr taida_stub_new(taida_ptr message);
 taida_ptr taida_todo_new(taida_ptr id, taida_ptr task, taida_ptr sol, taida_ptr unm);
-taida_ptr taida_cage_apply(taida_val cage_value, taida_fn_ptr fn_ptr);
 taida_ptr taida_gorillax_err(taida_ptr error);
 taida_val taida_gorillax_unmold(taida_ptr ptr);
 taida_ptr taida_gorillax_relax(taida_ptr ptr);
@@ -3140,6 +3139,7 @@ static int taida_is_gorillax_like_pack(taida_val ptr) {
 
 static int taida_is_error_info_source_pack(taida_val ptr) {
     return TAIDA_IS_PACK(ptr)
+        && taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)
         && taida_pack_has_hash(ptr, (taida_val)HASH_TYPE)
         && taida_pack_has_hash(ptr, (taida_val)HASH_MESSAGE);
 }
@@ -7245,27 +7245,6 @@ taida_val taida_error_type_check_or_rethrow(taida_val error_val, taida_val handl
     return 0; // unreachable
 }
 
-taida_val taida_cage_apply(taida_val cage_value, taida_val fn_ptr) {
-    if (fn_ptr == 0) {
-        taida_val error = taida_make_error("CageError", "Cage second argument must be a function");
-        return taida_gorillax_err(error);
-    }
-
-    taida_val depth = taida_error_ceiling_push();
-    if (setjmp(__taida_error_jmp[(int)depth]) == 0) {
-        taida_val result = taida_invoke_callback1(fn_ptr, cage_value);
-        taida_error_ceiling_pop();
-        return taida_gorillax_new(result);
-    }
-
-    taida_val error = taida_error_get_value(depth);
-    taida_error_ceiling_pop();
-    if (error == 0) {
-        error = taida_make_error("CageError", "Cage function failed");
-    }
-    return taida_gorillax_err(error);
-}
-
 // ── Result[T, P] (v0.8.0 redesign — predicate support) ───
 // Optional abolished in v0.8.0 — use Lax[T] instead.
 // Result: operation mold — BuchiPack @(__value: T, __predicate: P, throw: Error, __type: "Result")
@@ -8374,6 +8353,9 @@ taida_val taida_type_name(taida_val val, taida_val tag) {
                 return (taida_val)taida_str_new_copy((const char*)type_val);
             }
         }
+        // Plain packs intentionally have no class-like identity. If a future
+        // pack metadata field becomes public identity, add it before this return.
+        return (taida_val)taida_str_new_copy("");
     }
     return taida_typeof(val, tag);
 }

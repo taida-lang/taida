@@ -3837,7 +3837,7 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
-                // Cage[value, fn]() → Cage_mold(value, fn)
+                // Cage[subject, runner]() -> Cage_mold(subject, CageRilla runner)
                 if name == "Cage" {
                     self.write("Cage_mold(");
                     for (i, arg) in type_args.iter().enumerate() {
@@ -4991,19 +4991,7 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 /// agrees with Native / Interpreter on what counts as the project
 /// boundary. Falls back to `start_dir` if no marker is found.
 fn js_find_project_root(start_dir: &std::path::Path) -> std::path::PathBuf {
-    let mut dir = start_dir.to_path_buf();
-    loop {
-        if dir.join("packages.tdm").exists()
-            || dir.join("taida.toml").exists()
-            || dir.join(".git").exists()
-        {
-            return dir;
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    start_dir.to_path_buf()
+    crate::project_root::find_project_root(start_dir)
 }
 
 fn pathdiff(base: &std::path::Path, target: &std::path::Path) -> Option<std::path::PathBuf> {

@@ -1086,10 +1086,27 @@ function Gorillax(value, error) {
   });
 }
 
-// Cage: execute function in protected context, return Gorillax
-function Cage_mold(cageValue, cageFn) {
+function __taida_cagerilla_runner(fn) {
+  Object.defineProperty(fn, '__taida_cagerilla_runner', {
+    value: true,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
+  return fn;
+}
+
+// Cage: execute a CageRilla descriptor runner in protected context.
+function Cage_mold(cageValue, cageRunner) {
+  if (typeof cageRunner !== 'function' || cageRunner.__taida_cagerilla_runner !== true) {
+    throw new __TaidaError(
+      'TypeError',
+      'Cage runner must be a CageRilla descriptor; direct functions and lambdas are not supported',
+      {}
+    );
+  }
   try {
-    const result = cageFn(cageValue);
+    const result = cageRunner(cageValue);
     return Gorillax(result, null);
   } catch (e) {
     return Gorillax(null, e);
@@ -3101,6 +3118,8 @@ function __taida_typename(x) {
   }
   if (x && typeof x === 'object' && typeof x.__type === 'string') return x.__type;
   if (x instanceof __TaidaError || x instanceof globalThis.Error) return x.type || x.name || 'Error';
+  if (Array.isArray(x) || __taida_isBytes(x) || x instanceof __TaidaJSON || x instanceof __TaidaAsync) return __taida_typeof(x);
+  if (x && typeof x === 'object') return '';
   return __taida_typeof(x);
 }
 
@@ -3190,15 +3209,15 @@ function __taida_js_parent_and_key(subject, path, op) {
 
 function __taida_js_get_runner(path) {
   const runnerPath = __taida_js_path_array(path);
-  return function(subject) {
+  return __taida_cagerilla_runner(function(subject) {
     return __taida_js_get_path(subject, runnerPath);
-  };
+  });
 }
 
 function __taida_js_call_runner(path, args) {
   const runnerPath = __taida_js_path_array(path);
   const runnerArgs = __taida_js_args_array(args).map(__taida_to_js_value);
-  return function(subject) {
+  return __taida_cagerilla_runner(function(subject) {
     if (runnerPath.length === 0) {
       if (typeof subject !== 'function') {
         throw new __TaidaError('JSError', 'JSCall target is not callable', {});
@@ -3211,34 +3230,34 @@ function __taida_js_call_runner(path, args) {
       throw new __TaidaError('JSError', 'JSCall target is not callable', {});
     }
     return __taida_from_js_value(fn.apply(receiver, runnerArgs));
-  };
+  });
 }
 
 function __taida_js_new_runner(path, args) {
   const runnerPath = __taida_js_path_array(path);
   const runnerArgs = __taida_js_args_array(args).map(__taida_to_js_value);
-  return function(subject) {
+  return __taida_cagerilla_runner(function(subject) {
     const ctor = __taida_js_get_path(subject, runnerPath);
     if (typeof ctor !== 'function') {
       throw new __TaidaError('JSError', 'JSNew target is not constructible', {});
     }
     return __taida_from_js_value(new ctor(...runnerArgs));
-  };
+  });
 }
 
 function __taida_js_set_runner(path, value) {
   const runnerPath = __taida_js_path_array(path);
   const runnerValue = __taida_to_js_value(value);
-  return function(subject) {
+  return __taida_cagerilla_runner(function(subject) {
     const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSSet');
     receiver[key] = runnerValue;
     return subject;
-  };
+  });
 }
 
 function __taida_js_bind_runner(path) {
   const runnerPath = __taida_js_path_array(path);
-  return function(subject) {
+  return __taida_cagerilla_runner(function(subject) {
     if (runnerPath.length === 0) {
       if (typeof subject !== 'function') {
         throw new __TaidaError('JSError', 'JSBind target is not callable', {});
@@ -3251,13 +3270,13 @@ function __taida_js_bind_runner(path) {
       throw new __TaidaError('JSError', 'JSBind target is not callable', {});
     }
     return fn.bind(receiver);
-  };
+  });
 }
 
 function __taida_js_spread_runner(source) {
   const runnerSource = __taida_to_js_value(source);
-  return function(subject) {
+  return __taida_cagerilla_runner(function(subject) {
     return __taida_from_js_value(__taida_js_spread(subject, runnerSource));
-  };
+  });
 }
 "#;

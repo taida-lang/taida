@@ -153,8 +153,28 @@ impl TypeChecker {
             }
         };
 
+        // errorInfo intentionally uses an explicit allow-list. Accepting any
+        // `(type, message)` shaped pack would reintroduce duck typing here.
+        if method == "errorInfo"
+            && !matches!(
+                obj_type,
+                Type::Generic(name, _) if name == "Gorillax" || name == "RelaxedGorillax"
+            )
+            && !matches!(obj_type, Type::Error(_))
+            && !matches!(obj_type, Type::Unknown | Type::Any)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1509] Unknown method 'errorInfo' on type {}. \
+                     Hint: errorInfo() is only available on Gorillax, RelaxedGorillax, and Error values.",
+                    obj_type
+                ),
+                span: span.clone(),
+            });
+        }
+
         // FL-22: Emit error for unknown methods on known concrete types
-        if method_sig.is_none() && method != "toString" {
+        if method_sig.is_none() && method != "toString" && method != "errorInfo" {
             let is_known_type = matches!(
                 obj_type,
                 Type::Str

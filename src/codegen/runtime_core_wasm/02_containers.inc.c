@@ -357,6 +357,7 @@ static int _wasm_is_gorillax_like_pack(int64_t ptr) {
 
 static int _wasm_is_error_info_source_pack(int64_t ptr) {
     return _looks_like_pack(ptr)
+        && taida_pack_has_hash(ptr, WASM_HASH___TYPE)
         && taida_pack_has_hash(ptr, WASM_HASH_TYPE)
         && taida_pack_has_hash(ptr, WASM_HASH_MESSAGE);
 }
@@ -925,31 +926,6 @@ int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_typ
     /* Re-throw: sets __wasm_error_thrown flag */
     taida_throw(error_val);
     return 0; /* caller should check __wasm_error_thrown */
-}
-
-int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr) {
-    if (fn_ptr == 0) {
-        int64_t error = taida_make_error(
-            (int64_t)(intptr_t)"CageError",
-            (int64_t)(intptr_t)"Cage second argument must be a function");
-        return taida_gorillax_err(error);
-    }
-
-    int64_t depth = taida_error_ceiling_push();
-    __wasm_error_thrown = 0;
-    int64_t result = _wasm_invoke_callback1(fn_ptr, cage_value);
-    if (__wasm_error_thrown) {
-        int64_t error = taida_error_get_value(depth);
-        taida_error_ceiling_pop();
-        if (error == 0) {
-            error = taida_make_error(
-                (int64_t)(intptr_t)"CageError",
-                (int64_t)(intptr_t)"Cage function failed");
-        }
-        return taida_gorillax_err(error);
-    }
-    taida_error_ceiling_pop();
-    return taida_gorillax_new(result);
 }
 
 /* ── W-5: Molten/Stub/Todo stubs ── */

@@ -1389,6 +1389,22 @@ stdout(TypeName[rect]() + " " + rect.color + " " + s + " " + w + " " + h)
     assert_eq!(interp, wasm, "RC-6/WASM: custom multilevel mismatch");
 }
 
+#[test]
+fn rc6_wasm_typename_plain_buchi_pack_empty() {
+    let Some(wasmtime) = require_wasmtime() else {
+        return;
+    };
+    let source = r#"
+stdout("[" + TypeName[@(a <= 1)]() + "]")
+"#;
+    let interp = run_interpreter_src(source, "rc6_wasm_typename_plain_pack")
+        .expect("RC-6: interpreter should succeed");
+    let wasm = compile_and_run_wasm_src(source, &wasmtime, "rc6_wasm_typename_plain_pack")
+        .expect("RC-6: wasm-min should succeed");
+    assert_eq!(interp, wasm, "RC-6/WASM: TypeName plain BuchiPack mismatch");
+    assert_eq!(wasm, "[]");
+}
+
 // ── NB-30: Net HTTP API compile error integration tests ──────────────
 
 /// NB-30: httpServe in wasm-min must produce compile error (not silent success).

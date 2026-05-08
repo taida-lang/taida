@@ -275,3 +275,37 @@ result <= Cage[basename, {}]()
         );
     }
 }
+
+#[test]
+fn cage_rilla_abstract_runner_rejects_in_native_backend() {
+    for abstract_runner in ["CageRilla[JS, Str]()", "JSRilla[Str]()"] {
+        let source = format!(
+            r#"
+>>> npm:node:path => @(basename)
+result <= Cage[basename, {}]()
+"#,
+            abstract_runner
+        );
+        let td = write_source("abstract_native_reject", &source);
+        let bin = td.with_extension("bin");
+        let output = Command::new(taida_bin())
+            .args(["build", "native"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .expect("run taida build native");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{}: native abstract runner should be rejected",
+            abstract_runner
+        );
+        assert!(
+            stderr.contains("abstract CageRilla descriptor"),
+            "{}: native error should mention abstract CageRilla descriptor, got: {}",
+            abstract_runner,
+            stderr
+        );
+    }
+}

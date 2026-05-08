@@ -1209,10 +1209,6 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Ptr, Ptr, Ptr],
             returns: &[Ptr],
         },
-        "taida_cage_apply" => RuntimeAbi {
-            params: &[Val, FnPtr],
-            returns: &[Ptr],
-        },
         "taida_gorillax_unmold" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Val],

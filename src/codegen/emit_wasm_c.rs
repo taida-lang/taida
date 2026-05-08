@@ -768,9 +768,6 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_result_map_error" => {
             "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string()
         }
-        "taida_cage_apply" => {
-            "int64_t taida_cage_apply(int64_t cage_value, int64_t fn_ptr);".to_string()
-        }
         // W-5: Error/Molten/Stub helpers
         "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
         // C25B-001: minimal Stream wrapper (runtime lives in

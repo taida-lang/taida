@@ -38,8 +38,10 @@ use std::sync::{Mutex, Once, OnceLock};
 /// Search order:
 ///
 /// 1. `TAIDA_BIN` runtime env override (used by ad-hoc local runs)
-/// 2. Canonical `<manifest>/target/release/taida` (or `target/debug/taida`)
-///    — chosen ahead of `CARGO_BIN_EXE_taida` because cargo can cache
+/// 2. Canonical `<manifest>/target/<current-test-profile>/taida`, then the
+///    other profile. The profile matching the test binary is tried first so
+///    debug `cargo test` cannot accidentally run a stale release CLI. This is
+///    still chosen ahead of `CARGO_BIN_EXE_taida` because cargo can cache
 ///    multiple bin fingerprints under `target/<profile>/deps/taida-XXXX`
 ///    and silently point `CARGO_BIN_EXE_taida` at a stale one when test
 ///    builds race with bin builds (observed on `feat/c27` Round 1 fix
@@ -68,10 +70,14 @@ pub fn taida_bin() -> PathBuf {
     }
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for canonical in [
-        manifest.join("target").join("release").join(BIN_NAME),
-        manifest.join("target").join("debug").join(BIN_NAME),
-    ] {
+    let debug = manifest.join("target").join("debug").join(BIN_NAME);
+    let release = manifest.join("target").join("release").join(BIN_NAME);
+    let canonical_order = if cfg!(debug_assertions) {
+        [debug, release]
+    } else {
+        [release, debug]
+    };
+    for canonical in canonical_order {
         if canonical.exists() {
             return canonical;
         }

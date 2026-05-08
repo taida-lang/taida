@@ -33,6 +33,9 @@ int64_t taida_type_name(int64_t val, int64_t tag) {
             int64_t type_name = taida_pack_get(val, WASM_HASH___TYPE);
             if (type_name != 0) return type_name;
         }
+        /* Plain packs intentionally have no class-like identity. If a future
+           pack metadata field becomes public identity, add it before this return. */
+        return (int64_t)(intptr_t)"";
     }
     return taida_typeof(val, tag);
 }

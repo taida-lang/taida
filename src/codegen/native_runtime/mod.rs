@@ -725,7 +725,11 @@ mod tests {
         // E33 gate recalibration (2026-05-08): prior runtime/accessor growth
         //   plus C warning cleanup leaves the assembled native runtime at
         //   1,115,939 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_115_939;
+        // 2026-05-08 blocker review: TypeName on plain buchi-packs now
+        //   returns `""`, raw errorInfo() source packs must carry `__type`
+        //   metadata, and the legacy direct-function Cage runtime entry is
+        //   removed. Final concatenated native runtime: 1,115,415 bytes.
+        const EXPECTED_TOTAL_LEN: usize = 1_115_415;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1243,10 +1247,14 @@ mod tests {
         // E33 gate recalibration (2026-05-08): prior core growth plus C
         //   warning cleanup leaves the `// ── Error ceiling` marker at byte
         //   309,555. The tail section is 162,396 bytes.
-        const F1_LEN: usize = 309_555;
+        // 2026-05-08 blocker review: TypeName plain-pack fallback,
+        //   stricter errorInfo source metadata, and legacy direct Cage
+        //   runtime removal leave the marker at byte 309,544 and the tail
+        //   section at 161,883 bytes.
+        const F1_LEN: usize = 309_544;
         assert_eq!(
             CORE_SECTION.len(),
-            309_555 + 162_396,
+            309_544 + 161_883,
             "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper)"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

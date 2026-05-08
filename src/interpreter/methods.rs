@@ -268,11 +268,6 @@ impl Interpreter {
                     Some("HashMap") => self.eval_hashmap_method(fields, method, &arg_values),
                     Some("Set") => self.eval_set_method(fields, method, &arg_values),
                     _ => {
-                        let has_error_shape = fields.iter().any(|(n, _)| n == "type")
-                            && fields.iter().any(|(n, _)| n == "message");
-                        if method == "errorInfo" && has_error_shape {
-                            return Ok(Signal::Value(Self::error_info_lax(Some(obj))));
-                        }
                         // .unmold() on custom mold: delegate to unmold_value() which
                         // handles __unmold (with Signal::Throw propagation) and
                         // __value fallback — exactly the same path as ]=> / <=[
