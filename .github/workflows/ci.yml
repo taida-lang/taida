@@ -142,7 +142,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --release
       - name: Run E2E smoke tests
-        run: TAIDA_BIN=./target/release/taida ./tests/e2e_smoke.sh
+        run: TAIDA_BIN="$PWD/target/release/taida" ./tests/e2e_smoke.sh
 
   e32-loopback-smoke:
     name: E32 Loopback Smoke

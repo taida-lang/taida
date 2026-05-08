@@ -223,6 +223,24 @@ pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+/// Mark a directory as a Taida project root without taking over packages.tdm.
+///
+/// Use this for fixtures that need project-root detection but write their own
+/// `packages.tdm` as semantic test input later.
+pub fn mark_project_root(dir: &Path) {
+    let marker = dir.join("taida.toml");
+    if !marker.exists() {
+        std::fs::write(marker, "").expect("failed to write project root marker");
+    }
+}
+
+/// Create a unique temporary directory that is immediately usable as a project root.
+pub fn unique_project_temp_dir(prefix: &str) -> PathBuf {
+    let dir = unique_temp_dir(prefix);
+    mark_project_root(&dir);
+    dir
+}
+
 /// Write string content to a file, panicking on failure.
 pub fn write_file(path: &Path, content: &str) {
     std::fs::write(path, content).expect("failed to write file");
