@@ -728,6 +728,25 @@ impl Interpreter {
         match method {
             "hasValue" => Ok(Signal::Value(Value::Bool(has_value))),
             "isEmpty" => Ok(Signal::Value(Value::Bool(!has_value))),
+            // E34 Phase 3 (Lock-D=B'): Lax[T].errorInfo() -> Lax[ErrorInfo].
+            // Returns empty Lax when the receiver succeeded or carried no
+            // metadata; otherwise wraps the recorded `__error` field through
+            // `error_info_value`. The canonical metadata pipeline through
+            // net/file/process/JSON failures is being built up in Phase 5;
+            // until those producers populate `__error`, callers see
+            // hasValue=false even on failed Lax, which is consistent with
+            // PHILOSOPHY III (default-value guarantee, Lax never null).
+            "errorInfo" => {
+                let error_value = fields
+                    .iter()
+                    .find(|(n, _)| n == "__error")
+                    .map(|(_, v)| v.clone());
+                if has_value {
+                    Ok(Signal::Value(Self::error_info_lax(None)))
+                } else {
+                    Ok(Signal::Value(Self::error_info_lax(error_value.as_ref())))
+                }
+            }
             "getOrDefault" => {
                 if has_value {
                     Ok(Signal::Value(inner_value))

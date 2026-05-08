@@ -980,7 +980,7 @@ function __taida_hasValue(val) {
   return fn;
 }
 
-function Lax(value, typedDefault, floatHint) {
+function Lax(value, typedDefault, floatHint, error) {
   const _hasValue = value !== null && value !== undefined;
   const _default = _hasValue ? __taida_lax_default(value) : (typedDefault !== undefined ? typedDefault : 0);
   const _val = _hasValue ? value : _default;
@@ -991,12 +991,18 @@ function Lax(value, typedDefault, floatHint) {
   // Without this the default `String(0.0)` collapses to `"0"` and the
   // interpreter's `Lax(default: 0.0)` drifts.
   const _floatHint = floatHint === true;
+  // E34 Phase 3 (Lock-D=B'): optional ErrorInfo carrier. Producers like
+  // JSON failure / net / file / process pass an `error` describing the
+  // failure cause; `errorInfo()` surfaces it as Lax[ErrorInfo].
+  const _error = error === undefined ? null : error;
   const pack = {
     __type: 'Lax',
     __value: _val,
     __default: _default,
+    __error: _error,
     hasValue: __taida_hasValue(_hasValue),
     isEmpty() { return !_hasValue; },
+    errorInfo() { return _hasValue ? __taida_error_info_lax(null) : __taida_error_info_lax(_error); },
     getOrDefault(def) { return _hasValue ? _val : def; },
     map(fn) { return _hasValue ? Lax(fn(_val), undefined, _floatHint) : this; },
     flatMap(fn) {
