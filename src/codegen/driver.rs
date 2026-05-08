@@ -1119,6 +1119,8 @@ fn wasm_clang_base_args(include_dir: &Path, profile: emit_wasm_c::WasmProfile) -
     args
 }
 
+// The clang invocation contract is clearer as explicit parameters than as a
+// short-lived options struct that would only be unpacked at this call site.
 #[allow(clippy::too_many_arguments)]
 fn run_wasm_clang_object(
     clang: &str,

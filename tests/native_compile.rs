@@ -232,6 +232,17 @@ fn test_native_compile_parity_allowlist_guard() {
     assert!(!COMPILE_TD_FIXTURES.is_empty(), "No compile_*.td fixtures");
 }
 
+#[test]
+fn test_native_mutual_recursion_reject_allowlist_pins_examples() {
+    let expected_rejects = expected_native_reject_examples();
+    for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
+        assert!(
+            expected_rejects.contains(&stem),
+            "native mutual-recursion policy must keep `{stem}` in the documented reject allowlist"
+        );
+    }
+}
+
 // Per-fixture tests emitted by build.rs.
 macro_rules! c24_fixture_runner {
     ($stem:expr) => {

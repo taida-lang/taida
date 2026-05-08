@@ -67,5 +67,5 @@ docs/reference/tail_recursion.md:184
 docs/reference/tail_recursion.md:202
 docs/reference/tail_recursion.md:219
 docs/reference/tail_recursion.md:239
-docs/reference/tail_recursion.md:347
-docs/reference/tail_recursion.md:412
+docs/reference/tail_recursion.md:349
+docs/reference/tail_recursion.md:414

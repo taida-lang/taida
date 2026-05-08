@@ -260,6 +260,21 @@ jobs:
             ./target/debug/taida way lint --quiet examples/embedding
           fi
 
+  ignored-inventory:
+    name: Ignored / optional test inventory
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-base
+      - name: List ignored tests inventory
+        run: cargo nextest list --profile ci --run-ignored only
+
   # D29B-010 / Lock-G: workflow YAML hard-fail audit.
   #
   # `bench.yml` / `perf-router.yml` reproduced an `Invalid workflow file:
