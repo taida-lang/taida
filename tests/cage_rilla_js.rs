@@ -1,28 +1,7 @@
 mod common;
 
 use common::{node_available, taida_bin, unique_temp_dir, write_file};
-use std::path::PathBuf;
 use std::process::Command;
-
-fn current_taida_bin() -> PathBuf {
-    #[cfg(windows)]
-    const BIN_NAME: &str = "taida.exe";
-    #[cfg(not(windows))]
-    const BIN_NAME: &str = "taida";
-
-    if let Some(path) = std::env::var_os("TAIDA_BIN") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = option_env!("CARGO_BIN_EXE_taida") {
-        return PathBuf::from(path);
-    }
-
-    let debug = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("debug")
-        .join(BIN_NAME);
-    if debug.exists() { debug } else { taida_bin() }
-}
 
 fn build_and_run_js(source: &str) -> String {
     let dir = unique_temp_dir("cage_rilla_js");
@@ -30,7 +9,7 @@ fn build_and_run_js(source: &str) -> String {
     let js = dir.join("main.mjs");
     write_file(&td, source.trim_start());
 
-    let build = Command::new(current_taida_bin())
+    let build = Command::new(taida_bin())
         .args(["build", "js"])
         .arg(&td)
         .arg("-o")
