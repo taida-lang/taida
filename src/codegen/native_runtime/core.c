@@ -8922,7 +8922,6 @@ typedef struct json_obj {
 // Forward declarations
 static json_val json_parse_value(const char **p);
 static void json_skip_ws(const char **p);
-static json_val json_default_for_desc(const char *desc);
 static taida_val json_apply_schema(json_val *jval, const char **desc);
 
 // FNV-1a hash (matches Rust side)

@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       # C25B-003 Phase 2B: migrate from hand-rolled actions/cache to
       # Swatinem/rust-cache@v2. Advantages:
       #  - save-on-success semantics avoid polluting the cache with broken
@@ -70,7 +70,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
@@ -78,6 +78,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build nextest archive
         run: cargo nextest archive --all-targets --archive-file taida-nextest.tar.zst
+      - name: Direct taida binary path gate
+        run: cargo test --test archive_path_gate -- --nocapture
       - name: Upload nextest archive
         uses: actions/upload-artifact@v6
         with:
@@ -92,7 +94,7 @@ jobs:
     needs: build-archive
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: taiki-e/install-action@nextest
       - name: Install wasmtime
         run: |
@@ -119,7 +121,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
@@ -135,7 +137,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
@@ -150,7 +152,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
@@ -175,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -189,7 +191,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -225,7 +227,7 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-base
