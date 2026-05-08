@@ -107,12 +107,32 @@ impl TypeChecker {
                 // `getOrThrow` is Result-only on the runtime side; Lax does
                 // not currently surface it, so we leave the existing arity-only
                 // signature for Result below.
+                //
+                // E34 Phase 1.4 (Lock-C=B full pin): map/flatMap signatures
+                // are pinned to `Function([T], U)` / `Function([T], Lax[U])`
+                // so that argument-type / return-type mismatch is caught at
+                // type-check time via [E1508].
                 let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
                     "hasValue" | "isEmpty" => Some((0, 0, vec![])),
-                    "getOrDefault" => Some((1, 1, vec![inner])),
-                    // function arg — receiver shape, not strict
-                    "map" | "flatMap" => Some((1, 1, vec![Type::Unknown])),
+                    "getOrDefault" => Some((1, 1, vec![inner.clone()])),
+                    // Lock-C=B: fn: T -> U
+                    "map" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Unknown))],
+                    )),
+                    // Lock-C=B: fn: T -> Lax[U]
+                    "flatMap" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![inner.clone()],
+                            Box::new(Type::Generic("Lax".to_string(), vec![Type::Unknown])),
+                        )],
+                    )),
+                    // Phase 1: errorInfo signature 追加 (Phase 3 で runtime 実装)
+                    "errorInfo" => Some((0, 0, vec![])),
                     "unmold" => Some((0, 0, vec![])),
                     "toString" => Some((0, 0, vec![])),
                     _ => None,
@@ -122,12 +142,57 @@ impl TypeChecker {
                 // E32B-021 (Lock-M): match Lax/Result behaviour — both
                 // accumulators (success type at index 0) get strict
                 // `default` arg type checking.
+                //
+                // E34 Phase 1.4 (Lock-C=B full pin):
+                //   map(fn: T -> U) -> Result[U, P]              (error type P を保存)
+                //   flatMap(fn: T -> Result[U, P]) -> Result[U, P]  (方針 A: error type 保存 strict)
+                //   mapError(fn: P -> Q) -> Result[T, Q]
                 let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                let error_ty = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
                 match method {
                     "isSuccess" | "isError" => Some((0, 0, vec![])),
-                    "map" | "flatMap" | "mapError" => Some((1, 1, vec![Type::Unknown])),
+                    "map" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![success_ty.clone()],
+                            Box::new(Type::Unknown),
+                        )],
+                    )),
+                    // 方針 A: return Result の error type が receiver と一致必須
+                    "flatMap" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(
+                            vec![success_ty.clone()],
+                            Box::new(Type::Generic(
+                                "Result".to_string(),
+                                vec![Type::Unknown, error_ty.clone()],
+                            )),
+                        )],
+                    )),
+                    "mapError" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(vec![error_ty.clone()], Box::new(Type::Unknown))],
+                    )),
                     "getOrDefault" => Some((1, 1, vec![success_ty])),
                     "getOrThrow" => Some((0, 0, vec![])),
+                    "toString" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
+            // E34 Phase 1.4 (Lock-C=B full pin): Async[T].map(fn: T -> U) -> Async[U]
+            Type::Generic(name, inner_args) if name == "Async" => {
+                let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "isPending" | "isFulfilled" | "isRejected" => Some((0, 0, vec![])),
+                    "map" => Some((
+                        1,
+                        1,
+                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Unknown))],
+                    )),
+                    "getOrDefault" => Some((1, 1, vec![inner])),
                     "toString" => Some((0, 0, vec![])),
                     _ => None,
                 }
@@ -225,19 +290,44 @@ impl TypeChecker {
                     if *expected_ty == Type::Unknown {
                         continue;
                     }
-                    let actual_ty = self.infer_expr_type(arg);
+                    // E34 Phase 1.4 (Lock-C=B): Lambda bidirectional inference.
+                    // When the expected param type is Function([T], _), hint the
+                    // lambda's untyped params with T. This lets users write
+                    // `obj.map(_ x = x + 1)` without an explicit type annotation
+                    // and still benefit from full pin checking.
+                    let actual_ty = if matches!(expected_ty, Type::Function(_, _))
+                        && matches!(arg, Expr::Lambda(_, _, _))
+                    {
+                        self.infer_lambda_with_hint(arg, expected_ty)
+                    } else {
+                        self.infer_expr_type(arg)
+                    };
                     if actual_ty == Type::Unknown {
                         continue;
                     }
                     if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                        // Provide a hint specific to Function-typed expected
+                        // (most common: Lax/Result/Async map/flatMap/mapError).
+                        let hint = match expected_ty {
+                            Type::Function(exp_params, _) => format!(
+                                "Hint: Pass a function whose parameter types match {}.",
+                                exp_params
+                                    .iter()
+                                    .map(|p| p.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            _ => "Hint: Pass a value of the correct type.".to_string(),
+                        };
                         self.errors.push(TypeError {
                             message: format!(
                                 "[E1508] Method '{}' argument {} has type {}, expected {}. \
-                                 Hint: Pass a value of the correct type.",
+                                 {}",
                                 method,
                                 i + 1,
                                 actual_ty,
-                                expected_ty
+                                expected_ty,
+                                hint
                             ),
                             span: span.clone(),
                         });
@@ -245,6 +335,146 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    /// E34 Phase 1.4 (Lock-C=B): Bidirectional Lambda inference.
+    ///
+    /// Infer a Lambda's type using the expected `Type::Function(expected_params, _)`
+    /// to fill in missing param annotations. If the lambda has explicit type
+    /// annotations on params, those win (they may legitimately reject via
+    /// subtype check downstream). If a param has no annotation, the expected
+    /// param type at the same index is used as a hint.
+    ///
+    /// This is the **only** place where bidirectional hint flows into Lambda
+    /// inference in Phase 1. The general lambda inference path remains
+    /// unchanged (no annotation -> Type::Unknown).
+    fn infer_lambda_with_hint(&mut self, expr: &Expr, expected: &Type) -> Type {
+        let (Expr::Lambda(params, body, _), Type::Function(expected_params, _)) =
+            (expr, expected)
+        else {
+            return self.infer_expr_type(expr);
+        };
+        // Compute resolved param types: explicit annotation wins, else hint.
+        let param_types: Vec<Type> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if let Some(annotation) = &p.type_annotation {
+                    self.registry.resolve_type(annotation)
+                } else {
+                    expected_params
+                        .get(i)
+                        .cloned()
+                        .unwrap_or(Type::Unknown)
+                }
+            })
+            .collect();
+        // Push a temporary scope for the lambda body with hinted param types.
+        self.push_scope();
+        for (i, p) in params.iter().enumerate() {
+            self.define_var(
+                &p.name,
+                param_types.get(i).cloned().unwrap_or(Type::Unknown),
+            );
+        }
+        let ret_type = self.infer_expr_type(body);
+        self.pop_scope();
+        let fn_ty = Type::Function(param_types, Box::new(ret_type));
+        // Last-write wins: idempotent record overrides any earlier path.
+        self.typed_expr_table.record(expr, fn_ty.clone());
+        fn_ty
+    }
+
+    /// E34 Phase 1.4 (Lock-C=B full pin): Infer the return type of a method
+    /// call **using the actual lambda/fn arguments** to pin generic parameters
+    /// (U / Q in `Lax[T].map(fn: T -> U) -> Lax[U]` etc.).
+    ///
+    /// Falls back to `infer_method_return_type` for methods that don't need
+    /// arg-aware inference. The MethodCall arm in `infer_expr_type_inner`
+    /// calls this variant.
+    pub(super) fn infer_method_return_type_with_args(
+        &mut self,
+        obj_type: &Type,
+        method: &str,
+        args: &[Expr],
+    ) -> Type {
+        // Only Lax/Result/Async map/flatMap/mapError need arg-aware inference.
+        // Other methods use the existing arg-less variant.
+        if let Type::Generic(name, inner_args) = obj_type {
+            let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
+            let error_ty = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
+
+            // Helper: extract the lambda's actual return type (U) from args[0].
+            // If args[0] is a Lambda, use bidirectional hint from the expected
+            // function param type (T) so the lambda body sees T for untyped params.
+            let lambda_ret = |this: &mut Self, expected_param: &Type| -> Type {
+                if let Some(arg) = args.first() {
+                    let expected_fn = Type::Function(
+                        vec![expected_param.clone()],
+                        Box::new(Type::Unknown),
+                    );
+                    let inferred = this.infer_lambda_with_hint(arg, &expected_fn);
+                    if let Type::Function(_, ret) = inferred {
+                        return *ret;
+                    }
+                }
+                Type::Unknown
+            };
+
+            match (name.as_str(), method) {
+                ("Lax", "map") => {
+                    let u = lambda_ret(self, &success_ty);
+                    return Type::Generic("Lax".to_string(), vec![u]);
+                }
+                ("Lax", "flatMap") => {
+                    // Lambda returns Lax[U]; extract U for the chain return.
+                    let ret = lambda_ret(self, &success_ty);
+                    if let Type::Generic(rn, ra) = &ret
+                        && rn == "Lax"
+                    {
+                        return Type::Generic(
+                            "Lax".to_string(),
+                            vec![ra.first().cloned().unwrap_or(Type::Unknown)],
+                        );
+                    }
+                    return Type::Generic("Lax".to_string(), vec![Type::Unknown]);
+                }
+                ("Async", "map") => {
+                    let u = lambda_ret(self, &success_ty);
+                    return Type::Generic("Async".to_string(), vec![u]);
+                }
+                ("Result", "map") => {
+                    let u = lambda_ret(self, &success_ty);
+                    return Type::Generic("Result".to_string(), vec![u, error_ty]);
+                }
+                ("Result", "flatMap") => {
+                    // Lambda returns Result[U, P]; extract U; preserve receiver's P (方針 A).
+                    let ret = lambda_ret(self, &success_ty);
+                    if let Type::Generic(rn, ra) = &ret
+                        && rn == "Result"
+                    {
+                        return Type::Generic(
+                            "Result".to_string(),
+                            vec![
+                                ra.first().cloned().unwrap_or(Type::Unknown),
+                                error_ty,
+                            ],
+                        );
+                    }
+                    return Type::Generic(
+                        "Result".to_string(),
+                        vec![Type::Unknown, error_ty],
+                    );
+                }
+                ("Result", "mapError") => {
+                    let q = lambda_ret(self, &error_ty);
+                    return Type::Generic("Result".to_string(), vec![success_ty, q]);
+                }
+                _ => {}
+            }
+        }
+        // Fallback: existing arg-less variant.
+        self.infer_method_return_type(obj_type, method)
     }
 
     /// Infer the return type of a method call based on the receiver type and method name.
@@ -348,6 +578,10 @@ impl TypeChecker {
                 "hasValue" | "isEmpty" => Type::Bool,
                 "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
                 "map" | "flatMap" => obj_type.clone(),
+                "errorInfo" => Type::Generic(
+                    "Lax".to_string(),
+                    vec![Type::Named("ErrorInfo".to_string())],
+                ),
                 "unmold" => args.first().cloned().unwrap_or(Type::Unknown),
                 "toString" => Type::Str,
                 _ => Type::Unknown,

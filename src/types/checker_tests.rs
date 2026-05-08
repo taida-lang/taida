@@ -4896,3 +4896,170 @@ result <= Cage[JSON[raw, Data](), JSCall[@[], @[], Int]()]()
         errors
     );
 }
+
+
+// E34 Phase 1.3 (Lock-B=C foundation): TypedExprTable delivery tests.
+// Verify that infer_expr_type records into the table for every expression.
+
+#[test]
+fn typed_expr_table_records_simple_int_literal() {
+    let (checker, errors) = check("x <= 42\n");
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert!(
+        !checker.typed_expr_table.is_empty(),
+        "TypedExprTable should not be empty after check_program"
+    );
+}
+
+#[test]
+fn typed_expr_table_records_lax_inner_type() {
+    let (checker, errors) = check("obj <= Lax[42]()\n");
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    // The Lax[42]() expression should have been typed as Lax[Int].
+    let has_lax_int = checker
+        .typed_expr_table
+        .iter()
+        .any(|(_, ty)| matches!(ty, Type::Generic(n, args)
+            if n == "Lax" && args.len() == 1 && args[0] == Type::Int));
+    assert!(
+        has_lax_int,
+        "Expected Lax[Int] in typed_expr_table, got: {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn typed_expr_table_records_method_call_chain() {
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.hasValue()\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    // hasValue() returns Bool; the MethodCall expression should have Bool typed.
+    let has_bool = checker
+        .typed_expr_table
+        .iter()
+        .any(|(_, ty)| ty == &Type::Bool);
+    assert!(has_bool, "Expected Bool in typed_expr_table");
+}
+
+// E34 Phase 1.4 (Lock-C=B full pin): Lax/Result/Async function-arg integrity tests.
+// Acceptance for E34B-002.
+//
+// Note: taida lambdas (`_ x = expr`) cannot carry type annotations at the
+// syntax level. Negative tests use **named functions with explicit `:Type`
+// parameter annotations** to assert that mismatched function signatures
+// are rejected at type-check time. Positive tests use bare lambdas to
+// verify bidirectional inference picks up the receiver's T.
+
+#[test]
+fn e34b_002_lax_map_arg_type_mismatch_rejected_via_named_fn() {
+    // Named fn with Str param, applied to Lax[Int].map -> [E1508].
+    let src = "fn1 x: Str = x.length() => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(fn1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "expected [E1508] for Lax[Int].map((Str)->_), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lax_map_chain_propagates_inner_type() {
+    // Lax[Int].map(Int->Str).map(Str->Int) — full pin chain should accept.
+    let src = "intToStr x: Int = x.toString() => :Str\n\
+               strLen s: Str = s.length() => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(intToStr).map(strLen)\n";
+    let (_, errors) = check(src);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+}
+
+#[test]
+fn e34b_002_lax_map_chain_type_break_rejected() {
+    // Lax[Int].map(Int->Str).map(Int->Int) — second map gets Lax[Str], rejects fn taking Int.
+    let src = "intToStr x: Int = x.toString() => :Str\n\
+               doubleInt x: Int = x * 2 => :Int\n\
+               obj <= Lax[42]()\n\
+               bad <= obj.map(intToStr).map(doubleInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for chain type break, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lax_flatmap_must_return_lax() {
+    // flatMap signature requires fn: T -> Lax[U]; non-Lax return is rejected.
+    let src = "doubleInt x: Int = x * 2 => :Int\n\
+               obj <= Lax[42]()\n\
+               bad <= obj.flatMap(doubleInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "expected [E1508] for Lax.flatMap returning non-Lax, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_async_map_arg_type_mismatch_rejected() {
+    let src = "fnStr s: Str = s.length() => :Int\n\
+               a <= Async[42]()\n\
+               result <= a.map(fnStr)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "expected [E1508] for Async[Int].map((Str)->_), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lambda_without_annotation_uses_bidirectional_hint() {
+    // Phase 1.4 bidirectional inference: bare lambda picks up T from receiver.
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(_ x = x + 1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Should accept bare lambda via bidirectional hint, errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_002_lambda_chain_with_bidirectional_hint() {
+    // Bare lambda chain: Lax[Int] -> Lax[Int] -> Lax[Int]
+    // First map's lambda body returns Int, second map sees Lax[Int] and hints x:Int again.
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(_ x = x + 1).map(_ y = y * 2)\n";
+    let (_, errors) = check(src);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+}
+
+#[test]
+fn e34b_002_result_map_preserves_error_type() {
+    // Result[T, P].map(T -> U) should yield Result[U, P] (error type preservation).
+    let src = "Error => Fail = @(message: Str)\n\
+               intToStr x: Int = x.toString() => :Str\n\
+               r <= Result[42](throw <= Fail(message <= \"e\"))\n\
+               result <= r.map(intToStr)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "Errors: {:?}", errors);
+    let result_ty = checker.lookup_var("result").unwrap();
+    let Type::Generic(name, args) = &result_ty else {
+        panic!("Expected Generic Result, got {:?}", result_ty);
+    };
+    assert_eq!(name, "Result");
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0], Type::Str, "U should be Str");
+    assert!(
+        matches!(&args[1], Type::Named(n) if n == "Fail"),
+        "P should be Fail, got {:?}",
+        args[1]
+    );
+}

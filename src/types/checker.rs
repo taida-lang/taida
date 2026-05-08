@@ -210,6 +210,10 @@ pub struct TypeChecker {
     /// entry, popped on exit. Used to resolve constrained type variables
     /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
     current_func_type_params: Vec<Vec<TypeParam>>,
+    /// E34 Phase 1.3 (Lock-B=C foundation): Typed HIR / expression type table.
+    /// `infer_expr_type` の末尾で record される。Phase 2 で codegen lower が
+    /// `typed_expr_table[expr_id].type == Bool` query で consume する。
+    pub typed_expr_table: super::typed_hir::TypedExprTable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -289,6 +293,7 @@ impl TypeChecker {
             net_http_protocol_type_names: HashSet::new(),
             branch_scope_stack: vec![HashMap::new()],
             current_func_type_params: Vec::new(),
+            typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
         // in `src/codegen/lower/core.rs` (import-less parity with interpreter/
@@ -4229,7 +4234,21 @@ defaulted fields must be provided via `()`",
     }
 
     /// Infer the type of an expression.
+    ///
+    /// E34 Phase 1.3 (Lock-B=C foundation): wraps `infer_expr_type_inner` and
+    /// records the inferred type into `typed_expr_table` for downstream
+    /// consumption (Phase 2 codegen lower will query this table).
     pub fn infer_expr_type(&mut self, expr: &Expr) -> Type {
+        let ty = self.infer_expr_type_inner(expr);
+        self.typed_expr_table.record(expr, ty.clone());
+        ty
+    }
+
+    /// Inner implementation of `infer_expr_type`. Does NOT record into
+    /// the typed expression table — recording happens in the public wrapper.
+    /// Recursive calls go through the public wrapper so every subexpression
+    /// is recorded as well.
+    fn infer_expr_type_inner(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::IntLit(_, _) => Type::Int,
             Expr::FloatLit(_, _) => Type::Float,
@@ -5119,7 +5138,10 @@ defaulted fields must be provided via `()`",
                 }
                 // E1508: Method call argument count and type checking
                 self.check_method_args(&obj_type, method, args, span);
-                self.infer_method_return_type(&obj_type, method)
+                // E34 Phase 1.4 (Lock-C=B full pin): use arg-aware return type
+                // inference so chains like `obj.map(fn1).map(fn2)` propagate
+                // type info through the Typed HIR.
+                self.infer_method_return_type_with_args(&obj_type, method, args)
             }
 
             Expr::FieldAccess(obj, field, span) => {
@@ -5293,17 +5315,23 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown);
                         Type::Generic("Async".to_string(), vec![inner])
                     }
-                    // Result[value, predicate] returns Result type
-                    "Result" => Type::Generic(
-                        "Result".to_string(),
-                        vec![
-                            type_args
-                                .first()
-                                .map(|a| self.infer_expr_type(a))
-                                .unwrap_or(Type::Unknown),
-                            Type::Unknown, // predicate type
-                        ],
-                    ),
+                    // Result[value]() / Result[value](throw <= ErrorVal) returns Result[T, P].
+                    // E34 Phase 1.4 (Lock-C=B): pin error type P from the
+                    // `throw <= ...` field when present so chains like
+                    // `r.flatMap(...)` can enforce Result[U, P] preservation
+                    // (方針 A: error type 保存 strict).
+                    "Result" => {
+                        let success_ty = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        let error_ty = fields
+                            .iter()
+                            .find(|f| f.name == "throw")
+                            .map(|f| self.infer_expr_type(&f.value))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Result".to_string(), vec![success_ty, error_ty])
+                    }
                     // Lax[value]() returns Lax[T]
                     "Lax" => {
                         let inner = type_args
