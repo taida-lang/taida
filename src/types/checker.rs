@@ -453,60 +453,6 @@ impl TypeChecker {
         md.name_args.as_ref().cloned().unwrap_or(mold_args)
     }
 
-    // E34B-013 follow-up (Codex review #12): default-only fields
-    // (`name <= literal` with no `:Type` annotation) used to register
-    // as `Type::Unknown`, which then suppressed every subsequent
-    // boundary check (`Foo(x <= "s")` against `Foo = @(x <= 0.0)`
-    // silently widened).  PHILOSOPHY I requires the field type be
-    // pinned, and the natural anchor is the literal default itself.
-    // We keep the inference deliberately narrow — primary literals
-    // only — so we never accidentally type a field by walking a
-    // non-trivial expression that may reference yet-unregistered
-    // names. Anything more elaborate stays `Unknown` and the user
-    // can pin the type explicitly with `name: T <= expr`.
-    //
-    // Internal-comment downgrade (`///` -> `//`): CLAUDE.md absolute
-    // rule forbids surfacing internal block IDs via doc-comments
-    // (which `taida doc generate` consumes).
-    fn primary_literal_type(expr: &Expr) -> Option<Type> {
-        match expr {
-            Expr::IntLit(_, _) => Some(Type::Int),
-            Expr::FloatLit(_, _) => Some(Type::Float),
-            Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(Type::Str),
-            Expr::BoolLit(_, _) => Some(Type::Bool),
-            Expr::ListLit(items, _) if items.is_empty() => {
-                Some(Type::List(Box::new(Type::Unknown)))
-            }
-            // Conservative: only homogeneous primary-literal lists.
-            Expr::ListLit(items, _) => {
-                let first = Self::primary_literal_type(items.first()?)?;
-                if items
-                    .iter()
-                    .all(|it| Self::primary_literal_type(it).as_ref() == Some(&first))
-                {
-                    Some(Type::List(Box::new(first)))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    // Resolve a `FieldDef` to a Type, preferring an explicit
-    // annotation but falling back to the default expression's
-    // primary-literal type. (Internal-comment downgrade to keep
-    // internal review IDs out of doc-comment surface.)
-    fn field_def_type(&self, f: &FieldDef) -> Type {
-        if let Some(ann) = f.type_annotation.as_ref() {
-            self.registry.resolve_type(ann)
-        } else if let Some(default_expr) = f.default_value.as_ref() {
-            Self::primary_literal_type(default_expr).unwrap_or(Type::Unknown)
-        } else {
-            Type::Unknown
-        }
-    }
-
     fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {
         let mut merged = parent.to_vec();
         for child_field in child {
@@ -1956,708 +1902,6 @@ impl TypeChecker {
     ///   - the name is registered as a user-defined (possibly generic)
     ///     function / type / mold, or
     ///   - it is a known builtin identifier.
-    /// E34B-019 (Codex review #15 follow-up): boundary check for
-    /// built-in molds that accept a callback option such as
-    /// `Sort[xs](by <= keyFn)` or `Unique[xs](by <= keyFn)`. The
-    /// callback's first parameter must accept the list element type.
-    /// Without this pin, a `Sort[@[Int]](by <= keyFloat)` would
-    /// silently widen Int -> Float at runtime and lose 4-backend
-    /// parity.
-    /// E34B-020 (Codex review #16 follow-up): central arity check
-    /// for built-in molds. The dedicated arms in `Expr::MoldInst`
-    /// already cover return-type inference; this helper keeps the
-    /// arity / shape discipline aligned with the runtime
-    /// (`src/interpreter/mold_eval.rs`) so that the front gate
-    /// rejects invalid call shapes before lowering.
-    fn check_built_in_mold_arity(
-        &mut self,
-        name: &str,
-        type_args: &[Expr],
-        span: &Span,
-    ) {
-        // (shape_label, min, max). `max == None` means variadic.
-        // Async / Cancel / All / Race / Timeout already enforce arity
-        // in their dedicated arms (E34B-018), so they are intentionally
-        // omitted to avoid double diagnostics.
-        // Each entry is `(slot_label, min, max)`; `max == None` means
-        // variadic. The label describes the *placeholders* — the
-        // mold name itself is added below by `format!`.
-        let arity_spec: Option<(&'static str, usize, Option<usize>)> = match name {
-            "AsyncReject" => Some(("[error]", 1, Some(1))),
-            "Stream" => Some(("[value, ...]", 1, None)),
-            "StreamFrom" => Some(("[list]", 1, Some(1))),
-            "JSON" => Some(("[raw, Schema]", 2, Some(2))),
-            "Cage" => Some(("[subject, runner, ...]", 2, None)),
-            "Div" | "Mod" => Some(("[dividend, divisor]", 2, Some(2))),
-            "If" => Some(("[cond, then, else]", 3, Some(3))),
-            "Map" | "Filter" | "TakeWhile" | "DropWhile" => Some(("[xs, fn]", 2, Some(2))),
-            "Fold" | "Foldr" | "Reduce" => Some(("[xs, init, fn]", 3, Some(3))),
-            "Sort" | "Unique" | "Reverse" | "Flatten" | "Enumerate" => {
-                Some(("[xs]", 1, Some(1)))
-            }
-            "Take" | "Drop" => Some(("[xs, n]", 2, Some(2))),
-            "Append" | "Prepend" => Some(("[xs, value]", 2, Some(2))),
-            "Zip" => Some(("[xs, ys]", 2, Some(2))),
-            // E34B-023 (Codex review #19 follow-up): `Int[value, base?]`
-            // is a public surface in `mold_eval.rs:2655` (`Int["ff", 16]()`
-            // parses a hex string), so the previous `[value]` 1-1
-            // entry was an over-reject. Float / Bool / Bytes etc.
-            // remain strictly 1-1.
-            "Int" => Some(("[value, base?]", 1, Some(2))),
-            "Str" | "Float" | "Bool" | "Bytes" | "UInt8" | "Char"
-            | "CodePoint" | "Utf8Encode" | "Utf8Decode" => {
-                Some(("[value]", 1, Some(1)))
-            }
-            "U16BE" | "U16LE" | "U32BE" | "U32LE" | "U16BEDecode"
-            | "U16LEDecode" | "U32BEDecode" | "U32LEDecode" => {
-                Some(("[value]", 1, Some(1)))
-            }
-            // E34B-021 (Codex review #17 follow-up): close the
-            // remaining gaps surfaced when checking the central
-            // arity helper's coverage.
-            "Stub" => Some(("[message]", 1, Some(1))),
-            "Upper" | "Lower" | "Trim" => Some(("[str]", 1, Some(1))),
-            "Replace" => Some(("[str, old, new]", 3, Some(3))),
-            "Repeat" => Some(("[str, n]", 2, Some(2))),
-            "Pad" => Some(("[str, len]", 2, Some(2))),
-            "Find" | "FindIndex" | "FindIndexLax" | "Count" => {
-                Some(("[xs, fn]", 2, Some(2)))
-            }
-            // E34B-022 (Codex review #18 follow-up): close the
-            // 16-mold gap Codex re-discovered after the previous
-            // round. All entries mirror `src/interpreter/mold_eval.rs`
-            // exactly.
-            "Split" => Some(("[str, delim]", 2, Some(2))),
-            "Chars" => Some(("[str]", 1, Some(1))),
-            // `Slice[str|bytes]` accepts the 1-arg form
-            // (`Slice[str](start <= ...)`) as well as the 3-arg
-            // shorthand `Slice[str, start, end]`.
-            "Slice" => Some(("[str|bytes, start?, end?]", 1, Some(3))),
-            "CharAt" | "ByteAt" => Some(("[str, idx]", 2, Some(2))),
-            "ByteSlice" => Some(("[str, start, end]", 3, Some(3))),
-            "StringRepeatJoin" => Some(("[str, n, sep]", 3, Some(3))),
-            "ToFixed" => Some(("[num, digits]", 2, Some(2))),
-            "Abs" => Some(("[num]", 1, Some(1))),
-            "Sum" => Some(("[list]", 1, Some(1))),
-            "Clamp" => Some(("[num, min, max]", 3, Some(3))),
-            "BitAnd" => Some(("[a, b]", 2, Some(2))),
-            "BytesCursor" => Some(("[bytes]", 1, Some(1))),
-            "BytesCursorTake" => Some(("[cursor, size]", 2, Some(2))),
-            // E34B-023 (Codex review #19 follow-up): `Concat` takes
-            // `Concat[bytes, bytes]` as well as the list form, so the
-            // diagnostic label is widened.
-            "Concat" => Some(("[list|bytes, other]", 2, Some(2))),
-            "Join" => Some(("[list, other]", 2, Some(2))),
-            // E34B-023 (Codex review #19 follow-up): the remaining
-            // surface from `docs/reference/standard_methods.md` and
-            // `mold_eval.rs` that the central allow-list was missing.
-            // Numeric scalar molds (1-arg).
-            "Floor" | "Ceil" | "Round" | "Truncate" => Some(("[num]", 1, Some(1))),
-            // E34B-024 (Codex review #20): split the byte-shape
-            // helpers — `ByteLength` accepts `Str` per
-            // `mold_eval.rs:697`, while `BytesToList` reads
-            // `Bytes`. Putting them under the same label was a
-            // diagnostic-string error introduced in E34B-023.
-            "ByteLength" => Some(("[str]", 1, Some(1))),
-            "BytesToList" => Some(("[bytes]", 1, Some(1))),
-            // Math 1-arg unary helpers (every entry from
-            // `eval_unary_math` and the dedicated Asin/Acos/Atan
-            // arms).
-            "Sqrt" | "Exp" | "Ln" | "Log2" | "Log10" | "Sin" | "Cos"
-            | "Tan" | "Asin" | "Acos" | "Atan" | "Sinh" | "Cosh" | "Tanh" => {
-                Some(("[num]", 1, Some(1)))
-            }
-            // Math 2-arg helpers.
-            "Pow" => Some(("[base, exp]", 2, Some(2))),
-            "Atan2" => Some(("[y, x]", 2, Some(2))),
-            // `Log` accepts an optional base — `Log[value, base?]`.
-            "Log" => Some(("[value, base?]", 1, Some(2))),
-            // Bit operations.
-            "BitOr" | "BitXor" => Some(("[a, b]", 2, Some(2))),
-            "BitNot" => Some(("[x]", 1, Some(1))),
-            "ShiftL" | "ShiftR" | "ShiftRU" => Some(("[x, n]", 2, Some(2))),
-            "ToRadix" => Some(("[int, base]", 2, Some(2))),
-            // Bytes cursor / mutation surface.
-            "BytesCursorRemaining" | "BytesCursorU8" => {
-                Some(("[cursor]", 1, Some(1)))
-            }
-            "ByteSet" => Some(("[bytes, idx, value]", 3, Some(3))),
-            // Public introspection / type metadata helpers.
-            "TypeIs" => Some(("[value, :Type]", 2, Some(2))),
-            "TypeExtends" => Some(("[:TypeA, :TypeB]", 2, Some(2))),
-            "Ordinal" => Some(("[enum_value]", 1, Some(1))),
-            // Mold core: keep `Gorillax[value]` as the documented
-            // public shape even though the runtime tolerates the
-            // empty-arg fallthrough.
-            "Gorillax" => Some(("[value]", 1, Some(1))),
-            // Span helpers (public net_api / introspection surface).
-            "SpanEquals" | "SpanStartsWith" | "SpanContains" => {
-                Some(("[span, raw, needle]", 3, Some(3)))
-            }
-            "StrOf" => Some(("[span, raw]", 2, Some(2))),
-            "SpanSlice" => Some(("[span, raw, start, end]", 4, Some(4))),
-            _ => None,
-        };
-        let Some((slots, min, max)) = arity_spec else {
-            return;
-        };
-        let n = type_args.len();
-        let too_few = n < min;
-        let too_many = max.map(|m| n > m).unwrap_or(false);
-        if !too_few && !too_many {
-            return;
-        }
-        let arity_desc = match max {
-            Some(m) if m == min => format!("exactly {}", min),
-            Some(m) => format!("{}-{}", min, m),
-            None => format!("at least {}", min),
-        };
-        self.errors.push(TypeError {
-            message: format!(
-                "[E1505] `{}{}()` requires {} type argument(s), got {}. \
-                 Hint: align the call shape with the runtime contract.",
-                name, slots, arity_desc, n
-            ),
-            span: span.clone(),
-        });
-    }
-
-    fn check_built_in_mold_callback_option(
-        &mut self,
-        name: &str,
-        type_args: &[Expr],
-        fields: &[BuchiField],
-        span: &Span,
-    ) {
-        // Allow-list of built-in molds that accept a `by` callback
-        // option whose param0 must accept the list element type.
-        let by_callback_molds = ["Sort", "Unique"];
-        if !by_callback_molds.contains(&name) {
-            return;
-        }
-        let Some(by_field) = fields.iter().find(|f| f.name == "by") else {
-            return;
-        };
-        let Some(xs_arg) = type_args.first() else {
-            return;
-        };
-        let xs_ty = self.infer_expr_type(xs_arg);
-        let Type::List(elem_ty) = &xs_ty else {
-            return;
-        };
-        if matches!(elem_ty.as_ref(), Type::Unknown) {
-            return;
-        }
-        let by_ty = self.infer_expr_type(&by_field.value);
-        let Type::Function(by_params, _) = &by_ty else {
-            return;
-        };
-        let Some(fn_param0) = by_params.first() else {
-            return;
-        };
-        if matches!(fn_param0, Type::Unknown) {
-            return;
-        }
-        if !self
-            .registry
-            .is_function_arg_subtype_of(elem_ty, fn_param0)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] `{}[xs](by <= ..)`: callback parameter type {} cannot \
-                     accept the list element type {}. Hint: align the callback's \
-                     first parameter with the list element type, or use an explicit \
-                     conversion mold.",
-                    name, fn_param0, elem_ty
-                ),
-                span: span.clone(),
-            });
-        }
-    }
-
-    /// E34B-013 / E34B-014 follow-up (Codex review #11): direct HOF
-    /// mold boundary check. `Map[xs, fn]()` and friends called
-    /// outside a pipeline still form a function boundary between the
-    /// list's element type and the function value's first parameter.
-    /// PHILOSOPHY I requires the same strict discipline as the
-    /// pipeline form, which lives in
-    /// `check_pipeline_mold_inst_placeholder`.
-    fn check_direct_hof_mold_boundary(
-        &mut self,
-        name: &str,
-        type_args: &[Expr],
-        span: &Span,
-    ) {
-        // E34B-013 follow-up (Codex review #12 / #13 / #14): every
-        // direct (non-pipeline) HOF mold call must pin every
-        // value-vs-function boundary, not just the list-element /
-        // first-param pairing. The allow-list covers:
-        //   * Map / Filter / TakeWhile / DropWhile / Find / FindIndex
-        //     / FindIndexLax / Count -- single-arg `(elem) -> ?`
-        //     callback / predicate at slot 1.
-        //   * Fold / Reduce / Foldr -- two-arg `(acc, x) -> acc` at
-        //     slot 2, with init at slot 1 and the same return-vs-acc
-        //     pin (the function value's return flows back as the
-        //     next iteration's accumulator).
-        let (xs_idx, fn_idx, expects_acc) = match name {
-            "Map"
-            | "Filter"
-            | "TakeWhile"
-            | "DropWhile"
-            | "Find"
-            | "FindIndex"
-            | "FindIndexLax"
-            | "Count" => (0usize, 1usize, false),
-            "Fold" | "Reduce" | "Foldr" => (0usize, 2usize, true),
-            _ => return,
-        };
-        let Some(xs_arg) = type_args.get(xs_idx) else {
-            return;
-        };
-        let Some(fn_arg) = type_args.get(fn_idx) else {
-            return;
-        };
-        // Pipeline placeholder is handled in the pipeline path; bail
-        // out here so we don't double-report.
-        if matches!(xs_arg, Expr::Placeholder(_) | Expr::Hole(_))
-            || matches!(fn_arg, Expr::Placeholder(_) | Expr::Hole(_))
-        {
-            return;
-        }
-        let xs_ty = self.infer_expr_type(xs_arg);
-        let fn_ty = self.infer_expr_type(fn_arg);
-        // E34B-013 follow-up (Codex review #14): accept Stream[T]
-        // alongside List[T] as the xs source type. Stream HOFs
-        // execute the same callback boundary at runtime.
-        let elem_ty: Type = match &xs_ty {
-            Type::List(inner) => (**inner).clone(),
-            Type::Generic(stream_name, args) if stream_name == "Stream" => {
-                args.first().cloned().unwrap_or(Type::Unknown)
-            }
-            _ => return,
-        };
-        let elem_ty = Box::new(elem_ty);
-        let Type::Function(fn_params, _) = &fn_ty else {
-            return;
-        };
-        // Determine which fn param corresponds to the list element,
-        // and (for Fold) check the accumulator side first so a single
-        // call surfaces both mismatches.
-        if expects_acc {
-            if let (Some(init_arg), Some(acc_param_ty)) =
-                (type_args.get(1), fn_params.first())
-            {
-                if !matches!(init_arg, Expr::Placeholder(_) | Expr::Hole(_))
-                    && !matches!(acc_param_ty, Type::Unknown)
-                {
-                    let init_ty = self.infer_expr_type(init_arg);
-                    if !matches!(init_ty, Type::Unknown)
-                        && !self
-                            .registry
-                            .is_function_arg_subtype_of(&init_ty, acc_param_ty)
-                    {
-                        self.errors.push(TypeError {
-                            message: format!(
-                                "[E1506] `{}[xs, init, fn]()`: init value of type {} cannot \
-                                 satisfy accumulator parameter type {}. Hint: Pass an init \
-                                 value whose type matches the function's first parameter, \
-                                 or use an explicit conversion.",
-                                name, init_ty, acc_param_ty
-                            ),
-                            span: span.clone(),
-                        });
-                    }
-                    // E34B-013 follow-up (Codex review #13): the
-                    // accumulator carries the pipeline result, so the
-                    // function value's return type must also satisfy
-                    // the declared accumulator type. Otherwise a
-                    // function returning Float silently widens an Int
-                    // accumulator across iterations.
-                    if let Type::Function(_, fn_ret) = &fn_ty
-                        && !matches!(fn_ret.as_ref(), Type::Unknown)
-                        && !self
-                            .registry
-                            .is_function_arg_subtype_of(fn_ret, acc_param_ty)
-                    {
-                        self.errors.push(TypeError {
-                            message: format!(
-                                "[E1506] `{}[xs, init, fn]()`: function return type {} cannot \
-                                 satisfy accumulator parameter type {}. Hint: The function's \
-                                 return value flows back as the next iteration's accumulator, \
-                                 so its type must match the accumulator type.",
-                                name, fn_ret, acc_param_ty
-                            ),
-                            span: span.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        let elem_param_idx = if expects_acc { 1 } else { 0 };
-        let Some(fn_param_ty) = fn_params.get(elem_param_idx) else {
-            return;
-        };
-        if matches!(elem_ty.as_ref(), Type::Unknown)
-            || matches!(fn_param_ty, Type::Unknown)
-        {
-            return;
-        }
-        if !self
-            .registry
-            .is_function_arg_subtype_of(&elem_ty, fn_param_ty)
-        {
-            let positions = if expects_acc {
-                "`{}[xs, init, fn]()`: list element type"
-            } else {
-                "`{}[xs, fn]()`: list element type"
-            };
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] {} {} cannot satisfy function parameter type {}. \
-                     Hint: Pass a list whose elements match the function's expected \
-                     parameter type, or use an explicit conversion.",
-                    positions.replace("{}", name),
-                    elem_ty,
-                    fn_param_ty
-                ),
-                span: span.clone(),
-            });
-        }
-    }
-
-    /// E34B-013 / E34B-014 follow-up (Codex review #10): pipeline
-    /// `Mold[_]()` / `Map[_, fn]()` etc. — the placeholder in the
-    /// type-args list receives the upstream value at runtime.
-    /// Surface the expected element type from a small allow-list
-    /// (the HOF molds `Map` / `Filter` / `Fold` and the generic
-    /// `Mold[_]()` form for any user-declared mold) and reject when
-    /// the upstream type cannot satisfy the strict subtype rule.
-    fn check_pipeline_mold_inst_placeholder(
-        &mut self,
-        name: &str,
-        type_args: &[Expr],
-        pipe_value_ty: &Type,
-        span: &Span,
-    ) {
-        let ph_idx = type_args
-            .iter()
-            .position(|a| matches!(a, Expr::Placeholder(_) | Expr::Hole(_)));
-        // Build the expected slot type from the mold.
-        // - `Map[_, fn]()` / `Filter[_, fn]()` / `Fold[_, init, fn]()`:
-        //   the `_` slot holds a `List[T]` whose element type is the
-        //   first parameter type of the function value supplied in the
-        //   second/third position.
-        // E34B-013 follow-up (Codex review #13): every placeholder
-        // slot in a pipeline `HOF[..]()` form is a real boundary —
-        // the pipeline value is fed to that slot at runtime, so we
-        // must ground the slot's expected type and run the strict
-        // function-arg subtype check. Map/Filter only have a single
-        // value slot (the list); Fold-family molds (Fold / Reduce /
-        // Foldr) have three:
-        //   slot 0 (xs):  expects List[fn.param[1]]
-        //   slot 1 (init): expects fn.param[0]
-        //   slot 2 (fn):  expects (acc, x) -> acc — direct function
-        //     value placeholder is rare; we still pin via list-elem
-        //     when possible.
-        // E34B-013 follow-up (Codex review #14): single-arg HOF
-        // family (`Map`/`Filter`/`TakeWhile`/`DropWhile`/`Find`/
-        // `FindIndex`/`FindIndexLax`/`Count`) all share `(elem) -> ?`
-        // shape. Helper closure converts a list/stream xs source
-        // expression to its concrete element type so the same
-        // allow-list arms can extract the slot expectation uniformly.
-        let xs_elem_ty = |this: &mut Self, xs_arg: &Expr| -> Option<Type> {
-            match this.infer_expr_type(xs_arg) {
-                Type::List(inner) => Some((*inner).clone()),
-                Type::Generic(stream_name, args) if stream_name == "Stream" => {
-                    args.first().cloned()
-                }
-                _ => None,
-            }
-        };
-        let expected_ty: Option<Type> = match (name, ph_idx) {
-            ("Map", Some(0))
-            | ("Filter", Some(0))
-            | ("TakeWhile", Some(0))
-            | ("DropWhile", Some(0))
-            | ("Find", Some(0))
-            | ("FindIndex", Some(0))
-            | ("FindIndexLax", Some(0))
-            | ("Count", Some(0)) => {
-                type_args.get(1).and_then(|fn_arg| {
-                    match self.infer_expr_type(fn_arg) {
-                        Type::Function(params, _) => params
-                            .first()
-                            .cloned()
-                            .map(|p| Type::List(Box::new(p))),
-                        _ => None,
-                    }
-                })
-            }
-            ("Map", Some(1))
-            | ("Filter", Some(1))
-            | ("TakeWhile", Some(1))
-            | ("DropWhile", Some(1))
-            | ("Find", Some(1))
-            | ("FindIndex", Some(1))
-            | ("FindIndexLax", Some(1))
-            | ("Count", Some(1)) => {
-                // Pipeline value must be a function value compatible
-                // with the upstream list/stream's element type.
-                type_args.get(0).and_then(|xs_arg| {
-                    xs_elem_ty(self, xs_arg).map(|elem| {
-                        Type::Function(vec![elem], Box::new(Type::Unknown))
-                    })
-                })
-            }
-            ("Fold", Some(0)) | ("Reduce", Some(0)) | ("Foldr", Some(0)) => {
-                type_args.get(2).and_then(|fn_arg| {
-                    match self.infer_expr_type(fn_arg) {
-                        // Fold's `fn` is `(acc, x) -> acc`, so the
-                        // upstream list/stream element type must
-                        // satisfy `fn.param[1]`, NOT `fn.param[0]`.
-                        // The previous `params.first()` pairing pinned
-                        // the wrong slot.
-                        Type::Function(params, _) => params
-                            .get(1)
-                            .cloned()
-                            .map(|p| Type::List(Box::new(p))),
-                        _ => None,
-                    }
-                })
-            }
-            ("Fold", Some(1)) | ("Reduce", Some(1)) | ("Foldr", Some(1)) => {
-                // The init slot expects whatever the function value's
-                // accumulator parameter is.
-                type_args.get(2).and_then(|fn_arg| {
-                    match self.infer_expr_type(fn_arg) {
-                        Type::Function(params, _) => params.first().cloned(),
-                        _ => None,
-                    }
-                })
-            }
-            ("Fold", Some(2)) | ("Reduce", Some(2)) | ("Foldr", Some(2)) => {
-                // The fn slot accepts a `(acc, x) -> acc` value.
-                // We can ground the second param via the upstream
-                // list's element type when it is concrete.
-                let xs_ty = type_args
-                    .get(0)
-                    .map(|xs_arg| self.infer_expr_type(xs_arg))
-                    .unwrap_or(Type::Unknown);
-                let init_ty = type_args
-                    .get(1)
-                    .map(|init_arg| self.infer_expr_type(init_arg))
-                    .unwrap_or(Type::Unknown);
-                let elem_ty = match xs_ty {
-                    Type::List(inner) => *inner,
-                    _ => Type::Unknown,
-                };
-                Some(Type::Function(
-                    vec![init_ty.clone(), elem_ty],
-                    Box::new(init_ty),
-                ))
-            }
-            // Function-as-mold misuse (`fn[_]()` / `fn[]()` where
-            // `fn` is a user function rather than a registered mold):
-            // surface the function's first param as the expected slot
-            // type so PHILOSOPHY I "no implicit type conversion at
-            // function boundaries" is honoured even on this fringe
-            // syntax. Without this, `1 => acceptFloat[_]() => debug`
-            // would silently widen Int → Float at runtime.
-            //
-            // E34B-013 / E34B-014 follow-up (Codex review #12): a
-            // local function-valued binding (`f <= fnFloat`) must take
-            // the same path. Prefer the local binding so that a
-            // shadowed global function does not bypass the boundary.
-            _ if !self.registry.mold_defs.contains_key(name) => {
-                if let Some(Type::Function(params, _)) = self.lookup_var(name) {
-                    params.first().cloned()
-                } else {
-                    self.func_param_types
-                        .get(name)
-                        .and_then(|params| params.first().cloned())
-                }
-            }
-            // Generic `Mold[_]()` for a registered mold: the mold
-            // registry tracks the type-parameter names but not a
-            // concrete expected type at the placeholder slot, so we
-            // skip the strict check here. Per-mold pinning lives in
-            // the dedicated arms above (Map / Filter / Fold) and can
-            // be extended as new HOF surfaces emerge.
-            _ => None,
-        };
-        let Some(expected_ty) = expected_ty else {
-            return;
-        };
-        if matches!(expected_ty, Type::Unknown) {
-            return;
-        }
-        if matches!(pipe_value_ty, Type::Unknown) {
-            return;
-        }
-        if !self
-            .registry
-            .is_function_arg_subtype_of(pipe_value_ty, &expected_ty)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] Pipeline value of type {} cannot fill the `_` slot of \
-                     `{}[..]()` expecting {}. Hint: Pass a value of the correct type, \
-                     or use an explicit conversion.",
-                    pipe_value_ty, name, expected_ty
-                ),
-                span: span.clone(),
-            });
-        }
-
-        // E34B-013 follow-up (Codex review #14): when the pipeline
-        // form fills the xs or init slot of a Fold-family mold, the
-        // function value at slot 2 still needs the return-vs-acc pin.
-        // The direct form runs this check inside
-        // `check_direct_hof_mold_boundary`; the pipeline form runs
-        // it here so both shapes preserve the accumulator discipline.
-        let is_fold_family = matches!(name, "Fold" | "Reduce" | "Foldr");
-        if is_fold_family && matches!(ph_idx, Some(0) | Some(1))
-            && let Some(fn_arg) = type_args.get(2)
-            && !matches!(fn_arg, Expr::Placeholder(_) | Expr::Hole(_))
-            && let Type::Function(fn_params, fn_ret) = self.infer_expr_type(fn_arg)
-            && let Some(acc_param_ty) = fn_params.first()
-            && !matches!(acc_param_ty, Type::Unknown)
-            && !matches!(fn_ret.as_ref(), Type::Unknown)
-            && !self
-                .registry
-                .is_function_arg_subtype_of(&fn_ret, acc_param_ty)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] `{}[..]()` (pipeline): function return type {} cannot \
-                     satisfy accumulator parameter type {}. Hint: The function's \
-                     return value flows back as the next iteration's accumulator, \
-                     so its type must match the accumulator type.",
-                    name, fn_ret, acc_param_ty
-                ),
-                span: span.clone(),
-            });
-        }
-    }
-
-    /// E34B-013 / E34B-014 follow-up (Codex review #10): pipeline
-    /// auto-call boundary check. When a step is a bare `Ident` (or
-    /// any callable form without an explicit placeholder slot), the
-    /// previous value is fed to the function's first parameter at
-    /// runtime; the type-checker mirrors that discipline here.
-    fn check_pipeline_ident_auto_call_arg(
-        &mut self,
-        name: &str,
-        pipe_value_ty: &Type,
-        span: &Span,
-    ) {
-        // E34B-013 / E34B-014 follow-up (Codex review #11): the
-        // function value can come from either a top-level definition
-        // (registered in `func_param_types`) or a local variable
-        // shadowing it (`f <= fnFloat`); both paths must run the
-        // boundary discipline. `lookup_var` is consulted first since
-        // a local binding intentionally shadows a global of the same
-        // name.
-        let expected_params: Vec<Type> = if let Some(Type::Function(params, _)) =
-            self.lookup_var(name)
-        {
-            params
-        } else if let Some(params) = self.func_param_types.get(name).cloned() {
-            params
-        } else {
-            return;
-        };
-        let Some(expected_ty) = expected_params.first() else {
-            return;
-        };
-        if matches!(expected_ty, Type::Unknown) {
-            return;
-        }
-        if matches!(pipe_value_ty, Type::Unknown) {
-            return;
-        }
-        if !self
-            .registry
-            .is_function_arg_subtype_of(pipe_value_ty, expected_ty)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] Pipeline value of type {} cannot be auto-applied to '{}' \
-                     expecting {}. Hint: Pass a value of the correct type, or use an \
-                     explicit conversion.",
-                    pipe_value_ty, name, expected_ty
-                ),
-                span: span.clone(),
-            });
-        }
-    }
-
-    /// E34B-013 / E34B-014 follow-up (Codex review #9): check the
-    /// `_` placeholder slot in a pipeline-call step against the
-    /// callee's declared parameter type. The placeholder receives the
-    /// previous pipeline step's value, so it forms a real
-    /// function/method boundary just like any other call site.
-    fn check_pipeline_placeholder_arg(
-        &mut self,
-        func: &Expr,
-        args: &[Expr],
-        pipe_value_ty: &Type,
-        span: &Span,
-    ) {
-        let Some(ph_idx) = args
-            .iter()
-            .position(|a| matches!(a, Expr::Placeholder(_) | Expr::Hole(_)))
-        else {
-            return;
-        };
-        // E34B-013 / E34B-014 follow-up (Codex review #12): the
-        // function value can come from either a top-level definition
-        // (registered in `func_param_types`) or a local variable
-        // shadowing it (`f <= fnFloat`). Both paths form a real
-        // function boundary at the placeholder slot, so prefer the
-        // local binding (which intentionally shadows any global of
-        // the same name) and fall back to the global registry.
-        let expected_params: Option<Vec<Type>> = match func {
-            Expr::Ident(name, _) => {
-                if let Some(Type::Function(params, _)) = self.lookup_var(name) {
-                    Some(params)
-                } else {
-                    self.func_param_types.get(name).cloned()
-                }
-            }
-            _ => match self.infer_expr_type(func) {
-                Type::Function(params, _) => Some(params),
-                _ => None,
-            },
-        };
-        let Some(expected_params) = expected_params else {
-            return;
-        };
-        let Some(expected_ty) = expected_params.get(ph_idx) else {
-            return;
-        };
-        if matches!(expected_ty, Type::Unknown) {
-            return;
-        }
-        if matches!(pipe_value_ty, Type::Unknown) {
-            return;
-        }
-        if !self
-            .registry
-            .is_function_arg_subtype_of(pipe_value_ty, expected_ty)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] Pipeline value of type {} cannot be passed to placeholder \
-                     expecting {}. Hint: Pass a value of the correct type, or use an \
-                     explicit conversion.",
-                    pipe_value_ty, expected_ty
-                ),
-                span: span.clone(),
-            });
-        }
-    }
-
     fn is_pipeline_callable_ident(&self, name: &str) -> bool {
         if let Some(ty) = self.lookup_var(name)
             && matches!(ty, Type::Function(_, _))
@@ -3016,7 +2260,14 @@ impl TypeChecker {
                         .fields
                         .iter()
                         .filter(|f| !f.is_method)
-                        .map(|f| (f.name.clone(), self.field_def_type(f)))
+                        .map(|f| {
+                            let ty = f
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown);
+                            (f.name.clone(), ty)
+                        })
                         .collect();
                     self.registry.register_type(&td.name, fields);
                     self.declared_header_arities.insert(td.name.clone(), 0);
@@ -3052,7 +2303,14 @@ impl TypeChecker {
                         .fields
                         .iter()
                         .filter(|f| !f.is_method)
-                        .map(|f| (f.name.clone(), self.field_def_type(f)))
+                        .map(|f| {
+                            let ty = f
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown);
+                            (f.name.clone(), ty)
+                        })
                         .collect();
                     self.registry
                         .register_mold(&md.name, type_params, fields.clone());
@@ -3082,7 +2340,14 @@ impl TypeChecker {
                         .fields
                         .iter()
                         .filter(|f| !f.is_method)
-                        .map(|f| (f.name.clone(), self.field_def_type(f)))
+                        .map(|f| {
+                            let ty = f
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| self.registry.resolve_type(t))
+                                .unwrap_or(Type::Unknown);
+                            (f.name.clone(), ty)
+                        })
                         .collect();
                     if let Some(parent_fields) = self.registry.get_type_fields(inh_parent) {
                         for (child_name, child_ty) in &extra_fields {
@@ -3282,15 +2547,7 @@ impl TypeChecker {
                         if sym.name == "sha256" {
                             let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
                             self.func_types.insert(local_name.clone(), Type::Str);
-                            self.func_param_counts.insert(local_name.clone(), 1);
-                            // E34B-014 follow-up (Codex review #8): also
-                            // pin the param signature so that imported
-                            // function values resolve to a full
-                            // `Type::Function(params, ret)` at the
-                            // `Expr::Ident` site, not just a return-type
-                            // alias.
-                            self.func_param_types
-                                .insert(local_name, vec![Type::Str]);
+                            self.func_param_counts.insert(local_name, 1);
                         }
                     }
                 } else if imp.path == "taida-lang/net" {
@@ -3610,63 +2867,6 @@ defaulted fields must be provided via `()`",
                     ),
                     span: field.span.clone(),
                 });
-            } else {
-                // E34B-013 follow-up (Codex review #12): `()` field
-                // overrides on a custom MoldInst form a function-like
-                // boundary just as `Foo(field <= ...)` does on a
-                // class-like TypeInst. The structural validator above
-                // only checks names; PHILOSOPHY I requires the value
-                // type to also satisfy the declared field type, so
-                // `MyMold[1.0](option <= 1)` cannot widen `Int → Float`
-                // when `option: Float`.
-                if let Some(field_def) =
-                    mold_fields.iter().find(|f| f.name == field.name)
-                {
-                    // E34B-013 follow-up (Codex review #12): default-
-                    // only mold options (`option <= 0.0` with no
-                    // `:Type`) now surface a literal-derived type via
-                    // `field_def_type`, so the boundary check fires
-                    // even without an explicit annotation.
-                    let expected_ty = self.field_def_type(field_def);
-                    if !matches!(expected_ty, Type::Unknown) {
-                        let actual_ty = self.infer_expr_type(&field.value);
-                        // E34B-013 follow-up (Codex review #15):
-                        // mirror the both-functions exception used by
-                        // `validate_type_inst_constructor`. A custom
-                        // MoldInst option `fn <= _ x = 1` against a
-                        // declared `fn: Int => :Float` produces
-                        // `Function([Unknown], Int)` -- the param
-                        // Unknown previously absorbed the entire
-                        // check and hid the genuine return widening.
-                        // Function subtyping handles Unknown on either
-                        // side so spurious noise does not appear,
-                        // while real `Int -> Float` return mismatches
-                        // now surface symmetrically with the
-                        // constructor-field path.
-                        let both_functions = matches!(
-                            (&actual_ty, &expected_ty),
-                            (Type::Function(_, _), Type::Function(_, _))
-                        );
-                        let actual_or_expected_unknown = !both_functions
-                            && (matches!(actual_ty, Type::Unknown)
-                                || Self::contains_unknown(&actual_ty)
-                                || Self::contains_unknown(&expected_ty));
-                        if !actual_or_expected_unknown
-                            && !self
-                                .registry
-                                .is_function_arg_subtype_of(&actual_ty, &expected_ty)
-                        {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1506] MoldInst '{}' option '{}' has type {}, expected {}. \
-                                     Hint: Pass a value of the declared field type, or use an explicit conversion.",
-                                    name, field.name, actual_ty, expected_ty
-                                ),
-                                span: field.span.clone(),
-                            });
-                        }
-                    }
-                }
             }
         }
     }
@@ -3846,13 +3046,7 @@ defaulted fields must be provided via `()`",
                 }
                 _ => false,
             },
-            // E34B-013 Lock-H follow-up (Codex review #9): generic
-            // direct-call patterns also live at a function boundary, so
-            // the same `Int → Float` widening prohibition applies. The
-            // residual subtype paths covered here (Named / BuchiPack
-            // structural resolution, primitive numeric chains) inherit
-            // the strict flag through `is_function_arg_subtype_of`.
-            _ => self.registry.is_function_arg_subtype_of(actual, pattern),
+            _ => self.registry.is_subtype_of(actual, pattern),
         }
     }
 
@@ -4979,21 +4173,6 @@ defaulted fields must be provided via `()`",
                     if imp.path.starts_with("npm:") {
                         self.define_var(name, Type::Molten);
                         self.define_branch_info(name, BranchInfo::Molten(CageBranch::Js));
-                    } else if let (Some(params), Some(ret)) = (
-                        self.func_param_types.get(name).cloned(),
-                        self.func_types.get(name).cloned(),
-                    ) {
-                        // E34B-014 follow-up (Codex review #8): imported
-                        // function value should resolve to its full
-                        // `Type::Function(params, ret)` signature,
-                        // pinned earlier in the first pass (e.g.
-                        // `taida-lang/crypto::sha256`,
-                        // `taida-lang/os::runInteractive`). Without
-                        // this, `lookup_var(name)` previously hit a
-                        // `Type::Unknown` shadow and bypassed both the
-                        // HOF wrapper-return check and the param-type
-                        // check.
-                        self.define_var(name, Type::Function(params, Box::new(ret)));
                     } else {
                         self.define_var(name, Type::Unknown);
                     }
@@ -5089,19 +4268,6 @@ defaulted fields must be provided via `()`",
                 // Look up variable in scope
                 if let Some(ty) = self.lookup_var(name) {
                     ty
-                } else if !self.generic_func_defs.contains_key(name)
-                    && let (Some(params), Some(ret)) = (
-                        self.func_param_types.get(name).cloned(),
-                        self.func_types.get(name).cloned(),
-                    )
-                {
-                    // E34B-014: Resolve a non-generic named function value
-                    // reference to its full `Type::Function` signature
-                    // (registered in the first pass) instead of falling
-                    // through to `Type::Unknown`. This lets HOF argument
-                    // checks pin the params and return at the call site
-                    // even for forward references.
-                    Type::Function(params, Box::new(ret))
                 } else if self.func_types.contains_key(name)
                     || self.generic_func_defs.contains_key(name)
                     || self.declared_concrete_type_names.contains(name)
@@ -5576,12 +4742,7 @@ defaulted fields must be provided via `()`",
                                     if actual_ty == Type::Unknown {
                                         continue;
                                     }
-                                    // E34B-013 (Lock-H=A): direct call
-                                    // through `func_param_types`
-                                    // registry is also a function
-                                    // boundary; reject `Int → Float`
-                                    // implicit widening here.
-                                    if !self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty) {
+                                    if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
                                         self.errors.push(TypeError {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
@@ -5646,16 +4807,7 @@ defaulted fields must be provided via `()`",
                                 if actual_ty == Type::Unknown {
                                     continue;
                                 }
-                                // E34B-013 (Lock-H=A): direct function
-                                // call is also a function boundary, so
-                                // PHILOSOPHY I forbids `Int → Float`
-                                // implicit widening here exactly as it
-                                // does for HOF arg slots. The wider
-                                // widening rule still applies to
-                                // numeric arithmetic / direct
-                                // assignment paths, which never reach
-                                // this site.
-                                if !self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty) {
+                                if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
                                     self.errors.push(TypeError {
                                         message: format!(
                                             "[E1506] Argument {} of '{}' has type {}, expected {}. \
@@ -5730,9 +4882,7 @@ defaulted fields must be provided via `()`",
                             {
                                 continue;
                             }
-                            // E34B-013 (Lock-H=A): generic function
-                            // direct call is also a function boundary.
-                            if !self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty) {
+                            if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1506] Argument {} of '{}' has type {}, expected {}. \
@@ -5926,9 +5076,7 @@ defaulted fields must be provided via `()`",
                     }
                     base_ty
                 } else {
-                    // Calling a non-ident expression (e.g. lambda call,
-                    // immediate partial application result, function-valued
-                    // pack-field access).
+                    // Calling a non-ident expression (e.g. lambda call)
                     let func_type = self.infer_expr_type(func);
                     match func_type {
                         Type::Function(params, ret) => {
@@ -5950,42 +5098,6 @@ defaulted fields must be provided via `()`",
                                     ),
                                     span: span.clone(),
                                 });
-                            }
-                            // E34B-013 / E34B-014 follow-up (Codex review #9):
-                            // immediate partial-call (`f(, 2)(1)`) and
-                            // function-valued pack-field call
-                            // (`(holder.fn)(1)`) had no param-type check
-                            // here; only arity. Apply the same strict
-                            // boundary subtype check used at every other
-                            // function/method boundary so that `Int → Float`
-                            // implicit widening cannot leak in.
-                            for (i, arg) in args.iter().enumerate() {
-                                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
-                                    continue;
-                                }
-                                let Some(expected_ty) = params.get(i) else {
-                                    continue;
-                                };
-                                if matches!(expected_ty, Type::Unknown) {
-                                    continue;
-                                }
-                                let actual_ty = self.infer_expr_type(arg);
-                                if matches!(actual_ty, Type::Unknown) {
-                                    continue;
-                                }
-                                if !self
-                                    .registry
-                                    .is_function_arg_subtype_of(&actual_ty, expected_ty)
-                                {
-                                    self.errors.push(TypeError {
-                                        message: format!(
-                                            "[E1506] Argument {} of function value has type {}, expected {}. \
-                                             Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                            i + 1, actual_ty, expected_ty
-                                        ),
-                                        span: span.clone(),
-                                    });
-                                }
                             }
                             if hole_count > 0 {
                                 let hole_param_types: Vec<Type> = args
@@ -6128,56 +5240,6 @@ defaulted fields must be provided via `()`",
                 for (i, pipe_expr) in exprs.iter().enumerate() {
                     if i > 0 {
                         self.in_pipeline = true;
-                        // E34B-013 / E34B-014 follow-up (Codex review #9):
-                        // pipeline placeholder boundary check. When a
-                        // pipeline step is `f(_)` (or `f(a, _, b)`), the
-                        // placeholder slot receives the previous step's
-                        // value. Apply the same strict function-arg
-                        // subtype check used elsewhere so that an
-                        // `Int → Float` widening cannot leak in via the
-                        // placeholder.
-                        if let Expr::FuncCall(func, args, span) = pipe_expr {
-                            self.check_pipeline_placeholder_arg(func, args, &result_type, span);
-                            // E34B-013 / E34B-014 follow-up (Codex
-                            // review #10): a FuncCall with no
-                            // placeholder and no explicit arg is the
-                            // empty-paren auto-call form
-                            // `1 => f() => debug`. Treat the same as a
-                            // bare ident step.
-                            if args.is_empty()
-                                && let Expr::Ident(name, _) = func.as_ref()
-                                && self.is_pipeline_callable_ident(name)
-                            {
-                                self.check_pipeline_ident_auto_call_arg(
-                                    name,
-                                    &result_type,
-                                    span,
-                                );
-                            }
-                        }
-                        // E34B-013 / E34B-014 follow-up (Codex review #10):
-                        // pipeline auto-call (no-placeholder) boundary
-                        // check. `1 => acceptFloat` is auto-applied as
-                        // `acceptFloat(1)` at runtime; the type-checker
-                        // must apply the same boundary discipline here.
-                        if let Expr::Ident(name, span) = pipe_expr
-                            && self.is_pipeline_callable_ident(name)
-                        {
-                            self.check_pipeline_ident_auto_call_arg(name, &result_type, span);
-                        }
-                        // E34B-013 / E34B-014 follow-up (Codex review #10):
-                        // pipeline `Mold[_]()` / `Mold[_, args]()` —
-                        // the `_` slot in type-args receives the
-                        // upstream value at runtime; the same boundary
-                        // discipline applies here.
-                        if let Expr::MoldInst(name, type_args, _, span) = pipe_expr {
-                            self.check_pipeline_mold_inst_placeholder(
-                                name,
-                                type_args,
-                                &result_type,
-                                span,
-                            );
-                        }
                     }
                     if i > 0
                         && i < last_idx
@@ -6191,20 +5253,6 @@ defaulted fields must be provided via `()`",
                         continue;
                     }
                     result_type = self.infer_expr_type(pipe_expr);
-                    // E34B-013 / E34B-014 follow-up (Codex review #10):
-                    // a callable `Ident` step is auto-applied to the
-                    // previous value, so the next step's input is the
-                    // function's return type, not the function value.
-                    // This unwraps `Type::Function(_, ret)` -> `ret`
-                    // when the step is the bare ident form (FuncCall
-                    // already returns `ret` directly).
-                    if i > 0
-                        && let Expr::Ident(name, _) = pipe_expr
-                        && self.is_pipeline_callable_ident(name)
-                        && let Type::Function(_, ret) = &result_type
-                    {
-                        result_type = (**ret).clone();
-                    }
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;
@@ -6240,66 +5288,19 @@ defaulted fields must be provided via `()`",
 
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
                 self.validate_mold_header_constraints(name, type_args, mold_span);
-                // E34B-013 / E34B-014 follow-up (Codex review #11):
-                // direct (non-pipeline) call of the HOF molds —
-                // `Map[xs, fn]()` / `Filter[xs, fn]()` / `Fold[xs,
-                // init, fn]()` — must enforce the same boundary
-                // discipline. The pipeline form is handled by
-                // `check_pipeline_mold_inst_placeholder`; this branch
-                // covers the direct shape.
-                self.check_direct_hof_mold_boundary(name, type_args, mold_span);
-                // E34B-019 (Codex review #15 follow-up): Sort / Unique
-                // accept a `by` callback option whose first parameter
-                // must match the list element type. Pin the boundary
-                // here so `Sort[@[Int]](by <= keyFloat)` cannot widen
-                // Int -> Float silently.
-                self.check_built_in_mold_callback_option(name, type_args, fields, mold_span);
-                // E34B-020 (Codex review #16 follow-up): every
-                // built-in mold whose runtime side enforces a
-                // specific arity must have the same enforcement at
-                // type-check time. Without this, shapes like
-                // `JSON["{}"]()` (missing schema), `Async[]()` (empty),
-                // and `If[true, 1]()` (missing else) silently passed
-                // the front gate and only failed at runtime, breaking
-                // 4-backend parity for the fast feedback loop.
-                self.check_built_in_mold_arity(name, type_args, mold_span);
                 match name.as_str() {
-                    // JSON[raw, Schema]() returns Lax (wrapping the schema type).
-                    // E34B-014 follow-up (Codex review #11): when the
-                    // Schema position is a concrete type literal, surface
-                    // it as the Lax inner type so downstream boundaries
-                    // can pin the unmolded value (`v ]=> inner` then
-                    // `acceptFloat(inner)`) instead of letting a
-                    // `Lax[Unknown]` slip past the function-arg check.
-                    "JSON" => {
-                        let inner = type_args
-                            .get(1)
-                            .map(|schema| self.type_arg_expr_to_type(schema))
-                            .unwrap_or(Type::Unknown);
-                        Type::Generic("Lax".to_string(), vec![inner])
-                    }
+                    // JSON[raw, Schema]() returns Lax (wrapping the schema type)
+                    "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
                     // Async[T] wraps a value
-                    "Async" => {
-                        if type_args.is_empty() {
-                            self.errors.push(TypeError {
-                                message:
-                                    "[E1505] `Async[value]()` requires at least 1 type \
-                                     argument, got 0. Hint: pass the value to wrap, \
-                                     e.g. `Async[42]()`."
-                                        .to_string(),
-                                span: mold_span.clone(),
-                            });
-                        }
-                        Type::Generic(
-                            "Async".to_string(),
-                            vec![
-                                type_args
-                                    .first()
-                                    .map(|a| self.infer_expr_type(a))
-                                    .unwrap_or(Type::Unknown),
-                            ],
-                        )
-                    }
+                    "Async" => Type::Generic(
+                        "Async".to_string(),
+                        vec![
+                            type_args
+                                .first()
+                                .map(|a| self.infer_expr_type(a))
+                                .unwrap_or(Type::Unknown),
+                        ],
+                    ),
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
                         if type_args.len() != 1 {
@@ -6325,10 +5326,10 @@ defaulted fields must be provided via `()`",
                         Type::Generic("Async".to_string(), vec![inner])
                     }
                     // E34B-018 (Codex review #15 follow-up): All / Race /
-                    // Timeout had no checker-side arity validation, so
-                    // `All[xs, extra]()` and `Timeout[async]()` (missing
-                    // ms) silently passed type checking and only failed
-                    // at runtime. Pin the signatures here to align with
+                    // Timeout had no checker-side arity validation and no
+                    // dedicated return-type pin, so `All[xs, extra]()` and
+                    // `Timeout[async]()` (missing ms) silently passed type
+                    // checking. Pin the signatures here to align with
                     // `src/interpreter/mold_eval.rs` (4-backend parity).
                     //
                     // Runtime contracts:
@@ -6403,8 +5404,6 @@ defaulted fields must be provided via `()`",
                                 span: mold_span.clone(),
                             });
                         }
-                        // Validate the second argument's type: must be a
-                        // numeric literal / value (Int or Float).
                         if let Some(ms_arg) = type_args.get(1) {
                             let ms_ty = self.infer_expr_type(ms_arg);
                             if !matches!(ms_ty, Type::Unknown)
@@ -6439,13 +5438,10 @@ defaulted fields must be provided via `()`",
                     // `r.flatMap(...)` can enforce Result[U, P] preservation
                     // (方針 A: error type 保存 strict).
                     "Result" => {
-                        // E34B-024 (Codex review #20): pin the upper
-                        // arity. `Result[value, predicate?]()` is the
-                        // public shape (`docs/reference/standard_methods.md`,
-                        // `examples/compile_optional_result.td:95`),
-                        // and the runtime reads `type_args[0]` /
-                        // `type_args[1]` only. Anything past index 1
-                        // was silently dropped at the front gate.
+                        // Pin upper arity. `Result[value, predicate?]()` is the
+                        // public shape; the runtime reads `type_args[0]` /
+                        // `type_args[1]` only. Anything past index 1 was
+                        // silently dropped at the front gate.
                         if type_args.len() > 2 {
                             self.errors.push(TypeError {
                                 message: format!(
@@ -6470,10 +5466,9 @@ defaulted fields must be provided via `()`",
                     }
                     // Lax[value]() returns Lax[T]
                     "Lax" => {
-                        // E34B-024 (Codex review #20): same silent-drop
-                        // gap as `Result` — any `type_args[1..]` were
-                        // ignored, masking simple typos like
-                        // `Lax[1, 2, 3]()`.
+                        // Same silent-drop gap as `Result` — any
+                        // `type_args[1..]` were ignored, masking simple
+                        // typos like `Lax[1, 2, 3]()`.
                         if type_args.len() > 1 {
                             self.errors.push(TypeError {
                                 message: format!(
@@ -7096,15 +6091,12 @@ defaulted fields must be provided via `()`",
             }
 
             // (d) value type compatibility against declared / inherited type
-            //
-            // E34B-013 follow-up (Codex review #12): default-only
-            // fields (`name <= literal` with no `:Type` annotation)
-            // also surface a type now via `field_def_type`. Without
-            // this, `Foo = @(x <= 0.0)` followed by
-            // `Foo(x <= "s")` previously slipped because the
-            // declared type was treated as `Unknown`.
             let expected_ty = if let Some(declared) = declared_opt {
-                self.field_def_type(declared)
+                declared
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| self.registry.resolve_type(ta))
+                    .unwrap_or(Type::Unknown)
             } else {
                 inherited_ty.unwrap_or(Type::Unknown)
             };
@@ -7115,44 +6107,10 @@ defaulted fields must be provided via `()`",
             if matches!(actual_ty, Type::Unknown) {
                 continue;
             }
-            // E34B-013 follow-up (Codex review #12): the existing
-            // `contains_unknown` skip was too coarse for
-            // function-typed fields. A lambda `_ x = 1` passed to a
-            // `fn: Int => :Float` field has actual
-            // `Function([Unknown], Int)` because the lambda param has
-            // no explicit annotation, so the old skip suppressed the
-            // genuine return-type mismatch.
-            //
-            // For function-valued fields we keep checking — function
-            // subtype rules already accept `Unknown` on either side
-            // (Unknown <: anything passes), so spurious noise does
-            // not materialise, while the real `Int → Float` return
-            // mismatch is now surfaced by the strict subtype check.
-            // For non-function fields we preserve the original skip
-            // because lambda inference is the only place where a
-            // legitimate `Unknown` propagates through into a
-            // boundary check.
-            let both_functions = matches!(
-                (&actual_ty, &expected_ty),
-                (Type::Function(_, _), Type::Function(_, _))
-            );
-            if !both_functions
-                && (Self::contains_unknown(&actual_ty)
-                    || Self::contains_unknown(&expected_ty))
-            {
+            if Self::contains_unknown(&actual_ty) || Self::contains_unknown(&expected_ty) {
                 continue;
             }
-            // E34B-013 follow-up (Codex review #11): constructor
-            // field assignments are also a function-like boundary —
-            // PHILOSOPHY I forbids implicit type conversion when the
-            // user has explicitly annotated the field's declared
-            // type. Widening at this site would silently expand
-            // `Int → Float` for any TypeDef / MoldDef field with a
-            // numeric annotation.
-            if !self
-                .registry
-                .is_function_arg_subtype_of(&actual_ty, &expected_ty)
-            {
+            if !self.registry.is_subtype_of(&actual_ty, &expected_ty) {
                 self.errors.push(TypeError {
                     message: format!(
                         "[E1506] Constructor '{}' field '{}' has type {}, expected {}. \
