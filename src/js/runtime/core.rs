@@ -2029,7 +2029,11 @@ function Sort(list, opts) {
   } else {
     copy.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
   }
-  if (opts && opts.reverse) copy.reverse();
+  // E34B-021: `desc` is treated as an alias for `reverse` so that
+  // every backend honours `Sort[xs](by <= ..., desc <= true)` the
+  // same way (Native / WASM already OR these two options together
+  // in `lower_molds.rs`).
+  if (opts && (opts.reverse || opts.desc)) copy.reverse();
   return Object.freeze(copy);
 }
 function Unique(list, opts) {

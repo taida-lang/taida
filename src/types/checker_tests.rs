@@ -6669,3 +6669,68 @@ fn e34b_020_unique_by_callback_lowering_smoke() {
         errors
     );
 }
+
+// E34B-021 (Codex review #17 follow-up): close the remaining gaps
+// the central arity helper missed (Stub / Find / Upper-family) and
+// the Sort `desc` parity drift between Interp/JS and Native/WASM.
+
+#[test]
+fn e34b_021_stub_rejects_empty_type_args() {
+    let src = "v <= Stub[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Stub[message]()")),
+        "Expected [E1505] for `Stub[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_021_find_rejects_empty_type_args() {
+    let src = "v <= Find[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Find[xs, fn]()")),
+        "Expected [E1505] for `Find[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_021_upper_rejects_empty_type_args() {
+    let src = "v <= Upper[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Upper[str]()")),
+        "Expected [E1505] for `Upper[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_021_replace_rejects_partial_args() {
+    let src = "v <= Replace[\"s\"]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Replace[str, old, new]()")
+            && e.message.contains("got 1")),
+        "Expected [E1505] for `Replace[\"s\"]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_021_pad_rejects_partial_args() {
+    let src = "v <= Pad[\"s\"]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Pad[str, len]()")),
+        "Expected [E1505] for `Pad[\"s\"]()`, got: {:?}",
+        errors
+    );
+}

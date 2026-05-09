@@ -2006,6 +2006,17 @@ impl TypeChecker {
             | "U16LEDecode" | "U32BEDecode" | "U32LEDecode" => {
                 Some(("[value]", 1, Some(1)))
             }
+            // E34B-021 (Codex review #17 follow-up): close the
+            // remaining gaps surfaced when checking the central
+            // arity helper's coverage.
+            "Stub" => Some(("[message]", 1, Some(1))),
+            "Upper" | "Lower" | "Trim" => Some(("[str]", 1, Some(1))),
+            "Replace" => Some(("[str, old, new]", 3, Some(3))),
+            "Repeat" => Some(("[str, n]", 2, Some(2))),
+            "Pad" => Some(("[str, len]", 2, Some(2))),
+            "Find" | "FindIndex" | "FindIndexLax" | "Count" => {
+                Some(("[xs, fn]", 2, Some(2)))
+            }
             _ => None,
         };
         let Some((slots, min, max)) = arity_spec else {
