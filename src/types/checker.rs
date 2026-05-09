@@ -1902,6 +1902,59 @@ impl TypeChecker {
     ///   - the name is registered as a user-defined (possibly generic)
     ///     function / type / mold, or
     ///   - it is a known builtin identifier.
+    /// E34B-013 / E34B-014 follow-up (Codex review #9): check the
+    /// `_` placeholder slot in a pipeline-call step against the
+    /// callee's declared parameter type. The placeholder receives the
+    /// previous pipeline step's value, so it forms a real
+    /// function/method boundary just like any other call site.
+    fn check_pipeline_placeholder_arg(
+        &mut self,
+        func: &Expr,
+        args: &[Expr],
+        pipe_value_ty: &Type,
+        span: &Span,
+    ) {
+        let Some(ph_idx) = args
+            .iter()
+            .position(|a| matches!(a, Expr::Placeholder(_) | Expr::Hole(_)))
+        else {
+            return;
+        };
+        let expected_params: Option<Vec<Type>> = match func {
+            Expr::Ident(name, _) => self.func_param_types.get(name).cloned(),
+            _ => match self.infer_expr_type(func) {
+                Type::Function(params, _) => Some(params),
+                _ => None,
+            },
+        };
+        let Some(expected_params) = expected_params else {
+            return;
+        };
+        let Some(expected_ty) = expected_params.get(ph_idx) else {
+            return;
+        };
+        if matches!(expected_ty, Type::Unknown) {
+            return;
+        }
+        if matches!(pipe_value_ty, Type::Unknown) {
+            return;
+        }
+        if !self
+            .registry
+            .is_function_arg_subtype_of(pipe_value_ty, expected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Pipeline value of type {} cannot be passed to placeholder \
+                     expecting {}. Hint: Pass a value of the correct type, or use an \
+                     explicit conversion.",
+                    pipe_value_ty, expected_ty
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
     fn is_pipeline_callable_ident(&self, name: &str) -> bool {
         if let Some(ty) = self.lookup_var(name)
             && matches!(ty, Type::Function(_, _))
@@ -3054,7 +3107,13 @@ defaulted fields must be provided via `()`",
                 }
                 _ => false,
             },
-            _ => self.registry.is_subtype_of(actual, pattern),
+            // E34B-013 Lock-H follow-up (Codex review #9): generic
+            // direct-call patterns also live at a function boundary, so
+            // the same `Int → Float` widening prohibition applies. The
+            // residual subtype paths covered here (Named / BuchiPack
+            // structural resolution, primitive numeric chains) inherit
+            // the strict flag through `is_function_arg_subtype_of`.
+            _ => self.registry.is_function_arg_subtype_of(actual, pattern),
         }
     }
 
@@ -5128,7 +5187,9 @@ defaulted fields must be provided via `()`",
                     }
                     base_ty
                 } else {
-                    // Calling a non-ident expression (e.g. lambda call)
+                    // Calling a non-ident expression (e.g. lambda call,
+                    // immediate partial application result, function-valued
+                    // pack-field access).
                     let func_type = self.infer_expr_type(func);
                     match func_type {
                         Type::Function(params, ret) => {
@@ -5150,6 +5211,42 @@ defaulted fields must be provided via `()`",
                                     ),
                                     span: span.clone(),
                                 });
+                            }
+                            // E34B-013 / E34B-014 follow-up (Codex review #9):
+                            // immediate partial-call (`f(, 2)(1)`) and
+                            // function-valued pack-field call
+                            // (`(holder.fn)(1)`) had no param-type check
+                            // here; only arity. Apply the same strict
+                            // boundary subtype check used at every other
+                            // function/method boundary so that `Int → Float`
+                            // implicit widening cannot leak in.
+                            for (i, arg) in args.iter().enumerate() {
+                                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                    continue;
+                                }
+                                let Some(expected_ty) = params.get(i) else {
+                                    continue;
+                                };
+                                if matches!(expected_ty, Type::Unknown) {
+                                    continue;
+                                }
+                                let actual_ty = self.infer_expr_type(arg);
+                                if matches!(actual_ty, Type::Unknown) {
+                                    continue;
+                                }
+                                if !self
+                                    .registry
+                                    .is_function_arg_subtype_of(&actual_ty, expected_ty)
+                                {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1506] Argument {} of function value has type {}, expected {}. \
+                                             Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                            i + 1, actual_ty, expected_ty
+                                        ),
+                                        span: span.clone(),
+                                    });
+                                }
                             }
                             if hole_count > 0 {
                                 let hole_param_types: Vec<Type> = args
@@ -5292,6 +5389,17 @@ defaulted fields must be provided via `()`",
                 for (i, pipe_expr) in exprs.iter().enumerate() {
                     if i > 0 {
                         self.in_pipeline = true;
+                        // E34B-013 / E34B-014 follow-up (Codex review #9):
+                        // pipeline placeholder boundary check. When a
+                        // pipeline step is `f(_)` (or `f(a, _, b)`), the
+                        // placeholder slot receives the previous step's
+                        // value. Apply the same strict function-arg
+                        // subtype check used elsewhere so that an
+                        // `Int → Float` widening cannot leak in via the
+                        // placeholder.
+                        if let Expr::FuncCall(func, args, span) = pipe_expr {
+                            self.check_pipeline_placeholder_arg(func, args, &result_type, span);
+                        }
                     }
                     if i > 0
                         && i < last_idx

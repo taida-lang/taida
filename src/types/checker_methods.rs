@@ -57,24 +57,52 @@ impl TypeChecker {
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
-            Type::List(_) => match method {
+            Type::List(inner) => match method {
                 "length" => Some((0, 0, vec![])),
                 "isEmpty" => Some((0, 0, vec![])),
                 "first" | "last" | "max" | "min" => Some((0, 0, vec![])),
                 "get" => Some((1, 1, vec![Type::Int])),
-                "contains" => Some((1, 1, vec![Type::Unknown])), // element type varies
-                "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Unknown])),
+                "contains" => Some((1, 1, vec![inner.as_ref().clone()])),
+                "indexOf" | "lastIndexOf" => Some((1, 1, vec![inner.as_ref().clone()])),
                 // E32B-022 (Lock-N): Lax[Int] additive replacements.
-                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![Type::Unknown])),
-                "any" | "all" | "none" => Some((1, 1, vec![Type::Unknown])), // predicate
+                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![inner.as_ref().clone()])),
+                // E34B-013 / E34B-014 follow-up (Codex review #9): full
+                // pin the predicate / mapper signatures so that the
+                // List HOF surface is symmetric with `Lax[T]` /
+                // `Result[T, P]` / `Async[T]`. The expected param type
+                // is the element type T; any widening at the boundary
+                // is rejected the same way as Lax/Result/Async.
+                "any" | "all" | "none" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::Bool),
+                    )],
+                )),
                 "take" | "drop" => Some((1, 1, vec![Type::Int])),
                 "unique" | "reverse" | "sort" | "flatten" => Some((0, 0, vec![])),
-                "map" | "flatMap" | "filter" => Some((1, 1, vec![Type::Unknown])),
+                "map" | "filter" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::Unknown),
+                    )],
+                )),
+                "flatMap" => Some((
+                    1,
+                    1,
+                    vec![Type::Function(
+                        vec![inner.as_ref().clone()],
+                        Box::new(Type::List(Box::new(Type::Unknown))),
+                    )],
+                )),
                 "reduce" | "fold" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
                 "join" => Some((1, 1, vec![Type::Str])),
                 "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
-                "push" | "append" => Some((1, 1, vec![Type::Unknown])),
-                "concat" => Some((1, 1, vec![Type::Unknown])),
+                "push" | "append" => Some((1, 1, vec![inner.as_ref().clone()])),
+                "concat" => Some((1, 1, vec![Type::List(Box::new(inner.as_ref().clone()))])),
                 "zip" => Some((1, 1, vec![Type::Unknown])),
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
@@ -208,6 +236,22 @@ impl TypeChecker {
                 "errorInfo" | "throw" | "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
+            // E34B-013 / E34B-014 follow-up (Codex review #9): a
+            // function-valued pack field invoked via `pack.fn(arg)` is
+            // syntactically a MethodCall, but the receiver is a
+            // BuchiPack and the "method" is really a stored function
+            // value. Surface its declared signature so that the regular
+            // boundary subtype check applies — otherwise the legacy
+            // unknown-method path silently swallowed every arg type.
+            Type::BuchiPack(fields) => fields
+                .iter()
+                .find(|(name, _)| name == method)
+                .and_then(|(_, ty)| match ty {
+                    Type::Function(params, _) => {
+                        Some((params.len(), params.len(), params.clone()))
+                    }
+                    _ => None,
+                }),
             _ => {
                 // N-66: For unknown/unresolved receiver types (Type::Unknown, Type::Any,
                 // Type::Generic for non-Lax/Result/Async, user-defined Named types without

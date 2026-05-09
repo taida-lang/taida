@@ -5473,3 +5473,144 @@ fn e34b_014_named_fn_with_full_annotations_still_accepted() {
     );
 }
 
+// E34B-013 / E34B-014 follow-up (Codex review #9): close the five
+// remaining boundary leaks uncovered after the previous round.
+//   5. immediate partial-call `f(, 2)(1)` — non-ident callee skipped
+//      param check, only arity was verified
+//   6. function-valued pack field call `holder.fn(1)` and
+//      `(holder.fn)(1)` — MethodCall path had no signature lookup for
+//      BuchiPack receivers
+//   7. generic direct-call `genericFloat[T] x: Float ... ; genericFloat(1, _)` —
+//      `bind_generic_type_pattern` fell through to non-strict
+//      `registry.is_subtype_of`
+//   8. pipeline placeholder `1 => acceptFloat(_)` — placeholder was
+//      skipped in arg loops with no upstream-type check
+//   9. List HOF `xs.map / filter / flatMap` with a function value —
+//      previously `vec![Type::Unknown]`, now full pin to `Function([T], _)`
+//      to mirror Lax/Result/Async
+
+#[test]
+fn e34b_013_immediate_partial_call_rejects_int_for_float() {
+    // Hole 5: `acceptFloat(, 2)(1)` — partial application result is a
+    // function value, calling it with Int for a Float slot must reject.
+    let src = "acceptFloat x: Float y: Int = x + 1.0 => :Float\n\
+               result <= acceptFloat(, 2)(1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("function value")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for partial-call(1) with Float param, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_pack_field_call_rejects_int_for_float() {
+    // Hole 6: function-valued pack field call. Both `holder.fn(1)`
+    // (MethodCall) and `(holder.fn)(1)` (FuncCall on FieldAccess) must
+    // reject.
+    let src_method = "fnFloat x: Float = x + 1.0 => :Float\n\
+                      holder <= @(fn <= fnFloat)\n\
+                      result <= holder.fn(1)\n";
+    let (_, errors) = check(src_method);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("Method 'fn'")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1508] for `holder.fn(1)`, got: {:?}",
+        errors
+    );
+
+    let src_paren = "fnFloat x: Float = x + 1.0 => :Float\n\
+                     holder <= @(fn <= fnFloat)\n\
+                     result <= (holder.fn)(1)\n";
+    let (_, errors) = check(src_paren);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]") || e.message.contains("[E1508]")),
+        "Expected reject for `(holder.fn)(1)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_generic_direct_call_rejects_int_for_float() {
+    // Hole 7: generic direct-call falls through to a non-strict subtype
+    // check inside `bind_generic_type_pattern`; that path is now strict.
+    let src = "genericFloat[T] x: Float y: T = x => :Float\n\
+               result <= genericFloat(1, \"ok\")\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("genericFloat")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `genericFloat(1, \"ok\")`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_placeholder_rejects_int_for_float() {
+    // Hole 8: pipeline placeholder must be checked against the
+    // upstream value's type.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               1 => acceptFloat(_) => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Pipeline value")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for pipeline placeholder Int -> Float, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_pipeline_placeholder_accepts_float_for_float() {
+    // Positive: matching Float upstream is fine.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               1.0 => acceptFloat(_) => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Pipeline `1.0 => acceptFloat(_)` should be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_list_map_rejects_float_param_for_int_list() {
+    // Hole 9: List HOF surfaces are now full pin, mirroring
+    // Lax/Result/Async. `@[1].map(fnFloat: Float -> Float)` must reject.
+    let src = "fnFloat x: Float = x * 2.0 => :Float\n\
+               xs <= @[1, 2, 3]\n\
+               ys <= xs.map(fnFloat)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("Method 'map'")
+            && e.message.contains("Float")
+            && e.message.contains("Int")),
+        "Expected [E1508] for `@[Int].map(fn: Float -> Float)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_list_map_accepts_int_param_for_int_list() {
+    // Positive: matching Int -> Int function is accepted.
+    let src = "double x: Int = x * 2 => :Int\n\
+               xs <= @[1, 2, 3]\n\
+               ys <= xs.map(double)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`@[Int].map(double: Int -> Int)` should be accepted; errors: {:?}",
+        errors
+    );
+}
+
