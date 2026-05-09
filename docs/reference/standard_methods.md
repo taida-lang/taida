@@ -832,8 +832,8 @@ result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 
 確定させる側の対処は以下のいずれか:
 
-- import 元の関数に戻り値注釈を付けて inner type を明示する
-- 受け側で `Lax[Int]()` 等の具体型コンストラクタを経由してから `map` に渡す
+- 受け側に **引数の型注釈付き local 関数** を定義し、import 経由で受けた値をそこに通してから `map` に渡す (例: `unwrap v: Lax[Int] = v => :Lax[Int]` を経由すると inner が `Int` に pin される)。import された symbol 自体は call site でも `Type::Unknown` のまま登録されるため、import 元に戻り値注釈を付け足しても importer 側の pin は復活しません
+- import を経由せず、`Lax[42]()` のような **値ベースのコンストラクタ** で受け側に具体型 Lax を直接組み立てる (`Lax[Int]()` のような型名引数形式は `[E1502]` で reject されます)
 - 中間に `getOrDefault(...)` を挟んで Lax の inner を取り出してから処理する
 
 同じ caveat は `Result` / `Async` の `map` / `flatMap` / `mapError` にも当てはまります。
@@ -842,7 +842,7 @@ result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 
 #### errorInfo
 
-Lax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`Div[10, 0]()` / `@[1, 2, 3].get(99)` / `Float["not_a_number"]()` などの失敗系コンストラクタや JSON cast 失敗、`Bytes["..."]()` 派生の Lax からも同一の API で error 詳細を読み出せます。`hasValue = true` (成功) のときは戻り値の `Lax` も `hasValue = false` (中身無し) になります。`Lax` 以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
+Lax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`Div[10, 0]()` / `@[1, 2, 3].get(99)` / `Float["not_a_number"]()` などの失敗系コンストラクタや JSON cast 失敗、`Bytes["..."]()` 派生の Lax からも同一の API で error 詳細を読み出せます。`hasValue = true` (成功) のときは戻り値の `Lax` も `hasValue = false` (中身無し) になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
 
 ```taida fragment
 result <= Float["not_a_number"]()

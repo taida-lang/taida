@@ -228,7 +228,7 @@
 | コード (予約) | 内容 | 既存帯域 |
 |--------------|------|---------|
 | `E0700` | Native と native lowering 系 WASM で相互再帰を検出した場合の拒否 | `E07xx` コード生成エラー |
-| `E1508` | `Lax[T].getOrDefault` / `getOrThrow` / `map` / `flatMap` および `Result[T, P].map` / `flatMap` / `mapError` / `Async[T].map` の引数型不整合 (関数引数型ピン違反を含む) | `E15xx` 定義・意味論エラー |
+| `E1508` | `Lax[T].getOrDefault` / `map` / `flatMap`、`Result[T, P].getOrDefault` / `map` / `flatMap` / `mapError`、`Async[T].getOrDefault` / `map` の引数型不整合 (関数引数型ピン違反を含む。`getOrThrow` は arity 0 のため対象外) | `E15xx` 定義・意味論エラー |
 
 ### アドオンマニフェストエラー (`E20xx`)
 
