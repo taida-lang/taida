@@ -47,7 +47,10 @@ fn fixture_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(String, String); 3] {
+fn run_three_backends(
+    main_path: &std::path::Path,
+    dir: &std::path::Path,
+) -> [(String, Option<String>); 3] {
     let interp = {
         let out = Command::new(taida_bin())
             .arg(main_path)
@@ -58,7 +61,7 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
             "interp failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
 
     let js = if node_available() {
@@ -81,10 +84,10 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
             "js run failed: {}",
             String::from_utf8_lossy(&run.stderr)
         );
-        String::from_utf8_lossy(&run.stdout).trim().to_string()
+        Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
     } else {
         eprintln!("node unavailable; skipping JS leg");
-        String::new()
+        None
     };
 
     let native = if cc_available() {
@@ -107,10 +110,10 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
             "native run failed: {}",
             String::from_utf8_lossy(&run.stderr)
         );
-        String::from_utf8_lossy(&run.stdout).trim().to_string()
+        Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
     } else {
         eprintln!("cc unavailable; skipping native leg");
-        String::new()
+        None
     };
 
     [
@@ -120,17 +123,21 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
     ]
 }
 
-fn assert_three_backends_agree(results: &[(String, String); 3]) {
+fn assert_three_backends_agree(results: &[(String, Option<String>); 3]) {
     let interp = results
         .iter()
         .find(|(b, _)| b == "interp")
-        .map(|(_, o)| o.clone())
-        .unwrap_or_default();
+        .and_then(|(_, o)| o.clone())
+        .expect("interp output is required");
     for (backend, out) in results {
-        if out.is_empty() {
-            continue;
+        match out {
+            None => continue,
+            Some(actual) => assert_eq!(
+                actual, &interp,
+                "{} backend disagrees with interp",
+                backend
+            ),
         }
-        assert_eq!(out, &interp, "{} backend disagrees with interp", backend);
     }
 }
 
@@ -151,8 +158,8 @@ fn named_pack_function_field_returns_bool_three_backends() {
     let interp = results
         .iter()
         .find(|(b, _)| b == "interp")
-        .map(|(_, o)| o.clone())
-        .unwrap_or_default();
+        .and_then(|(_, o)| o.clone())
+        .expect("interp output is required");
     assert_eq!(
         interp, "true|false",
         "interp: function-field Bool method must surface its declared return"

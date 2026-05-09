@@ -833,7 +833,7 @@ result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 確定させる側の対処は以下のいずれか:
 
 - 受け側に **引数の型注釈付き local 関数** を定義し、import 経由で受けた値をそこに通してから `map` に渡す (例: `unwrap v: Lax[Int] = v => :Lax[Int]` を経由すると inner が `Int` に pin される)。import された symbol 自体は call site でも `Type::Unknown` のまま登録されるため、import 元に戻り値注釈を付け足しても importer 側の pin は復活しません
-- import を経由せず、`Lax[42]()` のような **値ベースのコンストラクタ** で受け側に具体型 Lax を直接組み立てる (`Lax[Int]()` のような型名引数形式は `[E1502]` で reject されます)
+- import を経由せず、`Lax[42]()` のような **値ベースのコンストラクタ** で受け側に具体型 Lax を直接組み立てる (`Lax[Int]()` のような型名引数形式は `Int` が型名ではなく未定義変数として扱われ `[E1502] Undefined variable 'Int'` で reject されます)
 - 中間に `getOrDefault(...)` を挟んで Lax の inner を取り出してから処理する
 
 同じ caveat は `Result` / `Async` の `map` / `flatMap` / `mapError` にも当てはまります。

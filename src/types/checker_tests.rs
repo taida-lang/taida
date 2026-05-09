@@ -5145,6 +5145,33 @@ fn e34b_011_named_pack_function_field_call_unwraps_return_type() {
     );
 }
 
+// E34B-011 strong pin: bind `p.check(0)` to a variable and verify the
+// checker records its type as `Type::Bool`. The arg-mismatch test
+// above only proves that the checker rejects Int contexts, but a
+// regression that left the type as `Type::Function(_, Bool)` would
+// still trip an `[E1506]` ("has type Function...") and accidentally
+// pass the substring filter. Looking at the resolved variable type
+// directly forces the unwrap to land before assignment.
+
+#[test]
+fn e34b_011_named_pack_function_field_call_records_bool_for_bound_var() {
+    let src = "Predicate = @(check: Int => :Bool)\n\
+               p <= Predicate(check <= _ x = x > 0)\n\
+               result <= p.check(0)\n";
+    let (checker, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Expected no type errors for plain `result <= p.check(0)`, got: {:?}",
+        errors
+    );
+    assert_eq!(
+        checker.lookup_var("result"),
+        Some(Type::Bool),
+        "Expected `result` to be Type::Bool (Function return unwrapped), got: {:?}",
+        checker.lookup_var("result")
+    );
+}
+
 // E34B-015 negative coverage: an explicit `fn(s: Str) -> Str` cannot be
 // passed to `Result[T, P].mapError` when P is not Str. The full-pin
 // signature must reject the mismatch via [E1508].
