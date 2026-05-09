@@ -490,7 +490,12 @@ impl TypeChecker {
                 _ => {}
             }
         }
-        // Fallback: existing arg-less variant.
+        // Delegate every non-Lax/Result/Async receiver back to the
+        // arg-less variant. The Named-pack arm there unwraps a
+        // function-typed field's declared return (`Function(_, R) -> R`)
+        // for callers like `obj.someField(7)`, so reusing it here keeps
+        // a single source of truth and avoids duplicating that arm on
+        // both code paths.
         self.infer_method_return_type(obj_type, method)
     }
 

@@ -5121,6 +5121,30 @@ fn e34b_008_lambda_body_diagnostic_emitted_once() {
     );
 }
 
+// E34B-011: `infer_method_return_type_with_args` must surface the
+// declared return type of a function-valued pack field rather than
+// the bare `Type::Function`. The arg-aware variant intentionally
+// delegates to `infer_method_return_type` for non-Lax/Result/Async
+// receivers, so the Named-pack arm that unwraps `Function(_, R) -> R`
+// is reused via fallback. If that delegation regresses (e.g. by
+// short-circuiting before the fallback or recording the raw function
+// type), a downstream `Bool`-context call site will silently accept
+// a non-Bool value.
+
+#[test]
+fn e34b_011_named_pack_function_field_call_unwraps_return_type() {
+    let src = "Predicate = @(check: Int => :Bool)\n\
+               p <= Predicate(check <= _ x = x > 0)\n\
+               takesInt n: Int = n + 1 => :Int\n\
+               ignored <= takesInt(p.check(0))\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]") && e.message.contains("Bool")),
+        "Expected [E1506] when feeding Bool result of `p.check(0)` into Int parameter, got: {:?}",
+        errors
+    );
+}
+
 // E34B-015 negative coverage: an explicit `fn(s: Str) -> Str` cannot be
 // passed to `Result[T, P].mapError` when P is not Str. The full-pin
 // signature must reject the mismatch via [E1508].

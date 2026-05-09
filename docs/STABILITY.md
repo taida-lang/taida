@@ -550,6 +550,18 @@ fully pinned for the stable release line:
   receiver; cross-error mixing is rejected and must be made
   explicit through `mapError`.
 
+The full pin engages only when the receiver's inner type is
+concrete. When the inner type stays unresolved — typically
+because the value flowed in from an unannotated cross-module
+import or otherwise reached the call site without enough
+information for the checker to commit to a concrete shape — the
+unknown side acts as a subtype wildcard, so a lambda whose
+argument type would otherwise be rejected can still pass through
+without diagnostic. Annotate the receiver (or the import) with a
+concrete type to restore the pinned check; the same caveat is
+echoed in `docs/reference/standard_methods.md` next to each
+signature.
+
 See `docs/reference/standard_methods.md` for the canonical
 signatures.
 

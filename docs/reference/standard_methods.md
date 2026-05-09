@@ -818,6 +818,43 @@ Div[10, 2]().flatMap(_ x = Div[x, 3]()) ]=> result  // 1
 
 **シグネチャ**: `fn: :T => :Lax[U] => :Lax[U]`
 
+#### `map` / `flatMap` の引数型ピンの効力範囲
+
+`map` / `flatMap` は受け取る関数のシグネチャ全体（引数型と戻り値型）を型チェッカーが固定し、`fn` の引数型が `T` と食い違えば `[E1508]` で reject されます。ただしこのピンは **受け側の `T` が具体型として確定しているとき** にのみ機能します。受け側の `T` が確定しないまま (例: 型注釈なしのクロスモジュール import 経由で値が流入した場合) call site に到達したときは、未解決側がサブタイプ規則のワイルドカードとして振る舞い、本来 reject すべき関数も silent pass します。
+
+```taida
+// other_module.td が `make` を export し、Lax を返すが戻り値注釈がない場合、
+// 呼び出し側で `make()` の inner T が未解決のまま map に流れ込みます。
+import "./other_module.td" >>> { make }
+
+result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
+```
+
+確定させる側の対処は以下のいずれか:
+
+- import 元の関数に戻り値注釈を付けて inner type を明示する
+- 受け側で `Lax[Int]()` 等の具体型コンストラクタを経由してから `map` に渡す
+- 中間に `getOrDefault(...)` を挟んで Lax の inner を取り出してから処理する
+
+同じ caveat は `Result` / `Async` の `map` / `flatMap` / `mapError` にも当てはまります。
+
+### 失敗情報取得
+
+#### errorInfo
+
+Lax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`Div[10, 0]()` / `@[1, 2, 3].get(99)` / `Float["not_a_number"]()` などの失敗系コンストラクタや JSON cast 失敗、`Bytes["..."]()` 派生の Lax からも同一の API で error 詳細を読み出せます。`hasValue = true` (成功) のときは戻り値の `Lax` も `hasValue = false` (中身無し) になります。`Lax` 以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
+
+```taida fragment
+result <= Float["not_a_number"]()
+result.errorInfo() ]=> err
+err.hasValue()      // true (失敗、error info あり)
+err.getOrDefault(@(type <= "", message <= "", kind <= "", code <= 0)).message
+```
+
+`ErrorInfo` シェイプ: `@(type: Str, message: Str, kind: Str, code: Int)`。詳細は `docs/reference/class_like_types.md::ErrorInfo` を参照。
+
+**シグネチャ**: `=> :Lax[ErrorInfo]`
+
 ### 文字列変換
 
 #### toString
@@ -975,6 +1012,8 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `toString()` | `=> :Str` | 文字列表現 |
 | `unmold()` | `=> :T` | アンモールディング |
 
+`map` / `flatMap` / `mapError` の引数型ピンは **受け側の `T` / `P` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` / `P` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
+
 ---
 
 ## Async — 非同期メソッド
@@ -988,3 +1027,5 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `map(fn)` | `:T => :U => :Async[U]` | モナディック変換 |
 | `toString()` | `=> :Str` | 文字列表現 |
 | `unmold()` | `=> :T` | アンモールディング |
+
+`map` の引数型ピンは **受け側の `T` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
