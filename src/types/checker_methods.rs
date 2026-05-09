@@ -98,7 +98,24 @@ impl TypeChecker {
                         Box::new(Type::List(Box::new(Type::Unknown))),
                     )],
                 )),
-                "reduce" | "fold" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
+                // E34B-013 follow-up (Codex review #12):
+                // `xs.fold(init, fn)` -- the function value's second
+                // parameter must accept the list element type, which
+                // we *can* ground here.  The accumulator (first param)
+                // still depends on `init` at the call site and stays
+                // `Unknown` for now; closing it cleanly requires
+                // arg-aware bidirectional inference (carry-over).
+                "reduce" | "fold" => Some((
+                    2,
+                    2,
+                    vec![
+                        Type::Unknown,
+                        Type::Function(
+                            vec![Type::Unknown, inner.as_ref().clone()],
+                            Box::new(Type::Unknown),
+                        ),
+                    ],
+                )),
                 "join" => Some((1, 1, vec![Type::Str])),
                 "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
                 "push" | "append" => Some((1, 1, vec![inner.as_ref().clone()])),

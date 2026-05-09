@@ -453,6 +453,60 @@ impl TypeChecker {
         md.name_args.as_ref().cloned().unwrap_or(mold_args)
     }
 
+    // E34B-013 follow-up (Codex review #12): default-only fields
+    // (`name <= literal` with no `:Type` annotation) used to register
+    // as `Type::Unknown`, which then suppressed every subsequent
+    // boundary check (`Foo(x <= "s")` against `Foo = @(x <= 0.0)`
+    // silently widened).  PHILOSOPHY I requires the field type be
+    // pinned, and the natural anchor is the literal default itself.
+    // We keep the inference deliberately narrow — primary literals
+    // only — so we never accidentally type a field by walking a
+    // non-trivial expression that may reference yet-unregistered
+    // names. Anything more elaborate stays `Unknown` and the user
+    // can pin the type explicitly with `name: T <= expr`.
+    //
+    // Internal-comment downgrade (`///` -> `//`): CLAUDE.md absolute
+    // rule forbids surfacing internal block IDs via doc-comments
+    // (which `taida doc generate` consumes).
+    fn primary_literal_type(expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::IntLit(_, _) => Some(Type::Int),
+            Expr::FloatLit(_, _) => Some(Type::Float),
+            Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(Type::Str),
+            Expr::BoolLit(_, _) => Some(Type::Bool),
+            Expr::ListLit(items, _) if items.is_empty() => {
+                Some(Type::List(Box::new(Type::Unknown)))
+            }
+            // Conservative: only homogeneous primary-literal lists.
+            Expr::ListLit(items, _) => {
+                let first = Self::primary_literal_type(items.first()?)?;
+                if items
+                    .iter()
+                    .all(|it| Self::primary_literal_type(it).as_ref() == Some(&first))
+                {
+                    Some(Type::List(Box::new(first)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    // Resolve a `FieldDef` to a Type, preferring an explicit
+    // annotation but falling back to the default expression's
+    // primary-literal type. (Internal-comment downgrade to keep
+    // internal review IDs out of doc-comment surface.)
+    fn field_def_type(&self, f: &FieldDef) -> Type {
+        if let Some(ann) = f.type_annotation.as_ref() {
+            self.registry.resolve_type(ann)
+        } else if let Some(default_expr) = f.default_value.as_ref() {
+            Self::primary_literal_type(default_expr).unwrap_or(Type::Unknown)
+        } else {
+            Type::Unknown
+        }
+    }
+
     fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {
         let mut merged = parent.to_vec();
         for child_field in child {
@@ -1915,9 +1969,27 @@ impl TypeChecker {
         type_args: &[Expr],
         span: &Span,
     ) {
-        let (xs_idx, fn_idx) = match name {
-            "Map" | "Filter" => (0usize, 1usize),
-            "Fold" => (0usize, 2usize),
+        // E34B-013 follow-up (Codex review #12 / #13 / #14): every
+        // direct (non-pipeline) HOF mold call must pin every
+        // value-vs-function boundary, not just the list-element /
+        // first-param pairing. The allow-list covers:
+        //   * Map / Filter / TakeWhile / DropWhile / Find / FindIndex
+        //     / FindIndexLax / Count -- single-arg `(elem) -> ?`
+        //     callback / predicate at slot 1.
+        //   * Fold / Reduce / Foldr -- two-arg `(acc, x) -> acc` at
+        //     slot 2, with init at slot 1 and the same return-vs-acc
+        //     pin (the function value's return flows back as the
+        //     next iteration's accumulator).
+        let (xs_idx, fn_idx, expects_acc) = match name {
+            "Map"
+            | "Filter"
+            | "TakeWhile"
+            | "DropWhile"
+            | "Find"
+            | "FindIndex"
+            | "FindIndexLax"
+            | "Count" => (0usize, 1usize, false),
+            "Fold" | "Reduce" | "Foldr" => (0usize, 2usize, true),
             _ => return,
         };
         let Some(xs_arg) = type_args.get(xs_idx) else {
@@ -1935,10 +2007,75 @@ impl TypeChecker {
         }
         let xs_ty = self.infer_expr_type(xs_arg);
         let fn_ty = self.infer_expr_type(fn_arg);
-        let (Type::List(elem_ty), Type::Function(fn_params, _)) = (&xs_ty, &fn_ty) else {
+        // E34B-013 follow-up (Codex review #14): accept Stream[T]
+        // alongside List[T] as the xs source type. Stream HOFs
+        // execute the same callback boundary at runtime.
+        let elem_ty: Type = match &xs_ty {
+            Type::List(inner) => (**inner).clone(),
+            Type::Generic(stream_name, args) if stream_name == "Stream" => {
+                args.first().cloned().unwrap_or(Type::Unknown)
+            }
+            _ => return,
+        };
+        let elem_ty = Box::new(elem_ty);
+        let Type::Function(fn_params, _) = &fn_ty else {
             return;
         };
-        let Some(fn_param_ty) = fn_params.first() else {
+        // Determine which fn param corresponds to the list element,
+        // and (for Fold) check the accumulator side first so a single
+        // call surfaces both mismatches.
+        if expects_acc {
+            if let (Some(init_arg), Some(acc_param_ty)) =
+                (type_args.get(1), fn_params.first())
+            {
+                if !matches!(init_arg, Expr::Placeholder(_) | Expr::Hole(_))
+                    && !matches!(acc_param_ty, Type::Unknown)
+                {
+                    let init_ty = self.infer_expr_type(init_arg);
+                    if !matches!(init_ty, Type::Unknown)
+                        && !self
+                            .registry
+                            .is_function_arg_subtype_of(&init_ty, acc_param_ty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1506] `{}[xs, init, fn]()`: init value of type {} cannot \
+                                 satisfy accumulator parameter type {}. Hint: Pass an init \
+                                 value whose type matches the function's first parameter, \
+                                 or use an explicit conversion.",
+                                name, init_ty, acc_param_ty
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                    // E34B-013 follow-up (Codex review #13): the
+                    // accumulator carries the pipeline result, so the
+                    // function value's return type must also satisfy
+                    // the declared accumulator type. Otherwise a
+                    // function returning Float silently widens an Int
+                    // accumulator across iterations.
+                    if let Type::Function(_, fn_ret) = &fn_ty
+                        && !matches!(fn_ret.as_ref(), Type::Unknown)
+                        && !self
+                            .registry
+                            .is_function_arg_subtype_of(fn_ret, acc_param_ty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1506] `{}[xs, init, fn]()`: function return type {} cannot \
+                                 satisfy accumulator parameter type {}. Hint: The function's \
+                                 return value flows back as the next iteration's accumulator, \
+                                 so its type must match the accumulator type.",
+                                name, fn_ret, acc_param_ty
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        let elem_param_idx = if expects_acc { 1 } else { 0 };
+        let Some(fn_param_ty) = fn_params.get(elem_param_idx) else {
             return;
         };
         if matches!(elem_ty.as_ref(), Type::Unknown)
@@ -1948,15 +2085,21 @@ impl TypeChecker {
         }
         if !self
             .registry
-            .is_function_arg_subtype_of(elem_ty, fn_param_ty)
+            .is_function_arg_subtype_of(&elem_ty, fn_param_ty)
         {
+            let positions = if expects_acc {
+                "`{}[xs, init, fn]()`: list element type"
+            } else {
+                "`{}[xs, fn]()`: list element type"
+            };
             self.errors.push(TypeError {
                 message: format!(
-                    "[E1506] `{}[xs, fn]()`: list element type {} cannot satisfy \
-                     function parameter type {}. Hint: Pass a list whose elements \
-                     match the function's expected parameter type, or use an \
-                     explicit conversion.",
-                    name, elem_ty, fn_param_ty
+                    "[E1506] {} {} cannot satisfy function parameter type {}. \
+                     Hint: Pass a list whose elements match the function's expected \
+                     parameter type, or use an explicit conversion.",
+                    positions.replace("{}", name),
+                    elem_ty,
+                    fn_param_ty
                 ),
                 span: span.clone(),
             });
@@ -1985,8 +2128,42 @@ impl TypeChecker {
         //   the `_` slot holds a `List[T]` whose element type is the
         //   first parameter type of the function value supplied in the
         //   second/third position.
+        // E34B-013 follow-up (Codex review #13): every placeholder
+        // slot in a pipeline `HOF[..]()` form is a real boundary —
+        // the pipeline value is fed to that slot at runtime, so we
+        // must ground the slot's expected type and run the strict
+        // function-arg subtype check. Map/Filter only have a single
+        // value slot (the list); Fold-family molds (Fold / Reduce /
+        // Foldr) have three:
+        //   slot 0 (xs):  expects List[fn.param[1]]
+        //   slot 1 (init): expects fn.param[0]
+        //   slot 2 (fn):  expects (acc, x) -> acc — direct function
+        //     value placeholder is rare; we still pin via list-elem
+        //     when possible.
+        // E34B-013 follow-up (Codex review #14): single-arg HOF
+        // family (`Map`/`Filter`/`TakeWhile`/`DropWhile`/`Find`/
+        // `FindIndex`/`FindIndexLax`/`Count`) all share `(elem) -> ?`
+        // shape. Helper closure converts a list/stream xs source
+        // expression to its concrete element type so the same
+        // allow-list arms can extract the slot expectation uniformly.
+        let xs_elem_ty = |this: &mut Self, xs_arg: &Expr| -> Option<Type> {
+            match this.infer_expr_type(xs_arg) {
+                Type::List(inner) => Some((*inner).clone()),
+                Type::Generic(stream_name, args) if stream_name == "Stream" => {
+                    args.first().cloned()
+                }
+                _ => None,
+            }
+        };
         let expected_ty: Option<Type> = match (name, ph_idx) {
-            ("Map", Some(0)) | ("Filter", Some(0)) => {
+            ("Map", Some(0))
+            | ("Filter", Some(0))
+            | ("TakeWhile", Some(0))
+            | ("DropWhile", Some(0))
+            | ("Find", Some(0))
+            | ("FindIndex", Some(0))
+            | ("FindIndexLax", Some(0))
+            | ("Count", Some(0)) => {
                 type_args.get(1).and_then(|fn_arg| {
                     match self.infer_expr_type(fn_arg) {
                         Type::Function(params, _) => params
@@ -1997,15 +2174,69 @@ impl TypeChecker {
                     }
                 })
             }
-            ("Fold", Some(0)) => type_args.get(2).and_then(|fn_arg| {
-                match self.infer_expr_type(fn_arg) {
-                    Type::Function(params, _) => params
-                        .first()
-                        .cloned()
-                        .map(|p| Type::List(Box::new(p))),
-                    _ => None,
-                }
-            }),
+            ("Map", Some(1))
+            | ("Filter", Some(1))
+            | ("TakeWhile", Some(1))
+            | ("DropWhile", Some(1))
+            | ("Find", Some(1))
+            | ("FindIndex", Some(1))
+            | ("FindIndexLax", Some(1))
+            | ("Count", Some(1)) => {
+                // Pipeline value must be a function value compatible
+                // with the upstream list/stream's element type.
+                type_args.get(0).and_then(|xs_arg| {
+                    xs_elem_ty(self, xs_arg).map(|elem| {
+                        Type::Function(vec![elem], Box::new(Type::Unknown))
+                    })
+                })
+            }
+            ("Fold", Some(0)) | ("Reduce", Some(0)) | ("Foldr", Some(0)) => {
+                type_args.get(2).and_then(|fn_arg| {
+                    match self.infer_expr_type(fn_arg) {
+                        // Fold's `fn` is `(acc, x) -> acc`, so the
+                        // upstream list/stream element type must
+                        // satisfy `fn.param[1]`, NOT `fn.param[0]`.
+                        // The previous `params.first()` pairing pinned
+                        // the wrong slot.
+                        Type::Function(params, _) => params
+                            .get(1)
+                            .cloned()
+                            .map(|p| Type::List(Box::new(p))),
+                        _ => None,
+                    }
+                })
+            }
+            ("Fold", Some(1)) | ("Reduce", Some(1)) | ("Foldr", Some(1)) => {
+                // The init slot expects whatever the function value's
+                // accumulator parameter is.
+                type_args.get(2).and_then(|fn_arg| {
+                    match self.infer_expr_type(fn_arg) {
+                        Type::Function(params, _) => params.first().cloned(),
+                        _ => None,
+                    }
+                })
+            }
+            ("Fold", Some(2)) | ("Reduce", Some(2)) | ("Foldr", Some(2)) => {
+                // The fn slot accepts a `(acc, x) -> acc` value.
+                // We can ground the second param via the upstream
+                // list's element type when it is concrete.
+                let xs_ty = type_args
+                    .get(0)
+                    .map(|xs_arg| self.infer_expr_type(xs_arg))
+                    .unwrap_or(Type::Unknown);
+                let init_ty = type_args
+                    .get(1)
+                    .map(|init_arg| self.infer_expr_type(init_arg))
+                    .unwrap_or(Type::Unknown);
+                let elem_ty = match xs_ty {
+                    Type::List(inner) => *inner,
+                    _ => Type::Unknown,
+                };
+                Some(Type::Function(
+                    vec![init_ty.clone(), elem_ty],
+                    Box::new(init_ty),
+                ))
+            }
             // Function-as-mold misuse (`fn[_]()` / `fn[]()` where
             // `fn` is a user function rather than a registered mold):
             // surface the function's first param as the expected slot
@@ -2013,10 +2244,19 @@ impl TypeChecker {
             // function boundaries" is honoured even on this fringe
             // syntax. Without this, `1 => acceptFloat[_]() => debug`
             // would silently widen Int → Float at runtime.
+            //
+            // E34B-013 / E34B-014 follow-up (Codex review #12): a
+            // local function-valued binding (`f <= fnFloat`) must take
+            // the same path. Prefer the local binding so that a
+            // shadowed global function does not bypass the boundary.
             _ if !self.registry.mold_defs.contains_key(name) => {
-                self.func_param_types
-                    .get(name)
-                    .and_then(|params| params.first().cloned())
+                if let Some(Type::Function(params, _)) = self.lookup_var(name) {
+                    params.first().cloned()
+                } else {
+                    self.func_param_types
+                        .get(name)
+                        .and_then(|params| params.first().cloned())
+                }
             }
             // Generic `Mold[_]()` for a registered mold: the mold
             // registry tracks the type-parameter names but not a
@@ -2045,6 +2285,36 @@ impl TypeChecker {
                      `{}[..]()` expecting {}. Hint: Pass a value of the correct type, \
                      or use an explicit conversion.",
                     pipe_value_ty, name, expected_ty
+                ),
+                span: span.clone(),
+            });
+        }
+
+        // E34B-013 follow-up (Codex review #14): when the pipeline
+        // form fills the xs or init slot of a Fold-family mold, the
+        // function value at slot 2 still needs the return-vs-acc pin.
+        // The direct form runs this check inside
+        // `check_direct_hof_mold_boundary`; the pipeline form runs
+        // it here so both shapes preserve the accumulator discipline.
+        let is_fold_family = matches!(name, "Fold" | "Reduce" | "Foldr");
+        if is_fold_family && matches!(ph_idx, Some(0) | Some(1))
+            && let Some(fn_arg) = type_args.get(2)
+            && !matches!(fn_arg, Expr::Placeholder(_) | Expr::Hole(_))
+            && let Type::Function(fn_params, fn_ret) = self.infer_expr_type(fn_arg)
+            && let Some(acc_param_ty) = fn_params.first()
+            && !matches!(acc_param_ty, Type::Unknown)
+            && !matches!(fn_ret.as_ref(), Type::Unknown)
+            && !self
+                .registry
+                .is_function_arg_subtype_of(&fn_ret, acc_param_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] `{}[..]()` (pipeline): function return type {} cannot \
+                     satisfy accumulator parameter type {}. Hint: The function's \
+                     return value flows back as the next iteration's accumulator, \
+                     so its type must match the accumulator type.",
+                    name, fn_ret, acc_param_ty
                 ),
                 span: span.clone(),
             });
@@ -2121,8 +2391,21 @@ impl TypeChecker {
         else {
             return;
         };
+        // E34B-013 / E34B-014 follow-up (Codex review #12): the
+        // function value can come from either a top-level definition
+        // (registered in `func_param_types`) or a local variable
+        // shadowing it (`f <= fnFloat`). Both paths form a real
+        // function boundary at the placeholder slot, so prefer the
+        // local binding (which intentionally shadows any global of
+        // the same name) and fall back to the global registry.
         let expected_params: Option<Vec<Type>> = match func {
-            Expr::Ident(name, _) => self.func_param_types.get(name).cloned(),
+            Expr::Ident(name, _) => {
+                if let Some(Type::Function(params, _)) = self.lookup_var(name) {
+                    Some(params)
+                } else {
+                    self.func_param_types.get(name).cloned()
+                }
+            }
             _ => match self.infer_expr_type(func) {
                 Type::Function(params, _) => Some(params),
                 _ => None,
@@ -2514,14 +2797,7 @@ impl TypeChecker {
                         .fields
                         .iter()
                         .filter(|f| !f.is_method)
-                        .map(|f| {
-                            let ty = f
-                                .type_annotation
-                                .as_ref()
-                                .map(|t| self.registry.resolve_type(t))
-                                .unwrap_or(Type::Unknown);
-                            (f.name.clone(), ty)
-                        })
+                        .map(|f| (f.name.clone(), self.field_def_type(f)))
                         .collect();
                     self.registry.register_type(&td.name, fields);
                     self.declared_header_arities.insert(td.name.clone(), 0);
@@ -2557,14 +2833,7 @@ impl TypeChecker {
                         .fields
                         .iter()
                         .filter(|f| !f.is_method)
-                        .map(|f| {
-                            let ty = f
-                                .type_annotation
-                                .as_ref()
-                                .map(|t| self.registry.resolve_type(t))
-                                .unwrap_or(Type::Unknown);
-                            (f.name.clone(), ty)
-                        })
+                        .map(|f| (f.name.clone(), self.field_def_type(f)))
                         .collect();
                     self.registry
                         .register_mold(&md.name, type_params, fields.clone());
@@ -2594,14 +2863,7 @@ impl TypeChecker {
                         .fields
                         .iter()
                         .filter(|f| !f.is_method)
-                        .map(|f| {
-                            let ty = f
-                                .type_annotation
-                                .as_ref()
-                                .map(|t| self.registry.resolve_type(t))
-                                .unwrap_or(Type::Unknown);
-                            (f.name.clone(), ty)
-                        })
+                        .map(|f| (f.name.clone(), self.field_def_type(f)))
                         .collect();
                     if let Some(parent_fields) = self.registry.get_type_fields(inh_parent) {
                         for (child_name, child_ty) in &extra_fields {
@@ -3129,6 +3391,63 @@ defaulted fields must be provided via `()`",
                     ),
                     span: field.span.clone(),
                 });
+            } else {
+                // E34B-013 follow-up (Codex review #12): `()` field
+                // overrides on a custom MoldInst form a function-like
+                // boundary just as `Foo(field <= ...)` does on a
+                // class-like TypeInst. The structural validator above
+                // only checks names; PHILOSOPHY I requires the value
+                // type to also satisfy the declared field type, so
+                // `MyMold[1.0](option <= 1)` cannot widen `Int → Float`
+                // when `option: Float`.
+                if let Some(field_def) =
+                    mold_fields.iter().find(|f| f.name == field.name)
+                {
+                    // E34B-013 follow-up (Codex review #12): default-
+                    // only mold options (`option <= 0.0` with no
+                    // `:Type`) now surface a literal-derived type via
+                    // `field_def_type`, so the boundary check fires
+                    // even without an explicit annotation.
+                    let expected_ty = self.field_def_type(field_def);
+                    if !matches!(expected_ty, Type::Unknown) {
+                        let actual_ty = self.infer_expr_type(&field.value);
+                        // E34B-013 follow-up (Codex review #15):
+                        // mirror the both-functions exception used by
+                        // `validate_type_inst_constructor`. A custom
+                        // MoldInst option `fn <= _ x = 1` against a
+                        // declared `fn: Int => :Float` produces
+                        // `Function([Unknown], Int)` -- the param
+                        // Unknown previously absorbed the entire
+                        // check and hid the genuine return widening.
+                        // Function subtyping handles Unknown on either
+                        // side so spurious noise does not appear,
+                        // while real `Int -> Float` return mismatches
+                        // now surface symmetrically with the
+                        // constructor-field path.
+                        let both_functions = matches!(
+                            (&actual_ty, &expected_ty),
+                            (Type::Function(_, _), Type::Function(_, _))
+                        );
+                        let actual_or_expected_unknown = !both_functions
+                            && (matches!(actual_ty, Type::Unknown)
+                                || Self::contains_unknown(&actual_ty)
+                                || Self::contains_unknown(&expected_ty));
+                        if !actual_or_expected_unknown
+                            && !self
+                                .registry
+                                .is_function_arg_subtype_of(&actual_ty, &expected_ty)
+                        {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1506] MoldInst '{}' option '{}' has type {}, expected {}. \
+                                     Hint: Pass a value of the declared field type, or use an explicit conversion.",
+                                    name, field.name, actual_ty, expected_ty
+                                ),
+                                span: field.span.clone(),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -6379,12 +6698,15 @@ defaulted fields must be provided via `()`",
             }
 
             // (d) value type compatibility against declared / inherited type
+            //
+            // E34B-013 follow-up (Codex review #12): default-only
+            // fields (`name <= literal` with no `:Type` annotation)
+            // also surface a type now via `field_def_type`. Without
+            // this, `Foo = @(x <= 0.0)` followed by
+            // `Foo(x <= "s")` previously slipped because the
+            // declared type was treated as `Unknown`.
             let expected_ty = if let Some(declared) = declared_opt {
-                declared
-                    .type_annotation
-                    .as_ref()
-                    .map(|ta| self.registry.resolve_type(ta))
-                    .unwrap_or(Type::Unknown)
+                self.field_def_type(declared)
             } else {
                 inherited_ty.unwrap_or(Type::Unknown)
             };
@@ -6395,7 +6717,31 @@ defaulted fields must be provided via `()`",
             if matches!(actual_ty, Type::Unknown) {
                 continue;
             }
-            if Self::contains_unknown(&actual_ty) || Self::contains_unknown(&expected_ty) {
+            // E34B-013 follow-up (Codex review #12): the existing
+            // `contains_unknown` skip was too coarse for
+            // function-typed fields. A lambda `_ x = 1` passed to a
+            // `fn: Int => :Float` field has actual
+            // `Function([Unknown], Int)` because the lambda param has
+            // no explicit annotation, so the old skip suppressed the
+            // genuine return-type mismatch.
+            //
+            // For function-valued fields we keep checking — function
+            // subtype rules already accept `Unknown` on either side
+            // (Unknown <: anything passes), so spurious noise does
+            // not materialise, while the real `Int → Float` return
+            // mismatch is now surfaced by the strict subtype check.
+            // For non-function fields we preserve the original skip
+            // because lambda inference is the only place where a
+            // legitimate `Unknown` propagates through into a
+            // boundary check.
+            let both_functions = matches!(
+                (&actual_ty, &expected_ty),
+                (Type::Function(_, _), Type::Function(_, _))
+            );
+            if !both_functions
+                && (Self::contains_unknown(&actual_ty)
+                    || Self::contains_unknown(&expected_ty))
+            {
                 continue;
             }
             // E34B-013 follow-up (Codex review #11): constructor

@@ -5885,3 +5885,513 @@ fn e34b_014_prelude_double_with_return_only_annotation_accepted() {
     );
 }
 
+
+
+// E34B-013 / E34B-014 follow-up (Codex review #12): close the three
+// remaining boundary leaks Codex surfaced after `7edcebb`.
+//   * pipeline placeholder shape on a local function-valued binding
+//     (`f <= fnFloat; 1 => f(_)` and `1 => f[_]()`)
+//   * custom MoldInst `()` option override against a declared
+//     non-default type (`MyMold[1.0](option <= 1)` where
+//     `option: Float`)
+//   * constructor field with a function-typed lambda whose body
+//     return type widens (`Holder = @(fn: Int => :Float)` with
+//     `fn <= _ x = 1`)
+//
+// The fully-unannotated lambda case (`Holder(fn <= _ x = x)` against
+// `fn: Float => :Int`) is left as carry-over; closing it requires
+// flowing bidirectional inference into constructor field positions,
+// the same axis as the `fnUnknown x = x` named-function carve-out.
+// The PHILOSOPHY I corollary "強力な型推論" admits the gradual shape
+// (Unknown propagates as Any when the user has not committed to an
+// annotation); the strict rule fires the moment any annotation in the
+// lambda or named function pins a concrete type.
+
+#[test]
+fn e34b_013_local_var_pipeline_placeholder_rejects_int_for_float() {
+    // `check_pipeline_placeholder_arg` previously consulted only
+    // `func_param_types`, so a local binding `f <= fnFloat` slipped
+    // through `1 => f(_)` even though both forms feed the value to
+    // the same function boundary.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               f <= fnFloat\n\
+               1 => f(_) => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("placeholder")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `f <= fnFloat; 1 => f(_)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_local_var_pipeline_mold_placeholder_rejects_int_for_float() {
+    // The `f[_]()` shape goes through `check_pipeline_mold_inst_placeholder`
+    // and shares the same fallback gap before the fix.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               f <= fnFloat\n\
+               1 => f[_]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`f[..]()`")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `f <= fnFloat; 1 => f[_]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_custom_mold_option_override_rejects_int_for_float() {
+    // `validate_custom_mold_inst_bindings` only validated structure
+    // (names / arity); the value-type check now mirrors every other
+    // declared boundary so `()` overrides cannot widen `Int → Float`.
+    let src = "Mold[T] => MyMold[T] = @(\n\
+                 filling: T\n\
+                 option: Float <= 0.0\n\
+               )\n\
+               v <= MyMold[1.0](option <= 1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("MoldInst 'MyMold'")
+            && e.message.contains("option")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `MyMold[1.0](option <= 1)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_constructor_function_field_lambda_return_widening_rejected() {
+    // The constructor-field check skipped any actual type containing
+    // Unknown, suppressing genuine return-type mismatches when the
+    // lambda's *body* return type concretely widened (`Int → Float`).
+    // Function subtyping accepts Unknown gracefully on either side,
+    // so we now run the strict check whenever both sides are
+    // functions, surfacing the body return-type mismatch.
+    let src = "Holder = @(fn: Int => :Float)\n\
+               holder <= Holder(fn <= _ x = 1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Constructor 'Holder'")
+            && e.message.contains("fn")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `Holder(fn <= _ x = 1)` returning Int into Float, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_constructor_function_field_concrete_lambda_accepted() {
+    // Positive: when the lambda's body matches the declared return
+    // type, the boundary is satisfied. Pins the carve-out so future
+    // tightening does not regress legitimate usage.
+    let src = "Holder = @(fn: Int => :Float)\n\
+               holder <= Holder(fn <= _ x = 1.5)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Holder(fn <= _ x = 1.5)` matches `(Int) => Float` and must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+// E34B-013 follow-up (Codex review #12, round 2): two more
+// non-carve-out leaks closed.
+//   * `Foo = @(x <= 0.0); Foo(x <= "s")` -- default-only field type
+//     was registered as `Unknown`, suppressing the boundary check.
+//     Default literal type is now surfaced via `field_def_type`.
+//   * `Fold[xs, init, fn]()` direct mold form -- only the first
+//     fn-param vs list-element pin was checked. The accumulator
+//     position now also pins `init` against `fn`'s first parameter,
+//     and the list-element check correctly targets `fn`'s second
+//     parameter.
+//
+// Two remaining cases sit on the gradual-typing axis (PHILOSOPHY
+// "強力な型推論") and stay scope-out for E34:
+//   * `xs.fold(init, fn)` method form -- the accumulator boundary
+//     between `init` and `fn`'s first parameter is not yet pinned;
+//     closing it requires arg-aware bidirectional inference for
+//     fold/reduce just like Lax/Result/Async map/flatMap.
+//   * `takes(_ x = x)` direct call with a fully unannotated lambda
+//     -- the same axis as the `fnUnknown x = x` named-function
+//     carve-out and the `Holder(fn <= _ x = x)` constructor case;
+//     bidirectional inference must flow into direct/positional
+//     argument slots before the strict rule can fire.
+
+#[test]
+fn e34b_013_default_only_field_pins_literal_type() {
+    // `x <= 0.0` (no annotation) used to register `x: Unknown`,
+    // letting `Foo(x <= "s")` slip. The default literal now pins
+    // the field type so the constructor field check fires.
+    let src = "Foo = @(x <= 0.0)\n\
+               foo <= Foo(x <= \"s\")\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Constructor 'Foo'")
+            && e.message.contains("Str")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `Foo(x <= \"s\")` against `Foo = @(x <= 0.0)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_default_only_int_field_rejects_float() {
+    // Mirror for the Int / Float widening direction: a default-only
+    // Int field must reject a Float literal.
+    let src = "Bar = @(n <= 0)\n\
+               bar <= Bar(n <= 1.5)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Constructor 'Bar'")
+            && e.message.contains("Float")
+            && e.message.contains("Int")),
+        "Expected [E1506] for `Bar(n <= 1.5)` against `Bar = @(n <= 0)`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_mold_pins_accumulator_against_init() {
+    // `Fold[xs, init, fn]()` -- the accumulator boundary between
+    // `init` and `fn`'s first parameter is now checked.
+    let src = "addFloat acc: Float x: Int = acc + 1.0 => :Float\n\
+               result <= Fold[@[1, 2, 3], 0, addFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("init value of type Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] init/acc mismatch for `Fold[..., 0, addFloat]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_mold_pins_list_element_against_fn_second_param() {
+    // The list-element pin now correctly targets `fn`'s SECOND
+    // parameter (the `x` slot), not the first (the `acc` slot).
+    let src = "bad acc: Int x: Float = acc => :Int\n\
+               f <= bad\n\
+               result <= Fold[@[1, 2, 3], 0, f]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`Fold[xs, init, fn]()`")
+            && e.message.contains("list element type Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] elem/x mismatch for `Fold[..., 0, bad]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_mold_int_accumulator_int_element_accepted() {
+    // Positive: when the accumulator and element types both align
+    // with the function value's parameters, no error fires.
+    let src = "addInt acc: Int x: Int = acc + x => :Int\n\
+               result <= Fold[@[1, 2, 3], 0, addInt]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Aligned `Fold[Int-list, 0, Int->Int->Int]()` must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+// Codex review #13 closing batch: 6 more direct/pipeline HOF mold
+// leaks beyond the Fold-direct round 2 fixes.
+//   * Reduce / Foldr direct molds (same shape as Fold)
+//   * Fold-family pipeline forms with the placeholder on any of the
+//     three slots (xs / init / fn)
+//   * Map / Filter pipeline form with the placeholder on the fn slot
+//   * Fold-direct return-vs-accumulator pin (the function value's
+//     return flows back into the accumulator each iteration)
+
+#[test]
+fn e34b_013_reduce_direct_mold_pins_accumulator() {
+    let src = "addFloat acc: Float x: Int = acc + 1.0 => :Float\n\
+               result <= Reduce[@[1, 2, 3], 0, addFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`Reduce[xs, init, fn]()`")
+            && e.message.contains("init value of type Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] init/acc mismatch for Reduce, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_foldr_direct_mold_pins_list_element() {
+    let src = "bad acc: Int x: Float = acc => :Int\n\
+               result <= Foldr[@[1, 2, 3], 0, bad]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`Foldr[xs, init, fn]()`")
+            && e.message.contains("list element type Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] elem/x mismatch for Foldr, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_direct_pins_function_return_against_accumulator() {
+    // The function's return type flows back as the next iteration's
+    // accumulator, so a widening return must be rejected.
+    let src = "badRet acc: Int x: Int = 1.5 => :Float\n\
+               result <= Fold[@[1, 2, 3], 0, badRet]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("function return type Float")
+            && e.message.contains("Int")),
+        "Expected [E1506] for Fold return-vs-accumulator widening, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_pipeline_xs_slot_pins_list_element() {
+    // `@[Int] => Fold[_, init, fn]()` -- the upstream list element
+    // type must satisfy `fn.param[1]` (NOT `fn.param[0]` -- the
+    // earlier code paired the wrong slot).
+    let src = "bad acc: Int x: Float = acc => :Int\n\
+               @[1, 2, 3] => Fold[_, 0, bad]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Pipeline value of type @[Int]")
+            && e.message.contains("@[Float]")),
+        "Expected [E1506] for Fold pipeline xs slot vs fn.param[1], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_pipeline_init_slot_pins_accumulator() {
+    let src = "addFloat acc: Float x: Int = acc + 1.0 => :Float\n\
+               0 => Fold[@[1, 2, 3], _, addFloat]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Pipeline value of type Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for Fold pipeline init slot vs fn.param[0], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_map_pipeline_fn_slot_pins_function_signature() {
+    // `f => Map[xs, _]()` -- the pipeline value at the fn slot must
+    // be a function whose first parameter type matches the upstream
+    // list's element type.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               f <= fnFloat\n\
+               f => Map[@[1, 2, 3], _]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Pipeline value of type (Float)")
+            && e.message.contains("(Int)")),
+        "Expected [E1506] for Map pipeline fn slot vs xs element, got: {:?}",
+        errors
+    );
+}
+
+// Codex review #14 closing batch: extend the HOF allow-list to all
+// single-arg `(elem) -> ?` callbacks, surface Stream[T] sources
+// alongside List[T], and pin the Fold-family fn return-vs-accumulator
+// boundary on the pipeline xs/init slots too. Sort/Unique `by`
+// callback options and `xs.fold(init, fn)` method-form accumulator
+// remain on the carry-over list (built-in mold field handling and
+// arg-aware bidirectional inference, respectively).
+
+#[test]
+fn e34b_013_takewhile_direct_pins_list_element() {
+    let src = "predFloat x: Float = true => :Bool\n\
+               result <= TakeWhile[@[1, 2, 3], predFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`TakeWhile[xs, fn]()`")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for TakeWhile direct, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_dropwhile_direct_pins_list_element() {
+    let src = "predFloat x: Float = true => :Bool\n\
+               result <= DropWhile[@[1, 2, 3], predFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`DropWhile[xs, fn]()`")),
+        "Expected [E1506] for DropWhile direct, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_find_direct_pins_list_element() {
+    let src = "predFloat x: Float = true => :Bool\n\
+               result <= Find[@[1, 2, 3], predFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`Find[xs, fn]()`")),
+        "Expected [E1506] for Find direct, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_count_direct_pins_list_element() {
+    let src = "predFloat x: Float = true => :Bool\n\
+               result <= Count[@[1, 2, 3], predFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`Count[xs, fn]()`")),
+        "Expected [E1506] for Count direct, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_takewhile_pipeline_xs_slot_pins_list_element() {
+    let src = "predFloat x: Float = true => :Bool\n\
+               @[1, 2, 3] => TakeWhile[_, predFloat]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`TakeWhile[..]()`")
+            && e.message.contains("@[Int]")
+            && e.message.contains("@[Float]")),
+        "Expected [E1506] for TakeWhile pipeline xs slot, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_takewhile_pipeline_fn_slot_pins_function_signature() {
+    let src = "predFloat x: Float = true => :Bool\n\
+               predFloat => TakeWhile[@[1, 2, 3], _]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`TakeWhile[..]()`")
+            && e.message.contains("(Float)")
+            && e.message.contains("(Int)")),
+        "Expected [E1506] for TakeWhile pipeline fn slot, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_pipeline_xs_slot_also_pins_return_against_accumulator() {
+    // Pipeline form must run the same return-vs-acc check that the
+    // direct form runs. xs slot placeholder + a function whose return
+    // widens the accumulator must reject.
+    let src = "badRet acc: Int x: Int = 1.5 => :Float\n\
+               @[1, 2, 3] => Fold[_, 0, badRet]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("(pipeline)")
+            && e.message.contains("function return type Float")
+            && e.message.contains("Int")),
+        "Expected [E1506] return-vs-acc on Fold pipeline xs slot, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_fold_pipeline_init_slot_also_pins_return_against_accumulator() {
+    let src = "badRet acc: Int x: Int = 1.5 => :Float\n\
+               0 => Fold[@[1, 2, 3], _, badRet]() => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("(pipeline)")
+            && e.message.contains("function return type Float")
+            && e.message.contains("Int")),
+        "Expected [E1506] return-vs-acc on Fold pipeline init slot, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_stream_input_pins_direct_hof_element_type() {
+    // Stream[T] sources must run the same boundary discipline as
+    // List[T] sources for the direct HOF mold form.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               s <= StreamFrom[@[1, 2, 3]]()\n\
+               result <= Map[s, fnFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("`Map[xs, fn]()`")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for Stream-input Map direct, got: {:?}",
+        errors
+    );
+}
+
+// Codex review #15: mirror the constructor-field both-functions
+// exception into the custom MoldInst `()` option check so lambda
+// return mismatches surface symmetrically.
+
+#[test]
+fn e34b_013_custom_mold_function_option_lambda_return_widening_rejected() {
+    let src = "Mold[T] => MyMold[T] = @(\n\
+                 filling: T\n\
+                 fn: Int => :Float\n\
+               )\n\
+               v <= MyMold[0](fn <= _ x = 1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("MoldInst 'MyMold'")
+            && e.message.contains("fn")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `MyMold[0](fn <= _ x = 1)` returning Int into Float, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_custom_mold_function_option_concrete_return_accepted() {
+    // Positive: when the lambda body matches the declared return
+    // type, the boundary is satisfied. Pins symmetry with
+    // `e34b_013_constructor_function_field_concrete_lambda_accepted`.
+    let src = "Mold[T] => MyMold[T] = @(\n\
+                 filling: T\n\
+                 fn: Int => :Float\n\
+               )\n\
+               v <= MyMold[0](fn <= _ x = 1.5)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Aligned `MyMold[0](fn <= _ x = 1.5)` must be accepted; errors: {:?}",
+        errors
+    );
+}
