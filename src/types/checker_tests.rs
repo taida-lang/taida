@@ -5439,19 +5439,38 @@ fn e34b_014_imported_sha256_rejected_at_hof_boundary() {
 }
 
 #[test]
-fn e34b_014_named_fn_unannotated_param_rejected_at_hof_boundary() {
-    // Hole 3: `strLen s = s.length() => :Int`. The unannotated `s`
-    // resolves to `Type::Unknown`, which previously satisfied
-    // `Int <: Unknown` via the wildcard rule and slipped through.
+fn e34b_014_named_fn_return_only_annotated_accepted_at_hof_boundary() {
+    // Hole 3 (Codex review #11 carve-out): `strLen s = s.length() => :Int`
+    // has the return annotation but the param is unannotated. PHILOSOPHY V
+    // "強力な型推論" admits this as gradual typing — the param type can
+    // be inferred from the body. Strict reject only fires when at least
+    // one param has an explicit annotation that mismatches the expected
+    // slot.
     let src = "strLen s = s.length() => :Int\n\
                obj <= Lax[42]()\n\
                result <= obj.map(strLen)\n";
     let (_, errors) = check(src);
     assert!(
+        errors.is_empty(),
+        "Return-only-annotated `strLen s = s.length() => :Int` should be \
+         accepted (gradual typing), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_named_fn_partially_annotated_param_mismatch_rejected() {
+    // Strict reject still fires when a param has an explicit annotation
+    // that mismatches the HOF's expected slot (regular subtype-mismatch
+    // diagnostic, not the unannotated-param hint).
+    let src = "strLen s: Str = s.length() => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(strLen)\n";
+    let (_, errors) = check(src);
+    assert!(
         errors.iter().any(|e| e.message.contains("[E1508]")
-            && e.message.contains("strLen")
-            && e.message.contains("unannotated parameter")),
-        "Expected [E1508] for HOF arg with unannotated param, got: {:?}",
+            && e.message.contains("Method 'map'")),
+        "Expected [E1508] for `Lax[Int].map(strLen: Str -> Int)`, got: {:?}",
         errors
     );
 }
@@ -5750,6 +5769,118 @@ fn e34b_013_pipeline_hof_mold_accepts_int_for_int_list() {
     assert!(
         errors.is_empty(),
         "`@[Int] => Map[_, double]()` should be accepted; errors: {:?}",
+        errors
+    );
+}
+
+// E34B-013 / E34B-014 follow-up (Codex review #11): close the
+// remaining boundary leaks Codex surfaced after `490a060`.
+//   * local function-valued variable in pipeline auto-call shapes
+//   * direct HOF mold (`Map[xs, fn]()` outside a pipeline)
+//   * constructor field assignment with implicit widening
+//   * JSON `Lax[Unknown]` -> `Lax[T]` narrowing from the schema
+//   * gradual-typing carve-out for prelude examples
+//     (`double x = x * 2 => :Int` accepted via `Lax.map(double)`)
+
+#[test]
+fn e34b_013_local_var_pipeline_auto_call_rejects_int_for_float() {
+    // Local binding shadowing a top-level function value still
+    // forms a function boundary, so the auto-call must surface the
+    // signature stored on the local var.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               f <= fnFloat\n\
+               1 => f => debug\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("auto-applied")
+            && e.message.contains("'f'")),
+        "Expected [E1506] for `f <= fnFloat; 1 => f`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_direct_hof_mold_rejects_int_list_for_float_fn() {
+    // Direct (non-pipeline) `Map[xs, fn]()` form must reject when
+    // the list element type and the function value's first
+    // parameter type disagree.
+    let src = "fnFloat x: Float = x + 1.0 => :Float\n\
+               ys <= Map[@[1, 2], fnFloat]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Map[xs, fn]()")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `Map[@[Int], fnFloat]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_constructor_field_assignment_rejects_int_for_float() {
+    // Constructor field assignments are also a function-like
+    // boundary. PHILOSOPHY I forbids implicit widening when the
+    // declared field type is annotated.
+    let src = "Foo = @(x: Float)\n\
+               foo <= Foo(x <= 1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("Constructor 'Foo'")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `Foo(x <= 1)` with x: Float, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_json_schema_narrows_lax_inner_type() {
+    // `JSON[raw, Schema]()` previously returned `Lax[Unknown]`,
+    // which let downstream boundaries silently widen the unmolded
+    // value. The schema position now narrows the Lax inner type
+    // so a subsequent function-arg check can fire on `Int → Float`.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               v <= JSON[\"1\", Int]()\n\
+               v ]=> inner\n\
+               result <= acceptFloat(inner)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("acceptFloat")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `acceptFloat(inner)` after JSON[Int] schema, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_prelude_double_with_return_only_annotation_accepted() {
+    // Regression guard: prelude examples (`examples/26_prelude_optional.td`,
+    // `examples/13_async.td`) rely on the gradual-typing shape
+    // `double x = x * 2 => :Int` and pass that through `Lax.map`,
+    // `Async.map`, `xs.map` etc. The unannotated-param strict rule
+    // must NOT trip on this shape.
+    let src = "double x = x * 2 => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(double)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Return-only-annotated `double` should be admissible through `Lax.map`; errors: {:?}",
+        errors
+    );
+
+    let src_list = "double x = x * 2 => :Int\n\
+                    xs <= @[1, 2, 3]\n\
+                    ys <= xs.map(double)\n";
+    let (_, errors) = check(src_list);
+    assert!(
+        errors.is_empty(),
+        "Return-only-annotated `double` should be admissible through `xs.map`; errors: {:?}",
         errors
     );
 }

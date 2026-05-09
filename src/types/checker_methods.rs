@@ -407,47 +407,77 @@ impl TypeChecker {
                         });
                         continue;
                     }
-                    // E34B-014 follow-up (Codex review #8): if the HOF
-                    // argument is a named function reference whose
-                    // params include `Type::Unknown` (i.e. the function
-                    // definition omits some param annotation) and the
+                    // E34B-014 follow-up (Codex review #8 / #11): if
+                    // the HOF argument is a named function reference
+                    // whose params include `Type::Unknown` and the
                     // expected slot demands a concrete param type,
                     // reject so that the legacy wildcard rule cannot
                     // silently slip through. Lambdas are exempt — they
                     // are bidirectionally inferred from `expected_ty`.
+                    //
+                    // Codex review #11 carve-out: a *fully* unannotated
+                    // named function (`f x = x * 2` with no param /
+                    // return annotation at all) is treated as gradual
+                    // typing — author opted out of explicit typing and
+                    // body inference fills in the gaps later. PHILOSOPHY
+                    // I "no implicit type conversion" only fires once
+                    // the author has *committed* to a partial
+                    // annotation (e.g. `f x = x * 2 => :Int` pins the
+                    // return; `f x: Int = ...` pins the param). This
+                    // restores the prelude examples (`double x = x * 2`
+                    // used through `xs.map(double)`) without
+                    // re-introducing the unbounded wildcard slip.
                     if matches!(arg, Expr::Ident(_, _))
                         && let (
-                            Type::Function(act_params, _),
+                            Type::Function(act_params, act_ret),
                             Type::Function(exp_params, _),
                         ) = (&actual_ty, expected_ty)
                     {
-                        let mismatch = act_params
+                        // E34B-014 follow-up (Codex review #11):
+                        // strict reject only fires when at least one
+                        // param has an explicit annotation. The two
+                        // gradual-typing shapes
+                        //   (a) fully unannotated:  `f x = ...`
+                        //   (b) return-annotated, params unannotated:
+                        //       `f x = x * 2 => :Int`
+                        // are admitted; PHILOSOPHY V "強力な型推論"
+                        // covers param inference from the body when
+                        // the author has not written annotations.
+                        // Mixed shapes (one param annotated, another
+                        // not) still trip the strict rule.
+                        let all_params_unannotated = act_params
                             .iter()
-                            .zip(exp_params.iter())
-                            .position(|(a, e)| {
-                                matches!(a, Type::Unknown) && !matches!(e, Type::Unknown)
-                            });
-                        if let Some(pos) = mismatch {
-                            let arg_label = match arg {
-                                Expr::Ident(name, _) => format!("'{}'", name),
-                                _ => format!("{}", i + 1),
-                            };
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1508] Method '{}' argument {} ({}) has an unannotated \
-                                     parameter at position {}. \
-                                     Hint: Add an explicit type annotation (e.g. `param: {}`) \
-                                     to the function definition.",
-                                    method,
-                                    i + 1,
-                                    arg_label,
-                                    pos + 1,
-                                    exp_params[pos]
-                                ),
-                                span: span.clone(),
-                            });
-                            continue;
+                            .all(|t| matches!(t, Type::Unknown));
+                        if !all_params_unannotated {
+                            let mismatch = act_params
+                                .iter()
+                                .zip(exp_params.iter())
+                                .position(|(a, e)| {
+                                    matches!(a, Type::Unknown) && !matches!(e, Type::Unknown)
+                                });
+                            if let Some(pos) = mismatch {
+                                let arg_label = match arg {
+                                    Expr::Ident(name, _) => format!("'{}'", name),
+                                    _ => format!("{}", i + 1),
+                                };
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1508] Method '{}' argument {} ({}) has an unannotated \
+                                         parameter at position {}. \
+                                         Hint: Add an explicit type annotation (e.g. `param: {}`) \
+                                         to the function definition.",
+                                        method,
+                                        i + 1,
+                                        arg_label,
+                                        pos + 1,
+                                        exp_params[pos]
+                                    ),
+                                    span: span.clone(),
+                                });
+                                continue;
+                            }
                         }
+                        let _ = act_ret;
                     }
                     // E34B-013 (Lock-H=A): apply the strict
                     // function-arg subtype rule at every method-call

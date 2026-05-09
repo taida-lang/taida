@@ -1902,6 +1902,67 @@ impl TypeChecker {
     ///   - the name is registered as a user-defined (possibly generic)
     ///     function / type / mold, or
     ///   - it is a known builtin identifier.
+    /// E34B-013 / E34B-014 follow-up (Codex review #11): direct HOF
+    /// mold boundary check. `Map[xs, fn]()` and friends called
+    /// outside a pipeline still form a function boundary between the
+    /// list's element type and the function value's first parameter.
+    /// PHILOSOPHY I requires the same strict discipline as the
+    /// pipeline form, which lives in
+    /// `check_pipeline_mold_inst_placeholder`.
+    fn check_direct_hof_mold_boundary(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        span: &Span,
+    ) {
+        let (xs_idx, fn_idx) = match name {
+            "Map" | "Filter" => (0usize, 1usize),
+            "Fold" => (0usize, 2usize),
+            _ => return,
+        };
+        let Some(xs_arg) = type_args.get(xs_idx) else {
+            return;
+        };
+        let Some(fn_arg) = type_args.get(fn_idx) else {
+            return;
+        };
+        // Pipeline placeholder is handled in the pipeline path; bail
+        // out here so we don't double-report.
+        if matches!(xs_arg, Expr::Placeholder(_) | Expr::Hole(_))
+            || matches!(fn_arg, Expr::Placeholder(_) | Expr::Hole(_))
+        {
+            return;
+        }
+        let xs_ty = self.infer_expr_type(xs_arg);
+        let fn_ty = self.infer_expr_type(fn_arg);
+        let (Type::List(elem_ty), Type::Function(fn_params, _)) = (&xs_ty, &fn_ty) else {
+            return;
+        };
+        let Some(fn_param_ty) = fn_params.first() else {
+            return;
+        };
+        if matches!(elem_ty.as_ref(), Type::Unknown)
+            || matches!(fn_param_ty, Type::Unknown)
+        {
+            return;
+        }
+        if !self
+            .registry
+            .is_function_arg_subtype_of(elem_ty, fn_param_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] `{}[xs, fn]()`: list element type {} cannot satisfy \
+                     function parameter type {}. Hint: Pass a list whose elements \
+                     match the function's expected parameter type, or use an \
+                     explicit conversion.",
+                    name, elem_ty, fn_param_ty
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
     /// E34B-013 / E34B-014 follow-up (Codex review #10): pipeline
     /// `Mold[_]()` / `Map[_, fn]()` etc. — the placeholder in the
     /// type-args list receives the upstream value at runtime.
@@ -2001,7 +2062,20 @@ impl TypeChecker {
         pipe_value_ty: &Type,
         span: &Span,
     ) {
-        let Some(expected_params) = self.func_param_types.get(name).cloned() else {
+        // E34B-013 / E34B-014 follow-up (Codex review #11): the
+        // function value can come from either a top-level definition
+        // (registered in `func_param_types`) or a local variable
+        // shadowing it (`f <= fnFloat`); both paths must run the
+        // boundary discipline. `lookup_var` is consulted first since
+        // a local binding intentionally shadows a global of the same
+        // name.
+        let expected_params: Vec<Type> = if let Some(Type::Function(params, _)) =
+            self.lookup_var(name)
+        {
+            params
+        } else if let Some(params) = self.func_param_types.get(name).cloned() {
+            params
+        } else {
             return;
         };
         let Some(expected_ty) = expected_params.first() else {
@@ -5628,9 +5702,29 @@ defaulted fields must be provided via `()`",
 
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
                 self.validate_mold_header_constraints(name, type_args, mold_span);
+                // E34B-013 / E34B-014 follow-up (Codex review #11):
+                // direct (non-pipeline) call of the HOF molds —
+                // `Map[xs, fn]()` / `Filter[xs, fn]()` / `Fold[xs,
+                // init, fn]()` — must enforce the same boundary
+                // discipline. The pipeline form is handled by
+                // `check_pipeline_mold_inst_placeholder`; this branch
+                // covers the direct shape.
+                self.check_direct_hof_mold_boundary(name, type_args, mold_span);
                 match name.as_str() {
-                    // JSON[raw, Schema]() returns Lax (wrapping the schema type)
-                    "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
+                    // JSON[raw, Schema]() returns Lax (wrapping the schema type).
+                    // E34B-014 follow-up (Codex review #11): when the
+                    // Schema position is a concrete type literal, surface
+                    // it as the Lax inner type so downstream boundaries
+                    // can pin the unmolded value (`v ]=> inner` then
+                    // `acceptFloat(inner)`) instead of letting a
+                    // `Lax[Unknown]` slip past the function-arg check.
+                    "JSON" => {
+                        let inner = type_args
+                            .get(1)
+                            .map(|schema| self.type_arg_expr_to_type(schema))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Lax".to_string(), vec![inner])
+                    }
                     // Async[T] wraps a value
                     "Async" => Type::Generic(
                         "Async".to_string(),
@@ -6304,7 +6398,17 @@ defaulted fields must be provided via `()`",
             if Self::contains_unknown(&actual_ty) || Self::contains_unknown(&expected_ty) {
                 continue;
             }
-            if !self.registry.is_subtype_of(&actual_ty, &expected_ty) {
+            // E34B-013 follow-up (Codex review #11): constructor
+            // field assignments are also a function-like boundary —
+            // PHILOSOPHY I forbids implicit type conversion when the
+            // user has explicitly annotated the field's declared
+            // type. Widening at this site would silently expand
+            // `Int → Float` for any TypeDef / MoldDef field with a
+            // numeric annotation.
+            if !self
+                .registry
+                .is_function_arg_subtype_of(&actual_ty, &expected_ty)
+            {
                 self.errors.push(TypeError {
                     message: format!(
                         "[E1506] Constructor '{}' field '{}' has type {}, expected {}. \
