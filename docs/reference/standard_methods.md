@@ -825,7 +825,7 @@ Div[10, 2]().flatMap(_ x = Div[x, 3]()) ]=> result  // 1
 ```taida
 // other_module.td が `make` を export し、Lax を返すが戻り値注釈がない場合、
 // 呼び出し側で `make()` の inner T が未解決のまま map に流れ込みます。
-import "./other_module.td" >>> { make }
+>>> ./other_module.td => @(make)
 
 result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 ```
