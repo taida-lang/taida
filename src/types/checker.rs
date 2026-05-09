@@ -1998,7 +1998,13 @@ impl TypeChecker {
             "Take" | "Drop" => Some(("[xs, n]", 2, Some(2))),
             "Append" | "Prepend" => Some(("[xs, value]", 2, Some(2))),
             "Zip" => Some(("[xs, ys]", 2, Some(2))),
-            "Str" | "Int" | "Float" | "Bool" | "Bytes" | "UInt8" | "Char"
+            // E34B-023 (Codex review #19 follow-up): `Int[value, base?]`
+            // is a public surface in `mold_eval.rs:2655` (`Int["ff", 16]()`
+            // parses a hex string), so the previous `[value]` 1-1
+            // entry was an over-reject. Float / Bool / Bytes etc.
+            // remain strictly 1-1.
+            "Int" => Some(("[value, base?]", 1, Some(2))),
+            "Str" | "Float" | "Bool" | "Bytes" | "UInt8" | "Char"
             | "CodePoint" | "Utf8Encode" | "Utf8Decode" => {
                 Some(("[value]", 1, Some(1)))
             }
@@ -2037,7 +2043,53 @@ impl TypeChecker {
             "BitAnd" => Some(("[a, b]", 2, Some(2))),
             "BytesCursor" => Some(("[bytes]", 1, Some(1))),
             "BytesCursorTake" => Some(("[cursor, size]", 2, Some(2))),
-            "Concat" | "Join" => Some(("[list, other]", 2, Some(2))),
+            // E34B-023 (Codex review #19 follow-up): `Concat` takes
+            // `Concat[bytes, bytes]` as well as the list form, so the
+            // diagnostic label is widened.
+            "Concat" => Some(("[list|bytes, other]", 2, Some(2))),
+            "Join" => Some(("[list, other]", 2, Some(2))),
+            // E34B-023 (Codex review #19 follow-up): the remaining
+            // surface from `docs/reference/standard_methods.md` and
+            // `mold_eval.rs` that the central allow-list was missing.
+            // Numeric scalar molds (1-arg).
+            "Floor" | "Ceil" | "Round" | "Truncate" => Some(("[num]", 1, Some(1))),
+            "ByteLength" | "BytesToList" => Some(("[bytes]", 1, Some(1))),
+            // Math 1-arg unary helpers (every entry from
+            // `eval_unary_math` and the dedicated Asin/Acos/Atan
+            // arms).
+            "Sqrt" | "Exp" | "Ln" | "Log2" | "Log10" | "Sin" | "Cos"
+            | "Tan" | "Asin" | "Acos" | "Atan" | "Sinh" | "Cosh" | "Tanh" => {
+                Some(("[num]", 1, Some(1)))
+            }
+            // Math 2-arg helpers.
+            "Pow" => Some(("[base, exp]", 2, Some(2))),
+            "Atan2" => Some(("[y, x]", 2, Some(2))),
+            // `Log` accepts an optional base — `Log[value, base?]`.
+            "Log" => Some(("[value, base?]", 1, Some(2))),
+            // Bit operations.
+            "BitOr" | "BitXor" => Some(("[a, b]", 2, Some(2))),
+            "BitNot" => Some(("[x]", 1, Some(1))),
+            "ShiftL" | "ShiftR" | "ShiftRU" => Some(("[x, n]", 2, Some(2))),
+            "ToRadix" => Some(("[int, base]", 2, Some(2))),
+            // Bytes cursor / mutation surface.
+            "BytesCursorRemaining" | "BytesCursorU8" => {
+                Some(("[cursor]", 1, Some(1)))
+            }
+            "ByteSet" => Some(("[bytes, idx, value]", 3, Some(3))),
+            // Public introspection / type metadata helpers.
+            "TypeIs" => Some(("[value, :Type]", 2, Some(2))),
+            "TypeExtends" => Some(("[:TypeA, :TypeB]", 2, Some(2))),
+            "Ordinal" => Some(("[enum_value]", 1, Some(1))),
+            // Mold core: keep `Gorillax[value]` as the documented
+            // public shape even though the runtime tolerates the
+            // empty-arg fallthrough.
+            "Gorillax" => Some(("[value]", 1, Some(1))),
+            // Span helpers (public net_api / introspection surface).
+            "SpanEquals" | "SpanStartsWith" | "SpanContains" => {
+                Some(("[span, raw, needle]", 3, Some(3)))
+            }
+            "StrOf" => Some(("[span, raw]", 2, Some(2))),
+            "SpanSlice" => Some(("[span, raw, start, end]", 4, Some(4))),
             _ => None,
         };
         let Some((slots, min, max)) = arity_spec else {

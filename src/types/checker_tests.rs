@@ -6617,11 +6617,15 @@ fn e34b_020_div_rejects_single_argument() {
 
 #[test]
 fn e34b_020_str_conversion_rejects_empty() {
+    // E34B-023 (Codex review #19 follow-up): `Int[value, base?]`
+    // accepts the optional base argument
+    // (`Int["ff", 16]()`), so the diagnostic label widened from
+    // `Int[value]()` to `Int[value, base?]()`.
     let src = "v <= Int[]()\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
-            && e.message.contains("Int[value]()")),
+            && e.message.contains("Int[value, base?]()")),
         "Expected [E1505] for `Int[]()`, got: {:?}",
         errors
     );
@@ -6790,11 +6794,14 @@ fn e34b_022_charat_rejects_partial() {
 
 #[test]
 fn e34b_022_concat_rejects_empty() {
+    // E34B-023 (Codex review #19 follow-up): `Concat` operates on
+    // both lists and Bytes; the diagnostic label widens to
+    // `[list|bytes, other]` to match the runtime.
     let src = "v <= Concat[]()\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
-            && e.message.contains("Concat[list, other]()")),
+            && e.message.contains("Concat[list|bytes, other]()")),
         "Expected [E1505] for `Concat[]()`, got: {:?}",
         errors
     );
@@ -6910,6 +6917,243 @@ fn e34b_022_correct_signatures_accepted() {
     assert!(
         errors.is_empty(),
         "Correctly-shaped string / numeric mold calls must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+// E34B-023 (Codex review #19 follow-up): the remaining surface
+// from `docs/reference/standard_methods.md` that the central
+// arity helper still missed, plus two existing-entry corrections
+// (Int over-reject and Concat diagnostic label).
+
+#[test]
+fn e34b_023_int_accepts_string_with_base() {
+    // `Int["ff", 16]()` was incorrectly rejected by the previous
+    // 1-1 entry. The runtime supports the 2-arg form for parsing
+    // numeric strings with an explicit base.
+    let src = "v <= Int[\"ff\", 16]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Int[\"ff\", 16]()` must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_int_rejects_three_arguments() {
+    let src = "v <= Int[\"ff\", 16, 0]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Int[value, base?]()")),
+        "Expected [E1505] for `Int[\"ff\", 16, 0]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_floor_rejects_empty() {
+    let src = "v <= Floor[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Floor[num]()")),
+        "Expected [E1505] for `Floor[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_sqrt_rejects_empty() {
+    let src = "v <= Sqrt[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Sqrt[num]()")),
+        "Expected [E1505] for `Sqrt[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_log_accepts_one_or_two_args() {
+    // `Log[value, base?]` — 1-arg form defaults to natural log,
+    // 2-arg form takes an explicit base. Both must pass.
+    let src = "a <= Log[10.0]()\n\
+               b <= Log[100.0, 10]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Log[10.0]()` and `Log[100.0, 10]()` must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_log_rejects_zero_args() {
+    let src = "v <= Log[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Log[value, base?]()")),
+        "Expected [E1505] for `Log[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_pow_rejects_one_arg() {
+    let src = "v <= Pow[2]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Pow[base, exp]()")),
+        "Expected [E1505] for `Pow[2]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_atan2_rejects_one_arg() {
+    let src = "v <= Atan2[1.0]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Atan2[y, x]()")),
+        "Expected [E1505] for `Atan2[1.0]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_bitor_rejects_one_arg() {
+    let src = "v <= BitOr[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("BitOr[a, b]()")),
+        "Expected [E1505] for `BitOr[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_bitnot_rejects_empty() {
+    let src = "v <= BitNot[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("BitNot[x]()")),
+        "Expected [E1505] for `BitNot[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_shiftl_rejects_one_arg() {
+    let src = "v <= ShiftL[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("ShiftL[x, n]()")),
+        "Expected [E1505] for `ShiftL[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_to_radix_rejects_one_arg() {
+    let src = "v <= ToRadix[255]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("ToRadix[int, base]()")),
+        "Expected [E1505] for `ToRadix[255]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_byte_length_rejects_empty() {
+    let src = "v <= ByteLength[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("ByteLength[bytes]()")),
+        "Expected [E1505] for `ByteLength[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_byte_set_rejects_partial() {
+    let src = "v <= ByteSet[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("ByteSet[bytes, idx, value]()")),
+        "Expected [E1505] for `ByteSet[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_bytes_to_list_rejects_empty() {
+    let src = "v <= BytesToList[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("BytesToList[bytes]()")),
+        "Expected [E1505] for `BytesToList[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_type_is_rejects_one_arg() {
+    let src = "v <= TypeIs[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("TypeIs[value, :Type]()")),
+        "Expected [E1505] for `TypeIs[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_ordinal_rejects_empty() {
+    let src = "v <= Ordinal[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Ordinal[enum_value]()")),
+        "Expected [E1505] for `Ordinal[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_str_of_rejects_one_arg() {
+    let src = "v <= StrOf[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("StrOf[span, raw]()")),
+        "Expected [E1505] for `StrOf[1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_023_span_slice_rejects_partial() {
+    let src = "v <= SpanSlice[1, 2, 3]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("SpanSlice[span, raw, start, end]()")),
+        "Expected [E1505] for `SpanSlice[1, 2, 3]()`, got: {:?}",
         errors
     );
 }
