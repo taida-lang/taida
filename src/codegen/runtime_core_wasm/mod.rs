@@ -474,9 +474,12 @@ mod tests {
     /// 2026-05-09 mapError Phase 3.1: revert the empty-message
     /// allowance to match the four-backend "empty == missing" decision;
     /// assembled runtime is 340,167 bytes.
+    /// 2026-05-09 E34B-020 (Codex review #16): +1174 bytes for the new
+    /// `taida_list_unique_by` runtime that closes the 4-backend
+    /// `Unique[xs](by <= ..)` parity gap.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 340_167;
+        const EXPECTED_TOTAL_LEN: usize = 341_341;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

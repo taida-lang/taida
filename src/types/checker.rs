@@ -1963,6 +1963,75 @@ impl TypeChecker {
     /// Without this pin, a `Sort[@[Int]](by <= keyFloat)` would
     /// silently widen Int -> Float at runtime and lose 4-backend
     /// parity.
+    /// E34B-020 (Codex review #16 follow-up): central arity check
+    /// for built-in molds. The dedicated arms in `Expr::MoldInst`
+    /// already cover return-type inference; this helper keeps the
+    /// arity / shape discipline aligned with the runtime
+    /// (`src/interpreter/mold_eval.rs`) so that the front gate
+    /// rejects invalid call shapes before lowering.
+    fn check_built_in_mold_arity(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        span: &Span,
+    ) {
+        // (shape_label, min, max). `max == None` means variadic.
+        // Async / Cancel / All / Race / Timeout already enforce arity
+        // in their dedicated arms (E34B-018), so they are intentionally
+        // omitted to avoid double diagnostics.
+        // Each entry is `(slot_label, min, max)`; `max == None` means
+        // variadic. The label describes the *placeholders* — the
+        // mold name itself is added below by `format!`.
+        let arity_spec: Option<(&'static str, usize, Option<usize>)> = match name {
+            "AsyncReject" => Some(("[error]", 1, Some(1))),
+            "Stream" => Some(("[value, ...]", 1, None)),
+            "StreamFrom" => Some(("[list]", 1, Some(1))),
+            "JSON" => Some(("[raw, Schema]", 2, Some(2))),
+            "Cage" => Some(("[subject, runner, ...]", 2, None)),
+            "Div" | "Mod" => Some(("[dividend, divisor]", 2, Some(2))),
+            "If" => Some(("[cond, then, else]", 3, Some(3))),
+            "Map" | "Filter" | "TakeWhile" | "DropWhile" => Some(("[xs, fn]", 2, Some(2))),
+            "Fold" | "Foldr" | "Reduce" => Some(("[xs, init, fn]", 3, Some(3))),
+            "Sort" | "Unique" | "Reverse" | "Flatten" | "Enumerate" => {
+                Some(("[xs]", 1, Some(1)))
+            }
+            "Take" | "Drop" => Some(("[xs, n]", 2, Some(2))),
+            "Append" | "Prepend" => Some(("[xs, value]", 2, Some(2))),
+            "Zip" => Some(("[xs, ys]", 2, Some(2))),
+            "Str" | "Int" | "Float" | "Bool" | "Bytes" | "UInt8" | "Char"
+            | "CodePoint" | "Utf8Encode" | "Utf8Decode" => {
+                Some(("[value]", 1, Some(1)))
+            }
+            "U16BE" | "U16LE" | "U32BE" | "U32LE" | "U16BEDecode"
+            | "U16LEDecode" | "U32BEDecode" | "U32LEDecode" => {
+                Some(("[value]", 1, Some(1)))
+            }
+            _ => None,
+        };
+        let Some((slots, min, max)) = arity_spec else {
+            return;
+        };
+        let n = type_args.len();
+        let too_few = n < min;
+        let too_many = max.map(|m| n > m).unwrap_or(false);
+        if !too_few && !too_many {
+            return;
+        }
+        let arity_desc = match max {
+            Some(m) if m == min => format!("exactly {}", min),
+            Some(m) => format!("{}-{}", min, m),
+            None => format!("at least {}", min),
+        };
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1505] `{}{}()` requires {} type argument(s), got {}. \
+                 Hint: align the call shape with the runtime contract.",
+                name, slots, arity_desc, n
+            ),
+            span: span.clone(),
+        });
+    }
+
     fn check_built_in_mold_callback_option(
         &mut self,
         name: &str,
@@ -6095,6 +6164,15 @@ defaulted fields must be provided via `()`",
                 // here so `Sort[@[Int]](by <= keyFloat)` cannot widen
                 // Int -> Float silently.
                 self.check_built_in_mold_callback_option(name, type_args, fields, mold_span);
+                // E34B-020 (Codex review #16 follow-up): every
+                // built-in mold whose runtime side enforces a
+                // specific arity must have the same enforcement at
+                // type-check time. Without this, shapes like
+                // `JSON["{}"]()` (missing schema), `Async[]()` (empty),
+                // and `If[true, 1]()` (missing else) silently passed
+                // the front gate and only failed at runtime, breaking
+                // 4-backend parity for the fast feedback loop.
+                self.check_built_in_mold_arity(name, type_args, mold_span);
                 match name.as_str() {
                     // JSON[raw, Schema]() returns Lax (wrapping the schema type).
                     // E34B-014 follow-up (Codex review #11): when the
@@ -6111,15 +6189,27 @@ defaulted fields must be provided via `()`",
                         Type::Generic("Lax".to_string(), vec![inner])
                     }
                     // Async[T] wraps a value
-                    "Async" => Type::Generic(
-                        "Async".to_string(),
-                        vec![
-                            type_args
-                                .first()
-                                .map(|a| self.infer_expr_type(a))
-                                .unwrap_or(Type::Unknown),
-                        ],
-                    ),
+                    "Async" => {
+                        if type_args.is_empty() {
+                            self.errors.push(TypeError {
+                                message:
+                                    "[E1505] `Async[value]()` requires at least 1 type \
+                                     argument, got 0. Hint: pass the value to wrap, \
+                                     e.g. `Async[42]()`."
+                                        .to_string(),
+                                span: mold_span.clone(),
+                            });
+                        }
+                        Type::Generic(
+                            "Async".to_string(),
+                            vec![
+                                type_args
+                                    .first()
+                                    .map(|a| self.infer_expr_type(a))
+                                    .unwrap_or(Type::Unknown),
+                            ],
+                        )
+                    }
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
                         if type_args.len() != 1 {

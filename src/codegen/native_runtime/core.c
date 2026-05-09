@@ -5461,6 +5461,39 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
     return new_list;
 }
 
+/* Unique by key extraction function: fn_ptr maps each element to a key,
+   then dedup by that key. Matches interpreter's Unique[list](by <= fn).
+   E34B-020 (Codex review #16 follow-up): close the 4-backend parity gap
+   where Native / WASM previously dropped the `by` callback and fell back
+   to value-identity dedup. */
+taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val elem_tag = list[3];
+    taida_val new_list = taida_list_new();
+    taida_val *nl_init = (taida_val*)new_list;
+    nl_init[3] = elem_tag;
+    if (len == 0) return new_list;
+    size_t keys_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_unique_by keys");
+    taida_val *seen_keys = (taida_val*)TAIDA_MALLOC(keys_size, "list_unique_by seen_keys");
+    taida_val seen_count = 0;
+    for (taida_val i = 0; i < len; i++) {
+        taida_val item = list[4 + i];
+        taida_val key = taida_invoke_callback1(fn_ptr, item);
+        taida_val found = 0;
+        for (taida_val j = 0; j < seen_count; j++) {
+            if (seen_keys[j] == key) { found = 1; break; }
+        }
+        if (!found) {
+            seen_keys[seen_count++] = key;
+            taida_list_elem_retain(item, elem_tag);
+            new_list = taida_list_push(new_list, item);
+        }
+    }
+    free(seen_keys);
+    return new_list;
+}
+
 /* Sort by key extraction function: fn_ptr maps each element to a sort key,
    then sort ascending by key. Matches interpreter's Sort[list](by <= fn). */
 taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {

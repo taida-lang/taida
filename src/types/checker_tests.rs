@@ -6542,3 +6542,130 @@ fn e34b_019_unique_rejects_int_list_with_float_key_callback() {
         errors
     );
 }
+
+// E34B-020 (Codex review #16 follow-up): central built-in mold arity
+// validation. The runtime had per-mold arity guards but the checker
+// was missing them for many built-in shapes, so calls like
+// `Async[]()`, `If[true, 1]()`, and `Map[xs]()` (missing fn) only
+// failed at runtime. The new `check_built_in_mold_arity` helper
+// pins the arity for every built-in surface that is not already
+// covered by a dedicated arm.
+
+#[test]
+fn e34b_020_async_rejects_empty_type_args() {
+    let src = "Async[]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Async[value]()")),
+        "Expected [E1505] for `Async[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_async_reject_rejects_empty_type_args() {
+    let src = "AsyncReject[]() ]=> bad\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("AsyncReject[error]()")),
+        "Expected [E1505] for `AsyncReject[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_if_rejects_missing_else_branch() {
+    let src = "v <= If[true, 1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("If[cond, then, else]()")
+            && e.message.contains("got 2")),
+        "Expected [E1505] for `If[true, 1]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_map_rejects_missing_function() {
+    let src = "xs <= @[1, 2, 3]\n\
+               ys <= Map[xs]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Map[xs, fn]()")
+            && e.message.contains("got 1")),
+        "Expected [E1505] for `Map[xs]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_div_rejects_single_argument() {
+    let src = "v <= Div[10]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Div[dividend, divisor]()")
+            && e.message.contains("got 1")),
+        "Expected [E1505] for `Div[10]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_str_conversion_rejects_empty() {
+    let src = "v <= Int[]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1505]")
+            && e.message.contains("Int[value]()")),
+        "Expected [E1505] for `Int[]()`, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_correct_signatures_accepted() {
+    // Spot-check that the arity helper does not over-fire on
+    // legitimate shapes.
+    let src = "a <= Async[42]()\n\
+               r <= AsyncReject[\"err\"]()\n\
+               s <= Stream[1, 2, 3]()\n\
+               ifv <= If[true, 1, 2]()\n\
+               xs <= @[1, 2, 3]\n\
+               doubleInt x: Int = x * 2 => :Int\n\
+               ys <= Map[xs, doubleInt]()\n\
+               q <= Div[10, 2]()\n\
+               iv <= Int[1.5]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Correctly-shaped built-in mold calls must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_020_unique_by_callback_lowering_smoke() {
+    // E34B-020 P0: ensure the boundary check still accepts a
+    // legitimate `Unique[@[Int]](by <= Int -> Int)` shape so that
+    // the new lowering hook (`taida_list_unique_by`) is reachable
+    // through the pipeline. The actual 4-backend parity is verified
+    // by hand on `examples/`-shaped fixtures (Native + JS + Interp
+    // all return `@[1, 7]` for the keyParity case).
+    let src = "keyParity x: Int =\n\
+                 | x > 5 |> 1\n\
+                 | _    |> 0\n\
+               => :Int\n\
+               xs <= @[1, 4, 7, 2, 5, 3]\n\
+               u <= Unique[xs](by <= keyParity)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "`Unique[@[Int]](by <= keyParity)` must be accepted; errors: {:?}",
+        errors
+    );
+}
