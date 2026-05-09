@@ -312,9 +312,51 @@ impl TypeChecker {
                     if actual_ty == Type::Unknown {
                         continue;
                     }
-                    if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
-                        // Provide a hint specific to Function-typed expected
-                        // (most common: Lax/Result/Async map/flatMap/mapError).
+                    // E34B-014: If the HOF argument is a function value
+                    // whose return is `Type::Unknown` (e.g. a named
+                    // function with no return annotation, or a forward
+                    // reference whose body inference has not yet run),
+                    // reject when the expected wrapper demands a more
+                    // specific return type. The legacy wildcard rule
+                    // (`Type::Unknown <: anything`) is intended for
+                    // in-flight inference variables, not for function
+                    // values that escaped the type-checker without an
+                    // annotated return.
+                    if let (Type::Function(_, act_ret), Type::Function(_, exp_ret)) =
+                        (&actual_ty, expected_ty)
+                        && matches!(act_ret.as_ref(), Type::Unknown)
+                        && !matches!(exp_ret.as_ref(), Type::Unknown)
+                    {
+                        let arg_label = match arg {
+                            Expr::Ident(name, _) => format!("'{}'", name),
+                            _ => format!("{}", i + 1),
+                        };
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1508] Method '{}' argument {} is a function value with no \
+                                 inferable return type. \
+                                 Hint: Add an explicit return type annotation (e.g. `=> :{}`) \
+                                 to the function definition.",
+                                method, arg_label, exp_ret
+                            ),
+                            span: span.clone(),
+                        });
+                        continue;
+                    }
+                    // E34B-013 (Lock-H=A): when the expected type is a
+                    // function value, treat its parameter contravariance
+                    // strictly so that `Int → Float` widening cannot
+                    // sneak a function value through HOF arg checks
+                    // (e.g. `Lax[Int].map(fn: Float -> Float)`). Direct
+                    // numeric arguments still rely on the wider
+                    // registry-aware subtype check, since their widening
+                    // semantics live outside the function-value boundary.
+                    let pass = if matches!(expected_ty, Type::Function(_, _)) {
+                        actual_ty.is_function_arg_subtype_of(expected_ty)
+                    } else {
+                        self.registry.is_subtype_of(&actual_ty, expected_ty)
+                    };
+                    if !pass {
                         let hint = match expected_ty {
                             Type::Function(exp_params, _) => format!(
                                 "Hint: Pass a function whose parameter types match {}.",

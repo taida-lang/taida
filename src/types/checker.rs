@@ -4268,6 +4268,19 @@ defaulted fields must be provided via `()`",
                 // Look up variable in scope
                 if let Some(ty) = self.lookup_var(name) {
                     ty
+                } else if !self.generic_func_defs.contains_key(name)
+                    && let (Some(params), Some(ret)) = (
+                        self.func_param_types.get(name).cloned(),
+                        self.func_types.get(name).cloned(),
+                    )
+                {
+                    // E34B-014: Resolve a non-generic named function value
+                    // reference to its full `Type::Function` signature
+                    // (registered in the first pass) instead of falling
+                    // through to `Type::Unknown`. This lets HOF argument
+                    // checks pin the params and return at the call site
+                    // even for forward references.
+                    Type::Function(params, Box::new(ret))
                 } else if self.func_types.contains_key(name)
                     || self.generic_func_defs.contains_key(name)
                     || self.declared_concrete_type_names.contains(name)

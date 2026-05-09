@@ -137,6 +137,21 @@ impl Type {
     /// progress; the type-checker is expected to resolve it before any
     /// method signature is recorded.
     pub fn is_subtype_of(&self, expected: &Type) -> bool {
+        self.is_subtype_of_inner(expected, false)
+    }
+
+    /// Like `is_subtype_of`, but the `Int → Float` widening rule is
+    /// disabled across the entire type tree. Used by the function-param
+    /// contravariance check so that an `Int`-accepting function value
+    /// cannot be passed where a `Float`-accepting parameter is expected.
+    /// PHILOSOPHY I forbids implicit type conversion at function
+    /// boundaries; the residual widening rule is kept only for direct
+    /// numeric assignment / arithmetic contexts.
+    pub fn is_function_arg_subtype_of(&self, expected: &Type) -> bool {
+        self.is_subtype_of_inner(expected, true)
+    }
+
+    fn is_subtype_of_inner(&self, expected: &Type, strict_int_float: bool) -> bool {
         if self == expected {
             return true;
         }
@@ -148,20 +163,21 @@ impl Type {
 
             // Int is a subtype of Num, Float is a subtype of Num
             (Type::Int, Type::Num) | (Type::Float, Type::Num) => true,
-            (Type::Int, Type::Float) => true, // Int widened to Float
+            (Type::Int, Type::Float) if !strict_int_float => true, // Int widened to Float
+            (Type::Int, Type::Float) => false,
 
             // Structural subtyping for buchi packs
             (Type::BuchiPack(self_fields), Type::BuchiPack(expected_fields)) => {
-                // All fields in expected must exist in self with compatible types
                 expected_fields.iter().all(|(exp_name, exp_type)| {
                     self_fields.iter().any(|(self_name, self_type)| {
-                        self_name == exp_name && self_type.is_subtype_of(exp_type)
+                        self_name == exp_name
+                            && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                     })
                 })
             }
 
             // List covariance
-            (Type::List(a), Type::List(b)) => a.is_subtype_of(b),
+            (Type::List(a), Type::List(b)) => a.is_subtype_of_inner(b, strict_int_float),
 
             // Function subtype: param contravariant, return covariant.
             // (P1, ..., Pn) -> R   <:   (Q1, ..., Qn) -> S
@@ -173,17 +189,13 @@ impl Type {
                     && self_params
                         .iter()
                         .zip(exp_params.iter())
-                        .all(|(self_p, exp_p)| exp_p.is_subtype_of(self_p))
-                    && self_ret.is_subtype_of(exp_ret)
+                        .all(|(self_p, exp_p)| exp_p.is_subtype_of_inner(self_p, strict_int_float))
+                    && self_ret.is_subtype_of_inner(exp_ret, strict_int_float)
             }
 
             // Error subtyping: specific error is subtype of Error
             (Type::Error(_), Type::Error(name)) if name == "Error" => true,
             (Type::Error(_), Type::Named(name)) if name == "Error" => true,
-            // E34 Phase 1.4: Error vs Named with the same name treated as
-            // equivalent. Fixes a subtype gap where TypeInst returns
-            // `Type::Named` for an error constructor while the function
-            // signature's `:Result[T, ErrName]` resolves to `Type::Error`.
             (Type::Error(a), Type::Named(b)) | (Type::Named(a), Type::Error(b)) if a == b => true,
 
             // Named type could match by name
@@ -196,7 +208,7 @@ impl Type {
                     && a_args
                         .iter()
                         .zip(b_args.iter())
-                        .all(|(a, b)| a.is_subtype_of(b))
+                        .all(|(a, b)| a.is_subtype_of_inner(b, strict_int_float))
             }
 
             _ => false,

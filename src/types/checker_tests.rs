@@ -5190,3 +5190,161 @@ fn e34b_015_map_error_rejects_str_input_when_payload_is_pack() {
     );
 }
 
+// E34B-013 (Lock-H=A): Int → Float widening must NOT slip through a
+// function-value parameter check. PHILOSOPHY I forbids implicit type
+// conversion at function boundaries; while direct numeric arithmetic
+// keeps the wider subtype rule, an `Int → X` function value cannot
+// satisfy a `Float → X` parameter slot.
+
+#[test]
+fn e34b_013_lax_int_map_rejects_float_param_named_fn() {
+    // Lax[Int].map(fn: Float -> Float) — Int param should not silently
+    // accept the Float-accepting function value via Int <: Float widening.
+    let src = "doubleFloat x: Float = x * 2.0 => :Float\n\
+               obj <= Lax[1]()\n\
+               result <= obj.map(doubleFloat)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for Lax[Int].map(fn: Float -> Float), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_lax_int_flat_map_rejects_float_param_named_fn() {
+    // flatMap path is just as strict — Int input cannot be widened to Float.
+    let src = "wrapFloat x: Float = Lax[x * 2.0]() => :Lax[Float]\n\
+               obj <= Lax[1]()\n\
+               result <= obj.flatMap(wrapFloat)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for Lax[Int].flatMap(fn: Float -> Lax[Float]), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_lax_int_map_accepts_num_param_named_fn() {
+    // The Int → Num subtype path is intentional: `Num` is the explicit
+    // polymorphic numeric, not an implicit widening. PHILOSOPHY I is
+    // satisfied because `Num` was written by the author on purpose.
+    let src = "doubleNum x: Num = x * 2 => :Num\n\
+               obj <= Lax[1]()\n\
+               result <= obj.map(doubleNum)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Lax[Int].map(fn: Num -> Num) should be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_lax_float_map_rejects_int_param_named_fn() {
+    // Symmetric: Float receiver cannot satisfy an Int-only function param.
+    // (This was already covered by `Float </: Int`, but pin it explicitly.)
+    let src = "doubleInt x: Int = x * 2 => :Int\n\
+               obj <= Lax[1.5]()\n\
+               result <= obj.map(doubleInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")),
+        "Expected [E1508] for Lax[Float].map(fn: Int -> Int), got: {:?}",
+        errors
+    );
+}
+
+// E34B-014: HOF arguments that resolve to `Type::Function(_, Unknown)`
+// (named function with no return annotation, or forward reference)
+// must not slip through the wrapper-return check via the legacy
+// `Type::Unknown` wildcard rule.
+
+#[test]
+fn e34b_014_flat_map_rejects_named_fn_without_return_annotation() {
+    // Repro 1 from blocker entry: doubleInt has no return annotation.
+    // flatMap requires `T -> Lax[U]`, but `Type::Unknown` return cannot
+    // satisfy that; previously the wildcard rule let this slip through.
+    let src = "doubleInt x: Int = x * 2 =>\n\
+               obj <= Lax[42]()\n\
+               result <= obj.flatMap(doubleInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("doubleInt")
+            && e.message.contains("no inferable return type")),
+        "Expected [E1508] HOF-no-return for flatMap(doubleInt), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_map_rejects_forward_reference_with_type_mismatch() {
+    // Repro 2 from blocker entry: forward reference must resolve to its
+    // first-pass signature so the param type mismatch is reported, not
+    // skipped via Type::Unknown.
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(fnStr)\n\
+               fnStr s: Str = s.length() => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("Method 'map'")),
+        "Expected [E1508] for Lax[Int].map(forward fnStr: Str -> Int), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_map_accepts_forward_reference_with_matching_signature() {
+    // Forward reference with a matching Int -> Int signature must still
+    // pass — the new behavior is to surface the signature, not to ban
+    // forward references.
+    let src = "obj <= Lax[42]()\n\
+               result <= obj.map(addOne)\n\
+               addOne x: Int = x + 1 => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Forward reference with matching signature should be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_map_accepts_named_fn_without_return_annotation_but_loses_pin() {
+    // Boundary pin: `Lax[T].map(fn: T -> U)` has an unbound inference
+    // variable `U` in its expected return position. A named function
+    // value with no return annotation still satisfies this slot via
+    // the in-flight inference rule, but the resulting wrapper carries
+    // `Lax[Unknown]`. Tightening `map` further would require pinning
+    // `U` from other context — that is left to a follow-up cycle.
+    // flatMap, whose expected return is the concrete wrapper
+    // `Lax[Unknown]`, is rejected by `e34b_014_flat_map_rejects_…`.
+    let src = "addOne x: Int = x + 1 =>\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(addOne)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Map with no-return-annotation named fn is accepted in E34 scope (yields Lax[Unknown]); \
+         errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_flat_map_accepts_named_fn_with_lax_return_annotation() {
+    // Positive: named function returning Lax[Int] satisfies flatMap.
+    let src = "wrapInt x: Int = Lax[x * 2]() => :Lax[Int]\n\
+               obj <= Lax[42]()\n\
+               result <= obj.flatMap(wrapInt)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "flatMap(wrapInt: Int -> Lax[Int]) should be accepted; errors: {:?}",
+        errors
+    );
+}
+
