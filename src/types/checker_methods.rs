@@ -343,19 +343,57 @@ impl TypeChecker {
                         });
                         continue;
                     }
-                    // E34B-013 (Lock-H=A): when the expected type is a
-                    // function value, treat its parameter contravariance
-                    // strictly so that `Int → Float` widening cannot
-                    // sneak a function value through HOF arg checks
-                    // (e.g. `Lax[Int].map(fn: Float -> Float)`). Direct
-                    // numeric arguments still rely on the wider
-                    // registry-aware subtype check, since their widening
-                    // semantics live outside the function-value boundary.
-                    let pass = if matches!(expected_ty, Type::Function(_, _)) {
-                        actual_ty.is_function_arg_subtype_of(expected_ty)
-                    } else {
-                        self.registry.is_subtype_of(&actual_ty, expected_ty)
-                    };
+                    // E34B-014 follow-up (Codex review #8): if the HOF
+                    // argument is a named function reference whose
+                    // params include `Type::Unknown` (i.e. the function
+                    // definition omits some param annotation) and the
+                    // expected slot demands a concrete param type,
+                    // reject so that the legacy wildcard rule cannot
+                    // silently slip through. Lambdas are exempt — they
+                    // are bidirectionally inferred from `expected_ty`.
+                    if matches!(arg, Expr::Ident(_, _))
+                        && let (
+                            Type::Function(act_params, _),
+                            Type::Function(exp_params, _),
+                        ) = (&actual_ty, expected_ty)
+                    {
+                        let mismatch = act_params
+                            .iter()
+                            .zip(exp_params.iter())
+                            .position(|(a, e)| {
+                                matches!(a, Type::Unknown) && !matches!(e, Type::Unknown)
+                            });
+                        if let Some(pos) = mismatch {
+                            let arg_label = match arg {
+                                Expr::Ident(name, _) => format!("'{}'", name),
+                                _ => format!("{}", i + 1),
+                            };
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1508] Method '{}' argument {} ({}) has an unannotated \
+                                     parameter at position {}. \
+                                     Hint: Add an explicit type annotation (e.g. `param: {}`) \
+                                     to the function definition.",
+                                    method,
+                                    i + 1,
+                                    arg_label,
+                                    pos + 1,
+                                    exp_params[pos]
+                                ),
+                                span: span.clone(),
+                            });
+                            continue;
+                        }
+                    }
+                    // E34B-013 (Lock-H=A): apply the strict
+                    // function-arg subtype rule at every method-call
+                    // boundary, including registry-resolved Named /
+                    // BuchiPack structural paths. This forbids the
+                    // `Int → Float` implicit widening uniformly across
+                    // function/method-arg slots while preserving the
+                    // wider widening rule for non-boundary contexts
+                    // (numeric arithmetic / direct assignment).
+                    let pass = self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty);
                     if !pass {
                         let hint = match expected_ty {
                             Type::Function(exp_params, _) => format!(

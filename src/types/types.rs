@@ -151,7 +151,7 @@ impl Type {
         self.is_subtype_of_inner(expected, true)
     }
 
-    fn is_subtype_of_inner(&self, expected: &Type, strict_int_float: bool) -> bool {
+    pub(crate) fn is_subtype_of_inner(&self, expected: &Type, strict_int_float: bool) -> bool {
         if self == expected {
             return true;
         }
@@ -403,62 +403,74 @@ impl TypeRegistry {
     /// Check structural subtype compatibility with registry context.
     /// Resolves Named types to their fields for structural comparison.
     pub fn is_subtype_of(&self, actual: &Type, expected: &Type) -> bool {
+        self.is_subtype_of_inner(actual, expected, false)
+    }
+
+    /// Like `is_subtype_of`, but disallows the `Int → Float` widening
+    /// rule across the whole type tree, including registry-resolved
+    /// Named / BuchiPack structural paths. Used at every function /
+    /// method boundary so that PHILOSOPHY I "no implicit type
+    /// conversion" is honoured uniformly. Pre-existing widening on
+    /// non-boundary subtype contexts (numeric arithmetic, direct
+    /// assignment) is unaffected.
+    pub fn is_function_arg_subtype_of(&self, actual: &Type, expected: &Type) -> bool {
+        self.is_subtype_of_inner(actual, expected, true)
+    }
+
+    fn is_subtype_of_inner(&self, actual: &Type, expected: &Type, strict_int_float: bool) -> bool {
         if actual == expected {
             return true;
         }
         // Delegate to the basic check first
-        if actual.is_subtype_of(expected) {
+        if actual.is_subtype_of_inner(expected, strict_int_float) {
             return true;
         }
         match (actual, expected) {
             // Named vs Named: check inheritance chain, then structural fields
             (Type::Named(a), Type::Named(b)) => {
-                // Check inheritance chain: a inherits from b?
-                // RCB-51: Use a visited set to prevent infinite loops on
-                // cyclic inheritance chains that slipped past validation.
                 let mut current = a.clone();
                 let mut visited = HashSet::new();
-                visited.insert(a.clone()); // include start node
+                visited.insert(a.clone());
                 while let Some(parent) = self.inheritance.get(&current) {
                     if parent == b {
                         return true;
                     }
                     if !visited.insert(parent.clone()) {
-                        break; // Cycle detected -- stop walking
+                        break;
                     }
                     current = parent.clone();
                 }
-                // Structural check: a's fields are a superset of b's fields
                 if let (Some(a_fields), Some(b_fields)) =
                     (self.get_type_fields(a), self.get_type_fields(b))
                 {
                     b_fields.iter().all(|(exp_name, exp_type)| {
                         a_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name && self_type.is_subtype_of(exp_type)
+                            self_name == exp_name
+                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                         })
                     })
                 } else {
                     false
                 }
             }
-            // Named vs BuchiPack: resolve Named and check structurally
             (Type::Named(name), Type::BuchiPack(expected_fields)) => {
                 if let Some(actual_fields) = self.get_type_fields(name) {
                     expected_fields.iter().all(|(exp_name, exp_type)| {
                         actual_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name && self_type.is_subtype_of(exp_type)
+                            self_name == exp_name
+                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                         })
                     })
                 } else {
                     false
                 }
             }
-            // BuchiPack vs Named: resolve Named and check structurally
             (Type::BuchiPack(actual_fields), Type::Named(name)) => {
                 if let Some(expected_fields) = self.get_type_fields(name) {
                     expected_fields.iter().all(|(exp_name, exp_type)| {
                         actual_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name && self_type.is_subtype_of(exp_type)
+                            self_name == exp_name
+                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
                         })
                     })
                 } else {

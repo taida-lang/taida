@@ -5348,3 +5348,128 @@ fn e34b_014_flat_map_accepts_named_fn_with_lax_return_annotation() {
     );
 }
 
+// E34B-013 / E34B-014 follow-up (Codex review #8): close the four
+// holes uncovered after the initial commit:
+//   1. direct `f(1)` against `f x: Float` widens silently
+//   2. imported function value (`>>> ... => @(fn)`) bypasses the
+//      Function-signature resolve via a `Type::Unknown` shadow
+//   3. unannotated param of a named function escapes via the legacy
+//      `Type::Unknown <: anything` wildcard rule at the HOF boundary
+//   4. registry-aware Named/BuchiPack subtype paths must propagate
+//      the same strict flag so widening cannot leak via structural
+//      resolution
+
+#[test]
+fn e34b_013_direct_call_rejects_int_for_float_param() {
+    // Hole 1: `acceptFloat(1)` was previously accepted via the
+    // pre-existing `Int <: Float` widening rule. Lock-H=A extends to
+    // every direct function-call boundary.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               result <= acceptFloat(1)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")
+            && e.message.contains("acceptFloat")
+            && e.message.contains("Int")
+            && e.message.contains("Float")),
+        "Expected [E1506] for `acceptFloat(1)` (Int → Float widening), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_direct_call_accepts_float_for_float_param() {
+    // Positive: explicit Float literal is fine.
+    let src = "acceptFloat x: Float = x + 1.0 => :Float\n\
+               result <= acceptFloat(2.0)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Direct call with matching Float arg should be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_013_direct_call_accepts_int_for_num_param() {
+    // Positive: explicit polymorphic Num still admits Int via Int <: Num.
+    let src = "acceptNum x: Num = x + 1 => :Num\n\
+               result <= acceptNum(7)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "Direct call with `Num` polymorphic param should accept Int; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_imported_runinteractive_rejected_at_hof_boundary() {
+    // Hole 2: `runInteractive(program: Str, args: @[Str]) -> Gorillax[...]`
+    // has a fully pinned signature; `Lax[Int].map(runInteractive)` must
+    // surface the param mismatch (Int vs Str) instead of silently
+    // bypassing via a `Type::Unknown` shadow installed by Statement::Import.
+    let src = ">>> taida-lang/os => @(runInteractive)\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(runInteractive)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("Method 'map'")),
+        "Expected [E1508] for Lax[Int].map(imported runInteractive), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_imported_sha256_rejected_at_hof_boundary() {
+    // Hole 2 continued: `sha256(s: Str) -> Str`. `Lax[Int].map(sha256)`
+    // must reject because the imported function value is now resolved to
+    // `Type::Function([Str], Str)` at first pass.
+    let src = ">>> taida-lang/crypto => @(sha256)\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(sha256)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("Method 'map'")),
+        "Expected [E1508] for Lax[Int].map(imported sha256), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_named_fn_unannotated_param_rejected_at_hof_boundary() {
+    // Hole 3: `strLen s = s.length() => :Int`. The unannotated `s`
+    // resolves to `Type::Unknown`, which previously satisfied
+    // `Int <: Unknown` via the wildcard rule and slipped through.
+    let src = "strLen s = s.length() => :Int\n\
+               obj <= Lax[42]()\n\
+               result <= obj.map(strLen)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("strLen")
+            && e.message.contains("unannotated parameter")),
+        "Expected [E1508] for HOF arg with unannotated param, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e34b_014_named_fn_with_full_annotations_still_accepted() {
+    // Positive: same shape as above, but with a `s: Str` annotation. The
+    // Str/Int param mismatch reported here is the *real* error (not a
+    // wildcard bypass), and a fully matching Int -> Int variant is
+    // accepted.
+    let src_match = "strLen s: Str = s.length() => :Int\n\
+                     obj <= Lax[\"hi\"]()\n\
+                     result <= obj.map(strLen)\n";
+    let (_, errors) = check(src_match);
+    assert!(
+        errors.is_empty(),
+        "Lax[Str].map(strLen: Str -> Int) should be accepted; errors: {:?}",
+        errors
+    );
+}
+

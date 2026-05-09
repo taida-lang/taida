@@ -2547,7 +2547,15 @@ impl TypeChecker {
                         if sym.name == "sha256" {
                             let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
                             self.func_types.insert(local_name.clone(), Type::Str);
-                            self.func_param_counts.insert(local_name, 1);
+                            self.func_param_counts.insert(local_name.clone(), 1);
+                            // E34B-014 follow-up (Codex review #8): also
+                            // pin the param signature so that imported
+                            // function values resolve to a full
+                            // `Type::Function(params, ret)` at the
+                            // `Expr::Ident` site, not just a return-type
+                            // alias.
+                            self.func_param_types
+                                .insert(local_name, vec![Type::Str]);
                         }
                     }
                 } else if imp.path == "taida-lang/net" {
@@ -4173,6 +4181,21 @@ defaulted fields must be provided via `()`",
                     if imp.path.starts_with("npm:") {
                         self.define_var(name, Type::Molten);
                         self.define_branch_info(name, BranchInfo::Molten(CageBranch::Js));
+                    } else if let (Some(params), Some(ret)) = (
+                        self.func_param_types.get(name).cloned(),
+                        self.func_types.get(name).cloned(),
+                    ) {
+                        // E34B-014 follow-up (Codex review #8): imported
+                        // function value should resolve to its full
+                        // `Type::Function(params, ret)` signature,
+                        // pinned earlier in the first pass (e.g.
+                        // `taida-lang/crypto::sha256`,
+                        // `taida-lang/os::runInteractive`). Without
+                        // this, `lookup_var(name)` previously hit a
+                        // `Type::Unknown` shadow and bypassed both the
+                        // HOF wrapper-return check and the param-type
+                        // check.
+                        self.define_var(name, Type::Function(params, Box::new(ret)));
                     } else {
                         self.define_var(name, Type::Unknown);
                     }
@@ -4755,7 +4778,12 @@ defaulted fields must be provided via `()`",
                                     if actual_ty == Type::Unknown {
                                         continue;
                                     }
-                                    if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                                    // E34B-013 (Lock-H=A): direct call
+                                    // through `func_param_types`
+                                    // registry is also a function
+                                    // boundary; reject `Int → Float`
+                                    // implicit widening here.
+                                    if !self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty) {
                                         self.errors.push(TypeError {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
@@ -4820,7 +4848,16 @@ defaulted fields must be provided via `()`",
                                 if actual_ty == Type::Unknown {
                                     continue;
                                 }
-                                if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                                // E34B-013 (Lock-H=A): direct function
+                                // call is also a function boundary, so
+                                // PHILOSOPHY I forbids `Int → Float`
+                                // implicit widening here exactly as it
+                                // does for HOF arg slots. The wider
+                                // widening rule still applies to
+                                // numeric arithmetic / direct
+                                // assignment paths, which never reach
+                                // this site.
+                                if !self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty) {
                                     self.errors.push(TypeError {
                                         message: format!(
                                             "[E1506] Argument {} of '{}' has type {}, expected {}. \
@@ -4895,7 +4932,9 @@ defaulted fields must be provided via `()`",
                             {
                                 continue;
                             }
-                            if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
+                            // E34B-013 (Lock-H=A): generic function
+                            // direct call is also a function boundary.
+                            if !self.registry.is_function_arg_subtype_of(&actual_ty, expected_ty) {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1506] Argument {} of '{}' has type {}, expected {}. \
