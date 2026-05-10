@@ -39823,7 +39823,7 @@ stdout(p.name.length().toString())
 // call signatures surface the declared `Type::Function`) treats the
 // E30 zero-argument marker `Unit => :T` as a one-Unit-parameter
 // signature. Tracked as a carry-over to the next cycle (registry-
-// pattern reshape, see E36_BLOCKERS::E36B-007 family); ignore until
+// pattern reshape, see E35_BLOCKERS::E35B-007 family); ignore until
 // the registry layer normalises `Unit` back to an empty parameter
 // list.
 #[test]
