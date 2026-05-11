@@ -55,6 +55,8 @@ pub enum MoldArgKind {
     Any,
     Bool,
     Function,
+    Int,
+    Str,
     UnaryFunction,
     UnaryPredicate,
     BinaryFunction,
@@ -179,6 +181,52 @@ const LIST_ANY_BINARY_FUNCTION: &[MoldArgKind] = &[
 const LIST_PREDICATE_ONLY: &[MoldArgKind] = &[MoldArgKind::List, MoldArgKind::UnaryPredicate];
 const ASYNC_NUM: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Numeric];
 
+const TRIM_OPTIONS: &[MoldOptionSpec] = &[
+    MoldOptionSpec {
+        name: "start",
+        kind: MoldArgKind::Bool,
+    },
+    MoldOptionSpec {
+        name: "end",
+        kind: MoldArgKind::Bool,
+    },
+];
+const REPLACE_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
+    name: "all",
+    kind: MoldArgKind::Bool,
+}];
+const SLICE_OPTIONS: &[MoldOptionSpec] = &[
+    MoldOptionSpec {
+        name: "start",
+        kind: MoldArgKind::Int,
+    },
+    MoldOptionSpec {
+        name: "end",
+        kind: MoldArgKind::Int,
+    },
+];
+const PAD_OPTIONS: &[MoldOptionSpec] = &[
+    MoldOptionSpec {
+        name: "side",
+        kind: MoldArgKind::Str,
+    },
+    MoldOptionSpec {
+        name: "char",
+        kind: MoldArgKind::Str,
+    },
+];
+const RESULT_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
+    name: "throw",
+    kind: MoldArgKind::Any,
+}];
+const BYTES_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
+    name: "fill",
+    kind: MoldArgKind::Int,
+}];
+const DIV_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
+    name: "default",
+    kind: MoldArgKind::Any,
+}];
 const SORT_OPTIONS: &[MoldOptionSpec] = &[
     MoldOptionSpec {
         name: "reverse",
@@ -200,11 +248,11 @@ const UNIQUE_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
 
 pub static MOLD_SPECS: &[MoldSpec] = &[
     // Primitive conversion / wrappers.
-    MoldSpec::exact("Int", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::range("Int", 1, Some(2), ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("Float", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Bool", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Str", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("Bytes", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("Bytes", 1, ANY1, MoldReturnKind::Pack).with_options(BYTES_OPTIONS),
     MoldSpec::exact("UInt8", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Char", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("CodePoint", 1, ANY1, MoldReturnKind::Pack),
@@ -219,7 +267,7 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("U32BEDecode", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("U32LEDecode", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("Lax", 0, Some(1), ANY1, MoldReturnKind::Pack),
-    MoldSpec::range("Result", 1, Some(2), ANY2, MoldReturnKind::Pack),
+    MoldSpec::range("Result", 1, Some(2), ANY2, MoldReturnKind::Pack).with_options(RESULT_OPTIONS),
     MoldSpec::exact("Async", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Gorillax", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("RelaxedGorillax", 1, ANY1, MoldReturnKind::Pack),
@@ -227,6 +275,14 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("StreamFrom", 1, LIST1, MoldReturnKind::Pack),
     MoldSpec::exact("Molten", 0, &[], MoldReturnKind::Pack),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("JSON", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("JSGet", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("JSCall", 3, ANY3, MoldReturnKind::Pack),
+    MoldSpec::exact("JSNew", 3, ANY3, MoldReturnKind::Pack),
+    MoldSpec::exact("JSSet", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("JSBind", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("JSSpread", 1, ANY1, MoldReturnKind::Pack),
     // Numeric / math.
     MoldSpec::exact("Sqrt", 1, ANY1, MoldReturnKind::Float),
     MoldSpec::exact("Pow", 2, ANY2, MoldReturnKind::Float),
@@ -251,22 +307,22 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("Truncate", 1, ANY1, MoldReturnKind::Int),
     MoldSpec::exact("Abs", 1, ANY1, MoldReturnKind::Dynamic),
     MoldSpec::exact("Clamp", 3, ANY3, MoldReturnKind::Dynamic),
-    MoldSpec::exact("Div", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("Div", 2, ANY2, MoldReturnKind::Pack).with_options(DIV_OPTIONS),
     MoldSpec::exact("Mod", 2, ANY2, MoldReturnKind::Pack),
     // String / bytes.
     MoldSpec::exact("TypeName", 1, ANY1, MoldReturnKind::Str),
     MoldSpec::exact("Upper", 1, ANY1, MoldReturnKind::Str),
     MoldSpec::exact("Lower", 1, ANY1, MoldReturnKind::Str),
-    MoldSpec::exact("Trim", 1, ANY1, MoldReturnKind::Str),
-    MoldSpec::exact("Replace", 3, ANY3, MoldReturnKind::Str),
+    MoldSpec::exact("Trim", 1, ANY1, MoldReturnKind::Str).with_options(TRIM_OPTIONS),
+    MoldSpec::exact("Replace", 3, ANY3, MoldReturnKind::Str).with_options(REPLACE_OPTIONS),
     MoldSpec::exact("ReplaceAll", 3, ANY3, MoldReturnKind::Str),
     MoldSpec::exact("Repeat", 2, ANY2, MoldReturnKind::Str),
-    MoldSpec::exact("Pad", 3, ANY3, MoldReturnKind::Str),
+    MoldSpec::exact("Pad", 2, ANY2, MoldReturnKind::Str).with_options(PAD_OPTIONS),
     MoldSpec::exact("PadLeft", 3, ANY3, MoldReturnKind::Str),
     MoldSpec::exact("PadRight", 3, ANY3, MoldReturnKind::Str),
     MoldSpec::exact("Join", 2, ANY2, MoldReturnKind::Str),
     MoldSpec::exact("ToFixed", 2, ANY2, MoldReturnKind::Str),
-    MoldSpec::exact("ToRadix", 2, ANY2, MoldReturnKind::Str),
+    MoldSpec::exact("ToRadix", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("StrOf", 2, ANY2, MoldReturnKind::Str),
     MoldSpec::exact("ByteSlice", 3, ANY3, MoldReturnKind::Str),
     MoldSpec::exact("StringRepeatJoin", 2, ANY2, MoldReturnKind::Str),
@@ -275,7 +331,7 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("CharAt", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("ByteSet", 3, ANY3, MoldReturnKind::Pack),
     MoldSpec::exact("BytesToList", 1, ANY1, MoldReturnKind::List),
-    MoldSpec::range("Slice", 2, Some(3), ANY3, MoldReturnKind::Dynamic),
+    MoldSpec::range("Slice", 1, Some(3), ANY3, MoldReturnKind::Dynamic).with_options(SLICE_OPTIONS),
     MoldSpec::range("Concat", 2, None, ANY2, MoldReturnKind::Dynamic),
     MoldSpec::exact("Chars", 1, ANY1, MoldReturnKind::List),
     MoldSpec::exact("Split", 2, ANY2, MoldReturnKind::List),
@@ -339,8 +395,8 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     )
     .enforce_checker(),
     MoldSpec::exact("Sum", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Min", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Max", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
+    MoldSpec::exact("Min", 1, LIST1, MoldReturnKind::Dynamic),
+    MoldSpec::exact("Max", 1, LIST1, MoldReturnKind::Dynamic),
     MoldSpec::exact("If", 3, BOOL_ANY_ANY, MoldReturnKind::Dynamic).enforce_checker(),
     // Async combinators.
     MoldSpec::exact("Cancel", 1, ANY1, MoldReturnKind::Pack),
@@ -392,7 +448,6 @@ mod tests {
             "PadRight",
             "Join",
             "ToFixed",
-            "ToRadix",
             // Byte-level slice + single-alloc repeat/join.
             "ByteSlice",
             "StringRepeatJoin",
@@ -559,6 +614,7 @@ mod tests {
             "Cage",
             "Find",
             "CharAt",
+            "ToRadix",
             "ShiftL",
             "ShiftR",
             "ByteSet",

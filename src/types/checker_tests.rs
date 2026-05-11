@@ -3595,7 +3595,7 @@ fn test_c12_1_mold_specs_matches_checker() {
         ("Trim", r#"Trim[" x "]()"#),
         ("Replace", r#"Replace["abc", "a", "z"]()"#),
         ("Repeat", r#"Repeat["a", 3]()"#),
-        ("Pad", r#"Pad["a", 3, "0"]()"#),
+        ("Pad", r#"Pad["a", 3]()"#),
         ("Join", r#"Join[@[1, 2], ","]()"#),
         ("ToFixed", r#"ToFixed[3.14, 2]()"#),
         // Int-returning

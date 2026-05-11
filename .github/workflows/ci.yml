@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, "feat/**"]
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
@@ -243,6 +243,13 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  mold-surface:
+    name: Mold Surface Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 scripts/lint/mold_surface_drift.py --strict
 
   # D28B-008 Round 3 wK — naming-convention lint hard-fail.
   #

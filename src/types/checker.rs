@@ -3201,6 +3201,8 @@ defaulted fields must be provided via `()`",
             MoldArgKind::Any => true,
             MoldArgKind::Bool => actual == &Type::Bool,
             MoldArgKind::Function => matches!(actual, Type::Function(_, _)),
+            MoldArgKind::Int => actual == &Type::Int,
+            MoldArgKind::Str => actual == &Type::Str,
             MoldArgKind::UnaryFunction => {
                 matches!(actual, Type::Function(params, _) if params.len() == 1)
             }
@@ -3229,6 +3231,8 @@ defaulted fields must be provided via `()`",
             MoldArgKind::Any => "any value",
             MoldArgKind::Bool => "Bool",
             MoldArgKind::Function => "function",
+            MoldArgKind::Int => "Int",
+            MoldArgKind::Str => "Str",
             MoldArgKind::UnaryFunction => "1-argument function",
             MoldArgKind::UnaryPredicate => "1-argument Bool predicate",
             MoldArgKind::BinaryFunction => "2-argument function",
