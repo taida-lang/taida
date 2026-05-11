@@ -12,8 +12,8 @@
 //   - FALSE NEGATIVE: a cross-module `:Bool` function lands in the
 //     typed table even though it is defined in another module.
 //
-// Both fixtures below are part of the active E34 Phase 2 acceptance
-// regression suite (no longer #[ignore]'d).
+// Both fixtures below are active regression coverage across the native and
+// wasm lowering paths (no longer #[ignore]'d).
 
 mod common;
 
@@ -23,6 +23,10 @@ use std::process::Command;
 
 fn taida_bin() -> PathBuf {
     common::taida_bin()
+}
+
+fn wasmtime_bin() -> Option<PathBuf> {
+    common::wasmtime_bin()
 }
 
 fn node_available() -> bool {
@@ -56,7 +60,7 @@ fn fixture_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(String, String); 3] {
+fn run_four_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(String, String); 4] {
     let interp = {
         let out = Command::new(taida_bin())
             .arg(main_path)
@@ -122,15 +126,47 @@ fn run_three_backends(main_path: &std::path::Path, dir: &std::path::Path) -> [(S
         String::new()
     };
 
+    let wasm_full = if let Some(wasmtime) = wasmtime_bin() {
+        let wasm = dir.join("main.wasm");
+        let build = Command::new(taida_bin())
+            .args(["build", "wasm-full"])
+            .arg(main_path)
+            .arg("-o")
+            .arg(&wasm)
+            .output()
+            .expect("build wasm-full");
+        assert!(
+            build.status.success(),
+            "wasm-full build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(wasmtime)
+            .args(["run", "--"])
+            .arg(&wasm)
+            .output()
+            .expect("wasmtime run");
+        let _ = fs::remove_file(&wasm);
+        assert!(
+            run.status.success(),
+            "wasm-full run failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        String::from_utf8_lossy(&run.stdout).trim().to_string()
+    } else {
+        eprintln!("wasmtime unavailable; skipping wasm-full leg");
+        String::new()
+    };
+
     [
         ("interp".to_string(), interp),
         ("js".to_string(), js),
         ("native".to_string(), native),
+        ("wasm-full".to_string(), wasm_full),
     ]
 }
 
 #[test]
-fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
+fn expr_is_bool_cross_module_bool_get_or_default_four_backend_parity() {
     // FALSE NEGATIVE — a Bool fn imported from another module must be
     // typed from the import signature, otherwise `getOrDefault(...)`
     // falls through to the polymorphic stringifier on Native.
@@ -145,7 +181,7 @@ fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
     )
     .expect("write main");
 
-    let results = run_three_backends(&main, &dir);
+    let results = run_four_backends(&main, &dir);
     let interp = results
         .iter()
         .find(|(b, _)| b == "interp")
@@ -170,11 +206,11 @@ fn expr_is_bool_cross_module_bool_get_or_default_three_backend_parity() {
 }
 
 #[test]
-fn expr_is_bool_pack_field_shadows_bool_method_three_backend_parity() {
+fn expr_is_bool_pack_field_shadows_bool_method_four_backend_parity() {
     // FALSE POSITIVE — a user-defined pack with a field named like a
     // built-in Bool method (`has`, `isEmpty`, `contains`, ...) must not
-    // be classified from the method name alone. Interp, JS, and Native
-    // should all render the Int value.
+    // be classified from the method name alone. Every enabled backend should
+    // render the Int value.
     let dir = fixture_dir("pack_shadow");
     let main = dir.join("main.td");
 
@@ -184,14 +220,14 @@ fn expr_is_bool_pack_field_shadows_bool_method_three_backend_parity() {
     )
     .expect("write main");
 
-    let results = run_three_backends(&main, &dir);
+    let results = run_four_backends(&main, &dir);
     let interp = results
         .iter()
         .find(|(b, _)| b == "interp")
         .map(|(_, o)| o.clone())
         .unwrap_or_default();
-    // The defaultFn for an unbound `Int => :Int` field returns 0; all
-    // three backends should agree on the Int representation.
+    // The defaultFn for an unbound `Int => :Int` field returns 0; all enabled
+    // backends should agree on the Int representation.
     assert_eq!(
         interp, "0",
         "interp must render the underlying Int (defaultFn returns 0)"

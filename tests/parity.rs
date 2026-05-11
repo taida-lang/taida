@@ -431,6 +431,50 @@ fn run_wasm_min_build_error(td_path: &Path, label: &str) -> Option<String> {
     Some(normalize(&String::from_utf8_lossy(&output.stderr)))
 }
 
+fn run_wasm_full_build_error(td_path: &Path, label: &str) -> Option<String> {
+    let wasm_path = unique_temp_path("taida_parity_wasm_full_err", label, "wasm");
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-full")
+        .arg(td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .ok()?;
+    let _ = fs::remove_file(&wasm_path);
+    if output.status.success() {
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn assert_all_backend_paths_reject_source(source: &str, label: &str, expected: &str) {
+    let td_path = unique_temp_path("taida_parity_reject", label, "td");
+    fs::write(&td_path, source).expect("write negative parity source");
+
+    let backends: [(&str, Option<String>); 4] = [
+        ("interpreter", run_interpreter_error(&td_path)),
+        ("js", run_js_build_error(&td_path, label)),
+        ("native", run_native_build_error(&td_path, label)),
+        ("wasm-full", run_wasm_full_build_error(&td_path, label)),
+    ];
+
+    let _ = fs::remove_file(&td_path);
+
+    for (backend, err) in backends {
+        let err =
+            err.unwrap_or_else(|| panic!("{}: {} unexpectedly accepted source", label, backend));
+        assert!(
+            err.contains(expected),
+            "{}: {} error should contain {}, got: {}",
+            label,
+            backend,
+            expected,
+            err
+        );
+    }
+}
+
 fn assert_e32b019_e1605_rejected_4backend(label: &str, source: &str) {
     let td_path = unique_temp_path("taida_e32b019_e1605", label, "td");
     fs::write(&td_path, source).expect("write E32B-019 source");
@@ -9367,6 +9411,73 @@ stdout("should not reach here")
         stderr.contains("handler must be a Function"),
         "NB-31: Interpreter stderr should mention handler type error, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_nb31_http_serve_bool_handler_rejects_without_crash() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= true
+attempt =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  result ]=> v
+  @(ok <= true, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+outcome <= attempt()
+stdout(outcome.ok.toString())
+stdout(outcome.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_bool_handler");
+    let js = run_net_js(&dir, "nb31_bool_handler")
+        .expect("NB-31: JS should not crash with Bool handler");
+    let native = run_net_native(&dir, "nb31_bool_handler")
+        .expect("NB-31: Native should not crash with Bool handler");
+    let interp_err = run_net_interpreter_runtime_error(&dir)
+        .expect("NB-31: interpreter should reject Bool handler");
+    let wasm_err = run_wasm_full_build_error(&dir.join("main.td"), "nb31_bool_handler")
+        .expect("NB-31: wasm-full should reject unsupported net surface");
+    cleanup_net_project(&dir);
+
+    for (backend, output) in [("JS", js), ("Native", native)] {
+        let lines: Vec<&str> = output.trim().lines().collect();
+        assert!(
+            lines.len() >= 2,
+            "NB-31 bool handler: {} output too short: {:?}",
+            backend,
+            output
+        );
+        assert_eq!(
+            lines[0], "false",
+            "NB-31 bool handler: {} ok field must be false",
+            backend
+        );
+        assert_eq!(
+            lines[1], "TypeError",
+            "NB-31 bool handler: {} kind must be TypeError",
+            backend
+        );
+    }
+    assert!(
+        interp_err.contains("handler must be a Function"),
+        "NB-31 bool handler: interpreter error should mention handler type, got: {}",
+        interp_err
+    );
+    assert!(
+        wasm_err.contains("[E1612]"),
+        "NB-31 bool handler: wasm-full should pin unsupported net rejection, got: {}",
+        wasm_err
     );
 }
 
@@ -40212,6 +40323,58 @@ val <= res.getOrDefault("oops")
 stdout(val)
 "#;
     assert_backends_reject_source(source, "e32b_021_result_get_or_default_type_mismatch");
+}
+
+#[test]
+fn monadic_function_argument_integrity_rejects_on_all_build_paths() {
+    let cases = [
+        (
+            "lax_map_arg_type",
+            r#"
+fn1 x: Str = x.length() => :Int
+obj <= Lax[42]()
+result <= obj.map(fn1)
+"#,
+        ),
+        (
+            "lax_map_chain_break",
+            r#"
+intToStr x: Int = x.toString() => :Str
+doubleInt x: Int = x * 2 => :Int
+obj <= Lax[42]()
+bad <= obj.map(intToStr).map(doubleInt)
+"#,
+        ),
+        (
+            "lax_flat_map_return",
+            r#"
+doubleInt x: Int = x * 2 => :Int
+obj <= Lax[42]()
+bad <= obj.flatMap(doubleInt)
+"#,
+        ),
+        (
+            "async_map_arg_type",
+            r#"
+fnStr s: Str = s.length() => :Int
+a <= Async[42]()
+result <= a.map(fnStr)
+"#,
+        ),
+        (
+            "result_map_error_payload",
+            r#"
+Error => Fail = @(message: Str)
+renderStr s: Str = "prefix: " + s => :Str
+r <= Result[0](throw <= Fail(message <= "boom"))
+mapped <= r.mapError(renderStr)
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_all_backend_paths_reject_source(source, label, "[E1508]");
+    }
 }
 
 // ── E32B-030: Native Lax[Bool].getOrDefault parity gap ───────────────
