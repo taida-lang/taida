@@ -34272,7 +34272,7 @@ stdout(Repeat["ab", 3]())
 // `emit_call_arg_tags` path picked up the wrong tag and the callee's
 // runtime display used Pack heuristics).
 //
-// C12-1 introduces `src/types/mold_returns.rs` as the single source of
+// C12-1 introduces `src/types/mold_specs.rs` as the single source of
 // truth and wires `expr_type_tag()` through it. These parity tests lock
 // in that Str-returning molds travel across user-function boundaries
 // and render identically on interpreter / JS / native — exercising the
@@ -34317,7 +34317,7 @@ print_int(Round[4.5]())
 // still prints `1`/`0` on the native backend instead of `true`/`false`.
 // That is the FB-1 param_tag_vars-non-propagation issue and is
 // explicitly the C12-11 Phase's scope. C12-1 only fixes the compile-
-// time tag table (`src/types/mold_returns.rs`) so `expr_type_tag()` is
+// time tag table (`src/types/mold_specs.rs`) so `expr_type_tag()` is
 // authoritative for MoldInst return types; wiring param_tag_vars into
 // stdout's tagged-dispatch path is done in C12-11. The direct literal
 // case (`print_any(true)`) also exhibits the same FB-1 gap on main.
@@ -34839,7 +34839,7 @@ print_any(false)
 }
 
 /// C12-11 (a): Bool-returning MoldInst passed to a user function.
-/// `TypeIs[...]()` has compile tag 2 per `src/types/mold_returns.rs`,
+/// `TypeIs[...]()` has compile tag 2 per `src/types/mold_specs.rs`,
 /// `emit_call_arg_tags` sets the caller slot to 2, and the callee's
 /// `param_tag_vars[v]` is read back at the `stdout(v)` site.
 #[test]

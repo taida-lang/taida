@@ -3526,10 +3526,10 @@ C => A = @(d: Int)
 }
 
 // ────────────────────────────────────────────────────────────────
-// C12-1c: mold_returns table ↔ checker builtin-mold consistency
+// C12-1c: mold_specs table ↔ checker builtin-mold consistency
 // ────────────────────────────────────────────────────────────────
 //
-// `src/types/mold_returns.rs` is the single source of truth for builtin
+// `src/types/mold_specs.rs` is the single source of truth for builtin
 // mold return tags. The checker (`Expr::MoldInst` branch of
 // `infer_expr_type`) maintains a richer Type-level mapping because it
 // needs Type::Generic("Lax", vec![Type::Str]) and similar. We verify
@@ -3570,8 +3570,8 @@ fn type_to_tag(t: &Type) -> Option<i64> {
 }
 
 #[test]
-fn test_c12_1_mold_returns_matches_checker() {
-    use crate::types::mold_returns;
+fn test_c12_1_mold_specs_matches_checker() {
+    use crate::types::mold_specs;
 
     // For each name with a static tag, construct a minimal MoldInst that
     // the checker can infer, then confirm the tag matches.
@@ -3611,9 +3611,9 @@ fn test_c12_1_mold_returns_matches_checker() {
     ];
 
     for (mold_name, src) in cases {
-        let expected_tag = mold_returns::mold_return_tag(mold_name).unwrap_or_else(|| {
+        let expected_tag = mold_specs::mold_return_tag(mold_name).unwrap_or_else(|| {
             panic!(
-                "mold_returns::mold_return_tag({}) returned None but case declares a static tag",
+                "mold_specs::mold_return_tag({}) returned None but case declares a static tag",
                 mold_name
             )
         });
@@ -3644,10 +3644,71 @@ fn test_c12_1_mold_returns_matches_checker() {
         });
         assert_eq!(
             actual_tag, expected_tag,
-            "tag mismatch for {}: mold_returns table says {} but checker inferred {:?} (tag {})",
+            "tag mismatch for {}: mold_specs table says {} but checker inferred {:?} (tag {})",
             mold_name, expected_tag, t, actual_tag
         );
     }
+}
+
+#[test]
+fn builtin_mold_registry_rejects_map_missing_function_arg() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Map[nums]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1505]") && e.message.contains("Map")),
+        "expected registry arity error for Map[nums](), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_filter_non_function_arg() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Filter[nums, 1]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]") && e.message.contains("function")),
+        "expected registry function-arg error for Filter[nums, 1](), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_sort_unknown_option() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Sort[nums](bogus <= true)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1406]")),
+        "expected registry option error for Sort bogus option, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_sort_by_non_function() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Sort[nums](by <= 1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]") && e.message.contains("option 'by'")),
+        "expected registry option type error for Sort by option, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_accepts_sort_options() {
+    let source = "nums <= @[1, 2, 3]\nok <= Sort[nums](by <= _ x = x, desc <= true)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "registry-backed Sort options should type-check, got: {:?}",
+        errors
+    );
 }
 
 // ── C12-2: FB-10 `.toString()` universal adoption ──

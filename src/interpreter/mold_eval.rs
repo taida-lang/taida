@@ -1006,7 +1006,7 @@ impl Interpreter {
             // These interpreter implementations delegate to `f64::sqrt`,
             // `f64::powf`, etc. NaN / ±Infinity / denormal are preserved
             // as Rust's `f64` semantics. Accepting `Int` widens to `f64`
-            // first; `Pow[Int, Int]` returns Float per `mold_returns.rs`.
+            // first; `Pow[Int, Int]` returns Float per `mold_specs.rs`.
             "Sqrt" => eval_unary_math(self, type_args, "Sqrt", f64::sqrt),
             "Exp" => eval_unary_math(self, type_args, "Exp", f64::exp),
             "Ln" => eval_unary_math(self, type_args, "Ln", f64::ln),

@@ -1,7 +1,7 @@
 #![allow(clippy::module_inception)]
 
 mod checker;
-pub mod mold_returns;
+pub mod mold_specs;
 pub mod typed_hir;
 mod types;
 

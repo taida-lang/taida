@@ -224,7 +224,7 @@ impl Lowering {
                 }
             }
             // C12-1b (FB-27): MoldInst return-type tag dispatch now consults the
-            // single-source-of-truth table in `src/types/mold_returns.rs` instead
+            // single-source-of-truth table in `src/types/mold_specs.rs` instead
             // of hardcoding Pack (4) for every mold. This lets stdout/stderr
             // route Str / Int / Float / Bool / List returning molds through
             // `taida_io_stdout_with_tag` without the B11-2f `convert_to_string`
@@ -233,7 +233,7 @@ impl Lowering {
             // Ordering: explicit handling still applies for Dynamic molds whose
             // return tag depends on argument types (Concat / Slice / Abs / ...).
             Expr::MoldInst(name, type_args, _, _) => {
-                if let Some(tag) = crate::types::mold_returns::mold_return_tag(name) {
+                if let Some(tag) = crate::types::mold_specs::mold_return_tag(name) {
                     return tag;
                 }
                 // Dynamic / user-defined molds: try argument-based inference

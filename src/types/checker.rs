@@ -3071,6 +3071,157 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    fn validate_builtin_mold_spec(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        fields: &[BuchiField],
+        span: &Span,
+    ) {
+        let Some(spec) = crate::types::mold_specs::lookup_mold_spec(name) else {
+            return;
+        };
+
+        if spec.checker_enforced && !spec.accepts_arity(type_args.len()) {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `{}` expects {} positional `[]` argument(s), got {}.",
+                    name,
+                    spec.arity_description(),
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+        }
+
+        if spec.checker_enforced {
+            for (idx, arg) in type_args.iter().enumerate() {
+                let Some(kind) = spec.arg_kinds.get(idx).copied() else {
+                    continue;
+                };
+                self.validate_builtin_mold_arg_kind(name, idx, arg, kind, span);
+            }
+        }
+
+        if spec.options.is_empty() {
+            return;
+        }
+
+        let mut seen = std::collections::HashSet::<String>::new();
+        for field in fields {
+            if !seen.insert(field.name.clone()) {
+                self.errors.push(TypeError {
+                    message: Self::binding_diag(
+                        "E1404",
+                        format!("MoldInst '{}' has duplicate option '{}'", name, field.name),
+                        "Specify each named option in `()` at most once.",
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            let Some(option) = spec.options.iter().find(|option| option.name == field.name) else {
+                self.errors.push(TypeError {
+                    message: Self::binding_diag(
+                        "E1406",
+                        format!(
+                            "MoldInst '{}' has undefined option '{}' in `()`",
+                            name, field.name
+                        ),
+                        "Use only named options declared by the builtin mold registry.",
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            };
+            self.validate_builtin_mold_option_kind(name, &field.name, &field.value, option.kind);
+        }
+    }
+
+    fn validate_builtin_mold_arg_kind(
+        &mut self,
+        mold_name: &str,
+        idx: usize,
+        arg: &Expr,
+        kind: crate::types::mold_specs::MoldArgKind,
+        span: &Span,
+    ) {
+        let actual = self.infer_expr_type(arg);
+        if self.builtin_mold_kind_matches(&actual, kind) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1506] `{}` argument {} has type {}, expected {}.",
+                mold_name,
+                idx + 1,
+                actual,
+                Self::builtin_mold_kind_label(kind)
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn validate_builtin_mold_option_kind(
+        &mut self,
+        mold_name: &str,
+        option_name: &str,
+        value: &Expr,
+        kind: crate::types::mold_specs::MoldArgKind,
+    ) {
+        let actual = self.infer_expr_type(value);
+        if self.builtin_mold_kind_matches(&actual, kind) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1506] `{}` option '{}' has type {}, expected {}.",
+                mold_name,
+                option_name,
+                actual,
+                Self::builtin_mold_kind_label(kind)
+            ),
+            span: value.span().clone(),
+        });
+    }
+
+    fn builtin_mold_kind_matches(
+        &self,
+        actual: &Type,
+        kind: crate::types::mold_specs::MoldArgKind,
+    ) -> bool {
+        use crate::types::mold_specs::MoldArgKind;
+
+        if actual == &Type::Unknown || Self::contains_unknown(actual) {
+            return true;
+        }
+        match kind {
+            MoldArgKind::Any => true,
+            MoldArgKind::Bool => actual == &Type::Bool,
+            MoldArgKind::Function => matches!(actual, Type::Function(_, _)),
+            MoldArgKind::List => matches!(actual, Type::List(_)),
+            MoldArgKind::ListOrStream => {
+                matches!(actual, Type::List(_))
+                    || matches!(actual, Type::Generic(name, _) if name == "Stream")
+            }
+            MoldArgKind::Numeric => actual.is_numeric(),
+        }
+    }
+
+    fn builtin_mold_kind_label(kind: crate::types::mold_specs::MoldArgKind) -> &'static str {
+        use crate::types::mold_specs::MoldArgKind;
+
+        match kind {
+            MoldArgKind::Any => "any value",
+            MoldArgKind::Bool => "Bool",
+            MoldArgKind::Function => "function",
+            MoldArgKind::List => "List",
+            MoldArgKind::ListOrStream => "List or Stream",
+            MoldArgKind::Numeric => "numeric",
+        }
+    }
+
     fn validate_mold_header_constraints(&mut self, name: &str, type_args: &[Expr], span: &Span) {
         let Some(spec) = self.mold_header_specs.get(name).cloned() else {
             return;
@@ -5536,6 +5687,7 @@ defaulted fields must be provided via `()`",
 
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
                 self.validate_mold_header_constraints(name, type_args, mold_span);
+                self.validate_builtin_mold_spec(name, type_args, fields, mold_span);
                 match name.as_str() {
                     // JSON[raw, Schema]() returns Lax (wrapping the schema type)
                     "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),

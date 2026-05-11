@@ -60,7 +60,7 @@ impl Lowering {
                 self.float_vars.contains(name) || self.stdlib_constants.contains_key(name)
             }
             // C25B-025 Phase 5-I: math mold family returns Float. Must
-            // match the `Float` entries in `src/types/mold_returns.rs`
+            // match the `Float` entries in `src/types/mold_specs.rs`
             // so nested calls (`Sqrt[Pow[2.0, 3]()]`) skip the
             // int→float widening in the outer mold's lowering.
             Expr::MoldInst(name, _, _, _) => {
@@ -571,7 +571,7 @@ impl Lowering {
                 self.float_vars.insert(target.to_string());
             }
             // C26B-011 (Phase 11): math molds return Float per
-            // `src/types/mold_returns.rs`. Previously `Sqrt[-1.0]() ]=> nan`
+            // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() ]=> nan`
             // left `nan` untagged and `debug(nan)` fell through to
             // `taida_debug_int`, printing the f64 bit-pattern as Int
             // (e.g. `-2251799813685248` for NaN). Must match

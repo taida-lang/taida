@@ -841,7 +841,7 @@ impl Lowering {
             // libm (`sqrt`, `pow`, `sin`, ...); wasm uses manual
             // freestanding implementations in
             // `runtime_core_wasm/03_typeof_list.inc.c`. All molds
-            // return Float per `src/types/mold_returns.rs` and widen
+            // return Float per `src/types/mold_specs.rs` and widen
             // Int arguments to Float via `taida_int_to_float` first
             // (same as interpreter's `eval_unary_math` which accepts
             // either Int or Float and widens Int to f64).

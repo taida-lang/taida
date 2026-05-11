@@ -303,7 +303,7 @@ fn float_local_to_string_wasm_parity() {
 //   `_wasm_stdout_display_string` + tight `_is_pack_for_stdout` guard
 //   (List / HashMap / Set / Async excluded so `stdout(@[1,2,3])` still
 //   prints the list form).
-// * `src/types/mold_returns.rs` — `Int`/`Float`/`Bool`/`Str` moved to
+// * `src/types/mold_specs.rs` — `Int`/`Float`/`Bool`/`Str` moved to
 //   the `Pack` table so `expr_type_tag(Float[x]())` no longer reports
 //   the primitive output type and mis-routes the Lax pointer through
 //   the FLOAT fast path.
