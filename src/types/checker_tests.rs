@@ -3670,8 +3670,39 @@ fn builtin_mold_registry_rejects_filter_non_function_arg() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("[E1506]") && e.message.contains("function")),
+            .any(|e| e.message.contains("[E1506]")
+                && e.message.contains("1-argument Bool predicate")),
         "expected registry function-arg error for Filter[nums, 1](), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_filter_non_bool_callback() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Filter[nums, _ x = x.toString()]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("Filter")
+                && e.message.contains("1-argument Bool predicate")
+        }),
+        "expected registry predicate error for Filter callback, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_fold_unary_callback() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Fold[nums, 0, _ x = x]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("Fold")
+                && e.message.contains("2-argument function")
+        }),
+        "expected registry arity error for Fold callback, got: {:?}",
         errors
     );
 }

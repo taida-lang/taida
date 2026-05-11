@@ -55,6 +55,9 @@ pub enum MoldArgKind {
     Any,
     Bool,
     Function,
+    UnaryFunction,
+    UnaryPredicate,
+    BinaryFunction,
     List,
     ListOrStream,
     Numeric,
@@ -163,11 +166,17 @@ const ANY2: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any];
 const ANY3: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any, MoldArgKind::Any];
 const BOOL_ANY_ANY: &[MoldArgKind] = &[MoldArgKind::Bool, MoldArgKind::Any, MoldArgKind::Any];
 const LIST1: &[MoldArgKind] = &[MoldArgKind::List];
-const LIST_FUNCTION: &[MoldArgKind] = &[MoldArgKind::ListOrStream, MoldArgKind::Function];
+const LIST_UNARY_FUNCTION: &[MoldArgKind] =
+    &[MoldArgKind::ListOrStream, MoldArgKind::UnaryFunction];
+const LIST_UNARY_PREDICATE: &[MoldArgKind] =
+    &[MoldArgKind::ListOrStream, MoldArgKind::UnaryPredicate];
 const LIST_ANY: &[MoldArgKind] = &[MoldArgKind::List, MoldArgKind::Any];
-const LIST_ANY_FUNCTION: &[MoldArgKind] =
-    &[MoldArgKind::List, MoldArgKind::Any, MoldArgKind::Function];
-const LIST_FUNCTION_ONLY: &[MoldArgKind] = &[MoldArgKind::List, MoldArgKind::Function];
+const LIST_ANY_BINARY_FUNCTION: &[MoldArgKind] = &[
+    MoldArgKind::List,
+    MoldArgKind::Any,
+    MoldArgKind::BinaryFunction,
+];
+const LIST_PREDICATE_ONLY: &[MoldArgKind] = &[MoldArgKind::List, MoldArgKind::UnaryPredicate];
 const ASYNC_NUM: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Numeric];
 
 const SORT_OPTIONS: &[MoldOptionSpec] = &[
@@ -181,12 +190,12 @@ const SORT_OPTIONS: &[MoldOptionSpec] = &[
     },
     MoldOptionSpec {
         name: "by",
-        kind: MoldArgKind::Function,
+        kind: MoldArgKind::UnaryFunction,
     },
 ];
 const UNIQUE_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
     name: "by",
-    kind: MoldArgKind::Function,
+    kind: MoldArgKind::UnaryFunction,
 }];
 
 pub static MOLD_SPECS: &[MoldSpec] = &[
@@ -305,18 +314,30 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("Flatten", 1, LIST1, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Reverse", 1, ANY1, MoldReturnKind::Dynamic).enforce_checker(),
     MoldSpec::exact("Take", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
-    MoldSpec::exact("TakeWhile", 2, LIST_FUNCTION_ONLY, MoldReturnKind::List).enforce_checker(),
+    MoldSpec::exact("TakeWhile", 2, LIST_PREDICATE_ONLY, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Drop", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
-    MoldSpec::exact("DropWhile", 2, LIST_FUNCTION_ONLY, MoldReturnKind::List).enforce_checker(),
+    MoldSpec::exact("DropWhile", 2, LIST_PREDICATE_ONLY, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Append", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Prepend", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Zip", 2, ANY2, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Enumerate", 1, LIST1, MoldReturnKind::List).enforce_checker(),
-    MoldSpec::exact("Map", 2, LIST_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Filter", 2, LIST_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Fold", 3, LIST_ANY_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Foldr", 3, LIST_ANY_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Reduce", 3, LIST_ANY_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
+    MoldSpec::exact("Map", 2, LIST_UNARY_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
+    MoldSpec::exact("Filter", 2, LIST_UNARY_PREDICATE, MoldReturnKind::Dynamic).enforce_checker(),
+    MoldSpec::exact("Fold", 3, LIST_ANY_BINARY_FUNCTION, MoldReturnKind::Dynamic).enforce_checker(),
+    MoldSpec::exact(
+        "Foldr",
+        3,
+        LIST_ANY_BINARY_FUNCTION,
+        MoldReturnKind::Dynamic,
+    )
+    .enforce_checker(),
+    MoldSpec::exact(
+        "Reduce",
+        3,
+        LIST_ANY_BINARY_FUNCTION,
+        MoldReturnKind::Dynamic,
+    )
+    .enforce_checker(),
     MoldSpec::exact("Sum", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
     MoldSpec::exact("Min", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
     MoldSpec::exact("Max", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
@@ -482,6 +503,47 @@ mod tests {
     fn user_defined_molds_return_none() {
         assert_eq!(mold_return_tag("MyMold"), None);
         assert_eq!(mold_return_tag("UserPack"), None);
+    }
+
+    #[test]
+    fn registry_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in MOLD_SPECS {
+            assert!(
+                seen.insert(spec.name),
+                "duplicate mold spec for {}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn enforced_specs_have_kind_for_each_positional_arg() {
+        for spec in MOLD_SPECS.iter().filter(|spec| spec.checker_enforced) {
+            let max_arity = spec.arity_max.unwrap_or(spec.arity_min);
+            assert!(
+                spec.arg_kinds.len() >= max_arity,
+                "{} enforces {} positional args but only has {} kind entries",
+                spec.name,
+                max_arity,
+                spec.arg_kinds.len()
+            );
+        }
+    }
+
+    #[test]
+    fn registry_option_names_are_unique_per_mold() {
+        for spec in MOLD_SPECS {
+            let mut seen = std::collections::HashSet::new();
+            for option in spec.options {
+                assert!(
+                    seen.insert(option.name),
+                    "duplicate option {} for {}",
+                    option.name,
+                    spec.name
+                );
+            }
+        }
     }
 
     #[test]

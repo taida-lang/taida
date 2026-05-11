@@ -3082,7 +3082,8 @@ defaulted fields must be provided via `()`",
             return;
         };
 
-        if spec.checker_enforced && !spec.accepts_arity(type_args.len()) {
+        let arity_ok = !spec.checker_enforced || spec.accepts_arity(type_args.len());
+        if !arity_ok {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1505] `{}` expects {} positional `[]` argument(s), got {}.",
@@ -3094,7 +3095,7 @@ defaulted fields must be provided via `()`",
             });
         }
 
-        if spec.checker_enforced {
+        if spec.checker_enforced && arity_ok {
             for (idx, arg) in type_args.iter().enumerate() {
                 let Some(kind) = spec.arg_kinds.get(idx).copied() else {
                     continue;
@@ -3193,13 +3194,25 @@ defaulted fields must be provided via `()`",
     ) -> bool {
         use crate::types::mold_specs::MoldArgKind;
 
-        if actual == &Type::Unknown || Self::contains_unknown(actual) {
+        if matches!(actual, Type::Unknown | Type::Any) {
             return true;
         }
         match kind {
             MoldArgKind::Any => true,
             MoldArgKind::Bool => actual == &Type::Bool,
             MoldArgKind::Function => matches!(actual, Type::Function(_, _)),
+            MoldArgKind::UnaryFunction => {
+                matches!(actual, Type::Function(params, _) if params.len() == 1)
+            }
+            MoldArgKind::UnaryPredicate => match actual {
+                Type::Function(params, ret) if params.len() == 1 => {
+                    matches!(ret.as_ref(), Type::Bool | Type::Unknown | Type::Any)
+                }
+                _ => false,
+            },
+            MoldArgKind::BinaryFunction => {
+                matches!(actual, Type::Function(params, _) if params.len() == 2)
+            }
             MoldArgKind::List => matches!(actual, Type::List(_)),
             MoldArgKind::ListOrStream => {
                 matches!(actual, Type::List(_))
@@ -3216,6 +3229,9 @@ defaulted fields must be provided via `()`",
             MoldArgKind::Any => "any value",
             MoldArgKind::Bool => "Bool",
             MoldArgKind::Function => "function",
+            MoldArgKind::UnaryFunction => "1-argument function",
+            MoldArgKind::UnaryPredicate => "1-argument Bool predicate",
+            MoldArgKind::BinaryFunction => "2-argument function",
             MoldArgKind::List => "List",
             MoldArgKind::ListOrStream => "List or Stream",
             MoldArgKind::Numeric => "numeric",
