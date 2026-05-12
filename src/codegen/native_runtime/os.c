@@ -1,8 +1,32 @@
 // ── taida-lang/os package — Native runtime ────────────────
 
-// Helper: build os Result success BuchiPack @(ok=true, code=0, message="")
+// Helper: build os Result pack. OS Result constructors preserve the
+// interpreter's field order: __value, throw, __predicate, __type.
+static taida_val taida_os_result_create(taida_val inner, taida_val throw_val) {
+    taida_register_result_field_names();
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_RES___VALUE);
+    taida_pack_set(pack, 0, inner);
+    taida_retain_and_tag_field(pack, 0, inner);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_RES_THROW);
+    taida_pack_set(pack, 1, throw_val);
+    if (throw_val != 0) {
+        taida_retain_and_tag_field(pack, 1, throw_val);
+    } else {
+        taida_pack_set_tag(pack, 1, TAIDA_TAG_PACK);
+    }
+    taida_pack_set_hash(pack, 2, (taida_val)HASH_RES___PREDICATE);
+    taida_pack_set(pack, 2, 0);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__result_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    return pack;
+}
+
+// Helper: build os Result success BuchiPack.
 static taida_val taida_os_result_success(taida_val inner) {
-    return taida_result_create(inner, 0, 0);
+    return taida_os_result_create(inner, 0);
 }
 
 // Helper: build os Result failure with IoError
@@ -31,7 +55,7 @@ static taida_val taida_os_result_failure(int err_code, const char *err_msg) {
     taida_pack_set(inner, 3, (taida_val)kind_copy);
 
     taida_val error = taida_make_io_error(err_code, message);
-    return taida_result_create(inner, error, 0);
+    return taida_os_result_create(inner, error);
 }
 
 // Helper: build os ok inner @(ok=true, code=0, message="")
@@ -307,7 +331,7 @@ taida_val taida_os_stat(taida_val path_ptr) {
 // polymorphic `.toString()` / stdout prints "true"/"false" rather
 // than "1"/"0".
 static taida_val taida_os_result_success_bool(taida_val b) {
-    taida_val r = taida_result_create(b ? 1 : 0, 0, 0);
+    taida_val r = taida_os_result_success(b ? 1 : 0);
     taida_pack_set_tag(r, 0, TAIDA_TAG_BOOL);
     return r;
 }
@@ -942,4 +966,3 @@ taida_val taida_os_argv(void) {
 #include <signal.h>   // NB3-5: SIGPIPE suppression for peer-close resilience
 #include <dlfcn.h>    // NET5-4a: dlopen for OpenSSL TLS support
 #include <stdbool.h>  // NET7-8a: bool type for quiche FFI
-

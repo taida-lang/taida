@@ -812,7 +812,7 @@ function None() { throw new __NativeError('None() has been removed. Optional is 
 // Result[value, pred]() => r — predicate unevaluated (stored as __predicate)
 // Result[value, pred]() ]=> r — predicate evaluated: true → value T, false → throw
 // Result[value]() — backward compatible: no predicate (always success if no throw)
-function __taida_result_create(value, throwVal, predicate) {
+function __taida_result_create(value, throwVal, predicate, displayOrder) {
   const _value = value;
   const _throw = throwVal || null;
   const _pred = (typeof predicate === 'function') ? predicate : null;
@@ -836,7 +836,7 @@ function __taida_result_create(value, throwVal, predicate) {
     }
     return false;
   }
-  return Object.freeze({
+  const result = {
     __type: 'Result',
     __value: _value,
     __predicate: _pred,
@@ -925,7 +925,15 @@ function __taida_result_create(value, throwVal, predicate) {
       }
       return _value;
     },
-  });
+  };
+  if (displayOrder) {
+    Object.defineProperty(result, '__taidaResultDisplayOrder', {
+      value: displayOrder,
+      enumerable: false,
+      configurable: false,
+    });
+  }
+  return Object.freeze(result);
 }
 
 // ── Ok() / Err() — ABOLISHED ─────────────────────────────
@@ -1208,14 +1216,18 @@ function __taida_display_string(v) {
         + ', __type <= "Lax")';
     }
     if (v.__type === 'Result') {
-      // Mirror interpreter Result.to_display_string (full form).
-      const ok = typeof v.isSuccess === 'function' ? v.isSuccess() : !v.__isError;
-      if (ok) {
+      const pred = v.__predicate ? __taida_format(v.__predicate) : '@()';
+      const thrown = (v.throw !== null && v.throw !== undefined) ? __taida_format(v.throw) : '@()';
+      if (v.__taidaResultDisplayOrder === 'os') {
         return '@(__value <= ' + __taida_format(v.__value)
-          + ', __isError <= false, throw <= @())';
+          + ', throw <= ' + thrown
+          + ', __predicate <= ' + pred
+          + ', __type <= "Result")';
       }
-      return '@(__value <= @(), __isError <= true, throw <= '
-        + __taida_format(v.__error !== undefined ? v.__error : {}) + ')';
+      return '@(__value <= ' + __taida_format(v.__value)
+        + ', __predicate <= ' + pred
+        + ', throw <= ' + thrown
+        + ', __type <= "Result")';
     }
     if (v.__type === 'Async') {
       const status = v.status;
@@ -2151,8 +2163,7 @@ function __taida_stdout(...args) {
         rendered = 'Async[pending]';
       }
     } else if (arg && arg.__type === 'Result') {
-      if (arg.isSuccess()) rendered = 'Result[' + String(arg.__value) + ']';
-      else rendered = 'Result(throw)';
+      rendered = __taida_display_string(arg);
     } else if (arg && arg.__type === 'Lax') {
       // Match interpreter BuchiPack display format.
       // C21B-seed-04 re-fix: when the Lax was produced by `Float_mold_f`

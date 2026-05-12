@@ -17,7 +17,7 @@ const __OS_MAX_READ_SIZE = 64 * 1024 * 1024; // 64 MB
 
 // Helper: create os Result success value
 function __taida_os_result_ok(inner) {
-  return __taida_result_create(inner, null, null);
+  return __taida_result_create(inner, null, null, 'os');
 }
 
 // Helper: build IoError value from runtime error object.
@@ -70,7 +70,7 @@ function __taida_os_result_fail(err) {
   const message = err && err.message ? err.message : String(err);
   const kind = __taida_os_classify_error_kind(err);
   const inner = Object.freeze({ ok: false, code: code, message: message, kind: kind });
-  return __taida_result_create(inner, __taida_os_io_error(err), null);
+  return __taida_result_create(inner, __taida_os_io_error(err), null, 'os');
 }
 
 // Helper: create os Result failure with explicit kind/message (non-OS errors)
@@ -79,7 +79,7 @@ function __taida_os_result_fail_with_kind(kind, message) {
   // E33B-003 Cat B: lift `code` and `kind` to top-level for `err.X` parity
   // with Interpreter / Native. Keep `fields.X` for legacy callers.
   const errVal = { __type: 'IoError', type: 'IoError', message: message, code: -1, kind: kind, fields: { code: -1, kind: kind } };
-  return __taida_result_create(inner, errVal, null);
+  return __taida_result_create(inner, errVal, null, 'os');
 }
 
 function __taida_os_gorillax_ok(inner) {

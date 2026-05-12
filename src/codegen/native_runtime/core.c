@@ -7331,34 +7331,38 @@ taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val pr
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_RES___VALUE);
     taida_pack_set(pack, 0, value);
-    // retain-on-store: value が Pack/List/Closure の場合 retain
-    // value の型は不明なので magic header で判定
-    if (value > 4096 && taida_ptr_is_readable(value, sizeof(taida_val))) {
-        taida_val vtag = ((taida_val*)value)[0] & TAIDA_MAGIC_MASK;
-        if (vtag == TAIDA_PACK_MAGIC || vtag == TAIDA_LIST_MAGIC || vtag == TAIDA_CLOSURE_MAGIC) {
-            taida_retain(value);
-            // value の型タグも設定
-            if (vtag == TAIDA_PACK_MAGIC) taida_pack_set_tag(pack, 0, TAIDA_TAG_PACK);
-            else if (vtag == TAIDA_LIST_MAGIC) taida_pack_set_tag(pack, 0, TAIDA_TAG_LIST);
-            else taida_pack_set_tag(pack, 0, TAIDA_TAG_CLOSURE);
-        }
-    }
+    taida_retain_and_tag_field(pack, 0, value);
     taida_pack_set_hash(pack, 1, (taida_val)HASH_RES___PREDICATE);
     taida_pack_set(pack, 1, predicate);  // 0 = no predicate, non-zero = function pointer
     if (predicate != 0) {
         taida_pack_set_tag(pack, 1, TAIDA_TAG_CLOSURE);
         taida_retain(predicate);  // retain-on-store: closure child
+    } else {
+        taida_pack_set_tag(pack, 1, TAIDA_TAG_PACK);  // Unit @()
     }
     taida_pack_set_hash(pack, 2, (taida_val)HASH_RES_THROW);
     taida_pack_set(pack, 2, throw_val);  // 0 = success (Unit), non-zero = error
     if (throw_val != 0) {
-        taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
-        taida_retain(throw_val);  // retain-on-store: pack child
+        taida_retain_and_tag_field(pack, 2, throw_val);
+    } else {
+        taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);  // Unit @()
     }
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__result_type_str);
-    // __result_type_str is static - leave tag as INT(0)
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
     return pack;
+}
+
+static taida_val taida_result_get_value(taida_val result) {
+    return taida_pack_get(result, (taida_val)HASH_RES___VALUE);
+}
+
+static taida_val taida_result_get_predicate(taida_val result) {
+    return taida_pack_get(result, (taida_val)HASH_RES___PREDICATE);
+}
+
+static taida_val taida_result_get_throw(taida_val result) {
+    return taida_pack_get(result, (taida_val)HASH_RES_THROW);
 }
 
 // Helper: check if Result has error
@@ -7366,9 +7370,9 @@ taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val pr
 // 2. If predicate exists, evaluate P(value) — true = success, false = error
 // 3. No predicate + no throw = success (backward compatible)
 static taida_val taida_result_is_error_check(taida_val result) {
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw
-    taida_val pred = taida_pack_get_idx(result, 1);  // __predicate
-    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val throw_val = taida_result_get_throw(result);
+    taida_val pred = taida_result_get_predicate(result);
+    taida_val value = taida_result_get_value(result);
 
     if (throw_val != 0) {
         // If predicate exists, evaluate it even when throw is set
@@ -7391,7 +7395,7 @@ taida_val taida_result_is_ok(taida_val result) {
 }
 
 taida_val taida_result_get_or_default(taida_val result, taida_val def) {
-    if (!taida_result_is_error_check(result)) return taida_pack_get_idx(result, 0);
+    if (!taida_result_is_error_check(result)) return taida_result_get_value(result);
     return def;
 }
 
@@ -7406,7 +7410,7 @@ taida_val taida_result_map(taida_val result, taida_val fn_ptr) {
     if (taida_result_is_error_check(result)) {
         return result;  // Error: return as-is
     }
-    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val value = taida_result_get_value(result);
     taida_val new_val = taida_invoke_callback1(fn_ptr, value);
     return taida_result_create(new_val, 0, 0);  // success, no predicate
 }
@@ -7416,7 +7420,7 @@ taida_val taida_result_flat_map(taida_val result, taida_val fn_ptr) {
     if (taida_result_is_error_check(result)) {
         return result;
     }
-    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val value = taida_result_get_value(result);
     taida_val new_result = taida_invoke_callback1(fn_ptr, value);
     return new_result;
 }
@@ -7428,7 +7432,7 @@ taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
     if (!taida_result_is_error_check(result)) {
         return result;  // Success: return as-is
     }
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
+    taida_val throw_val = taida_result_get_throw(result);
     taida_val mapped = taida_invoke_callback1(fn_ptr, throw_val);
     // Snapshot the callback return tag immediately — the helpers
     // below clear and reuse it.
@@ -7474,9 +7478,9 @@ taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
 // Result.getOrThrow() — if success return __value, otherwise throw
 taida_val taida_result_get_or_throw(taida_val result) {
     if (!taida_result_is_error_check(result)) {
-        return taida_pack_get_idx(result, 0);  // __value
+        return taida_result_get_value(result);
     }
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
+    taida_val throw_val = taida_result_get_throw(result);
     if (taida_can_throw_payload(throw_val)) {
         return taida_throw(throw_val);
     }
@@ -7532,8 +7536,18 @@ static taida_val taida_throw_to_display_string(taida_val throw_val) {
 
 taida_val taida_result_to_string(taida_val result) {
     if (!taida_result_is_error_check(result)) {
-        taida_val value = taida_pack_get_idx(result, 0);  // __value
-        taida_val value_str = taida_value_to_display_string(value);
+        taida_val value = taida_result_get_value(result);
+        taida_val value_tag = taida_pack_get_field_tag(result, (taida_val)HASH_RES___VALUE);
+        taida_val value_str;
+        if (value_tag == TAIDA_TAG_BOOL) {
+            value_str = (taida_val)taida_str_from_bool(value);
+        } else if (value_tag == TAIDA_TAG_FLOAT) {
+            double f;
+            memcpy(&f, &value, sizeof(double));
+            value_str = taida_float_to_str(f);
+        } else {
+            value_str = taida_value_to_display_string(value);
+        }
         const char *value_cstr = (const char*)value_str;
         size_t value_len = strlen(value_cstr);
         size_t need = value_len + 10;
@@ -7542,7 +7556,7 @@ taida_val taida_result_to_string(taida_val result) {
         taida_str_release(value_str);
         return (taida_val)buf;
     }
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
+    taida_val throw_val = taida_result_get_throw(result);
     if (throw_val == 0) {
         return (taida_val)taida_str_new_copy("Result(throw <= error)");
     }
@@ -8773,43 +8787,43 @@ taida_val taida_generic_unmold(taida_val ptr) {
         taida_val field_count = obj[1];
         taida_val hash0 = obj[2];
 
-        // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw
+        // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw.
         if (field_count == 4 && hash0 == (taida_val)HASH_RES___VALUE) {
-        taida_val value = taida_pack_get_idx(ptr, 0);       // __value
-        taida_val pred = taida_pack_get_idx(ptr, 1);         // __predicate
-        taida_val throw_val = taida_pack_get_idx(ptr, 2);    // throw
+            taida_val value = taida_result_get_value(ptr);
+            taida_val pred = taida_result_get_predicate(ptr);
+            taida_val throw_val = taida_result_get_throw(ptr);
 
-        // If throw is set explicitly, check predicate first
-        if (throw_val != 0) {
+            // If throw is set explicitly, check predicate first
+            if (throw_val != 0) {
+                if (pred != 0) {
+                    taida_val pred_result = taida_invoke_callback1(pred, value);
+                    if (!pred_result) {
+                        // Predicate failed — throw the error
+                        if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+                        taida_val error = taida_make_error("ResultError", "Result predicate failed");
+                        return taida_throw(error);
+                    }
+                    // Predicate passed even with throw set — return value
+                    return value;
+                }
+                // No predicate, throw is set — throw
+                if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+                taida_val error = taida_make_error("ResultError", "Result error");
+                return taida_throw(error);
+            }
+
+            // Evaluate predicate if present (no throw set)
             if (pred != 0) {
                 taida_val pred_result = taida_invoke_callback1(pred, value);
-                if (!pred_result) {
-                    // Predicate failed — throw the error
-                    if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-                    taida_val error = taida_make_error("ResultError", "Result predicate failed");
-                    return taida_throw(error);
-                }
-                // Predicate passed even with throw set — return value
-                return value;
+                if (pred_result) return value;  // success
+                // Predicate failed — throw default error
+                taida_val error = taida_make_error("ResultError", "Result predicate failed");
+                return taida_throw(error);
             }
-            // No predicate, throw is set — throw
-            if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-            taida_val error = taida_make_error("ResultError", "Result error");
-            return taida_throw(error);
-        }
 
-        // Evaluate predicate if present (no throw set)
-        if (pred != 0) {
-            taida_val pred_result = taida_invoke_callback1(pred, value);
-            if (pred_result) return value;  // success
-            // Predicate failed — throw default error
-            taida_val error = taida_make_error("ResultError", "Result predicate failed");
-            return taida_throw(error);
+            // No predicate, no throw — success
+            return value;
         }
-
-        // No predicate, no throw — success
-        return value;
-    }
 
     // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE)
     if (field_count == 4 && hash0 == (taida_val)HASH_HAS_VALUE) {

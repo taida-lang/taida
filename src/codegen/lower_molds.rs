@@ -2415,6 +2415,12 @@ impl Lowering {
                     "taida_result_create".to_string(),
                     vec![inner_value, throw_val, predicate],
                 ));
+                if let Some(value_expr) = type_args.first() {
+                    let value_tag = self.expr_type_tag(value_expr);
+                    if value_tag != 0 && value_tag != -1 {
+                        func.push(IrInst::PackSetTag(result, 0, value_tag));
+                    }
+                }
                 Ok(result)
             }
             // -- OS input molds (taida-lang/os) --
@@ -2467,7 +2473,7 @@ impl Lowering {
                 Ok(result)
             }
             "Exists" => {
-                // Exists[path]() -> taida_os_exists(path) -> Bool
+                // Exists[path]() -> taida_os_exists(path) -> Result[Bool]
                 if type_args.is_empty() {
                     return Err(LowerError {
                         message: "Exists requires 1 argument: Exists[path]()".into(),

@@ -36266,6 +36266,15 @@ stdout(r.isSuccess().toString())
     assert_eq!(out, "true\nfalse");
 }
 
+#[test]
+fn test_c12b_021_result_direct_stdout_field_tags() {
+    let source = r#"
+stdout(Result[true]())
+stdout(Result["ok"]())
+"#;
+    assert_backend_parity_for_source(source, "c12b_021_result_direct_stdout_field_tags");
+}
+
 /// C12B-021: Exists on a present path reports isSuccess=true; on a
 /// missing path also isSuccess=true (probe itself worked) — the
 /// inner Bool distinguishes the two states. We only assert the
@@ -36291,6 +36300,19 @@ stdout(b.isSuccess().toString())
     let out = run_interpreter_src(&source, "c12b_021_exists_result_bool_expected")
         .expect("interpreter output should exist");
     assert_eq!(out, "true\ntrue");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_c12b_021_exists_direct_stdout_result_shape_parity() {
+    let dir = std::env::temp_dir().join("taida_c12b_021_exists_direct_stdout");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mktmp");
+    let present = dir.join("present.txt");
+    std::fs::write(&present, "x").unwrap();
+    let p = present.to_string_lossy().replace('\\', "/");
+    let source = format!(r#"stdout(Exists["{p}"]())"#);
+    assert_backend_parity_for_source(&source, "c12b_021_exists_direct_stdout_result_shape");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

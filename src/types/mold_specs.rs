@@ -389,7 +389,7 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     // Bool / type predicates.
     MoldSpec::exact("TypeIs", 2, ANY2, MoldReturnKind::Bool),
     MoldSpec::exact("TypeExtends", 2, ANY2, MoldReturnKind::Bool),
-    MoldSpec::exact("Exists", 1, ANY1, MoldReturnKind::Bool),
+    MoldSpec::exact("Exists", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Contains", 2, ANY2, MoldReturnKind::Bool),
     MoldSpec::exact("SpanEquals", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanStartsWith", 3, ANY3, MoldReturnKind::Bool),
@@ -538,9 +538,14 @@ mod tests {
     #[test]
     fn bool_returning_molds_map_to_bool_tag() {
         // `Bool[x]()` returns Lax[Bool], not a bare Bool.
-        for name in ["TypeIs", "TypeExtends", "Exists", "Contains"] {
+        for name in ["TypeIs", "TypeExtends", "Contains"] {
             assert_eq!(mold_return_tag(name), Some(2), "{name} should be Bool (2)");
         }
+        assert_eq!(
+            mold_return_tag("Exists"),
+            Some(4),
+            "Exists should be Result[Bool] envelope (Pack tag 4)"
+        );
     }
 
     #[test]
