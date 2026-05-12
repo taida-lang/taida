@@ -3742,6 +3742,76 @@ fn builtin_mold_registry_accepts_sort_options() {
     );
 }
 
+#[test]
+fn builtin_mold_registry_enforces_non_hof_runtime_arities() {
+    let cases = [
+        (
+            "SpanSlice",
+            "bad <= SpanSlice[@(start <= 0, len <= 1), \"abc\", 0]()",
+        ),
+        ("StringRepeatJoin", "bad <= StringRepeatJoin[\"x\", 2]()"),
+        ("Count", "bad <= Count[@[1, 2, 3]]()"),
+        (
+            "BytesCursorTake",
+            "bad <= BytesCursorTake[@(bytes <= Bytes[\"x\"](), offset <= 0, length <= 1)]()",
+        ),
+        ("HttpRequest", "bad <= HttpRequest[\"GET\"]()"),
+    ];
+
+    for (name, source) in cases {
+        let (_, errors) = check(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("[E1505]") && e.message.contains(name)),
+            "expected registry arity error for {name}, got: {:?}",
+            errors
+        );
+    }
+}
+
+#[test]
+fn function_field_zero_arg_marker_and_normal_signature_boundary() {
+    let source = r#"
+Status = @(label: Str, pick: Unit => :Int, map: Int => :Int)
+s <= Status(label <= "ready")
+ok <= s.pick()
+bad0 <= s.map()
+bad1 <= s.pick(1)
+good <= s.map(41)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("map")
+                && e.message.contains("takes 1 argument")
+                && e.message.contains("got 0")
+        }),
+        "normal function field must still require its Int parameter, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("pick")
+                && e.message.contains("takes 0 argument")
+                && e.message.contains("got 1")
+        }),
+        "Unit => :T marker must remain a zero-argument signature, got: {:?}",
+        errors
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e.message.contains("[E1508]"))
+            .count(),
+        2,
+        "only the two intentional function-field boundary errors should be E1508: {:?}",
+        errors
+    );
+}
+
 // ── C12-2: FB-10 `.toString()` universal adoption ──
 
 /// `.toString()` on Int takes no arguments. Passing `16` as a base must
@@ -5464,4 +5534,73 @@ fn e34b_018_lax_and_result_accept_canonical_shapes() {
         "`Lax[42]()` / `Result[\"ok\"]()` must remain accepted; errors: {:?}",
         errors
     );
+}
+
+#[test]
+fn core_builtin_and_async_reject_status_methods_infer_bool() {
+    let src = r#"fileResult <= writeFile("/tmp/taida-type-only", "data")
+fileFlag <= fileResult.isError()
+rejected <= AsyncReject[@(type <= "TestError", message <= "fail")]()
+asyncFlag <= rejected.isRejected()
+stdout(fileFlag.toString())
+stdout(asyncFlag.toString())
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    assert!(
+        checker.errors.is_empty(),
+        "status-method source should typecheck cleanly, got: {:?}",
+        checker.errors
+    );
+    assert_eq!(checker.lookup_var("fileFlag"), Some(Type::Bool));
+    assert_eq!(checker.lookup_var("asyncFlag"), Some(Type::Bool));
+}
+
+#[test]
+fn registry_bool_mold_result_binds_as_bool() {
+    let src = r#"raw <= "GET / HTTP/1.1"
+span <= @(start <= 0, length <= 3)
+isGet <= SpanEquals[span, raw, "GET"]()
+marker <= "ok-" + isGet.toString()
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    assert!(
+        checker.errors.is_empty(),
+        "SpanEquals binding should typecheck cleanly, got: {:?}",
+        checker.errors
+    );
+    assert_eq!(checker.lookup_var("isGet"), Some(Type::Bool));
+    assert_eq!(checker.lookup_var("marker"), Some(Type::Str));
+}
+
+#[test]
+fn json_enum_has_value_field_infers_bool() {
+    let src = r#"Enum => Status = :Active :Inactive
+User = @(name: Str, status: Status)
+raw <= '{"name": "Dave", "status": "Bogus"}'
+JSON[raw, User]() ]=> user
+statusHasValue <= user.status.hasValue
+rawTop <= '"Bogus"'
+JSON[rawTop, Status]() ]=> topStatus
+topHasValue <= topStatus.hasValue
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    assert!(
+        checker.errors.is_empty(),
+        "JSON enum hasValue source should typecheck cleanly, got: {:?}",
+        checker.errors
+    );
+    assert_eq!(checker.lookup_var("statusHasValue"), Some(Type::Bool));
+    assert_eq!(checker.lookup_var("topHasValue"), Some(Type::Bool));
 }

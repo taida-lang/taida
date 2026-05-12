@@ -166,6 +166,12 @@ impl MoldReturnKind {
 const ANY1: &[MoldArgKind] = &[MoldArgKind::Any];
 const ANY2: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any];
 const ANY3: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any, MoldArgKind::Any];
+const ANY4: &[MoldArgKind] = &[
+    MoldArgKind::Any,
+    MoldArgKind::Any,
+    MoldArgKind::Any,
+    MoldArgKind::Any,
+];
 const LIST1: &[MoldArgKind] = &[MoldArgKind::List];
 const LIST_UNARY_FUNCTION: &[MoldArgKind] =
     &[MoldArgKind::ListOrStream, MoldArgKind::UnaryFunction];
@@ -182,6 +188,10 @@ const LIST_OR_STREAM_PREDICATE: &[MoldArgKind] =
     &[MoldArgKind::ListOrStream, MoldArgKind::UnaryPredicate];
 const ASYNC_NUM: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Numeric];
 
+const BYTES_CURSOR_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
+    name: "offset",
+    kind: MoldArgKind::Int,
+}];
 const TRIM_OPTIONS: &[MoldOptionSpec] = &[
     MoldOptionSpec {
         name: "start",
@@ -228,6 +238,34 @@ const DIV_OPTIONS: &[MoldOptionSpec] = &[MoldOptionSpec {
     name: "default",
     kind: MoldArgKind::Any,
 }];
+const TODO_OPTIONS: &[MoldOptionSpec] = &[
+    MoldOptionSpec {
+        name: "id",
+        kind: MoldArgKind::Any,
+    },
+    MoldOptionSpec {
+        name: "task",
+        kind: MoldArgKind::Any,
+    },
+    MoldOptionSpec {
+        name: "sol",
+        kind: MoldArgKind::Any,
+    },
+    MoldOptionSpec {
+        name: "unm",
+        kind: MoldArgKind::Any,
+    },
+];
+const HTTP_REQUEST_OPTIONS: &[MoldOptionSpec] = &[
+    MoldOptionSpec {
+        name: "headers",
+        kind: MoldArgKind::Any,
+    },
+    MoldOptionSpec {
+        name: "body",
+        kind: MoldArgKind::Any,
+    },
+];
 const SORT_OPTIONS: &[MoldOptionSpec] = &[
     MoldOptionSpec {
         name: "reverse",
@@ -267,16 +305,28 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("U16LEDecode", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("U32BEDecode", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("U32LEDecode", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("BytesCursor", 1, ANY1, MoldReturnKind::Pack)
+        .with_options(BYTES_CURSOR_OPTIONS),
+    MoldSpec::exact("BytesCursorRemaining", 1, ANY1, MoldReturnKind::Int),
+    MoldSpec::exact("BytesCursorTake", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("BytesCursorU8", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("Lax", 0, Some(1), ANY1, MoldReturnKind::Pack),
     MoldSpec::range("Result", 1, Some(2), ANY2, MoldReturnKind::Pack).with_options(RESULT_OPTIONS),
     MoldSpec::exact("Async", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("AsyncReject", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Gorillax", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("RelaxedGorillax", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Stream", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("StreamFrom", 1, LIST1, MoldReturnKind::Pack),
+    MoldSpec::range("Optional", 0, Some(1), ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Molten", 0, &[], MoldReturnKind::Pack),
+    MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("JSRilla", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("FileRilla", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("BuildRilla", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("JSON", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("JSGet", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("JSCall", 3, ANY3, MoldReturnKind::Pack),
@@ -326,7 +376,7 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("ToRadix", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("StrOf", 2, ANY2, MoldReturnKind::Str),
     MoldSpec::exact("ByteSlice", 3, ANY3, MoldReturnKind::Str),
-    MoldSpec::exact("StringRepeatJoin", 2, ANY2, MoldReturnKind::Str),
+    MoldSpec::exact("StringRepeatJoin", 3, ANY3, MoldReturnKind::Str),
     MoldSpec::exact("ByteLength", 1, ANY1, MoldReturnKind::Int),
     MoldSpec::exact("ByteAt", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("CharAt", 2, ANY2, MoldReturnKind::Pack),
@@ -344,7 +394,7 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("SpanEquals", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanStartsWith", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanContains", 3, ANY3, MoldReturnKind::Bool),
-    MoldSpec::exact("SpanSlice", 3, ANY3, MoldReturnKind::Pack),
+    MoldSpec::exact("SpanSlice", 4, ANY4, MoldReturnKind::Pack),
     // Bit / ordinal.
     MoldSpec::exact("BitAnd", 2, ANY2, MoldReturnKind::Int),
     MoldSpec::exact("BitOr", 2, ANY2, MoldReturnKind::Int),
@@ -356,10 +406,15 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("Ordinal", 1, ANY1, MoldReturnKind::Int),
     // Collections and HOF molds.
     MoldSpec::exact("Length", 1, ANY1, MoldReturnKind::Int),
-    MoldSpec::range("Count", 1, Some(2), ANY2, MoldReturnKind::Int),
-    MoldSpec::range("Find", 1, Some(2), ANY2, MoldReturnKind::Pack),
-    MoldSpec::range("FindIndex", 1, Some(2), ANY2, MoldReturnKind::Int),
-    MoldSpec::range("FindIndexLax", 1, Some(2), ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("Count", 2, LIST_UNARY_PREDICATE, MoldReturnKind::Int),
+    MoldSpec::exact("Find", 2, LIST_UNARY_PREDICATE, MoldReturnKind::Pack),
+    MoldSpec::exact("FindIndex", 2, LIST_UNARY_PREDICATE, MoldReturnKind::Int),
+    MoldSpec::exact(
+        "FindIndexLax",
+        2,
+        LIST_UNARY_PREDICATE,
+        MoldReturnKind::Pack,
+    ),
     MoldSpec::exact("IndexOf", 2, ANY2, MoldReturnKind::Int),
     MoldSpec::exact("LastIndexOf", 2, ANY2, MoldReturnKind::Int),
     MoldSpec::exact("Sort", 1, LIST1, MoldReturnKind::List)
@@ -416,6 +471,16 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("All", 1, LIST1, MoldReturnKind::Pack),
     MoldSpec::exact("Race", 1, LIST1, MoldReturnKind::Pack),
     MoldSpec::exact("Timeout", 2, ASYNC_NUM, MoldReturnKind::Pack),
+    // OS package mold constructors.
+    MoldSpec::exact("Read", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("ListDir", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("Stat", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("EnvVar", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("ReadAsync", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("HttpGet", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("HttpPost", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("HttpRequest", 2, ANY2, MoldReturnKind::Pack)
+        .with_options(HTTP_REQUEST_OPTIONS),
 ];
 
 /// Look up a builtin mold specification by name.

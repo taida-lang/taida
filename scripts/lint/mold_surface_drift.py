@@ -34,6 +34,11 @@ TYPE_ONLY_HEADINGS = {
     "RelaxedGorillax",
 }
 
+RUNTIME_TYPE_LITERAL_NAMES = {
+    "Error",
+    "Num",
+}
+
 
 @dataclass
 class RegistrySpec:
@@ -296,7 +301,7 @@ def check(strict: bool) -> int:
     registry_names = set(registry)
     runtime_names = set(runtime)
     registry_only = sorted(registry_names - documented)
-    runtime_only = sorted(runtime_names - registry_names - documented)
+    runtime_only = sorted((runtime_names - registry_names - documented) - RUNTIME_TYPE_LITERAL_NAMES)
     enforced_missing_runtime = sorted(
         name for name, spec in registry.items() if spec.enforced and name not in runtime
     )
@@ -307,8 +312,8 @@ def check(strict: bool) -> int:
             + ", ".join(registry_only)
         )
     if runtime_only:
-        advisories.append(
-            "runtime names not represented in the registry: " + ", ".join(runtime_only)
+        failures.append(
+            "runtime mold names not represented in the registry: " + ", ".join(runtime_only)
         )
     if enforced_missing_runtime:
         failures.append(

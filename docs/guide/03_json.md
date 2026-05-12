@@ -75,7 +75,7 @@ JSON[raw, Pilot]() ]=> pilot
 
 `JSON` モールドは常に 2 引数（生データ + スキーマ）を要求します。1 引数はコンパイルエラーです。
 
-```taida
+```taida fragment
 JSON[raw, User]()    // OK: スキーマあり
 JSON[raw]()          // エラー: JSON requires a schema type argument
 ```

@@ -321,6 +321,164 @@ impl TypeChecker {
         self.pin_exec_shell_interactive_signature("execShellInteractive");
     }
 
+    fn is_core_builtin_name(name: &str) -> bool {
+        matches!(
+            name,
+            "debug"
+                | "toString"
+                | "toStr"
+                | "typeOf"
+                | "typeof"
+                | "jsonEncode"
+                | "jsonPretty"
+                | "nowMs"
+                | "assert"
+                | "range"
+                | "enumerate"
+                | "zip"
+                | "hashMap"
+                | "setOf"
+                | "stdout"
+                | "stderr"
+                | "exit"
+                | "stdin"
+                | "stdinLine"
+                | "argv"
+                | "sleep"
+                | "Regex"
+                | "strOf"
+                | "readBytes"
+                | "readBytesAt"
+                | "writeFile"
+                | "writeBytes"
+                | "appendFile"
+                | "remove"
+                | "createDir"
+                | "rename"
+                | "allEnv"
+                | "dnsResolve"
+                | "tcpConnect"
+                | "tcpListen"
+                | "tcpAccept"
+                | "socketSend"
+                | "socketSendAll"
+                | "socketRecv"
+                | "socketSendBytes"
+                | "socketRecvBytes"
+                | "socketRecvExact"
+                | "udpBind"
+                | "udpSendTo"
+                | "udpRecvFrom"
+                | "socketClose"
+                | "listenerClose"
+                | "udpClose"
+                | "poolCreate"
+                | "poolAcquire"
+                | "poolRelease"
+                | "poolClose"
+                | "poolHealth"
+        )
+    }
+
+    fn core_builtin_arity(name: &str) -> Option<(usize, usize)> {
+        match name {
+            "debug" => Some((1, 2)),
+            "toString" | "toStr" => Some((1, 1)),
+            "typeOf" | "typeof" => Some((1, 1)),
+            "jsonEncode" | "jsonPretty" => Some((1, 1)),
+            "nowMs" => Some((0, 0)),
+            "assert" => Some((1, 2)),
+            "range" => Some((2, 3)),
+            "enumerate" => Some((1, 1)),
+            "zip" => Some((2, 2)),
+            "hashMap" => Some((0, 1)),
+            "setOf" => Some((1, 1)),
+            "strOf" => Some((2, 2)),
+            "stdout" | "stderr" | "exit" => Some((1, 1)),
+            "stdin" | "stdinLine" => Some((0, 1)),
+            "argv" => Some((0, 0)),
+            "sleep" => Some((1, 1)),
+            "Regex" => Some((1, 2)),
+            "readBytes" => Some((1, 1)),
+            "readBytesAt" => Some((3, 3)),
+            "writeFile" | "writeBytes" | "appendFile" => Some((2, 2)),
+            "remove" | "createDir" => Some((1, 1)),
+            "rename" => Some((2, 2)),
+            "allEnv" => Some((0, 0)),
+            "dnsResolve" => Some((1, 2)),
+            "tcpConnect" => Some((2, 3)),
+            "tcpListen" | "tcpAccept" => Some((1, 2)),
+            "socketSend" | "socketSendAll" | "socketSendBytes" => Some((2, 3)),
+            "socketRecv" | "socketRecvBytes" => Some((1, 2)),
+            "socketRecvExact" => Some((2, 3)),
+            "udpBind" => Some((2, 3)),
+            "udpSendTo" => Some((4, 5)),
+            "udpRecvFrom" => Some((1, 2)),
+            "socketClose" | "listenerClose" | "udpClose" => Some((1, 1)),
+            "poolCreate" => Some((1, 1)),
+            "poolAcquire" => Some((1, 2)),
+            "poolRelease" => Some((3, 3)),
+            "poolClose" | "poolHealth" => Some((1, 1)),
+            _ => None,
+        }
+    }
+
+    fn result_type(success_ty: Type) -> Type {
+        Type::Generic("Result".to_string(), vec![success_ty, Type::Unknown])
+    }
+
+    fn async_type(inner_ty: Type) -> Type {
+        Type::Generic("Async".to_string(), vec![inner_ty])
+    }
+
+    fn core_builtin_return_type(&mut self, name: &str, args: &[Expr]) -> Option<Type> {
+        match name {
+            "debug" => Some(
+                args.first()
+                    .map(|arg| self.infer_expr_type(arg))
+                    .unwrap_or(Type::Unit),
+            ),
+            "toString" | "toStr" => Some(Type::Str),
+            "strOf" => Some(Type::Str),
+            "typeOf" | "typeof" => Some(Type::Str),
+            "jsonEncode" | "jsonPretty" => Some(Type::Str),
+            "nowMs" => Some(Type::Int),
+            "assert" => Some(Type::Unit),
+            "range" => Some(Type::List(Box::new(Type::Int))),
+            "enumerate" => Some(Type::List(Box::new(Type::Unknown))),
+            "zip" => Some(Type::List(Box::new(Type::Unknown))),
+            "hashMap" => Some(Type::Named("HashMap".to_string())),
+            "setOf" => Some(Type::Named("Set".to_string())),
+            "stdout" | "stderr" => Some(Type::Int),
+            "exit" => Some(Type::Unit),
+            "stdin" => Some(Type::Str),
+            "stdinLine" => Some(Self::async_type(Type::Generic(
+                "Lax".to_string(),
+                vec![Type::Str],
+            ))),
+            "argv" => Some(Type::List(Box::new(Type::Str))),
+            "sleep" => Some(Self::async_type(Type::Unit)),
+            "Regex" => Some(Type::Named("Regex".to_string())),
+            "readBytes" | "readBytesAt" => {
+                Some(Type::Generic("Lax".to_string(), vec![Type::Bytes]))
+            }
+            "writeFile" | "writeBytes" | "appendFile" | "remove" | "createDir" | "rename" => {
+                Some(Self::result_type(Type::Int))
+            }
+            "allEnv" => Some(Type::Generic(
+                "HashMap".to_string(),
+                vec![Type::Str, Type::Str],
+            )),
+            "poolHealth" => Some(Type::BuchiPack(vec![
+                ("open".to_string(), Type::Bool),
+                ("idle".to_string(), Type::Int),
+                ("inUse".to_string(), Type::Int),
+                ("waiting".to_string(), Type::Int),
+            ])),
+            _ => None,
+        }
+    }
+
     fn pin_run_interactive_signature(&mut self, local_name: &str) {
         // runInteractive(program: Str, args: @[Str]) → Gorillax[@(code: Int)]
         let inner = Type::BuchiPack(vec![("code".to_string(), Type::Int)]);
@@ -2115,30 +2273,7 @@ impl TypeChecker {
         {
             return true;
         }
-        matches!(
-            name,
-            "debug"
-                | "toString"
-                | "toStr"
-                | "typeOf"
-                | "typeof"
-                | "jsonEncode"
-                | "jsonPretty"
-                | "nowMs"
-                | "assert"
-                | "range"
-                | "enumerate"
-                | "zip"
-                | "hashMap"
-                | "setOf"
-                | "stdout"
-                | "stderr"
-                | "exit"
-                | "stdin"
-                | "stdinLine"
-                | "argv"
-                | "sleep"
-        )
+        Self::is_core_builtin_name(name)
     }
 
     /// Look up a variable type from the scope stack (innermost first).
@@ -3082,20 +3217,25 @@ defaulted fields must be provided via `()`",
             return;
         };
 
-        let arity_ok = !spec.checker_enforced || spec.accepts_arity(type_args.len());
+        let arity_ok = spec.accepts_arity(type_args.len());
         if !arity_ok {
-            self.errors.push(TypeError {
-                message: format!(
+            let message = if name == "Molten" {
+                "Molten takes no type arguments: Molten[]()".to_string()
+            } else {
+                format!(
                     "[E1505] `{}` expects {} positional `[]` argument(s), got {}.",
                     name,
                     spec.arity_description(),
                     type_args.len()
-                ),
+                )
+            };
+            self.errors.push(TypeError {
+                message,
                 span: span.clone(),
             });
         }
 
-        if spec.checker_enforced && arity_ok {
+        if arity_ok {
             for (idx, arg) in type_args.iter().enumerate() {
                 let Some(kind) = spec.arg_kinds.get(idx).copied() else {
                     continue;
@@ -3148,6 +3288,9 @@ defaulted fields must be provided via `()`",
         kind: crate::types::mold_specs::MoldArgKind,
         span: &Span,
     ) {
+        if matches!(kind, crate::types::mold_specs::MoldArgKind::Any) {
+            return;
+        }
         let actual = self.infer_expr_type(arg);
         if self.builtin_mold_kind_matches(&actual, kind) {
             return;
@@ -3171,6 +3314,9 @@ defaulted fields must be provided via `()`",
         value: &Expr,
         kind: crate::types::mold_specs::MoldArgKind,
     ) {
+        if matches!(kind, crate::types::mold_specs::MoldArgKind::Any) {
+            return;
+        }
         let actual = self.infer_expr_type(value);
         if self.builtin_mold_kind_matches(&actual, kind) {
             return;
@@ -4678,30 +4824,7 @@ defaulted fields must be provided via `()`",
                     || self.generic_func_defs.contains_key(name)
                     || self.declared_concrete_type_names.contains(name)
                     || self.registry.mold_defs.contains_key(name)
-                    || matches!(
-                        name.as_str(),
-                        "debug"
-                            | "toString"
-                            | "toStr"
-                            | "typeOf"
-                            | "typeof"
-                            | "jsonEncode"
-                            | "jsonPretty"
-                            | "nowMs"
-                            | "assert"
-                            | "range"
-                            | "enumerate"
-                            | "zip"
-                            | "hashMap"
-                            | "setOf"
-                            | "stdout"
-                            | "stderr"
-                            | "exit"
-                            | "stdin"
-                            | "stdinLine"
-                            | "argv"
-                            | "sleep"
-                    )
+                    || Self::is_core_builtin_name(name)
                 {
                     // Known function/type/mold name used as value reference
                     Type::Unknown
@@ -5344,47 +5467,7 @@ defaulted fields must be provided via `()`",
                     // Check if it's a known builtin
                     // E1507: Builtin arity check
                     // (name, min_args, max_args)
-                    let builtin_arity: Option<(usize, usize)> = match name.as_str() {
-                        "debug" => Some((1, 2)), // debug(value) or debug(label, value)
-                        "toString" | "toStr" => Some((1, 1)),
-                        "typeOf" | "typeof" => Some((1, 1)),
-                        "jsonEncode" | "jsonPretty" => Some((1, 1)),
-                        "nowMs" => Some((0, 0)),
-                        "assert" => Some((1, 2)), // assert(cond) or assert(cond, msg)
-                        "range" => Some((2, 3)),  // range(start, end) or range(start, end, step)
-                        "enumerate" => Some((1, 1)),
-                        "zip" => Some((2, 2)),
-                        "hashMap" => Some((0, 1)),
-                        "setOf" => Some((1, 1)),
-                        // D28B-015: `strOf(span, raw)` lowercase function-form
-                        // (function counterpart of `StrOf[span, raw]()` mold).
-                        // The 2026-04-26 D28B-001 naming-rules Lock justifies
-                        // the co-existence of mold form (PascalCase) and
-                        // function form (camelCase). 4-backend parity (interp /
-                        // JS / native / wasm-full) — see `interpreter/prelude.rs`,
-                        // `js/codegen.rs`, `codegen/lower_molds.rs` (function
-                        // dispatch hooks delegate to existing StrOf paths).
-                        "strOf" => Some((2, 2)),
-                        "stdout" => Some((1, 1)),
-                        "stderr" => Some((1, 1)),
-                        "exit" => Some((1, 1)),
-                        // C20-3 (ROOT-13): prompt is optional. The prelude
-                        // runtime, Native lowering and LSP / docs all treat
-                        // `stdin()` (no-prompt) as valid. Before C20 the
-                        // checker rejected it with [E1507].
-                        "stdin" => Some((0, 1)),
-                        // C20-2: stdinLine is the UTF-8-aware successor to
-                        // `stdin`. Prompt is optional; result is
-                        // `Async[Lax[Str]]` and callers must unmold via
-                        // `]=>` to get the inner `Lax[Str]`.
-                        "stdinLine" => Some((0, 1)),
-                        "argv" => Some((0, 0)),
-                        "sleep" => Some((1, 1)),
-                        // C12 Phase 6 (FB-5): Regex(pattern, flags?)
-                        // returns a :Regex BuchiPack.
-                        "Regex" => Some((1, 2)),
-                        _ => None,
-                    };
+                    let builtin_arity = Self::core_builtin_arity(name.as_str());
                     if let Some((min_args, max_args)) = builtin_arity
                         && (args.len() < min_args || args.len() > max_args)
                     {
@@ -5438,56 +5521,9 @@ defaulted fields must be provided via `()`",
                             }
                         }
                     }
-                    let base_ty = match name.as_str() {
-                        // debug returns its argument (pass-through)
-                        "debug" => {
-                            if let Some(first_arg) = args.first() {
-                                self.infer_expr_type(first_arg)
-                            } else {
-                                Type::Unit
-                            }
-                        }
-                        "toString" | "toStr" => Type::Str,
-                        // D28B-015: `strOf(span, raw)` returns owned Str
-                        // (cold-path span materialization, function counterpart
-                        // of `StrOf[span, raw]()` mold).
-                        "strOf" => Type::Str,
-                        "typeOf" | "typeof" => Type::Str,
-                        "jsonEncode" | "jsonPretty" => Type::Str,
-                        "nowMs" => Type::Int,
-                        // Prelude functions
-                        "assert" => Type::Unit,
-                        "range" => Type::List(Box::new(Type::Int)),
-                        "enumerate" => Type::List(Box::new(Type::Unknown)),
-                        "zip" => Type::List(Box::new(Type::Unknown)),
-                        "hashMap" => Type::Named("HashMap".to_string()),
-                        "setOf" => Type::Named("Set".to_string()),
-                        // C12-5 (FB-18): stdout/stderr now return Int (bytes
-                        // written) instead of Unit so that `Value::Unit` stays
-                        // unobservable from Taida surface. `exit` remains Unit
-                        // because it never returns (process terminates).
-                        "stdout" | "stderr" => Type::Int,
-                        "exit" => Type::Unit,
-                        "stdin" => Type::Str,
-                        // C20-2: `stdinLine` pins its result to
-                        // `Async[Lax[Str]]` so that callers are forced to
-                        // unmold via `]=>` and then reason about the Lax
-                        // (failure on EOF / IO error returns the default
-                        // `""`). Direct `<=` binding leaves the Async in
-                        // place — the Lax is not reachable without an
-                        // unmold, which matches Taida's Async discipline.
-                        "stdinLine" => Type::Generic(
-                            "Async".to_string(),
-                            vec![Type::Generic("Lax".to_string(), vec![Type::Str])],
-                        ),
-                        "argv" => Type::List(Box::new(Type::Str)),
-                        "sleep" => Type::Generic("Async".to_string(), vec![Type::Unit]),
-                        // C12 Phase 6 (FB-5): Regex(pattern, flags?)
-                        // returns an opaque named :Regex type (internally
-                        // a BuchiPack with `__type <= "Regex"`).
-                        "Regex" => Type::Named("Regex".to_string()),
-                        _ => Type::Unknown,
-                    };
+                    let base_ty = self
+                        .core_builtin_return_type(name.as_str(), args)
+                        .unwrap_or(Type::Unknown);
                     if hole_count > 0 {
                         let hole_param_types: Vec<Type> =
                             (0..hole_count).map(|_| Type::Unknown).collect();
@@ -5593,6 +5629,9 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     Type::Named(type_name) => {
+                        if self.registry.enum_defs.contains_key(type_name) && field == "hasValue" {
+                            return Type::Bool;
+                        }
                         // Look up field in registered type definition
                         if let Some(fields) = self.registry.get_type_fields(type_name) {
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
@@ -5613,6 +5652,10 @@ defaulted fields must be provided via `()`",
                             Type::Unknown
                         }
                     }
+                    Type::Generic(name, _) if name == "Lax" => match field.as_str() {
+                        "hasValue" | "isEmpty" => Type::Bool,
+                        _ => Type::Unknown,
+                    },
                     // E32B-018: internal `__*` envelope slots are rejected
                     // above before type-specific dispatch. Public `hasValue`
                     // remains available.
@@ -5709,9 +5752,17 @@ defaulted fields must be provided via `()`",
                 self.validate_mold_header_constraints(name, type_args, mold_span);
                 self.validate_builtin_mold_spec(name, type_args, fields, mold_span);
                 match name.as_str() {
-                    // JSON[raw, Schema]() returns Lax (wrapping the schema type)
-                    "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
-                    // Async[T] wraps a value
+                    // JSON[raw, Schema]() returns Lax[Schema].
+                    "JSON" => {
+                        let schema_ty = type_args
+                            .get(1)
+                            .map(|arg| self.type_arg_expr_to_type(arg))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Lax".to_string(), vec![schema_ty])
+                    }
+                    // Async[T] wraps a value. AsyncReject[err]() is still an
+                    // Async value, but its success payload is unavailable at
+                    // the type level.
                     "Async" => Type::Generic(
                         "Async".to_string(),
                         vec![
@@ -5721,6 +5772,7 @@ defaulted fields must be provided via `()`",
                                 .unwrap_or(Type::Unknown),
                         ],
                     ),
+                    "AsyncReject" => Type::Generic("Async".to_string(), vec![Type::Unknown]),
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
                         if type_args.len() != 1 {
@@ -6057,6 +6109,7 @@ defaulted fields must be provided via `()`",
                     // check_mold_errors_in_expr(), not here, to ensure it
                     // fires regardless of expression context.
                     "TypeExtends" => Type::Bool,
+                    "Exists" => Self::result_type(Type::Bool),
                     "TypeName" => {
                         if type_args.len() != 1 {
                             self.errors.push(TypeError {
@@ -6143,15 +6196,7 @@ defaulted fields must be provided via `()`",
                         Type::Generic("Gorillax".to_string(), vec![inner])
                     }
                     // Molten[]() returns Molten (no type arguments allowed)
-                    "Molten" => {
-                        if !type_args.is_empty() {
-                            self.errors.push(TypeError {
-                                message: "Molten takes no type arguments: Molten[]()".to_string(),
-                                span: mold_span.clone(),
-                            });
-                        }
-                        Type::Molten
-                    }
+                    "Molten" => Type::Molten,
                     // Cage[subject, runner] where runner <: CageRilla[Branch, Out].
                     "Cage" => {
                         let Some(subject) = type_args.first() else {
@@ -6228,6 +6273,12 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     _ => {
+                        if matches!(
+                            name.as_str(),
+                            "SpanEquals" | "SpanStartsWith" | "SpanContains"
+                        ) {
+                            return Type::Bool;
+                        }
                         // Look up in mold definitions
                         if self.registry.mold_defs.contains_key(name) {
                             Type::Named(name.clone())
