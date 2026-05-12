@@ -110,7 +110,7 @@ fn c25b016_separate_snapshots_do_not_alias() {
     let src = r#"
 makeAdder k =
   _ v = v + k
-=> :Fn
+=> :Int => :Int
 
 add5 <= makeAdder(5)
 add9 <= makeAdder(9)

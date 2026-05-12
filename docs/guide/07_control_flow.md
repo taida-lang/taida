@@ -400,7 +400,7 @@ f x =
 
 短い 2 分岐なら `If` モールドが簡潔です。
 
-```taida
+```taida fragment
 result <= If[cond, doSomething(), 0]()
 ```
 

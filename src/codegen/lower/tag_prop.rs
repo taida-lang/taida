@@ -42,16 +42,39 @@ impl Lowering {
 
     /// Return whether an expression is known to produce Bool.
     ///
-    /// The type-checker's Typed HIR side table is the source of truth for
-    /// expression-level Bool decisions. Syntax-only fallback is limited to
-    /// primitive Bool forms that do not depend on a name registry.
+    /// The type-checker's Typed HIR side table is the first source for
+    /// expression-level Bool decisions. Unknown entries fall back to syntax
+    /// and mold-spec facts so registry-backed Bool molds still tag correctly.
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
+        fn mold_expr_is_bool(expr: &Expr) -> bool {
+            match expr {
+                Expr::MoldInst(name, _, _, _) => {
+                    crate::types::mold_specs::mold_return_tag(name)
+                        == Some(crate::codegen::tag_prop::TAG_BOOL)
+                }
+                Expr::FuncCall(callee, args, _) if args.is_empty() => match callee.as_ref() {
+                    Expr::MoldInst(name, _, _, _) => {
+                        crate::types::mold_specs::mold_return_tag(name)
+                            == Some(crate::codegen::tag_prop::TAG_BOOL)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+
         if let Some(ty) = self.typed_expr_table.lookup(expr) {
-            return matches!(ty, crate::types::Type::Bool);
+            if matches!(ty, crate::types::Type::Bool) {
+                return true;
+            }
+            if !matches!(ty, crate::types::Type::Unknown) {
+                return mold_expr_is_bool(expr);
+            }
         }
 
         match expr {
             Expr::BoolLit(_, _) => true,
+            Expr::Ident(name, _) => self.bool_vars.contains(name),
             Expr::BinaryOp(_, op, _, _) => {
                 matches!(
                     op,
@@ -65,6 +88,51 @@ impl Lowering {
                 )
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
+            Expr::MethodCall(_, method, _, _) => matches!(
+                method.as_str(),
+                "hasValue"
+                    | "isEmpty"
+                    | "contains"
+                    | "startsWith"
+                    | "endsWith"
+                    | "any"
+                    | "all"
+                    | "none"
+                    | "isOk"
+                    | "isError"
+                    | "isSuccess"
+                    | "isFulfilled"
+                    | "isPending"
+                    | "isRejected"
+                    | "isNaN"
+                    | "isInfinite"
+                    | "isFinite"
+                    | "isPositive"
+                    | "isNegative"
+                    | "isZero"
+                    | "has"
+            ),
+            Expr::FuncCall(_, _, _) | Expr::MoldInst(_, _, _, _) => mold_expr_is_bool(expr),
+            Expr::FieldAccess(obj, field, _) => {
+                if field == "hasValue" {
+                    return true;
+                }
+                if let Some(type_name) = self.infer_type_name(obj)
+                    && let Some(field_types) = self.type_field_types.get(&type_name)
+                {
+                    if field_types.iter().any(|(name, ty)| {
+                        name == field
+                            && matches!(
+                                ty,
+                                Some(crate::parser::TypeExpr::Named(type_name))
+                                    if type_name == "Bool"
+                            )
+                    }) {
+                        return true;
+                    }
+                }
+                self.field_type_tags.get(field).copied() == Some(4)
+            }
             _ => false,
         }
     }

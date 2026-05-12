@@ -19960,7 +19960,7 @@ handler req writer =
   ws <= upgradeV.ws
   msg <= wsReceive(ws)
   stdout(msg.hasValue.toString())
-=> :Unit
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -22670,7 +22670,7 @@ parseAttempt =
     msg <= wsReceive(ws)
     code <= wsCloseCode(ws)
     stdout(code)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({}, handler, 1, 5000)
   asyncResult ]=> result

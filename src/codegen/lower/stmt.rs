@@ -857,6 +857,14 @@ impl Lowering {
             }
         }
 
+        for stmt in &func_def.body {
+            if let Statement::Assignment(assign) = stmt
+                && self.expr_type_tag(&assign.value) == crate::codegen::tag_prop::TAG_BOOL
+            {
+                self.bool_vars.insert(assign.target.clone());
+            }
+        }
+
         // NB3-4 fix: Save/restore return_type_inferred_params across function boundaries
         // so that inner function parameters don't inherit outer function's inference.
         // Must be saved BEFORE return-type inference so that current function's inferred

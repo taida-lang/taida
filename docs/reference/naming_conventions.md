@@ -104,7 +104,7 @@ Error => HttpError = @(status_code: Int)
 
 ### 関数 (camelCase)
 
-```taida
+```taida fragment
 // 基本的な関数
 getPilotName pilot: Pilot =
   pilot.first_name + " " + pilot.last_name

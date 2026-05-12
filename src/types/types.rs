@@ -200,6 +200,12 @@ impl Type {
 
             // Named type could match by name
             (Type::Named(a), Type::Named(b)) => a == b,
+            (Type::Named(a), Type::Generic(b, _)) => {
+                a == b && matches!(a.as_str(), "HashMap" | "Set")
+            }
+            (Type::Generic(a, _), Type::Named(b)) => {
+                a == b && matches!(a.as_str(), "HashMap" | "Set")
+            }
 
             // Generic types
             (Type::Generic(a_name, a_args), Type::Generic(b_name, b_args)) => {

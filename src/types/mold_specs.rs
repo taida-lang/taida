@@ -166,19 +166,20 @@ impl MoldReturnKind {
 const ANY1: &[MoldArgKind] = &[MoldArgKind::Any];
 const ANY2: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any];
 const ANY3: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any, MoldArgKind::Any];
-const BOOL_ANY_ANY: &[MoldArgKind] = &[MoldArgKind::Bool, MoldArgKind::Any, MoldArgKind::Any];
 const LIST1: &[MoldArgKind] = &[MoldArgKind::List];
 const LIST_UNARY_FUNCTION: &[MoldArgKind] =
     &[MoldArgKind::ListOrStream, MoldArgKind::UnaryFunction];
 const LIST_UNARY_PREDICATE: &[MoldArgKind] =
     &[MoldArgKind::ListOrStream, MoldArgKind::UnaryPredicate];
 const LIST_ANY: &[MoldArgKind] = &[MoldArgKind::List, MoldArgKind::Any];
+const LIST_OR_STREAM_ANY: &[MoldArgKind] = &[MoldArgKind::ListOrStream, MoldArgKind::Any];
 const LIST_ANY_BINARY_FUNCTION: &[MoldArgKind] = &[
     MoldArgKind::List,
     MoldArgKind::Any,
     MoldArgKind::BinaryFunction,
 ];
-const LIST_PREDICATE_ONLY: &[MoldArgKind] = &[MoldArgKind::List, MoldArgKind::UnaryPredicate];
+const LIST_OR_STREAM_PREDICATE: &[MoldArgKind] =
+    &[MoldArgKind::ListOrStream, MoldArgKind::UnaryPredicate];
 const ASYNC_NUM: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Numeric];
 
 const TRIM_OPTIONS: &[MoldOptionSpec] = &[
@@ -369,10 +370,22 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
         .enforce_checker(),
     MoldSpec::exact("Flatten", 1, LIST1, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Reverse", 1, ANY1, MoldReturnKind::Dynamic).enforce_checker(),
-    MoldSpec::exact("Take", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
-    MoldSpec::exact("TakeWhile", 2, LIST_PREDICATE_ONLY, MoldReturnKind::List).enforce_checker(),
-    MoldSpec::exact("Drop", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
-    MoldSpec::exact("DropWhile", 2, LIST_PREDICATE_ONLY, MoldReturnKind::List).enforce_checker(),
+    MoldSpec::exact("Take", 2, LIST_OR_STREAM_ANY, MoldReturnKind::List).enforce_checker(),
+    MoldSpec::exact(
+        "TakeWhile",
+        2,
+        LIST_OR_STREAM_PREDICATE,
+        MoldReturnKind::List,
+    )
+    .enforce_checker(),
+    MoldSpec::exact("Drop", 2, LIST_OR_STREAM_ANY, MoldReturnKind::List).enforce_checker(),
+    MoldSpec::exact(
+        "DropWhile",
+        2,
+        LIST_OR_STREAM_PREDICATE,
+        MoldReturnKind::List,
+    )
+    .enforce_checker(),
     MoldSpec::exact("Append", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Prepend", 2, LIST_ANY, MoldReturnKind::List).enforce_checker(),
     MoldSpec::exact("Zip", 2, ANY2, MoldReturnKind::List).enforce_checker(),
@@ -397,7 +410,7 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("Sum", 1, LIST1, MoldReturnKind::Dynamic).enforce_checker(),
     MoldSpec::exact("Min", 1, LIST1, MoldReturnKind::Dynamic),
     MoldSpec::exact("Max", 1, LIST1, MoldReturnKind::Dynamic),
-    MoldSpec::exact("If", 3, BOOL_ANY_ANY, MoldReturnKind::Dynamic).enforce_checker(),
+    MoldSpec::exact("If", 3, ANY3, MoldReturnKind::Dynamic).enforce_checker(),
     // Async combinators.
     MoldSpec::exact("Cancel", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("All", 1, LIST1, MoldReturnKind::Pack),

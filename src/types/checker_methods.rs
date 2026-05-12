@@ -135,6 +135,19 @@ impl TypeChecker {
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
+            Type::Generic(name, args) if name == "HashMap" => {
+                let key = args.first().cloned().unwrap_or(Type::Unknown);
+                let value = args.get(1).cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "get" | "remove" | "has" => Some((1, 1, vec![key])),
+                    "set" => Some((2, 2, vec![key, value])),
+                    "keys" | "values" | "entries" => Some((0, 0, vec![])),
+                    "size" | "isEmpty" => Some((0, 0, vec![])),
+                    "merge" => Some((1, 1, vec![Type::Unknown])),
+                    "toString" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
             Type::Named(name) if name == "Set" => match method {
                 "add" | "remove" => Some((1, 1, vec![Type::Unknown])),
                 "has" => Some((1, 1, vec![Type::Unknown])),
@@ -144,6 +157,17 @@ impl TypeChecker {
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
+            Type::Generic(name, args) if name == "Set" => {
+                let value = args.first().cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "add" | "remove" | "has" => Some((1, 1, vec![value])),
+                    "union" | "intersect" | "diff" => Some((1, 1, vec![Type::Unknown])),
+                    "toList" => Some((0, 0, vec![])),
+                    "size" | "isEmpty" => Some((0, 0, vec![])),
+                    "toString" => Some((0, 0, vec![])),
+                    _ => None,
+                }
+            }
             Type::Generic(name, inner_args) if name == "Lax" => {
                 // E32B-021 (Lock-M): the `default` arg of `getOrDefault`
                 // must match the Lax inner type T. Previously
@@ -769,29 +793,52 @@ impl TypeChecker {
             // HashMap methods
             Type::Named(name) if name == "HashMap" => match method {
                 "get" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
-                "set" => Type::Unit,
-                "remove" => Type::Unit,
+                "set" | "remove" | "merge" => Type::Named("HashMap".to_string()),
                 "has" => Type::Bool,
                 "keys" => Type::List(Box::new(Type::Str)),
                 "values" => Type::List(Box::new(Type::Unknown)),
                 "entries" => Type::List(Box::new(Type::Unknown)),
                 "size" => Type::Int,
-                "merge" => Type::Named("HashMap".to_string()),
                 "isEmpty" => Type::Bool,
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
+            Type::Generic(name, args) if name == "HashMap" => {
+                let key = args.first().cloned().unwrap_or(Type::Unknown);
+                let value = args.get(1).cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "get" => Type::Generic("Lax".to_string(), vec![value.clone()]),
+                    "set" | "remove" | "merge" => obj_type.clone(),
+                    "has" | "isEmpty" => Type::Bool,
+                    "keys" => Type::List(Box::new(key)),
+                    "values" => Type::List(Box::new(value)),
+                    "entries" => Type::List(Box::new(Type::Unknown)),
+                    "size" => Type::Int,
+                    "toString" => Type::Str,
+                    _ => Type::Unknown,
+                }
+            }
             // Set methods
             Type::Named(name) if name == "Set" => match method {
-                "add" | "remove" => Type::Unit,
+                "add" | "remove" | "union" | "intersect" | "diff" => Type::Named("Set".to_string()),
                 "has" => Type::Bool,
-                "union" | "intersect" | "diff" => Type::Named("Set".to_string()),
                 "toList" => Type::List(Box::new(Type::Unknown)),
                 "size" => Type::Int,
                 "isEmpty" => Type::Bool,
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
+            Type::Generic(name, args) if name == "Set" => {
+                let value = args.first().cloned().unwrap_or(Type::Unknown);
+                match method {
+                    "add" | "remove" | "union" | "intersect" | "diff" => obj_type.clone(),
+                    "has" | "isEmpty" => Type::Bool,
+                    "toList" => Type::List(Box::new(value)),
+                    "size" => Type::Int,
+                    "toString" => Type::Str,
+                    _ => Type::Unknown,
+                }
+            }
             // Lax methods
             Type::Generic(name, args) if name == "Lax" => match method {
                 "hasValue" | "isEmpty" => Type::Bool,

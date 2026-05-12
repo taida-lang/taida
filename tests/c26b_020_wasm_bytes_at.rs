@@ -17,6 +17,13 @@ mod common;
 use common::{taida_bin, wasmtime_bin};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+
+static PAYLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn payload_lock() -> &'static Mutex<()> {
+    PAYLOAD_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Compile a .td to a given wasm profile and return the output wasm path
 /// on success, or the emitted stderr string on compile failure.
@@ -81,6 +88,7 @@ fn c26b_020_wasm_wasi_read_bytes_at_success() {
     let wasm = std::env::temp_dir().join("c26b020_wasi_basic.wasm");
     compile_wasm(&td, "wasm-wasi", &wasm).expect("wasm-wasi compile");
 
+    let _payload_lock = payload_lock().lock().expect("payload lock");
     let _payload = write_payload();
     let out = run_wasm(&wasm, &wasmtime).expect("wasm-wasi run");
     let _ = std::fs::remove_file(&wasm);
@@ -132,6 +140,7 @@ fn c26b_020_wasm_full_read_bytes_at_success() {
     let wasm = std::env::temp_dir().join("c26b020_full_basic.wasm");
     compile_wasm(&td, "wasm-full", &wasm).expect("wasm-full compile");
 
+    let _payload_lock = payload_lock().lock().expect("payload lock");
     let _payload = write_payload();
     let out = run_wasm(&wasm, &wasmtime).expect("wasm-full run");
     let _ = std::fs::remove_file(&wasm);

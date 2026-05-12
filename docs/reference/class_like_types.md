@@ -659,7 +659,7 @@ If[condition, then_value, else_value]() => T
 - パイプラインで `_` を使って前段の値を参照できます
 - ネスト可能: `If[cond, If[cond2, a, b](), c]()`
 
-```taida
+```taida fragment
 If[x > 0, "positive", "negative"]()
 150 => If[_ > 100, 100, _]()   // clamp: 100
 If[true, If[false, 1, 2](), 3]()   // 2
