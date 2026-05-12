@@ -368,6 +368,32 @@ impl TypeChecker {
         }
     }
 
+    fn core_builtin_allows_unknown_return(name: &str) -> bool {
+        matches!(
+            name,
+            "dnsResolve"
+                | "tcpConnect"
+                | "tcpListen"
+                | "tcpAccept"
+                | "socketSend"
+                | "socketSendAll"
+                | "socketSendBytes"
+                | "socketRecv"
+                | "socketRecvBytes"
+                | "socketRecvExact"
+                | "udpBind"
+                | "udpSendTo"
+                | "udpRecvFrom"
+                | "socketClose"
+                | "listenerClose"
+                | "udpClose"
+                | "poolCreate"
+                | "poolAcquire"
+                | "poolRelease"
+                | "poolClose"
+        )
+    }
+
     fn result_type(success_ty: Type) -> Type {
         Type::Generic("Result".to_string(), vec![success_ty, Type::Unknown])
     }
@@ -422,7 +448,7 @@ impl TypeChecker {
             ])),
             known if Self::core_builtin_arity(known).is_some() => {
                 debug_assert!(
-                    Self::is_core_builtin_name(known),
+                    Self::core_builtin_allows_unknown_return(known),
                     "core builtin arity/return registries drifted for {known}"
                 );
                 Some(Type::Unknown)
@@ -4040,6 +4066,105 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    fn check_str_plus_known_non_str_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
+                let lhs_type = Self::static_add_operand_type(lhs);
+                let rhs_type = Self::static_add_operand_type(rhs);
+
+                let lhs_bad = matches!(lhs_type, Some(Type::Str))
+                    && !matches!(rhs_type, Some(Type::Str) | None);
+                let rhs_bad = matches!(rhs_type, Some(Type::Str))
+                    && !matches!(lhs_type, Some(Type::Str) | None);
+                if lhs_bad || rhs_bad {
+                    let _ = self.infer_expr_type(expr);
+                } else {
+                    self.check_str_plus_known_non_str_in_expr(lhs);
+                    self.check_str_plus_known_non_str_in_expr(rhs);
+                }
+            }
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                self.check_str_plus_known_non_str_in_expr(lhs);
+                self.check_str_plus_known_non_str_in_expr(rhs);
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_str_plus_known_non_str_in_expr(obj);
+                for arg in args {
+                    self.check_str_plus_known_non_str_in_expr(arg);
+                }
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_str_plus_known_non_str_in_expr(callee);
+                for arg in args {
+                    self.check_str_plus_known_non_str_in_expr(arg);
+                }
+            }
+            Expr::UnaryOp(_, inner, _) | Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                self.check_str_plus_known_non_str_in_expr(inner);
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_str_plus_known_non_str_in_expr(e);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for e in items {
+                    self.check_str_plus_known_non_str_in_expr(e);
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    self.check_str_plus_known_non_str_in_expr(&field.value);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.check_str_plus_known_non_str_in_expr(cond);
+                    }
+                    for stmt in &arm.body {
+                        if let Statement::Expr(e) = stmt {
+                            self.check_str_plus_known_non_str_in_expr(e);
+                        }
+                    }
+                }
+            }
+            Expr::Lambda(_, body, _) => self.check_str_plus_known_non_str_in_expr(body),
+            Expr::FieldAccess(obj, _, _) => self.check_str_plus_known_non_str_in_expr(obj),
+            _ => {}
+        }
+    }
+
+    fn static_add_operand_type(expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(Type::Str),
+            Expr::IntLit(_, _) => Some(Type::Int),
+            Expr::FloatLit(_, _) => Some(Type::Float),
+            Expr::BoolLit(_, _) => Some(Type::Bool),
+            Expr::ListLit(_, _) => Some(Type::List(Box::new(Type::Unknown))),
+            Expr::BuchiPack(_, _) | Expr::TypeInst(_, _, _) => Some(Type::Unknown),
+            Expr::MethodCall(_, method, args, _)
+                if args.is_empty() && matches!(method.as_str(), "toString" | "toStr") =>
+            {
+                Some(Type::Str)
+            }
+            Expr::BinaryOp(lhs, BinOp::Add, rhs, _)
+                if matches!(Self::static_add_operand_type(lhs), Some(Type::Str))
+                    && matches!(Self::static_add_operand_type(rhs), Some(Type::Str)) =>
+            {
+                Some(Type::Str)
+            }
+            Expr::BinaryOp(_, BinOp::Concat, _, _) => Some(Type::Str),
+            Expr::MoldInst(name, _, _, _)
+                if crate::types::mold_specs::mold_return_tag(name)
+                    == Some(crate::codegen::tag_prop::TAG_STR) =>
+            {
+                Some(Type::Str)
+            }
+            _ => None,
+        }
+    }
+
     // ── Comparison diagnostics in skipped expression contexts ──
     //
     // Some containers know their own type without fully inferring children
@@ -5457,6 +5582,7 @@ defaulted fields must be provided via `()`",
                             if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                                 self.check_tostring_arity_in_expr(arg);
                                 self.check_pinned_field_access_in_expr(arg);
+                                self.check_str_plus_known_non_str_in_expr(arg);
                             }
                         }
                     }

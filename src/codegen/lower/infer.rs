@@ -9,6 +9,8 @@ use super::{LowerError, Lowering};
 use crate::codegen::ir::*;
 use crate::parser::*;
 
+const LEGACY_FIELD_TYPE_BOOL: i64 = 4;
+
 impl Lowering {
     // lower_index_access removed in v0.5.0 — IndexAccess no longer exists in AST
 
@@ -629,7 +631,7 @@ impl Lowering {
         if self.expr_is_string_full(expr) {
             // Already a string — no conversion needed
             Ok(var)
-        } else if self.expr_is_bool_for_string_conversion(expr) {
+        } else if self.expr_is_likely_bool(expr) {
             let result = func.alloc_var();
             func.push(IrInst::Call(
                 result,
@@ -657,7 +659,9 @@ impl Lowering {
         }
     }
 
-    pub(crate) fn expr_is_bool_for_string_conversion(&self, expr: &Expr) -> bool {
+    /// Return whether codegen can safely route this expression through Bool
+    /// formatting or a Bool runtime tag when the typed side table is absent.
+    pub(crate) fn expr_is_likely_bool(&self, expr: &Expr) -> bool {
         if self.expr_is_bool(expr) {
             return true;
         }
@@ -667,32 +671,17 @@ impl Lowering {
             Expr::FieldAccess(obj, field, _) => {
                 field == "hasValue"
                     || self.field_access_has_named_type(obj, field, "Bool")
-                    || self.field_type_tags.get(field).copied() == Some(4)
+                    || self.field_type_tags.get(field).copied() == Some(LEGACY_FIELD_TYPE_BOOL)
             }
-            Expr::MethodCall(_, method, _, _) => matches!(
-                method.as_str(),
-                "hasValue"
-                    | "isEmpty"
-                    | "contains"
-                    | "startsWith"
-                    | "endsWith"
-                    | "has"
-                    | "any"
-                    | "all"
-                    | "none"
-                    | "isOk"
-                    | "isError"
-                    | "isSuccess"
-                    | "isFulfilled"
-                    | "isPending"
-                    | "isRejected"
-                    | "isNaN"
-                    | "isInfinite"
-                    | "isFinite"
-                    | "isPositive"
-                    | "isNegative"
-                    | "isZero"
-            ),
+            Expr::MethodCall(_, method, args, _) => match method.as_str() {
+                "hasValue" | "isEmpty" | "isOk" | "isError" | "isSuccess" | "isFulfilled"
+                | "isPending" | "isRejected" | "isNaN" | "isInfinite" | "isFinite"
+                | "isPositive" | "isNegative" | "isZero" => args.is_empty(),
+                "contains" | "startsWith" | "endsWith" | "has" | "any" | "all" | "none" => {
+                    args.len() == 1
+                }
+                _ => false,
+            },
             _ => false,
         }
     }

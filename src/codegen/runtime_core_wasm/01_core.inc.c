@@ -2099,13 +2099,15 @@ static int _wasm_is_result(int64_t val) {
     if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
     /* Result: core wasm stores `throw` at field 2; wasm-wasi keeps its
-       historical display order with `throw` at field 1. Detect by hash
-       rather than by a single slot so both shapes route through Result
-       methods and display logic. */
+       historical display order with `throw` at field 1. Require the
+       `__type` slot too so user packs that merely contain `__value` and
+       `throw` do not route as Result. */
     if (p[0] == 4 && p[1] == WASM_HASH___VALUE) {
         int64_t hash1 = p[1 + 1 * 3];
         int64_t hash2 = p[1 + 2 * 3];
-        if (hash1 == WASM_HASH_THROW || hash2 == WASM_HASH_THROW) return 1;
+        int64_t hash3 = p[1 + 3 * 3];
+        if ((hash1 == WASM_HASH_THROW || hash2 == WASM_HASH_THROW)
+            && hash3 == WASM_HASH___TYPE) return 1;
     }
     return 0;
 }

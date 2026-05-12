@@ -534,6 +534,14 @@ fn assert_all_backend_paths_reject_source(source: &str, label: &str, expected: &
     }
 }
 
+#[test]
+fn test_str_plus_non_str_rejected_all_backend_paths() {
+    let source = r#"
+stdout("prefix " + 42)
+"#;
+    assert_all_backend_paths_reject_source(source, "str_plus_int_rejected", "Cannot");
+}
+
 fn assert_e32b019_e1605_rejected_4backend(label: &str, source: &str) {
     let td_path = unique_temp_path("taida_e32b019_e1605", label, "td");
     fs::write(&td_path, source).expect("write E32B-019 source");

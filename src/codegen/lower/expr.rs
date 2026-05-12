@@ -1340,11 +1340,33 @@ impl Lowering {
         let lhs_var = self.lower_expr(func, lhs)?;
         let rhs_var = self.lower_expr(func, rhs)?;
 
-        // Add (+) with string operands → string concatenation
         let lhs_is_str = self.expr_is_string_full(lhs);
         let rhs_is_str = self.expr_is_string_full(rhs);
 
-        if matches!(op, BinOp::Add | BinOp::Concat) && (lhs_is_str || rhs_is_str) {
+        if matches!(op, BinOp::Add) {
+            if lhs_is_str && rhs_is_str {
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_concat".to_string(),
+                    vec![lhs_var, rhs_var],
+                ));
+                return Ok(result);
+            }
+            if lhs_is_str || rhs_is_str {
+                let lhs_str = self.convert_to_string(func, lhs, lhs_var)?;
+                let rhs_str = self.convert_to_string(func, rhs, rhs_var)?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_concat".to_string(),
+                    vec![lhs_str, rhs_str],
+                ));
+                return Ok(result);
+            }
+        }
+
+        if matches!(op, BinOp::Concat) && (lhs_is_str || rhs_is_str) {
             let lhs_str = self.convert_to_string(func, lhs, lhs_var)?;
             let rhs_str = self.convert_to_string(func, rhs, rhs_var)?;
             let result = func.alloc_var();
@@ -1358,9 +1380,7 @@ impl Lowering {
 
         let runtime_fn = match op {
             BinOp::Add => {
-                if lhs_is_str || rhs_is_str {
-                    "taida_str_concat"
-                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     // Float arithmetic: use float add
                     "taida_float_add"
                 } else if self.expr_type_is_unknown(lhs) || self.expr_type_is_unknown(rhs) {
