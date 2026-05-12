@@ -1692,6 +1692,12 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
+        int render_unit  = field_val == 0
+            && (field_tag == WASM_TAG_PACK
+                || field_hash == WASM_HASH___PREDICATE
+                || field_hash == WASM_HASH_THROW
+                || _wf_strcmp(fname, "__predicate") == 0
+                || _wf_strcmp(fname, "throw") == 0);
         /* C23B-005 (2026-04-22): explicit Int branch. Packs default
            `field_tag = 0` (INT), so without a dedicated branch an
            untagged large Int value would fall through to the generic
@@ -1721,6 +1727,8 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
             _sb_append(&sb, "\"");
             if (sv) _sb_append(&sb, sv);
             _sb_append(&sb, "\"");
+        } else if (render_unit) {
+            _sb_append(&sb, "@()");
         } else if (render_int) {
             int64_t is = taida_int_to_str(field_val);
             _sb_append(&sb, (const char *)(intptr_t)is);
@@ -1761,6 +1769,12 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
+        int render_unit  = field_val == 0
+            && (field_tag == WASM_TAG_PACK
+                || field_hash == WASM_HASH___PREDICATE
+                || field_hash == WASM_HASH_THROW
+                || _wf_strcmp(fname, "__predicate") == 0
+                || _wf_strcmp(fname, "throw") == 0);
         /* C23B-005 (2026-04-22): explicit Int branch — see the
            `_wasm_pack_to_string` counterpart comment. */
         int render_int = (field_tag == WASM_TAG_INT) && !render_bool;
@@ -1781,6 +1795,8 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
             _sb_append(&sb, "\"");
             if (sv) _sb_append(&sb, sv);
             _sb_append(&sb, "\"");
+        } else if (render_unit) {
+            _sb_append(&sb, "@()");
         } else if (render_int) {
             int64_t is = taida_int_to_str(field_val);
             _sb_append(&sb, (const char *)(intptr_t)is);
@@ -2205,7 +2221,7 @@ static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
 static int64_t _wasm_result_to_string(int64_t result) {
     if (!_wasm_result_is_error_check(result)) {
         /* Success case */
-        int64_t value = taida_pack_get_idx(result, 0); /* __value */
+        int64_t value = taida_pack_get(result, WASM_HASH___VALUE);
         int64_t value_str = _wasm_value_to_display_string(value);
         _wasm_strbuf sb;
         _sb_init(&sb);
@@ -2215,7 +2231,7 @@ static int64_t _wasm_result_to_string(int64_t result) {
         return _sb_finish(&sb);
     }
     /* Error case — throw_val == 0 means Unit (@()), matching interpreter */
-    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
+    int64_t throw_val = taida_pack_get(result, WASM_HASH_THROW);
     if (throw_val == 0) {
         return (int64_t)(intptr_t)"Result(throw <= @())";
     }

@@ -19,6 +19,10 @@ from pathlib import Path
 DOC_PATHS = [
     Path("docs/reference/standard_methods.md"),
     Path("docs/reference/class_like_types.md"),
+    Path("docs/reference/os_api.md"),
+    Path("docs/reference/addon_manifest.md"),
+    Path("docs/reference/mold_types.md"),
+    Path("docs/guide/14_os_package.md"),
 ]
 RUNTIME_PATHS = [
     Path("src/codegen/lower_molds.rs"),
@@ -30,9 +34,7 @@ SIG_RE = re.compile(r"`([A-Z][A-Za-z0-9_]*)\[([^`]*)\]\(\)`")
 HEADING_SIG_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Za-z0-9_]*)\[([^\]]*)\]")
 RUNTIME_ARM_NAME_RE = re.compile(r'"([A-Z][A-Za-z0-9_]*)"')
 
-TYPE_ONLY_HEADINGS = {
-    "RelaxedGorillax",
-}
+TYPE_ONLY_HEADINGS: set[str] = set()
 
 RUNTIME_TYPE_LITERAL_NAMES = {
     "Error",
@@ -99,9 +101,12 @@ def split_options(raw: str) -> set[str]:
 
 
 def doc_return_kind(raw: str) -> str | None:
-    raw = raw.strip()
+    raw = raw.strip().strip("`")
     if not raw or raw == "-":
         return None
+    if "->" in raw:
+        raw = raw.rsplit("->", 1)[1].strip()
+    raw = raw.strip().strip("`")
     if raw == "Bool":
         return "Bool"
     if raw == "Int":
@@ -110,6 +115,10 @@ def doc_return_kind(raw: str) -> str | None:
         return "Float"
     if raw == "Str":
         return "Str"
+    if raw == "Pack":
+        return "Pack"
+    if raw == "Dynamic":
+        return "Dynamic"
     if raw.startswith("@["):
         return "List"
     if any(token in raw for token in ("Lax", "Result", "Gorillax", "JSRilla", "Molten")):
@@ -143,6 +152,8 @@ def parse_docs(root: Path) -> dict[str, DocSpec]:
     docs: dict[str, DocSpec] = {}
     for rel in DOC_PATHS:
         path = root / rel
+        if not path.exists():
+            continue
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if line.startswith("|"):
                 cells = [c.strip() for c in line.strip().strip("|").split("|")]
@@ -157,9 +168,12 @@ def parse_docs(root: Path) -> dict[str, DocSpec]:
                     continue
                 options: set[str] = set()
                 ret_kind: str | None = None
-                if sig_cell == 0 and len(cells) >= 4:
-                    options = split_options(cells[2])
-                    ret_kind = doc_return_kind(cells[3])
+                if sig_cell == 0:
+                    if len(cells) >= 4:
+                        options = split_options(cells[2])
+                        ret_kind = doc_return_kind(cells[3])
+                    elif len(cells) >= 2:
+                        ret_kind = doc_return_kind(cells[1])
                 for match in SIG_RE.finditer(cells[sig_cell]):
                     add_doc_entry(
                         docs,
@@ -294,7 +308,7 @@ def check(strict: bool) -> int:
                     f"`{name}` documented return {ret} disagrees with registry "
                     f"return {spec.return_kind}"
                 )
-        if name not in runtime:
+        if name not in runtime and spec.enforced:
             failures.append(f"documented mold `{name}` has no runtime dispatch arm")
 
     documented = set(docs)
@@ -307,7 +321,7 @@ def check(strict: bool) -> int:
     )
 
     if registry_only:
-        advisories.append(
+        failures.append(
             "registry entries not documented in the scoped reference files: "
             + ", ".join(registry_only)
         )

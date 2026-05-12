@@ -10,7 +10,7 @@
 ///   3. Three-way parity -- compile_*.td files tested across all three backends
 mod common;
 
-use common::{normalize, run_interpreter_normalized, taida_bin};
+use common::{normalize, run_interpreter_normalized, taida_bin, wasmtime_bin};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -310,6 +310,51 @@ fn run_native_src(source: &str, label: &str) -> Option<String> {
     out
 }
 
+fn run_wasm_full_src(
+    source: &str,
+    label: &str,
+    wasmtime_args: &[&str],
+) -> Result<Option<String>, String> {
+    let Some(wasmtime) = wasmtime_bin() else {
+        eprintln!(
+            "SKIP: wasmtime not available for wasm-full parity {}",
+            label
+        );
+        return Ok(None);
+    };
+    let td_path = unique_temp_path("taida_parity_wasm_full", label, "td");
+    let wasm_path = unique_temp_path("taida_parity_wasm_full", label, "wasm");
+    fs::write(&td_path, source).map_err(|e| format!("write source: {}", e))?;
+
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-full")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .map_err(|e| format!("spawn wasm-full build: {}", e))?;
+    let _ = fs::remove_file(&td_path);
+    if !build.status.success() {
+        let _ = fs::remove_file(&wasm_path);
+        return Err(String::from_utf8_lossy(&build.stderr).trim().to_string());
+    }
+
+    let mut cmd = Command::new(wasmtime);
+    cmd.arg("run");
+    for arg in wasmtime_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("--").arg(&wasm_path);
+    let run = cmd.output().map_err(|e| format!("spawn wasmtime: {}", e))?;
+    let _ = fs::remove_file(&wasm_path);
+    if !run.status.success() {
+        return Err(String::from_utf8_lossy(&run.stderr).trim().to_string());
+    }
+
+    Ok(Some(normalize(&String::from_utf8_lossy(&run.stdout))))
+}
+
 fn assert_backend_parity_for_source(source: &str, label: &str) {
     let interp = run_interpreter_src(source, label)
         .unwrap_or_else(|| panic!("interpreter failed for {}", label));
@@ -327,6 +372,21 @@ fn assert_backend_parity_for_source(source: &str, label: &str) {
         assert_eq!(
             interp, js,
             "interpreter/js mismatch for source case {}",
+            label
+        );
+    }
+}
+
+fn assert_full_backend_parity_for_source(source: &str, label: &str, wasmtime_args: &[&str]) {
+    let interp = run_interpreter_src(source, label)
+        .unwrap_or_else(|| panic!("interpreter failed for {}", label));
+    assert_backend_parity_for_source(source, label);
+    if let Some(wasm) =
+        run_wasm_full_src(source, label, wasmtime_args).expect("wasm-full parity run")
+    {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-full mismatch for source case {}",
             label
         );
     }
@@ -9446,8 +9506,6 @@ stdout(outcome.kind)
         .expect("NB-31: Native should not crash with Bool handler");
     let interp_err = run_net_interpreter_runtime_error(&dir)
         .expect("NB-31: interpreter should reject Bool handler");
-    let wasm_err = run_wasm_full_build_error(&dir.join("main.td"), "nb31_bool_handler")
-        .expect("NB-31: wasm-full should reject unsupported net surface");
     cleanup_net_project(&dir);
 
     for (backend, output) in [("JS", js), ("Native", native)] {
@@ -9474,11 +9532,15 @@ stdout(outcome.kind)
         "NB-31 bool handler: interpreter error should mention handler type, got: {}",
         interp_err
     );
-    assert!(
-        wasm_err.contains("[E1612]"),
-        "NB-31 bool handler: wasm-full should pin unsupported net rejection, got: {}",
-        wasm_err
-    );
+}
+
+#[test]
+fn test_nb31_bool_callback_type_mismatch_rejects_on_all_build_paths() {
+    let source = r#"
+nums <= @[1, 2]
+out <= Map[nums, true]()
+"#;
+    assert_all_backend_paths_reject_source(source, "nb31_bool_callback_type_mismatch", "[E1506]");
 }
 
 /// NB-31: Arithmetic Int expression path (bad <= 999999 + 1).
@@ -36272,7 +36334,7 @@ fn test_c12b_021_result_direct_stdout_field_tags() {
 stdout(Result[true]())
 stdout(Result["ok"]())
 "#;
-    assert_backend_parity_for_source(source, "c12b_021_result_direct_stdout_field_tags");
+    assert_full_backend_parity_for_source(source, "c12b_021_result_direct_stdout_field_tags", &[]);
 }
 
 /// C12B-021: Exists on a present path reports isSuccess=true; on a
@@ -36305,15 +36367,37 @@ stdout(b.isSuccess().toString())
 
 #[test]
 fn test_c12b_021_exists_direct_stdout_result_shape_parity() {
-    let dir = std::env::temp_dir().join("taida_c12b_021_exists_direct_stdout");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mktmp");
-    let present = dir.join("present.txt");
-    std::fs::write(&present, "x").unwrap();
-    let p = present.to_string_lossy().replace('\\', "/");
-    let source = format!(r#"stdout(Exists["{p}"]())"#);
-    assert_backend_parity_for_source(&source, "c12b_021_exists_direct_stdout_result_shape");
-    let _ = std::fs::remove_dir_all(&dir);
+    let source = r#"stdout(Exists["."]())"#;
+    assert_full_backend_parity_for_source(
+        source,
+        "c12b_021_exists_direct_stdout_result_shape",
+        &["--dir=."],
+    );
+}
+
+#[test]
+fn test_hashmap_set_generic_method_chains_preserve_types() {
+    let source = r#"
+Registry = @(
+  data: HashMap[Str, Int]
+)
+Bag = @(
+  items: Set[Int]
+)
+
+baseMap <= hashMap().set("a", 1).set("b", 2)
+updatedMap <= baseMap.remove("a").set("c", 3)
+reg <= Registry(data <= updatedMap)
+
+baseSet <= setOf(@[1, 2])
+updatedSet <= baseSet.remove(1).add(3)
+bag <= Bag(items <= updatedSet)
+
+stdout(reg.data.get("b").getOrDefault(0).toString())
+stdout(reg.data.get("c").getOrDefault(0).toString())
+stdout(bag.items.has(3).toString())
+"#;
+    assert_full_backend_parity_for_source(source, "hashmap_set_generic_method_chains", &[]);
 }
 
 // ──────────────────────────────────────────────────────────────

@@ -581,12 +581,26 @@ int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate)
     taida_pack_set(pack, 0, value);
     taida_pack_set_hash(pack, 1, WASM_HASH___PREDICATE);
     taida_pack_set(pack, 1, predicate);
+    taida_pack_set_tag(pack, 1, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 2, WASM_HASH_THROW);
     taida_pack_set(pack, 2, throw_val);
+    taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
     taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
+}
+
+static int64_t _wasm_result_get_value(int64_t result) {
+    return taida_pack_get(result, WASM_HASH___VALUE);
+}
+
+static int64_t _wasm_result_get_predicate(int64_t result) {
+    return taida_pack_get(result, WASM_HASH___PREDICATE);
+}
+
+static int64_t _wasm_result_get_throw(int64_t result) {
+    return taida_pack_get(result, WASM_HASH_THROW);
 }
 
 /* C25B-001: Stream[val]() — minimal wasm wrapper. Mirrors
@@ -672,9 +686,9 @@ static int64_t _wasm_stream_to_display_string(int64_t stream_ptr) {
    2. If predicate exists, evaluate P(value) — true = success, false = error
    3. No predicate + no throw = success (backward compatible) */
 static int64_t _wasm_result_is_error_check(int64_t result) {
-    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw */
-    int64_t pred = taida_pack_get_idx(result, 1);      /* __predicate */
-    int64_t value = taida_pack_get_idx(result, 0);     /* __value */
+    int64_t throw_val = _wasm_result_get_throw(result);
+    int64_t pred = _wasm_result_get_predicate(result);
+    int64_t value = _wasm_result_get_value(result);
 
     if (throw_val != 0) {
         if (pred != 0) {
@@ -703,7 +717,7 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
     if (!_wasm_result_is_error_check(result)) {
         return result; /* Success: return as-is */
     }
-    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
+    int64_t throw_val = _wasm_result_get_throw(result);
     /* Pass the throw payload `P` directly to the mapper so the runtime
        matches the type-checker contract
        `mapError(fn: P -> Q) -> Result[T, Q]`. */
@@ -786,14 +800,14 @@ int64_t taida_result_is_error_check(int64_t result) {
 
 /// Result.getOrDefault(fallback)
 int64_t taida_result_get_or_default(int64_t result, int64_t def) {
-    if (!_wasm_result_is_error_check(result)) return taida_pack_get_idx(result, 0);
+    if (!_wasm_result_is_error_check(result)) return _wasm_result_get_value(result);
     return def;
 }
 
 /// Result.map(fn)
 int64_t taida_result_map(int64_t result, int64_t fn_ptr) {
     if (_wasm_result_is_error_check(result)) return result;
-    int64_t value = taida_pack_get_idx(result, 0);
+    int64_t value = _wasm_result_get_value(result);
     int64_t new_val = taida_invoke_callback1(fn_ptr, value);
     return taida_result_create(new_val, 0, 0);
 }
@@ -801,16 +815,16 @@ int64_t taida_result_map(int64_t result, int64_t fn_ptr) {
 /// Result.flatMap(fn)
 int64_t taida_result_flat_map(int64_t result, int64_t fn_ptr) {
     if (_wasm_result_is_error_check(result)) return result;
-    int64_t value = taida_pack_get_idx(result, 0);
+    int64_t value = _wasm_result_get_value(result);
     return taida_invoke_callback1(fn_ptr, value);
 }
 
 /// Result.getOrThrow()
 int64_t taida_result_get_or_throw(int64_t result) {
     if (!_wasm_result_is_error_check(result)) {
-        return taida_pack_get_idx(result, 0);
+        return _wasm_result_get_value(result);
     }
-    int64_t throw_val = taida_pack_get_idx(result, 2);
+    int64_t throw_val = _wasm_result_get_throw(result);
     if (taida_can_throw_payload(throw_val)) {
         return taida_throw(throw_val);
     }

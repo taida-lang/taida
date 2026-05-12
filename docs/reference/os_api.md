@@ -17,7 +17,7 @@
 | `readBytesAt(path, offset, len)` | `(Str, Int, Int) -> Lax[Bytes]` | チャンク読み込み。`offset` は 0-indexed、1 回呼び出しの `len` 上限は 64MB。EOF 越えは可読部分のみ返す。`offset` / `len` 不正は `Lax` の default |
 | `ListDir[path]()` | `Str -> Lax[@[Str]]` | ファイル名のみ（パス無し） |
 | `Stat[path]()` | `Str -> Lax[@(size: Int, modified: Int, isDir: Bool)]` | `modified` は epoch ミリ秒 |
-| `Exists[path]()` | `Str -> Bool` | symlink は follow する |
+| `Exists[path]()` | `Str -> Result[Bool]` | symlink は follow する。I/O 失敗は `throw`、通常の存在有無は inner Bool |
 
 ### 出力（関数）
 

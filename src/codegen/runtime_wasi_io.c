@@ -60,6 +60,15 @@ extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
 
 /* Type tags (must match runtime_core_wasm.c) */
 #define WASM_TAG_STR 1
+#define WASI_RT_TAG_INT 0
+#define WASI_RT_TAG_BOOL 2
+#define WASI_RT_TAG_STR_REAL 3
+#define WASI_RT_TAG_PACK 4
+
+#define WASI_HASH___TYPE      0x84d2d84b631f799bLL
+#define WASI_HASH___VALUE     0x0a7fc9f13472bbe0LL
+#define WASI_HASH_THROW       0x5a5fe3720c9584cfLL
+#define WASI_HASH___PREDICATE 0x15592af3c2291540LL
 
 /* ── WASI imports (wasi_snapshot_preview1) ── */
 
@@ -507,8 +516,30 @@ static int64_t wasi_os_ok_inner(void) {
 /* Build os Result success — matches Native taida_os_result_success.
  * Kept for compatibility; C12B-021 callers should prefer
  * wasi_os_result_success_value to embed a meaningful Int inner. */
+static int64_t wasi_os_result_create(int64_t inner, int64_t throw_val) {
+    taida_register_field_name(WASI_HASH___VALUE, (int64_t)(intptr_t)"__value");
+    taida_register_field_name(WASI_HASH_THROW, (int64_t)(intptr_t)"throw");
+    taida_register_field_name(WASI_HASH___PREDICATE, (int64_t)(intptr_t)"__predicate");
+    taida_register_field_name(WASI_HASH___TYPE, (int64_t)(intptr_t)"__type");
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASI_HASH___VALUE);
+    taida_pack_set(pack, 0, inner);
+    taida_pack_set_hash(pack, 1, WASI_HASH_THROW);
+    taida_pack_set(pack, 1, throw_val);
+    taida_pack_set_tag(pack, 1, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(pack, 2, WASI_HASH___PREDICATE);
+    taida_pack_set(pack, 2, 0);
+    taida_pack_set_tag(pack, 2, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(pack, 3, WASI_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
+    taida_pack_set_tag(pack, 3, WASI_RT_TAG_STR_REAL);
+    return pack;
+}
+
 static int64_t wasi_os_result_success(void) {
-    return taida_result_create(wasi_os_ok_inner(), 0, 0);
+    int64_t r = wasi_os_result_create(wasi_os_ok_inner(), 0);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_PACK);
+    return r;
 }
 
 /* C12B-021: Result[Int] success with an explicit integer inner value
@@ -516,19 +547,18 @@ static int64_t wasi_os_result_success(void) {
  * preserves sign/width across i64 but keeps the shape identical to
  * Native's `taida_os_result_success(value)`. */
 static int64_t wasi_os_result_success_value(int64_t value) {
-    return taida_result_create(value, 0, 0);
+    return wasi_os_result_create(value, 0);
 }
 
 /* C12B-021: Result[Bool] success — wraps a Bool inner value and
  * sets the proper runtime tag so `.toString()` / tag-dispatched
  * printing ("true" / "false") matches the Interpreter / Native
  * contract byte-for-byte. Used by Exists on wasi. */
-#define WASM_TAG_BOOL 2
 static int64_t wasi_os_result_success_bool(int64_t bool_val) {
-    int64_t r = taida_result_create(bool_val ? 1 : 0, 0, 0);
+    int64_t r = wasi_os_result_create(bool_val ? 1 : 0, 0);
     /* Result layout: index 0 = __value. Mark it Bool so downstream
      * polymorphic display prints "true"/"false" rather than "1"/"0". */
-    taida_pack_set_tag(r, 0, WASM_TAG_BOOL);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_BOOL);
     return r;
 }
 
@@ -559,7 +589,9 @@ static int64_t wasi_os_result_failure_code(int32_t wasi_errno, const char *msg) 
     taida_pack_set_tag(inner, 3, WASM_TAG_STR);
 
     int64_t error = wasi_make_io_error(wasi_errno, message);
-    return taida_result_create(inner, error, 0);
+    int64_t r = wasi_os_result_create(inner, error);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_PACK);
+    return r;
 }
 
 /* Convenience: failure with errno=0 (for validation errors without WASI errno) */
@@ -806,10 +838,9 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
  * existing `WASM_TAG_STR 1` defined above is a historic mismatch with
  * core's value (3) and is only used by this file's allEnv path -- not
  * worth touching. New constants below use the correct core values. */
-#define WASI_RT_TAG_INT     0
+#ifndef WASI_RT_TAG_FLOAT
 #define WASI_RT_TAG_FLOAT   1
-#define WASI_RT_TAG_BOOL    2
-#define WASI_RT_TAG_STR_REAL 3
+#endif
 
 /* Float bit-punning helpers (mirror runtime_full_wasm.c::_to_double /
  * core_wasm::_d2l).  Unboxed double <-> int64 bit-pattern. */

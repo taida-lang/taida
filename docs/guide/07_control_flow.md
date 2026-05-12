@@ -330,7 +330,8 @@ handle =
 ```taida
 // NG: アーム内に副作用文が紛れ込む anti-pattern
 validateProjectRoot =
-  | Exists["./"]() == false |>
+  rootExists <= Exists["./"]()
+  | rootExists.getOrDefault(false) == false |>
     fail("error: current directory does not exist")
     writeFile(".hk_write_check", "test") => _wr   // [E1616]: discard 破棄パターンは禁止
     RemoveFile[".hk_write_check"]() => _rm

@@ -1029,3 +1029,78 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `unmold()` | `=> :T` | アンモールディング |
 
 `map` の引数型ピンは **受け側の `T` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
+
+---
+
+## Built-in Mold Surface Index
+
+この一覧は、モールド registry と公開ドキュメントの同期確認に使う索引です。詳細な使い方は各型・パッケージの節を参照してください。
+
+| API | 引数 | Options | Return |
+|-----|------|---------|--------|
+| `Acos[a1]()` | a1 | - | Float |
+| `All[a1]()` | a1 | - | Pack |
+| `Asin[a1]()` | a1 | - | Float |
+| `Async[a1]()` | a1 | - | Pack |
+| `AsyncReject[a1]()` | a1 | - | Pack |
+| `Atan[a1]()` | a1 | - | Float |
+| `Atan2[a1, a2]()` | a1, a2 | - | Float |
+| `BuildRilla[a1]()` | a1 | - | Pack |
+| `ByteAt[a1, a2]()` | a1, a2 | - | Pack |
+| `ByteLength[a1]()` | a1 | - | Int |
+| `ByteSlice[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `BytesCursor[a1]()` | a1 | offset | Pack |
+| `BytesCursorRemaining[a1]()` | a1 | - | Int |
+| `BytesCursorTake[a1, a2]()` | a1, a2 | - | Pack |
+| `BytesCursorU8[a1]()` | a1 | - | Pack |
+| `Cancel[a1]()` | a1 | - | Pack |
+| `Chars[a1]()` | a1 | - | List |
+| `Contains[a1, a2]()` | a1, a2 | - | Bool |
+| `Cos[a1]()` | a1 | - | Float |
+| `Cosh[a1]()` | a1 | - | Float |
+| `Exp[a1]()` | a1 | - | Float |
+| `FileRilla[a1]()` | a1 | - | Pack |
+| `HttpRequest[a1, a2]()` | a1, a2 | body,headers | Pack |
+| `IndexOf[a1, a2]()` | a1, a2 | - | Int |
+| `JSRilla[a1]()` | a1 | - | Pack |
+| `LastIndexOf[a1, a2]()` | a1, a2 | - | Int |
+| `Length[a1]()` | a1 | - | Int |
+| `Ln[a1]()` | a1 | - | Float |
+| `Log[a1]()` | a1 | - | Float |
+| `Log10[a1]()` | a1 | - | Float |
+| `Log2[a1]()` | a1 | - | Float |
+| `Max[a1]()` | a1 | - | Dynamic |
+| `Min[a1]()` | a1 | - | Dynamic |
+| `Molten[]()` | - | - | Pack |
+| `Optional[]()` | - | - | Pack |
+| `PadLeft[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `PadRight[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `Pow[a1, a2]()` | a1, a2 | - | Float |
+| `Race[a1]()` | a1 | - | Pack |
+| `Reduce[a1, a2, a3]()` | a1, a2, a3 | - | Dynamic |
+| `RelaxedGorillax[a1]()` | a1 | - | Pack |
+| `ReplaceAll[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `Sin[a1]()` | a1 | - | Float |
+| `Sinh[a1]()` | a1 | - | Float |
+| `SpanContains[a1, a2, a3]()` | a1, a2, a3 | - | Bool |
+| `SpanEquals[a1, a2, a3]()` | a1, a2, a3 | - | Bool |
+| `SpanSlice[a1, a2, a3, a4]()` | a1, a2, a3, a4 | - | Pack |
+| `SpanStartsWith[a1, a2, a3]()` | a1, a2, a3 | - | Bool |
+| `Sqrt[a1]()` | a1 | - | Float |
+| `StrOf[a1, a2]()` | a1, a2 | - | Str |
+| `Stream[a1]()` | a1 | - | Pack |
+| `StreamFrom[a1]()` | a1 | - | Pack |
+| `StringRepeatJoin[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `Stub[a1]()` | a1 | - | Pack |
+| `TODO[]()` | - | id,sol,task,unm | Pack |
+| `Tan[a1]()` | a1 | - | Float |
+| `Tanh[a1]()` | a1 | - | Float |
+| `Timeout[a1, a2]()` | a1, a2 | - | Pack |
+| `U16BE[a1]()` | a1 | - | Pack |
+| `U16BEDecode[a1]()` | a1 | - | Pack |
+| `U16LE[a1]()` | a1 | - | Pack |
+| `U16LEDecode[a1]()` | a1 | - | Pack |
+| `U32BE[a1]()` | a1 | - | Pack |
+| `U32BEDecode[a1]()` | a1 | - | Pack |
+| `U32LE[a1]()` | a1 | - | Pack |
+| `U32LEDecode[a1]()` | a1 | - | Pack |

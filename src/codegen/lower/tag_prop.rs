@@ -44,9 +44,7 @@ impl Lowering {
     ///
     /// The type-checker's Typed HIR side table is the source for
     /// expression-level Bool decisions. Unknown or unrecorded entries only
-    /// fall back to primitive syntax, mold-spec facts, previously tracked local
-    /// bindings, and the small set of public state-check accessors that every
-    /// runtime exposes as Bool.
+    /// fall back to primitive syntax and mold-spec facts.
     pub(crate) fn expr_is_bool(&self, expr: &Expr) -> bool {
         fn mold_expr_is_bool(expr: &Expr) -> bool {
             match expr {
@@ -65,41 +63,6 @@ impl Lowering {
             }
         }
 
-        fn state_method_is_bool(method: &str, args: &[Expr]) -> bool {
-            if matches!(
-                method,
-                "contains" | "startsWith" | "endsWith" | "any" | "all" | "none" | "has"
-            ) {
-                return true;
-            }
-            args.is_empty()
-                && matches!(
-                    method,
-                    "hasValue"
-                        | "isEmpty"
-                        | "isOk"
-                        | "isError"
-                        | "isSuccess"
-                        | "isFulfilled"
-                        | "isPending"
-                        | "isRejected"
-                        | "isNaN"
-                        | "isInfinite"
-                        | "isFinite"
-                        | "isPositive"
-                        | "isNegative"
-                        | "isZero"
-                )
-        }
-
-        fn state_accessor_is_bool(expr: &Expr) -> bool {
-            match expr {
-                Expr::FieldAccess(_, field, _) => matches!(field.as_str(), "hasValue"),
-                Expr::MethodCall(_, method, args, _) => state_method_is_bool(method, args),
-                _ => false,
-            }
-        }
-
         if let Some(ty) = self.typed_expr_table.lookup(expr) {
             if matches!(ty, crate::types::Type::Bool) {
                 return true;
@@ -111,7 +74,6 @@ impl Lowering {
 
         match expr {
             Expr::BoolLit(_, _) => true,
-            Expr::Ident(name, _) => self.bool_vars.contains(name),
             Expr::BinaryOp(_, op, _, _) => {
                 matches!(
                     op,
@@ -126,24 +88,6 @@ impl Lowering {
             }
             Expr::UnaryOp(UnaryOp::Not, _, _) => true,
             Expr::FuncCall(_, _, _) | Expr::MoldInst(_, _, _, _) => mold_expr_is_bool(expr),
-            Expr::FieldAccess(obj, field, _)
-                if self
-                    .infer_type_name(obj)
-                    .and_then(|type_name| self.type_field_types.get(&type_name))
-                    .is_some_and(|field_types| {
-                        field_types.iter().any(|(name, ty)| {
-                            name == field
-                                && matches!(
-                                    ty,
-                                    Some(crate::parser::TypeExpr::Named(type_name))
-                                        if type_name == "Bool"
-                                )
-                        })
-                    }) =>
-            {
-                true
-            }
-            _ if state_accessor_is_bool(expr) => true,
             _ => false,
         }
     }
