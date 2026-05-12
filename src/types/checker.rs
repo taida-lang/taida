@@ -420,6 +420,13 @@ impl TypeChecker {
                 ("inUse".to_string(), Type::Int),
                 ("waiting".to_string(), Type::Int),
             ])),
+            known if Self::core_builtin_arity(known).is_some() => {
+                debug_assert!(
+                    Self::is_core_builtin_name(known),
+                    "core builtin arity/return registries drifted for {known}"
+                );
+                Some(Type::Unknown)
+            }
             _ => None,
         }
     }

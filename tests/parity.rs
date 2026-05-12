@@ -316,11 +316,10 @@ fn run_wasm_full_src(
     wasmtime_args: &[&str],
 ) -> Result<Option<String>, String> {
     let Some(wasmtime) = wasmtime_bin() else {
-        eprintln!(
-            "SKIP: wasmtime not available for wasm-full parity {}",
+        return Err(format!(
+            "wasmtime not available for required wasm-full parity {}",
             label
-        );
-        return Ok(None);
+        ));
     };
     let td_path = unique_temp_path("taida_parity_wasm_full", label, "td");
     let wasm_path = unique_temp_path("taida_parity_wasm_full", label, "wasm");
@@ -9541,6 +9540,28 @@ nums <= @[1, 2]
 out <= Map[nums, true]()
 "#;
     assert_all_backend_paths_reject_source(source, "nb31_bool_callback_type_mismatch", "[E1506]");
+}
+
+#[test]
+fn test_nb31_http_serve_wasm_full_net_surface_rejects() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  0
+=> :Int
+
+asyncResult <= httpServe(0, handler, 1, 1000)
+"#;
+    let td_path = unique_temp_path("taida_nb31_wasm_net_surface", "http_serve", "td");
+    fs::write(&td_path, source).expect("write wasm-full net surface fixture");
+    let err = run_wasm_full_build_error(&td_path, "nb31_http_serve_wasm_net_surface")
+        .expect("wasm-full should reject unsupported net surface");
+    let _ = fs::remove_file(&td_path);
+    assert!(
+        err.contains("[E1612]"),
+        "wasm-full net surface rejection should mention [E1612], got: {}",
+        err
+    );
 }
 
 /// NB-31: Arithmetic Int expression path (bad <= 999999 + 1).

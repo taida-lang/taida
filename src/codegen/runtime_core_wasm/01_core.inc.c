@@ -703,6 +703,8 @@ static int64_t _wasm_async_to_string(int64_t async_ptr);    /* PR-4: forward dec
 #define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
 #define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
 #define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
+#define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 #define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
 #define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
 
@@ -735,9 +737,9 @@ int64_t taida_generic_unmold(int64_t val) {
     }
     if (_wasm_is_result(val)) {
         /* Result unmold: evaluate predicate + check throw (matching native) */
-        int64_t value = taida_pack_get_idx(val, 0);      /* __value */
-        int64_t pred = taida_pack_get_idx(val, 1);        /* __predicate */
-        int64_t throw_val = taida_pack_get_idx(val, 2);   /* throw */
+        int64_t value = taida_pack_get(val, WASM_HASH___VALUE);
+        int64_t pred = taida_pack_get(val, WASM_HASH___PREDICATE);
+        int64_t throw_val = taida_pack_get(val, WASM_HASH_THROW);
 
         if (throw_val != 0) {
             if (pred != 0) {
@@ -1515,19 +1517,8 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
 /* WFX-2: corrected FNV-1a hashes (previous values were wrong, causing
    field access mismatch with compiler-generated hashes from simple_hash()) */
 #define WASM_HASH_HAS_VALUE   0x9e9c6dc733414d60LL  /* FNV-1a("hasValue") */
-#ifndef WASM_HASH___VALUE
-#define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
-#endif
-#ifndef WASM_HASH___TYPE
-#define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
-#endif
 #define WASM_HASH_IS_OK       0x6550c1c5b98b56bfLL  /* FNV-1a("isOk") */
 #define WASM_HASH___ERROR     0x15c3e6e41a99a6cbLL  /* FNV-1a("__error") */
-#ifndef WASM_HASH___DEFAULT
-#define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
-#endif
-#define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
-#define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 /* BE-WASM-1: TODO field hashes (matching native_runtime.c) */
 #define WASM_HASH_TODO_ID     0x08b72e07b55c3ac0LL  /* FNV-1a("id") */
 #define WASM_HASH_TODO_TASK   0xd9603bef07a9524cLL  /* FNV-1a("task") */
@@ -1693,8 +1684,7 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
         int render_unit  = field_val == 0
-            && (field_tag == WASM_TAG_PACK
-                || field_hash == WASM_HASH___PREDICATE
+            && (field_hash == WASM_HASH___PREDICATE
                 || field_hash == WASM_HASH_THROW
                 || _wf_strcmp(fname, "__predicate") == 0
                 || _wf_strcmp(fname, "throw") == 0);
@@ -1770,8 +1760,7 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
         int render_unit  = field_val == 0
-            && (field_tag == WASM_TAG_PACK
-                || field_hash == WASM_HASH___PREDICATE
+            && (field_hash == WASM_HASH___PREDICATE
                 || field_hash == WASM_HASH_THROW
                 || _wf_strcmp(fname, "__predicate") == 0
                 || _wf_strcmp(fname, "throw") == 0);
@@ -2109,10 +2098,14 @@ static int _wasm_is_result(int64_t val) {
     /* Need at least 13 int64_t slots (fc + 4*3 fields) = 104 bytes */
     if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    /* Result: fc=4, hash0 = WASM_HASH___VALUE, hash2 = WASM_HASH_THROW */
+    /* Result: core wasm stores `throw` at field 2; wasm-wasi keeps its
+       historical display order with `throw` at field 1. Detect by hash
+       rather than by a single slot so both shapes route through Result
+       methods and display logic. */
     if (p[0] == 4 && p[1] == WASM_HASH___VALUE) {
-        int64_t hash2 = p[1 + 2 * 3]; /* field 2 hash */
-        if (hash2 == WASM_HASH_THROW) return 1;
+        int64_t hash1 = p[1 + 1 * 3];
+        int64_t hash2 = p[1 + 2 * 3];
+        if (hash1 == WASM_HASH_THROW || hash2 == WASM_HASH_THROW) return 1;
     }
     return 0;
 }

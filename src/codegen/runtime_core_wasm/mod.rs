@@ -477,9 +477,12 @@ mod tests {
     /// 2026-05-09 E34B-020 (Codex review #16): +1174 bytes for the new
     /// `taida_list_unique_by` runtime that closes the 4-backend
     /// `Unique[xs](by <= ..)` parity gap.
+    /// 2026-05-12 E35 review follow-up: Result field hash lookup /
+    /// unit-rendering cleanup + OS Result display parity changes leave
+    /// the assembled runtime at 342,258 bytes.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 341_341;
+        const EXPECTED_TOTAL_LEN: usize = 342_258;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

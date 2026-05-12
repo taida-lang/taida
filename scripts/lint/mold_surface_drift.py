@@ -21,7 +21,6 @@ DOC_PATHS = [
     Path("docs/reference/class_like_types.md"),
     Path("docs/reference/os_api.md"),
     Path("docs/reference/addon_manifest.md"),
-    Path("docs/reference/mold_types.md"),
     Path("docs/guide/14_os_package.md"),
 ]
 RUNTIME_PATHS = [

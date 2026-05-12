@@ -547,7 +547,9 @@ static int64_t wasi_os_result_success(void) {
  * preserves sign/width across i64 but keeps the shape identical to
  * Native's `taida_os_result_success(value)`. */
 static int64_t wasi_os_result_success_value(int64_t value) {
-    return wasi_os_result_create(value, 0);
+    int64_t r = wasi_os_result_create(value, 0);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_INT);
+    return r;
 }
 
 /* C12B-021: Result[Bool] success — wraps a Bool inner value and

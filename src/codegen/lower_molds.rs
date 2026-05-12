@@ -2156,7 +2156,7 @@ impl Lowering {
                     "taida_str_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_str_mold_str"
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_bool_for_string_conversion(&type_args[0]) {
                     "taida_str_mold_bool"
                 } else if self.expr_is_int(&type_args[0]) {
                     // Compile-time-known Int: literal, negated literal,
@@ -2210,7 +2210,7 @@ impl Lowering {
                     ("taida_int_mold_float", vec![val])
                 } else if self.expr_is_string_full(&type_args[0]) {
                     ("taida_int_mold_str", vec![val])
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_bool_for_string_conversion(&type_args[0]) {
                     ("taida_int_mold_bool", vec![val])
                 } else {
                     // Dynamic fallback (e.g. function parameters/local vars):
@@ -2237,7 +2237,7 @@ impl Lowering {
                     "taida_float_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_float_mold_str"
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_bool_for_string_conversion(&type_args[0]) {
                     "taida_float_mold_bool"
                 } else {
                     // Default: Int->Float promotion
@@ -2259,7 +2259,7 @@ impl Lowering {
                     "taida_bool_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_bool_mold_str"
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_bool_for_string_conversion(&type_args[0]) {
                     "taida_bool_mold_bool"
                 } else {
                     // Default: Int->Bool (!=0)
@@ -2816,7 +2816,7 @@ impl Lowering {
                                         }
                                         Expr::BoolLit(_, _) => Some(false),
                                         Expr::EnumVariant(_, _, _) => Some(false),
-                                        _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                        _ if self.expr_is_bool_for_string_conversion(&type_args[0]) => Some(false),
                                         _ => {
                                             // Check if the expression is a known string type
                                             if self.expr_is_string_full(&type_args[0]) {
@@ -2836,7 +2836,7 @@ impl Lowering {
                                     Expr::IntLit(_, _) | Expr::FloatLit(_, _) => Some(true),
                                     Expr::BoolLit(_, _) => Some(false),
                                     Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
-                                    _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                    _ if self.expr_is_bool_for_string_conversion(&type_args[0]) => Some(false),
                                     _ if self.expr_is_string_full(&type_args[0]) => Some(false),
                                     _ => Some(true),
                                 },
@@ -2850,7 +2850,7 @@ impl Lowering {
                                 },
                                 "Bool" => match &type_args[0] {
                                     Expr::BoolLit(_, _) => Some(true),
-                                    _ if self.expr_is_bool(&type_args[0]) => Some(true),
+                                    _ if self.expr_is_bool_for_string_conversion(&type_args[0]) => Some(true),
                                     Expr::IntLit(_, _)
                                     | Expr::FloatLit(_, _)
                                     | Expr::StringLit(_, _)

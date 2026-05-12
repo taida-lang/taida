@@ -914,8 +914,8 @@ int64_t taida_monadic_flat_map(int64_t obj, int64_t fn_ptr) {
 int64_t taida_monadic_get_or_throw(int64_t obj) {
     if (obj == 0 || obj < WASM_MIN_HEAP_ADDR) return obj;
     if (_wasm_is_result(obj)) {
-        if (taida_result_is_ok(obj)) return taida_pack_get_idx(obj, 0);
-        int64_t throw_val = taida_pack_get_idx(obj, 2);
+        if (taida_result_is_ok(obj)) return taida_pack_get(obj, WASM_HASH___VALUE);
+        int64_t throw_val = taida_pack_get(obj, WASM_HASH_THROW);
         if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
         int64_t error = taida_make_error(
             (int64_t)(intptr_t)"ResultError",

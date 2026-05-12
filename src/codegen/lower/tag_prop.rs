@@ -205,7 +205,7 @@ impl Lowering {
                 }
             }
             Expr::FuncCall(callee, _, _) => {
-                if self.expr_is_bool(expr) {
+                if self.expr_is_bool_for_string_conversion(expr) {
                     return 2;
                 }
                 if let Expr::Ident(name, _) = callee.as_ref() {
@@ -229,7 +229,7 @@ impl Lowering {
                 -1 // TAIDA_TAG_UNKNOWN: return type cannot be determined at compile time
             }
             Expr::MethodCall(_, method, _, _) => {
-                if self.expr_is_bool(expr) {
+                if self.expr_is_bool_for_string_conversion(expr) {
                     return 2;
                 }
                 match method.as_str() {
@@ -327,7 +327,7 @@ impl Lowering {
                 }
             }
             Expr::Unmold(_, _) => -1, // TAIDA_TAG_UNKNOWN: could be anything
-            _ if self.expr_is_bool(expr) => 2,
+            _ if self.expr_is_bool_for_string_conversion(expr) => 2,
             _ => -1, // TAIDA_TAG_UNKNOWN
         }
     }

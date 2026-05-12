@@ -65,7 +65,7 @@ impl Lowering {
             }
             "isEmpty" => "taida_polymorphic_is_empty",
             "toString" | "toStr" => {
-                if self.expr_is_bool(obj) {
+                if self.expr_is_bool_for_string_conversion(obj) {
                     "taida_str_from_bool"
                 } else if self.expr_is_string_full(obj) {
                     // Str.toString() is identity — just return obj directly

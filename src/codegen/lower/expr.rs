@@ -1344,6 +1344,18 @@ impl Lowering {
         let lhs_is_str = self.expr_is_string_full(lhs);
         let rhs_is_str = self.expr_is_string_full(rhs);
 
+        if matches!(op, BinOp::Add | BinOp::Concat) && (lhs_is_str || rhs_is_str) {
+            let lhs_str = self.convert_to_string(func, lhs, lhs_var)?;
+            let rhs_str = self.convert_to_string(func, rhs, rhs_var)?;
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_str_concat".to_string(),
+                vec![lhs_str, rhs_str],
+            ));
+            return Ok(result);
+        }
+
         let runtime_fn = match op {
             BinOp::Add => {
                 if lhs_is_str || rhs_is_str {
