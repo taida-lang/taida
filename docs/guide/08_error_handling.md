@@ -557,7 +557,7 @@ validateAndProcess input =
 | **ゴリラ** | `><` | 即時終了リテラルです。条件分岐と組み合わせて使います |
 | **Gorillax** | `Gorillax[T]` | 覚悟のモールド型。unmold 失敗でゴリラ（プログラム終了） |
 | **Cage** | `Cage[subject, runner]` | Molten branch capability boundary。runner `CageRilla[Branch, Out]` を実行し Gorillax[Out] を返します |
-| **errorInfo()** | `g.errorInfo()` | Lax / Gorillax / RelaxedGorillax / RelaxedGorillaEscaped から失敗詳細を `Lax[ErrorInfo]` として取り出します |
+| **errorInfo()** | `g.errorInfo()` | Lax / Gorillax / RelaxedGorillax / Error 系（RelaxedGorillaEscaped を含む）から失敗詳細を `Lax[ErrorInfo]` として取り出します |
 | **RelaxedGorillax** | `.relax()` | Gorillax を throw 可能に変換。`\|==` でキャッチ可能になります |
 
 ### 使い分けの指針

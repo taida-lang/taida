@@ -1042,8 +1042,8 @@ impl Value {
 
     /// Get a field from an error, including built-in fields.
     pub fn get_error_field(&self, name: &str) -> Option<Value> {
-        if let Value::Error(err) = self {
-            match name {
+        match self {
+            Value::Error(err) => match name {
                 "type" => Some(Value::str(err.error_type.clone())),
                 "message" => Some(Value::str(err.message.clone())),
                 _ => err
@@ -1051,9 +1051,12 @@ impl Value {
                     .iter()
                     .find(|(n, _)| n == name)
                     .map(|(_, v)| v.clone()),
-            }
-        } else {
-            None
+            },
+            Value::BuchiPack(fields) => fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone()),
+            _ => None,
         }
     }
 

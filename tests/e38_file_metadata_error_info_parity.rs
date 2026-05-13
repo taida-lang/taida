@@ -1,3 +1,6 @@
+//! File metadata error metadata is checked on Interpreter, JS, and Native.
+//! WASM profiles do not expose this OS surface.
+
 mod common;
 
 use std::fs;

@@ -1,3 +1,6 @@
+//! Socket receive error metadata is checked on Interpreter, JS, and Native.
+//! WASM profiles do not expose this OS/network surface.
+
 mod common;
 
 use std::fs;

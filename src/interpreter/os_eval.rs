@@ -132,13 +132,7 @@ fn make_lax_failure(default_val: Value) -> Value {
 
 /// Create a Lax[T] failure value with ErrorInfo metadata.
 fn make_lax_failure_with_error(default_val: Value, error: Value) -> Value {
-    Value::pack(vec![
-        ("hasValue".into(), Value::Bool(false)),
-        ("__value".into(), default_val.clone()),
-        ("__default".into(), default_val),
-        ("__type".into(), Value::str("Lax".into())),
-        ("__error".into(), error),
-    ])
+    Interpreter::lax_failure_with_error(default_val, error)
 }
 
 /// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
@@ -193,14 +187,7 @@ fn make_result_failure_with_kind(kind: &str, message: impl Into<String>) -> Valu
         ("message".into(), Value::str(message.clone())),
         ("kind".into(), Value::str(kind.to_string())),
     ]);
-    let error_val = Value::Error(ErrorValue {
-        error_type: "IoError".to_string(),
-        message,
-        fields: vec![
-            ("code".into(), Value::Int(-1)),
-            ("kind".into(), Value::str(kind.to_string())),
-        ],
-    });
+    let error_val = make_io_error_with_kind(kind, &message, -1);
     Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
@@ -242,25 +229,11 @@ fn make_io_error(err: &std::io::Error) -> Value {
     let code = err.raw_os_error().unwrap_or(-1) as i64;
     let message = err.to_string();
     let kind = classify_io_error_kind(err).to_string();
-    Value::Error(ErrorValue {
-        error_type: "IoError".to_string(),
-        message,
-        fields: vec![
-            ("code".into(), Value::Int(code)),
-            ("kind".into(), Value::str(kind)),
-        ],
-    })
+    Interpreter::canonical_error_pack("IoError", message, kind, code)
 }
 
 fn make_io_error_with_kind(kind: &str, message: &str, code: i64) -> Value {
-    Value::Error(ErrorValue {
-        error_type: "IoError".to_string(),
-        message: message.to_string(),
-        fields: vec![
-            ("code".into(), Value::Int(code)),
-            ("kind".into(), Value::str(kind.to_string())),
-        ],
-    })
+    Interpreter::canonical_error_pack("IoError", message.to_string(), kind.to_string(), code)
 }
 
 fn make_read_lax_failure(default_val: Value, kind: &str) -> Value {
@@ -3960,9 +3933,9 @@ r"#;
     #[test]
     fn test_c19_run_interactive_missing_program_returns_io_error() {
         // E32B-035 migration: same shape as `exit_7`, but the failure carries
-        // an `IoError` (`Value::Error` variant) instead of a process exit
-        // BuchiPack. We still cannot reach `__error.kind` from user code, so
-        // we read the `Value::Error` field map directly at the Rust level.
+        // an `IoError` instead of a process-exit error. We still cannot reach
+        // `__error.kind` from user code, so we read the error carrier at the
+        // Rust level.
         let code = r#"r <= runInteractive("/nonexistent/taida_c19_xyz", @[])
 stdout(r.hasValue)
 r"#;
@@ -3981,6 +3954,30 @@ r"#;
             kind_field,
             Value::str("not_found".into()),
             "Missing program must be classified as not_found IoError"
+        );
+    }
+
+    #[test]
+    fn test_io_error_uses_canonical_pack_carrier() {
+        let code = r#"r <= runInteractive("/nonexistent/taida_canonical_io_error_xyz", @[])
+r"#;
+        let (value, out) = run_code_returning_value(code);
+        assert!(out.is_empty());
+        assert!(!lax_has_value(&value));
+        let error = pack_field(&value, "__error");
+        let Value::BuchiPack(fields) = error else {
+            panic!("IoError must use canonical BuchiPack carrier, got: {error:?}");
+        };
+        assert_eq!(pack_field(error, "type"), &Value::str("IoError".into()));
+        assert_eq!(pack_field(error, "__type"), &Value::str("IoError".into()));
+        assert!(
+            matches!(pack_field(error, "message"), Value::Str(_)),
+            "IoError carrier must include message, got: {fields:?}"
+        );
+        assert_eq!(pack_field(error, "kind"), &Value::str("not_found".into()));
+        assert!(
+            matches!(pack_field(error, "code"), Value::Int(_)),
+            "IoError carrier must include numeric code, got: {fields:?}"
         );
     }
 
