@@ -241,13 +241,18 @@ static int taida_cmp_strings(const void *a, const void *b) {
     return strcmp(*(const char**)a, *(const char**)b);
 }
 
+static taida_val taida_os_list_dir_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "ListDir error", kind, 0);
+    return taida_lax_empty_error(taida_list_new(), error);
+}
+
 // ── ListDir[path]() → Lax[@[Str]] ────────────────────────
 taida_val taida_os_list_dir(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty(taida_list_new());
+    if (!path) return taida_os_list_dir_lax_error("invalid");
 
     DIR *dir = opendir(path);
-    if (!dir) return taida_lax_empty(taida_list_new());
+    if (!dir) return taida_os_list_dir_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     // Collect entries, then sort
     taida_val capacity = 64;
@@ -269,7 +274,7 @@ taida_val taida_os_list_dir(taida_val path_ptr) {
                 for (taida_val i = 0; i < count; i++) taida_str_release((taida_val)names[i]);
                 free(names);
                 closedir(dir);
-                return taida_lax_empty(taida_list_new());
+                return taida_os_list_dir_lax_error("too_large");
             }
             capacity *= 2;
             TAIDA_REALLOC(names, taida_safe_mul((size_t)capacity, sizeof(char*), "listDir_grow"), "listDir");
@@ -293,11 +298,7 @@ taida_val taida_os_list_dir(taida_val path_ptr) {
     return taida_lax_new(list, taida_list_new());
 }
 
-// ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
-taida_val taida_os_stat(taida_val path_ptr) {
-    const char *path = (const char*)path_ptr;
-
-    // Build default stat pack
+static taida_val taida_os_stat_default_pack(void) {
     taida_val default_pack = taida_pack_new(3);
     taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
     taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
@@ -308,11 +309,28 @@ taida_val taida_os_stat(taida_val path_ptr) {
     taida_pack_set(default_pack, 1, (taida_val)"");
     taida_pack_set_hash(default_pack, 2, (taida_val)is_dir_hash);
     taida_pack_set(default_pack, 2, 0);
+    return default_pack;
+}
 
-    if (!path) return taida_lax_empty(default_pack);
+static taida_val taida_os_stat_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "Stat error", kind, 0);
+    return taida_lax_empty_error(taida_os_stat_default_pack(), error);
+}
+
+// ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
+taida_val taida_os_stat(taida_val path_ptr) {
+    const char *path = (const char*)path_ptr;
+
+    // Build default stat pack
+    taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
+    taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
+    taida_val is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
+    taida_val default_pack = taida_os_stat_default_pack();
+
+    if (!path) return taida_os_stat_lax_error("invalid");
 
     struct stat st;
-    if (stat(path, &st) != 0) return taida_lax_empty(default_pack);
+    if (stat(path, &st) != 0) return taida_os_stat_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     // Format modified time as RFC3339/UTC
     struct tm tm_buf;

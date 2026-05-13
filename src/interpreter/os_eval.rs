@@ -288,6 +288,44 @@ fn make_env_var_lax_failure(default_val: Value, kind: &str) -> Value {
     )
 }
 
+fn make_list_dir_lax_failure(kind: &str) -> Value {
+    make_lax_failure_with_error(
+        Value::list(Vec::new()),
+        make_io_error_with_kind(kind, "ListDir error", 0),
+    )
+}
+
+fn default_stat_pack() -> Value {
+    Value::pack(vec![
+        ("size".into(), Value::Int(0)),
+        ("modified".into(), Value::str(String::new())),
+        ("isDir".into(), Value::Bool(false)),
+    ])
+}
+
+fn make_stat_lax_failure(kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_stat_pack(),
+        make_io_error_with_kind(kind, "Stat error", 0),
+    )
+}
+
+fn make_http_lax_failure_with_kind(kind: &str) -> Value {
+    let default_response = Value::pack(vec![
+        ("status".into(), Value::Int(0)),
+        ("body".into(), Value::str(String::new())),
+        ("headers".into(), Value::pack(vec![])),
+    ]);
+    make_lax_failure_with_error(
+        default_response,
+        make_io_error_with_kind(kind, "HttpRequest error", 0),
+    )
+}
+
+fn make_socket_lax_failure(default_val: Value, message: &str, kind: &str) -> Value {
+    make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, message, 0))
+}
+
 fn classify_io_error_kind(err: &std::io::Error) -> &'static str {
     use std::io::ErrorKind;
     match err.kind() {
@@ -448,12 +486,7 @@ fn make_http_response(status: i64, body: String, headers: Vec<(String, String)>)
 }
 
 fn make_http_failure() -> Value {
-    let default_response = Value::pack(vec![
-        ("status".into(), Value::Int(0)),
-        ("body".into(), Value::str(String::new())),
-        ("headers".into(), Value::pack(vec![])),
-    ]);
-    make_lax_failure(default_response)
+    make_http_lax_failure_with_kind("other")
 }
 
 fn make_udp_recv_default_payload() -> Value {
@@ -467,6 +500,10 @@ fn make_udp_recv_default_payload() -> Value {
 
 /// Parse a URL into (host, port, path, use_tls).
 fn parse_url(url: &str) -> Option<(String, u16, String, bool)> {
+    if url.contains("://") && !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+
     let (scheme, rest) = if let Some(stripped) = url.strip_prefix("https://") {
         ("https", stripped)
     } else if let Some(stripped) = url.strip_prefix("http://") {
@@ -538,7 +575,7 @@ async fn http_request_async_via_curl(
     url: &str,
     extra_headers: &[(String, String)],
     body: &str,
-) -> Option<Value> {
+) -> Value {
     // C26B-007 SEC-005: strip CR/LF from method / url before passing to curl
     // for defense-in-depth; curl treats these as exec args so CRLF cannot
     // inject HTTP headers via the command itself, but a malicious method
@@ -566,12 +603,15 @@ async fn http_request_async_via_curl(
         cmd.arg("--data-raw").arg(body);
     }
 
-    let output = cmd.output().await.ok()?;
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(e) => return make_http_lax_failure_with_kind(classify_io_error_kind(&e)),
+    };
     if !output.status.success() {
-        return None;
+        return make_http_failure();
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_http_response_text(&text)
+    parse_http_response_text(&text).unwrap_or_else(|| make_http_lax_failure_with_kind("invalid"))
 }
 
 /// Perform an HTTP/1.1 request.
@@ -585,19 +625,17 @@ async fn http_request_async(
 ) -> Value {
     let (host, port, path, use_tls) = match parse_url(url) {
         Some(parsed) => parsed,
-        None => return make_http_failure(),
+        None => return make_http_lax_failure_with_kind("invalid"),
     };
 
     if use_tls {
-        return http_request_async_via_curl(method, url, extra_headers, body)
-            .await
-            .unwrap_or_else(make_http_failure);
+        return http_request_async_via_curl(method, url, extra_headers, body).await;
     }
 
     let addr = format!("{}:{}", host, port);
     let stream = match tokio::net::TcpStream::connect(&addr).await {
         Ok(s) => s,
-        Err(_) => return make_http_failure(),
+        Err(e) => return make_http_lax_failure_with_kind(classify_io_error_kind(&e)),
     };
 
     // C26B-007 SEC-005: Strip CR/LF from method, path, host to prevent
@@ -651,7 +689,8 @@ async fn http_request_async(
     }
 
     let response_str = String::from_utf8_lossy(&response_buf);
-    parse_http_response_text(&response_str).unwrap_or_else(make_http_failure)
+    parse_http_response_text(&response_str)
+        .unwrap_or_else(|| make_http_lax_failure_with_kind("invalid"))
 }
 
 // ── Mold evaluation (input APIs) ────────────────────────────
@@ -747,9 +786,9 @@ impl Interpreter {
                         });
                         Ok(Some(Signal::Value(make_lax_success(Value::list(names)))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::list(
-                        Vec::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_list_dir_lax_failure(
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -770,12 +809,6 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
 
-                let default_stat = Value::pack(vec![
-                    ("size".into(), Value::Int(0)),
-                    ("modified".into(), Value::str(String::new())),
-                    ("isDir".into(), Value::Bool(false)),
-                ]);
-
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         let size = meta.len() as i64;
@@ -788,7 +821,9 @@ impl Interpreter {
                         ]);
                         Ok(Some(Signal::Value(make_lax_success(stat_pack))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(default_stat)))),
+                    Err(e) => Ok(Some(Signal::Value(make_stat_lax_failure(
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -1964,7 +1999,11 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            Value::str(String::new()),
+                            "SocketRecv error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -1978,14 +2017,29 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::str(String::new()),
+                                "SocketRecv error",
+                                "peer_closed",
+                            )));
                         }
                         Ok(Ok(n)) => {
                             let data = String::from_utf8_lossy(&buf[..n]).to_string();
                             let _ = tx.send(Ok(make_lax_success(Value::str(data))));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::str(String::new()),
+                                "SocketRecv error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::str(String::new()),
+                                "SocketRecv error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2071,7 +2125,11 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            Value::bytes(Vec::new()),
+                            "SocketRecvBytes error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -2085,13 +2143,28 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvBytes error",
+                                "peer_closed",
+                            )));
                         }
                         Ok(Ok(n)) => {
                             let _ = tx.send(Ok(make_lax_success(Value::bytes(buf[..n].to_vec()))));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvBytes error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvBytes error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2142,7 +2215,11 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            Value::bytes(Vec::new()),
+                            "SocketRecvExact error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -2158,8 +2235,19 @@ impl Interpreter {
                         Ok(Ok(_)) => {
                             let _ = tx.send(Ok(make_lax_success(Value::bytes(buf))));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvExact error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvExact error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2334,7 +2422,11 @@ impl Interpreter {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.tokio_runtime.spawn(async move {
                     let Some(socket_handle) = udp_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(make_udp_recv_default_payload())));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            make_udp_recv_default_payload(),
+                            "UdpRecvFrom error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -2356,8 +2448,19 @@ impl Interpreter {
                             ]);
                             let _ = tx.send(Ok(make_lax_success(payload)));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(make_udp_recv_default_payload())));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                make_udp_recv_default_payload(),
+                                "UdpRecvFrom error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                make_udp_recv_default_payload(),
+                                "UdpRecvFrom error",
+                                "timeout",
+                            )));
                         }
                     }
                 });

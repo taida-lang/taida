@@ -1199,6 +1199,9 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg) {
 #ifdef EINVAL
         case EINVAL:
 #endif
+#ifdef EBADF
+        case EBADF:
+#endif
             return "invalid";
         default:
             break;
