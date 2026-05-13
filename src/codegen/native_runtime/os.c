@@ -113,17 +113,22 @@ static taida_val taida_os_extract_wait_code(int status) {
 }
 
 // ── Read[path]() → Lax[Str] ──────────────────────────────
+static taida_val taida_os_read_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "Read error", kind, 0);
+    return taida_lax_empty_error((taida_val)"", error);
+}
+
 taida_val taida_os_read(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty((taida_val)"");
+    if (!path) return taida_os_read_lax_error("invalid");
 
     // Check file size (64MB limit)
     struct stat st;
-    if (stat(path, &st) != 0) return taida_lax_empty((taida_val)"");
-    if (st.st_size > 64 * 1024 * 1024) return taida_lax_empty((taida_val)"");
+    if (stat(path, &st) != 0) return taida_os_read_lax_error(taida_os_error_kind(errno, strerror(errno)));
+    if (st.st_size > 64 * 1024 * 1024) return taida_os_read_lax_error("too_large");
 
     FILE *f = fopen(path, "r");
-    if (!f) return taida_lax_empty((taida_val)"");
+    if (!f) return taida_os_read_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     taida_val size = st.st_size;
     char *buf = taida_str_alloc(size);

@@ -130,6 +130,17 @@ fn make_lax_failure(default_val: Value) -> Value {
     ])
 }
 
+/// Create a Lax[T] failure value with ErrorInfo metadata.
+fn make_lax_failure_with_error(default_val: Value, error: Value) -> Value {
+    Value::pack(vec![
+        ("hasValue".into(), Value::Bool(false)),
+        ("__value".into(), default_val.clone()),
+        ("__default".into(), default_val),
+        ("__type".into(), Value::str("Lax".into())),
+        ("__error".into(), error),
+    ])
+}
+
 /// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
 /// any other prelude-scope builder that needs to hand back a Lax[T])
 /// can build `Lax` values without duplicating the BuchiPack shape.
@@ -239,6 +250,21 @@ fn make_io_error(err: &std::io::Error) -> Value {
             ("kind".into(), Value::str(kind)),
         ],
     })
+}
+
+fn make_io_error_with_kind(kind: &str, message: &str, code: i64) -> Value {
+    Value::Error(ErrorValue {
+        error_type: "IoError".to_string(),
+        message: message.to_string(),
+        fields: vec![
+            ("code".into(), Value::Int(code)),
+            ("kind".into(), Value::str(kind.to_string())),
+        ],
+    })
+}
+
+fn make_read_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, "Read error", 0))
 }
 
 fn classify_io_error_kind(err: &std::io::Error) -> &'static str {
@@ -641,23 +667,26 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                                String::new(),
-                            )))));
+                            return Ok(Some(Signal::Value(make_read_lax_failure(
+                                Value::str(String::new()),
+                                "too_large",
+                            ))));
                         }
                     }
-                    Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                            String::new(),
-                        )))));
+                    Err(e) => {
+                        return Ok(Some(Signal::Value(make_read_lax_failure(
+                            Value::str(String::new()),
+                            classify_io_error_kind(&e),
+                        ))));
                     }
                 }
 
                 match std::fs::read_to_string(&path) {
                     Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::str(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                        String::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_read_lax_failure(
+                        Value::str(String::new()),
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 

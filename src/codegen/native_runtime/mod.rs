@@ -771,7 +771,9 @@ mod tests {
         // 2026-05-13 E38 Phase 3: RelaxedGorillax throw now uses the
         //   canonical 5-field error carrier and propagates kind/code from
         //   the source error; assembled runtime is 1,124,297 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_124_297;
+        // 2026-05-13 E38 Phase 4: Read[path]() Lax failure now carries
+        //   canonical IoError metadata; assembled runtime is 1,124,592 bytes.
+        const EXPECTED_TOTAL_LEN: usize = 1_124_592;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

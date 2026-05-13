@@ -130,15 +130,31 @@ function __taida_os_extract_spawn_sync_code(result) {
 
 // ── Input molds (Read, ListDir, Stat, Exists, EnvVar) ──
 
+function __taida_os_read_error(kind) {
+  return Lax(null, '', undefined, __taida_error_pack('IoError', 'Read error', kind || 'other', 0));
+}
+
+function __taida_os_error_kind(e) {
+  const code = e && e.code ? String(e.code) : '';
+  if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
+  if (code === 'EACCES' || code === 'EPERM') return 'permission';
+  if (code === 'ETIMEDOUT') return 'timeout';
+  if (code === 'ECONNREFUSED') return 'refused';
+  if (code === 'ECONNRESET') return 'reset';
+  if (code === 'EPIPE' || code === 'ENOTCONN' || code === 'ECONNABORTED') return 'peer_closed';
+  if (code === 'EINVAL') return 'invalid';
+  return 'other';
+}
+
 function __taida_os_read(path) {
-  if (!__os_fs) return Lax(null, '');
+  if (!__os_fs) return __taida_os_read_error('unavailable');
   try {
     const stat = __os_fs.statSync(path);
-    if (stat.size > __OS_MAX_READ_SIZE) return Lax(null, '');
+    if (stat.size > __OS_MAX_READ_SIZE) return __taida_os_read_error('too_large');
     const content = __os_fs.readFileSync(path, 'utf-8');
     return Lax(content);
   } catch (e) {
-    return Lax(null, '');
+    return __taida_os_read_error(__taida_os_error_kind(e));
   }
 }
 
