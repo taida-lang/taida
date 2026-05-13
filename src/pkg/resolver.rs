@@ -70,17 +70,17 @@ impl AddonInstallPolicy {
     }
 
     fn min_age_seconds_for(&self, package_name: &str) -> Result<u64, String> {
-        if let Some(raw) = std::env::var("TAIDA_MIN_RELEASE_AGE")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-        {
-            return parse_age_duration_seconds(&raw);
-        }
         if let Some(age) = self.project_min_age_seconds {
             return Ok(age);
         }
         if let Some(age) = self.global_min_age_seconds {
             return Ok(age);
+        }
+        if let Some(raw) = std::env::var("TAIDA_MIN_RELEASE_AGE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
+            return parse_age_duration_seconds(&raw);
         }
         if package_name.starts_with("taida-lang/") {
             Ok(0)
@@ -654,6 +654,10 @@ pub fn install_addon_prebuilds(
 
         match prebuild_result {
             Ok(fetched) => {
+                if install_policy.allow_fresh {
+                    record_allow_fresh_audit(&manifest.root_dir, pkg, &fetched.metadata)?;
+                }
+
                 // RC2.7B-010: use shared helper for binary placement
                 place_addon_binary(
                     &deps_dir,
@@ -722,6 +726,51 @@ pub fn install_addon_prebuilds(
     }
 
     Ok(addon_info)
+}
+
+fn record_allow_fresh_audit(
+    project_root: &Path,
+    pkg: &ResolvedPackage,
+    metadata: &ReleaseMetadata,
+) -> Result<(), String> {
+    let audit_path = project_root.join(".taida").join("install-audit.log");
+    if let Some(parent) = audit_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "cannot create install audit dir '{}': {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&audit_path)
+        .map_err(|e| {
+            format!(
+                "cannot open install audit log '{}': {}",
+                audit_path.display(),
+                e
+            )
+        })?;
+    use std::io::Write;
+    writeln!(
+        file,
+        "{} allow-fresh package={} version={} published_at={} publisher={}",
+        current_rfc3339_utc_seconds(),
+        pkg.name,
+        pkg.version,
+        metadata.published_at,
+        metadata.publisher_login
+    )
+    .map_err(|e| {
+        format!(
+            "cannot write install audit log '{}': {}",
+            audit_path.display(),
+            e
+        )
+    })
 }
 
 // ── RC2.7B-010: shared binary placement helper ──────────────
@@ -1009,7 +1058,13 @@ fn try_fetch_prebuild(
                     ))
                 })?
         }
-        PackageSource::Path(_) | PackageSource::CoreBundled => ReleaseMetadata {
+        PackageSource::CoreBundled => {
+            return Err(PrebuildFailure::IntegrityMismatch(format!(
+                "core-bundled package '{}' must not install external addon prebuilds; bundled addon artifacts require an audited in-tree path",
+                pkg.name
+            )));
+        }
+        PackageSource::Path(_) => ReleaseMetadata {
             published_at: current_rfc3339_utc_seconds(),
             publisher_login: pkg
                 .name
@@ -1346,6 +1401,16 @@ fn enforce_release_metadata_policy(
     })?;
 
     let min_age = policy.min_age_seconds_for(&pkg.name)?;
+    eprintln!(
+        "  Addon risk: {}@{} published {} by {} (min age {}, override {})",
+        pkg.name,
+        pkg.version,
+        metadata.published_at,
+        metadata.publisher_login,
+        format_duration(min_age),
+        if policy.allow_fresh { "on" } else { "off" }
+    );
+
     if min_age > 0 && !policy.allow_fresh {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1390,16 +1455,6 @@ fn enforce_release_metadata_policy(
             }
         }
     }
-
-    eprintln!(
-        "  Addon risk: {}@{} published {} by {} (min age {}, override {})",
-        pkg.name,
-        pkg.version,
-        metadata.published_at,
-        metadata.publisher_login,
-        format_duration(min_age),
-        if policy.allow_fresh { "on" } else { "off" }
-    );
 
     Ok(())
 }
@@ -1747,6 +1802,82 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nonce))
+    }
+
+    #[test]
+    fn addon_min_age_policy_prefers_project_over_env() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let dir = unique_test_dir("taida_test_min_age_project_env");
+        let home = dir.join("home");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("packages.tdm"),
+            r#"
+name <= "demo"
+version <= "a.1"
+
+[security]
+min_release_age = "9d"
+"#,
+        )
+        .unwrap();
+        let old_home = std::env::var("HOME").ok();
+        let old_age = std::env::var("TAIDA_MIN_RELEASE_AGE").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("TAIDA_MIN_RELEASE_AGE", "1d");
+        }
+
+        let manifest = Manifest {
+            name: "demo".to_string(),
+            version: "a.1".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: BTreeMap::new(),
+            root_dir: dir.clone(),
+            exports: Vec::new(),
+        };
+        let policy = AddonInstallPolicy::from_manifest(&manifest, false);
+        assert_eq!(
+            policy.min_age_seconds_for("someone/pkg").unwrap(),
+            9 * 24 * 60 * 60
+        );
+
+        match old_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match old_age {
+            Some(v) => unsafe { std::env::set_var("TAIDA_MIN_RELEASE_AGE", v) },
+            None => unsafe { std::env::remove_var("TAIDA_MIN_RELEASE_AGE") },
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allow_fresh_audit_log_records_override() {
+        let dir = unique_test_dir("taida_test_allow_fresh_audit");
+        let pkg = ResolvedPackage {
+            name: "alice/addon".to_string(),
+            version: "a.7".to_string(),
+            source: PackageSource::Store {
+                org: "alice".to_string(),
+                name: "addon".to_string(),
+            },
+            path: dir.join("addon"),
+            integrity: "sha256:ok".to_string(),
+        };
+        let metadata = ReleaseMetadata {
+            published_at: "2026-05-13T00:00:00Z".to_string(),
+            publisher_login: "alice".to_string(),
+        };
+
+        record_allow_fresh_audit(&dir, &pkg, &metadata).unwrap();
+
+        let content = fs::read_to_string(dir.join(".taida").join("install-audit.log")).unwrap();
+        assert!(content.contains("allow-fresh package=alice/addon version=a.7"));
+        assert!(content.contains("published_at=2026-05-13T00:00:00Z publisher=alice"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

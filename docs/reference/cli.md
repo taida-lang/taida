@@ -274,7 +274,7 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 - 通常の `install` でも既存 lockfile と解決結果の triple mismatch は `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` で拒否します。依存更新は `taida ingot update`、旧 lockfile 変換は `taida ingot migrate-lockfile` を使います。
 - アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256 検証付きで prebuild を取得します。
 - third-party addon prebuild は、GitHub Release の `published_at` が既定の cooling-off window を満たすまで拒否されます。既定は `taida-lang/*` が `0d`、それ以外が `3d` です。
-- release age は CLI override、環境変数 `TAIDA_MIN_RELEASE_AGE`、`packages.tdm` の `[security] min_release_age = "3d"`、グローバル `~/.taida/config.toml` の `[security] min_release_age`、組み込み既定の順に解決します。
+- release age は CLI override、`packages.tdm` の `[security] min_release_age = "3d"`、グローバル `~/.taida/config.toml` の `[security] min_release_age`、環境変数 `TAIDA_MIN_RELEASE_AGE`、組み込み既定の順に解決します。`--allow-fresh` を使った実行は `.taida/install-audit.log` に記録します。
 - addon lock entry は target、SHA-256、release `published_at`、publisher login を記録します。publisher 変更や `published_at` の後退は hard fail です。
 - アドオンキャッシュは `~/.taida/addon-cache/` に置かれます。
 

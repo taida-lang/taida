@@ -69,6 +69,13 @@ No finding is in an undecided state.
 
 ## Supply-chain pinning
 
+GitHub Actions workflows must not execute network-fetched shell
+installers directly. Do not pipe `curl` or `wget` output into a shell,
+and do not feed a shell from process substitution backed by a network
+download. Workflow tool installation must download a versioned release
+archive and verify its SHA-256 digest before executing anything from
+the archive.
+
 `taida upgrade` (pre-`@c.15.rc3`) used to read releases from a
 personal GitHub fork; this was rotated to `taida-lang/taida` in
 `@c.15.rc3` (`src/upgrade.rs::canonical_release_source_is_taida_lang_org`

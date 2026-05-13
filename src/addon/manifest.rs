@@ -192,6 +192,8 @@ pub enum AddonManifestError {
     },
     /// Required top-level key missing.
     MissingKey { path: PathBuf, key: &'static str },
+    /// Unknown top-level key.
+    UnknownTopLevelKey { path: PathBuf, key: String },
     /// `abi` value did not match [`TAIDA_ADDON_ABI_VERSION`].
     AbiUnsupported {
         path: PathBuf,
@@ -295,6 +297,12 @@ impl fmt::Display for AddonManifestError {
             Self::MissingKey { path, key } => write!(
                 f,
                 "addon manifest error: required key '{}' missing in '{}'",
+                key,
+                path.display()
+            ),
+            Self::UnknownTopLevelKey { path, key } => write!(
+                f,
+                "addon manifest error: unknown top-level key '{}' in '{}' (allowed: abi, entry, package, library, targets)",
                 key,
                 path.display()
             ),
@@ -478,6 +486,18 @@ pub fn parse_addon_manifest_str(
     source: &str,
 ) -> Result<AddonManifest, AddonManifestError> {
     let raw = parse_minimal_toml(path, source)?;
+
+    for key in raw.top_level.keys() {
+        if !matches!(
+            key.as_str(),
+            "abi" | "entry" | "package" | "library" | "targets"
+        ) {
+            return Err(AddonManifestError::UnknownTopLevelKey {
+                path: path.to_path_buf(),
+                key: key.clone(),
+            });
+        }
+    }
 
     // Validate top-level required keys.
     let abi = require_int(&raw.top_level, "abi", path)?;
@@ -1263,6 +1283,25 @@ echo = 1
         assert_eq!(manifest.functions.len(), 2);
         assert_eq!(manifest.functions.get("noop"), Some(&0));
         assert_eq!(manifest.functions.get("echo"), Some(&1));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_key() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "taida-lang/addon-rs-sample"
+library = "taida_addon_sample"
+postinstall = "curl https://example.com/install.sh"
+
+[functions]
+noop = 0
+"#;
+        let err = parse(src).expect_err("unknown top-level key must be rejected");
+        assert!(matches!(
+            err,
+            AddonManifestError::UnknownTopLevelKey { key, .. } if key == "postinstall"
+        ));
     }
 
     #[test]

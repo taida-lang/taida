@@ -1589,6 +1589,28 @@ impl TypeChecker {
             });
             return;
         }
+        if matches!(
+            self.compile_target,
+            CompileTarget::WasmWasi | CompileTarget::WasmFull
+        ) && self.http_serve_handler_arity(args.get(1)) == Some(2)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1612] {} supports only 1-arg response-return httpServe handlers. \
+                     Hint: 2-arg streaming handlers require the interpreter, JS, or native backend.",
+                    self.compile_target.label()
+                ),
+                span: args
+                    .get(1)
+                    .map(|arg| arg.span().clone())
+                    .unwrap_or_else(|| Span {
+                        start: 0,
+                        end: 0,
+                        line: 1,
+                        column: 1,
+                    }),
+            });
+        }
         let Some(tls_expr) = args.get(5) else {
             return;
         };
@@ -1625,10 +1647,8 @@ impl TypeChecker {
         if matches!(
             self.compile_target,
             CompileTarget::WasmWasi | CompileTarget::WasmFull
-        ) && let Expr::BuchiPack(fields, span) = tls_expr
-            && fields
-                .iter()
-                .any(|field| matches!(field.name.as_str(), "cert" | "key" | "protocol"))
+        ) && let Some((span, non_empty)) = self.http_serve_tls_pack_shape(tls_expr)
+            && non_empty
         {
             self.errors.push(TypeError {
                 message: format!(
@@ -1638,6 +1658,25 @@ impl TypeChecker {
                 ),
                 span: span.clone(),
             });
+        }
+    }
+
+    fn http_serve_handler_arity(&self, expr: Option<&Expr>) -> Option<usize> {
+        match expr? {
+            Expr::Lambda(params, _, _) => Some(params.len()),
+            Expr::Ident(name, _) => self.func_param_counts.get(name).copied(),
+            _ => None,
+        }
+    }
+
+    fn http_serve_tls_pack_shape(&self, expr: &Expr) -> Option<(Span, bool)> {
+        match expr {
+            Expr::BuchiPack(fields, span) => Some((span.clone(), !fields.is_empty())),
+            Expr::Ident(name, span) => match self.lookup_var(name) {
+                Some(Type::BuchiPack(fields)) => Some((span.clone(), !fields.is_empty())),
+                _ => None,
+            },
+            _ => None,
         }
     }
 

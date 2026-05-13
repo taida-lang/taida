@@ -409,7 +409,7 @@ Enum => HttpProtocol = :H1 :H2 :H3
 
 `wasm-wasi` / `wasm-full` で `httpServe` を実行する場合、guest は自前で bind/listen しません。host が `wasi_snapshot_preview1.sock_accept` を実装している場合は fd 3 の inherited listener を使います。`sock_accept` を提供しない host では、accept 済み TCP 接続を fd 0/1 に接続する socket-activation 形式で 1 request を処理します。
 
-この WASM 部分集合では TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body primitive はまだ提供されません。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
+この WASM 部分集合では `port` は host 側 listener 選択に使われず、`timeoutMs` / `maxConnections` は runtime 内で追加制御されません。TLS は非空 pack を compile-time reject します。2-arg streaming handler も compile-time reject されます。request header が 16 KiB を超えて header 終端に到達しない場合、handler を呼ばず `413 Payload Too Large` を返します。TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body primitive はまだ提供されません。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
 
 例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
 

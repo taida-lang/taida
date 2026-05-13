@@ -141,8 +141,11 @@ jobs:
       - uses: taiki-e/install-action@285e94bf531e72a83c0923d52526fabb44c3b169 # nextest
       - name: Install wasmtime
         run: |
+          set -euo pipefail
           WASMTIME_VERSION=v33.0.0
+          WASMTIME_SHA256=075d491ad2c9855c6247b7ca4284a833d1f3b51e85339e0f6be4e64620ea7f40
           curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" -o wasmtime.tar.xz
+          echo "${WASMTIME_SHA256}  wasmtime.tar.xz" | sha256sum -c -
           tar xf wasmtime.tar.xz
           mv "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime-bin"
           mkdir -p "$HOME/.wasmtime/bin"
@@ -349,9 +352,24 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install actionlint
         run: |
-          bash <(curl --proto '=https' --tlsv1.2 -sSfL \
-            https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          echo "$PWD" >> "$GITHUB_PATH"
+          set -euo pipefail
+          ACTIONLINT_VERSION=1.7.12
+          ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -L "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf actionlint.tar.gz -C "$RUNNER_TEMP/actionlint"
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+      - name: Reject unverified workflow shell installers
+        run: |
+          set -euo pipefail
+          curl_pipe='curl .*\| *bash'
+          wget_pipe='wget .*\| *sh'
+          bash_curl='bash +<\(curl'
+          if grep -RInE "${curl_pipe}|${wget_pipe}|${bash_curl}" .github/workflows; then
+            echo "::error::Workflow shell installers must use pinned archives with digest verification."
+            exit 1
+          fi
       - name: Run actionlint over all workflows
         run: |
           actionlint -color .github/workflows/*.yml

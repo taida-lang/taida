@@ -98,7 +98,16 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - uses: taiki-e/install-action@285e94bf531e72a83c0923d52526fabb44c3b169 # nextest
       - name: Install wasmtime
-        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+        run: |
+          set -euo pipefail
+          WASMTIME_VERSION=v33.0.0
+          WASMTIME_SHA256=075d491ad2c9855c6247b7ca4284a833d1f3b51e85339e0f6be4e64620ea7f40
+          curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" -o wasmtime.tar.xz
+          echo "${WASMTIME_SHA256}  wasmtime.tar.xz" | sha256sum -c -
+          tar xf wasmtime.tar.xz
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - run: cargo nextest run --profile ci
       - run: cargo build --locked --release
       - run: ./tests/run_backend_parity.sh

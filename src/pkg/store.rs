@@ -3997,4 +3997,56 @@ mod tests {
             Some("ghp_abc123".to_string())
         );
     }
+
+    #[test]
+    fn test_github_auth_token_prefers_install_token_from_auth_json() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let old_home = std::env::var("HOME").ok();
+        let old_userprofile = std::env::var("USERPROFILE").ok();
+        let old_gh = std::env::var("GH_TOKEN").ok();
+        let old_github = std::env::var("GITHUB_TOKEN").ok();
+        let tmp =
+            std::env::temp_dir().join(format!("taida_store_install_token_{}", std::process::id()));
+        let auth_dir = tmp.join(".taida");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        std::fs::write(
+            auth_dir.join("auth.json"),
+            r#"{
+  "github_token": "legacy-token",
+  "github_token_read": "read-token",
+  "github_token_publish": "publish-token",
+  "username": "alice",
+  "created_at": "2026-05-13T00:00:00Z"
+}"#,
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+
+        assert_eq!(super::github_auth_token().as_deref(), Some("read-token"));
+
+        match old_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match old_userprofile {
+            Some(v) => unsafe { std::env::set_var("USERPROFILE", v) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+        match old_gh {
+            Some(v) => unsafe { std::env::set_var("GH_TOKEN", v) },
+            None => unsafe { std::env::remove_var("GH_TOKEN") },
+        }
+        match old_github {
+            Some(v) => unsafe { std::env::set_var("GITHUB_TOKEN", v) },
+            None => unsafe { std::env::remove_var("GITHUB_TOKEN") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

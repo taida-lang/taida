@@ -422,6 +422,9 @@ pub fn check_gh_auth() -> Result<(), String> {
     if std::env::var("TAIDA_PUBLISH_SKIP_GH_AUTH").ok().as_deref() == Some("1") {
         return Ok(());
     }
+    if publish_auth_token().is_some() {
+        return Ok(());
+    }
     let output = Command::new("gh").args(["auth", "status"]).output();
     match output {
         Ok(o) if o.status.success() => Ok(()),
@@ -429,16 +432,44 @@ pub fn check_gh_auth() -> Result<(), String> {
             let stderr = String::from_utf8_lossy(&o.stderr);
             Err(format!(
                 "`gh auth status` reports no active GitHub session:\n{}\n\n\
-                 Run `gh auth login`, then retry `taida ingot publish`.",
+                 Run `gh auth login`, or save a publish token with `taida auth login`, then retry `taida ingot publish`.",
                 stderr.trim()
             ))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
-            "GitHub CLI (`gh`) not found. Install it from https://cli.github.com/ and run `gh auth login`."
+            "GitHub CLI (`gh`) not found and no publish token is configured. Install `gh` from https://cli.github.com/ and run `gh auth login`, or save a publish token with `taida auth login`."
                 .to_string(),
         ),
         Err(e) => Err(format!("Failed to invoke `gh auth status`: {}", e)),
     }
+}
+
+fn publish_auth_token() -> Option<String> {
+    for (name, value) in [
+        ("GH_TOKEN", std::env::var("GH_TOKEN").ok()),
+        ("GITHUB_TOKEN", std::env::var("GITHUB_TOKEN").ok()),
+    ] {
+        if let Some(token) = value
+            && let Some(token) = sanitize_publish_token(&token, name)
+        {
+            return Some(token);
+        }
+    }
+    crate::auth::token::load_token()
+        .and_then(|token| sanitize_publish_token(token.publish_token(), "~/.taida/auth.json"))
+}
+
+fn sanitize_publish_token(raw: &str, source: &str) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty()
+        || token
+            .chars()
+            .any(|ch| matches!(ch, '\n' | '\r' | '"' | '\\'))
+    {
+        eprintln!("warning: ignoring invalid GitHub publish token from {source}");
+        return None;
+    }
+    Some(token.to_string())
 }
 
 /// C26B-025: Compare the `<<<@<version>` self-identity from
@@ -656,6 +687,28 @@ fn _unused_pathbuf_import_keeper() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publish_auth_token_uses_publish_scope_env_token() {
+        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let old_gh = std::env::var("GH_TOKEN").ok();
+        let old_github = std::env::var("GITHUB_TOKEN").ok();
+        unsafe {
+            std::env::set_var("GH_TOKEN", "publish-token");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+
+        assert_eq!(publish_auth_token().as_deref(), Some("publish-token"));
+
+        match old_gh {
+            Some(v) => unsafe { std::env::set_var("GH_TOKEN", v) },
+            None => unsafe { std::env::remove_var("GH_TOKEN") },
+        }
+        match old_github {
+            Some(v) => unsafe { std::env::set_var("GITHUB_TOKEN", v) },
+            None => unsafe { std::env::remove_var("GITHUB_TOKEN") },
+        }
+    }
 
     #[test]
     fn bump_number_preserves_generation_and_drops_label() {

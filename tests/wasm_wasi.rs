@@ -12,10 +12,12 @@ mod common;
 
 use common::{run_interpreter, taida_bin, wasmtime_bin};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -218,6 +220,297 @@ asyncResult ]=> result
     );
 }
 
+#[cfg(unix)]
+fn compile_and_run_stdio_http_serve_source(
+    profile: &str,
+    label: &str,
+    source_for_port: impl FnOnce(u16) -> String,
+    request: &[u8],
+) -> String {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping {profile} stdio httpServe test");
+            return String::new();
+        }
+    };
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind wasm httpServe test socket");
+    let port = listener
+        .local_addr()
+        .expect("read wasm httpServe test socket address")
+        .port();
+    let source = source_for_port(port);
+    let td_path = std::env::temp_dir().join(format!(
+        "taida_{label}_http_serve_custom_{}.td",
+        std::process::id()
+    ));
+    let wasm_path = std::env::temp_dir().join(format!(
+        "taida_{label}_http_serve_custom_{}.wasm",
+        std::process::id()
+    ));
+    std::fs::write(&td_path, source).expect("write temporary Taida httpServe source");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg(profile)
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("compile should run");
+    let _ = std::fs::remove_file(&td_path);
+    assert!(
+        compile.status.success(),
+        "{profile} custom httpServe compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let request = request.to_vec();
+    let client = thread::spawn(move || {
+        let mut stream = None;
+        for _ in 0..50 {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        let mut stream =
+            stream.ok_or_else(|| "custom wasm httpServe listener did not accept".to_string())?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|e| format!("set custom wasm httpServe read timeout: {e}"))?;
+        stream
+            .write_all(&request)
+            .map_err(|e| format!("write custom HTTP request: {e}"))?;
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(|e| format!("finish custom HTTP request write side: {e}"))?;
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == ErrorKind::ConnectionReset && !bytes.is_empty() => break,
+                Err(e) => return Err(format!("read custom HTTP response: {e}")),
+            }
+        }
+        let response = String::from_utf8_lossy(&bytes).to_string();
+        Ok::<String, String>(response)
+    });
+
+    let (accepted, _) = listener
+        .accept()
+        .expect("accept local TCP connection for custom wasm httpServe");
+    let stdin_fd = unsafe { libc::dup(accepted.as_raw_fd()) };
+    let stdout_fd = unsafe { libc::dup(accepted.as_raw_fd()) };
+    assert!(stdin_fd >= 0, "dup custom stdin socket fd failed");
+    assert!(stdout_fd >= 0, "dup custom stdout socket fd failed");
+    let stdin_file = unsafe { File::from_raw_fd(stdin_fd) };
+    let stdout_file = unsafe { File::from_raw_fd(stdout_fd) };
+
+    let output = Command::new(&wasmtime)
+        .args(["run", "--"])
+        .arg(&wasm_path)
+        .stdin(Stdio::from(stdin_file))
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run custom wasmtime httpServe process");
+    drop(accepted);
+    let _ = std::fs::remove_file(&wasm_path);
+    let response = client
+        .join()
+        .expect("join custom wasm httpServe client")
+        .unwrap_or_else(|message| {
+            panic!(
+                "{message}. wasmtime status: {:?}\nstderr: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert!(
+        output.status.success(),
+        "{profile} custom httpServe process failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    response
+}
+
+fn wasm_wasi_build_error(source: &str, label: &str) -> String {
+    let td_path = std::env::temp_dir().join(format!("taida_{label}_{}.td", std::process::id()));
+    let wasm_path = std::env::temp_dir().join(format!("taida_{label}_{}.wasm", std::process::id()));
+    std::fs::write(&td_path, source).expect("write wasm-wasi build-error fixture");
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-wasi")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasm-wasi build-error compile should run");
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    assert!(
+        !output.status.success(),
+        "wasm-wasi fixture should fail to build"
+    );
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+#[cfg(unix)]
+fn wasmtime_supports_listenfd(wasmtime: &Path) -> bool {
+    Command::new(wasmtime)
+        .args(["run", "-S", "help"])
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout).contains("listenfd")
+                || String::from_utf8_lossy(&output.stderr).contains("listenfd")
+        })
+        .unwrap_or(false)
+}
+
+#[test]
+fn wasm_wasi_http_serve_primary_fd3_listener() {
+    #[cfg(not(unix))]
+    {
+        eprintln!("SKIP: wasm-wasi fd3 httpServe test requires Unix fd passing");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let wasmtime = match wasmtime_bin() {
+            Some(p) => p,
+            None => {
+                eprintln!("wasmtime not found, skipping wasm-wasi fd3 httpServe test");
+                return;
+            }
+        };
+        if !wasmtime_supports_listenfd(&wasmtime) {
+            eprintln!("wasmtime lacks -S listenfd support, skipping wasm-wasi fd3 httpServe test");
+            return;
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fd3 httpServe listener");
+        let port = listener.local_addr().expect("read fd3 test port").port();
+        let listener_fd = listener.as_raw_fd();
+
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "primary-fd3-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+"#,
+            port = port
+        );
+        let td_path =
+            std::env::temp_dir().join(format!("taida_wasm_wasi_fd3_{}.td", std::process::id()));
+        let wasm_path =
+            std::env::temp_dir().join(format!("taida_wasm_wasi_fd3_{}.wasm", std::process::id()));
+        std::fs::write(&td_path, source).expect("write fd3 httpServe fixture");
+        let compile = Command::new(taida_bin())
+            .arg("build")
+            .arg("wasm-wasi")
+            .arg(&td_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("compile fd3 httpServe fixture");
+        let _ = std::fs::remove_file(&td_path);
+        assert!(
+            compile.status.success(),
+            "fd3 httpServe compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+
+        let mut command = Command::new(&wasmtime);
+        command
+            .args(["run", "-S", "preview2=false", "-S", "listenfd=y", "--"])
+            .arg(&wasm_path)
+            .env("LISTEN_FDS", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(listener_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let listen_pid = std::ffi::CString::new(libc::getpid().to_string()).unwrap();
+                let listen_pid_key = std::ffi::CString::new("LISTEN_PID").unwrap();
+                if libc::setenv(listen_pid_key.as_ptr(), listen_pid.as_ptr(), 1) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("spawn wasmtime fd3 httpServe");
+
+        let mut stream = None;
+        for _ in 0..50 {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        let mut stream = match stream {
+            Some(stream) => stream,
+            None => {
+                let output = child.wait_with_output().expect("collect failed fd3 child");
+                let _ = std::fs::remove_file(&wasm_path);
+                panic!(
+                    "wasm-wasi fd3 listener did not accept connections. status: {:?}\nstderr: {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set fd3 client read timeout");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write fd3 HTTP request");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("finish fd3 request write side");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read fd3 HTTP response");
+
+        let output = child.wait_with_output().expect("wait fd3 wasmtime child");
+        let _ = std::fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "wasm-wasi fd3 httpServe failed. stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            response.contains("HTTP/1.1 200 OK") && response.ends_with("primary-fd3-ok"),
+            "unexpected fd3 HTTP response: {response:?}"
+        );
+    }
+}
+
 #[test]
 fn wasm_wasi_http_serve_inherited_listener() {
     compile_and_run_inherited_listener_http_serve("wasm-wasi", "wasm-wasi");
@@ -226,6 +519,166 @@ fn wasm_wasi_http_serve_inherited_listener() {
 #[test]
 fn wasm_full_http_serve_inherited_listener() {
     compile_and_run_inherited_listener_http_serve("wasm-full", "wasm-full");
+}
+
+#[test]
+fn wasm_wasi_http_serve_status_reason_and_wire_string() {
+    #[cfg(not(unix))]
+    {
+        eprintln!("SKIP: wasm-wasi httpServe wire tests require Unix fd passing");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let pack_response = compile_and_run_stdio_http_serve_source(
+            "wasm-wasi",
+            "wasm-wasi-404-pack",
+            |port| {
+                format!(
+                    r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 404, headers <= @[], body <= "missing")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+"#
+                )
+            },
+            b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            pack_response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "pack response should use status reason, got: {pack_response:?}"
+        );
+
+        let wire_response = compile_and_run_stdio_http_serve_source(
+            "wasm-wasi",
+            "wasm-wasi-wire-string",
+            |port| {
+                format!(
+                    r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nwire-body"
+=> :Str
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+"#
+                )
+            },
+            b"GET /wire HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(
+            wire_response,
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nwire-body"
+        );
+    }
+}
+
+#[test]
+fn wasm_wasi_http_serve_req_shape_uses_spans() {
+    #[cfg(not(unix))]
+    {
+        eprintln!("SKIP: wasm-wasi req-shape test requires Unix fd passing");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let response = compile_and_run_stdio_http_serve_source(
+            "wasm-wasi",
+            "wasm-wasi-req-shape",
+            |port| {
+                format!(
+                    r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  body <= req.method.start.toString() + ":" + req.method.len.toString() + "|" + req.path.start.toString() + ":" + req.path.len.toString() + "|" + req.query.start.toString() + ":" + req.query.len.toString() + "|" + req.body.start.toString() + ":" + req.body.len.toString()
+  @(status <= 200, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+"#
+                )
+            },
+            b"POST /abc?x=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        );
+        assert!(
+            response.ends_with("0:4|5:4|10:3|81:5"),
+            "wasm-wasi request span offsets should match the request line, got: {response:?}"
+        );
+    }
+}
+
+#[test]
+fn wasm_wasi_http_serve_rejects_large_header() {
+    #[cfg(not(unix))]
+    {
+        eprintln!("SKIP: wasm-wasi large-header test requires Unix fd passing");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let mut request = b"GET / HTTP/1.1\r\nX-Fill: ".to_vec();
+        request.extend(std::iter::repeat_n(b'a', 20_000));
+        let response = compile_and_run_stdio_http_serve_source(
+            "wasm-wasi",
+            "wasm-wasi-large-header",
+            |port| {
+                format!(
+                    r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "should-not-run")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+"#
+                )
+            },
+            &request,
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+            "large header should be rejected before handler, got: {response:?}"
+        );
+    }
+}
+
+#[test]
+fn wasm_wasi_http_serve_rejects_2arg_handler_and_nonempty_tls_variable() {
+    let streaming_source = r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  0
+=> :Int
+
+asyncResult <= httpServe(0, handler, 1, 1000, 128, @())
+"#;
+    let streaming_err = wasm_wasi_build_error(streaming_source, "wasm_wasi_2arg_http_serve");
+    assert!(
+        streaming_err.contains("[E1612]") && streaming_err.contains("1-arg"),
+        "wasm-wasi 2-arg handler rejection should mention [E1612] and 1-arg, got: {streaming_err}"
+    );
+
+    let tls_source = r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+tlsConfig <= @(certFile <= "cert.pem")
+asyncResult <= httpServe(0, handler, 1, 1000, 128, tlsConfig)
+"#;
+    let tls_err = wasm_wasi_build_error(tls_source, "wasm_wasi_tls_variable");
+    assert!(
+        tls_err.contains("[E1612]") && tls_err.contains("plaintext"),
+        "wasm-wasi non-empty TLS variable rejection should mention [E1612], got: {tls_err}"
+    );
 }
 
 /// Test: wasm-wasi compiles and runs the stderr fixture.

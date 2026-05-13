@@ -175,10 +175,11 @@ the `.so` manually" mode. If this section is present:
 - Fresh third-party releases are refused by default until the configured
   cooling-off window has elapsed. The default is `0d` for `taida-lang/*`
   and `3d` for other publishers.
-- The release-age window can be set with `TAIDA_MIN_RELEASE_AGE`,
-  `[security] min_release_age` in `packages.tdm`, or
-  `[security] min_release_age` in `~/.taida/config.toml`. `--allow-fresh`
-  is the explicit one-shot override.
+- The release-age window is resolved from `[security] min_release_age` in
+  `packages.tdm`, then `[security] min_release_age` in
+  `~/.taida/config.toml`, then `TAIDA_MIN_RELEASE_AGE`, then the built-in
+  default. `--allow-fresh` is the explicit one-shot override and is recorded
+  in `.taida/install-audit.log`.
 - Existing lock entries pin publisher login and publication time. A
   publisher mismatch or publication-time regression is a hard failure.
 

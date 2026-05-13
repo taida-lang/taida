@@ -767,13 +767,33 @@ pub fn fetch_release_metadata(
     let publisher_login = json["author"]["login"]
         .as_str()
         .or_else(|| json["user"]["login"].as_str())
-        .unwrap_or(org)
-        .to_string();
+        .ok_or_else(|| {
+            format!(
+                "release metadata for '{}@{}' is missing author.login/user.login",
+                package_name, version
+            )
+        })?;
+    if !is_valid_github_login(publisher_login) {
+        return Err(format!(
+            "release metadata for '{}@{}' has invalid publisher login '{}'",
+            package_name, version, publisher_login
+        ));
+    }
 
     Ok(ReleaseMetadata {
         published_at,
-        publisher_login,
+        publisher_login: publisher_login.to_string(),
     })
+}
+
+fn is_valid_github_login(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 39 || bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
 }
 
 /// Stub for when `community` feature is not enabled.
@@ -1039,6 +1059,16 @@ mod tests {
     fn split_package_id_empty_org_or_name() {
         assert_eq!(split_package_id("/name"), None);
         assert_eq!(split_package_id("org/"), None);
+    }
+
+    #[test]
+    fn publisher_login_validation_rejects_homographs() {
+        assert!(is_valid_github_login("taida-lang"));
+        assert!(is_valid_github_login("Alice-123"));
+        assert!(!is_valid_github_login("оrg"));
+        assert!(!is_valid_github_login("-org"));
+        assert!(!is_valid_github_login("org-"));
+        assert!(!is_valid_github_login(""));
     }
 
     #[test]

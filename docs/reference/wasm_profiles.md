@@ -62,6 +62,11 @@ OS API のシンボル単位の対応範囲は `docs/reference/build_descriptors
 listener を使います。Wasmtime の legacy preview1 実行環境など
 `sock_accept` を提供しない host では、accept 済み TCP 接続を fd 0/1
 に接続する socket-activation 形式で 1 request を処理します。
+この部分集合では guest が bind/listen を行わないため `httpServe` の
+`port` は host 側 listener の選択には使われません。`timeoutMs` と
+`maxConnections` も host の WASI socket 実装に委譲され、Taida runtime
+側では追加の scheduling policy を持ちません。TLS 設定は非空 pack
+なら compile-time reject されます。
 
 ---
 
