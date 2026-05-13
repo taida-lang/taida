@@ -988,7 +988,7 @@ err.code        // Int -- numeric code（OS error / HTTP status 等）
 | `errorInfo()` | `Lax[T]` | `Lax[ErrorInfo]` |
 | `errorInfo()` | `Gorillax[T]` | `Lax[ErrorInfo]` |
 | `errorInfo()` | `RelaxedGorillax[T]` | `Lax[ErrorInfo]` |
-| `errorInfo()` | `RelaxedGorillaEscaped` | `Lax[ErrorInfo]` |
+| `errorInfo()` | `Error` 系 (`RelaxedGorillaEscaped` を含む) | `Lax[ErrorInfo]` |
 
 `hasValue = true` の値では `errorInfo()` の戻り値 `Lax` の `hasValue = false`（実体は無い）。失敗のときだけ、producer が詳細を持っていれば `Lax(true)` で `ErrorInfo` を取り出せます。
 
