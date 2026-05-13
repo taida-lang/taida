@@ -9551,23 +9551,23 @@ out <= Map[nums, true]()
 }
 
 #[test]
-fn test_nb31_http_serve_wasm_full_net_surface_rejects() {
+fn test_nb31_http_serve_wasm_full_tls_surface_rejects() {
     let source = r#">>> taida-lang/net => @(httpServe)
 
 handler req writer =
   0
 => :Int
 
-asyncResult <= httpServe(0, handler, 1, 1000)
+asyncResult <= httpServe(0, handler, 1, 1000, 128, @(cert <= "c.pem", key <= "k.pem"))
 "#;
-    let td_path = unique_temp_path("taida_nb31_wasm_net_surface", "http_serve", "td");
-    fs::write(&td_path, source).expect("write wasm-full net surface fixture");
-    let err = run_wasm_full_build_error(&td_path, "nb31_http_serve_wasm_net_surface")
-        .expect("wasm-full should reject unsupported net surface");
+    let td_path = unique_temp_path("taida_nb31_wasm_tls_surface", "http_serve", "td");
+    fs::write(&td_path, source).expect("write wasm-full TLS surface fixture");
+    let err = run_wasm_full_build_error(&td_path, "nb31_http_serve_wasm_tls_surface")
+        .expect("wasm-full should reject unsupported TLS surface");
     let _ = fs::remove_file(&td_path);
     assert!(
         err.contains("[E1612]"),
-        "wasm-full net surface rejection should mention [E1612], got: {}",
+        "wasm-full TLS surface rejection should mention [E1612], got: {}",
         err
     );
 }
@@ -13098,9 +13098,10 @@ stdout(body.length())
     );
 }
 
-/// NET2-6f: httpServe still rejected on all 4 WASM profiles (regression check).
+/// NET2-6f / E37: plain httpServe is rejected on wasm-min / wasm-edge and
+/// accepted on wasm-wasi / wasm-full.
 #[test]
-fn test_net2_6f_wasm_all_profiles_httpserve_still_rejected() {
+fn test_net2_6f_wasm_httpserve_profile_policy() {
     let source = r#">>> taida-lang/net => @(httpServe)
 
 handler req =
@@ -13129,18 +13130,27 @@ stdout(serverResult.ok)
         let _ = std::fs::remove_file(&wasm_path);
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success(),
-            "NET2-6f: {} should reject httpServe, but compile succeeded.\nstderr: {}",
-            profile,
-            stderr
-        );
-        assert!(
-            stderr.contains("httpServe") || stderr.contains("net"),
-            "NET2-6f: {} compile error should mention httpServe or net.\nstderr: {}",
-            profile,
-            stderr
-        );
+        if matches!(*profile, "wasm-wasi" | "wasm-full") {
+            assert!(
+                output.status.success(),
+                "NET2-6f: {} should accept plaintext httpServe, but compile failed.\nstderr: {}",
+                profile,
+                stderr
+            );
+        } else {
+            assert!(
+                !output.status.success(),
+                "NET2-6f: {} should reject httpServe, but compile succeeded.\nstderr: {}",
+                profile,
+                stderr
+            );
+            assert!(
+                stderr.contains("httpServe") || stderr.contains("net"),
+                "NET2-6f: {} compile error should mention httpServe or net.\nstderr: {}",
+                profile,
+                stderr
+            );
+        }
     }
 }
 

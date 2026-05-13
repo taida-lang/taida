@@ -29,6 +29,9 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -42,26 +45,26 @@ jobs:
     # D28B-013 hard-fail: continue-on-error removed.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           submodules: false
 
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@1.93.1
+        uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
         with:
           components: llvm-tools-preview
 
       - name: install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@a2f3d48f081a1b445fc8caf0071d1e22950908f2 # cargo-llvm-cov
 
       - name: shared cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-cov
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: ensure node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
 
@@ -155,7 +158,7 @@ jobs:
           PY
 
       - name: upload lcov
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: coverage-lcov-${{ github.sha }}
           path: lcov.info
@@ -163,7 +166,7 @@ jobs:
           retention-days: 30
 
       - name: upload html report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: coverage-html-${{ github.sha }}
           path: target/llvm-cov/html

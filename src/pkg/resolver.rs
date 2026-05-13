@@ -20,7 +20,7 @@ use super::provider::{
 // RC1.5: addon prebuild integration
 use crate::addon::host_target;
 use crate::addon::manifest::parse_addon_manifest;
-use crate::addon::prebuild_fetcher::{FetchError, fetch_prebuild_with_progress};
+use crate::addon::prebuild_fetcher::{FetchError, ReleaseMetadata, fetch_prebuild_with_progress};
 
 /// Result of dependency resolution.
 #[derive(Debug)]
@@ -41,6 +41,103 @@ pub struct StoreRefreshFlags {
     /// `--no-remote-check`: skip the remote HEAD lookup; sidecar presence
     /// alone governs skip/warn.
     pub no_remote_check: bool,
+}
+
+/// Receiving-side addon install policy.
+#[derive(Debug, Clone, Copy)]
+pub struct AddonInstallPolicy {
+    /// Explicit one-shot override for fresh release refusal.
+    pub allow_fresh: bool,
+    project_min_age_seconds: Option<u64>,
+    global_min_age_seconds: Option<u64>,
+}
+
+impl AddonInstallPolicy {
+    pub fn default_with_allow_fresh(allow_fresh: bool) -> Self {
+        Self {
+            allow_fresh,
+            project_min_age_seconds: None,
+            global_min_age_seconds: read_global_min_release_age().ok().flatten(),
+        }
+    }
+
+    pub fn from_manifest(manifest: &Manifest, allow_fresh: bool) -> Self {
+        Self {
+            allow_fresh,
+            project_min_age_seconds: read_project_min_release_age(manifest).ok().flatten(),
+            global_min_age_seconds: read_global_min_release_age().ok().flatten(),
+        }
+    }
+
+    fn min_age_seconds_for(&self, package_name: &str) -> Result<u64, String> {
+        if let Some(raw) = std::env::var("TAIDA_MIN_RELEASE_AGE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
+            return parse_age_duration_seconds(&raw);
+        }
+        if let Some(age) = self.project_min_age_seconds {
+            return Ok(age);
+        }
+        if let Some(age) = self.global_min_age_seconds {
+            return Ok(age);
+        }
+        if package_name.starts_with("taida-lang/") {
+            Ok(0)
+        } else {
+            Ok(3 * 24 * 60 * 60)
+        }
+    }
+}
+
+fn read_project_min_release_age(manifest: &Manifest) -> Result<Option<u64>, String> {
+    let path = manifest.root_dir.join("packages.tdm");
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read '{}': {}", path.display(), e)),
+    };
+    read_min_release_age_from_security_table(&source)
+}
+
+fn read_global_min_release_age() -> Result<Option<u64>, String> {
+    let home = match crate::util::taida_home_dir() {
+        Ok(home) => home,
+        Err(_) => return Ok(None),
+    };
+    let path = home.join(".taida").join("config.toml");
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read '{}': {}", path.display(), e)),
+    };
+    read_min_release_age_from_security_table(&source)
+}
+
+fn read_min_release_age_from_security_table(source: &str) -> Result<Option<u64>, String> {
+    let mut in_security = false;
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_security = line == "[security]";
+            continue;
+        }
+        if !in_security {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("invalid [security] line '{}'", line));
+        };
+        if key.trim() != "min_release_age" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        return parse_age_duration_seconds(value).map(Some);
+    }
+    Ok(None)
 }
 
 impl StoreRefreshFlags {
@@ -514,6 +611,7 @@ pub fn install_addon_prebuilds(
     force_refresh: bool,
     lockfile: Option<&Lockfile>,
     allow_local_addon_build: bool,
+    install_policy: AddonInstallPolicy,
 ) -> Result<BTreeMap<String, crate::pkg::lockfile::LockedAddon>, String> {
     let deps_dir = manifest.root_dir.join(".taida").join("deps");
     let mut addon_info: BTreeMap<String, crate::pkg::lockfile::LockedAddon> = BTreeMap::new();
@@ -545,18 +643,24 @@ pub fn install_addon_prebuilds(
         // RC2.7: attempt prebuild fetch, then potentially fall back to
         // local build if allowed. The "try prebuild" result is captured
         // so fallback decisions can inspect the error variant.
-        let prebuild_result =
-            try_fetch_prebuild(pkg, &addon_manifest, &host, lockfile, force_refresh);
+        let prebuild_result = try_fetch_prebuild(
+            pkg,
+            &addon_manifest,
+            &host,
+            lockfile,
+            force_refresh,
+            install_policy,
+        );
 
         match prebuild_result {
-            Ok((fetched_path, expected_sha256)) => {
+            Ok(fetched) => {
                 // RC2.7B-010: use shared helper for binary placement
                 place_addon_binary(
                     &deps_dir,
                     &pkg.name,
                     &addon_manifest.library,
                     host.cdylib_ext(),
-                    &fetched_path,
+                    &fetched.path,
                 )?;
 
                 // RC2.7B-004: record the actual SHA from the prebuild
@@ -564,7 +668,9 @@ pub fn install_addon_prebuilds(
                     pkg.name.clone(),
                     crate::pkg::lockfile::LockedAddon {
                         target: host.as_triple().to_string(),
-                        sha256: expected_sha256,
+                        sha256: fetched.sha256,
+                        published_at: fetched.metadata.published_at,
+                        publisher_login: fetched.metadata.publisher_login,
                     },
                 );
             }
@@ -657,6 +763,12 @@ enum PrebuildFailure {
     UnsupportedTarget(String),
 }
 
+struct PrebuildSuccess {
+    path: PathBuf,
+    sha256: String,
+    metadata: ReleaseMetadata,
+}
+
 /// SHA-source decision for a single `(addon, host)` pair.
 ///
 /// Exposed so unit tests can assert the decision table without spinning
@@ -709,11 +821,50 @@ pub(crate) fn choose_sha_source(
     }
 }
 
+fn enforce_prebuild_host_allowlist(url: &str, allowed_hosts: &[String]) -> Result<(), String> {
+    if allowed_hosts.is_empty() {
+        return Ok(());
+    }
+    let host = prebuild_https_host(url).ok_or_else(|| {
+        format!(
+            "prebuild URL host allowlist is configured, but the expanded URL is not an HTTPS URL with a host: {url}"
+        )
+    })?;
+    if allowed_hosts.iter().any(|allowed| allowed == &host) {
+        return Ok(());
+    }
+    Err(format!(
+        "prebuild URL host '{}' is not allowed by addon.toml allowed_prebuild_hosts [{}]",
+        host,
+        allowed_hosts.join(", ")
+    ))
+}
+
+fn prebuild_https_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|value| !value.is_empty())?;
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    if host_port.starts_with('[') {
+        return None;
+    }
+    let host = host_port
+        .split_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(host_port)
+        .trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
 /// Attempt to fetch a prebuild for the given package.
 ///
-/// Returns `Ok((path, expected_sha256))` with the cached binary path and the
-/// expected SHA-256 hex string on success, or a classified error for the
-/// fallback policy to decide on.
+/// Returns the cached binary path, expected SHA-256, and release metadata
+/// on success, or a classified error for the fallback policy to decide on.
 ///
 /// RC2.7B-004: the SHA is returned so the caller can record it in the lockfile.
 fn try_fetch_prebuild(
@@ -722,7 +873,8 @@ fn try_fetch_prebuild(
     host: &host_target::HostTarget,
     lockfile: Option<&Lockfile>,
     force_refresh: bool,
-) -> Result<(PathBuf, String), PrebuildFailure> {
+    install_policy: AddonInstallPolicy,
+) -> Result<PrebuildSuccess, PrebuildFailure> {
     // Check if the host target is supported by this addon.
     //
     // C14B-012: `taida init --target rust-addon` seeds
@@ -847,6 +999,29 @@ fn try_fetch_prebuild(
         .unwrap_or(&expected_sha256)
         .to_string();
 
+    let metadata = match &pkg.source {
+        PackageSource::Store { .. } => {
+            crate::addon::prebuild_fetcher::fetch_release_metadata(&pkg.name, &pkg.version)
+                .map_err(|e| {
+                    PrebuildFailure::Unavailable(format!(
+                        "addon '{}' release metadata fetch failed: {}",
+                        addon_manifest.package, e
+                    ))
+                })?
+        }
+        PackageSource::Path(_) | PackageSource::CoreBundled => ReleaseMetadata {
+            published_at: current_rfc3339_utc_seconds(),
+            publisher_login: pkg
+                .name
+                .split_once('/')
+                .map(|(org, _)| org)
+                .unwrap_or("local")
+                .to_string(),
+        },
+    };
+    enforce_release_metadata_policy(pkg, &metadata, lockfile, install_policy)
+        .map_err(PrebuildFailure::IntegrityMismatch)?;
+
     // Expand URL template
     let url = crate::addon::url_template::expand_url_template(
         addon_manifest.prebuild.url_template.as_ref().unwrap(),
@@ -858,6 +1033,8 @@ fn try_fetch_prebuild(
     .map_err(|e| {
         PrebuildFailure::Unavailable(format!("addon URL template expansion failed: {}", e))
     })?;
+    enforce_prebuild_host_allowlist(&url, &addon_manifest.prebuild.allowed_prebuild_hosts)
+        .map_err(PrebuildFailure::IntegrityMismatch)?;
 
     // RC1.5-3b-4: cross-check with lockfile if available
     if let Some(lf) = lockfile {
@@ -962,7 +1139,11 @@ fn try_fetch_prebuild(
                     )));
                 }
             }
-            Ok((path, expected_sha256))
+            Ok(PrebuildSuccess {
+                path,
+                sha256: expected_sha256,
+                metadata,
+            })
         }
         Err(FetchError::IntegrityMismatch { expected, actual }) => {
             Err(PrebuildFailure::IntegrityMismatch(format!(
@@ -1151,6 +1332,205 @@ fn addon_fetch_error_as_string(err: &FetchError) -> String {
     }
 }
 
+fn enforce_release_metadata_policy(
+    pkg: &ResolvedPackage,
+    metadata: &ReleaseMetadata,
+    lockfile: Option<&Lockfile>,
+    policy: AddonInstallPolicy,
+) -> Result<(), String> {
+    let published_at = parse_rfc3339_utc_seconds(&metadata.published_at).ok_or_else(|| {
+        format!(
+            "[E32K2_LOCKFILE_ADDON_METADATA_INVALID] release '{}' has invalid published_at '{}'",
+            pkg.name, metadata.published_at
+        )
+    })?;
+
+    let min_age = policy.min_age_seconds_for(&pkg.name)?;
+    if min_age > 0 && !policy.allow_fresh {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let age = now.saturating_sub(published_at);
+        if age < min_age {
+            return Err(format!(
+                "[E32K2_FRESH_RELEASE_REFUSED] package '{}' release '{}' is too fresh (age {}, required {}). Re-run with `taida ingot install --allow-fresh` only after reviewing the publisher and artifact.",
+                pkg.name,
+                pkg.version,
+                format_duration(age),
+                format_duration(min_age)
+            ));
+        }
+    }
+
+    if let Some(lf) = lockfile {
+        for locked in &lf.packages {
+            if locked.name == pkg.name
+                && let Some(addon) = &locked.addon
+            {
+                if addon.publisher_login != metadata.publisher_login {
+                    return Err(format!(
+                        "[E32K2_LOCKFILE_PUBLISHER_MISMATCH] package '{}' publisher changed from '{}' to '{}'",
+                        pkg.name, addon.publisher_login, metadata.publisher_login
+                    ));
+                }
+                let locked_published =
+                    parse_rfc3339_utc_seconds(&addon.published_at).ok_or_else(|| {
+                        format!(
+                            "[E32K2_LOCKFILE_ADDON_METADATA_INVALID] package '{}' lockfile published_at '{}' is invalid",
+                            pkg.name, addon.published_at
+                        )
+                    })?;
+                if published_at < locked_published {
+                    return Err(format!(
+                        "[E32K2_LOCKFILE_AGE_REGRESSION] package '{}' published_at moved backwards from '{}' to '{}'",
+                        pkg.name, addon.published_at, metadata.published_at
+                    ));
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "  Addon risk: {}@{} published {} by {} (min age {}, override {})",
+        pkg.name,
+        pkg.version,
+        metadata.published_at,
+        metadata.publisher_login,
+        format_duration(min_age),
+        if policy.allow_fresh { "on" } else { "off" }
+    );
+
+    Ok(())
+}
+
+fn parse_age_duration_seconds(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    let (digits, unit) = trimmed
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_digit())
+        .map(|(idx, _)| trimmed.split_at(idx))
+        .unwrap_or((trimmed, ""));
+    let value: u64 = digits
+        .parse()
+        .map_err(|_| format!("invalid release age duration '{}'", raw))?;
+    match unit {
+        "" | "s" => Ok(value),
+        "m" => Ok(value.saturating_mul(60)),
+        "h" => Ok(value.saturating_mul(60 * 60)),
+        "d" => Ok(value.saturating_mul(24 * 60 * 60)),
+        _ => Err(format!(
+            "invalid release age duration '{}'; use seconds or a suffix of s, m, h, d",
+            raw
+        )),
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds.is_multiple_of(24 * 60 * 60) {
+        format!("{}d", seconds / (24 * 60 * 60))
+    } else if seconds.is_multiple_of(60 * 60) {
+        format!("{}h", seconds / (60 * 60))
+    } else if seconds.is_multiple_of(60) {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+fn parse_rfc3339_utc_seconds(value: &str) -> Option<u64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let year: i32 = value[0..4].parse().ok()?;
+    let month: u32 = value[5..7].parse().ok()?;
+    let day: u32 = value[8..10].parse().ok()?;
+    let hour: u32 = value[11..13].parse().ok()?;
+    let minute: u32 = value[14..16].parse().ok()?;
+    let second: u32 = value[17..19].parse().ok()?;
+    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let dim = days_in_month(year, month)?;
+    if day == 0 || day > dim {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400 + hour as u64 * 3_600 + minute as u64 * 60 + second as u64)
+}
+
+fn current_rfc3339_utc_seconds() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    unix_secs_to_rfc3339(secs)
+}
+
+fn unix_secs_to_rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month,
+        day,
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let y = y + i64::from(m <= 2);
+    (y as i32, m as u32, d as u32)
+}
+
+fn days_in_month(year: i32, month: u32) -> Option<u32> {
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = year as i64 - i64::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = month as i64 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Generate/update the lockfile after dependency resolution.
 pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(), String> {
     let lock_path = manifest.root_dir.join(".taida").join("taida.lock");
@@ -1196,7 +1576,13 @@ pub fn write_lockfile_with_addons(
 
     // Attach addon info
     for (pkg_name, addon) in addons {
-        lockfile.with_addon(pkg_name, addon.target.clone(), addon.sha256.clone())?;
+        lockfile.with_addon(
+            pkg_name,
+            addon.target.clone(),
+            addon.sha256.clone(),
+            addon.published_at.clone(),
+            addon.publisher_login.clone(),
+        )?;
     }
 
     lockfile.write(&lock_path)
@@ -1407,6 +1793,40 @@ mod tests {
     fn choose_sha_source_no_prebuild_when_missing_and_no_url() {
         // No row, no URL — no prebuild. Hard error downstream.
         assert_eq!(choose_sha_source(None, false), ShaSource::NoPrebuild);
+    }
+
+    #[test]
+    fn prebuild_host_allowlist_accepts_matching_https_host() {
+        let allowed = vec!["github.com".to_string()];
+        enforce_prebuild_host_allowlist(
+            "https://github.com/taida-lang/demo/releases/download/a.1/libdemo.so",
+            &allowed,
+        )
+        .expect("matching host must pass");
+    }
+
+    #[test]
+    fn prebuild_host_allowlist_accepts_matching_https_host_with_port() {
+        let allowed = vec!["localhost".to_string()];
+        enforce_prebuild_host_allowlist("https://localhost:8443/demo.so", &allowed)
+            .expect("matching host with port must pass");
+    }
+
+    #[test]
+    fn prebuild_host_allowlist_rejects_unlisted_https_host() {
+        let allowed = vec!["github.com".to_string()];
+        let err = enforce_prebuild_host_allowlist("https://evil.example/demo.so", &allowed)
+            .expect_err("unlisted host must fail");
+        assert!(err.contains("evil.example"));
+        assert!(err.contains("github.com"));
+    }
+
+    #[test]
+    fn prebuild_host_allowlist_rejects_file_url_when_configured() {
+        let allowed = vec!["github.com".to_string()];
+        let err = enforce_prebuild_host_allowlist("file://fixtures/demo.so", &allowed)
+            .expect_err("file URL cannot satisfy an HTTPS host allowlist");
+        assert!(err.contains("not an HTTPS URL"));
     }
 
     #[test]
@@ -1738,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires network access — run with `cargo test -- --ignored`
+    #[ignore = "external-service: requires live GitHub registry access; run with cargo test --lib test_resolve_registry_store_uncached -- --ignored --nocapture"]
     fn test_resolve_registry_store_uncached() {
         // StoreProvider now tries to actually download, so uncached packages
         // will fail with a download error (not "not yet implemented")

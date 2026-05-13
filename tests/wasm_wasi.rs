@@ -11,8 +11,15 @@
 mod common;
 
 use common::{run_interpreter, taida_bin, wasmtime_bin};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 /// Compile a .td file to wasm-wasi and run with wasmtime.
 /// `extra_args` are passed to wasmtime (e.g. --env, --dir).
@@ -68,6 +75,157 @@ fn compile_and_run_wasm_wasi(
             .trim_end()
             .to_string(),
     )
+}
+
+fn compile_and_run_inherited_listener_http_serve(profile: &str, label: &str) {
+    #[cfg(not(unix))]
+    {
+        eprintln!("SKIP: {profile} inherited-socket httpServe requires Unix fd passing");
+        return;
+    }
+
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping {profile} inherited-socket httpServe test");
+            return;
+        }
+    };
+
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).expect("bind inherited-listener httpServe socket");
+    let port = listener
+        .local_addr()
+        .expect("read inherited-listener httpServe socket address")
+        .port();
+    let source = format!(
+        r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  @(status <= 200, headers <= @[], body <= "{label}-ok")
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
+asyncResult ]=> result
+"#,
+        port = port,
+        label = label,
+    );
+
+    let td_path = std::env::temp_dir().join(format!(
+        "taida_{label}_http_serve_{}.td",
+        std::process::id()
+    ));
+    let wasm_path = std::env::temp_dir().join(format!(
+        "taida_{label}_http_serve_{}.wasm",
+        std::process::id()
+    ));
+    std::fs::write(&td_path, source).expect("write temporary Taida httpServe source");
+
+    let compile = Command::new(taida_bin())
+        .arg("build")
+        .arg(profile)
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .expect("compile should run");
+    let _ = std::fs::remove_file(&td_path);
+    assert!(
+        compile.status.success(),
+        "{profile} httpServe compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let profile_for_client = profile.to_string();
+    let client = thread::spawn(move || {
+        let mut stream = None;
+        for _ in 0..50 {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        let mut stream = stream.ok_or_else(|| {
+            format!("{profile_for_client} httpServe listener did not accept connections")
+        })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|e| format!("set wasm httpServe client read timeout: {e}"))?;
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .map_err(|e| format!("write HTTP request to wasm httpServe: {e}"))?;
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(|e| format!("finish HTTP request write side: {e}"))?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|e| format!("read HTTP response from wasm httpServe: {e}"))?;
+        Ok::<String, String>(response)
+    });
+
+    let (accepted, _) = listener
+        .accept()
+        .expect("accept local TCP connection for wasm httpServe");
+    let stdin_fd = unsafe { libc::dup(accepted.as_raw_fd()) };
+    let stdout_fd = unsafe { libc::dup(accepted.as_raw_fd()) };
+    assert!(stdin_fd >= 0, "dup stdin socket fd failed");
+    assert!(stdout_fd >= 0, "dup stdout socket fd failed");
+    let stdin_file = unsafe { File::from_raw_fd(stdin_fd) };
+    let stdout_file = unsafe { File::from_raw_fd(stdout_fd) };
+
+    let output = Command::new(&wasmtime)
+        .args(["run", "--"])
+        .arg(&wasm_path)
+        .stdin(Stdio::from(stdin_file))
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run wasmtime httpServe process");
+    drop(accepted);
+    let _ = std::fs::remove_file(&wasm_path);
+    let response = match client.join().expect("join wasm httpServe client") {
+        Ok(response) => response,
+        Err(message) => {
+            panic!(
+                "{message}. wasmtime status: {:?}\nstderr: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    };
+    assert!(
+        output.status.success(),
+        "{profile} httpServe process failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        response.contains("HTTP/1.1 200 OK"),
+        "{profile} response should be 200 OK, got: {response:?}"
+    );
+    let expected_body = format!("{label}-ok");
+    assert!(
+        response.contains(&format!("Content-Length: {}", expected_body.len())),
+        "{profile} response should report body length, got: {response:?}"
+    );
+    assert!(
+        response.ends_with(&expected_body),
+        "{profile} response should include handler body, got: {response:?}"
+    );
+}
+
+#[test]
+fn wasm_wasi_http_serve_inherited_listener() {
+    compile_and_run_inherited_listener_http_serve("wasm-wasi", "wasm-wasi");
+}
+
+#[test]
+fn wasm_full_http_serve_inherited_listener() {
+    compile_and_run_inherited_listener_http_serve("wasm-full", "wasm-full");
 }
 
 /// Test: wasm-wasi compiles and runs the stderr fixture.

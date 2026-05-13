@@ -44,7 +44,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, develop, feat/c26, feat/d28]
+    branches: [main, develop, "feat/**"]
   schedule:
     # Nightly at 05:00 UTC to collect samples on a quiet schedule and
     # catch slow drift between PRs.
@@ -71,14 +71,14 @@ jobs:
     # per-bench basis via `min_samples_required`.
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Setup Python (for compare_baseline.py)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Install /usr/bin/time (for peak RSS gate)
@@ -174,7 +174,7 @@ jobs:
 
       - name: Upload bench results
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: perf-baseline-${{ github.sha }}
           path: |
@@ -200,15 +200,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           # Need full history for the commit we push back.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Download bench results
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: perf-baseline-${{ github.sha }}
           path: bench-artifacts

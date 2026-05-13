@@ -239,7 +239,7 @@ taida init [--target rust-addon] [DIR]
 
 ```bash
 taida ingot [--help]
-taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
+taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--allow-fresh] [--frozen]
 taida ingot migrate-lockfile
 taida ingot deps
 taida ingot update [--allow-local-addon-build]
@@ -266,17 +266,21 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 | `--force-refresh` | `~/.taida/store/` の該当パッケージを破棄して再展開 |
 | `--no-remote-check` | リモート確認をスキップ |
 | `--allow-local-addon-build` | prebuild 不在時にローカルの `cargo build` へフォールバック |
+| `--allow-fresh` | third-party addon prebuild の release age policy をこの実行だけ明示 override |
 | `--frozen` | `.taida/taida.lock` の `(name, version, integrity)` triple と解決結果が一致しない場合に失敗 |
 
 挙動:
 - 解決できた依存をインストールし、`.taida/taida.lock` を生成または更新します。
 - 通常の `install` でも既存 lockfile と解決結果の triple mismatch は `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` で拒否します。依存更新は `taida ingot update`、旧 lockfile 変換は `taida ingot migrate-lockfile` を使います。
 - アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256 検証付きで prebuild を取得します。
+- third-party addon prebuild は、GitHub Release の `published_at` が既定の cooling-off window を満たすまで拒否されます。既定は `taida-lang/*` が `0d`、それ以外が `3d` です。
+- release age は CLI override、環境変数 `TAIDA_MIN_RELEASE_AGE`、`packages.tdm` の `[security] min_release_age = "3d"`、グローバル `~/.taida/config.toml` の `[security] min_release_age`、組み込み既定の順に解決します。
+- addon lock entry は target、SHA-256、release `published_at`、publisher login を記録します。publisher 変更や `published_at` の後退は hard fail です。
 - アドオンキャッシュは `~/.taida/addon-cache/` に置かれます。
 
 ### `ingot migrate-lockfile`
 
-`.taida/taida.lock` schema v1 / `fnv1a:` integrity を、installed `.taida/deps` tree から再計算した schema v2 / `sha256:` integrity に書き換えます。通常の `install` は v1 / `fnv1a:` を `[E32K2_LOCKFILE_V1_REJECTED]` で拒否します。migration 中に installed dependency が見つからない場合は `[E32K2_LOCKFILE_MIGRATE_FAIL]` で停止します。
+`.taida/taida.lock` schema v1 / `fnv1a:` integrity を、installed `.taida/deps` tree から再計算した現行 schema / `sha256:` integrity に書き換えます。通常の `install` は旧 schema と `fnv1a:` を `[E32K2_LOCKFILE_V1_REJECTED]` で拒否します。migration 中に installed dependency が見つからない場合は `[E32K2_LOCKFILE_MIGRATE_FAIL]` で停止します。
 
 ストア sidecar と stale 検知:
 

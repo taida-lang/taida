@@ -155,6 +155,7 @@ rejected at parse time.
 ```toml
 [library.prebuild]
 url = "https://example.com/releases/{version}/lib{name}-{target}.{ext}"
+allowed_prebuild_hosts = ["example.com"]
 ```
 
 Declares where `taida ingot install` should fetch the prebuild cdylib. If
@@ -165,6 +166,21 @@ the `.so` manually" mode. If this section is present:
 - Template variables are `{version}`, `{target}`, `{ext}`, `{name}`.
 - Unknown variables, unbalanced braces, and `{{` / `}}` escapes are
   rejected at parse time.
+- `allowed_prebuild_hosts`, when present, must be a non-empty array of
+  lowercase DNS host names without scheme, path, or port. After template
+  expansion, `taida ingot install` rejects any HTTPS prebuild URL whose
+  host is not listed.
+- Registry addon installs fetch GitHub Release metadata and record release
+  `published_at` plus publisher login in `.taida/taida.lock`.
+- Fresh third-party releases are refused by default until the configured
+  cooling-off window has elapsed. The default is `0d` for `taida-lang/*`
+  and `3d` for other publishers.
+- The release-age window can be set with `TAIDA_MIN_RELEASE_AGE`,
+  `[security] min_release_age` in `packages.tdm`, or
+  `[security] min_release_age` in `~/.taida/config.toml`. `--allow-fresh`
+  is the explicit one-shot override.
+- Existing lock entries pin publisher login and publication time. A
+  publisher mismatch or publication-time regression is a hard failure.
 
 ### `[library.prebuild.targets]` (required when `[library.prebuild]` is present)
 
@@ -231,6 +247,26 @@ For `file://` URLs, the fetcher rejects:
 - Any URL scheme other than `file://` or `https://`
 
 These checks run **before** any filesystem access or network I/O.
+
+---
+
+## No install scripts
+
+Addon manifests do not support `postinstall`, `install`, `scripts`,
+or any equivalent install-time command hook. Unknown top-level keys and
+unknown sections are rejected by the strict parser, so an addon cannot
+smuggle a shell command into installation by adding a future-looking key.
+
+Prebuild installation is limited to:
+
+1. Resolve the manifest and target triple.
+2. Fetch or copy the declared prebuild artifact.
+3. Verify the recorded digest and release policy.
+4. Place the cdylib in the dependency tree.
+
+Local source builds only happen when the user explicitly passes
+`--allow-local-addon-build`, and integrity mismatches never fall back to
+a local build.
 
 ---
 
@@ -322,6 +358,8 @@ use:
 | `PrebuildInvalidSha256`                | `targets.*` not `sha256:` + 64 lowercase hex |
 | `PrebuildUnknownUrlVariable`           | `{foo}` not in `{version|target|ext|name}` |
 | `PrebuildUnbalancedBrace`              | Lone `{` or `}` in URL template |
+| `PrebuildUnknownKey`                   | Unknown key under `[library.prebuild]` |
+| `PrebuildInvalidAllowedHost`           | `allowed_prebuild_hosts` contained an invalid host |
 | `PrebuildDuplicateTarget`              | Same target listed twice under `targets` |
 | `PrebuildUnknownTarget`                | Target key not in `HostTarget::from_triple` |
 | `PrebuildInvalidSignatureFormat`       | Signature value not `gpg:<opaque>` |

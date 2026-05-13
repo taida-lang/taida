@@ -39,6 +39,9 @@ on:
     branches: [main, develop]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 concurrency:
   group: soak-smoke-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -52,15 +55,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           submodules: false
 
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@1.93.1
+        uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
 
       - name: shared cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           # Same partition used by memory.yml so we reuse the cached
           # release build artefacts on top of cargo-base.
@@ -157,7 +160,7 @@ jobs:
 
       - name: upload proxy log
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: soak-smoke-proxy-log-${{ github.sha }}
           path: target/soak-smoke/proxy.log

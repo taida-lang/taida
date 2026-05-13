@@ -405,7 +405,11 @@ Enum => HttpProtocol = :H1 :H2 :H3
 
 ## 10. Backend scope
 
-`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
+`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で full parity を保証します。`wasm-wasi` / `wasm-full` は WASI preview1 の継承済み TCP listener を使う plaintext HTTP/1.1 `httpServe` 部分集合を提供します。`wasm-min` / `wasm-edge` は `httpServe` を受け付けず、該当 capability を呼び出した場合 `[E1612]` を返します。
+
+`wasm-wasi` / `wasm-full` で `httpServe` を実行する場合、guest は自前で bind/listen しません。host が `wasi_snapshot_preview1.sock_accept` を実装している場合は fd 3 の inherited listener を使います。`sock_accept` を提供しない host では、accept 済み TCP 接続を fd 0/1 に接続する socket-activation 形式で 1 request を処理します。
+
+この WASM 部分集合では TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body primitive はまだ提供されません。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
 
 例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
 

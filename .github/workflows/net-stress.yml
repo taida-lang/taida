@@ -1,0 +1,37 @@
+name: net-stress
+
+on:
+  schedule:
+    - cron: "0 7 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+concurrency:
+  group: net-stress-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  portbind-race:
+    name: portbind race long run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: cargo-base
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --bin taida
+      - name: Run portbind race stress
+        run: |
+          TAIDA_BIN="$PWD/target/debug/taida" \
+            cargo test --test c27b_003_portbind_race \
+              c27b_003_portbind_race_long_100_iter \
+              -- --ignored --exact --nocapture

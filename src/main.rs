@@ -148,7 +148,7 @@ fn print_ingot_help() {
 Usage:
   taida ingot [--help]
   taida ingot deps
-  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
+  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--allow-fresh] [--frozen]
   taida ingot migrate-lockfile
   taida ingot update [--allow-local-addon-build]
   taida ingot publish [--label LABEL] [--force-version VERSION] [--retag] [--dry-run]
@@ -158,7 +158,7 @@ Commands:
   deps      Resolve/install dependencies strictly
   install   Install dependencies and write lockfile
   migrate-lockfile
-            Rewrite legacy taida.lock v1/fnv1a entries to v2/SHA-256
+            Rewrite legacy taida.lock entries to the current SHA-256 schema
   update    Update dependencies and lockfile
   publish   Push a package tag; CI creates release assets
   cache     Manage WASM/runtime/addon caches
@@ -289,7 +289,7 @@ fn print_install_help() {
     println!(
         "\
 Usage:
-  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--frozen]
+  taida ingot install [--force-refresh | --no-remote-check] [--allow-local-addon-build] [--allow-fresh] [--frozen]
 
 Behavior:
   Install resolved dependencies and generate/update `.taida/taida.lock`.
@@ -310,8 +310,8 @@ Behavior:
   re-extracted automatically. Offline or unverifiable states emit a
   warning to stderr but never silently skip.
 
-  E32: `.taida/taida.lock` uses schema v2 and SHA-256 integrity. Legacy v1
-  lockfiles and `fnv1a:` integrity are rejected. Run
+  `.taida/taida.lock` uses schema v3 and SHA-256 integrity. Legacy lockfiles
+  and `fnv1a:` integrity are rejected. Run
   `taida ingot migrate-lockfile` once after installing dependencies to rewrite
   an old lockfile from the installed `.taida/deps` tree.
 
@@ -327,6 +327,8 @@ Options:
   --allow-local-addon-build    When a prebuild is missing or unavailable, fall back
                                to building the addon from source using `cargo build`.
                                Integrity mismatches are never overridden by fallback.
+  --allow-fresh                Allow a third-party addon release before the
+                               default cooling-off window has elapsed.
   --frozen                     Require `.taida/taida.lock` to already match the
                                resolved `(name, version, integrity)` triples.
                                No lockfile writes are allowed.
@@ -336,6 +338,7 @@ Example:
   taida ingot install --force-refresh
   taida ingot install --no-remote-check
   taida ingot install --allow-local-addon-build
+  taida ingot install --allow-fresh
   taida ingot install --frozen"
     );
 }
@@ -7744,6 +7747,7 @@ fn run_install(args: &[String]) {
     let mut force_refresh = false;
     let mut no_remote_check = false;
     let mut allow_local_addon_build = false;
+    let mut allow_fresh = false;
     let mut frozen = false;
     let mut filtered: Vec<&str> = Vec::new();
     for arg in args {
@@ -7753,6 +7757,8 @@ fn run_install(args: &[String]) {
             no_remote_check = true;
         } else if arg == "--allow-local-addon-build" {
             allow_local_addon_build = true;
+        } else if arg == "--allow-fresh" {
+            allow_fresh = true;
         } else if arg == "--frozen" {
             frozen = true;
         } else if is_help_flag(arg.as_str()) {
@@ -7938,6 +7944,7 @@ fn run_install(args: &[String]) {
             force_refresh,
             existing_lock.as_ref(),
             allow_local_addon_build,
+            pkg::resolver::AddonInstallPolicy::from_manifest(&manifest, allow_fresh),
         ) {
             Ok(map) => map,
             Err(e) => {
@@ -7980,7 +7987,7 @@ Usage:
 
 Behavior:
   Rewrite `.taida/taida.lock` from schema v1 / `fnv1a:` integrity to
-  schema v2 / `sha256:` integrity using the installed `.taida/deps` tree.
+  the current schema / `sha256:` integrity using the installed `.taida/deps` tree.
   Missing installed dependencies fail with `[E32K2_LOCKFILE_MIGRATE_FAIL]`."
             );
             return;
@@ -8000,7 +8007,7 @@ Behavior:
     let lock_path = project_dir.join(".taida").join("taida.lock");
     let deps_dir = project_dir.join(".taida").join("deps");
 
-    match pkg::lockfile::Lockfile::migrate_v2_from_installed(&lock_path, &deps_dir) {
+    match pkg::lockfile::Lockfile::migrate_current_from_installed(&lock_path, &deps_dir) {
         Ok(lockfile) => {
             println!(
                 "Migrated taida.lock to schema v{} ({} package(s))",
@@ -8106,6 +8113,7 @@ fn run_update(args: &[String]) {
             false, // force_refresh: update fetches latest versions but does not bypass cache
             existing_lock.as_ref(),
             allow_local_addon_build,
+            pkg::resolver::AddonInstallPolicy::from_manifest(&manifest, false),
         ) {
             Ok(map) => map,
             Err(e) => {

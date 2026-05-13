@@ -15,6 +15,15 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::Sha256;
 
+/// GitHub Release metadata used by the receiving-side install policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseMetadata {
+    /// Release publication timestamp in RFC3339 UTC seconds.
+    pub published_at: String,
+    /// GitHub login associated with the release owner/publisher.
+    pub publisher_login: String,
+}
+
 // ── Error ───────────────────────────────────────────────────────
 
 /// Errors from fetching / verifying / caching a prebuild.
@@ -699,11 +708,91 @@ pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<Strin
     Ok(body)
 }
 
+/// Fetch release metadata for receiving-side freshness and publisher checks.
+#[cfg(feature = "community")]
+pub fn fetch_release_metadata(
+    package_name: &str,
+    version: &str,
+) -> Result<ReleaseMetadata, String> {
+    let (org, name) = package_name
+        .split_once('/')
+        .ok_or_else(|| format!("Cannot parse package name '{}' as org/name", package_name))?;
+
+    let api = std::env::var("TAIDA_GITHUB_API_URL")
+        .unwrap_or_else(|_| "https://api.github.com".to_string());
+    let url = format!(
+        "{}/repos/{}/{}/releases/tags/{}",
+        api.trim_end_matches('/'),
+        org,
+        name,
+        version,
+    );
+
+    let response = reqwest::blocking::Client::builder()
+        .user_agent("taida-install")
+        .build()
+        .map_err(|e| format!("Failed to build GitHub API client: {}", e))?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| {
+            format!(
+                "Failed to fetch release metadata for '{}@{}' from {}: {}",
+                package_name, version, url, e
+            )
+        })?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "release metadata not found for '{}@{}' (HTTP {}) at {}",
+            package_name,
+            version,
+            response.status(),
+            url
+        ));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Failed to parse release metadata response: {}", e))?;
+    let published_at = json["published_at"]
+        .as_str()
+        .ok_or_else(|| {
+            format!(
+                "release metadata for '{}@{}' is missing published_at",
+                package_name, version
+            )
+        })?
+        .to_string();
+    let publisher_login = json["author"]["login"]
+        .as_str()
+        .or_else(|| json["user"]["login"].as_str())
+        .unwrap_or(org)
+        .to_string();
+
+    Ok(ReleaseMetadata {
+        published_at,
+        publisher_login,
+    })
+}
+
 /// Stub for when `community` feature is not enabled.
 #[cfg(not(feature = "community"))]
 pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<String, String> {
     Err(format!(
         "HTTPS downloads require the 'community' feature (addon.lock.toml for '{}@{}')",
+        package_name, version
+    ))
+}
+
+/// Stub for when `community` feature is not enabled.
+#[cfg(not(feature = "community"))]
+pub fn fetch_release_metadata(
+    package_name: &str,
+    version: &str,
+) -> Result<ReleaseMetadata, String> {
+    Err(format!(
+        "HTTPS downloads require the 'community' feature (release metadata for '{}@{}')",
         package_name, version
     ))
 }

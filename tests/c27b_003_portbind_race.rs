@@ -99,7 +99,7 @@ fn c27b_003_portbind_race_smoke_10_iter() {
 }
 
 #[test]
-#[ignore = "long-running 100-iteration regression: opt in via --ignored on CI"]
+#[ignore = "network-stress: long-running 100-iteration regression; run via net-stress workflow or --ignored"]
 fn c27b_003_portbind_race_long_100_iter() {
     // Long variant: 100 iterations. ~7 min on 16T, ~15 min on CI 2C.
     // Run from CI weekly / on PR labels touching net_eval. The pre-fix

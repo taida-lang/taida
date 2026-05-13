@@ -233,13 +233,6 @@ impl CompileTarget {
         matches!(self, Self::Js)
     }
 
-    fn is_wasm(self) -> bool {
-        matches!(
-            self,
-            Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
-        )
-    }
-
     /// Native and wasm targets that lower through the
     /// C / wasm-C runtime use regular call instructions for mutual
     /// recursion (no trampoline). Deep mutual cycles therefore overflow
@@ -1574,11 +1567,14 @@ impl TypeChecker {
         if !self.net_http_serve_symbols.contains(callee_name) {
             return;
         }
-        if self.compile_target.is_wasm() {
+        if matches!(
+            self.compile_target,
+            CompileTarget::WasmMin | CompileTarget::WasmEdge
+        ) {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1612] {} does not support taida-lang/net HTTP API 'httpServe'. \
-                     Hint: Use the interpreter, JS, or native backend instead.",
+                     Hint: Use the interpreter, JS, native, wasm-wasi, or wasm-full backend instead.",
                     self.compile_target.label()
                 ),
                 span: args
@@ -1625,6 +1621,23 @@ impl TypeChecker {
                 }
                 _ => (),
             }
+        }
+        if matches!(
+            self.compile_target,
+            CompileTarget::WasmWasi | CompileTarget::WasmFull
+        ) && let Expr::BuchiPack(fields, span) = tls_expr
+            && fields
+                .iter()
+                .any(|field| matches!(field.name.as_str(), "cert" | "key" | "protocol"))
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1612] {} supports only plaintext HTTP/1.1 httpServe over inherited WASI file descriptors. \
+                     Hint: TLS, HTTP/2, HTTP/3, WebSocket, and streaming body APIs require the interpreter, JS, or native backend.",
+                    self.compile_target.label()
+                ),
+                span: span.clone(),
+            });
         }
     }
 

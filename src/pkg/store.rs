@@ -2025,7 +2025,7 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
 /// Precedence (first match wins):
 ///   1. `GH_TOKEN`
 ///   2. `GITHUB_TOKEN`
-///   3. `~/.taida/auth.json` (`github_token` field) via `load_token`
+///   3. `~/.taida/auth.json` read/install token via `load_token`
 ///
 /// Returns `None` if none are available; callers degrade gracefully to
 /// unauthenticated requests.
@@ -2056,7 +2056,7 @@ fn github_auth_token() -> Option<String> {
         return Some(ok);
     }
     match crate::auth::token::load_token() {
-        Some(t) => sanitize_auth_token(&t.github_token, "~/.taida/auth.json"),
+        Some(t) => sanitize_auth_token(t.install_token(), "~/.taida/auth.json"),
         None => None,
     }
 }

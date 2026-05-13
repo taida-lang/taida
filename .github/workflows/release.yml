@@ -73,25 +73,13 @@ jobs:
     env:
       TAIDA_RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ needs.prepare.outputs.release_ref }}
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
         with:
           components: clippy, rustfmt
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.job }}-
-            ${{ runner.os }}-cargo-
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
       - name: E31 stable blocker guard (FUTURE_BLOCKERS::POST-STABLE-003)
@@ -108,7 +96,7 @@ jobs:
         run: ./scripts/release/secret-scan.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@285e94bf531e72a83c0923d52526fabb44c3b169 # nextest
       - name: Install wasmtime
         run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - run: cargo nextest run --profile ci
@@ -129,7 +117,7 @@ jobs:
           - Canary policy: one-host private canary before announcement
           - Rollback policy: delete release/tag and revert merge commit on \`main\` if stop conditions hit
           EOF
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-gate-summary
           path: release-gate-summary.md
@@ -168,22 +156,10 @@ jobs:
             archive_ext: zip
             binary_path: target/release/taida.exe
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ needs.prepare.outputs.release_ref }}
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
-            target/
-          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-build-
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
       - name: Build release binary
         run: cargo build --locked --release
       - name: Package Unix archive
@@ -207,7 +183,7 @@ jobs:
             -Tag "${env:RELEASE_TAG}" `
             -Target "${{ matrix.target }}" `
             -OutDir "dist"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-${{ matrix.target }}
           path: dist/taida-${{ needs.prepare.outputs.release_tag }}-${{ matrix.target }}.${{ matrix.archive_ext }}
@@ -234,10 +210,10 @@ jobs:
     outputs:
       artefact_digests: ${{ steps.digest.outputs.digests }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ needs.prepare.outputs.release_ref }}
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: dist
           merge-multiple: true
@@ -245,7 +221,7 @@ jobs:
         working-directory: dist
         run: sha256sum taida-* > SHA256SUMS
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
         with:
           cosign-release: v2.4.1
       - name: Sign release artefacts (cosign keyless)
@@ -282,7 +258,7 @@ jobs:
           # expects `<digest>  <name>` newline-delimited.
           digests=$(sha256sum taida-* SHA256SUMS | base64 -w0)
           echo "digests=${digests}" >> "${GITHUB_OUTPUT}"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-signed
           path: |
@@ -305,7 +281,7 @@ jobs:
       actions: read
       id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       base64-subjects: ${{ needs.sign.outputs.artefact_digests }}
       upload-assets: true
@@ -323,7 +299,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: release-signed
           path: dist

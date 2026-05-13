@@ -48,13 +48,20 @@ WASM からアドオンを呼び出すマニフェストでは、`native/addon.t
 | パッケージ領域 | `wasm-min` | `wasm-wasi` | `wasm-edge` | `wasm-full` |
 |----------------|------------|-------------|-------------|-------------|
 | `taida-lang/os` | 利用不可 | 文書化済みの WASI 向け部分集合 | 文書化済みのエッジ向け部分集合 | `wasm-wasi` と同一の OS 部分集合 |
-| `taida-lang/net` | 利用不可 | 利用不可 | 利用不可 | 利用不可 |
+| `taida-lang/net` | 利用不可 | 文書化済みの WASI 向け部分集合 | 利用不可 | `wasm-wasi` と同一の net 部分集合 |
 | `taida-lang/terminal` | 利用不可 | 利用不可 | 利用不可 | 利用不可 |
 | アドオンに裏打ちされたパッケージ | 利用不可 | 利用不可 | 利用不可 | マニフェストが明示的に対応宣言した場合のみ利用可 |
 
 OS API のシンボル単位の対応範囲は `docs/reference/build_descriptors.md`
 と `docs/reference/os_api.md` を参照してください。NET API の対応方針は
 `docs/reference/net_api.md` に記載しています。
+
+`wasm-wasi` / `wasm-full` の net 部分集合は、WASI preview1 の継承 fd
+を使う plaintext HTTP/1.1 `httpServe` です。host が
+`wasi_snapshot_preview1.sock_accept` を実装している場合は fd 3 の inherited
+listener を使います。Wasmtime の legacy preview1 実行環境など
+`sock_accept` を提供しない host では、accept 済み TCP 接続を fd 0/1
+に接続する socket-activation 形式で 1 request を処理します。
 
 ---
 
