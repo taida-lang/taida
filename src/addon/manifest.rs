@@ -80,8 +80,8 @@ use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 /// import resolver before manifest parsing is even attempted.
 /// Additions to this list must be made in lock-step with
 /// `AddonBackend::supports_addons` in `src/addon/backend_policy.rs`,
-/// the policy table at `docs/STABILITY.md § 5.2`, and the receivable
-/// values listed in `docs/reference/addon_manifest.md`.
+/// the WASM profile table at `docs/reference/wasm_profiles.md`, and
+/// the receivable values listed in `docs/reference/addon_manifest.md`.
 pub const SUPPORTED_ADDON_TARGETS: &[&str] = &["native", "wasm-full"];
 
 /// D28B-021: default value injected when `targets` is omitted.
@@ -105,6 +105,8 @@ pub fn default_addon_targets() -> Vec<String> {
 pub struct PrebuildConfig {
     /// URL template with `{version}`, `{target}`, `{ext}`, `{name}` variables.
     pub url_template: Option<String>,
+    /// Optional HTTPS host allowlist enforced after URL template expansion.
+    pub allowed_prebuild_hosts: Vec<String>,
     /// Target triple -> `sha256:<64-hex-string>` mapping.
     pub targets: HashMap<String, String>,
     /// RC15B-005: Optional GPG / detached signatures keyed by target triple.
@@ -190,6 +192,8 @@ pub enum AddonManifestError {
     },
     /// Required top-level key missing.
     MissingKey { path: PathBuf, key: &'static str },
+    /// Unknown top-level key.
+    UnknownTopLevelKey { path: PathBuf, key: String },
     /// `abi` value did not match [`TAIDA_ADDON_ABI_VERSION`].
     AbiUnsupported {
         path: PathBuf,
@@ -232,6 +236,10 @@ pub enum AddonManifestError {
     PrebuildUnknownUrlVariable { path: PathBuf, variable: String },
     /// RC1.5: unbalanced brace in `[library.prebuild].url` template.
     PrebuildUnbalancedBrace { path: PathBuf, detail: String },
+    /// Unknown key inside `[library.prebuild]`.
+    PrebuildUnknownKey { path: PathBuf, key: String },
+    /// Invalid host in `[library.prebuild].allowed_prebuild_hosts`.
+    PrebuildInvalidAllowedHost { path: PathBuf, host: String },
     /// RC1.5: duplicate `[library.prebuild.targets.<target>]` for the same target.
     PrebuildDuplicateTarget { path: PathBuf, target: String },
     /// RC15B-103: target triple in `[library.prebuild.targets]` is not a known valid triple.
@@ -289,6 +297,12 @@ impl fmt::Display for AddonManifestError {
             Self::MissingKey { path, key } => write!(
                 f,
                 "addon manifest error: required key '{}' missing in '{}'",
+                key,
+                path.display()
+            ),
+            Self::UnknownTopLevelKey { path, key } => write!(
+                f,
+                "addon manifest error: unknown top-level key '{}' in '{}' (allowed: abi, entry, package, library, targets)",
                 key,
                 path.display()
             ),
@@ -379,6 +393,18 @@ impl fmt::Display for AddonManifestError {
                 path.display(),
                 detail
             ),
+            Self::PrebuildUnknownKey { path, key } => write!(
+                f,
+                "addon manifest error: unknown key '{}' in '[library.prebuild]' of '{}' (allowed: url, allowed_prebuild_hosts)",
+                key,
+                path.display()
+            ),
+            Self::PrebuildInvalidAllowedHost { path, host } => write!(
+                f,
+                "addon manifest error: invalid host '{}' in '[library.prebuild].allowed_prebuild_hosts' of '{}' (expected lowercase DNS host without scheme, path, or port)",
+                host,
+                path.display()
+            ),
             Self::PrebuildDuplicateTarget { path, target } => write!(
                 f,
                 "addon manifest error: duplicate prebuild target '{}' in '{}'",
@@ -460,6 +486,18 @@ pub fn parse_addon_manifest_str(
     source: &str,
 ) -> Result<AddonManifest, AddonManifestError> {
     let raw = parse_minimal_toml(path, source)?;
+
+    for key in raw.top_level.keys() {
+        if !matches!(
+            key.as_str(),
+            "abi" | "entry" | "package" | "library" | "targets"
+        ) {
+            return Err(AddonManifestError::UnknownTopLevelKey {
+                path: path.to_path_buf(),
+                key: key.clone(),
+            });
+        }
+    }
 
     // Validate top-level required keys.
     let abi = require_int(&raw.top_level, "abi", path)?;
@@ -582,6 +620,15 @@ pub fn parse_addon_manifest_str(
     let prebuild = if !prebuild_section_present {
         PrebuildConfig::default()
     } else {
+        for key in raw.prebuild.keys() {
+            if key != "url" && key != "allowed_prebuild_hosts" {
+                return Err(AddonManifestError::PrebuildUnknownKey {
+                    path: path.to_path_buf(),
+                    key: key.clone(),
+                });
+            }
+        }
+
         // If either prebuild section exists, validate the URL template.
         let url_template = match raw.prebuild.get("url") {
             Some(RawValue::Str(s)) => {
@@ -621,6 +668,42 @@ pub fn parse_addon_manifest_str(
             None => {
                 return Err(AddonManifestError::PrebuildMissingUrl {
                     path: path.to_path_buf(),
+                });
+            }
+        };
+
+        let allowed_prebuild_hosts = match raw.prebuild.get("allowed_prebuild_hosts") {
+            None => Vec::new(),
+            Some(RawValue::StrArray(items)) => {
+                if items.is_empty() {
+                    return Err(AddonManifestError::PrebuildInvalidAllowedHost {
+                        path: path.to_path_buf(),
+                        host: String::new(),
+                    });
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                let mut hosts = Vec::with_capacity(items.len());
+                for host in items {
+                    if !is_valid_prebuild_host(host) {
+                        return Err(AddonManifestError::PrebuildInvalidAllowedHost {
+                            path: path.to_path_buf(),
+                            host: host.clone(),
+                        });
+                    }
+                    if seen.insert(host.clone()) {
+                        hosts.push(host.clone());
+                    }
+                }
+                hosts
+            }
+            Some(other) => {
+                return Err(AddonManifestError::TypeMismatch {
+                    path: path.to_path_buf(),
+                    key: "allowed_prebuild_hosts".to_string(),
+                    expected: match other {
+                        RawValue::StrArray(_) => unreachable!(),
+                        _ => "array of strings",
+                    },
                 });
             }
         };
@@ -707,6 +790,7 @@ pub fn parse_addon_manifest_str(
 
         PrebuildConfig {
             url_template,
+            allowed_prebuild_hosts,
             targets,
             signatures,
         }
@@ -1144,6 +1228,33 @@ fn is_valid_signature(value: &str) -> bool {
     payload.chars().all(|c| c.is_ascii_graphic() && c != ' ')
 }
 
+fn is_valid_prebuild_host(host: &str) -> bool {
+    if host.is_empty()
+        || host.len() > 253
+        || host.contains("://")
+        || host.contains('/')
+        || host.contains(':')
+        || host != host.to_ascii_lowercase()
+    {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && label
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+            && label
+                .as_bytes()
+                .last()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,6 +1283,25 @@ echo = 1
         assert_eq!(manifest.functions.len(), 2);
         assert_eq!(manifest.functions.get("noop"), Some(&0));
         assert_eq!(manifest.functions.get("echo"), Some(&1));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_key() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "taida-lang/addon-rs-sample"
+library = "taida_addon_sample"
+postinstall = "curl https://example.com/install.sh"
+
+[functions]
+noop = 0
+"#;
+        let err = parse(src).expect_err("unknown top-level key must be rejected");
+        assert!(matches!(
+            err,
+            AddonManifestError::UnknownTopLevelKey { key, .. } if key == "postinstall"
+        ));
     }
 
     #[test]
@@ -1478,6 +1608,7 @@ termPrint = 1
 
 [library.prebuild]
 url = "https://example.com/v{version}/{name}-{target}.{ext}"
+allowed_prebuild_hosts = ["example.com", "downloads.example.com", "example.com"]
 
 [library.prebuild.targets]
 x86_64-unknown-linux-gnu = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1488,6 +1619,10 @@ aarch64-apple-darwin = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         assert_eq!(
             manifest.prebuild.url_template.as_ref().unwrap(),
             "https://example.com/v{version}/{name}-{target}.{ext}"
+        );
+        assert_eq!(
+            manifest.prebuild.allowed_prebuild_hosts,
+            vec!["example.com", "downloads.example.com"]
         );
         assert_eq!(manifest.prebuild.targets.len(), 2);
         assert_eq!(
@@ -1517,6 +1652,70 @@ url = "https://example.com/{name}.{ext}"
         let manifest = parse(src).expect("prebuild without targets must parse");
         assert!(manifest.prebuild.has_prebuild());
         assert!(manifest.prebuild.targets.is_empty());
+        assert!(manifest.prebuild.allowed_prebuild_hosts.is_empty());
+    }
+
+    #[test]
+    fn prebuild_allowed_hosts_rejects_invalid_host() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+allowed_prebuild_hosts = ["https://example.com"]
+"#;
+        let err = parse(src).expect_err("host allowlist must contain bare hosts");
+        assert!(matches!(
+            err,
+            AddonManifestError::PrebuildInvalidAllowedHost { .. }
+        ));
+    }
+
+    #[test]
+    fn prebuild_allowed_hosts_rejects_wrong_type() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+allowed_prebuild_hosts = "example.com"
+"#;
+        let err = parse(src).expect_err("host allowlist must be an array");
+        assert!(matches!(
+            err,
+            AddonManifestError::TypeMismatch { key, .. } if key == "allowed_prebuild_hosts"
+        ));
+    }
+
+    #[test]
+    fn prebuild_unknown_key_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[library.prebuild]
+url = "https://example.com/{name}.{ext}"
+unexpected = "value"
+"#;
+        let err = parse(src).expect_err("unknown prebuild keys must be rejected");
+        assert!(matches!(err, AddonManifestError::PrebuildUnknownKey { .. }));
     }
 
     #[test]

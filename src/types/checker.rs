@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 /// `__default`, `__error`, `__tag`, `__items`, `__transforms`,
 /// `__status` as *internal* tags to carry nominal-type identity and
 /// invariants (e.g., `Regex` packs carry a validated `pattern` /
-/// `flags` pair, `Lax` packs carry `hasValue` + default, `Async` packs
+/// `flags` pair, `Lax` packs carry `has_value` + default, `Async` packs
 /// carry a state tag). Allowing user code to set these fields lets
 /// callers fabricate fake nominal packs that bypass the official
 /// constructors' validation. The earlier narrower fix (literal
@@ -158,6 +158,21 @@ impl std::fmt::Display for TypeError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionHintDiagnostic {
+    FunctionArg,
+    MethodArg,
+}
+
+impl FunctionHintDiagnostic {
+    fn code(self) -> &'static str {
+        match self {
+            FunctionHintDiagnostic::FunctionArg => "E1506",
+            FunctionHintDiagnostic::MethodArg => "E1508",
+        }
+    }
+}
+
 /// Type checker state.
 pub struct TypeChecker {
     pub registry: TypeRegistry,
@@ -171,6 +186,11 @@ pub struct TypeChecker {
     func_param_counts: HashMap<String, usize>,
     /// Function parameter types (name -> param types). Used for partial application type inference.
     func_param_types: HashMap<String, Vec<Type>>,
+    /// Function definitions retained for expected-type body inference.
+    func_defs: HashMap<String, FuncDef>,
+    /// Scope depth where a function name was bound as the function value.
+    /// Used to distinguish the function binding from an inner variable shadow.
+    func_def_scope_depths: HashMap<String, usize>,
     /// Generic function definitions keyed by function name.
     generic_func_defs: HashMap<String, FuncDef>,
     /// Function definitions rejected during registration.
@@ -210,6 +230,8 @@ pub struct TypeChecker {
     /// entry, popped on exit. Used to resolve constrained type variables
     /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
     current_func_type_params: Vec<Vec<TypeParam>>,
+    /// Re-entrancy guard for expected-type named function body inference.
+    hinted_func_stack: Vec<String>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -231,13 +253,6 @@ pub enum CompileTarget {
 impl CompileTarget {
     fn is_js(self) -> bool {
         matches!(self, Self::Js)
-    }
-
-    fn is_wasm(self) -> bool {
-        matches!(
-            self,
-            Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
-        )
     }
 
     /// Native and wasm targets that lower through the
@@ -278,6 +293,8 @@ impl TypeChecker {
             func_types: HashMap::new(),
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
+            func_defs: HashMap::new(),
+            func_def_scope_depths: HashMap::new(),
             generic_func_defs: HashMap::new(),
             invalid_func_defs: HashSet::new(),
             seen_func_defs: HashSet::new(),
@@ -293,6 +310,7 @@ impl TypeChecker {
             net_http_protocol_type_names: HashSet::new(),
             branch_scope_stack: vec![HashMap::new()],
             current_func_type_params: Vec::new(),
+            hinted_func_stack: Vec::new(),
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -319,6 +337,142 @@ impl TypeChecker {
     fn install_core_bundled_os_pins(&mut self) {
         self.pin_run_interactive_signature("runInteractive");
         self.pin_exec_shell_interactive_signature("execShellInteractive");
+    }
+
+    fn is_core_builtin_name(name: &str) -> bool {
+        Self::core_builtin_arity(name).is_some()
+    }
+
+    fn core_builtin_arity(name: &str) -> Option<(usize, usize)> {
+        match name {
+            "debug" => Some((1, 2)),
+            "toString" | "toStr" => Some((1, 1)),
+            "typeOf" | "typeof" => Some((1, 1)),
+            "jsonEncode" | "jsonPretty" => Some((1, 1)),
+            "nowMs" => Some((0, 0)),
+            "assert" => Some((1, 2)),
+            "range" => Some((2, 3)),
+            "enumerate" => Some((1, 1)),
+            "zip" => Some((2, 2)),
+            "hashMap" => Some((0, 1)),
+            "setOf" => Some((1, 1)),
+            "strOf" => Some((2, 2)),
+            "stdout" | "stderr" | "exit" => Some((1, 1)),
+            "stdin" | "stdinLine" => Some((0, 1)),
+            "argv" => Some((0, 0)),
+            "sleep" => Some((1, 1)),
+            "Regex" => Some((1, 2)),
+            "readBytes" => Some((1, 1)),
+            "readBytesAt" => Some((3, 3)),
+            "writeFile" | "writeBytes" | "appendFile" => Some((2, 2)),
+            "remove" | "createDir" => Some((1, 1)),
+            "rename" => Some((2, 2)),
+            "allEnv" => Some((0, 0)),
+            "dnsResolve" => Some((1, 2)),
+            "tcpConnect" => Some((2, 3)),
+            "tcpListen" | "tcpAccept" => Some((1, 2)),
+            "socketSend" | "socketSendAll" | "socketSendBytes" => Some((2, 3)),
+            "socketRecv" | "socketRecvBytes" => Some((1, 2)),
+            "socketRecvExact" => Some((2, 3)),
+            "udpBind" => Some((2, 3)),
+            "udpSendTo" => Some((4, 5)),
+            "udpRecvFrom" => Some((1, 2)),
+            "socketClose" | "listenerClose" | "udpClose" => Some((1, 1)),
+            "poolCreate" => Some((1, 1)),
+            "poolAcquire" => Some((1, 2)),
+            "poolRelease" => Some((3, 3)),
+            "poolClose" | "poolHealth" => Some((1, 1)),
+            _ => None,
+        }
+    }
+
+    fn core_builtin_allows_unknown_return(name: &str) -> bool {
+        matches!(
+            name,
+            "dnsResolve"
+                | "tcpConnect"
+                | "tcpListen"
+                | "tcpAccept"
+                | "socketSend"
+                | "socketSendAll"
+                | "socketSendBytes"
+                | "socketRecv"
+                | "socketRecvBytes"
+                | "socketRecvExact"
+                | "udpBind"
+                | "udpSendTo"
+                | "udpRecvFrom"
+                | "socketClose"
+                | "listenerClose"
+                | "udpClose"
+                | "poolCreate"
+                | "poolAcquire"
+                | "poolRelease"
+                | "poolClose"
+        )
+    }
+
+    fn result_type(success_ty: Type) -> Type {
+        Type::Generic("Result".to_string(), vec![success_ty, Type::Unknown])
+    }
+
+    fn async_type(inner_ty: Type) -> Type {
+        Type::Generic("Async".to_string(), vec![inner_ty])
+    }
+
+    fn core_builtin_return_type(&mut self, name: &str, args: &[Expr]) -> Option<Type> {
+        match name {
+            "debug" => Some(
+                args.first()
+                    .map(|arg| self.infer_expr_type(arg))
+                    .unwrap_or(Type::Unit),
+            ),
+            "toString" | "toStr" => Some(Type::Str),
+            "strOf" => Some(Type::Str),
+            "typeOf" | "typeof" => Some(Type::Str),
+            "jsonEncode" | "jsonPretty" => Some(Type::Str),
+            "nowMs" => Some(Type::Int),
+            "assert" => Some(Type::Unit),
+            "range" => Some(Type::List(Box::new(Type::Int))),
+            "enumerate" => Some(Type::List(Box::new(Type::Unknown))),
+            "zip" => Some(Type::List(Box::new(Type::Unknown))),
+            "hashMap" => Some(Type::Named("HashMap".to_string())),
+            "setOf" => Some(Type::Named("Set".to_string())),
+            "stdout" | "stderr" => Some(Type::Int),
+            "exit" => Some(Type::Unit),
+            "stdin" => Some(Type::Str),
+            "stdinLine" => Some(Self::async_type(Type::Generic(
+                "Lax".to_string(),
+                vec![Type::Str],
+            ))),
+            "argv" => Some(Type::List(Box::new(Type::Str))),
+            "sleep" => Some(Self::async_type(Type::Unit)),
+            "Regex" => Some(Type::Named("Regex".to_string())),
+            "readBytes" | "readBytesAt" => {
+                Some(Type::Generic("Lax".to_string(), vec![Type::Bytes]))
+            }
+            "writeFile" | "writeBytes" | "appendFile" | "remove" | "createDir" | "rename" => {
+                Some(Self::result_type(Type::Int))
+            }
+            "allEnv" => Some(Type::Generic(
+                "HashMap".to_string(),
+                vec![Type::Str, Type::Str],
+            )),
+            "poolHealth" => Some(Type::BuchiPack(vec![
+                ("open".to_string(), Type::Bool),
+                ("idle".to_string(), Type::Int),
+                ("inUse".to_string(), Type::Int),
+                ("waiting".to_string(), Type::Int),
+            ])),
+            known if Self::core_builtin_arity(known).is_some() => {
+                debug_assert!(
+                    Self::core_builtin_allows_unknown_return(known),
+                    "core builtin arity/return registries drifted for {known}"
+                );
+                Some(Type::Unknown)
+            }
+            _ => None,
+        }
     }
 
     fn pin_run_interactive_signature(&mut self, local_name: &str) {
@@ -1027,7 +1181,7 @@ impl TypeChecker {
     }
 
     /// Check if a type contains Unknown anywhere in its structure.
-    fn contains_unknown(ty: &Type) -> bool {
+    pub(super) fn contains_unknown(ty: &Type) -> bool {
         match ty {
             Type::Unknown => true,
             Type::List(inner) => Self::contains_unknown(inner),
@@ -1438,11 +1592,14 @@ impl TypeChecker {
         if !self.net_http_serve_symbols.contains(callee_name) {
             return;
         }
-        if self.compile_target.is_wasm() {
+        if matches!(
+            self.compile_target,
+            CompileTarget::WasmMin | CompileTarget::WasmEdge
+        ) {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1612] {} does not support taida-lang/net HTTP API 'httpServe'. \
-                     Hint: Use the interpreter, JS, or native backend instead.",
+                     Hint: Use the interpreter, JS, native, wasm-wasi, or wasm-full backend instead.",
                     self.compile_target.label()
                 ),
                 span: args
@@ -1456,6 +1613,28 @@ impl TypeChecker {
                     }),
             });
             return;
+        }
+        if matches!(
+            self.compile_target,
+            CompileTarget::WasmWasi | CompileTarget::WasmFull
+        ) && self.http_serve_handler_arity(args.get(1)) == Some(2)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1612] {} supports only 1-arg response-return taida-lang/net httpServe handlers. \
+                     Hint: 2-arg streaming handlers require the interpreter, JS, or native backend.",
+                    self.compile_target.label()
+                ),
+                span: args
+                    .get(1)
+                    .map(|arg| arg.span().clone())
+                    .unwrap_or_else(|| Span {
+                        start: 0,
+                        end: 0,
+                        line: 1,
+                        column: 1,
+                    }),
+            });
         }
         let Some(tls_expr) = args.get(5) else {
             return;
@@ -1489,6 +1668,40 @@ impl TypeChecker {
                 }
                 _ => (),
             }
+        }
+        if matches!(
+            self.compile_target,
+            CompileTarget::WasmWasi | CompileTarget::WasmFull
+        ) && let Some((span, non_empty)) = self.http_serve_tls_pack_shape(tls_expr)
+            && non_empty
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1612] {} supports only plaintext HTTP/1.1 httpServe over inherited WASI file descriptors. \
+                     Hint: TLS, HTTP/2, HTTP/3, WebSocket, and streaming body APIs require the interpreter, JS, or native backend.",
+                    self.compile_target.label()
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    fn http_serve_handler_arity(&self, expr: Option<&Expr>) -> Option<usize> {
+        match expr? {
+            Expr::Lambda(params, _, _) => Some(params.len()),
+            Expr::Ident(name, _) => self.func_param_counts.get(name).copied(),
+            _ => None,
+        }
+    }
+
+    fn http_serve_tls_pack_shape(&self, expr: &Expr) -> Option<(Span, bool)> {
+        match expr {
+            Expr::BuchiPack(fields, span) => Some((span.clone(), !fields.is_empty())),
+            Expr::Ident(name, span) => match self.lookup_var(name) {
+                Some(Type::BuchiPack(fields)) => Some((span.clone(), !fields.is_empty())),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -1709,15 +1922,15 @@ impl TypeChecker {
         }
     }
 
-    /// C18-1: Register Enum (and future TypeDef) types that cross the module
-    /// boundary so that `Color:Red()` in the importer does not trigger
-    /// `[E1608] Unknown enum type 'Color'.`.
+    /// Register exported types and function signatures that cross a module
+    /// boundary so the importer can type-check calls without falling back to
+    /// `Type::Unknown`.
     ///
     /// Behaviour:
     /// 1. Resolve the import path (relative, package, or submodule) using the same
     ///    logic as `validate_import_symbols`.
-    /// 2. Parse the target module and collect every `EnumDef` whose name is being
-    ///    imported by the current statement.
+    /// 2. Parse the target module and collect every `EnumDef` / `FuncDef`
+    ///    whose name is being imported by the current statement.
     /// 3. If the importer has **not** already defined an enum with the same local
     ///    name, register it into `self.registry`. The wire-order is the import
     ///    origin (source of truth).
@@ -1815,6 +2028,20 @@ impl TypeChecker {
             return;
         }
 
+        let mut type_aliases: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for stmt in &program.statements {
+            match stmt {
+                S::EnumDef(ed) if requested.contains_key(ed.name.as_str()) => {
+                    type_aliases.insert(ed.name.as_str(), requested[ed.name.as_str()]);
+                }
+                S::ClassLikeDef(cl) if requested.contains_key(cl.name.as_str()) => {
+                    type_aliases.insert(cl.name.as_str(), requested[cl.name.as_str()]);
+                }
+                _ => {}
+            }
+        }
+
         for stmt in &program.statements {
             if let S::EnumDef(ed) = stmt
                 && let Some(&local_name) = requested.get(ed.name.as_str())
@@ -1847,8 +2074,194 @@ impl TypeChecker {
                     self.declared_header_arities
                         .insert(local_name.to_string(), 0);
                 }
+            } else if let S::FuncDef(fd) = stmt
+                && let Some(&local_name) = requested.get(fd.name.as_str())
+            {
+                self.register_imported_function_signature(fd, local_name, &type_aliases);
             }
         }
+    }
+
+    fn register_imported_function_signature(
+        &mut self,
+        fd: &crate::parser::FuncDef,
+        local_name: &str,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) {
+        let ret_ty = fd
+            .return_type
+            .as_ref()
+            .map(|ty| self.resolve_imported_type_expr(ty, type_aliases))
+            .unwrap_or(Type::Unknown);
+        let param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .map(|param| {
+                param
+                    .type_annotation
+                    .as_ref()
+                    .map(|ty| self.resolve_imported_type_expr(ty, type_aliases))
+                    .unwrap_or(Type::Unknown)
+            })
+            .collect();
+
+        self.func_types.insert(local_name.to_string(), ret_ty);
+        self.func_param_counts
+            .insert(local_name.to_string(), fd.params.len());
+        self.func_param_types
+            .insert(local_name.to_string(), param_types);
+
+        if !fd.type_params.is_empty() {
+            let aliased = Self::alias_imported_func_def(fd, local_name, type_aliases);
+            self.generic_func_defs
+                .insert(local_name.to_string(), aliased);
+        }
+    }
+
+    fn alias_imported_func_def(
+        fd: &crate::parser::FuncDef,
+        local_name: &str,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) -> crate::parser::FuncDef {
+        let mut aliased = fd.clone();
+        aliased.name = local_name.to_string();
+        for type_param in &mut aliased.type_params {
+            if let Some(constraint) = &type_param.constraint {
+                type_param.constraint =
+                    Some(Self::alias_imported_type_expr(constraint, type_aliases));
+            }
+        }
+        for param in &mut aliased.params {
+            if let Some(type_annotation) = &param.type_annotation {
+                param.type_annotation = Some(Self::alias_imported_type_expr(
+                    type_annotation,
+                    type_aliases,
+                ));
+            }
+        }
+        if let Some(return_type) = &aliased.return_type {
+            aliased.return_type = Some(Self::alias_imported_type_expr(return_type, type_aliases));
+        }
+        aliased
+    }
+
+    fn alias_imported_type_expr(
+        ty: &crate::parser::TypeExpr,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) -> crate::parser::TypeExpr {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Named(name) => TypeExpr::Named(
+                type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+            ),
+            TypeExpr::BuchiPack(fields) => TypeExpr::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| {
+                        let mut field = field.clone();
+                        if let Some(type_annotation) = &field.type_annotation {
+                            field.type_annotation = Some(Self::alias_imported_type_expr(
+                                type_annotation,
+                                type_aliases,
+                            ));
+                        }
+                        field
+                    })
+                    .collect(),
+            ),
+            TypeExpr::List(inner) => TypeExpr::List(Box::new(Self::alias_imported_type_expr(
+                inner,
+                type_aliases,
+            ))),
+            TypeExpr::Generic(name, args) => TypeExpr::Generic(
+                type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                args.iter()
+                    .map(|arg| Self::alias_imported_type_expr(arg, type_aliases))
+                    .collect(),
+            ),
+            TypeExpr::Function(params, ret) => TypeExpr::Function(
+                params
+                    .iter()
+                    .map(|param| Self::alias_imported_type_expr(param, type_aliases))
+                    .collect(),
+                Box::new(Self::alias_imported_type_expr(ret, type_aliases)),
+            ),
+        }
+    }
+
+    fn resolve_imported_type_expr(
+        &self,
+        ty: &crate::parser::TypeExpr,
+        type_aliases: &std::collections::HashMap<&str, &str>,
+    ) -> Type {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Named(name) => {
+                let local_name = type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str());
+                self.registry
+                    .resolve_type(&TypeExpr::Named(local_name.to_string()))
+            }
+            TypeExpr::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| {
+                        let field_ty = field
+                            .type_annotation
+                            .as_ref()
+                            .map(|field_ty| self.resolve_imported_type_expr(field_ty, type_aliases))
+                            .unwrap_or(Type::Unknown);
+                        (field.name.clone(), field_ty)
+                    })
+                    .collect(),
+            ),
+            TypeExpr::List(inner) => Type::List(Box::new(
+                self.resolve_imported_type_expr(inner, type_aliases),
+            )),
+            TypeExpr::Generic(name, args) => Type::Generic(
+                type_aliases
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                args.iter()
+                    .map(|arg| self.resolve_imported_type_expr(arg, type_aliases))
+                    .collect(),
+            ),
+            TypeExpr::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.resolve_imported_type_expr(param, type_aliases))
+                    .collect(),
+                Box::new(self.resolve_imported_type_expr(ret, type_aliases)),
+            ),
+        }
+    }
+
+    fn imported_function_value_type(&self, name: &str) -> Option<Type> {
+        let ret = self.func_types.get(name)?;
+        let params = self.func_param_types.get(name).cloned().unwrap_or_else(|| {
+            vec![
+                Type::Unknown;
+                self.func_param_counts
+                    .get(name)
+                    .copied()
+                    .unwrap_or_default()
+            ]
+        });
+        Some(Type::Function(params, Box::new(ret.clone())))
     }
 
     /// Find project root by walking up from the given directory.
@@ -1915,30 +2328,7 @@ impl TypeChecker {
         {
             return true;
         }
-        matches!(
-            name,
-            "debug"
-                | "toString"
-                | "toStr"
-                | "typeOf"
-                | "typeof"
-                | "jsonEncode"
-                | "jsonPretty"
-                | "nowMs"
-                | "assert"
-                | "range"
-                | "enumerate"
-                | "zip"
-                | "hashMap"
-                | "setOf"
-                | "stdout"
-                | "stderr"
-                | "exit"
-                | "stdin"
-                | "stdinLine"
-                | "argv"
-                | "sleep"
-        )
+        Self::is_core_builtin_name(name)
     }
 
     /// Look up a variable type from the scope stack (innermost first).
@@ -2025,6 +2415,7 @@ impl TypeChecker {
     /// then checks all statements.
     pub fn check_program(&mut self, program: &Program) {
         self.seen_func_defs.clear();
+        self.func_def_scope_depths.clear();
         self.declared_concrete_type_names.clear();
         for stmt in &program.statements {
             match stmt {
@@ -2505,9 +2896,14 @@ impl TypeChecker {
                     self.func_types.remove(&fd.name);
                     self.func_param_counts.remove(&fd.name);
                     self.func_param_types.remove(&fd.name);
+                    self.func_defs.remove(&fd.name);
+                    self.func_def_scope_depths.remove(&fd.name);
                     self.generic_func_defs.remove(&fd.name);
                 } else if fd.type_params.is_empty() || generic_is_inferable {
                     self.invalid_func_defs.remove(&fd.name);
+                    if fd.type_params.is_empty() {
+                        self.func_defs.insert(fd.name.clone(), fd.clone());
+                    }
                     // Register function return type for later lookup
                     let ret_ty = fd
                         .return_type
@@ -2537,6 +2933,8 @@ impl TypeChecker {
                     self.func_types.remove(&fd.name);
                     self.func_param_counts.remove(&fd.name);
                     self.func_param_types.remove(&fd.name);
+                    self.func_defs.remove(&fd.name);
+                    self.func_def_scope_depths.remove(&fd.name);
                     self.generic_func_defs.remove(&fd.name);
                 }
             }
@@ -2868,6 +3266,188 @@ defaulted fields must be provided via `()`",
                     span: field.span.clone(),
                 });
             }
+        }
+    }
+
+    fn validate_builtin_mold_spec(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        fields: &[BuchiField],
+        span: &Span,
+    ) {
+        let Some(spec) = crate::types::mold_specs::lookup_mold_spec(name) else {
+            return;
+        };
+
+        let arity_ok = spec.accepts_arity(type_args.len());
+        if !arity_ok {
+            let message = if name == "Molten" {
+                "Molten takes no type arguments: Molten[]()".to_string()
+            } else {
+                format!(
+                    "[E1505] `{}` expects {} positional `[]` argument(s), got {}.",
+                    name,
+                    spec.arity_description(),
+                    type_args.len()
+                )
+            };
+            self.errors.push(TypeError {
+                message,
+                span: span.clone(),
+            });
+        }
+
+        if arity_ok {
+            for (idx, arg) in type_args.iter().enumerate() {
+                let Some(kind) = spec.arg_kinds.get(idx).copied() else {
+                    continue;
+                };
+                self.validate_builtin_mold_arg_kind(name, idx, arg, kind, span);
+            }
+        }
+
+        if spec.options.is_empty() {
+            return;
+        }
+
+        let mut seen = std::collections::HashSet::<String>::new();
+        for field in fields {
+            if !seen.insert(field.name.clone()) {
+                self.errors.push(TypeError {
+                    message: Self::binding_diag(
+                        "E1404",
+                        format!("MoldInst '{}' has duplicate option '{}'", name, field.name),
+                        "Specify each named option in `()` at most once.",
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            }
+
+            let Some(option) = spec.options.iter().find(|option| option.name == field.name) else {
+                self.errors.push(TypeError {
+                    message: Self::binding_diag(
+                        "E1406",
+                        format!(
+                            "MoldInst '{}' has undefined option '{}' in `()`",
+                            name, field.name
+                        ),
+                        "Use only named options declared by the builtin mold registry.",
+                    ),
+                    span: field.span.clone(),
+                });
+                continue;
+            };
+            self.validate_builtin_mold_option_kind(name, &field.name, &field.value, option.kind);
+        }
+    }
+
+    fn validate_builtin_mold_arg_kind(
+        &mut self,
+        mold_name: &str,
+        idx: usize,
+        arg: &Expr,
+        kind: crate::types::mold_specs::MoldArgKind,
+        span: &Span,
+    ) {
+        if matches!(kind, crate::types::mold_specs::MoldArgKind::Any) {
+            return;
+        }
+        let actual = self.infer_expr_type(arg);
+        if self.builtin_mold_kind_matches(&actual, kind) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1506] `{}` argument {} has type {}, expected {}.",
+                mold_name,
+                idx + 1,
+                actual,
+                Self::builtin_mold_kind_label(kind)
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn validate_builtin_mold_option_kind(
+        &mut self,
+        mold_name: &str,
+        option_name: &str,
+        value: &Expr,
+        kind: crate::types::mold_specs::MoldArgKind,
+    ) {
+        if matches!(kind, crate::types::mold_specs::MoldArgKind::Any) {
+            return;
+        }
+        let actual = self.infer_expr_type(value);
+        if self.builtin_mold_kind_matches(&actual, kind) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1506] `{}` option '{}' has type {}, expected {}.",
+                mold_name,
+                option_name,
+                actual,
+                Self::builtin_mold_kind_label(kind)
+            ),
+            span: value.span().clone(),
+        });
+    }
+
+    fn builtin_mold_kind_matches(
+        &self,
+        actual: &Type,
+        kind: crate::types::mold_specs::MoldArgKind,
+    ) -> bool {
+        use crate::types::mold_specs::MoldArgKind;
+
+        if matches!(actual, Type::Unknown | Type::Any) {
+            return true;
+        }
+        match kind {
+            MoldArgKind::Any => true,
+            MoldArgKind::Bool => actual == &Type::Bool,
+            MoldArgKind::Function => matches!(actual, Type::Function(_, _)),
+            MoldArgKind::Int => actual == &Type::Int,
+            MoldArgKind::Str => actual == &Type::Str,
+            MoldArgKind::UnaryFunction => {
+                matches!(actual, Type::Function(params, _) if params.len() == 1)
+            }
+            MoldArgKind::UnaryPredicate => match actual {
+                Type::Function(params, ret) if params.len() == 1 => {
+                    matches!(ret.as_ref(), Type::Bool | Type::Unknown | Type::Any)
+                }
+                _ => false,
+            },
+            MoldArgKind::BinaryFunction => {
+                matches!(actual, Type::Function(params, _) if params.len() == 2)
+            }
+            MoldArgKind::List => matches!(actual, Type::List(_)),
+            MoldArgKind::ListOrStream => {
+                matches!(actual, Type::List(_))
+                    || matches!(actual, Type::Generic(name, _) if name == "Stream")
+            }
+            MoldArgKind::Numeric => actual.is_numeric(),
+        }
+    }
+
+    fn builtin_mold_kind_label(kind: crate::types::mold_specs::MoldArgKind) -> &'static str {
+        use crate::types::mold_specs::MoldArgKind;
+
+        match kind {
+            MoldArgKind::Any => "any value",
+            MoldArgKind::Bool => "Bool",
+            MoldArgKind::Function => "function",
+            MoldArgKind::Int => "Int",
+            MoldArgKind::Str => "Str",
+            MoldArgKind::UnaryFunction => "1-argument function",
+            MoldArgKind::UnaryPredicate => "1-argument Bool predicate",
+            MoldArgKind::BinaryFunction => "2-argument function",
+            MoldArgKind::List => "List",
+            MoldArgKind::ListOrStream => "List or Stream",
+            MoldArgKind::Numeric => "numeric",
         }
     }
 
@@ -3571,6 +4151,105 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    fn check_str_plus_known_non_str_in_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
+                let lhs_type = Self::static_add_operand_type(lhs);
+                let rhs_type = Self::static_add_operand_type(rhs);
+
+                let lhs_bad = matches!(lhs_type, Some(Type::Str))
+                    && !matches!(rhs_type, Some(Type::Str) | None);
+                let rhs_bad = matches!(rhs_type, Some(Type::Str))
+                    && !matches!(lhs_type, Some(Type::Str) | None);
+                if lhs_bad || rhs_bad {
+                    let _ = self.infer_expr_type(expr);
+                } else {
+                    self.check_str_plus_known_non_str_in_expr(lhs);
+                    self.check_str_plus_known_non_str_in_expr(rhs);
+                }
+            }
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                self.check_str_plus_known_non_str_in_expr(lhs);
+                self.check_str_plus_known_non_str_in_expr(rhs);
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_str_plus_known_non_str_in_expr(obj);
+                for arg in args {
+                    self.check_str_plus_known_non_str_in_expr(arg);
+                }
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.check_str_plus_known_non_str_in_expr(callee);
+                for arg in args {
+                    self.check_str_plus_known_non_str_in_expr(arg);
+                }
+            }
+            Expr::UnaryOp(_, inner, _) | Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+                self.check_str_plus_known_non_str_in_expr(inner);
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_str_plus_known_non_str_in_expr(e);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for e in items {
+                    self.check_str_plus_known_non_str_in_expr(e);
+                }
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    self.check_str_plus_known_non_str_in_expr(&field.value);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.check_str_plus_known_non_str_in_expr(cond);
+                    }
+                    for stmt in &arm.body {
+                        if let Statement::Expr(e) = stmt {
+                            self.check_str_plus_known_non_str_in_expr(e);
+                        }
+                    }
+                }
+            }
+            Expr::Lambda(_, body, _) => self.check_str_plus_known_non_str_in_expr(body),
+            Expr::FieldAccess(obj, _, _) => self.check_str_plus_known_non_str_in_expr(obj),
+            _ => {}
+        }
+    }
+
+    fn static_add_operand_type(expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(Type::Str),
+            Expr::IntLit(_, _) => Some(Type::Int),
+            Expr::FloatLit(_, _) => Some(Type::Float),
+            Expr::BoolLit(_, _) => Some(Type::Bool),
+            Expr::ListLit(_, _) => Some(Type::List(Box::new(Type::Unknown))),
+            Expr::BuchiPack(_, _) | Expr::TypeInst(_, _, _) => Some(Type::Unknown),
+            Expr::MethodCall(_, method, args, _)
+                if args.is_empty() && matches!(method.as_str(), "toString" | "toStr") =>
+            {
+                Some(Type::Str)
+            }
+            Expr::BinaryOp(lhs, BinOp::Add, rhs, _)
+                if matches!(Self::static_add_operand_type(lhs), Some(Type::Str))
+                    && matches!(Self::static_add_operand_type(rhs), Some(Type::Str)) =>
+            {
+                Some(Type::Str)
+            }
+            Expr::BinaryOp(_, BinOp::Concat, _, _) => Some(Type::Str),
+            Expr::MoldInst(name, _, _, _)
+                if crate::types::mold_specs::mold_return_tag(name)
+                    == Some(crate::codegen::tag_prop::TAG_STR) =>
+            {
+                Some(Type::Str)
+            }
+            _ => None,
+        }
+    }
+
     // ── Comparison diagnostics in skipped expression contexts ──
     //
     // Some containers know their own type without fully inferring children
@@ -3874,11 +4553,18 @@ defaulted fields must be provided via `()`",
         match stmt {
             Statement::EnumDef(_) => {}
             Statement::Assignment(assign) => {
-                let inferred = self.infer_expr_type(&assign.value);
+                let expected_annotation = assign
+                    .type_annotation
+                    .as_ref()
+                    .map(|type_ann| self.registry.resolve_type(type_ann));
+                let inferred = if let Some(expected) = &expected_annotation {
+                    self.infer_expr_type_with_expected(&assign.value, expected)
+                } else {
+                    self.infer_expr_type(&assign.value)
+                };
 
                 // If there's a type annotation, check compatibility
-                if let Some(type_ann) = &assign.type_annotation {
-                    let expected = self.registry.resolve_type(type_ann);
+                if let Some(expected) = expected_annotation {
                     if !self.registry.is_subtype_of(&inferred, &expected)
                         && inferred != Type::Unknown
                     {
@@ -3940,6 +4626,10 @@ defaulted fields must be provided via `()`",
                     Type::Function(param_types.clone(), Box::new(ret_ty.clone()))
                 };
                 self.define_var_with_span(&fd.name, function_value_ty, Some(&fd.span));
+                if !self.invalid_func_defs.contains(&fd.name) {
+                    self.func_def_scope_depths
+                        .insert(fd.name.clone(), self.scope_stack.len().saturating_sub(1));
+                }
 
                 // Push new scope for function body
                 self.push_scope();
@@ -3978,10 +4668,13 @@ defaulted fields must be provided via `()`",
                 //     (C13-1 tail binding `name <= expr` / `expr => name`)
                 //   - `Statement::UnmoldForward(u)` / `UnmoldBackward(u)` →
                 //     the unmolded value (C13-1 tail unmold)
+                let mut inferred_body_ret = None;
                 if has_return_check {
                     let last_stmt = &fd.body[body_len - 1];
                     let body_ty_opt = match last_stmt {
-                        Statement::Expr(last_expr) => Some(self.infer_expr_type(last_expr)),
+                        Statement::Expr(last_expr) => {
+                            Some(self.infer_expr_type_with_expected(last_expr, &ret_ty))
+                        }
                         Statement::Assignment(_)
                         | Statement::UnmoldForward(_)
                         | Statement::UnmoldBackward(_) => {
@@ -4040,11 +4733,44 @@ defaulted fields must be provided via `()`",
                             });
                         }
                     }
+                } else if body_len > 0 && !self.invalid_func_defs.contains(&fd.name) {
+                    let last_stmt = &fd.body[body_len - 1];
+                    let body_ty = match last_stmt {
+                        Statement::Expr(last_expr) => self
+                            .typed_expr_table
+                            .lookup(last_expr)
+                            .cloned()
+                            .unwrap_or(Type::Unknown),
+                        Statement::Assignment(a) => {
+                            self.lookup_var(&a.target).unwrap_or(Type::Unknown)
+                        }
+                        Statement::UnmoldForward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        _ => Type::Unknown,
+                    };
+                    if fd.type_params.is_empty()
+                        && body_ty != Type::Unknown
+                        && !Self::contains_unknown(&body_ty)
+                    {
+                        inferred_body_ret = Some(body_ty);
+                    }
                 }
 
                 // D28B-023 / D28B-024: balance the type-param stack push above.
                 self.current_func_type_params.pop();
                 self.pop_scope();
+
+                if let Some(body_ret) = inferred_body_ret {
+                    self.func_types.insert(fd.name.clone(), body_ret.clone());
+                    self.define_var_silent(
+                        &fd.name,
+                        Type::Function(param_types.clone(), Box::new(body_ret)),
+                    );
+                }
             }
             Statement::Expr(expr) => {
                 self.infer_expr_type(expr);
@@ -4160,8 +4886,6 @@ defaulted fields must be provided via `()`",
                 // compile time. Unpinned os symbols still fall through to
                 // `Type::Unknown` below.
                 let os_import = imp.path == "taida-lang/os";
-                // Register imported symbols as Unknown
-                // (We don't have cross-module type info yet)
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
                     if imp.path == "taida-lang/net" {
@@ -4174,7 +4898,10 @@ defaulted fields must be provided via `()`",
                         self.define_var(name, Type::Molten);
                         self.define_branch_info(name, BranchInfo::Molten(CageBranch::Js));
                     } else {
-                        self.define_var(name, Type::Unknown);
+                        let value_ty = self
+                            .imported_function_value_type(name)
+                            .unwrap_or(Type::Unknown);
+                        self.define_var(name, value_ty);
                     }
                 }
             }
@@ -4244,6 +4971,376 @@ defaulted fields must be provided via `()`",
         ty
     }
 
+    const MAX_BIDI_TYPE_HINT_DEPTH: usize = 32;
+
+    pub(super) fn infer_expr_type_with_expected(&mut self, expr: &Expr, expected: &Type) -> Type {
+        self.infer_expr_type_with_expected_inner(expr, expected, FunctionHintDiagnostic::MethodArg)
+    }
+
+    fn infer_expr_type_with_expected_for_function_arg(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+    ) -> Type {
+        self.infer_expr_type_with_expected_inner(
+            expr,
+            expected,
+            FunctionHintDiagnostic::FunctionArg,
+        )
+    }
+
+    fn infer_expr_type_with_expected_inner(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+        diagnostic: FunctionHintDiagnostic,
+    ) -> Type {
+        if let Type::Function(_, _) = expected {
+            if let Expr::Lambda(_, _, _) = expr {
+                return self.infer_lambda_with_hint(expr, expected);
+            }
+            if let Some(fn_ty) = self.infer_named_function_with_hint(expr, expected, diagnostic) {
+                return fn_ty;
+            }
+        }
+
+        let inferred = self.infer_expr_type(expr);
+        let hinted = Self::fill_unknowns_from_expected(&inferred, expected);
+        if hinted != inferred {
+            self.typed_expr_table.record(expr, hinted.clone());
+        }
+        hinted
+    }
+
+    fn fill_unknowns_from_expected(inferred: &Type, expected: &Type) -> Type {
+        Self::fill_unknowns_from_expected_at_depth(inferred, expected, 0)
+    }
+
+    fn fill_unknowns_from_expected_at_depth(
+        inferred: &Type,
+        expected: &Type,
+        depth: usize,
+    ) -> Type {
+        if depth >= Self::MAX_BIDI_TYPE_HINT_DEPTH {
+            return inferred.clone();
+        }
+        match (inferred, expected) {
+            (
+                Type::Generic(inferred_name, inferred_args),
+                Type::Generic(expected_name, expected_args),
+            ) if inferred_name == expected_name && inferred_args.len() == expected_args.len() => {
+                Type::Generic(
+                    inferred_name.clone(),
+                    inferred_args
+                        .iter()
+                        .zip(expected_args.iter())
+                        .map(|(actual, expected)| {
+                            if matches!(actual, Type::Unknown) {
+                                expected.clone()
+                            } else {
+                                Self::fill_unknowns_from_expected_at_depth(
+                                    actual,
+                                    expected,
+                                    depth + 1,
+                                )
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            (Type::List(inferred_inner), Type::List(expected_inner)) => Type::List(Box::new(
+                if matches!(inferred_inner.as_ref(), Type::Unknown) {
+                    expected_inner.as_ref().clone()
+                } else {
+                    Self::fill_unknowns_from_expected_at_depth(
+                        inferred_inner,
+                        expected_inner,
+                        depth + 1,
+                    )
+                },
+            )),
+            (Type::BuchiPack(inferred_fields), Type::BuchiPack(expected_fields)) => {
+                Type::BuchiPack(
+                    inferred_fields
+                        .iter()
+                        .map(|(field_name, inferred_ty)| {
+                            let hinted_ty = expected_fields
+                                .iter()
+                                .find(|(expected_name, _)| expected_name == field_name)
+                                .map(|(_, expected_ty)| {
+                                    if matches!(inferred_ty, Type::Unknown) {
+                                        expected_ty.clone()
+                                    } else {
+                                        Self::fill_unknowns_from_expected_at_depth(
+                                            inferred_ty,
+                                            expected_ty,
+                                            depth + 1,
+                                        )
+                                    }
+                                })
+                                .unwrap_or_else(|| inferred_ty.clone());
+                            (field_name.clone(), hinted_ty)
+                        })
+                        .collect(),
+                )
+            }
+            (
+                Type::Function(inferred_params, inferred_ret),
+                Type::Function(expected_params, expected_ret),
+            ) if inferred_params.len() == expected_params.len() => Type::Function(
+                // This is hint filling, not subtype validation. Function
+                // boundary variance is checked later by is_function_arg_subtype_of.
+                inferred_params
+                    .iter()
+                    .zip(expected_params.iter())
+                    .map(|(actual, expected)| {
+                        if matches!(actual, Type::Unknown) {
+                            expected.clone()
+                        } else {
+                            Self::fill_unknowns_from_expected_at_depth(actual, expected, depth + 1)
+                        }
+                    })
+                    .collect(),
+                Box::new(if matches!(inferred_ret.as_ref(), Type::Unknown) {
+                    expected_ret.as_ref().clone()
+                } else {
+                    Self::fill_unknowns_from_expected_at_depth(
+                        inferred_ret,
+                        expected_ret,
+                        depth + 1,
+                    )
+                }),
+            ),
+            _ => inferred.clone(),
+        }
+    }
+
+    fn generic_expected_hint(
+        &self,
+        pattern: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        let substituted = self.substitute_generic_type(pattern, generic_names, bindings);
+        Self::erase_unbound_generic_names(&substituted, generic_names)
+    }
+
+    fn erase_unbound_generic_names(ty: &Type, generic_names: &HashSet<String>) -> Type {
+        Self::erase_unbound_generic_names_at_depth(ty, generic_names, 0)
+    }
+
+    fn erase_unbound_generic_names_at_depth(
+        ty: &Type,
+        generic_names: &HashSet<String>,
+        depth: usize,
+    ) -> Type {
+        if depth >= Self::MAX_BIDI_TYPE_HINT_DEPTH {
+            return ty.clone();
+        }
+        match ty {
+            Type::Named(name) if generic_names.contains(name) => Type::Unknown,
+            Type::List(inner) => Type::List(Box::new(Self::erase_unbound_generic_names_at_depth(
+                inner,
+                generic_names,
+                depth + 1,
+            ))),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| {
+                        Self::erase_unbound_generic_names_at_depth(arg, generic_names, depth + 1)
+                    })
+                    .collect(),
+            ),
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            Self::erase_unbound_generic_names_at_depth(
+                                ty,
+                                generic_names,
+                                depth + 1,
+                            ),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| {
+                        Self::erase_unbound_generic_names_at_depth(param, generic_names, depth + 1)
+                    })
+                    .collect(),
+                Box::new(Self::erase_unbound_generic_names_at_depth(
+                    ret,
+                    generic_names,
+                    depth + 1,
+                )),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
+    fn infer_named_function_with_hint(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+        diagnostic: FunctionHintDiagnostic,
+    ) -> Option<Type> {
+        let (Expr::Ident(name, span), Type::Function(expected_params, expected_ret)) =
+            (expr, expected)
+        else {
+            return None;
+        };
+        if self.hinted_func_stack.iter().any(|active| active == name) {
+            return None;
+        }
+        if self.visible_binding_shadows_function(name) {
+            return None;
+        }
+        let fd = self.func_defs.get(name)?.clone();
+        // Generic named functions use the generic-call substitution path;
+        // this expected-hint path is intentionally limited to plain names.
+        if !fd.type_params.is_empty() || fd.params.len() != expected_params.len() {
+            return None;
+        }
+
+        let param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, param)| {
+                param
+                    .type_annotation
+                    .as_ref()
+                    .map(|ty| self.registry.resolve_type(ty))
+                    .unwrap_or_else(|| expected_params.get(i).cloned().unwrap_or(Type::Unknown))
+            })
+            .collect();
+
+        let ret_annotation = fd
+            .return_type
+            .as_ref()
+            .map(|ty| self.registry.resolve_type(ty));
+        let (ret_type, body_failed) = if let Some(ret) = ret_annotation.clone() {
+            (ret, false)
+        } else {
+            self.hinted_func_stack.push(name.clone());
+            let inferred = self.infer_function_body_with_param_types(&fd, &param_types);
+            self.hinted_func_stack.pop();
+            inferred
+        };
+        if body_failed {
+            let code = diagnostic.code();
+            self.errors.push(TypeError {
+                message: format!(
+                    "[{}] Function argument '{}' could not be inferred as {}. \
+                     Hint: Add parameter and return annotations, or simplify the function body so it matches the expected function type.",
+                    code,
+                    name, expected
+                ),
+                span: span.clone(),
+            });
+            self.typed_expr_table.record(expr, Type::Unknown);
+            return Some(Type::Unknown);
+        }
+        let hinted_ret = if ret_type == Type::Unknown && ret_annotation.is_some() {
+            expected_ret.as_ref().clone()
+        } else {
+            Self::fill_unknowns_from_expected(&ret_type, expected_ret)
+        };
+
+        let fn_ty = Type::Function(param_types, Box::new(hinted_ret));
+        self.typed_expr_table.record(expr, fn_ty.clone());
+
+        Some(fn_ty)
+    }
+
+    fn visible_binding_shadows_function(&self, name: &str) -> bool {
+        let Some(function_scope_depth) = self.func_def_scope_depths.get(name).copied() else {
+            return self.lookup_var(name).is_some();
+        };
+        for (idx, scope) in self.scope_stack.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return idx != function_scope_depth;
+            }
+        }
+        false
+    }
+
+    fn infer_function_body_with_param_types(
+        &mut self,
+        fd: &FuncDef,
+        param_types: &[Type],
+    ) -> (Type, bool) {
+        let Some(Statement::Expr(expr)) = fd.body.last() else {
+            return (Type::Unknown, true);
+        };
+        if fd.body.len() != 1 || !Self::is_narrow_body_inference_expr(expr, &fd.params) {
+            return (Type::Unknown, true);
+        }
+
+        self.push_scope();
+        for (param, ty) in fd.params.iter().zip(param_types.iter()) {
+            self.define_var(&param.name, ty.clone());
+        }
+
+        let error_len = self.errors.len();
+        let table_snapshot = self.typed_expr_table.clone();
+        let ret = self.infer_expr_type(expr);
+        self.typed_expr_table = table_snapshot;
+        let ret = if self.errors.len() > error_len {
+            // The normal FuncDef pass owns body-local diagnostics. This
+            // contextual re-inference only decides whether a call-site hint
+            // can resolve the function boundary, so collapse internal errors
+            // into a single boundary diagnostic at the use site.
+            self.errors.truncate(error_len);
+            (Type::Unknown, true)
+        } else {
+            (ret, false)
+        };
+
+        self.pop_scope();
+        ret
+    }
+
+    fn is_narrow_body_inference_expr(expr: &Expr, params: &[Param]) -> bool {
+        let param_names: HashSet<&str> = params.iter().map(|param| param.name.as_str()).collect();
+        Self::is_narrow_body_expr_inner(expr, &param_names)
+    }
+
+    fn is_narrow_body_expr_inner(expr: &Expr, param_names: &HashSet<&str>) -> bool {
+        match expr {
+            Expr::Ident(name, _) => param_names.contains(name.as_str()),
+            Expr::IntLit(_, _)
+            | Expr::FloatLit(_, _)
+            | Expr::StringLit(_, _)
+            | Expr::BoolLit(_, _) => true,
+            Expr::FieldAccess(base, _, _) => Self::is_narrow_body_expr_inner(base, param_names),
+            // Keep the allow list to local, side-effect-free shapes that
+            // propagate types from hinted params. Branches and free calls are
+            // left to annotated functions or the normal checker path; method
+            // calls stay allowed only when receiver and args are narrow too.
+            Expr::MethodCall(receiver, method, args, _) if Self::is_narrow_body_method(method) => {
+                Self::is_narrow_body_expr_inner(receiver, param_names)
+                    && args
+                        .iter()
+                        .all(|arg| Self::is_narrow_body_expr_inner(arg, param_names))
+            }
+            _ => false,
+        }
+    }
+
+    fn is_narrow_body_method(method: &str) -> bool {
+        matches!(
+            method,
+            "toString" | "length" | "isEmpty" | "hasValue" | "typename"
+        )
+    }
+
     /// Inner implementation of `infer_expr_type`. Does NOT record into
     /// the typed expression table — recording happens in the public wrapper.
     /// Recursive calls go through the public wrapper so every subexpression
@@ -4272,30 +5369,7 @@ defaulted fields must be provided via `()`",
                     || self.generic_func_defs.contains_key(name)
                     || self.declared_concrete_type_names.contains(name)
                     || self.registry.mold_defs.contains_key(name)
-                    || matches!(
-                        name.as_str(),
-                        "debug"
-                            | "toString"
-                            | "toStr"
-                            | "typeOf"
-                            | "typeof"
-                            | "jsonEncode"
-                            | "jsonPretty"
-                            | "nowMs"
-                            | "assert"
-                            | "range"
-                            | "enumerate"
-                            | "zip"
-                            | "hashMap"
-                            | "setOf"
-                            | "stdout"
-                            | "stderr"
-                            | "exit"
-                            | "stdin"
-                            | "stdinLine"
-                            | "argv"
-                            | "sleep"
-                    )
+                    || Self::is_core_builtin_name(name)
                 {
                     // Known function/type/mold name used as value reference
                     Type::Unknown
@@ -4643,7 +5717,12 @@ defaulted fields must be provided via `()`",
                             let Some(pattern) = param_patterns.get(i) else {
                                 continue;
                             };
-                            let actual_ty = self.infer_expr_type(arg);
+                            let expected_hint =
+                                self.generic_expected_hint(pattern, &generic_names, &bindings);
+                            let actual_ty = self.infer_expr_type_with_expected_for_function_arg(
+                                arg,
+                                &expected_hint,
+                            );
                             if actual_ty == Type::Unknown {
                                 continue;
                             }
@@ -4738,8 +5817,28 @@ defaulted fields must be provided via `()`",
                                     if *expected_ty == Type::Unknown {
                                         continue;
                                     }
-                                    let actual_ty = self.infer_expr_type(arg);
+                                    let actual_ty = self
+                                        .infer_expr_type_with_expected_for_function_arg(
+                                            arg,
+                                            expected_ty,
+                                        );
                                     if actual_ty == Type::Unknown {
+                                        continue;
+                                    }
+                                    if Self::contains_unknown(&actual_ty)
+                                        && !Self::contains_unknown(expected_ty)
+                                    {
+                                        self.errors.push(TypeError {
+                                            message: format!(
+                                                "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                                                 Hint: Add annotations or simplify the function body so inference can resolve the argument type.",
+                                                i + 1,
+                                                name,
+                                                actual_ty,
+                                                expected_ty
+                                            ),
+                                            span: span.clone(),
+                                        });
                                         continue;
                                     }
                                     if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
@@ -4803,8 +5902,28 @@ defaulted fields must be provided via `()`",
                                 if *expected_ty == Type::Unknown {
                                     continue;
                                 }
-                                let actual_ty = self.infer_expr_type(arg);
+                                let actual_ty = self
+                                    .infer_expr_type_with_expected_for_function_arg(
+                                        arg,
+                                        expected_ty,
+                                    );
                                 if actual_ty == Type::Unknown {
+                                    continue;
+                                }
+                                if Self::contains_unknown(&actual_ty)
+                                    && !Self::contains_unknown(expected_ty)
+                                {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                                             Hint: Add annotations or simplify the function body so inference can resolve the argument type.",
+                                            i + 1,
+                                            name,
+                                            actual_ty,
+                                            expected_ty
+                                        ),
+                                        span: span.clone(),
+                                    });
                                     continue;
                                 }
                                 if !self.registry.is_subtype_of(&actual_ty, expected_ty) {
@@ -4876,7 +5995,7 @@ defaulted fields must be provided via `()`",
                             {
                                 continue;
                             }
-                            let actual_ty = self.infer_expr_type(arg);
+                            let actual_ty = self.infer_expr_type_with_expected(arg, expected_ty);
                             if actual_ty == Type::Unknown
                                 || self.contains_unresolved_type_var(&actual_ty)
                             {
@@ -4938,47 +6057,7 @@ defaulted fields must be provided via `()`",
                     // Check if it's a known builtin
                     // E1507: Builtin arity check
                     // (name, min_args, max_args)
-                    let builtin_arity: Option<(usize, usize)> = match name.as_str() {
-                        "debug" => Some((1, 2)), // debug(value) or debug(label, value)
-                        "toString" | "toStr" => Some((1, 1)),
-                        "typeOf" | "typeof" => Some((1, 1)),
-                        "jsonEncode" | "jsonPretty" => Some((1, 1)),
-                        "nowMs" => Some((0, 0)),
-                        "assert" => Some((1, 2)), // assert(cond) or assert(cond, msg)
-                        "range" => Some((2, 3)),  // range(start, end) or range(start, end, step)
-                        "enumerate" => Some((1, 1)),
-                        "zip" => Some((2, 2)),
-                        "hashMap" => Some((0, 1)),
-                        "setOf" => Some((1, 1)),
-                        // D28B-015: `strOf(span, raw)` lowercase function-form
-                        // (function counterpart of `StrOf[span, raw]()` mold).
-                        // The 2026-04-26 D28B-001 naming-rules Lock justifies
-                        // the co-existence of mold form (PascalCase) and
-                        // function form (camelCase). 4-backend parity (interp /
-                        // JS / native / wasm-full) — see `interpreter/prelude.rs`,
-                        // `js/codegen.rs`, `codegen/lower_molds.rs` (function
-                        // dispatch hooks delegate to existing StrOf paths).
-                        "strOf" => Some((2, 2)),
-                        "stdout" => Some((1, 1)),
-                        "stderr" => Some((1, 1)),
-                        "exit" => Some((1, 1)),
-                        // C20-3 (ROOT-13): prompt is optional. The prelude
-                        // runtime, Native lowering and LSP / docs all treat
-                        // `stdin()` (no-prompt) as valid. Before C20 the
-                        // checker rejected it with [E1507].
-                        "stdin" => Some((0, 1)),
-                        // C20-2: stdinLine is the UTF-8-aware successor to
-                        // `stdin`. Prompt is optional; result is
-                        // `Async[Lax[Str]]` and callers must unmold via
-                        // `]=>` to get the inner `Lax[Str]`.
-                        "stdinLine" => Some((0, 1)),
-                        "argv" => Some((0, 0)),
-                        "sleep" => Some((1, 1)),
-                        // C12 Phase 6 (FB-5): Regex(pattern, flags?)
-                        // returns a :Regex BuchiPack.
-                        "Regex" => Some((1, 2)),
-                        _ => None,
-                    };
+                    let builtin_arity = Self::core_builtin_arity(name.as_str());
                     if let Some((min_args, max_args)) = builtin_arity
                         && (args.len() < min_args || args.len() > max_args)
                     {
@@ -5016,59 +6095,26 @@ defaulted fields must be provided via `()`",
                             if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                                 self.check_tostring_arity_in_expr(arg);
                                 self.check_pinned_field_access_in_expr(arg);
+                                self.check_str_plus_known_non_str_in_expr(arg);
                             }
                         }
                     }
-                    let base_ty = match name.as_str() {
-                        // debug returns its argument (pass-through)
-                        "debug" => {
-                            if let Some(first_arg) = args.first() {
-                                self.infer_expr_type(first_arg)
-                            } else {
-                                Type::Unit
+                    if matches!(name.as_str(), "stdout" | "stderr") {
+                        for arg in args.iter() {
+                            if matches!(
+                                arg,
+                                Expr::FuncCall(_, _, _)
+                                    | Expr::MethodCall(_, _, _, _)
+                                    | Expr::MoldInst(_, _, _, _)
+                                    | Expr::FieldAccess(_, _, _)
+                            ) {
+                                let _ = self.infer_expr_type(arg);
                             }
                         }
-                        "toString" | "toStr" => Type::Str,
-                        // D28B-015: `strOf(span, raw)` returns owned Str
-                        // (cold-path span materialization, function counterpart
-                        // of `StrOf[span, raw]()` mold).
-                        "strOf" => Type::Str,
-                        "typeOf" | "typeof" => Type::Str,
-                        "jsonEncode" | "jsonPretty" => Type::Str,
-                        "nowMs" => Type::Int,
-                        // Prelude functions
-                        "assert" => Type::Unit,
-                        "range" => Type::List(Box::new(Type::Int)),
-                        "enumerate" => Type::List(Box::new(Type::Unknown)),
-                        "zip" => Type::List(Box::new(Type::Unknown)),
-                        "hashMap" => Type::Named("HashMap".to_string()),
-                        "setOf" => Type::Named("Set".to_string()),
-                        // C12-5 (FB-18): stdout/stderr now return Int (bytes
-                        // written) instead of Unit so that `Value::Unit` stays
-                        // unobservable from Taida surface. `exit` remains Unit
-                        // because it never returns (process terminates).
-                        "stdout" | "stderr" => Type::Int,
-                        "exit" => Type::Unit,
-                        "stdin" => Type::Str,
-                        // C20-2: `stdinLine` pins its result to
-                        // `Async[Lax[Str]]` so that callers are forced to
-                        // unmold via `]=>` and then reason about the Lax
-                        // (failure on EOF / IO error returns the default
-                        // `""`). Direct `<=` binding leaves the Async in
-                        // place — the Lax is not reachable without an
-                        // unmold, which matches Taida's Async discipline.
-                        "stdinLine" => Type::Generic(
-                            "Async".to_string(),
-                            vec![Type::Generic("Lax".to_string(), vec![Type::Str])],
-                        ),
-                        "argv" => Type::List(Box::new(Type::Str)),
-                        "sleep" => Type::Generic("Async".to_string(), vec![Type::Unit]),
-                        // C12 Phase 6 (FB-5): Regex(pattern, flags?)
-                        // returns an opaque named :Regex type (internally
-                        // a BuchiPack with `__type <= "Regex"`).
-                        "Regex" => Type::Named("Regex".to_string()),
-                        _ => Type::Unknown,
-                    };
+                    }
+                    let base_ty = self
+                        .core_builtin_return_type(name.as_str(), args)
+                        .unwrap_or(Type::Unknown);
                     if hole_count > 0 {
                         let hole_param_types: Vec<Type> =
                             (0..hole_count).map(|_| Type::Unknown).collect();
@@ -5150,8 +6196,8 @@ defaulted fields must be provided via `()`",
                     self.errors.push(TypeError {
                         message: format!(
                             "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. \
-                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax, \
-                             or an official introspection API instead.",
+                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax values, \
+                             or `errorInfo()` for failure details.",
                             field
                         ),
                         span: span.clone(),
@@ -5174,6 +6220,9 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     Type::Named(type_name) => {
+                        if self.registry.enum_defs.contains_key(type_name) && field == "has_value" {
+                            return Type::Bool;
+                        }
                         // Look up field in registered type definition
                         if let Some(fields) = self.registry.get_type_fields(type_name) {
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
@@ -5194,14 +6243,40 @@ defaulted fields must be provided via `()`",
                             Type::Unknown
                         }
                     }
+                    Type::Generic(name, _) if name == "Lax" => match field.as_str() {
+                        "has_value" | "isEmpty" => Type::Bool,
+                        "hasValue" => {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1602] Field '{}' does not exist on type '{}'. \
+                                     Hint: use `has_value` for field access or `hasValue()` for the state-check method.",
+                                    field, name
+                                ),
+                                span: span.clone(),
+                            });
+                            Type::Unknown
+                        }
+                        _ => Type::Unknown,
+                    },
                     // E32B-018: internal `__*` envelope slots are rejected
-                    // above before type-specific dispatch. Public `hasValue`
+                    // above before type-specific dispatch. Public `has_value`
                     // remains available.
                     Type::Generic(name, args)
                         if name == "Gorillax" || name == "RelaxedGorillax" =>
                     {
                         match field.as_str() {
-                            "hasValue" => Type::Bool,
+                            "has_value" => Type::Bool,
+                            "hasValue" => {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1602] Field '{}' does not exist on type '{}'. \
+                                         Hint: use `has_value` for field access or `hasValue()` for the state-check method.",
+                                        field, name
+                                    ),
+                                    span: span.clone(),
+                                });
+                                Type::Unknown
+                            }
                             "throw" => Type::Unknown,
                             _ => {
                                 // Only surface an error for fields that are
@@ -5288,10 +6363,19 @@ defaulted fields must be provided via `()`",
 
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
                 self.validate_mold_header_constraints(name, type_args, mold_span);
+                self.validate_builtin_mold_spec(name, type_args, fields, mold_span);
                 match name.as_str() {
-                    // JSON[raw, Schema]() returns Lax (wrapping the schema type)
-                    "JSON" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
-                    // Async[T] wraps a value
+                    // JSON[raw, Schema]() returns Lax[Schema].
+                    "JSON" => {
+                        let schema_ty = type_args
+                            .get(1)
+                            .map(|arg| self.type_arg_expr_to_type(arg))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Lax".to_string(), vec![schema_ty])
+                    }
+                    // Async[T] wraps a value. AsyncReject[err]() is still an
+                    // Async value, but its success payload is unavailable at
+                    // the type level.
                     "Async" => Type::Generic(
                         "Async".to_string(),
                         vec![
@@ -5301,6 +6385,7 @@ defaulted fields must be provided via `()`",
                                 .unwrap_or(Type::Unknown),
                         ],
                     ),
+                    "AsyncReject" => Type::Generic("Async".to_string(), vec![Type::Unknown]),
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
                         if type_args.len() != 1 {
@@ -5637,6 +6722,7 @@ defaulted fields must be provided via `()`",
                     // check_mold_errors_in_expr(), not here, to ensure it
                     // fires regardless of expression context.
                     "TypeExtends" => Type::Bool,
+                    "Exists" => Self::result_type(Type::Bool),
                     "TypeName" => {
                         if type_args.len() != 1 {
                             self.errors.push(TypeError {
@@ -5723,15 +6809,7 @@ defaulted fields must be provided via `()`",
                         Type::Generic("Gorillax".to_string(), vec![inner])
                     }
                     // Molten[]() returns Molten (no type arguments allowed)
-                    "Molten" => {
-                        if !type_args.is_empty() {
-                            self.errors.push(TypeError {
-                                message: "Molten takes no type arguments: Molten[]()".to_string(),
-                                span: mold_span.clone(),
-                            });
-                        }
-                        Type::Molten
-                    }
+                    "Molten" => Type::Molten,
                     // Cage[subject, runner] where runner <: CageRilla[Branch, Out].
                     "Cage" => {
                         let Some(subject) = type_args.first() else {
@@ -5808,6 +6886,12 @@ defaulted fields must be provided via `()`",
                         }
                     }
                     _ => {
+                        if matches!(
+                            name.as_str(),
+                            "SpanEquals" | "SpanStartsWith" | "SpanContains"
+                        ) {
+                            return Type::Bool;
+                        }
                         // Look up in mold definitions
                         if self.registry.mold_defs.contains_key(name) {
                             Type::Named(name.clone())

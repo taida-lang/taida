@@ -60,10 +60,10 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 > **Important — 2-arg handler body handling**: 2-arg form で handler 内から `req.body` を直接参照すると span の `len` が 0 になります (streaming 前提で body は eagerly 読まれない仕様)。**body を読む場合は必ず `readBody(req)` / `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使用**してください:
 >
 > - `readBody(req)` — 1-arg / 2-arg 両対応。2-arg では `readBodyAll` と同等 (stream を全読)。
-> - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `hasValue = false`。
+> - `readBodyChunk(req)` — 2-arg 専用。chunk 単位で `Lax[Bytes]` を返す。残り chunk が無い場合 `Lax` の `has_value = false`。
 > - `readBodyAll(req)` — 2-arg 専用。body を最後まで読んで `Bytes` を返す。
 >
-> 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。Phase 4 (1-arg) → Phase 5 (2-arg + streaming) の移行で最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
+> 1-arg handler での `Slice[req.raw, req.body.start, req.body.start + req.body.len]` パスを 2-arg にそのまま持ち込むと **silent に空 Bytes が返る**ため注意。1-arg 形式から 2-arg + streaming 形式へ移行する際に最頻発するハマりどころです。詳細は §3.2 / §8 を参照。
 
 ---
 
@@ -405,7 +405,11 @@ Enum => HttpProtocol = :H1 :H2 :H3
 
 ## 10. Backend scope
 
-`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で parity を保証します。WASM バックエンド (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) は `httpServe` / `httpRequest` を提供しません — 該当 capability を呼び出した場合 `[E1612]` を返します。WASM 向け NET dispatcher の現状方針は `docs/STABILITY.md` §1.2 / §4.2 / §5.2 を参照してください。
+`taida-lang/net` の API surface は **3-backend (Interpreter / JS / Native)** で full parity を保証します。`wasm-wasi` / `wasm-full` は WASI preview1 の継承済み TCP listener を使う plaintext HTTP/1.1 `httpServe` 部分集合を提供します。`wasm-min` / `wasm-edge` は `httpServe` を受け付けず、該当 capability を呼び出した場合 `[E1612]` を返します。
+
+`wasm-wasi` / `wasm-full` で `httpServe` を実行する場合、guest は自前で bind/listen しません。host が `wasi_snapshot_preview1.sock_accept` を実装している場合は fd 3 の inherited listener を使います。`sock_accept` を提供しない host では、accept 済み TCP 接続を fd 0/1 に接続する socket-activation 形式で 1 request を処理します。
+
+この WASM 部分集合では `port` は host 側 listener 選択に使われず、`timeoutMs` / `maxConnections` は runtime 内で追加制御されません。TLS は非空 pack を compile-time reject します。2-arg streaming handler も compile-time reject されます。request header が 16 KiB を超えて header 終端に到達しない場合、handler を呼ばず `413 Payload Too Large` を返します。TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body primitive はまだ提供されません。各 WASM プロファイルとアドオン dispatcher の対応関係は [`docs/reference/wasm_profiles.md`](wasm_profiles.md) と [`docs/reference/addon_manifest.md`](addon_manifest.md) を参照してください。
 
 例外として `readBytesAt` (bytes I/O) の `wasm-wasi` / `wasm-full` lowering のみ widening addition として land 済です。
 
@@ -450,10 +454,10 @@ handler req writer =
 
 ```taida
 handler req writer =
-  // chunk ごとに Lax[Bytes] を返す。hasValue=false で終端
+  // chunk ごとに Lax[Bytes] を返す。has_value=false で終端
   chunk1 <= readBodyChunk(req)
   chunk1 |
-    @(hasValue <= true) <= processChunk(chunk1.value)
+    @(has_value <= true) <= processChunk(chunk1.value)
     _ <= stdout("EOF")
   ...
 => :Unit
@@ -488,7 +492,8 @@ body path では handler を呼ばずに `400 Bad Request`、2-arg streaming
 
 ## 12. References
 
-- `docs/STABILITY.md` §2.2 / §5.1 — surface 保証範囲と NET stable viewpoint
-- `CHANGELOG.md` — タグ別の land 履歴と blocker 単位の進捗
-- `src/interpreter/net_eval/h1.rs` / `h2.rs` — interpreter reference 実装
+- [`docs/reference/release_process.md`](release_process.md) — 公開仕様の保証範囲と互換性判断
+- [`docs/reference/standard_methods.md`](standard_methods.md) — `Lax` / `Result` / `Async` のメソッド契約
+- `CHANGELOG.md` — タグ別の land 履歴
+- `src/interpreter/net_eval/h1.rs` / `h2.rs` — インタプリタ参照実装
 - `tests/parity.rs::test_net6_*` — 3-backend parity fixtures

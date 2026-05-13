@@ -25,7 +25,7 @@ name: Security
 
 on:
   push:
-    branches: [main, develop, feat/c25, feat/c26]
+    branches: [main, develop, "feat/**"]
   pull_request:
     branches: [main, develop]
   schedule:
@@ -33,6 +33,9 @@ on:
     # published between pushes without adding noticeable load.
     - cron: "0 6 * * 1"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -52,17 +55,15 @@ jobs:
     # `true` during @c.25.rc7; it is removed here so any advisory that
     # cargo-audit surfaces blocks the pipeline.
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
       - name: Cache cargo-audit binary
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.cargo/bin/cargo-audit
             ~/.cargo/advisory-db
           key: ${{ runner.os }}-cargo-audit-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-audit-v1-
       - name: Install cargo-audit
         run: |
           if ! command -v cargo-audit >/dev/null 2>&1; then
@@ -80,15 +81,13 @@ jobs:
     # C26B-007 Sub-phase 7.2: hard-fail gate (same rationale as
     # cargo-audit above). `continue-on-error` removed.
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
       - name: Cache cargo-deny binary
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-deny
           key: ${{ runner.os }}-cargo-deny-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-deny-v1-
       - name: Install cargo-deny
         run: |
           if ! command -v cargo-deny >/dev/null 2>&1; then
@@ -110,7 +109,7 @@ jobs:
     # on the assembled TU. Hard-fails on any gcc warning and on cppcheck
     # security findings.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install analyzers
         run: |
           sudo apt-get update -qq

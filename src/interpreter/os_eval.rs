@@ -109,25 +109,30 @@ pub(crate) const OS_SYMBOLS: &[&str] = &[
 
 // ── Helpers ─────────────────────────────────────────────────
 
-/// Create a Lax[T] success value: hasValue=true, __value=val, __default inferred.
+/// Create a Lax[T] success value: has_value=true, __value=val, __default inferred.
 fn make_lax_success(val: Value) -> Value {
     let default_val = Interpreter::default_for_value(&val);
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(true)),
+        ("has_value".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__default".into(), default_val),
         ("__type".into(), Value::str("Lax".into())),
     ])
 }
 
-/// Create a Lax[T] failure value: hasValue=false, __value=default, __default=default.
+/// Create a Lax[T] failure value: has_value=false, __value=default, __default=default.
 fn make_lax_failure(default_val: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(false)),
+        ("has_value".into(), Value::Bool(false)),
         ("__value".into(), default_val.clone()),
         ("__default".into(), default_val),
         ("__type".into(), Value::str("Lax".into())),
     ])
+}
+
+/// Create a Lax[T] failure value with ErrorInfo metadata.
+fn make_lax_failure_with_error(default_val: Value, error: Value) -> Value {
+    Interpreter::lax_failure_with_error(default_val, error)
 }
 
 /// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
@@ -182,14 +187,7 @@ fn make_result_failure_with_kind(kind: &str, message: impl Into<String>) -> Valu
         ("message".into(), Value::str(message.clone())),
         ("kind".into(), Value::str(kind.to_string())),
     ]);
-    let error_val = Value::Error(ErrorValue {
-        error_type: "IoError".to_string(),
-        message,
-        fields: vec![
-            ("code".into(), Value::Int(-1)),
-            ("kind".into(), Value::str(kind.to_string())),
-        ],
-    });
+    let error_val = make_io_error_with_kind(kind, &message, -1);
     Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
@@ -207,20 +205,20 @@ fn make_async_fulfilled(value: Value) -> Value {
     })
 }
 
-/// Create a Gorillax success value: hasValue=true, __value=val, __error=Unit.
+/// Create a Gorillax success value: has_value=true, __value=val, __error=Unit.
 fn make_gorillax_success(val: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(true)),
+        ("has_value".into(), Value::Bool(true)),
         ("__value".into(), val),
         ("__error".into(), Value::Unit),
         ("__type".into(), Value::str("Gorillax".into())),
     ])
 }
 
-/// Create a Gorillax failure value: hasValue=false, __error=err.
+/// Create a Gorillax failure value: has_value=false, __error=err.
 fn make_gorillax_failure(err: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(false)),
+        ("has_value".into(), Value::Bool(false)),
         ("__value".into(), Value::Unit),
         ("__error".into(), err),
         ("__type".into(), Value::str("Gorillax".into())),
@@ -231,14 +229,74 @@ fn make_io_error(err: &std::io::Error) -> Value {
     let code = err.raw_os_error().unwrap_or(-1) as i64;
     let message = err.to_string();
     let kind = classify_io_error_kind(err).to_string();
-    Value::Error(ErrorValue {
-        error_type: "IoError".to_string(),
-        message,
-        fields: vec![
-            ("code".into(), Value::Int(code)),
-            ("kind".into(), Value::str(kind)),
-        ],
-    })
+    Interpreter::canonical_error_pack("IoError", message, kind, code)
+}
+
+fn make_io_error_with_kind(kind: &str, message: &str, code: i64) -> Value {
+    Interpreter::canonical_error_pack("IoError", message.to_string(), kind.to_string(), code)
+}
+
+fn make_read_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, "Read error", 0))
+}
+
+fn make_read_bytes_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_val,
+        make_io_error_with_kind(kind, "ReadBytes error", 0),
+    )
+}
+
+fn make_read_bytes_at_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_val,
+        make_io_error_with_kind(kind, "ReadBytesAt error", 0),
+    )
+}
+
+fn make_env_var_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_val,
+        make_io_error_with_kind(kind, "EnvVar error", 0),
+    )
+}
+
+fn make_list_dir_lax_failure(kind: &str) -> Value {
+    make_lax_failure_with_error(
+        Value::list(Vec::new()),
+        make_io_error_with_kind(kind, "ListDir error", 0),
+    )
+}
+
+fn default_stat_pack() -> Value {
+    Value::pack(vec![
+        ("size".into(), Value::Int(0)),
+        ("modified".into(), Value::str(String::new())),
+        ("isDir".into(), Value::Bool(false)),
+    ])
+}
+
+fn make_stat_lax_failure(kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_stat_pack(),
+        make_io_error_with_kind(kind, "Stat error", 0),
+    )
+}
+
+fn make_http_lax_failure_with_kind(kind: &str) -> Value {
+    let default_response = Value::pack(vec![
+        ("status".into(), Value::Int(0)),
+        ("body".into(), Value::str(String::new())),
+        ("headers".into(), Value::pack(vec![])),
+    ]);
+    make_lax_failure_with_error(
+        default_response,
+        make_io_error_with_kind(kind, "HttpRequest error", 0),
+    )
+}
+
+fn make_socket_lax_failure(default_val: Value, message: &str, kind: &str) -> Value {
+    make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, message, 0))
 }
 
 fn classify_io_error_kind(err: &std::io::Error) -> &'static str {
@@ -401,12 +459,7 @@ fn make_http_response(status: i64, body: String, headers: Vec<(String, String)>)
 }
 
 fn make_http_failure() -> Value {
-    let default_response = Value::pack(vec![
-        ("status".into(), Value::Int(0)),
-        ("body".into(), Value::str(String::new())),
-        ("headers".into(), Value::pack(vec![])),
-    ]);
-    make_lax_failure(default_response)
+    make_http_lax_failure_with_kind("other")
 }
 
 fn make_udp_recv_default_payload() -> Value {
@@ -420,6 +473,10 @@ fn make_udp_recv_default_payload() -> Value {
 
 /// Parse a URL into (host, port, path, use_tls).
 fn parse_url(url: &str) -> Option<(String, u16, String, bool)> {
+    if url.contains("://") && !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+
     let (scheme, rest) = if let Some(stripped) = url.strip_prefix("https://") {
         ("https", stripped)
     } else if let Some(stripped) = url.strip_prefix("http://") {
@@ -491,7 +548,7 @@ async fn http_request_async_via_curl(
     url: &str,
     extra_headers: &[(String, String)],
     body: &str,
-) -> Option<Value> {
+) -> Value {
     // C26B-007 SEC-005: strip CR/LF from method / url before passing to curl
     // for defense-in-depth; curl treats these as exec args so CRLF cannot
     // inject HTTP headers via the command itself, but a malicious method
@@ -519,12 +576,15 @@ async fn http_request_async_via_curl(
         cmd.arg("--data-raw").arg(body);
     }
 
-    let output = cmd.output().await.ok()?;
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(e) => return make_http_lax_failure_with_kind(classify_io_error_kind(&e)),
+    };
     if !output.status.success() {
-        return None;
+        return make_http_failure();
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_http_response_text(&text)
+    parse_http_response_text(&text).unwrap_or_else(|| make_http_lax_failure_with_kind("invalid"))
 }
 
 /// Perform an HTTP/1.1 request.
@@ -538,19 +598,17 @@ async fn http_request_async(
 ) -> Value {
     let (host, port, path, use_tls) = match parse_url(url) {
         Some(parsed) => parsed,
-        None => return make_http_failure(),
+        None => return make_http_lax_failure_with_kind("invalid"),
     };
 
     if use_tls {
-        return http_request_async_via_curl(method, url, extra_headers, body)
-            .await
-            .unwrap_or_else(make_http_failure);
+        return http_request_async_via_curl(method, url, extra_headers, body).await;
     }
 
     let addr = format!("{}:{}", host, port);
     let stream = match tokio::net::TcpStream::connect(&addr).await {
         Ok(s) => s,
-        Err(_) => return make_http_failure(),
+        Err(e) => return make_http_lax_failure_with_kind(classify_io_error_kind(&e)),
     };
 
     // C26B-007 SEC-005: Strip CR/LF from method, path, host to prevent
@@ -604,7 +662,8 @@ async fn http_request_async(
     }
 
     let response_str = String::from_utf8_lossy(&response_buf);
-    parse_http_response_text(&response_str).unwrap_or_else(make_http_failure)
+    parse_http_response_text(&response_str)
+        .unwrap_or_else(|| make_http_lax_failure_with_kind("invalid"))
 }
 
 // ── Mold evaluation (input APIs) ────────────────────────────
@@ -641,23 +700,26 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                                String::new(),
-                            )))));
+                            return Ok(Some(Signal::Value(make_read_lax_failure(
+                                Value::str(String::new()),
+                                "too_large",
+                            ))));
                         }
                     }
-                    Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                            String::new(),
-                        )))));
+                    Err(e) => {
+                        return Ok(Some(Signal::Value(make_read_lax_failure(
+                            Value::str(String::new()),
+                            classify_io_error_kind(&e),
+                        ))));
                     }
                 }
 
                 match std::fs::read_to_string(&path) {
                     Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::str(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                        String::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_read_lax_failure(
+                        Value::str(String::new()),
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -697,9 +759,9 @@ impl Interpreter {
                         });
                         Ok(Some(Signal::Value(make_lax_success(Value::list(names)))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::list(
-                        Vec::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_list_dir_lax_failure(
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -720,12 +782,6 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
 
-                let default_stat = Value::pack(vec![
-                    ("size".into(), Value::Int(0)),
-                    ("modified".into(), Value::str(String::new())),
-                    ("isDir".into(), Value::Bool(false)),
-                ]);
-
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         let size = meta.len() as i64;
@@ -738,7 +794,9 @@ impl Interpreter {
                         ]);
                         Ok(Some(Signal::Value(make_lax_success(stat_pack))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(default_stat)))),
+                    Err(e) => Ok(Some(Signal::Value(make_stat_lax_failure(
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -799,9 +857,12 @@ impl Interpreter {
 
                 match std::env::var(&name) {
                     Ok(val) => Ok(Some(Signal::Value(make_lax_success(Value::str(val))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::str(
-                        String::new(),
-                    ))))),
+                    Err(std::env::VarError::NotPresent) => Ok(Some(Signal::Value(
+                        make_env_var_lax_failure(Value::str(String::new()), "not_found"),
+                    ))),
+                    Err(std::env::VarError::NotUnicode(_)) => Ok(Some(Signal::Value(
+                        make_env_var_lax_failure(Value::str(String::new()), "invalid"),
+                    ))),
                 }
             }
 
@@ -827,13 +888,20 @@ impl Interpreter {
                     // Check file size first
                     let meta_result = tokio::fs::metadata(&path).await;
                     let result = match meta_result {
-                        Ok(meta) if meta.len() > MAX_READ_SIZE => {
-                            Ok(make_lax_failure(Value::str(String::new())))
-                        }
-                        Err(_) => Ok(make_lax_failure(Value::str(String::new()))),
+                        Ok(meta) if meta.len() > MAX_READ_SIZE => Ok(make_read_lax_failure(
+                            Value::str(String::new()),
+                            "too_large",
+                        )),
+                        Err(e) => Ok(make_read_lax_failure(
+                            Value::str(String::new()),
+                            classify_io_error_kind(&e),
+                        )),
                         Ok(_) => match tokio::fs::read_to_string(&path).await {
                             Ok(content) => Ok(make_lax_success(Value::str(content))),
-                            Err(_) => Ok(make_lax_failure(Value::str(String::new()))),
+                            Err(e) => Ok(make_read_lax_failure(
+                                Value::str(String::new()),
+                                classify_io_error_kind(&e),
+                            )),
                         },
                     };
                     let _ = tx.send(result);
@@ -1039,23 +1107,26 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         if meta.len() > MAX_READ_SIZE {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                                Vec::new(),
-                            )))));
+                            return Ok(Some(Signal::Value(make_read_bytes_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "too_large",
+                            ))));
                         }
                     }
-                    Err(_) => {
-                        return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                            Vec::new(),
-                        )))));
+                    Err(e) => {
+                        return Ok(Some(Signal::Value(make_read_bytes_lax_failure(
+                            Value::bytes(Vec::new()),
+                            classify_io_error_kind(&e),
+                        ))));
                     }
                 }
 
                 match std::fs::read(&path) {
                     Ok(content) => Ok(Some(Signal::Value(make_lax_success(Value::bytes(content))))),
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_read_bytes_lax_failure(
+                        Value::bytes(Vec::new()),
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -1084,14 +1155,16 @@ impl Interpreter {
                 let len = self.eval_os_i64_arg(args, 2, "readBytesAt", "len")?;
 
                 if offset < 0 || len < 0 {
-                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                        Value::bytes(Vec::new()),
+                        "invalid",
+                    ))));
                 }
                 if (len as u64) > MAX_READ_SIZE {
-                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                        Value::bytes(Vec::new()),
+                        "too_large",
+                    ))));
                 }
                 if len == 0 {
                     return Ok(Some(Signal::Value(make_lax_success(Value::bytes(
@@ -1102,10 +1175,11 @@ impl Interpreter {
                 use std::io::{Read, Seek, SeekFrom};
                 match std::fs::File::open(&path) {
                     Ok(mut f) => {
-                        if f.seek(SeekFrom::Start(offset as u64)).is_err() {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                                Vec::new(),
-                            )))));
+                        if let Err(e) = f.seek(SeekFrom::Start(offset as u64)) {
+                            return Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                                Value::bytes(Vec::new()),
+                                classify_io_error_kind(&e),
+                            ))));
                         }
                         let mut buf = vec![0u8; len as usize];
                         // read_exact would fail at EOF even for legitimate
@@ -1117,19 +1191,23 @@ impl Interpreter {
                             match f.read(&mut buf[filled..]) {
                                 Ok(0) => break, // EOF
                                 Ok(n) => filled += n,
-                                Err(_) => {
-                                    return Ok(Some(Signal::Value(make_lax_failure(
-                                        Value::bytes(Vec::new()),
-                                    ))));
+                                Err(e) => {
+                                    return Ok(Some(Signal::Value(
+                                        make_read_bytes_at_lax_failure(
+                                            Value::bytes(Vec::new()),
+                                            classify_io_error_kind(&e),
+                                        ),
+                                    )));
                                 }
                             }
                         }
                         buf.truncate(filled);
                         Ok(Some(Signal::Value(make_lax_success(Value::bytes(buf)))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                        Value::bytes(Vec::new()),
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 
@@ -1894,7 +1972,11 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            Value::str(String::new()),
+                            "SocketRecv error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -1908,14 +1990,29 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::str(String::new()),
+                                "SocketRecv error",
+                                "peer_closed",
+                            )));
                         }
                         Ok(Ok(n)) => {
                             let data = String::from_utf8_lossy(&buf[..n]).to_string();
                             let _ = tx.send(Ok(make_lax_success(Value::str(data))));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::str(String::new()))));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::str(String::new()),
+                                "SocketRecv error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::str(String::new()),
+                                "SocketRecv error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2001,7 +2098,11 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            Value::bytes(Vec::new()),
+                            "SocketRecvBytes error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -2015,13 +2116,28 @@ impl Interpreter {
                     .await
                     {
                         Ok(Ok(0)) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvBytes error",
+                                "peer_closed",
+                            )));
                         }
                         Ok(Ok(n)) => {
                             let _ = tx.send(Ok(make_lax_success(Value::bytes(buf[..n].to_vec()))));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvBytes error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvBytes error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2072,7 +2188,11 @@ impl Interpreter {
                     use tokio::io::AsyncReadExt;
 
                     let Some(stream_handle) = socket_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            Value::bytes(Vec::new()),
+                            "SocketRecvExact error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -2088,8 +2208,19 @@ impl Interpreter {
                         Ok(Ok(_)) => {
                             let _ = tx.send(Ok(make_lax_success(Value::bytes(buf))));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(Value::bytes(Vec::new()))));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvExact error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                Value::bytes(Vec::new()),
+                                "SocketRecvExact error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2264,7 +2395,11 @@ impl Interpreter {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.tokio_runtime.spawn(async move {
                     let Some(socket_handle) = udp_handle else {
-                        let _ = tx.send(Ok(make_lax_failure(make_udp_recv_default_payload())));
+                        let _ = tx.send(Ok(make_socket_lax_failure(
+                            make_udp_recv_default_payload(),
+                            "UdpRecvFrom error",
+                            "invalid",
+                        )));
                         return;
                     };
 
@@ -2286,8 +2421,19 @@ impl Interpreter {
                             ]);
                             let _ = tx.send(Ok(make_lax_success(payload)));
                         }
-                        Ok(Err(_)) | Err(_) => {
-                            let _ = tx.send(Ok(make_lax_failure(make_udp_recv_default_payload())));
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                make_udp_recv_default_payload(),
+                                "UdpRecvFrom error",
+                                classify_io_error_kind(&e),
+                            )));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Ok(make_socket_lax_failure(
+                                make_udp_recv_default_payload(),
+                                "UdpRecvFrom error",
+                                "timeout",
+                            )));
                         }
                     }
                 });
@@ -2852,7 +2998,7 @@ mod tests {
     fn lax_has_value(val: &Value) -> bool {
         if let Value::BuchiPack(fields) = val {
             for (name, v) in fields.iter() {
-                if name == "hasValue"
+                if name == "has_value"
                     && let Value::Bool(b) = v
                 {
                     return *b;
@@ -3007,7 +3153,7 @@ mod tests {
         let path = dir.join("test.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> v
 stdout(v)"#,
             path
@@ -3021,7 +3167,7 @@ stdout(v)"#,
     #[test]
     fn test_read_nonexistent_file() {
         let code = r#"result <= Read["/tmp/taida_nonexistent_file_xyz.txt"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3039,7 +3185,7 @@ stdout(result.hasValue)"#;
         let path = dir.to_string_lossy().to_string();
         let code = format!(
             r#"result <= ListDir["{}"]()
-stdout(result.hasValue)"#,
+stdout(result.has_value)"#,
             path
         );
         let output = run_code(&code);
@@ -3051,7 +3197,7 @@ stdout(result.hasValue)"#,
     #[test]
     fn test_listdir_nonexistent() {
         let code = r#"result <= ListDir["/tmp/taida_nonexistent_dir_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3068,7 +3214,7 @@ stdout(result.hasValue)"#;
         let path = dir.join("data.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Stat["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> info
 stdout(info.size)
 stdout(info.isDir)"#,
@@ -3104,7 +3250,7 @@ stdout(info.isDir)"#,
     #[test]
     fn test_stat_nonexistent() {
         let code = r#"result <= Stat["/tmp/taida_nonexistent_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3154,7 +3300,7 @@ stdout(exists)"#;
     fn test_envvar_exists() {
         // PATH should always exist
         let code = r#"result <= EnvVar["PATH"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["true"]);
     }
@@ -3162,7 +3308,7 @@ stdout(result.hasValue)"#;
     #[test]
     fn test_envvar_missing() {
         let code = r#"result <= EnvVar["TAIDA_NONEXISTENT_VAR_XYZ"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3214,7 +3360,7 @@ payloadLax ]=> payload
 writeRes <= writeBytes("{}", payload)
 stdout(writeRes.isSuccess())
 readRes <= readBytes("{}")
-stdout(readRes.hasValue)
+stdout(readRes.has_value)
 readRes ]=> rawBytes
 decoded <= Utf8Decode[rawBytes]()
 decoded ]=> txt
@@ -3369,7 +3515,7 @@ stdout(proc.stdout)"#;
     #[test]
     fn test_run_failure() {
         let code = r#"result <= run("/nonexistent_program_xyz", @[])
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         // run() with nonexistent program should return failure Gorillax
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
@@ -3389,7 +3535,7 @@ stdout(proc.stdout)"#;
     #[test]
     fn test_execshell_failure() {
         let code = r#"result <= execShell("exit 7")
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3485,11 +3631,11 @@ stdout(info.modified)"#,
         let path = dir.join("test.txt").to_string_lossy().to_string();
         // ReadAsync returns Async[Lax[Str]], ]=> unwraps the Async to get
         // Lax[Str]; the second `]=>` then unwraps the Lax to the Str default
-        // (or the read content when hasValue=true).
+        // (or the read content when has_value=true).
         let code = format!(
             r#"result <= ReadAsync["{}"]()
 result ]=> lax
-stdout(lax.hasValue)
+stdout(lax.has_value)
 lax ]=> contents
 stdout(contents)"#,
             path
@@ -3504,7 +3650,7 @@ stdout(contents)"#,
     fn test_readasync_nonexistent_file() {
         let code = r#"result <= ReadAsync["/tmp/taida_nonexistent_readasync_xyz.txt"]()
 result ]=> lax
-stdout(lax.hasValue)"#;
+stdout(lax.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
     }
@@ -3756,7 +3902,7 @@ stdout(lax.hasValue)"#;
     #[test]
     fn test_c19_run_interactive_exit_0() {
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
-stdout(r.hasValue)
+stdout(r.has_value)
 r ]=> proc
 stdout(proc.code)"#;
         let out = run_code(code);
@@ -3772,7 +3918,7 @@ stdout(proc.code)"#;
         // `fields` map (not a `Value::BuchiPack`), so we go through
         // `get_error_field` to read it at the Rust level.
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 7"])
-stdout(r.hasValue)
+stdout(r.has_value)
 r"#;
         let (value, out) = run_code_returning_value(code);
         assert_eq!(out, vec!["false"]);
@@ -3787,11 +3933,11 @@ r"#;
     #[test]
     fn test_c19_run_interactive_missing_program_returns_io_error() {
         // E32B-035 migration: same shape as `exit_7`, but the failure carries
-        // an `IoError` (`Value::Error` variant) instead of a process exit
-        // BuchiPack. We still cannot reach `__error.kind` from user code, so
-        // we read the `Value::Error` field map directly at the Rust level.
+        // an `IoError` instead of a process-exit error. We still cannot reach
+        // `__error.kind` from user code, so we read the error carrier at the
+        // Rust level.
         let code = r#"r <= runInteractive("/nonexistent/taida_c19_xyz", @[])
-stdout(r.hasValue)
+stdout(r.has_value)
 r"#;
         let (value, out) = run_code_returning_value(code);
         assert_eq!(out, vec!["false"]);
@@ -3812,9 +3958,33 @@ r"#;
     }
 
     #[test]
+    fn test_io_error_uses_canonical_pack_carrier() {
+        let code = r#"r <= runInteractive("/nonexistent/taida_canonical_io_error_xyz", @[])
+r"#;
+        let (value, out) = run_code_returning_value(code);
+        assert!(out.is_empty());
+        assert!(!lax_has_value(&value));
+        let error = pack_field(&value, "__error");
+        let Value::BuchiPack(fields) = error else {
+            panic!("IoError must use canonical BuchiPack carrier, got: {error:?}");
+        };
+        assert_eq!(pack_field(error, "type"), &Value::str("IoError".into()));
+        assert_eq!(pack_field(error, "__type"), &Value::str("IoError".into()));
+        assert!(
+            matches!(pack_field(error, "message"), Value::Str(_)),
+            "IoError carrier must include message, got: {fields:?}"
+        );
+        assert_eq!(pack_field(error, "kind"), &Value::str("not_found".into()));
+        assert!(
+            matches!(pack_field(error, "code"), Value::Int(_)),
+            "IoError carrier must include numeric code, got: {fields:?}"
+        );
+    }
+
+    #[test]
     fn test_c19_exec_shell_interactive_exit_0() {
         let code = r#"r <= execShellInteractive("exit 0")
-stdout(r.hasValue)
+stdout(r.has_value)
 r ]=> proc
 stdout(proc.code)"#;
         let out = run_code(code);
@@ -3826,7 +3996,7 @@ stdout(proc.code)"#;
         // E32B-035 migration: same Rust-level inspection pattern as
         // `runInteractive_exit_7`.
         let code = r#"r <= execShellInteractive("exit 3")
-stdout(r.hasValue)
+stdout(r.has_value)
 r"#;
         let (value, out) = run_code_returning_value(code);
         assert_eq!(out, vec!["false"]);
@@ -3988,18 +4158,18 @@ stdout(proc.code)"#;
 
     #[test]
     fn test_bt11_read_nonexistent_returns_lax_false() {
-        // E32B-035 migration: `]=>` on a Lax with hasValue=false unmolds to
+        // E32B-035 migration: `]=>` on a Lax with has_value=false unmolds to
         // the implicit default (empty string for Lax[Str]), giving us the
         // same assertion as the old `result.__default` path without
         // touching compiler-internal fields.
         let code = r#"result <= Read["/tmp/taida_bt11_nonexistent_xyz.txt"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#;
         let output = run_code(code);
         assert_eq!(
             output[0], "false",
-            "Read nonexistent should return Lax(hasValue=false)"
+            "Read nonexistent should return Lax(has_value=false)"
         );
         assert_eq!(
             output[1], "",
@@ -4010,12 +4180,12 @@ stdout(contents)"#;
     #[test]
     fn test_bt11_stat_nonexistent_returns_lax_false() {
         let code = r#"result <= Stat["/tmp/taida_bt11_nonexistent_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(
             output,
             vec!["false"],
-            "Stat nonexistent should return Lax(hasValue=false)"
+            "Stat nonexistent should return Lax(has_value=false)"
         );
     }
 
@@ -4066,7 +4236,7 @@ stdout(exists)"#;
         let path = dir.path().join("empty.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path
@@ -4074,7 +4244,7 @@ stdout(contents)"#,
         let output = run_code(&code);
         assert_eq!(
             output[0], "true",
-            "Empty file should still have hasValue=true"
+            "Empty file should still have has_value=true"
         );
         assert_eq!(output[1], "", "Empty file content should be empty string");
     }
@@ -4087,7 +4257,7 @@ stdout(contents)"#,
         let code = format!(
             r#"writeFile("{path}", "")
 result <= Read["{path}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path = path
@@ -4109,7 +4279,7 @@ stdout(contents)"#,
             .to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path
@@ -4130,7 +4300,7 @@ stdout(contents)"#,
         let path = dir.path().join("test.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Read["{}"]()
-stdout(result.hasValue)
+stdout(result.has_value)
 result ]=> contents
 stdout(contents)"#,
             path
@@ -4146,12 +4316,12 @@ stdout(contents)"#,
     #[test]
     fn test_bt11_listdir_nonexistent_returns_lax_false() {
         let code = r#"result <= ListDir["/tmp/taida_bt11_nonexistent_dir_xyz"]()
-stdout(result.hasValue)"#;
+stdout(result.has_value)"#;
         let output = run_code(code);
         assert_eq!(
             output,
             vec!["false"],
-            "ListDir nonexistent should return Lax(hasValue=false)"
+            "ListDir nonexistent should return Lax(has_value=false)"
         );
     }
 }

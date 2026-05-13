@@ -3526,10 +3526,10 @@ C => A = @(d: Int)
 }
 
 // ────────────────────────────────────────────────────────────────
-// C12-1c: mold_returns table ↔ checker builtin-mold consistency
+// C12-1c: mold_specs table ↔ checker builtin-mold consistency
 // ────────────────────────────────────────────────────────────────
 //
-// `src/types/mold_returns.rs` is the single source of truth for builtin
+// `src/types/mold_specs.rs` is the single source of truth for builtin
 // mold return tags. The checker (`Expr::MoldInst` branch of
 // `infer_expr_type`) maintains a richer Type-level mapping because it
 // needs Type::Generic("Lax", vec![Type::Str]) and similar. We verify
@@ -3570,8 +3570,8 @@ fn type_to_tag(t: &Type) -> Option<i64> {
 }
 
 #[test]
-fn test_c12_1_mold_returns_matches_checker() {
-    use crate::types::mold_returns;
+fn test_c12_1_mold_specs_matches_checker() {
+    use crate::types::mold_specs;
 
     // For each name with a static tag, construct a minimal MoldInst that
     // the checker can infer, then confirm the tag matches.
@@ -3595,7 +3595,7 @@ fn test_c12_1_mold_returns_matches_checker() {
         ("Trim", r#"Trim[" x "]()"#),
         ("Replace", r#"Replace["abc", "a", "z"]()"#),
         ("Repeat", r#"Repeat["a", 3]()"#),
-        ("Pad", r#"Pad["a", 3, "0"]()"#),
+        ("Pad", r#"Pad["a", 3]()"#),
         ("Join", r#"Join[@[1, 2], ","]()"#),
         ("ToFixed", r#"ToFixed[3.14, 2]()"#),
         // Int-returning
@@ -3611,9 +3611,9 @@ fn test_c12_1_mold_returns_matches_checker() {
     ];
 
     for (mold_name, src) in cases {
-        let expected_tag = mold_returns::mold_return_tag(mold_name).unwrap_or_else(|| {
+        let expected_tag = mold_specs::mold_return_tag(mold_name).unwrap_or_else(|| {
             panic!(
-                "mold_returns::mold_return_tag({}) returned None but case declares a static tag",
+                "mold_specs::mold_return_tag({}) returned None but case declares a static tag",
                 mold_name
             )
         });
@@ -3644,10 +3644,172 @@ fn test_c12_1_mold_returns_matches_checker() {
         });
         assert_eq!(
             actual_tag, expected_tag,
-            "tag mismatch for {}: mold_returns table says {} but checker inferred {:?} (tag {})",
+            "tag mismatch for {}: mold_specs table says {} but checker inferred {:?} (tag {})",
             mold_name, expected_tag, t, actual_tag
         );
     }
+}
+
+#[test]
+fn builtin_mold_registry_rejects_map_missing_function_arg() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Map[nums]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1505]") && e.message.contains("Map")),
+        "expected registry arity error for Map[nums](), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_filter_non_function_arg() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Filter[nums, 1]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]")
+                && e.message.contains("1-argument Bool predicate")),
+        "expected registry function-arg error for Filter[nums, 1](), got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_filter_non_bool_callback() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Filter[nums, _ x = x.toString()]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("Filter")
+                && e.message.contains("1-argument Bool predicate")
+        }),
+        "expected registry predicate error for Filter callback, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_fold_unary_callback() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Fold[nums, 0, _ x = x]()";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("Fold")
+                && e.message.contains("2-argument function")
+        }),
+        "expected registry arity error for Fold callback, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_sort_unknown_option() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Sort[nums](bogus <= true)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1406]")),
+        "expected registry option error for Sort bogus option, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_rejects_sort_by_non_function() {
+    let source = "nums <= @[1, 2, 3]\nbad <= Sort[nums](by <= 1)";
+    let (_, errors) = check(source);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]") && e.message.contains("option 'by'")),
+        "expected registry option type error for Sort by option, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_accepts_sort_options() {
+    let source = "nums <= @[1, 2, 3]\nok <= Sort[nums](by <= _ x = x, desc <= true)";
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "registry-backed Sort options should type-check, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn builtin_mold_registry_enforces_non_hof_runtime_arities() {
+    let cases = [
+        (
+            "SpanSlice",
+            "bad <= SpanSlice[@(start <= 0, len <= 1), \"abc\", 0]()",
+        ),
+        ("StringRepeatJoin", "bad <= StringRepeatJoin[\"x\", 2]()"),
+        ("Count", "bad <= Count[@[1, 2, 3]]()"),
+        (
+            "BytesCursorTake",
+            "bad <= BytesCursorTake[@(bytes <= Bytes[\"x\"](), offset <= 0, length <= 1)]()",
+        ),
+        ("HttpRequest", "bad <= HttpRequest[\"GET\"]()"),
+    ];
+
+    for (name, source) in cases {
+        let (_, errors) = check(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("[E1505]") && e.message.contains(name)),
+            "expected registry arity error for {name}, got: {:?}",
+            errors
+        );
+    }
+}
+
+#[test]
+fn function_field_zero_arg_marker_and_normal_signature_boundary() {
+    let source = r#"
+Status = @(label: Str, pick: Unit => :Int, map: Int => :Int)
+s <= Status(label <= "ready")
+ok <= s.pick()
+bad0 <= s.map()
+bad1 <= s.pick(1)
+good <= s.map(41)
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("map")
+                && e.message.contains("takes 1 argument")
+                && e.message.contains("got 0")
+        }),
+        "normal function field must still require its Int parameter, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("pick")
+                && e.message.contains("takes 0 argument")
+                && e.message.contains("got 1")
+        }),
+        "Unit => :T marker must remain a zero-argument signature, got: {:?}",
+        errors
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e.message.contains("[E1508]"))
+            .count(),
+        2,
+        "only the two intentional function-field boundary errors should be E1508: {:?}",
+        errors
+    );
 }
 
 // ── C12-2: FB-10 `.toString()` universal adoption ──
@@ -4273,6 +4435,97 @@ fn test_c18_1_function_returning_imported_enum_is_usable() {
     );
 }
 
+#[test]
+fn imported_bool_function_signature_records_bool_call_type() {
+    let dir = C18TempDir::new("boolfn");
+    dir.write(
+        "bool_mod.td",
+        "giveTrue x = x > 0 => :Bool\n<<< @(giveTrue)\n",
+    );
+    let consumer = dir.write(
+        "bool_use.td",
+        ">>> ./bool_mod.td => @(giveTrue)\n\
+         direct <= giveTrue(5)\n\
+         f <= giveTrue\n\
+         via_value <= f(10)\n",
+    );
+    let (checker, errors) = check_file(&consumer);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let bool_entries = checker
+        .typed_expr_table
+        .iter()
+        .filter(|(_, ty)| *ty == &Type::Bool)
+        .count();
+    assert!(
+        bool_entries >= 2,
+        "imported direct and function-value calls should both be Bool, got: {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn imported_function_signature_checks_param_types() {
+    let dir = C18TempDir::new("fnparams");
+    dir.write(
+        "fn_mod.td",
+        "isPositive x: Int = x > 0 => :Bool\n<<< @(isPositive)\n",
+    );
+    let consumer = dir.write(
+        "fn_use.td",
+        ">>> ./fn_mod.td => @(isPositive)\n\
+         bad <= isPositive(\"x\")\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1506]")),
+        "imported function parameter type should be enforced, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn imported_generic_function_signature_rewrites_aliased_return_type() {
+    let dir = C18TempDir::new("generic_alias");
+    dir.write(
+        "box_mod.td",
+        "Mold[T] => Box[T] = @(value: T)\n\
+         wrap[T] x: T = Box[x]() => :Box[T]\n\
+         <<< @(Box, wrap)\n",
+    );
+    let consumer = dir.write(
+        "box_use.td",
+        ">>> ./box_mod.td => @(Box: CrateBox, wrap)\n\
+         value: CrateBox[Int] <= wrap(1)\n",
+    );
+    let (_checker, errors) = check_file(&consumer);
+    assert!(
+        errors.is_empty(),
+        "generic imported function should return the aliased type, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn local_unannotated_bool_function_records_bool_call_type() {
+    let (checker, errors) = check(
+        "isPositive x =\n  x > 0\n\
+direct <= isPositive(5)\n\
+f <= isPositive\n\
+viaValue <= f(10)\n",
+    );
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let bool_entries = checker
+        .typed_expr_table
+        .iter()
+        .filter(|(_, ty)| *ty == &Type::Bool)
+        .count();
+    assert!(
+        bool_entries >= 3,
+        "unannotated bool function body should type direct and function-value calls as Bool, got: {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
 // ── C19B-002: runInteractive / execShellInteractive Gorillax[@(code)] pin ──
 
 /// E32B-018: `runInteractive` must be unwrapped through unmolding;
@@ -4484,7 +4737,7 @@ fn test_c19b_002_error_inheriting_named_type_type_access_rejected() {
 // E30 Phase 4 / E30B-002: declare-only function field acceptance for
 // Mold and Inheritance (Error) variants.
 //
-// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// Decision (2026-04-28): declare-only function fields (e.g.
 // `transform: T => :T`) are permitted in all class-like variants, not
 // just the BuchiPack (TypeDef) kind. They are excluded from the
 // required-positional `[]` set and from the extra-type-arg binding
@@ -5139,6 +5392,334 @@ fn e34b_015_map_error_rejects_str_input_when_payload_is_pack() {
     );
 }
 
+#[test]
+fn e39b_001_lhs_and_method_hint_pin_unannotated_named_identity() {
+    let src = "identity x = x => :Int\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Int] <= obj.map(identity)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let result_ty = checker.lookup_var("result").unwrap();
+    assert_eq!(result_ty, Type::Generic("Lax".to_string(), vec![Type::Int]));
+    assert!(
+        checker.typed_expr_table.iter().any(|(_, ty)| {
+            matches!(ty, Type::Function(params, ret)
+                if params == &vec![Type::Int] && ret.as_ref() == &Type::Int)
+        }),
+        "expected typed_expr_table to record identity as (Int) => Int, got {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn e39b_002_unannotated_named_identity_body_infers_from_method_hint() {
+    let src = "identity x =\n  x\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Int] <= obj.map(identity)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(
+        checker.lookup_var("result").unwrap(),
+        Type::Generic("Lax".to_string(), vec![Type::Int])
+    );
+    assert!(
+        checker.typed_expr_table.iter().any(|(_, ty)| {
+            matches!(ty, Type::Function(params, ret)
+                if params == &vec![Type::Int] && ret.as_ref() == &Type::Int)
+        }),
+        "expected identity body inference to record (Int) => Int, got {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn e39b_002_unsupported_named_body_rejects_direct_expected_function_slot() {
+    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
+               choose x =\n\
+                 | x > 0 |> x\n\
+                 | _ |> 0\n\
+               result <= takes(choose)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("choose")
+                && e.message.contains("(Int) => Int")
+        }),
+        "expected concrete direct-call function slot to reject unresolved body inference, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_002_contextual_body_error_reports_function_boundary() {
+    let src = "appendWorld x =\n  x + \"world\"\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Int] <= obj.map(appendWorld)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("appendWorld")
+                && e.message.contains("(Int) => ?")
+        }),
+        "expected body inference failure to report the function boundary, got: {:?}",
+        errors
+    );
+    assert!(
+        !errors.iter().any(|e| e.message.contains("Cannot apply")),
+        "body-internal arithmetic diagnostic should not leak from hinted inference, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_003_direct_call_lambda_receives_expected_function_type() {
+    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
+               result <= takes(_ x = x)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("result").unwrap(), Type::Int);
+    assert!(
+        checker.typed_expr_table.iter().any(|(_, ty)| {
+            matches!(ty, Type::Function(params, ret)
+                if params == &vec![Type::Int] && ret.as_ref() == &Type::Int)
+        }),
+        "expected lambda to be recorded as (Int) => Int, got {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn e39b_003_direct_call_lambda_rejects_incompatible_body() {
+    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
+               result <= takes(_ x = x.toString())\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("takes")
+                && e.message.contains("Str")
+                && e.message.contains("Int")
+        }),
+        "expected direct-call lambda mismatch to reject, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_fold_accumulator_full_pin_accepts_matching_callback() {
+    let src = "xs <= @[1, 2, 3]\n\
+               sum <= xs.fold(0, _ acc x = acc + x)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("sum").unwrap(), Type::Int);
+}
+
+#[test]
+fn e39b_004_fold_accumulator_full_pin_rejects_mismatch() {
+    let src = "badFn acc: Str x: Int = acc + x.toString() => :Str\n\
+               xs <= @[1, 2, 3]\n\
+               bad <= xs.fold(0, badFn)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("fold")
+            && e.message.contains("expected (Int, Int) => Int")),
+        "expected [E1508] for fold accumulator mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_fold_accumulator_rejects_unresolved_callback_return() {
+    let src = "choose acc x =\n\
+                 | x > 0 |> acc\n\
+                 | _ |> x\n\
+               xs <= @[1, 2, 3]\n\
+               bad <= xs.fold(0, choose)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]") && e.message.contains("(Int, Int) => ?")
+                || e.message.contains("[E1508]")
+                    && e.message.contains("choose")
+                    && e.message.contains("(Int, Int) => Int")
+        }),
+        "expected fold callback with unresolved return to reject, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_fold_unknown_init_still_checks_callback_shape() {
+    let src = "xs <= @[1, 2, 3]\n\
+               bad <= xs.fold(missingInit, 42)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("fold")
+                && e.message.contains("argument 2")
+                && e.message.contains("expected (?, Int) => ?")
+        }),
+        "expected fold callback shape check even when init is unresolved, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_reduce_accumulator_full_pin_accepts_matching_callback() {
+    let src = "xs <= @[1, 2, 3]\n\
+               sum <= xs.reduce(0, _ acc x = acc + x)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("sum").unwrap(), Type::Int);
+}
+
+#[test]
+fn e39b_004_reduce_accumulator_full_pin_rejects_mismatch() {
+    let src = "badFn acc: Str x: Int = acc + x.toString() => :Str\n\
+               xs <= @[1, 2, 3]\n\
+               bad <= xs.reduce(0, badFn)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("reduce")
+            && e.message.contains("expected (Int, Int) => Int")),
+        "expected [E1508] for reduce accumulator mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_005_direct_call_shadowed_function_name_rejects_variable_type() {
+    let src = "identity x =\n  x\n\
+               takes fn: Int => :Int = fn(1) => :Int\n\
+               main =\n\
+                 identity <= 42\n\
+                 result <= takes(identity)\n\
+               => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("takes")
+                && e.message.contains("Int")
+                && e.message.contains("(Int) => Int")
+        }),
+        "expected shadowed variable to reject as Int, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_005_method_shadowed_function_name_rejects_variable_type() {
+    let src = "identity x =\n  x\n\
+               main =\n\
+                 identity <= \"shadowed\"\n\
+                 obj <= Lax[42]()\n\
+                 result: Lax[Int] <= obj.map(identity)\n\
+               => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("map")
+                && e.message.contains("Str")
+                && e.message.contains("(Int) => ?")
+        }),
+        "expected shadowed method callback variable to reject as Str, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_005_fold_shadowed_function_name_rejects_variable_type() {
+    let src = "addFn acc x =\n  acc\n\
+               main =\n\
+                 addFn <= 42\n\
+                 xs <= @[1, 2, 3]\n\
+                 bad <= xs.fold(0, addFn)\n\
+               => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("fold")
+                && e.message.contains("Int")
+                && e.message.contains("(Int, Int) => Int")
+        }),
+        "expected shadowed fold callback variable to reject as Int, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_010_named_arithmetic_body_rejects_in_expected_function_slot() {
+    let src = "addOne x =\n  x + 1\n\
+               obj <= Lax[3.14]()\n\
+               result: Lax[Float] <= obj.map(addOne)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("addOne")
+                && e.message.contains("(Float) => ?")
+        }),
+        "expected unannotated arithmetic body to reject at function boundary, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_010_named_concat_body_rejects_in_expected_function_slot() {
+    let src = "bang x =\n  x + \"!\"\n\
+               obj <= Lax[\"a\"]()\n\
+               result: Lax[Str] <= obj.map(bang)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("bang")
+                && e.message.contains("(Str) => ?")
+        }),
+        "expected unannotated concat body to reject at function boundary, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_012_narrow_method_body_keeps_known_method_but_rejects_arbitrary_call_shape() {
+    let ok = "render x =\n  x.toString()\n\
+              obj <= Lax[42]()\n\
+              result: Lax[Str] <= obj.map(render)\n";
+    let (checker, errors) = check(ok);
+    assert!(
+        errors.is_empty(),
+        "known narrow method should pass: {:?}",
+        errors
+    );
+    assert_eq!(
+        checker.lookup_var("result").unwrap(),
+        Type::Generic("Lax".to_string(), vec![Type::Str])
+    );
+
+    let bad = "render x =\n  x.fooBar()\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Str] <= obj.map(render)\n";
+    let (_, errors) = check(bad);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("render")
+                && e.message.contains("(Int) => ?")
+        }),
+        "unknown method shape should be rejected at function boundary, got: {:?}",
+        errors
+    );
+}
+
 // E34B-018 (Codex review #15 follow-up): Async-family dedicated arms.
 // All / Race / Timeout had no checker-side arity validation, while
 // Cancel had a dedicated arm but no arity check, so shapes like
@@ -5279,6 +5860,102 @@ fn e34b_018_lax_and_result_accept_canonical_shapes() {
     assert!(
         errors.is_empty(),
         "`Lax[42]()` / `Result[\"ok\"]()` must remain accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn core_builtin_and_async_reject_status_methods_infer_bool() {
+    let src = r#"fileResult <= writeFile("/tmp/taida-type-only", "data")
+fileFlag <= fileResult.isError()
+rejected <= AsyncReject[@(type <= "TestError", message <= "fail")]()
+asyncFlag <= rejected.isRejected()
+stdout(fileFlag.toString())
+stdout(asyncFlag.toString())
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    assert!(
+        checker.errors.is_empty(),
+        "status-method source should typecheck cleanly, got: {:?}",
+        checker.errors
+    );
+    assert_eq!(checker.lookup_var("fileFlag"), Some(Type::Bool));
+    assert_eq!(checker.lookup_var("asyncFlag"), Some(Type::Bool));
+}
+
+#[test]
+fn registry_bool_mold_result_binds_as_bool() {
+    let src = r#"raw <= "GET / HTTP/1.1"
+span <= @(start <= 0, length <= 3)
+isGet <= SpanEquals[span, raw, "GET"]()
+marker <= "ok-" + isGet.toString()
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    assert!(
+        checker.errors.is_empty(),
+        "SpanEquals binding should typecheck cleanly, got: {:?}",
+        checker.errors
+    );
+    assert_eq!(checker.lookup_var("isGet"), Some(Type::Bool));
+    assert_eq!(checker.lookup_var("marker"), Some(Type::Str));
+}
+
+#[test]
+fn json_enum_has_value_field_infers_bool() {
+    let src = r#"Enum => Status = :Active :Inactive
+User = @(name: Str, status: Status)
+raw <= '{"name": "Dave", "status": "Bogus"}'
+JSON[raw, User]() ]=> user
+statusHasValue <= user.status.has_value
+rawTop <= '"Bogus"'
+JSON[rawTop, Status]() ]=> topStatus
+topHasValue <= topStatus.has_value
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    assert!(
+        checker.errors.is_empty(),
+        "JSON enum hasValue source should typecheck cleanly, got: {:?}",
+        checker.errors
+    );
+    assert_eq!(checker.lookup_var("statusHasValue"), Some(Type::Bool));
+    assert_eq!(checker.lookup_var("topHasValue"), Some(Type::Bool));
+}
+
+#[test]
+fn legacy_has_value_field_spelling_is_rejected_on_lax_like_types() {
+    let src = r#"l <= Lax[1]()
+l_bad <= l.hasValue
+g <= Gorillax[42]()
+g_bad <= g.hasValue
+g.relax() => r
+r_bad <= r.hasValue
+"#;
+    let (_, errors) = check(src);
+    let legacy_field_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            e.message.contains("[E1602]")
+                && e.message.contains("hasValue")
+                && e.message.contains("has_value")
+                && e.message.contains("hasValue()")
+        })
+        .collect();
+    assert_eq!(
+        legacy_field_errors.len(),
+        3,
+        "Lax-like legacy hasValue field access should be rejected with migration guidance, got: {:?}",
         errors
     );
 }

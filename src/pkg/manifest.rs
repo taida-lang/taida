@@ -577,9 +577,21 @@ fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>,
     let mut active_package: Option<String> = None;
     let mut active_version: Option<String> = None;
     let mut active_integrity: Option<String> = None;
+    let mut active_security = false;
 
     for line in source.lines() {
         let trimmed = line.trim();
+        if trimmed == "[security]" {
+            flush_package_table(
+                &mut deps,
+                active_package.take(),
+                active_version.take(),
+                active_integrity.take(),
+            )?;
+            active_security = true;
+            stripped.push('\n');
+            continue;
+        }
         if let Some(package_id) = extract_package_table_name(trimmed) {
             flush_package_table(
                 &mut deps,
@@ -587,7 +599,53 @@ fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>,
                 active_version.take(),
                 active_integrity.take(),
             )?;
+            active_security = false;
             active_package = Some(package_id);
+            stripped.push('\n');
+            continue;
+        }
+
+        if active_security {
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+                stripped.push('\n');
+                continue;
+            }
+            if trimmed.starts_with(">>>") || trimmed.starts_with("<<<") {
+                active_security = false;
+                stripped.push_str(line);
+                stripped.push('\n');
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                return Err(format!(
+                    "packages.tdm: unsupported table header '{}'. Only [packages.\"org/name\"] and [security] are supported.",
+                    trimmed
+                ));
+            }
+            let Some((key, value_raw)) = trimmed.split_once('=') else {
+                return Err(format!(
+                    "packages.tdm: invalid security table line '{}'. Expected key = \"value\".",
+                    trimmed
+                ));
+            };
+            let key = key.trim();
+            let value = parse_quoted_string(value_raw).ok_or_else(|| {
+                format!(
+                    "packages.tdm: security table key '{}' must be a plain quoted string.",
+                    key
+                )
+            })?;
+            match key {
+                "min_release_age" => {
+                    let _ = value;
+                }
+                _ => {
+                    return Err(format!(
+                        "packages.tdm: unknown security table key '{}'. Expected min_release_age.",
+                        key
+                    ));
+                }
+            }
             stripped.push('\n');
             continue;
         }

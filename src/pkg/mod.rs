@@ -21,5 +21,6 @@ pub mod lockfile;
 pub mod manifest;
 pub mod provider;
 pub mod publish;
+pub(crate) mod publisher_identity;
 pub mod resolver;
 pub mod store;

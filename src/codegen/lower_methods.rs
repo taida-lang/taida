@@ -65,7 +65,7 @@ impl Lowering {
             }
             "isEmpty" => "taida_polymorphic_is_empty",
             "toString" | "toStr" => {
-                if self.expr_is_bool(obj) {
+                if self.expr_is_likely_bool(obj) {
                     "taida_str_from_bool"
                 } else if self.expr_is_string_full(obj) {
                     // Str.toString() is identity — just return obj directly
@@ -234,6 +234,9 @@ impl Lowering {
             "none" => {
                 return self.lower_list_predicate(func, obj_var, args, "taida_list_none");
             }
+            "fold" | "reduce" => {
+                return self.lower_list_fold(func, obj_var, args, "taida_list_fold");
+            }
             // Async methods
             "isPending" => "taida_async_is_pending",
             "isFulfilled" => "taida_async_is_fulfilled",
@@ -295,6 +298,30 @@ impl Lowering {
             result,
             runtime_fn.to_string(),
             vec![list_var, fn_var],
+        ));
+        Ok(result)
+    }
+
+    /// list.fold(init, fn) / list.reduce(init, fn)
+    fn lower_list_fold(
+        &mut self,
+        func: &mut IrFunction,
+        list_var: IrVar,
+        args: &[Expr],
+        runtime_fn: &str,
+    ) -> Result<IrVar, LowerError> {
+        if args.len() != 2 {
+            return Err(LowerError {
+                message: format!(".{}() requires exactly 2 arguments", runtime_fn),
+            });
+        }
+        let init_var = self.lower_expr(func, &args[0])?;
+        let fn_var = self.lower_expr(func, &args[1])?;
+        let result = func.alloc_var();
+        func.push(IrInst::Call(
+            result,
+            runtime_fn.to_string(),
+            vec![list_var, init_var, fn_var],
         ));
         Ok(result)
     }

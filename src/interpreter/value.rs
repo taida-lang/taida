@@ -1042,8 +1042,8 @@ impl Value {
 
     /// Get a field from an error, including built-in fields.
     pub fn get_error_field(&self, name: &str) -> Option<Value> {
-        if let Value::Error(err) = self {
-            match name {
+        match self {
+            Value::Error(err) => match name {
                 "type" => Some(Value::str(err.error_type.clone())),
                 "message" => Some(Value::str(err.message.clone())),
                 _ => err
@@ -1051,9 +1051,12 @@ impl Value {
                     .iter()
                     .find(|(n, _)| n == name)
                     .map(|(_, v)| v.clone()),
-            }
-        } else {
-            None
+            },
+            Value::BuchiPack(fields) => fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone()),
+            _ => None,
         }
     }
 
@@ -1075,12 +1078,20 @@ impl Value {
             }
             Value::Bool(b) => b.to_string(),
             Value::BuchiPack(fields) => {
+                let is_lax = fields.iter().any(|(name, value)| {
+                    name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
+                });
                 let mut s = String::from("@(");
-                for (i, (name, val)) in fields.iter().enumerate() {
-                    if i > 0 {
+                let mut visible = 0;
+                for (name, val) in fields.iter() {
+                    if is_lax && name == "__error" {
+                        continue;
+                    }
+                    if visible > 0 {
                         s.push_str(", ");
                     }
                     s.push_str(&format!("{} <= {}", name, val.to_debug_string()));
+                    visible += 1;
                 }
                 s.push(')');
                 s

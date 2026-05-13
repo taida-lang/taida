@@ -40,10 +40,12 @@ static void wasi_memcpy(void *dest, const void *src, int32_t n) {
 /* Lax constructor/empty (defined in runtime_core_wasm.c) */
 extern int64_t taida_lax_new(int64_t value, int64_t default_value);
 extern int64_t taida_lax_empty(int64_t default_value);
+extern int64_t taida_lax_empty_error(int64_t default_value, int64_t error);
 
 /* Result (defined in runtime_core_wasm.c) */
 extern int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate);
 extern int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
+extern int64_t taida_make_error_with_kind_code(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr, int64_t code);
 
 /* HashMap (for allEnv) */
 extern int64_t taida_hashmap_new(void);
@@ -57,9 +59,29 @@ extern int64_t taida_pack_new(int64_t field_count);
 extern int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);
 extern int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash);
 extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
+extern int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
+extern int64_t taida_pack_get_tag(int64_t pack_ptr, int64_t index);
+extern int64_t taida_pack_get_field_tag(int64_t pack_ptr, int64_t field_hash);
+extern int64_t taida_list_new(void);
+extern int64_t taida_list_push(int64_t list_ptr, int64_t item);
+extern int64_t taida_str_new_copy(int64_t src_raw);
+extern int64_t taida_async_ok_tagged(int64_t value, int64_t value_tag);
+extern int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0);
+extern int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t arg0, int64_t arg1);
+extern int64_t taida_get_return_tag(void);
 
 /* Type tags (must match runtime_core_wasm.c) */
 #define WASM_TAG_STR 1
+#define WASI_RT_TAG_INT 0
+#define WASI_RT_TAG_BOOL 2
+#define WASI_RT_TAG_STR_REAL 3
+#define WASI_RT_TAG_PACK 4
+#define WASI_RT_TAG_LIST 5
+
+#define WASI_HASH___TYPE      0x84d2d84b631f799bLL
+#define WASI_HASH___VALUE     0x0a7fc9f13472bbe0LL
+#define WASI_HASH_THROW       0x5a5fe3720c9584cfLL
+#define WASI_HASH___PREDICATE 0x15592af3c2291540LL
 
 /* ── WASI imports (wasi_snapshot_preview1) ── */
 
@@ -111,6 +133,22 @@ extern int32_t __wasi_fd_write(wasi_fd fd, const wasi_ciovec *iovs,
 /* fd_close: (fd) -> errno */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_close")))
 extern int32_t __wasi_fd_close(wasi_fd fd);
+
+/* sock_accept: Wasmtime legacy WASI preview1 exposes inherited TCP listeners
+   through systemd-style LISTEN_FDS + `-S preview2=false -S listenfd=y`. */
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("sock_accept")))
+extern int32_t __wasi_sock_accept(wasi_fd fd, int32_t flags, wasi_fd *accepted_fd);
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("sock_recv")))
+extern int32_t __wasi_sock_recv(wasi_fd fd, wasi_iovec *ri_data, int32_t ri_data_len,
+                                int32_t ri_flags, int32_t *ro_datalen, int32_t *ro_flags);
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("sock_send")))
+extern int32_t __wasi_sock_send(wasi_fd fd, const wasi_ciovec *si_data, int32_t si_data_len,
+                                int32_t si_flags, int32_t *so_datalen);
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("sock_shutdown")))
+extern int32_t __wasi_sock_shutdown(wasi_fd fd, int32_t how);
+
+#define WASI_ERRNO_BADF 8
+#define WASI_ERRNO_NOTSOCK 54
 
 /* fd_seek: (fd, offset, whence, newoffset_ptr) -> errno */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_seek")))
@@ -258,26 +296,36 @@ static char *wasi_str_copy(const char *src, int32_t len) {
 
 /* ── EnvVar[name]() → Lax[Str] ── */
 
+static int64_t wasi_env_var_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"EnvVar error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error((int64_t)(intptr_t)"", error);
+}
+
 int64_t taida_os_env_var(int64_t name_ptr) {
     const char *name = (const char *)(intptr_t)name_ptr;
-    if (!name) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (!name) return wasi_env_var_lax_error("invalid");
 
     int32_t name_len = wasi_strlen(name);
-    if (name_len == 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (name_len == 0) return wasi_env_var_lax_error("invalid");
 
     /* Get environ sizes */
     int32_t env_count = 0;
     int32_t env_buf_size = 0;
     int32_t err = __wasi_environ_sizes_get(&env_count, &env_buf_size);
-    if (err != 0 || env_count == 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (err != 0) return wasi_env_var_lax_error("other");
+    if (env_count == 0) return wasi_env_var_lax_error("not_found");
 
     /* Allocate buffers for environ pointers and data */
     int32_t *env_ptrs = (int32_t *)wasm_alloc(env_count * 4);
     char *env_buf = (char *)wasm_alloc(env_buf_size);
-    if (!env_ptrs || !env_buf) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (!env_ptrs || !env_buf) return wasi_env_var_lax_error("other");
 
     err = __wasi_environ_get(env_ptrs, env_buf);
-    if (err != 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (err != 0) return wasi_env_var_lax_error("other");
 
     /* Search for matching key */
     for (int32_t i = 0; i < env_count; i++) {
@@ -294,12 +342,12 @@ int64_t taida_os_env_var(int64_t name_ptr) {
             const char *val = entry + name_len + 1;
             int32_t val_len = wasi_strlen(val);
             char *copy = wasi_str_copy(val, val_len);
-            if (!copy) return taida_lax_empty((int64_t)(intptr_t)"");
+            if (!copy) return wasi_env_var_lax_error("other");
             return taida_lax_new((int64_t)(intptr_t)copy, (int64_t)(intptr_t)"");
         }
     }
 
-    return taida_lax_empty((int64_t)(intptr_t)"");
+    return wasi_env_var_lax_error("not_found");
 }
 
 /* ── allEnv() → HashMap[Str, Str] ── */
@@ -347,12 +395,23 @@ int64_t taida_os_all_env(void) {
 
 /* ── Read[path]() → Lax[Str] ── */
 
+static const char *wasi_error_kind(int32_t wasi_errno, const char *msg);
+
+static int64_t wasi_read_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"Read error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error((int64_t)(intptr_t)"", error);
+}
+
 int64_t taida_os_read(int64_t path_ptr) {
     const char *path = (const char *)(intptr_t)path_ptr;
-    if (!path) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (!path) return wasi_read_lax_error("invalid");
 
     int32_t path_len = wasi_strlen(path);
-    if (path_len == 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (path_len == 0) return wasi_read_lax_error("invalid");
 
     wasi_resolved_path rp = resolve_preopened_path(path, path_len);
 
@@ -369,14 +428,14 @@ int64_t taida_os_read(int64_t path_ptr) {
         0,  /* fdflags */
         &file_fd
     );
-    if (err != 0) return taida_lax_empty((int64_t)(intptr_t)"");
+    if (err != 0) return wasi_read_lax_error(wasi_error_kind(err, 0));
 
     /* Get file size via fd_seek to end */
     int64_t file_size = 0;
     err = __wasi_fd_seek(file_fd, 0, WASI_SEEK_END, &file_size);
     if (err != 0 || file_size < 0) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty((int64_t)(intptr_t)"");
+        return wasi_read_lax_error(err != 0 ? wasi_error_kind(err, 0) : "invalid");
     }
 
     /* Seek back to start */
@@ -386,7 +445,7 @@ int64_t taida_os_read(int64_t path_ptr) {
     /* Limit: 64MB */
     if (file_size > 64 * 1024 * 1024) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty((int64_t)(intptr_t)"");
+        return wasi_read_lax_error("too_large");
     }
 
     int32_t size32 = (int32_t)file_size;
@@ -395,7 +454,7 @@ int64_t taida_os_read(int64_t path_ptr) {
     char *buf = (char *)wasm_alloc(size32 + 1);
     if (!buf) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty((int64_t)(intptr_t)"");
+        return wasi_read_lax_error("other");
     }
 
     /* Read file contents */
@@ -414,6 +473,11 @@ int64_t taida_os_read(int64_t path_ptr) {
     __wasi_fd_close(file_fd);
 
     return taida_lax_new((int64_t)(intptr_t)buf, (int64_t)(intptr_t)"");
+}
+
+int64_t taida_os_read_async(int64_t path_ptr) {
+    int64_t lax_result = taida_os_read(path_ptr);
+    return taida_async_ok_tagged(lax_result, WASI_RT_TAG_PACK);
 }
 
 /* ── writeFile(path, content) → Result ── */
@@ -507,8 +571,30 @@ static int64_t wasi_os_ok_inner(void) {
 /* Build os Result success — matches Native taida_os_result_success.
  * Kept for compatibility; C12B-021 callers should prefer
  * wasi_os_result_success_value to embed a meaningful Int inner. */
+static int64_t wasi_os_result_create(int64_t inner, int64_t throw_val) {
+    taida_register_field_name(WASI_HASH___VALUE, (int64_t)(intptr_t)"__value");
+    taida_register_field_name(WASI_HASH_THROW, (int64_t)(intptr_t)"throw");
+    taida_register_field_name(WASI_HASH___PREDICATE, (int64_t)(intptr_t)"__predicate");
+    taida_register_field_name(WASI_HASH___TYPE, (int64_t)(intptr_t)"__type");
+    int64_t pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, WASI_HASH___VALUE);
+    taida_pack_set(pack, 0, inner);
+    taida_pack_set_hash(pack, 1, WASI_HASH_THROW);
+    taida_pack_set(pack, 1, throw_val);
+    taida_pack_set_tag(pack, 1, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(pack, 2, WASI_HASH___PREDICATE);
+    taida_pack_set(pack, 2, 0);
+    taida_pack_set_tag(pack, 2, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(pack, 3, WASI_HASH___TYPE);
+    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
+    taida_pack_set_tag(pack, 3, WASI_RT_TAG_STR_REAL);
+    return pack;
+}
+
 static int64_t wasi_os_result_success(void) {
-    return taida_result_create(wasi_os_ok_inner(), 0, 0);
+    int64_t r = wasi_os_result_create(wasi_os_ok_inner(), 0);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_PACK);
+    return r;
 }
 
 /* C12B-021: Result[Int] success with an explicit integer inner value
@@ -516,19 +602,20 @@ static int64_t wasi_os_result_success(void) {
  * preserves sign/width across i64 but keeps the shape identical to
  * Native's `taida_os_result_success(value)`. */
 static int64_t wasi_os_result_success_value(int64_t value) {
-    return taida_result_create(value, 0, 0);
+    int64_t r = wasi_os_result_create(value, 0);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_INT);
+    return r;
 }
 
 /* C12B-021: Result[Bool] success — wraps a Bool inner value and
  * sets the proper runtime tag so `.toString()` / tag-dispatched
  * printing ("true" / "false") matches the Interpreter / Native
  * contract byte-for-byte. Used by Exists on wasi. */
-#define WASM_TAG_BOOL 2
 static int64_t wasi_os_result_success_bool(int64_t bool_val) {
-    int64_t r = taida_result_create(bool_val ? 1 : 0, 0, 0);
+    int64_t r = wasi_os_result_create(bool_val ? 1 : 0, 0);
     /* Result layout: index 0 = __value. Mark it Bool so downstream
      * polymorphic display prints "true"/"false" rather than "1"/"0". */
-    taida_pack_set_tag(r, 0, WASM_TAG_BOOL);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_BOOL);
     return r;
 }
 
@@ -559,7 +646,9 @@ static int64_t wasi_os_result_failure_code(int32_t wasi_errno, const char *msg) 
     taida_pack_set_tag(inner, 3, WASM_TAG_STR);
 
     int64_t error = wasi_make_io_error(wasi_errno, message);
-    return taida_result_create(inner, error, 0);
+    int64_t r = wasi_os_result_create(inner, error);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_PACK);
+    return r;
 }
 
 /* Convenience: failure with errno=0 (for validation errors without WASI errno) */
@@ -678,7 +767,7 @@ int64_t taida_os_exists(int64_t path_ptr) {
  * both rt_wasi and rt_full, does not see duplicate symbols.  Any
  * Bytes value produced here is layout-compatible with rt_full's
  * `_wf_is_bytes()` / `taida_bytes_len()` and round-trips through
- * `Utf8Decode` / `.hasValue` / `@size` identically on wasm-full.
+ * `Utf8Decode` / `.has_value` / `@size` identically on wasm-full.
  */
 
 /* Must match runtime_full_wasm.c::WF_BYTES_MAGIC exactly (layout
@@ -707,20 +796,30 @@ static int64_t wasi_bytes_from_raw(const unsigned char *src, int64_t len) {
     return (int64_t)(intptr_t)bytes;
 }
 
-int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
+static int64_t wasi_read_bytes_at_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"ReadBytesAt error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error(wasi_bytes_default_value(), error);
+}
+
+static int64_t wasi_read_bytes_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"ReadBytes error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error(wasi_bytes_default_value(), error);
+}
+
+int64_t taida_os_read_bytes(int64_t path_ptr) {
     const char *path = (const char *)(intptr_t)path_ptr;
-    if (!path) return taida_lax_empty(wasi_bytes_default_value());
-    if (offset < 0 || len < 0) return taida_lax_empty(wasi_bytes_default_value());
-    /* 64 MB chunk ceiling — matches interpreter / native. */
-    if (len > 64LL * 1024LL * 1024LL) return taida_lax_empty(wasi_bytes_default_value());
-    if (len == 0) {
-        /* Lax success with an empty Bytes value. */
-        int64_t empty = wasi_bytes_from_raw((const unsigned char *)"", 0);
-        return taida_lax_new(empty, wasi_bytes_default_value());
-    }
+    if (!path) return wasi_read_bytes_lax_error("invalid");
 
     int32_t path_len = wasi_strlen(path);
-    if (path_len == 0) return taida_lax_empty(wasi_bytes_default_value());
+    if (path_len == 0) return wasi_read_bytes_lax_error("invalid");
 
     wasi_resolved_path rp = resolve_preopened_path(path, path_len);
 
@@ -736,7 +835,84 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
         0,
         &file_fd
     );
-    if (err != 0) return taida_lax_empty(wasi_bytes_default_value());
+    if (err != 0) return wasi_read_bytes_lax_error(wasi_error_kind(err, 0));
+
+    int64_t file_size = 0;
+    err = __wasi_fd_seek(file_fd, 0, WASI_SEEK_END, &file_size);
+    if (err != 0 || file_size < 0) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error(err != 0 ? wasi_error_kind(err, 0) : "invalid");
+    }
+    if (file_size > 64LL * 1024LL * 1024LL) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error("too_large");
+    }
+
+    int64_t ignored = 0;
+    err = __wasi_fd_seek(file_fd, 0, WASI_SEEK_SET, &ignored);
+    if (err != 0) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error(wasi_error_kind(err, 0));
+    }
+
+    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(file_size > 0 ? file_size : 1));
+    if (!buf) {
+        __wasi_fd_close(file_fd);
+        return wasi_read_bytes_lax_error("other");
+    }
+
+    int64_t filled = 0;
+    int32_t io_err = 0;
+    while (filled < file_size) {
+        wasi_iovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + filled);
+        iov.len = (int32_t)(file_size - filled);
+        int32_t nread = 0;
+        int32_t r = __wasi_fd_read(file_fd, &iov, 1, &nread);
+        if (r != 0) { io_err = r; break; }
+        if (nread == 0) break;
+        filled += nread;
+    }
+    __wasi_fd_close(file_fd);
+
+    if (io_err != 0) {
+        return wasi_read_bytes_lax_error(wasi_error_kind(io_err, 0));
+    }
+
+    int64_t bytes = wasi_bytes_from_raw(buf, filled);
+    return taida_lax_new(bytes, wasi_bytes_default_value());
+}
+
+int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
+    const char *path = (const char *)(intptr_t)path_ptr;
+    if (!path) return wasi_read_bytes_at_lax_error("invalid");
+    if (offset < 0 || len < 0) return wasi_read_bytes_at_lax_error("invalid");
+    /* 64 MB chunk ceiling — matches interpreter / native. */
+    if (len > 64LL * 1024LL * 1024LL) return wasi_read_bytes_at_lax_error("too_large");
+    if (len == 0) {
+        /* Lax success with an empty Bytes value. */
+        int64_t empty = wasi_bytes_from_raw((const unsigned char *)"", 0);
+        return taida_lax_new(empty, wasi_bytes_default_value());
+    }
+
+    int32_t path_len = wasi_strlen(path);
+    if (path_len == 0) return wasi_read_bytes_at_lax_error("invalid");
+
+    wasi_resolved_path rp = resolve_preopened_path(path, path_len);
+
+    wasi_fd file_fd = -1;
+    int32_t err = __wasi_path_open(
+        rp.fd,
+        1,  /* dirflags: LOOKUPFLAGS_SYMLINK_FOLLOW */
+        rp.rel_path,
+        rp.rel_path_len,
+        0,  /* oflags: none */
+        WASI_RIGHT_FD_READ | WASI_RIGHT_FD_SEEK,
+        0,
+        0,
+        &file_fd
+    );
+    if (err != 0) return wasi_read_bytes_at_lax_error(wasi_error_kind(err, 0));
 
     /* Seek to offset.  If the underlying fd does not support seek or
      * the offset is past EOF, fd_seek will set newoffset to a value
@@ -747,7 +923,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     err = __wasi_fd_seek(file_fd, offset, WASI_SEEK_SET, &new_off);
     if (err != 0) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty(wasi_bytes_default_value());
+        return wasi_read_bytes_at_lax_error(wasi_error_kind(err, 0));
     }
 
     /* Read up to `len` bytes.  Tolerate short reads at EOF: loop
@@ -755,7 +931,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)len);
     if (!buf) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty(wasi_bytes_default_value());
+        return wasi_read_bytes_at_lax_error("other");
     }
 
     int64_t filled = 0;
@@ -773,7 +949,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     __wasi_fd_close(file_fd);
 
     if (io_err != 0) {
-        return taida_lax_empty(wasi_bytes_default_value());
+        return wasi_read_bytes_at_lax_error(wasi_error_kind(io_err, 0));
     }
 
     /* Even with filled < len (truncated tail or beyond-EOF), we return
@@ -806,10 +982,9 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
  * existing `WASM_TAG_STR 1` defined above is a historic mismatch with
  * core's value (3) and is only used by this file's allEnv path -- not
  * worth touching. New constants below use the correct core values. */
-#define WASI_RT_TAG_INT     0
+#ifndef WASI_RT_TAG_FLOAT
 #define WASI_RT_TAG_FLOAT   1
-#define WASI_RT_TAG_BOOL    2
-#define WASI_RT_TAG_STR_REAL 3
+#endif
 
 /* Float bit-punning helpers (mirror runtime_full_wasm.c::_to_double /
  * core_wasm::_d2l).  Unboxed double <-> int64 bit-pattern. */
@@ -1408,7 +1583,7 @@ int64_t taida_utf8_single_scalar(int64_t v) {
  *   tagged FLOAT (matches native runtime exactly: see
  *   src/codegen/native_runtime/core.c::taida_div_mold_f).
  *
- *   The wasm runtime represents Lax as a 4-field pack (hasValue, __value,
+ *   The wasm runtime represents Lax as a 4-field pack (has_value, __value,
  *   __default, __type).  Tagging __value/__default with WASM_TAG_FLOAT (=1)
  *   makes `_wasm_pack_to_string_full` interpret them as f64 bit-patterns
  *   when stringifying -- mirrors `_float_lax_new` in
@@ -1678,4 +1853,504 @@ int64_t taida_float_to_str_d28b009(int64_t val) {
         return (int64_t)(intptr_t)buf;
     }
     return taida_float_to_str(val);
+}
+
+/* =========================================================================
+ * E37: wasm-wasi taida-lang/net HTTP/1.1 via inherited WASI listener
+ *
+ * WASI preview1 has no portable bind/listen API, but Wasmtime exposes
+ * inherited TCP listeners to legacy preview1 guests with:
+ *
+ *   LISTEN_FDS=1 LISTEN_PID=<wasmtime-pid> wasmtime run \
+ *     -S preview2=false -S listenfd=y -- app.wasm
+ *
+ * The listener is fd 3. The guest can accept with `sock_accept`, then use
+ * `sock_recv` / `sock_send` on the accepted socket. This keeps the ABI
+ * WASI-provided and avoids a Taida-private host shim.
+ * ========================================================================= */
+
+static int _wi_net_contains_header_end(const char *buf, int32_t len) {
+    for (int32_t i = 3; i < len; i++) {
+        if (buf[i - 3] == '\r' && buf[i - 2] == '\n' &&
+            buf[i - 1] == '\r' && buf[i] == '\n') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int32_t _wi_net_header_end_offset(const char *buf, int32_t len) {
+    for (int32_t i = 3; i < len; i++) {
+        if (buf[i - 3] == '\r' && buf[i - 2] == '\n' &&
+            buf[i - 1] == '\r' && buf[i] == '\n') {
+            return i + 1;
+        }
+    }
+    return -1;
+}
+
+static int32_t _wi_net_read_request(wasi_fd fd, char *buf, int32_t cap, int *too_large) {
+    int32_t total = 0;
+    if (too_large) *too_large = 0;
+    while (total < cap - 1) {
+        wasi_iovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + total);
+        iov.len = cap - 1 - total;
+        int32_t nread = 0;
+        int32_t ro_flags = 0;
+        int32_t err = __wasi_sock_recv(fd, &iov, 1, 0, &nread, &ro_flags);
+        (void)ro_flags;
+        if (err != 0 || nread <= 0) break;
+        total += nread;
+        if (_wi_net_contains_header_end(buf, total)) break;
+    }
+    if (total >= cap - 1 && !_wi_net_contains_header_end(buf, total) && too_large) {
+        *too_large = 1;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+static int32_t _wi_net_read_request_stdio(wasi_fd fd, char *buf, int32_t cap, int *too_large) {
+    int32_t total = 0;
+    if (too_large) *too_large = 0;
+    while (total < cap - 1) {
+        wasi_iovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + total);
+        iov.len = cap - 1 - total;
+        int32_t nread = 0;
+        int32_t err = __wasi_fd_read(fd, &iov, 1, &nread);
+        if (err != 0 || nread <= 0) break;
+        total += nread;
+        if (_wi_net_contains_header_end(buf, total)) break;
+    }
+    if (total >= cap - 1 && !_wi_net_contains_header_end(buf, total) && too_large) {
+        *too_large = 1;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+static int _wi_net_write_all(wasi_fd fd, const char *buf, int32_t len) {
+    int32_t off = 0;
+    while (off < len) {
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + off);
+        iov.len = len - off;
+        int32_t nwritten = 0;
+        int32_t err = __wasi_sock_send(fd, &iov, 1, 0, &nwritten);
+        if (err != 0 || nwritten <= 0) return -1;
+        off += nwritten;
+    }
+    return 0;
+}
+
+static int _wi_net_write_all_stdio(wasi_fd fd, const char *buf, int32_t len) {
+    int32_t off = 0;
+    while (off < len) {
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)(buf + off);
+        iov.len = len - off;
+        int32_t nwritten = 0;
+        int32_t err = __wasi_fd_write(fd, &iov, 1, &nwritten);
+        if (err != 0 || nwritten <= 0) return -1;
+        off += nwritten;
+    }
+    return 0;
+}
+
+static int _wi_net_u64_to_dec(int64_t value, char *out) {
+    if (value < 0) value = 0;
+    char tmp[32];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value > 0 && n < 31);
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    out[n] = '\0';
+    return n;
+}
+
+static const char *_wi_net_status_reason(int64_t status) {
+    switch ((int)status) {
+        case 100: return "Continue";
+        case 101: return "Switching Protocols";
+        case 200: return "OK";
+        case 201: return "Created";
+        case 202: return "Accepted";
+        case 204: return "No Content";
+        case 205: return "Reset Content";
+        case 206: return "Partial Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 304: return "Not Modified";
+        case 307: return "Temporary Redirect";
+        case 308: return "Permanent Redirect";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 413: return "Payload Too Large";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 503: return "Service Unavailable";
+        default: return "";
+    }
+}
+
+static int _wi_net_is_string_tag(int64_t tag) {
+    return tag == WASM_TAG_STR || tag == WASI_RT_TAG_STR_REAL;
+}
+
+static int64_t _wi_net_response_body(int64_t response) {
+    int64_t body_hash = taida_str_hash((int64_t)(intptr_t)"body");
+    int64_t body_val = taida_pack_get(response, body_hash);
+    int64_t body_tag = taida_pack_get_field_tag(response, body_hash);
+    if (body_val != 0 && _wi_net_is_string_tag(body_tag)) return body_val;
+
+    int64_t indexed_val = taida_pack_get_idx(response, 2);
+    int64_t indexed_tag = taida_pack_get_tag(response, 2);
+    if (indexed_val != 0 && _wi_net_is_string_tag(indexed_tag)) return indexed_val;
+
+    for (int64_t i = 0; i < 6; i++) {
+        int64_t tag = taida_pack_get_tag(response, i);
+        int64_t val = taida_pack_get_idx(response, i);
+        if (val != 0 && _wi_net_is_string_tag(tag)) return val;
+    }
+    return 0;
+}
+
+static int64_t _wi_net_result_ok(int64_t inner) {
+    int64_t r = wasi_os_result_create(inner, 0);
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_PACK);
+    return r;
+}
+
+static int64_t _wi_net_result_fail(const char *kind, const char *message) {
+    int64_t inner = taida_pack_new(4);
+    taida_pack_set_hash(inner, 0, taida_str_hash((int64_t)(intptr_t)"ok"));
+    taida_pack_set(inner, 0, 0);
+    taida_pack_set_tag(inner, 0, WASI_RT_TAG_BOOL);
+    taida_pack_set_hash(inner, 1, taida_str_hash((int64_t)(intptr_t)"code"));
+    taida_pack_set(inner, 1, -1);
+    taida_pack_set_tag(inner, 1, WASI_RT_TAG_INT);
+    taida_pack_set_hash(inner, 2, taida_str_hash((int64_t)(intptr_t)"message"));
+    taida_pack_set(inner, 2, taida_str_new_copy((int64_t)(intptr_t)message));
+    taida_pack_set_tag(inner, 2, WASM_TAG_STR);
+    taida_pack_set_hash(inner, 3, taida_str_hash((int64_t)(intptr_t)"kind"));
+    taida_pack_set(inner, 3, taida_str_new_copy((int64_t)(intptr_t)kind));
+    taida_pack_set_tag(inner, 3, WASM_TAG_STR);
+    int64_t r = wasi_os_result_create(inner, wasi_make_io_error(0, message));
+    taida_pack_set_tag(r, 0, WASI_RT_TAG_PACK);
+    return r;
+}
+
+static int64_t _wi_net_async_result(int64_t result) {
+    return taida_async_ok_tagged(result, WASI_RT_TAG_PACK);
+}
+
+static void _wi_net_slice_copy(char *dst, const char *src, int32_t start, int32_t end) {
+    int32_t n = end - start;
+    for (int32_t i = 0; i < n; i++) dst[i] = src[start + i];
+    dst[n] = '\0';
+}
+
+static int64_t _wi_net_make_span(int64_t start, int64_t len) {
+    int64_t span = taida_pack_new(2);
+    taida_pack_set_hash(span, 0, taida_str_hash((int64_t)(intptr_t)"start"));
+    taida_pack_set(span, 0, start);
+    taida_pack_set_tag(span, 0, WASI_RT_TAG_INT);
+    taida_pack_set_hash(span, 1, taida_str_hash((int64_t)(intptr_t)"len"));
+    taida_pack_set(span, 1, len);
+    taida_pack_set_tag(span, 1, WASI_RT_TAG_INT);
+    return span;
+}
+
+static int _wi_net_ascii_eq_ci(const char *s, int32_t start, int32_t len, const char *needle) {
+    int32_t i = 0;
+    while (needle[i]) i++;
+    if (i != len) return 0;
+    for (int32_t j = 0; j < len; j++) {
+        char a = s[start + j];
+        char b = needle[j];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static int64_t _wi_net_parse_content_length(const char *raw, int32_t raw_len) {
+    int32_t pos = 0;
+    while (pos < raw_len) {
+        int32_t line_start = pos;
+        while (pos < raw_len && raw[pos] != '\r' && raw[pos] != '\n') pos++;
+        int32_t line_end = pos;
+        if (line_end == line_start) break;
+        int32_t colon = line_start;
+        while (colon < line_end && raw[colon] != ':') colon++;
+        if (colon < line_end &&
+            _wi_net_ascii_eq_ci(raw, line_start, colon - line_start, "content-length")) {
+            int32_t v = colon + 1;
+            while (v < line_end && (raw[v] == ' ' || raw[v] == '\t')) v++;
+            int64_t n = 0;
+            while (v < line_end && raw[v] >= '0' && raw[v] <= '9') {
+                n = n * 10 + (raw[v] - '0');
+                v++;
+            }
+            return n;
+        }
+        while (pos < raw_len && (raw[pos] == '\r' || raw[pos] == '\n')) pos++;
+    }
+    return 0;
+}
+
+static int64_t _wi_net_make_headers(const char *raw, int32_t raw_len) {
+    int64_t headers = taida_list_new();
+    int32_t pos = 0;
+    while (pos < raw_len && raw[pos] != '\r' && raw[pos] != '\n') pos++;
+    while (pos < raw_len && (raw[pos] == '\r' || raw[pos] == '\n')) pos++;
+
+    while (pos < raw_len) {
+        int32_t line_start = pos;
+        while (pos < raw_len && raw[pos] != '\r' && raw[pos] != '\n') pos++;
+        int32_t line_end = pos;
+        if (line_end == line_start) break;
+        int32_t colon = line_start;
+        while (colon < line_end && raw[colon] != ':') colon++;
+        if (colon < line_end) {
+            int32_t value_start = colon + 1;
+            while (value_start < line_end && (raw[value_start] == ' ' || raw[value_start] == '\t')) {
+                value_start++;
+            }
+            int32_t value_end = line_end;
+            while (value_end > value_start &&
+                   (raw[value_end - 1] == ' ' || raw[value_end - 1] == '\t')) {
+                value_end--;
+            }
+            int64_t entry = taida_pack_new(2);
+            taida_pack_set_hash(entry, 0, taida_str_hash((int64_t)(intptr_t)"name"));
+            taida_pack_set(entry, 0, _wi_net_make_span(line_start, colon - line_start));
+            taida_pack_set_tag(entry, 0, WASI_RT_TAG_PACK);
+            taida_pack_set_hash(entry, 1, taida_str_hash((int64_t)(intptr_t)"value"));
+            taida_pack_set(entry, 1, _wi_net_make_span(value_start, value_end - value_start));
+            taida_pack_set_tag(entry, 1, WASI_RT_TAG_PACK);
+            headers = taida_list_push(headers, entry);
+        }
+        while (pos < raw_len && (raw[pos] == '\r' || raw[pos] == '\n')) pos++;
+    }
+    return headers;
+}
+
+static int64_t _wi_net_make_request(const char *raw, int32_t raw_len) {
+    int32_t method_start = 0, method_end = 0;
+    int32_t path_start = 0, path_end = 0;
+    int32_t query_start = 0, query_end = 0;
+    int32_t body_start = _wi_net_header_end_offset(raw, raw_len);
+    if (body_start < 0) body_start = raw_len;
+    int64_t content_length = _wi_net_parse_content_length(raw, raw_len);
+    int64_t buffered_body_len = raw_len > body_start ? raw_len - body_start : 0;
+    if (buffered_body_len > content_length) buffered_body_len = content_length;
+    int32_t i = 0;
+    while (i < raw_len && raw[i] != ' ' && raw[i] != '\r' && raw[i] != '\n') i++;
+    method_end = i;
+    while (i < raw_len && raw[i] == ' ') i++;
+    path_start = i;
+    while (i < raw_len && raw[i] != ' ' && raw[i] != '\r' && raw[i] != '\n') {
+        if (raw[i] == '?' && query_start == 0) {
+            path_end = i;
+            query_start = i + 1;
+        }
+        i++;
+    }
+    if (path_end == 0) path_end = i;
+    query_end = i;
+
+    char *raw_copy = (char *)wasm_alloc((unsigned int)(raw_len + 1));
+    if (!raw_copy) return taida_pack_new(0);
+
+    _wi_net_slice_copy(raw_copy, raw, 0, raw_len);
+    int64_t raw_bytes = taida_bytes_from_raw((int64_t)(intptr_t)raw_copy, raw_len);
+
+    int64_t req = taida_pack_new(13);
+    taida_pack_set_hash(req, 0, taida_str_hash((int64_t)(intptr_t)"raw"));
+    taida_pack_set(req, 0, raw_bytes);
+    taida_pack_set_tag(req, 0, WASM_TAG_STR);
+    taida_pack_set_hash(req, 1, taida_str_hash((int64_t)(intptr_t)"method"));
+    taida_pack_set(req, 1, _wi_net_make_span(method_start, method_end - method_start));
+    taida_pack_set_tag(req, 1, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(req, 2, taida_str_hash((int64_t)(intptr_t)"path"));
+    taida_pack_set(req, 2, _wi_net_make_span(path_start, path_end - path_start));
+    taida_pack_set_tag(req, 2, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(req, 3, taida_str_hash((int64_t)(intptr_t)"query"));
+    taida_pack_set(req, 3, _wi_net_make_span(query_start ? query_start : 0,
+                                             query_start ? (query_end - query_start) : 0));
+    taida_pack_set_tag(req, 3, WASI_RT_TAG_PACK);
+    int64_t version = taida_pack_new(2);
+    taida_pack_set_hash(version, 0, taida_str_hash((int64_t)(intptr_t)"major"));
+    taida_pack_set(version, 0, 1);
+    taida_pack_set_tag(version, 0, WASI_RT_TAG_INT);
+    taida_pack_set_hash(version, 1, taida_str_hash((int64_t)(intptr_t)"minor"));
+    taida_pack_set(version, 1, 1);
+    taida_pack_set_tag(version, 1, WASI_RT_TAG_INT);
+    taida_pack_set_hash(req, 4, taida_str_hash((int64_t)(intptr_t)"version"));
+    taida_pack_set(req, 4, version);
+    taida_pack_set_tag(req, 4, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(req, 5, taida_str_hash((int64_t)(intptr_t)"headers"));
+    taida_pack_set(req, 5, _wi_net_make_headers(raw, raw_len));
+    taida_pack_set_tag(req, 5, WASI_RT_TAG_LIST);
+    taida_pack_set_hash(req, 6, taida_str_hash((int64_t)(intptr_t)"body"));
+    taida_pack_set(req, 6, _wi_net_make_span(body_start, buffered_body_len));
+    taida_pack_set_tag(req, 6, WASI_RT_TAG_PACK);
+    taida_pack_set_hash(req, 7, taida_str_hash((int64_t)(intptr_t)"bodyOffset"));
+    taida_pack_set(req, 7, body_start);
+    taida_pack_set_tag(req, 7, WASI_RT_TAG_INT);
+    taida_pack_set_hash(req, 8, taida_str_hash((int64_t)(intptr_t)"contentLength"));
+    taida_pack_set(req, 8, content_length);
+    taida_pack_set_tag(req, 8, WASI_RT_TAG_INT);
+    taida_pack_set_hash(req, 9, taida_str_hash((int64_t)(intptr_t)"remoteHost"));
+    taida_pack_set(req, 9, taida_str_new_copy((int64_t)(intptr_t)""));
+    taida_pack_set_tag(req, 9, WASM_TAG_STR);
+    taida_pack_set_hash(req, 10, taida_str_hash((int64_t)(intptr_t)"remotePort"));
+    taida_pack_set(req, 10, 0);
+    taida_pack_set_tag(req, 10, WASI_RT_TAG_INT);
+    taida_pack_set_hash(req, 11, taida_str_hash((int64_t)(intptr_t)"keepAlive"));
+    taida_pack_set(req, 11, 0);
+    taida_pack_set_tag(req, 11, WASI_RT_TAG_BOOL);
+    taida_pack_set_hash(req, 12, taida_str_hash((int64_t)(intptr_t)"chunked"));
+    taida_pack_set(req, 12, 0);
+    taida_pack_set_tag(req, 12, WASI_RT_TAG_BOOL);
+    return req;
+}
+
+static int _wi_net_send_fixed(wasi_fd fd, int use_stdio, int64_t status, const char *body) {
+    if (!body) body = "";
+    int32_t body_len = wasi_strlen(body);
+    char status_buf[32];
+    char len_buf[32];
+    int status_len = _wi_net_u64_to_dec(status, status_buf);
+    int len_len = _wi_net_u64_to_dec(body_len, len_buf);
+    const char *reason = _wi_net_status_reason(status);
+
+    const char *p1 = "HTTP/1.1 ";
+    const char *sp = " ";
+    const char *p2 = "\r\nContent-Length: ";
+    const char *p3 = "\r\nConnection: close\r\n\r\n";
+#define WI_WRITE(part, n) do { \
+        if (use_stdio) { if (_wi_net_write_all_stdio(fd, (part), (n)) != 0) return -1; } \
+        else { if (_wi_net_write_all(fd, (part), (n)) != 0) return -1; } \
+    } while (0)
+    WI_WRITE(p1, wasi_strlen(p1));
+    WI_WRITE(status_buf, status_len);
+    WI_WRITE(sp, 1);
+    WI_WRITE(reason, wasi_strlen(reason));
+    WI_WRITE(p2, wasi_strlen(p2));
+    WI_WRITE(len_buf, len_len);
+    WI_WRITE(p3, wasi_strlen(p3));
+    if (body_len > 0) WI_WRITE(body, body_len);
+#undef WI_WRITE
+    return 0;
+}
+
+static int _wi_net_send_raw(wasi_fd fd, int use_stdio, const char *wire) {
+    if (!wire) return _wi_net_send_fixed(fd, use_stdio, 500, "");
+    int32_t len = wasi_strlen(wire);
+    if (use_stdio) return _wi_net_write_all_stdio(fd, wire, len);
+    return _wi_net_write_all(fd, wire, len);
+}
+
+static int _wi_net_send_response(wasi_fd fd, int64_t response, int64_t response_tag) {
+    if (_wi_net_is_string_tag(response_tag)) {
+        return _wi_net_send_raw(fd, 0, (const char *)(intptr_t)response);
+    }
+    if (response_tag != WASI_RT_TAG_PACK) {
+        return _wi_net_send_fixed(fd, 0, 500, "");
+    }
+    int64_t status = taida_pack_get(response, taida_str_hash((int64_t)(intptr_t)"status"));
+    if (status <= 0) status = taida_pack_get_idx(response, 0);
+    if (status <= 0) status = 200;
+    int64_t body_val = _wi_net_response_body(response);
+    const char *body = body_val != 0 ? (const char *)(intptr_t)body_val : "";
+    return _wi_net_send_fixed(fd, 0, status, body);
+}
+
+static int _wi_net_send_response_stdio(wasi_fd fd, int64_t response, int64_t response_tag) {
+    if (_wi_net_is_string_tag(response_tag)) {
+        return _wi_net_send_raw(fd, 1, (const char *)(intptr_t)response);
+    }
+    if (response_tag != WASI_RT_TAG_PACK) {
+        return _wi_net_send_fixed(fd, 1, 500, "");
+    }
+    int64_t status = taida_pack_get(response, taida_str_hash((int64_t)(intptr_t)"status"));
+    if (status <= 0) status = taida_pack_get_idx(response, 0);
+    if (status <= 0) status = 200;
+    int64_t body_val = _wi_net_response_body(response);
+    const char *body = body_val != 0 ? (const char *)(intptr_t)body_val : "";
+    return _wi_net_send_fixed(fd, 1, status, body);
+}
+
+int64_t taida_net_http_serve(int64_t port, int64_t handler, int64_t max_requests,
+                             int64_t timeout_ms, int64_t max_connections, int64_t tls,
+                             int64_t handler_type_tag, int64_t handler_arity) {
+    (void)port;
+    (void)timeout_ms;
+    (void)max_connections;
+    (void)tls;
+    (void)handler_type_tag;
+    (void)handler_arity;
+
+    int64_t limit = max_requests > 0 ? max_requests : 1;
+    int64_t served = 0;
+    for (int64_t n = 0; n < limit; n++) {
+        wasi_fd client_fd = -1;
+        int32_t err = __wasi_sock_accept((wasi_fd)3, 0, &client_fd);
+        if (err != 0) {
+            if (err != WASI_ERRNO_BADF && err != WASI_ERRNO_NOTSOCK) {
+                return _wi_net_async_result(_wi_net_result_fail("AcceptError", "WASI sock_accept failed"));
+            }
+            char req_buf[16384];
+            int too_large = 0;
+            int32_t req_len = _wi_net_read_request_stdio((wasi_fd)0, req_buf, (int32_t)sizeof(req_buf), &too_large);
+            if (too_large) {
+                (void)_wi_net_send_fixed((wasi_fd)1, 1, 413, "");
+                served++;
+                break;
+            }
+            int64_t req = _wi_net_make_request(req_buf, req_len);
+            int64_t response = taida_invoke_callback1(handler, req);
+            int64_t response_tag = taida_get_return_tag();
+            (void)_wi_net_send_response_stdio((wasi_fd)1, response, response_tag);
+            served++;
+            break;
+        }
+
+        char req_buf[16384];
+        int too_large = 0;
+        int32_t req_len = _wi_net_read_request(client_fd, req_buf, (int32_t)sizeof(req_buf), &too_large);
+        if (too_large) {
+            (void)_wi_net_send_fixed(client_fd, 0, 413, "");
+            (void)__wasi_sock_shutdown(client_fd, 3);
+            __wasi_fd_close(client_fd);
+            served++;
+            continue;
+        }
+        int64_t req = _wi_net_make_request(req_buf, req_len);
+        int64_t response = taida_invoke_callback1(handler, req);
+        int64_t response_tag = taida_get_return_tag();
+        (void)_wi_net_send_response(client_fd, response, response_tag);
+        (void)__wasi_sock_shutdown(client_fd, 3);
+        __wasi_fd_close(client_fd);
+        served++;
+    }
+
+    int64_t ok_inner = taida_pack_new(2);
+    taida_pack_set_hash(ok_inner, 0, taida_str_hash((int64_t)(intptr_t)"ok"));
+    taida_pack_set(ok_inner, 0, 1);
+    taida_pack_set_tag(ok_inner, 0, WASI_RT_TAG_BOOL);
+    taida_pack_set_hash(ok_inner, 1, taida_str_hash((int64_t)(intptr_t)"requests"));
+    taida_pack_set(ok_inner, 1, served);
+    taida_pack_set_tag(ok_inner, 1, WASI_RT_TAG_INT);
+    return _wi_net_async_result(_wi_net_result_ok(ok_inner));
 }

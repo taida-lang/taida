@@ -593,6 +593,8 @@ taida_ptr taida_pack_set(taida_ptr pack_ptr, taida_val field_idx, taida_val valu
 taida_ptr taida_pack_set_hash(taida_ptr pack_ptr, taida_val index, taida_val hash);
 taida_ptr taida_pack_set_tag(taida_ptr pack_ptr, taida_val index, taida_val tag);
 taida_val taida_pack_get_idx(taida_ptr pack_ptr, taida_val index);
+taida_val taida_pack_get(taida_ptr pack_ptr, taida_val field_hash);
+taida_val taida_pack_has_hash(taida_ptr pack_ptr, taida_val field_hash);
 taida_val taida_throw(taida_ptr error_val);
 taida_ptr taida_lax_new(taida_val value, taida_val default_value);
 taida_ptr taida_lax_empty(taida_val default_value);
@@ -720,6 +722,9 @@ static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
+static int taida_safe_cstr(taida_val ptr, size_t max_len);
+static taida_val taida_error_info_pack_from_error(taida_val error);
+static taida_val taida_make_error_with_kind_code(const char *error_type, const char *error_msg, const char *error_kind, taida_val error_code);
 // E34B-017: `taida_result_map_error` materialises the mapped value's
 // display string via the polymorphic helper before wrapping it in a
 // `ResultError`. The helper is defined far below, so forward declare
@@ -1116,9 +1121,13 @@ static taida_val taida_make_error(const char *error_type, const char *error_msg)
 // the Interpreter (which surfaces Error.fields[0] as a direct field via
 // `Value::get_error_field`) and the JS runtime (after the matching lift).
 static taida_val taida_make_error_with_kind(const char *error_type, const char *error_msg, const char *error_kind) {
+    return taida_make_error_with_kind_code(error_type, error_msg, error_kind, 0);
+}
+
+static taida_val taida_make_error_with_kind_code(const char *error_type, const char *error_msg, const char *error_kind, taida_val error_code) {
     taida_register_builtin_error_field_names();
 
-    taida_val pack = taida_pack_new(4);
+    taida_val pack = taida_pack_new(5);
     // type
     taida_pack_set_hash(pack, 0, (taida_val)HASH_TYPE);
     char *type_str = taida_str_new_copy(error_type);
@@ -1129,16 +1138,20 @@ static taida_val taida_make_error_with_kind(const char *error_type, const char *
     char *msg_str = taida_str_new_copy(error_msg);
     taida_pack_set(pack, 1, (taida_val)msg_str);
     taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
-    // __type (RCB-101)
-    taida_pack_set_hash(pack, 2, (taida_val)0x84d2d84b631f799bULL);
-    char *type_str2 = taida_str_new_copy(error_type);
-    taida_pack_set(pack, 2, (taida_val)type_str2);
-    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
     // kind (E33B-003 Cat B parity field)
-    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"kind"));
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)"kind"));
     char *kind_str = taida_str_new_copy(error_kind);
-    taida_pack_set(pack, 3, (taida_val)kind_str);
-    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, (taida_val)kind_str);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    // code
+    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)"code"));
+    taida_pack_set(pack, 3, error_code);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_INT);
+    // __type (RCB-101)
+    taida_pack_set_hash(pack, 4, (taida_val)0x84d2d84b631f799bULL);
+    char *type_str2 = taida_str_new_copy(error_type);
+    taida_pack_set(pack, 4, (taida_val)type_str2);
+    taida_pack_set_tag(pack, 4, TAIDA_TAG_STR);
     return pack;
 }
 
@@ -1185,6 +1198,9 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg) {
             return "not_found";
 #ifdef EINVAL
         case EINVAL:
+#endif
+#ifdef EBADF
+        case EBADF:
 #endif
             return "invalid";
         default:
@@ -1265,9 +1281,9 @@ static taida_val taida_make_io_error(int err_code, const char *err_msg) {
 }
 
 // ── Lax[T] runtime ────────────────────────────────────────
-// Lax is a BuchiPack with 4 fields: @(hasValue, __value, __default, __type)
+// Lax is a BuchiPack with 4 fields: @(has_value, __value, __default, __type)
 // Layout: [refcount, field_count=4, hash0, val0, hash1, val1, hash2, val2, hash3, val3]
-// Field 0: hasValue (0 or 1)
+// Field 0: has_value (0 or 1)
 // Field 1: __value
 // Field 2: __default
 // Field 3: __type (pointer to "Lax" string)
@@ -1281,7 +1297,7 @@ static const char __todo_type_str[] = "TODO";
 static const char __bytes_cursor_type_str[] = "BytesCursor";
 
 // FNV-1a hashes for Lax field names (computed with FNV-1a algorithm)
-#define HASH_HAS_VALUE 0x9e9c6dc733414d60ULL
+#define HASH_HAS_VALUE 0x175d21da0757452dULL
 #define HASH___VALUE   0x0a7fc9f13472bbe0ULL
 #define HASH___DEFAULT 0xed4fba440f8602d4ULL
 #define HASH___ERROR   0x15c3e6e41a99a6cbULL
@@ -1345,20 +1361,20 @@ static void taida_register_lax_field_names(void) {
     static int registered = 0;
     if (registered) return;
     registered = 1;
-    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue");
+    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"has_value");
     taida_register_field_name((taida_val)HASH___VALUE, (taida_val)"__value");
     taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
     taida_register_field_name((taida_val)HASH___ERROR, (taida_val)"__error");
     taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
-    // Register hasValue as Bool type for correct display (true/false instead of 0/1)
-    taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"hasValue", 4);
+    // Register has_value as Bool type for correct display (true/false instead of 0/1)
+    taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"has_value", 4);
 }
 
 taida_val taida_lax_new(taida_val value, taida_val default_value) {
     taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 1);  // hasValue = true
+    taida_pack_set(pack, 0, 1);  // has_value = true
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
     taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, value);
@@ -1383,7 +1399,7 @@ taida_val taida_lax_empty(taida_val default_value) {
     taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 0);  // hasValue = false
+    taida_pack_set(pack, 0, 0);  // has_value = false
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
     taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, default_value);
@@ -1399,8 +1415,29 @@ taida_val taida_lax_empty(taida_val default_value) {
     return pack;
 }
 
+taida_val taida_lax_empty_error(taida_val default_value, taida_val error) {
+    taida_register_lax_field_names();
+    taida_val pack = taida_pack_new(5);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
+    taida_pack_set(pack, 0, 0);
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
+    taida_pack_set(pack, 1, default_value);
+    taida_retain_and_tag_field(pack, 1, default_value);
+    taida_pack_set_hash(pack, 2, (taida_val)HASH___DEFAULT);
+    taida_pack_set(pack, 2, default_value);
+    taida_retain_and_tag_field(pack, 2, default_value);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__lax_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    taida_pack_set_hash(pack, 4, (taida_val)HASH___ERROR);
+    taida_pack_set(pack, 4, error);
+    taida_retain_and_tag_field(pack, 4, error);
+    return pack;
+}
+
 taida_val taida_lax_has_value(taida_val lax_ptr) {
-    return taida_pack_get_idx(lax_ptr, 0);  // hasValue field
+    return taida_pack_get_idx(lax_ptr, 0);  // has_value field
 }
 
 taida_val taida_lax_get_or_default(taida_val lax_ptr, taida_val fallback) {
@@ -1536,18 +1573,18 @@ static int taida_is_molten(taida_val ptr) {
 // ── Gorillax / RelaxedGorillax ──────────────────────────────
 // Gorillax is like Lax but unmold failure = program termination (gorilla).
 // RelaxedGorillax is like Gorillax but unmold failure = throw.
-// Same BuchiPack layout as Lax: @(hasValue, __value, __error, __type)
+// Same BuchiPack layout as Lax: @(has_value, __value, __error, __type)
 // Field 2 is __error (not __default like Lax).
 
 taida_val taida_gorillax_new(taida_val value) {
-    // C23B-003 reopen: ensure `__error` / `__type` / `hasValue` / `__value`
+    // C23B-003 reopen: ensure `__error` / `__type` / `has_value` / `__value`
     // field names are in the registry so `taida_pack_to_display_string_full`
     // (used by `Str[Gorillax[...]]()`) emits all four fields instead of
     // silently skipping them. The Lax registration also covers these.
     taida_register_lax_field_names();
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 1);  // hasValue = true
+    taida_pack_set(pack, 0, 1);  // has_value = true
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
     taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, value);
@@ -1571,7 +1608,7 @@ taida_val taida_gorillax_err(taida_val error) {
     taida_register_lax_field_names();  // C23B-003 reopen — register __error
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, 0);  // hasValue = false
+    taida_pack_set(pack, 0, 0);  // has_value = false
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
     taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, 0);  // __value = Unit
@@ -1588,9 +1625,9 @@ taida_val taida_gorillax_err(taida_val error) {
 
 taida_val taida_gorillax_unmold(taida_val ptr) {
     if (taida_pack_get_idx(ptr, 0)) {
-        return taida_pack_get_idx(ptr, 1);  // hasValue=true → __value
+        return taida_pack_get_idx(ptr, 1);  // has_value=true → __value
     }
-    // hasValue=false → GORILLA (program terminates)
+    // has_value=false → GORILLA (program terminates)
     fprintf(stderr, "><\n");
     exit(1);
     return 0;  // unreachable
@@ -1600,7 +1637,7 @@ taida_val taida_gorillax_unmold(taida_val ptr) {
 taida_val taida_gorillax_relax(taida_val ptr) {
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_HAS_VALUE);
-    taida_pack_set(pack, 0, taida_pack_get_idx(ptr, 0));  // hasValue
+    taida_pack_set(pack, 0, taida_pack_get_idx(ptr, 0));  // has_value
     taida_pack_set_tag(pack, 0, TAIDA_TAG_BOOL);
     taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 1, taida_pack_get_idx(ptr, 1));  // __value
@@ -1621,10 +1658,21 @@ taida_val taida_gorillax_relax(taida_val ptr) {
 
 taida_val taida_relaxed_gorillax_unmold(taida_val ptr) {
     if (taida_pack_get_idx(ptr, 0)) {
-        return taida_pack_get_idx(ptr, 1);  // hasValue=true → __value
+        return taida_pack_get_idx(ptr, 1);  // has_value=true → __value
     }
-    // hasValue=false → throw RelaxedGorillaEscaped
-    taida_val error = taida_make_error("RelaxedGorillaEscaped", "Relaxed gorilla escaped");
+    // has_value=false → throw RelaxedGorillaEscaped
+    taida_val source_error = taida_pack_get_idx(ptr, 2);
+    taida_val info = taida_error_info_pack_from_error(source_error);
+    const char *kind = "RelaxedGorillaEscaped";
+    taida_val code = 0;
+    taida_val kind_hash = taida_str_hash((taida_val)"kind");
+    taida_val code_hash = taida_str_hash((taida_val)"code");
+    if (TAIDA_IS_PACK(info)) {
+        taida_val kind_val = taida_pack_get(info, kind_hash);
+        if (taida_safe_cstr(kind_val, 1024)) kind = (const char*)kind_val;
+        if (taida_pack_has_hash(info, code_hash)) code = taida_pack_get(info, code_hash);
+    }
+    taida_val error = taida_make_error_with_kind_code("RelaxedGorillaEscaped", "Relaxed gorilla escaped", kind, code);
     return taida_throw(error);
 }
 
@@ -3137,7 +3185,7 @@ taida_val taida_pack_get_idx(taida_ptr pack_ptr, taida_val index) {
 static int taida_is_gorillax_like_pack(taida_val ptr) {
     if (!TAIDA_IS_PACK(ptr)) return 0;
     taida_val *pack = (taida_val*)ptr;
-    if (pack[1] < 4) return 0;
+    if (pack[1] != 4) return 0;
     return pack[2] == (taida_val)HASH_HAS_VALUE
         && pack[2 + 2 * 3] == (taida_val)HASH___ERROR;
 }
@@ -3237,6 +3285,14 @@ taida_val taida_error_info(taida_val source) {
     if (taida_is_gorillax_like_pack(source)) {
         if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
         taida_val error = taida_pack_get_idx(source, 2);
+        return taida_lax_new(taida_error_info_pack_from_error(error), def);
+    }
+    if (TAIDA_IS_PACK(source)
+        && taida_pack_has_hash(source, (taida_val)HASH_HAS_VALUE)
+        && taida_pack_has_hash(source, (taida_val)HASH___DEFAULT)) {
+        if (taida_pack_get_idx(source, 0)) return taida_lax_empty(def);
+        if (!taida_pack_has_hash(source, (taida_val)HASH___ERROR)) return taida_lax_empty(def);
+        taida_val error = taida_pack_get(source, (taida_val)HASH___ERROR);
         return taida_lax_new(taida_error_info_pack_from_error(error), def);
     }
     if (source == 0) return taida_lax_empty(def);
@@ -4842,14 +4898,14 @@ static taida_val taida_bytes_to_chars_offset(const char *s, size_t byte_off) {
     return chars;
 }
 
-// Build a :RegexMatch BuchiPack (`hasValue`, `full`, `groups`,
+// Build a :RegexMatch BuchiPack (`has_value`, `full`, `groups`,
 // `start`, `__type <= "RegexMatch"`). `start` is the char index of
 // the first match (not the byte index), matching the JS helper.
 static taida_val taida_regex_build_match_value(int matched,
                                                 const char *full,
                                                 taida_val start_chars,
                                                 taida_val groups_list) {
-    static uint64_t HASH_has_value_local = 0x9e9c6dc733414d60ULL; // HASH_HAS_VALUE
+    static uint64_t HASH_has_value_local = 0x175d21da0757452dULL; // HASH_HAS_VALUE
     taida_val pack = taida_pack_new(5);
     taida_pack_set_hash((taida_ptr)pack, 0, (taida_val)HASH_has_value_local);
     taida_pack_set_hash((taida_ptr)pack, 1, (taida_val)HASH_FULL);
@@ -6795,11 +6851,11 @@ taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle) {
 
 // E32B-022 (Lock-N): Lax[Int]-returning siblings of the legacy
 // `*indexOf*` helpers. The Lax pack uses Int default 0 for the
-// hasValue=false case to honour PHILOSOPHY I (no magic sentinels).
+// has_value=false case to honour PHILOSOPHY I (no magic sentinels).
 static taida_val taida_make_int_lax_found(taida_val idx) {
     taida_ptr lax = (taida_ptr)taida_lax_new(idx, 0);
     // Match `taida_lax_to_string` expectations: `taida_lax_new` /
-    // `taida_lax_empty` only stamp tags on slot 0 (hasValue, BOOL) and
+    // `taida_lax_empty` only stamp tags on slot 0 (has_value, BOOL) and
     // slot 3 (__type, STR). Slots 1 (__value) and 2 (__default) rely on
     // `taida_pack_new` which explicitly writes `TAIDA_TAG_INT (= 0)`
     // into every freshly allocated tag slot (arena / freelist /
@@ -7331,34 +7387,38 @@ taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val pr
     taida_val pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_RES___VALUE);
     taida_pack_set(pack, 0, value);
-    // retain-on-store: value が Pack/List/Closure の場合 retain
-    // value の型は不明なので magic header で判定
-    if (value > 4096 && taida_ptr_is_readable(value, sizeof(taida_val))) {
-        taida_val vtag = ((taida_val*)value)[0] & TAIDA_MAGIC_MASK;
-        if (vtag == TAIDA_PACK_MAGIC || vtag == TAIDA_LIST_MAGIC || vtag == TAIDA_CLOSURE_MAGIC) {
-            taida_retain(value);
-            // value の型タグも設定
-            if (vtag == TAIDA_PACK_MAGIC) taida_pack_set_tag(pack, 0, TAIDA_TAG_PACK);
-            else if (vtag == TAIDA_LIST_MAGIC) taida_pack_set_tag(pack, 0, TAIDA_TAG_LIST);
-            else taida_pack_set_tag(pack, 0, TAIDA_TAG_CLOSURE);
-        }
-    }
+    taida_retain_and_tag_field(pack, 0, value);
     taida_pack_set_hash(pack, 1, (taida_val)HASH_RES___PREDICATE);
     taida_pack_set(pack, 1, predicate);  // 0 = no predicate, non-zero = function pointer
     if (predicate != 0) {
         taida_pack_set_tag(pack, 1, TAIDA_TAG_CLOSURE);
         taida_retain(predicate);  // retain-on-store: closure child
+    } else {
+        taida_pack_set_tag(pack, 1, TAIDA_TAG_PACK);  // Unit @()
     }
     taida_pack_set_hash(pack, 2, (taida_val)HASH_RES_THROW);
     taida_pack_set(pack, 2, throw_val);  // 0 = success (Unit), non-zero = error
     if (throw_val != 0) {
-        taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
-        taida_retain(throw_val);  // retain-on-store: pack child
+        taida_retain_and_tag_field(pack, 2, throw_val);
+    } else {
+        taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);  // Unit @()
     }
     taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 3, (taida_val)__result_type_str);
-    // __result_type_str is static - leave tag as INT(0)
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
     return pack;
+}
+
+static taida_val taida_result_get_value(taida_val result) {
+    return taida_pack_get(result, (taida_val)HASH_RES___VALUE);
+}
+
+static taida_val taida_result_get_predicate(taida_val result) {
+    return taida_pack_get(result, (taida_val)HASH_RES___PREDICATE);
+}
+
+static taida_val taida_result_get_throw(taida_val result) {
+    return taida_pack_get(result, (taida_val)HASH_RES_THROW);
 }
 
 // Helper: check if Result has error
@@ -7366,9 +7426,9 @@ taida_val taida_result_create(taida_val value, taida_val throw_val, taida_val pr
 // 2. If predicate exists, evaluate P(value) — true = success, false = error
 // 3. No predicate + no throw = success (backward compatible)
 static taida_val taida_result_is_error_check(taida_val result) {
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw
-    taida_val pred = taida_pack_get_idx(result, 1);  // __predicate
-    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val throw_val = taida_result_get_throw(result);
+    taida_val pred = taida_result_get_predicate(result);
+    taida_val value = taida_result_get_value(result);
 
     if (throw_val != 0) {
         // If predicate exists, evaluate it even when throw is set
@@ -7391,7 +7451,7 @@ taida_val taida_result_is_ok(taida_val result) {
 }
 
 taida_val taida_result_get_or_default(taida_val result, taida_val def) {
-    if (!taida_result_is_error_check(result)) return taida_pack_get_idx(result, 0);
+    if (!taida_result_is_error_check(result)) return taida_result_get_value(result);
     return def;
 }
 
@@ -7406,7 +7466,7 @@ taida_val taida_result_map(taida_val result, taida_val fn_ptr) {
     if (taida_result_is_error_check(result)) {
         return result;  // Error: return as-is
     }
-    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val value = taida_result_get_value(result);
     taida_val new_val = taida_invoke_callback1(fn_ptr, value);
     return taida_result_create(new_val, 0, 0);  // success, no predicate
 }
@@ -7416,7 +7476,7 @@ taida_val taida_result_flat_map(taida_val result, taida_val fn_ptr) {
     if (taida_result_is_error_check(result)) {
         return result;
     }
-    taida_val value = taida_pack_get_idx(result, 0);  // __value
+    taida_val value = taida_result_get_value(result);
     taida_val new_result = taida_invoke_callback1(fn_ptr, value);
     return new_result;
 }
@@ -7428,7 +7488,7 @@ taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
     if (!taida_result_is_error_check(result)) {
         return result;  // Success: return as-is
     }
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted from idx 1 to idx 2)
+    taida_val throw_val = taida_result_get_throw(result);
     taida_val mapped = taida_invoke_callback1(fn_ptr, throw_val);
     // Snapshot the callback return tag immediately — the helpers
     // below clear and reuse it.
@@ -7474,9 +7534,9 @@ taida_val taida_result_map_error(taida_val result, taida_val fn_ptr) {
 // Result.getOrThrow() — if success return __value, otherwise throw
 taida_val taida_result_get_or_throw(taida_val result) {
     if (!taida_result_is_error_check(result)) {
-        return taida_pack_get_idx(result, 0);  // __value
+        return taida_result_get_value(result);
     }
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
+    taida_val throw_val = taida_result_get_throw(result);
     if (taida_can_throw_payload(throw_val)) {
         return taida_throw(throw_val);
     }
@@ -7532,8 +7592,18 @@ static taida_val taida_throw_to_display_string(taida_val throw_val) {
 
 taida_val taida_result_to_string(taida_val result) {
     if (!taida_result_is_error_check(result)) {
-        taida_val value = taida_pack_get_idx(result, 0);  // __value
-        taida_val value_str = taida_value_to_display_string(value);
+        taida_val value = taida_result_get_value(result);
+        taida_val value_tag = taida_pack_get_field_tag(result, (taida_val)HASH_RES___VALUE);
+        taida_val value_str;
+        if (value_tag == TAIDA_TAG_BOOL) {
+            value_str = (taida_val)taida_str_from_bool(value);
+        } else if (value_tag == TAIDA_TAG_FLOAT) {
+            double f;
+            memcpy(&f, &value, sizeof(double));
+            value_str = taida_float_to_str(f);
+        } else {
+            value_str = taida_value_to_display_string(value);
+        }
         const char *value_cstr = (const char*)value_str;
         size_t value_len = strlen(value_cstr);
         size_t need = value_len + 10;
@@ -7542,7 +7612,7 @@ taida_val taida_result_to_string(taida_val result) {
         taida_str_release(value_str);
         return (taida_val)buf;
     }
-    taida_val throw_val = taida_pack_get_idx(result, 2);  // throw (shifted to idx 2)
+    taida_val throw_val = taida_result_get_throw(result);
     if (throw_val == 0) {
         return (taida_val)taida_str_new_copy("Result(throw <= error)");
     }
@@ -7558,11 +7628,14 @@ taida_val taida_result_to_string(taida_val result) {
 
 // ── Lax methods (map, flatMap) ──────────────────────────────
 
-// Lax.map(fn) — if hasValue, apply fn to __value and return new Lax
+// Lax.map(fn) — if has_value, apply fn to __value and return new Lax
 taida_val taida_lax_map(taida_val lax_ptr, taida_val fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         // Empty Lax: return empty with same default
         taida_val def = taida_pack_get_idx(lax_ptr, 2);
+        if (taida_pack_has_hash(lax_ptr, (taida_val)HASH___ERROR)) {
+            return taida_lax_empty_error(def, taida_pack_get(lax_ptr, (taida_val)HASH___ERROR));
+        }
         return taida_lax_empty(def);
     }
     taida_val value = taida_pack_get_idx(lax_ptr, 1);
@@ -7571,10 +7644,13 @@ taida_val taida_lax_map(taida_val lax_ptr, taida_val fn_ptr) {
     return taida_lax_new(result, def);
 }
 
-// Lax.flatMap(fn) — if hasValue, apply fn (which should return Lax)
+// Lax.flatMap(fn) — if has_value, apply fn (which should return Lax)
 taida_val taida_lax_flat_map(taida_val lax_ptr, taida_val fn_ptr) {
     if (!taida_pack_get_idx(lax_ptr, 0)) {
         taida_val def = taida_pack_get_idx(lax_ptr, 2);
+        if (taida_pack_has_hash(lax_ptr, (taida_val)HASH___ERROR)) {
+            return taida_lax_empty_error(def, taida_pack_get(lax_ptr, (taida_val)HASH___ERROR));
+        }
         return taida_lax_empty(def);
     }
     taida_val value = taida_pack_get_idx(lax_ptr, 1);
@@ -7626,7 +7702,7 @@ taida_val taida_lax_to_string(taida_val lax_ptr) {
 // These functions detect the type at runtime and dispatch to the correct impl.
 // Type detection uses BuchiPack field_count + first field hash:
 //   - field_count == 4, hash0 == HASH_RES___VALUE → Result (__value, __predicate, throw, __type)
-//   - field_count == 4, hash0 == HASH_HAS_VALUE   → Lax (hasValue, __value, __default, __type)
+//   - field_count == 4, hash0 == HASH_HAS_VALUE   → Lax (has_value, __value, __default, __type)
 //   - otherwise → List (check via capacity/length heuristic)
 // Note: Optional (fc==2) was abolished in v0.8.0.
 // taida_monadic_field_count returns stable type IDs:
@@ -7648,13 +7724,13 @@ static int taida_monadic_field_count(taida_val ptr) {
     if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 3)) return 0;
     taida_val *obj = (taida_val*)ptr;
     taida_val fc = obj[1];
-    // Both Result and Lax are now fc=4; distinguish by hash0
-    if (fc == 4) {
+    // Result is fc=4; Lax may be fc=4 or fc=5 when it carries ErrorInfo metadata.
+    if (fc == 4 || fc == 5) {
         taida_val hash0 = obj[2];
         if (hash0 > 0x10000 || hash0 < 0) {
             // Result (fc=4, hash0=HASH_RES___VALUE) → return 3 for compat
-            if (hash0 == (taida_val)HASH_RES___VALUE) return 3;
-            // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE) → return 4
+            if (fc == 4 && hash0 == (taida_val)HASH_RES___VALUE) return 3;
+            // Lax/Gorillax/RelaxedGorillax (hash0=HASH_HAS_VALUE) → return 4
             if (hash0 == (taida_val)HASH_HAS_VALUE) return 4;
         }
     }
@@ -7915,6 +7991,11 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         taida_val field_val  = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
+        if (fc >= 5
+            && pack[2 + 2 * 3] == (taida_val)HASH___DEFAULT
+            && field_hash == (taida_val)HASH___ERROR) {
+            continue;
+        }
         // NOTE: Unlike taida_pack_to_display_string, we do NOT skip __ fields
         if (count > 0) {
             const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
@@ -7928,11 +8009,11 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         // Per-field tag takes precedence over the global registry. The
         // registry is only consulted when the per-field tag is the default
         // zero (= TAIDA_TAG_INT) AND the registry entry explicitly marks
-        // the field as Bool (legacy pattern used by Lax's `hasValue`).
+        // the field as Bool (legacy pattern used by Lax's `has_value`).
         int ftype = taida_lookup_field_type(field_hash);
         // Note: taida_lookup_field_type uses tag *4* to mean Bool (legacy
         // convention pre-dating C21B-seed-07). Keep that mapping intact so
-        // Lax's `hasValue` field continues to print `true`/`false`.
+        // Lax's `has_value` field continues to print `true`/`false`.
         int render_bool   = (field_tag == TAIDA_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float  = (field_tag == TAIDA_TAG_FLOAT);
         // C23B-003 reopen: `__error == 0` with a PACK-tagged slot represents
@@ -7948,7 +8029,7 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
         // fell into `taida_value_to_debug_string_full(1)`, which
         // dereferenced `(char*)1` and segfaulted on
         // `taida_read_cstr_len_safe`. The guard uses
-        // `!render_bool` to keep Lax's `hasValue` (INT tag +
+        // `!render_bool` to keep Lax's `has_value` (INT tag +
         // legacy ftype-4 registry hint) rendering as `true`/`false`.
         int render_int = (field_tag == TAIDA_TAG_INT) && !render_bool && !render_unit_pack;
         // C24-B: explicit STR branch — symmetric with WASM. Without it,
@@ -8032,7 +8113,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
     if (taida_is_buchi_pack(val)) {
         int fc = taida_monadic_field_count(val);
         if (fc == 3) return taida_result_to_string(val);
-        if (fc == 4) {
+        if (fc == 4 || fc == 5) {
             int gtype = taida_detect_gorillax_type(val);
             if (gtype == 1) return taida_gorillax_to_string(val);
             if (gtype == 2) return taida_relaxed_gorillax_to_string(val);
@@ -8067,7 +8148,7 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     if (taida_is_buchi_pack(val)) {
         int fc = taida_monadic_field_count(val);
         if (fc == 3) return taida_result_to_string(val);
-        if (fc == 4) return taida_lax_to_string(val);
+        if (fc == 4 || fc == 5) return taida_lax_to_string(val);
         return taida_pack_to_display_string(val);
     }
 
@@ -8168,7 +8249,7 @@ taida_val taida_polymorphic_get_or_default(taida_val obj, taida_val def) {
 taida_val taida_polymorphic_has_value(taida_val obj) {
     if (obj == 0 || obj < 4096) return 0;
     int fc = taida_monadic_field_count(obj);
-    if (fc == 4) return taida_pack_get_idx(obj, 0);     // Lax: hasValue field
+    if (fc == 4) return taida_pack_get_idx(obj, 0);     // Lax: has_value field
     return 0;
 }
 
@@ -8773,46 +8854,46 @@ taida_val taida_generic_unmold(taida_val ptr) {
         taida_val field_count = obj[1];
         taida_val hash0 = obj[2];
 
-        // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw
+        // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw.
         if (field_count == 4 && hash0 == (taida_val)HASH_RES___VALUE) {
-        taida_val value = taida_pack_get_idx(ptr, 0);       // __value
-        taida_val pred = taida_pack_get_idx(ptr, 1);         // __predicate
-        taida_val throw_val = taida_pack_get_idx(ptr, 2);    // throw
+            taida_val value = taida_result_get_value(ptr);
+            taida_val pred = taida_result_get_predicate(ptr);
+            taida_val throw_val = taida_result_get_throw(ptr);
 
-        // If throw is set explicitly, check predicate first
-        if (throw_val != 0) {
+            // If throw is set explicitly, check predicate first
+            if (throw_val != 0) {
+                if (pred != 0) {
+                    taida_val pred_result = taida_invoke_callback1(pred, value);
+                    if (!pred_result) {
+                        // Predicate failed — throw the error
+                        if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+                        taida_val error = taida_make_error("ResultError", "Result predicate failed");
+                        return taida_throw(error);
+                    }
+                    // Predicate passed even with throw set — return value
+                    return value;
+                }
+                // No predicate, throw is set — throw
+                if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
+                taida_val error = taida_make_error("ResultError", "Result error");
+                return taida_throw(error);
+            }
+
+            // Evaluate predicate if present (no throw set)
             if (pred != 0) {
                 taida_val pred_result = taida_invoke_callback1(pred, value);
-                if (!pred_result) {
-                    // Predicate failed — throw the error
-                    if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-                    taida_val error = taida_make_error("ResultError", "Result predicate failed");
-                    return taida_throw(error);
-                }
-                // Predicate passed even with throw set — return value
-                return value;
+                if (pred_result) return value;  // success
+                // Predicate failed — throw default error
+                taida_val error = taida_make_error("ResultError", "Result predicate failed");
+                return taida_throw(error);
             }
-            // No predicate, throw is set — throw
-            if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-            taida_val error = taida_make_error("ResultError", "Result error");
-            return taida_throw(error);
-        }
 
-        // Evaluate predicate if present (no throw set)
-        if (pred != 0) {
-            taida_val pred_result = taida_invoke_callback1(pred, value);
-            if (pred_result) return value;  // success
-            // Predicate failed — throw default error
-            taida_val error = taida_make_error("ResultError", "Result predicate failed");
-            return taida_throw(error);
+            // No predicate, no throw — success
+            return value;
         }
-
-        // No predicate, no throw — success
-        return value;
-    }
 
     // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE)
-    if (field_count == 4 && hash0 == (taida_val)HASH_HAS_VALUE) {
+    if ((field_count == 4 || field_count == 5) && hash0 == (taida_val)HASH_HAS_VALUE) {
         int gtype = taida_detect_gorillax_type(ptr);
         if (gtype == 1) return taida_gorillax_unmold(ptr);
         if (gtype == 2) return taida_relaxed_gorillax_unmold(ptr);
@@ -9586,7 +9667,7 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
         case 'E': {
             // C16: E{EnumName|Variant1,Variant2,...}
             // JSON String matching a variant -> Int(ordinal).
-            // Anything else -> Lax[Enum] empty (hasValue=false, __value=0, __default=0).
+            // Anything else -> Lax[Enum] empty (has_value=false, __value=0, __default=0).
             if (d[1] != '{') { *desc = d + 1; return taida_lax_empty(0); }
             d += 2;  // skip "E{"
 
@@ -9635,7 +9716,7 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
             if (matched) {
                 return ordinal;
             }
-            // Mismatch / non-string / missing -> Lax[Enum] with hasValue=false.
+            // Mismatch / non-string / missing -> Lax[Enum] with has_value=false.
             // __value = __default = 0 (first variant ordinal) per C16 design.
             return taida_lax_empty(0);
         }
@@ -9649,14 +9730,14 @@ static taida_val json_apply_schema(json_val *jval, const char **desc) {
 // Main entry point: JSON[raw, Schema]() -> Lax[T]
 // raw_ptr: C string (the raw JSON)
 // schema_ptr: C string (the schema descriptor)
-// Returns: Lax BuchiPack (hasValue=true if parse succeeds, false on error)
+// Returns: Lax BuchiPack (has_value=true if parse succeeds, false on error)
 taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     const char *raw = (const char *)raw_ptr;
     const char *schema = (const char *)schema_ptr;
 
     if (!raw || !schema) {
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: missing raw value or schema", "parse"));
     }
 
     // Parse JSON
@@ -9665,7 +9746,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (!*p) {
         // Empty string -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: empty input", "parse"));
     }
 
     const char *before_parse = p;
@@ -9676,7 +9757,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (p == before_parse) {
         // Parser didn't consume anything -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: invalid input", "parse"));
     }
 
     // Check if there's trailing non-whitespace (malformed JSON)
@@ -9684,7 +9765,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (*p != '\0') {
         // Trailing garbage -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: trailing input", "parse"));
     }
 
     // Apply schema
@@ -10094,7 +10175,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
     // trip through the slot-tag path; no 0-default ambiguity).
     int lax_default_force_type = 0;
     if (is_monadic && monadic_kind == 4) {
-        // Lax / Gorillax / RelaxedGorillax share the `hasValue` layout.
+        // Lax / Gorillax / RelaxedGorillax share the `has_value` layout.
         // Distinguish Lax (has `__default`) vs Gorillax (has `__error`)
         // by checking slot 2's hash.
         if (fc >= 3 && pack[2 + 2 * 3] == (taida_val)HASH___DEFAULT) {
@@ -10137,6 +10218,9 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         if (!fname) continue;
         // Always skip __type (internal metadata, not user data).
         if (strcmp(fname, "__type") == 0) continue;
+        if (monadic_kind == 4 && fc >= 3
+            && pack[2 + 2 * 3] == (taida_val)HASH___DEFAULT
+            && strcmp(fname, "__error") == 0) continue;
         // Non-monadic packs hide all other __ fields.
         // Monadic packs (Lax/Gorillax/RelaxedGorillax/Result) expose them
         // so that jsonEncode output matches the interpreter.

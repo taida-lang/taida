@@ -1,8 +1,32 @@
 // ── taida-lang/os package — Native runtime ────────────────
 
-// Helper: build os Result success BuchiPack @(ok=true, code=0, message="")
+// Helper: build os Result pack. OS Result constructors preserve the
+// interpreter's field order: __value, throw, __predicate, __type.
+static taida_val taida_os_result_create(taida_val inner, taida_val throw_val) {
+    taida_register_result_field_names();
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_RES___VALUE);
+    taida_pack_set(pack, 0, inner);
+    taida_retain_and_tag_field(pack, 0, inner);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH_RES_THROW);
+    taida_pack_set(pack, 1, throw_val);
+    if (throw_val != 0) {
+        taida_retain_and_tag_field(pack, 1, throw_val);
+    } else {
+        taida_pack_set_tag(pack, 1, TAIDA_TAG_PACK);
+    }
+    taida_pack_set_hash(pack, 2, (taida_val)HASH_RES___PREDICATE);
+    taida_pack_set(pack, 2, 0);
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_PACK);
+    taida_pack_set_hash(pack, 3, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 3, (taida_val)__result_type_str);
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    return pack;
+}
+
+// Helper: build os Result success BuchiPack.
 static taida_val taida_os_result_success(taida_val inner) {
-    return taida_result_create(inner, 0, 0);
+    return taida_os_result_create(inner, 0);
 }
 
 // Helper: build os Result failure with IoError
@@ -31,7 +55,7 @@ static taida_val taida_os_result_failure(int err_code, const char *err_msg) {
     taida_pack_set(inner, 3, (taida_val)kind_copy);
 
     taida_val error = taida_make_io_error(err_code, message);
-    return taida_result_create(inner, error, 0);
+    return taida_os_result_create(inner, error);
 }
 
 // Helper: build os ok inner @(ok=true, code=0, message="")
@@ -89,17 +113,22 @@ static taida_val taida_os_extract_wait_code(int status) {
 }
 
 // ── Read[path]() → Lax[Str] ──────────────────────────────
+static taida_val taida_os_read_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "Read error", kind, 0);
+    return taida_lax_empty_error((taida_val)"", error);
+}
+
 taida_val taida_os_read(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty((taida_val)"");
+    if (!path) return taida_os_read_lax_error("invalid");
 
     // Check file size (64MB limit)
     struct stat st;
-    if (stat(path, &st) != 0) return taida_lax_empty((taida_val)"");
-    if (st.st_size > 64 * 1024 * 1024) return taida_lax_empty((taida_val)"");
+    if (stat(path, &st) != 0) return taida_os_read_lax_error(taida_os_error_kind(errno, strerror(errno)));
+    if (st.st_size > 64 * 1024 * 1024) return taida_os_read_lax_error("too_large");
 
     FILE *f = fopen(path, "r");
-    if (!f) return taida_lax_empty((taida_val)"");
+    if (!f) return taida_os_read_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     taida_val size = st.st_size;
     char *buf = taida_str_alloc(size);
@@ -111,16 +140,21 @@ taida_val taida_os_read(taida_val path_ptr) {
 }
 
 // ── readBytes(path) → Lax[Bytes] ──────────────────────────
+static taida_val taida_os_read_bytes_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "ReadBytes error", kind, 0);
+    return taida_lax_empty_error(taida_bytes_default_value(), error);
+}
+
 taida_val taida_os_read_bytes(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty(taida_bytes_default_value());
+    if (!path) return taida_os_read_bytes_lax_error("invalid");
 
     struct stat st;
-    if (stat(path, &st) != 0) return taida_lax_empty(taida_bytes_default_value());
-    if (st.st_size > 64 * 1024 * 1024) return taida_lax_empty(taida_bytes_default_value());
+    if (stat(path, &st) != 0) return taida_os_read_bytes_lax_error(taida_os_error_kind(errno, strerror(errno)));
+    if (st.st_size > 64 * 1024 * 1024) return taida_os_read_bytes_lax_error("too_large");
 
     FILE *f = fopen(path, "rb");
-    if (!f) return taida_lax_empty(taida_bytes_default_value());
+    if (!f) return taida_os_read_bytes_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     taida_val size = st.st_size;
     unsigned char *buf = NULL;
@@ -128,7 +162,7 @@ taida_val taida_os_read_bytes(taida_val path_ptr) {
         buf = (unsigned char*)malloc((size_t)size);
         if (!buf) {
             fclose(f);
-            return taida_lax_empty(taida_bytes_default_value());
+            return taida_os_read_bytes_lax_error("other");
         }
     }
 
@@ -152,28 +186,34 @@ taida_val taida_os_read_bytes(taida_val path_ptr) {
 //   - offset >= file size         → Lax success (empty Bytes, short read)
 //   - offset + len > file size    → Lax success (truncated tail)
 //   - IO error                    → Lax failure
+static taida_val taida_os_read_bytes_at_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "ReadBytesAt error", kind, 0);
+    return taida_lax_empty_error(taida_bytes_default_value(), error);
+}
+
 taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val len) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty(taida_bytes_default_value());
-    if (offset < 0 || len < 0) return taida_lax_empty(taida_bytes_default_value());
-    if (len > 64 * 1024 * 1024) return taida_lax_empty(taida_bytes_default_value());
+    if (!path) return taida_os_read_bytes_at_lax_error("invalid");
+    if (offset < 0 || len < 0) return taida_os_read_bytes_at_lax_error("invalid");
+    if (len > 64 * 1024 * 1024) return taida_os_read_bytes_at_lax_error("too_large");
     if (len == 0) {
         taida_val empty = taida_bytes_from_raw(NULL, 0);
         return taida_lax_new(empty, taida_bytes_default_value());
     }
 
     FILE *f = fopen(path, "rb");
-    if (!f) return taida_lax_empty(taida_bytes_default_value());
+    if (!f) return taida_os_read_bytes_at_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     if (fseeko(f, (off_t)offset, SEEK_SET) != 0) {
+        int saved_errno = errno;
         fclose(f);
-        return taida_lax_empty(taida_bytes_default_value());
+        return taida_os_read_bytes_at_lax_error(taida_os_error_kind(saved_errno, strerror(saved_errno)));
     }
 
     unsigned char *buf = (unsigned char*)malloc((size_t)len);
     if (!buf) {
         fclose(f);
-        return taida_lax_empty(taida_bytes_default_value());
+        return taida_os_read_bytes_at_lax_error("other");
     }
 
     // Tolerate short reads at EOF: loop fread until full or EOF.
@@ -188,7 +228,7 @@ taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val
 
     if (io_err) {
         free(buf);
-        return taida_lax_empty(taida_bytes_default_value());
+        return taida_os_read_bytes_at_lax_error("other");
     }
 
     taida_val bytes = taida_bytes_from_raw(buf, (taida_val)filled);
@@ -201,13 +241,18 @@ static int taida_cmp_strings(const void *a, const void *b) {
     return strcmp(*(const char**)a, *(const char**)b);
 }
 
+static taida_val taida_os_list_dir_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "ListDir error", kind, 0);
+    return taida_lax_empty_error(taida_list_new(), error);
+}
+
 // ── ListDir[path]() → Lax[@[Str]] ────────────────────────
 taida_val taida_os_list_dir(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty(taida_list_new());
+    if (!path) return taida_os_list_dir_lax_error("invalid");
 
     DIR *dir = opendir(path);
-    if (!dir) return taida_lax_empty(taida_list_new());
+    if (!dir) return taida_os_list_dir_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     // Collect entries, then sort
     taida_val capacity = 64;
@@ -229,7 +274,7 @@ taida_val taida_os_list_dir(taida_val path_ptr) {
                 for (taida_val i = 0; i < count; i++) taida_str_release((taida_val)names[i]);
                 free(names);
                 closedir(dir);
-                return taida_lax_empty(taida_list_new());
+                return taida_os_list_dir_lax_error("too_large");
             }
             capacity *= 2;
             TAIDA_REALLOC(names, taida_safe_mul((size_t)capacity, sizeof(char*), "listDir_grow"), "listDir");
@@ -253,11 +298,7 @@ taida_val taida_os_list_dir(taida_val path_ptr) {
     return taida_lax_new(list, taida_list_new());
 }
 
-// ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
-taida_val taida_os_stat(taida_val path_ptr) {
-    const char *path = (const char*)path_ptr;
-
-    // Build default stat pack
+static taida_val taida_os_stat_default_pack(void) {
     taida_val default_pack = taida_pack_new(3);
     taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
     taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
@@ -268,11 +309,27 @@ taida_val taida_os_stat(taida_val path_ptr) {
     taida_pack_set(default_pack, 1, (taida_val)"");
     taida_pack_set_hash(default_pack, 2, (taida_val)is_dir_hash);
     taida_pack_set(default_pack, 2, 0);
+    return default_pack;
+}
 
-    if (!path) return taida_lax_empty(default_pack);
+static taida_val taida_os_stat_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "Stat error", kind, 0);
+    return taida_lax_empty_error(taida_os_stat_default_pack(), error);
+}
+
+// ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
+taida_val taida_os_stat(taida_val path_ptr) {
+    const char *path = (const char*)path_ptr;
+
+    if (!path) return taida_os_stat_lax_error("invalid");
 
     struct stat st;
-    if (stat(path, &st) != 0) return taida_lax_empty(default_pack);
+    if (stat(path, &st) != 0) return taida_os_stat_lax_error(taida_os_error_kind(errno, strerror(errno)));
+
+    taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
+    taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
+    taida_val is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
+    taida_val default_pack = taida_os_stat_default_pack();
 
     // Format modified time as RFC3339/UTC
     struct tm tm_buf;
@@ -307,7 +364,7 @@ taida_val taida_os_stat(taida_val path_ptr) {
 // polymorphic `.toString()` / stdout prints "true"/"false" rather
 // than "1"/"0".
 static taida_val taida_os_result_success_bool(taida_val b) {
-    taida_val r = taida_result_create(b ? 1 : 0, 0, 0);
+    taida_val r = taida_os_result_success(b ? 1 : 0);
     taida_pack_set_tag(r, 0, TAIDA_TAG_BOOL);
     return r;
 }
@@ -329,11 +386,16 @@ taida_val taida_os_exists(taida_val path_ptr) {
 }
 
 // ── EnvVar[name]() → Lax[Str] ─────────────────────────────
+static taida_val taida_os_env_var_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "EnvVar error", kind, 0);
+    return taida_lax_empty_error((taida_val)"", error);
+}
+
 taida_val taida_os_env_var(taida_val name_ptr) {
     const char *name = (const char*)name_ptr;
-    if (!name) return taida_lax_empty((taida_val)"");
+    if (!name) return taida_os_env_var_lax_error("invalid");
     const char *val = getenv(name);
-    if (!val) return taida_lax_empty((taida_val)"");
+    if (!val) return taida_os_env_var_lax_error("not_found");
     char *copy = taida_str_new_copy(val);
     return taida_lax_new((taida_val)copy, (taida_val)"");
 }
@@ -942,4 +1004,3 @@ taida_val taida_os_argv(void) {
 #include <signal.h>   // NB3-5: SIGPIPE suppression for peer-close resilience
 #include <dlfcn.h>    // NET5-4a: dlopen for OpenSSL TLS support
 #include <stdbool.h>  // NET7-8a: bool type for quiche FFI
-

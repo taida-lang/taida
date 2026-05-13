@@ -10,7 +10,7 @@
 ///   3. Three-way parity -- compile_*.td files tested across all three backends
 mod common;
 
-use common::{normalize, run_interpreter_normalized, taida_bin};
+use common::{normalize, run_interpreter_normalized, taida_bin, wasmtime_bin};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -310,6 +310,88 @@ fn run_native_src(source: &str, label: &str) -> Option<String> {
     out
 }
 
+fn run_wasm_full_src(
+    source: &str,
+    label: &str,
+    wasmtime_args: &[&str],
+) -> Result<Option<String>, String> {
+    let Some(wasmtime) = wasmtime_bin() else {
+        return Err(format!(
+            "wasmtime not available for required wasm-full parity {}",
+            label
+        ));
+    };
+    let td_path = unique_temp_path("taida_parity_wasm_full", label, "td");
+    let wasm_path = unique_temp_path("taida_parity_wasm_full", label, "wasm");
+    fs::write(&td_path, source).map_err(|e| format!("write source: {}", e))?;
+
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-full")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .map_err(|e| format!("spawn wasm-full build: {}", e))?;
+    let _ = fs::remove_file(&td_path);
+    if !build.status.success() {
+        let _ = fs::remove_file(&wasm_path);
+        return Err(String::from_utf8_lossy(&build.stderr).trim().to_string());
+    }
+
+    let mut cmd = Command::new(wasmtime);
+    cmd.arg("run");
+    for arg in wasmtime_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("--").arg(&wasm_path);
+    let run = cmd.output().map_err(|e| format!("spawn wasmtime: {}", e))?;
+    let _ = fs::remove_file(&wasm_path);
+    if !run.status.success() {
+        return Err(String::from_utf8_lossy(&run.stderr).trim().to_string());
+    }
+
+    Ok(Some(normalize(&String::from_utf8_lossy(&run.stdout))))
+}
+
+fn run_wasm_min_src(source: &str, label: &str) -> Result<Option<String>, String> {
+    let Some(wasmtime) = wasmtime_bin() else {
+        return Err(format!(
+            "wasmtime not available for required wasm-min parity {}",
+            label
+        ));
+    };
+    let td_path = unique_temp_path("taida_parity_wasm_min", label, "td");
+    let wasm_path = unique_temp_path("taida_parity_wasm_min", label, "wasm");
+    fs::write(&td_path, source).map_err(|e| format!("write source: {}", e))?;
+
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-min")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .map_err(|e| format!("spawn wasm-min build: {}", e))?;
+    let _ = fs::remove_file(&td_path);
+    if !build.status.success() {
+        let _ = fs::remove_file(&wasm_path);
+        return Err(String::from_utf8_lossy(&build.stderr).trim().to_string());
+    }
+
+    let run = Command::new(wasmtime)
+        .arg("run")
+        .arg(&wasm_path)
+        .output()
+        .map_err(|e| format!("spawn wasmtime: {}", e))?;
+    let _ = fs::remove_file(&wasm_path);
+    if !run.status.success() {
+        return Err(String::from_utf8_lossy(&run.stderr).trim().to_string());
+    }
+
+    Ok(Some(normalize(&String::from_utf8_lossy(&run.stdout))))
+}
+
 fn assert_backend_parity_for_source(source: &str, label: &str) {
     let interp = run_interpreter_src(source, label)
         .unwrap_or_else(|| panic!("interpreter failed for {}", label));
@@ -327,6 +409,21 @@ fn assert_backend_parity_for_source(source: &str, label: &str) {
         assert_eq!(
             interp, js,
             "interpreter/js mismatch for source case {}",
+            label
+        );
+    }
+}
+
+fn assert_full_backend_parity_for_source(source: &str, label: &str, wasmtime_args: &[&str]) {
+    let interp = run_interpreter_src(source, label)
+        .unwrap_or_else(|| panic!("interpreter failed for {}", label));
+    assert_backend_parity_for_source(source, label);
+    if let Some(wasm) =
+        run_wasm_full_src(source, label, wasmtime_args).expect("wasm-full parity run")
+    {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-full mismatch for source case {}",
             label
         );
     }
@@ -429,6 +526,58 @@ fn run_wasm_min_build_error(td_path: &Path, label: &str) -> Option<String> {
         return None;
     }
     Some(normalize(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn run_wasm_full_build_error(td_path: &Path, label: &str) -> Option<String> {
+    let wasm_path = unique_temp_path("taida_parity_wasm_full_err", label, "wasm");
+    let output = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-full")
+        .arg(td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .ok()?;
+    let _ = fs::remove_file(&wasm_path);
+    if output.status.success() {
+        return None;
+    }
+    Some(normalize(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn assert_all_backend_paths_reject_source(source: &str, label: &str, expected: &str) {
+    let td_path = unique_temp_path("taida_parity_reject", label, "td");
+    fs::write(&td_path, source).expect("write negative parity source");
+
+    let backends: [(&str, Option<String>); 4] = [
+        ("interpreter", run_interpreter_error(&td_path)),
+        ("js", run_js_build_error(&td_path, label)),
+        ("native", run_native_build_error(&td_path, label)),
+        ("wasm-full", run_wasm_full_build_error(&td_path, label)),
+    ];
+
+    let _ = fs::remove_file(&td_path);
+
+    for (backend, err) in backends {
+        let err =
+            err.unwrap_or_else(|| panic!("{}: {} unexpectedly accepted source", label, backend));
+        assert!(
+            err.contains(expected),
+            "{}: {} error should contain {}, got: {}",
+            label,
+            backend,
+            expected,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_str_plus_non_str_rejected_all_backend_paths() {
+    let source = r#"
+stdout("prefix " + 42)
+"#;
+    assert_all_backend_paths_reject_source(source, "str_plus_int_rejected", "Cannot");
 }
 
 fn assert_e32b019_e1605_rejected_4backend(label: &str, source: &str) {
@@ -1543,7 +1692,7 @@ writeRes <= writeBytes("{path}", payload)
 stdout(writeRes.isSuccess().toString())
 readRes <= readBytes("{path}")
 readRes ]=> readResV
-stdout(readRes.hasValue.toString())
+stdout(readRes.has_value.toString())
 decoded <= Utf8Decode[readResV]()
 decoded ]=> text
 stdout(text)
@@ -1631,18 +1780,18 @@ writeRes <= writeBytes("{path}", payload)
 stdout(writeRes.isSuccess().toString())
 chunkA <= readBytesAt("{path}", 0, 4)
 chunkA ]=> chunkAV
-stdout(chunkA.hasValue.toString())
+stdout(chunkA.has_value.toString())
 decA <= Utf8Decode[chunkAV]()
 decA ]=> textA
 stdout(textA)
 chunkB <= readBytesAt("{path}", 12, 8)
 chunkB ]=> chunkBV
-stdout(chunkB.hasValue.toString())
+stdout(chunkB.has_value.toString())
 decB <= Utf8Decode[chunkBV]()
 decB ]=> textB
 stdout(textB)
 chunkC <= readBytesAt("{path}", 32, 4)
-stdout(chunkC.hasValue.toString())
+stdout(chunkC.has_value.toString())
 "#,
             path = path_s
         );
@@ -1796,7 +1945,7 @@ recvRes <= socketRecvBytes(cV.socket)
 recvRes ]=> r
 r ]=> rV
 stdout(sV.bytesSent.toString())
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 decoded <= Utf8Decode[rV]()
 decoded ]=> msg
 stdout(msg)
@@ -1895,7 +2044,7 @@ c ]=> cV
 closeListener <= listenerClose(lV.listener)
 closeListener ]=> lc
 lc ]=> lcV
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 stdout(msg)
 stdout(sV.bytesSent.toString())
 stdout(cV.ok.toString())
@@ -2014,7 +2163,7 @@ closeRes <= udpClose(sV.socket)
 closeRes ]=> closed
 closed ]=> closedV
 stdout(sentV.bytesSent.toString())
-stdout(recv.hasValue.toString())
+stdout(recv.has_value.toString())
 stdout(msg)
 stdout(closedV.ok.toString())
 "#
@@ -2238,7 +2387,7 @@ conn ]=> c
 c ]=> cV
 recvRes <= socketRecv(cV.socket, 50)
 recvRes ]=> r
-stdout(r.hasValue.toString())
+stdout(r.has_value.toString())
 "#
         );
 
@@ -2601,7 +2750,7 @@ fn test_https_get_loopback_three_way_parity() {
             r#"
 resp <= HttpGet["https://127.0.0.1:{}/"]()
 resp ]=> out
-stdout(out.hasValue.toString())
+stdout(out.has_value.toString())
 out ]=> resOut
 stdout(resOut.status.toString())
 "#,
@@ -2880,7 +3029,7 @@ fn test_endian_pack_unpack_three_way_parity() {
 
     let source = r#"
 u16be <= U16BE[513]()
-stdout(u16be.hasValue.toString())
+stdout(u16be.has_value.toString())
 u16be ]=> b16be
 u16be_dec <= U16BEDecode[b16be]()
 u16be_dec ]=> v16be
@@ -2893,7 +3042,7 @@ u16le_dec ]=> v16le
 stdout(v16le.toString())
 
 u32be <= U32BE[16909060]()
-stdout(u32be.hasValue.toString())
+stdout(u32be.has_value.toString())
 u32be ]=> b32be
 u32be_dec <= U32BEDecode[b32be]()
 u32be_dec ]=> v32be
@@ -2906,19 +3055,19 @@ u32le_dec ]=> v32le
 stdout(v32le.toString())
 
 bad16 <= U16BE[-1]()
-stdout(bad16.hasValue.toString())
+stdout(bad16.has_value.toString())
 bad32 <= U32BE[-1]()
-stdout(bad32.hasValue.toString())
+stdout(bad32.has_value.toString())
 
 shortLax <= Bytes[@[1]]()
 shortLax ]=> short
 badDec16 <= U16BEDecode[short]()
-stdout(badDec16.hasValue.toString())
+stdout(badDec16.has_value.toString())
 
 threeLax <= Bytes[@[1, 2, 3]]()
 threeLax ]=> three
 badDec32 <= U32LEDecode[three]()
-stdout(badDec32.hasValue.toString())
+stdout(badDec32.has_value.toString())
 "#;
 
     for backend in backends {
@@ -3051,7 +3200,7 @@ stdout(msg2.getOrDefault("bad"))
 stdout(BytesCursorRemaining[cursor4]().toString())
 
 overflow <= BytesCursorTake[cursor4, 1]()
-stdout(overflow.hasValue.toString())
+stdout(overflow.has_value.toString())
 "#;
 
     for backend in backends {
@@ -3592,6 +3741,161 @@ matched <= Filter[items, _ x = x.title.contains("renamed")]()
 stdout(matched.length().toString())
 "#;
     assert_backend_parity_for_source(source, "contains_field_access_lambda_three_way");
+}
+
+#[test]
+fn test_bidirectional_named_identity_lax_map_full_backend_parity() {
+    let source = r#"
+identity x =
+  x
+obj <= Lax[42]()
+result: Lax[Int] <= obj.map(identity)
+stdout(result.getOrDefault(0).toString())
+"#;
+    assert_full_backend_parity_for_source(source, "bidi_named_identity_lax_map", &[]);
+}
+
+#[test]
+fn test_bidirectional_direct_lambda_full_backend_parity() {
+    let source = r#"
+takes fn: Int => :Int =
+  fn(1)
+=> :Int
+stdout(takes(_ x = x).toString())
+"#;
+    assert_full_backend_parity_for_source(source, "bidi_direct_lambda", &[]);
+}
+
+#[test]
+fn test_bidirectional_fold_reduce_full_backend_parity() {
+    let source = r#"
+xs <= @[1, 2, 3]
+folded <= xs.fold(0, _ acc x = acc + x)
+reduced <= xs.reduce(0, _ acc x = acc + x)
+stdout(folded.toString())
+stdout(reduced.toString())
+"#;
+    assert_full_backend_parity_for_source(source, "bidi_fold_reduce", &[]);
+}
+
+#[test]
+fn test_bidirectional_direct_lambda_rejected_all_backend_paths() {
+    let source = r#"
+takes fn: Int => :Int =
+  fn(1)
+=> :Int
+result <= takes(_ x = x.toString())
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_direct_lambda_reject", "[E1506]");
+}
+
+#[test]
+fn test_bidirectional_fold_callback_rejected_all_backend_paths() {
+    let source = r#"
+badFn acc: Str x: Int =
+  acc + x.toString()
+=> :Str
+xs <= @[1, 2, 3]
+bad <= xs.fold(0, badFn)
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_fold_callback_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_shadowed_direct_function_rejected_all_backend_paths() {
+    let source = r#"
+identity x =
+  x
+takes fn: Int => :Int =
+  fn(1)
+=> :Int
+main =
+  identity <= 42
+  result <= takes(identity)
+  stdout(result.toString())
+=> :Int
+main()
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_shadow_direct_reject", "[E1506]");
+}
+
+#[test]
+fn test_bidirectional_shadowed_method_function_rejected_all_backend_paths() {
+    let source = r#"
+identity x =
+  x
+main =
+  identity <= "shadowed"
+  obj <= Lax[42]()
+  result: Lax[Int] <= obj.map(identity)
+  stdout(result.getOrDefault(0).toString())
+=> :Int
+main()
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_shadow_method_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_shadowed_fold_function_rejected_all_backend_paths() {
+    let source = r#"
+addFn acc x =
+  acc
+main =
+  addFn <= 42
+  xs <= @[1, 2, 3]
+  bad <= xs.fold(0, addFn)
+  stdout(bad.toString())
+=> :Int
+main()
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_shadow_fold_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_unannotated_arithmetic_body_rejected_all_backend_paths() {
+    let source = r#"
+addOne x =
+  x + 1
+obj1 <= Lax[5]()
+obj2 <= Lax[3.14]()
+result1: Lax[Int] <= obj1.map(addOne)
+result2: Lax[Float] <= obj2.map(addOne)
+stdout(result1.getOrDefault(0).toString())
+stdout(result2.getOrDefault(0.0).toString())
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_arithmetic_body_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_unannotated_concat_body_rejected_all_backend_paths() {
+    let source = r#"
+bang x =
+  x + "!"
+obj <= Lax["a"]()
+result: Lax[Str] <= obj.map(bang)
+stdout(result.getOrDefault("").toString())
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_concat_body_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_fold_reduce_wasm_min_parity() {
+    let source = r#"
+xs <= @[1, 2, 3]
+folded <= xs.fold(0, _ acc x = acc + x)
+reduced <= xs.reduce(0, _ acc x = acc + x)
+stdout(folded.toString())
+stdout(reduced.toString())
+"#;
+    let interp = run_interpreter_src(source, "bidi_fold_reduce_wasm_min")
+        .expect("interpreter should run fold/reduce fixture");
+    let wasm = run_wasm_min_src(source, "bidi_fold_reduce_wasm_min")
+        .expect("wasm-min parity run")
+        .expect("wasm-min should produce stdout");
+    assert_eq!(
+        interp, wasm,
+        "interpreter/wasm-min mismatch for fold/reduce method form"
+    );
 }
 
 #[test]
@@ -4241,7 +4545,7 @@ stdout(obj.has("z"))
 }
 
 /// F-59 regression: JS transpiler should emit `.hasValue()` (function call) instead of
-/// `.hasValue` (property access) for Lax field access.
+/// `.has_value` (property access) for Lax field access.
 #[test]
 fn test_f59_js_lax_has_value_property() {
     if !node_available() {
@@ -4250,13 +4554,13 @@ fn test_f59_js_lax_has_value_property() {
     let src = r#"
 x <= @[1, 2, 3]
 lax <= x.get(0)
-| lax.hasValue |>
+| lax.has_value |>
   stdout("has value: true")
 | _ |>
   stdout("has value: false")
 
 empty <= x.get(99)
-| empty.hasValue |>
+| empty.has_value |>
   stdout("empty has value: true")
 | _ |>
   stdout("empty has value: false")
@@ -4266,7 +4570,7 @@ empty <= x.get(99)
     let js = run_js_src(src, "f59_has_value").expect("F-59: JS should succeed");
     assert_eq!(
         interp, js,
-        "F-59: interp/JS mismatch for Lax.hasValue\ninterp: {}\njs: {}",
+        "F-59: interp/JS mismatch for Lax.has_value\ninterp: {}\njs: {}",
         interp, js
     );
 }
@@ -7147,6 +7451,190 @@ stdout(r.requests)
     }
 }
 
+fn run_net_http_server_once(
+    backend: &str,
+    label: &str,
+    source: &str,
+    request: &[u8],
+) -> (String, String) {
+    let dir = setup_net_project(source, label);
+    let td_path = dir.join("main.td");
+
+    let mut child = match backend {
+        "interp" => Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn interpreter"),
+        "js" => {
+            let js_path = unique_temp_path("taida_net_http_serve_js", label, "mjs");
+            let transpile = Command::new(taida_bin())
+                .arg("build")
+                .arg("js")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&js_path)
+                .output()
+                .expect("transpile js server");
+            if !transpile.status.success() {
+                let stderr = String::from_utf8_lossy(&transpile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&js_path);
+                panic!("JS transpile failed for {label}: {stderr}");
+            }
+            let child = Command::new("node")
+                .arg(&js_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn node server");
+            thread::sleep(Duration::from_millis(500));
+            let _ = fs::remove_file(&js_path);
+            child
+        }
+        "native" => {
+            let bin_path = unique_temp_path("taida_net_http_serve_native", label, "bin");
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native server");
+            if !compile.status.success() {
+                let stderr = String::from_utf8_lossy(&compile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&bin_path);
+                panic!("Native compile failed for {label}: {stderr}");
+            }
+            let child = Command::new(&bin_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn native server");
+            thread::sleep(Duration::from_millis(200));
+            let _ = fs::remove_file(&bin_path);
+            child
+        }
+        _ => unreachable!("unknown net server backend {backend}"),
+    };
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    let port = extract_port_from_http_serve_source(source)
+        .unwrap_or_else(|| panic!("test source must contain httpServe(<port>, ...): {source}"));
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{port}")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("{backend} backend: server did not respond on port {port}");
+    }
+
+    let output = child.wait_with_output().expect("wait for net server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    let response = String::from_utf8_lossy(&response).to_string();
+    cleanup_net_project(&dir);
+    (stdout, response)
+}
+
+fn extract_port_from_http_serve_source(source: &str) -> Option<u16> {
+    let start = source.find("httpServe(")? + "httpServe(".len();
+    let rest = &source[start..];
+    let end = rest.find(',')?;
+    rest[..end].trim().parse().ok()
+}
+
+/// E37: generated response wire output and canonical request spans must
+/// stay aligned across the three full net backends.
+#[test]
+fn test_net_http_serve_status_req_shape_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let request =
+        b"POST /abc?x=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    let expected_body = "0:4|5:4|10:3";
+    let mut bodies = Vec::new();
+
+    for backend in ["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  body <= req.method.start.toString() + ":" + req.method.len.toString() + "|" + req.path.start.toString() + ":" + req.path.len.toString() + "|" + req.query.start.toString() + ":" + req.query.len.toString()
+  @(status <= 404, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+        let (stdout, response) =
+            run_net_http_server_once(backend, &format!("e37_wire_{backend}"), &source, request);
+        assert_eq!(
+            stdout, "1",
+            "{backend}: httpServe should report one request, got: {stdout:?}"
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{backend}: response should preserve 404 reason phrase, got: {response:?}"
+        );
+        let actual_body = response.split("\r\n\r\n").last().unwrap_or("").to_string();
+        assert_eq!(
+            actual_body, expected_body,
+            "{backend}: request span body mismatch, got: {response:?}"
+        );
+        bodies.push((backend, actual_body));
+    }
+
+    assert_eq!(
+        bodies[0].1, bodies[1].1,
+        "request span body mismatch: interp vs js"
+    );
+    assert_eq!(
+        bodies[0].1, bodies[2].1,
+        "request span body mismatch: interp vs native"
+    );
+}
+
 /// NET-4 review F1: malformed HTTP version "HTTP/a.b" must be rejected (Interpreter vs Native)
 #[test]
 fn test_net_parse_malformed_http_version_native_parity() {
@@ -9367,6 +9855,97 @@ stdout("should not reach here")
         stderr.contains("handler must be a Function"),
         "NB-31: Interpreter stderr should mention handler type error, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_nb31_http_serve_bool_handler_rejects_without_crash() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+bad <= true
+attempt =
+  |== err: Error =
+    @(ok <= false, kind <= err.kind)
+  => :@(ok: Bool, kind: Str)
+  asyncResult <= httpServe(0, bad, 1, 1000)
+  asyncResult ]=> result
+  result ]=> v
+  @(ok <= true, kind <= "")
+=> :@(ok: Bool, kind: Str)
+
+outcome <= attempt()
+stdout(outcome.ok.toString())
+stdout(outcome.kind)
+"#;
+
+    let dir = setup_net_project(source, "nb31_bool_handler");
+    let js = run_net_js(&dir, "nb31_bool_handler")
+        .expect("NB-31: JS should not crash with Bool handler");
+    let native = run_net_native(&dir, "nb31_bool_handler")
+        .expect("NB-31: Native should not crash with Bool handler");
+    let interp_err = run_net_interpreter_runtime_error(&dir)
+        .expect("NB-31: interpreter should reject Bool handler");
+    cleanup_net_project(&dir);
+
+    for (backend, output) in [("JS", js), ("Native", native)] {
+        let lines: Vec<&str> = output.trim().lines().collect();
+        assert!(
+            lines.len() >= 2,
+            "NB-31 bool handler: {} output too short: {:?}",
+            backend,
+            output
+        );
+        assert_eq!(
+            lines[0], "false",
+            "NB-31 bool handler: {} ok field must be false",
+            backend
+        );
+        assert_eq!(
+            lines[1], "TypeError",
+            "NB-31 bool handler: {} kind must be TypeError",
+            backend
+        );
+    }
+    assert!(
+        interp_err.contains("handler must be a Function"),
+        "NB-31 bool handler: interpreter error should mention handler type, got: {}",
+        interp_err
+    );
+}
+
+#[test]
+fn test_nb31_bool_callback_type_mismatch_rejects_on_all_build_paths() {
+    let source = r#"
+nums <= @[1, 2]
+out <= Map[nums, true]()
+"#;
+    assert_all_backend_paths_reject_source(source, "nb31_bool_callback_type_mismatch", "[E1506]");
+}
+
+#[test]
+fn test_nb31_http_serve_wasm_full_tls_surface_rejects() {
+    let source = r#">>> taida-lang/net => @(httpServe)
+
+handler req writer =
+  0
+=> :Int
+
+asyncResult <= httpServe(0, handler, 1, 1000, 128, @(cert <= "c.pem", key <= "k.pem"))
+"#;
+    let td_path = unique_temp_path("taida_nb31_wasm_tls_surface", "http_serve", "td");
+    fs::write(&td_path, source).expect("write wasm-full TLS surface fixture");
+    let err = run_wasm_full_build_error(&td_path, "nb31_http_serve_wasm_tls_surface")
+        .expect("wasm-full should reject unsupported TLS surface");
+    let _ = fs::remove_file(&td_path);
+    assert!(
+        err.contains("[E1612]"),
+        "wasm-full TLS surface rejection should mention [E1612], got: {}",
+        err
     );
 }
 
@@ -12896,9 +13475,10 @@ stdout(body.length())
     );
 }
 
-/// NET2-6f: httpServe still rejected on all 4 WASM profiles (regression check).
+/// NET2-6f / E37: plain httpServe is rejected on wasm-min / wasm-edge and
+/// accepted on wasm-wasi / wasm-full.
 #[test]
-fn test_net2_6f_wasm_all_profiles_httpserve_still_rejected() {
+fn test_net2_6f_wasm_httpserve_profile_policy() {
     let source = r#">>> taida-lang/net => @(httpServe)
 
 handler req =
@@ -12927,18 +13507,27 @@ stdout(serverResult.ok)
         let _ = std::fs::remove_file(&wasm_path);
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success(),
-            "NET2-6f: {} should reject httpServe, but compile succeeded.\nstderr: {}",
-            profile,
-            stderr
-        );
-        assert!(
-            stderr.contains("httpServe") || stderr.contains("net"),
-            "NET2-6f: {} compile error should mention httpServe or net.\nstderr: {}",
-            profile,
-            stderr
-        );
+        if matches!(*profile, "wasm-wasi" | "wasm-full") {
+            assert!(
+                output.status.success(),
+                "NET2-6f: {} should accept plaintext httpServe, but compile failed.\nstderr: {}",
+                profile,
+                stderr
+            );
+        } else {
+            assert!(
+                !output.status.success(),
+                "NET2-6f: {} should reject httpServe, but compile succeeded.\nstderr: {}",
+                profile,
+                stderr
+            );
+            assert!(
+                stderr.contains("httpServe") || stderr.contains("net"),
+                "NET2-6f: {} compile error should mention httpServe or net.\nstderr: {}",
+                profile,
+                stderr
+            );
+        }
     }
 }
 
@@ -16190,7 +16779,7 @@ handler req writer =
   chunk <= readBodyChunk(req)
   chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   writeChunk(writer, chunkV)
   endResponse(writer)
 => :Unit
@@ -16264,7 +16853,7 @@ stdout(r.ok)
         "response should contain '200 OK', got: {:?}",
         resp_str
     );
-    // Chunk should have data (hasValue = true) and contain "Hello body"
+    // Chunk should have data (has_value = true) and contain "Hello body"
     assert!(
         resp_str.contains("true"),
         "response should contain 'true' (chunk has value), got: {:?}",
@@ -16295,7 +16884,7 @@ handler req writer =
   chunk <= readBodyChunk(req)
   chunk ]=> chunkV
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   writeChunk(writer, "|")
   writeChunk(writer, chunkV)
   endResponse(writer)
@@ -16580,7 +17169,7 @@ fn test_net4_read_body_chunk_empty_body_interp() {
 handler req writer =
   chunk <= readBodyChunk(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -16648,7 +17237,7 @@ stdout(r.ok)
         "response should contain '200 OK', got: {:?}",
         resp_str
     );
-    // GET with no body -> readBodyChunk returns Lax empty -> hasValue = false
+    // GET with no body -> readBodyChunk returns Lax empty -> has_value = false
     assert!(
         resp_str.contains("false"),
         "response body should contain 'false' (hasValue), got: {:?}",
@@ -17036,7 +17625,7 @@ parseAttempt =
   handler req writer =
     upgrade <= wsUpgrade(req, writer)
     startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-    writeChunk(writer, upgrade.hasValue.toString())
+    writeChunk(writer, upgrade.has_value.toString())
     endResponse(writer)
   => :Unit
 
@@ -17111,7 +17700,7 @@ stdout(outcome.ok.toString())
         "response should contain '200 OK', got: {:?}",
         resp_str
     );
-    // Body should contain "false" (upgrade.hasValue == false).
+    // Body should contain "false" (upgrade.has_value == false).
     assert!(
         resp_str.contains("false"),
         "response body should contain 'false' (upgrade failed), got: {:?}",
@@ -17240,7 +17829,7 @@ parseAttempt =
   handler req writer =
     upgrade <= wsUpgrade(req, writer)
     startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-    writeChunk(writer, upgrade.hasValue.toString())
+    writeChunk(writer, upgrade.has_value.toString())
     endResponse(writer)
   => :Unit
 
@@ -17973,7 +18562,7 @@ fn test_net4_read_body_chunk_empty_interp_js_parity() {
 handler req writer =
   chunk <= readBodyChunk(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -18005,7 +18594,7 @@ stdout(r.ok)
             backend,
             resp_str
         );
-        // GET with no body -> readBodyChunk returns Lax empty -> hasValue = false
+        // GET with no body -> readBodyChunk returns Lax empty -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -18223,7 +18812,7 @@ fn test_net4_ws_upgrade_failure_interp_js_parity() {
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
+  writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -18256,7 +18845,7 @@ stdout(r.ok)
             backend,
             resp_str
         );
-        // wsUpgrade failed -> hasValue = false
+        // wsUpgrade failed -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -18572,7 +19161,7 @@ fn test_net4_read_body_chunk_empty_3way_parity() {
 handler req writer =
   chunk <= readBodyChunk(req)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, chunk.hasValue.toString())
+  writeChunk(writer, chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -18604,7 +19193,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // Empty body -> readBodyChunk returns Lax empty -> hasValue = false
+        // Empty body -> readBodyChunk returns Lax empty -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false' for empty body, got: {:?}",
@@ -18811,7 +19400,7 @@ fn test_net4_ws_upgrade_failure_3way_parity() {
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
+  writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -18844,7 +19433,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // wsUpgrade failed -> hasValue = false
+        // wsUpgrade failed -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -19026,7 +19615,7 @@ fn test_net4_5b_ws_upgrade_post_reject_3way_parity() {
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "text/plain")])
-  writeChunk(writer, upgrade.hasValue.toString())
+  writeChunk(writer, upgrade.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -19072,7 +19661,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // wsUpgrade should fail for POST -> hasValue = false
+        // wsUpgrade should fail for POST -> has_value = false
         assert!(
             resp_str.contains("false"),
             "[{}] response body should contain 'false', got: {:?}",
@@ -19267,7 +19856,7 @@ fn test_net4_5d_read_body_chunk_then_sse_3way_parity() {
 
 handler req writer =
   chunk <= readBodyChunk(req)
-  sseEvent(writer, "body", chunk.hasValue.toString())
+  sseEvent(writer, "body", chunk.has_value.toString())
   endResponse(writer)
 => :Unit
 
@@ -19305,7 +19894,7 @@ stdout(r.requests)
             backend,
             resp_str
         );
-        // readBodyChunk returns hasValue=true for 7 bytes
+        // readBodyChunk returns has_value=true for 7 bytes
         assert!(
             resp_str.contains("data: true"),
             "[{}] response should contain SSE 'data: true', got: {:?}",
@@ -19839,7 +20428,7 @@ fn test_net4_nb19_client_close_reply_3way_parity() {
         let port = find_free_loopback_port();
         // Handler: upgrade, receive (will get client close), handler returns.
         // wsReceive sees the close frame, sends close reply, returns Lax empty.
-        // wsSend is called with hasValue="false" string (close -> empty -> hasValue=false).
+        // wsSend is called with hasValue="false" string (close -> empty -> has_value=false).
         let source = format!(
             r#">>> taida-lang/net => @(httpServe, wsUpgrade, wsSend, wsReceive)
 
@@ -19848,8 +20437,8 @@ handler req writer =
   upgrade ]=> upgradeV
   ws <= upgradeV.ws
   msg <= wsReceive(ws)
-  stdout(msg.hasValue.toString())
-=> :Unit
+  stdout(msg.has_value.toString())
+=> :Int
 
 asyncResult <= httpServe({port}, handler, 1)
 asyncResult ]=> result
@@ -22559,7 +23148,7 @@ parseAttempt =
     msg <= wsReceive(ws)
     code <= wsCloseCode(ws)
     stdout(code)
-  => :Unit
+  => :Int
 
   asyncResult <= httpServe({}, handler, 1, 5000)
   asyncResult ]=> result
@@ -24219,18 +24808,19 @@ stdout(r.requests)
 // Live cert-rotation and ALPN matrix coverage is runtime-dependent
 // (needs cert fixtures + real TLS negotiation); those cases stay in
 // the C26B-005 soak runbook per the 2026-04-24 Phase 0 Design Lock.
-// The 3-backend parity pin here is the contract that `docs/STABILITY.md
-// § 5.1` TLS-construction bullet promises.
+// The 3-backend parity pin here is the contract that the NET
+// reference (`docs/reference/net_api.md`) promises for TLS
+// construction errors.
 
 /// C26B-002-1: TLS config with missing cert path — 3-backend
 /// construction-time error parity.
 ///
 /// Every backend must surface an error that mentions "cert" or "tls"
 /// (case-insensitive substrings). We do not pin the exact string (per
-/// `STABILITY § 2.3` diagnostic messages are not contractual) but we
-/// pin the classification: construction of a TLS server with a
-/// non-existent cert path is an error on every backend, never a
-/// silent fallback.
+/// `docs/reference/release_process.md` 非保証範囲 — diagnostic message
+/// wording is not contractual) but we pin the classification:
+/// construction of a TLS server with a non-existent cert path is an
+/// error on every backend, never a silent fallback.
 #[test]
 fn test_net6_1c_c26b002_1_tls_missing_cert_3backend_parity() {
     if !node_available() {
@@ -34272,7 +34862,7 @@ stdout(Repeat["ab", 3]())
 // `emit_call_arg_tags` path picked up the wrong tag and the callee's
 // runtime display used Pack heuristics).
 //
-// C12-1 introduces `src/types/mold_returns.rs` as the single source of
+// C12-1 introduces `src/types/mold_specs.rs` as the single source of
 // truth and wires `expr_type_tag()` through it. These parity tests lock
 // in that Str-returning molds travel across user-function boundaries
 // and render identically on interpreter / JS / native — exercising the
@@ -34317,7 +34907,7 @@ print_int(Round[4.5]())
 // still prints `1`/`0` on the native backend instead of `true`/`false`.
 // That is the FB-1 param_tag_vars-non-propagation issue and is
 // explicitly the C12-11 Phase's scope. C12-1 only fixes the compile-
-// time tag table (`src/types/mold_returns.rs`) so `expr_type_tag()` is
+// time tag table (`src/types/mold_specs.rs`) so `expr_type_tag()` is
 // authoritative for MoldInst return types; wiring param_tag_vars into
 // stdout's tagged-dispatch path is done in C12-11. The direct literal
 // case (`print_any(true)`) also exhibits the same FB-1 gap on main.
@@ -34839,7 +35429,7 @@ print_any(false)
 }
 
 /// C12-11 (a): Bool-returning MoldInst passed to a user function.
-/// `TypeIs[...]()` has compile tag 2 per `src/types/mold_returns.rs`,
+/// `TypeIs[...]()` has compile tag 2 per `src/types/mold_specs.rs`,
 /// `emit_call_arg_tags` sets the caller slot to 2, and the callee's
 /// `param_tag_vars[v]` is read back at the `stdout(v)` site.
 #[test]
@@ -34876,11 +35466,9 @@ stdout(is_int_like(42))
 }
 
 /// C12-11: body-based Bool inference. `is_int_like` has no explicit
-/// `-> Bool` annotation, but its body's last expression is a
-/// `TypeIs[...]()` MoldInst which `expr_is_bool()` recognises. After
-/// C12-11 the function is added to `bool_returning_funcs` so that
-/// `b1 <= is_int_like(42)` tags `b1` as Bool, and `stdout(b1)` routes
-/// through the tagged path.
+/// return annotation, but its body's last expression is a
+/// `TypeIs[...]()` mold, so the typed table records a Bool tail value
+/// and `stdout(b1)` routes through the tagged path.
 #[test]
 fn test_c12_11_bool_let_binding_from_user_func_parity() {
     let source = r#"is_int_like v =
@@ -36157,6 +36745,15 @@ stdout(r.isSuccess().toString())
     assert_eq!(out, "true\nfalse");
 }
 
+#[test]
+fn test_c12b_021_result_direct_stdout_field_tags() {
+    let source = r#"
+stdout(Result[true]())
+stdout(Result["ok"]())
+"#;
+    assert_full_backend_parity_for_source(source, "c12b_021_result_direct_stdout_field_tags", &[]);
+}
+
 /// C12B-021: Exists on a present path reports isSuccess=true; on a
 /// missing path also isSuccess=true (probe itself worked) — the
 /// inner Bool distinguishes the two states. We only assert the
@@ -36183,6 +36780,41 @@ stdout(b.isSuccess().toString())
         .expect("interpreter output should exist");
     assert_eq!(out, "true\ntrue");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_c12b_021_exists_direct_stdout_result_shape_parity() {
+    let source = r#"stdout(Exists["."]())"#;
+    assert_full_backend_parity_for_source(
+        source,
+        "c12b_021_exists_direct_stdout_result_shape",
+        &["--dir=."],
+    );
+}
+
+#[test]
+fn test_hashmap_set_generic_method_chains_preserve_types() {
+    let source = r#"
+Registry = @(
+  data: HashMap[Str, Int]
+)
+Bag = @(
+  items: Set[Int]
+)
+
+baseMap <= hashMap().set("a", 1).set("b", 2)
+updatedMap <= baseMap.remove("a").set("c", 3)
+reg <= Registry(data <= updatedMap)
+
+baseSet <= setOf(@[1, 2])
+updatedSet <= baseSet.remove(1).add(3)
+bag <= Bag(items <= updatedSet)
+
+stdout(reg.data.get("b").getOrDefault(0).toString())
+stdout(reg.data.get("c").getOrDefault(0).toString())
+stdout(bag.items.has(3).toString())
+"#;
+    assert_full_backend_parity_for_source(source, "hashmap_set_generic_method_chains", &[]);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -38057,7 +38689,7 @@ fn c27b_021_div_float_three_backend_parity() {
 a <= 3.0
 b <= 2.0
 c <= Div[a, b]()
-stdout(c.hasValue.toString())
+stdout(c.has_value.toString())
 "#;
     assert_backend_parity_for_source(src, "c27b021_div_float_basic");
 }
@@ -38072,7 +38704,7 @@ fn c27b_021_div_float_zero_three_backend_parity() {
 a <= 1.0
 b <= 0.0
 c <= Div[a, b]()
-stdout(c.hasValue.toString())
+stdout(c.has_value.toString())
 "#;
     assert_backend_parity_for_source(src, "c27b021_div_float_zero_lax_empty");
 }
@@ -38111,7 +38743,7 @@ stdout(v7.toString())
 // Critical 1 root cause was an overflow / precision bug in
 // `taida_mod_mold_f` inside src/codegen/runtime_wasi_io.c. Critical 2
 // was that the existing C27B-021 parity tests only checked
-// `c.hasValue.toString()` and never compared the numeric Lax payload.
+// `c.has_value.toString()` and never compared the numeric Lax payload.
 // These tests close that gap on the non-wasm legs, and `debug(r)` is
 // the proven canonical Float Lax formatter (cf. C26B-011's
 // examples/quality/c26_float_edge/div_mod_float.td).
@@ -38690,15 +39322,15 @@ fn d28b_009_denormal_compare_three_backend_parity() {
     }
     let src = r#"
 tiny <= Div[1.0e-300, 1.0e24]()
-stdout(tiny.hasValue.toString())
+stdout(tiny.has_value.toString())
 tiny2 <= Div[2.0e-300, 1.0e24]()
-stdout(tiny2.hasValue.toString())
+stdout(tiny2.has_value.toString())
 zero_q <= Div[0.0, 1.0e10]()
-stdout(zero_q.hasValue.toString())
+stdout(zero_q.has_value.toString())
 zero_div <= Div[5.0e-300, 0.0]()
-stdout(zero_div.hasValue.toString())
+stdout(zero_div.has_value.toString())
 m1 <= Mod[1.0, 0.5]()
-stdout(m1.hasValue.toString())
+stdout(m1.has_value.toString())
 "#;
     assert_backend_parity_for_source(src, "d28b009_denormal_compare");
 }
@@ -39639,14 +40271,13 @@ fn test_d29b_011_h3_arena_implementation_symmetry_with_h2() {
 //   * tests/d29b_012_native_span_zero_alloc_no_leak.rs -- valgrind leak guard
 //   * tests/d29b_012_native_span_alloc_count.rs       -- valgrind alloc balance
 //
-// Lock-Phase6 verdicts (sub-Lock A..E) are recorded in
-// `.dev/D29_SESSION_PLANS/Phase-6_2026-04-27-0937_track-eta_sub-Lock.md` and
-// the FIXED status flip is recorded in `.dev/D29_BLOCKERS.md`.
+// Historical implementation notes for these regressions live in local
+// development records.
 
 // ===========================================================================
 // E30B-002 / E30 Phase 4: declare-only function field parity across backends.
 //
-// Lock-B verdict (2026-04-28): declare-only function fields (e.g.
+// Decision (2026-04-28): declare-only function fields (e.g.
 // `transform: T => :T`) are permitted in all class-like variants (TypeDef
 // / Mold / Inheritance / Error). Phase 4 (E30B-002) excludes them from the
 // required-positional `[]` set and from the extra-type-arg binding-target
@@ -39818,16 +40449,9 @@ stdout(p.name.length().toString())
     assert_backend_parity_for_source(src, "e30b_004_default_fn_typedef");
 }
 
-// E34 cycle introduced a regression in declare-only fn field arity:
-// the new boundary discipline (E34B-013/014 follow-up — pack-field
-// call signatures surface the declared `Type::Function`) treats the
-// E30 zero-argument marker `Unit => :T` as a one-Unit-parameter
-// signature. Tracked as a carry-over to the next cycle (registry-
-// pattern reshape, see E35_BLOCKERS::E35B-007 family); ignore until
-// the registry layer normalises `Unit` back to an empty parameter
-// list.
+// Declare-only function fields use `Unit => :T` as the zero-argument
+// marker; the checker must surface that as an empty parameter list.
 #[test]
-#[ignore = "E34 declare-only fn `Unit => :T` regression — see E34_BLOCKERS::E34B-026"]
 fn e30b_004_default_fn_enum_return_three_backend_parity() {
     if !cc_available() {
         eprintln!("SKIP: cc unavailable");
@@ -39844,7 +40468,6 @@ stdout(s.toString())
 }
 
 #[test]
-#[ignore = "E34 declare-only fn `Unit => :T` regression — see E34_BLOCKERS::E34B-026"]
 fn e30b_004_default_fn_self_recursive_typedef_three_backend_parity() {
     if !cc_available() {
         eprintln!("SKIP: cc unavailable");
@@ -40006,8 +40629,8 @@ stdout(b.label)
 // `-1` siblings stay around as deprecated and are NOT removed in E32 —
 // pinning their continued existence is left to the existing `indexOf`
 // tests above. Each new pin asserts:
-//   - hasValue=true path returns Lax(<idx>) for found elements
-//   - hasValue=false path returns Lax(default: 0) for missing — the
+//   - has_value=true path returns Lax(<idx>) for found elements
+//   - has_value=false path returns Lax(default: 0) for missing — the
 //     `__default` is `0` (Int's default) and never the legacy `-1`
 //   - the toString() and getOrDefault() shapes match across backends
 #[test]
@@ -40017,7 +40640,7 @@ fn e32b_022_string_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 "hello".indexOfLax("xyz") ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + "hello".indexOfLax("xyz").hasValue.toString())
+stdout("missing_hv:" + "hello".indexOfLax("xyz").has_value.toString())
 stdout("missing_def:" + "hello".indexOfLax("xyz").getOrDefault(7).toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_string_index_of_lax");
@@ -40030,7 +40653,7 @@ fn e32b_022_string_last_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 "hello".lastIndexOfLax("xyz") ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + "hello".lastIndexOfLax("xyz").hasValue.toString())
+stdout("missing_hv:" + "hello".lastIndexOfLax("xyz").has_value.toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_string_last_index_of_lax");
 }
@@ -40042,7 +40665,7 @@ fn e32b_022_list_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 @[10, 20, 30].indexOfLax(99) ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + @[10, 20, 30].indexOfLax(99).hasValue.toString())
+stdout("missing_hv:" + @[10, 20, 30].indexOfLax(99).has_value.toString())
 stdout("missing_def:" + @[10, 20, 30].indexOfLax(99).getOrDefault(42).toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_list_index_of_lax");
@@ -40055,7 +40678,7 @@ fn e32b_022_list_last_index_of_lax_4backend_parity() {
 stdout("found:" + i.toString())
 @[10, 20, 30].lastIndexOfLax(99) ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + @[10, 20, 30].lastIndexOfLax(99).hasValue.toString())
+stdout("missing_hv:" + @[10, 20, 30].lastIndexOfLax(99).has_value.toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_list_last_index_of_lax");
 }
@@ -40076,7 +40699,7 @@ FindIndexLax[@[1, 2, 3, 4], isEven]() ]=> i
 stdout("found:" + i.toString())
 FindIndexLax[@[1, 2, 3, 4], allOdd]() ]=> j
 stdout("missing:" + j.toString())
-stdout("missing_hv:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().hasValue.toString())
+stdout("missing_hv:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().has_value.toString())
 stdout("found_def:" + FindIndexLax[@[1, 2, 3, 4], isEven]().getOrDefault(99).toString())
 stdout("missing_def:" + FindIndexLax[@[1, 2, 3, 4], allOdd]().getOrDefault(99).toString())
 "#;
@@ -40097,7 +40720,7 @@ stdout("list_last:" + @[1, 2, 3].lastIndexOf(99).toString())
     assert_backend_parity_for_source(source, "e32b_022_legacy_sentinels_minus_one");
 }
 
-// E32B-071: `*Lax` long-form (`@(hasValue <= ..., __value <= ..., __default <=
+// E32B-071: `*Lax` long-form (`@(has_value <= ..., __value <= ..., __default <=
 // ..., __type <= "Lax")`) raw-pack output must be identical across backends
 // regardless of whether the value is consumed via direct method call
 // (`stdout(xs.indexOfLax(...))`) or routed through a let binding
@@ -40148,8 +40771,8 @@ fn e32b_022_search_lax_3backend_parity() {
 stdout("found:" + idx.toString())
 "hello world".searchLax(Regex("zz+")) ]=> idx2
 stdout("missing:" + idx2.toString())
-stdout("missing_hv:" + "hello world".searchLax(Regex("zz+")).hasValue.toString())
-stdout("found_hv:" + "hello world".searchLax(Regex("w[a-z]+")).hasValue.toString())
+stdout("missing_hv:" + "hello world".searchLax(Regex("zz+")).has_value.toString())
+stdout("found_hv:" + "hello world".searchLax(Regex("w[a-z]+")).has_value.toString())
 "#;
     assert_backend_parity_for_source(source, "e32b_022_search_lax");
 }
@@ -40223,6 +40846,58 @@ val <= res.getOrDefault("oops")
 stdout(val)
 "#;
     assert_backends_reject_source(source, "e32b_021_result_get_or_default_type_mismatch");
+}
+
+#[test]
+fn monadic_function_argument_integrity_rejects_on_all_build_paths() {
+    let cases = [
+        (
+            "lax_map_arg_type",
+            r#"
+fn1 x: Str = x.length() => :Int
+obj <= Lax[42]()
+result <= obj.map(fn1)
+"#,
+        ),
+        (
+            "lax_map_chain_break",
+            r#"
+intToStr x: Int = x.toString() => :Str
+doubleInt x: Int = x * 2 => :Int
+obj <= Lax[42]()
+bad <= obj.map(intToStr).map(doubleInt)
+"#,
+        ),
+        (
+            "lax_flat_map_return",
+            r#"
+doubleInt x: Int = x * 2 => :Int
+obj <= Lax[42]()
+bad <= obj.flatMap(doubleInt)
+"#,
+        ),
+        (
+            "async_map_arg_type",
+            r#"
+fnStr s: Str = s.length() => :Int
+a <= Async[42]()
+result <= a.map(fnStr)
+"#,
+        ),
+        (
+            "result_map_error_payload",
+            r#"
+Error => Fail = @(message: Str)
+renderStr s: Str = "prefix: " + s => :Str
+r <= Result[0](throw <= Fail(message <= "boom"))
+mapped <= r.mapError(renderStr)
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        assert_all_backend_paths_reject_source(source, label, "[E1508]");
+    }
 }
 
 // ── E32B-030: Native Lax[Bool].getOrDefault parity gap ───────────────

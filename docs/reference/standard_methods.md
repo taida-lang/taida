@@ -95,22 +95,22 @@ true.toString()           // "true"
 
 #### indexOfLax (推奨)
 
-部分文字列の位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+部分文字列の位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 "hello world".indexOfLax("world") ]=> i  // 6
-"hello".indexOfLax("xyz").hasValue       // false
+"hello".indexOfLax("xyz").has_value       // false
 ```
 
 **シグネチャ**: `substr: Str => :Lax[Int]`
 
 #### lastIndexOfLax (推奨)
 
-部分文字列の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+部分文字列の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 "hello hello".lastIndexOfLax("hello") ]=> i   // 6
-"hello".lastIndexOfLax("xyz").hasValue        // false
+"hello".lastIndexOfLax("xyz").has_value        // false
 ```
 
 **シグネチャ**: `substr: Str => :Lax[Int]`
@@ -129,12 +129,12 @@ true.toString()           // "true"
 
 #### get
 
-指定インデックスの文字を Lax で返します。範囲外の場合は `hasValue = false`。
+指定インデックスの文字を Lax で返します。範囲外の場合は `has_value = false`。
 
 ```taida fragment
 "hello".get(0) ]=> ch    // "h"
 "hello".get(10) ]=> ch   // "" (デフォルト値)
-"hello".get(10).hasValue  // false
+"hello".get(10).has_value  // false
 ```
 
 **シグネチャ**: `index: Int => :Lax[Str]`
@@ -218,11 +218,11 @@ true.toString()           // "true"
 #### match
 
 正規表現で最初の一致を取り出します。結果は `:RegexMatch` ぶちパックで、
-`hasValue`, `full`, `groups`, `start` フィールドを持ちます。
+`has_value`, `full`, `groups`, `start` フィールドを持ちます。
 
 ```taida
 m <= "id: 12-34".match(Regex("(\\d+)-(\\d+)"))
-stdout(m.hasValue)  // true
+stdout(m.has_value)  // true
 stdout(m.full)       // "12-34"
 stdout(m.groups)     // @["12", "34"]
 stdout(m.start)      // 4  (char index, not byte index)
@@ -230,18 +230,18 @@ stdout(m.start)      // 4  (char index, not byte index)
 
 **シグネチャ**: `pattern: Regex => :RegexMatch`
 
-一致なしの場合 `hasValue <= false`, `full <= ""`, `groups <= @[]` の
+一致なしの場合 `has_value <= false`, `full <= ""`, `groups <= @[]` の
 ぶちパックを返します（null / undefined は返さない — 哲学 I）。
-`hasValue` を確認する前に `start` を読まないでください。位置だけ必要な
+`has_value` を確認する前に `start` を読まないでください。位置だけ必要な
 場合は `searchLax` の `Lax[Int]` を直接使う方が安全です。
 
 #### searchLax (推奨)
 
-正規表現で最初の一致が見つかった位置を文字インデックスとして `Lax[Int]` で返します。一致がない場合は `hasValue = false`、デフォルト値は `0` です。
+正規表現で最初の一致が見つかった位置を文字インデックスとして `Lax[Int]` で返します。一致がない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 "abc123".searchLax(Regex("\\d+")) ]=> i      // 3
-"nothing".searchLax(Regex("\\d+")).hasValue  // false
+"nothing".searchLax(Regex("\\d+")).has_value  // false
 ```
 
 **シグネチャ**: `pattern: Regex => :Lax[Int]`
@@ -352,12 +352,12 @@ b.length()  // 4
 
 #### get
 
-指定インデックスのバイト値を `Lax[Int]` で返します。範囲外は `hasValue = false`。
+指定インデックスのバイト値を `Lax[Int]` で返します。範囲外は `has_value = false`。
 
 ```taida
 Bytes[@[65, 66]]() ]=> b
 b.get(0) ]=> v    // 65
-b.get(99).hasValue  // false
+b.get(99).has_value  // false
 ```
 
 **シグネチャ**: `index: Int => :Lax[Int]`
@@ -563,22 +563,22 @@ NaN (非数) かどうかを返します。
 
 #### indexOfLax (推奨)
 
-要素の位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+要素の位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 @[10, 20, 30].indexOfLax(20) ]=> i        // 1
-@[10, 20, 30].indexOfLax(50).hasValue     // false
+@[10, 20, 30].indexOfLax(50).has_value     // false
 ```
 
 **シグネチャ**: `item: T => :Lax[Int]`
 
 #### lastIndexOfLax (推奨)
 
-要素の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `hasValue = false`、デフォルト値は `0` です。
+要素の最後の出現位置を `Lax[Int]` で返します。見つからない場合は `has_value = false`、デフォルト値は `0` です。
 
 ```taida
 @[1, 2, 1, 2].lastIndexOfLax(1) ]=> i     // 2
-@[1, 2, 1, 2].lastIndexOfLax(9).hasValue  // false
+@[1, 2, 1, 2].lastIndexOfLax(9).has_value  // false
 ```
 
 **シグネチャ**: `item: T => :Lax[Int]`
@@ -597,55 +597,55 @@ NaN (非数) かどうかを返します。
 
 #### first
 
-最初の要素を Lax で返します。空リストの場合は `hasValue = false`。
+最初の要素を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 2, 3].first() ]=> val  // 1
-@[].first().hasValue         // false
+@[].first().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
 
 #### last
 
-最後の要素を Lax で返します。空リストの場合は `hasValue = false`。
+最後の要素を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 2, 3].last() ]=> val  // 3
-@[].last().hasValue         // false
+@[].last().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
 
 #### get
 
-指定インデックスの要素を Lax で返します。範囲外の場合は `hasValue = false`。
+指定インデックスの要素を Lax で返します。範囲外の場合は `has_value = false`。
 
 ```taida
 @[10, 20, 30].get(1) ]=> val    // 20
-@[10, 20, 30].get(10).hasValue  // false
+@[10, 20, 30].get(10).has_value  // false
 ```
 
 **シグネチャ**: `index: Int => :Lax[T]`
 
 #### max
 
-最大値を Lax で返します。空リストの場合は `hasValue = false`。
+最大値を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 3, 2].max() ]=> val  // 3
-@[].max().hasValue         // false
+@[].max().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
 
 #### min
 
-最小値を Lax で返します。空リストの場合は `hasValue = false`。
+最小値を Lax で返します。空リストの場合は `has_value = false`。
 
 ```taida
 @[1, 3, 2].min() ]=> val  // 1
-@[].min().hasValue         // false
+@[].min().has_value         // false
 ```
 
 **シグネチャ**: `=> :Lax[T]`
@@ -747,13 +747,13 @@ Int[false]() ]=> num  // 0
 
 ### フィールド
 
-#### hasValue
+#### has_value
 
 値を持つかどうかを示すブールフィールドです。
 
 ```taida
-Div[10, 3]().hasValue   // true
-Div[10, 0]().hasValue   // false
+Div[10, 3]().has_value   // true
+Div[10, 0]().has_value   // false
 ```
 
 **型**: `Bool`
@@ -762,7 +762,7 @@ Div[10, 0]().hasValue   // false
 
 #### isEmpty
 
-値を持たないかどうかを返します。`!hasValue` と同じです。
+値を持たないかどうかを返します。`!has_value` と同じです。
 
 ```taida
 Div[10, 0]().isEmpty()  // true
@@ -784,9 +784,11 @@ Div[10, 0]().getOrDefault(99)  // 99
 
 **シグネチャ**: `default: T => :T`
 
+`default` の型は受け側の成功内部型 `T` と一致しなければなりません。例えば `Lax[Int]` に対して `getOrDefault("99")` を渡すと、型チェッカーが `[E1508]` で拒否します。判定は型チェッカーが持つ `Type::Function` のサブタイプ規則を経由しており、受け側の `T` が具体型として確定しているときにのみ機能します（同様の caveat は [`map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) と同じ）。`Result[T, P]` の `getOrDefault`、`Async[T]` の `getOrDefault` も同じ pin を共有します。
+
 #### unmold
 
-値を取り出します。`hasValue = false` の場合は型 T のデフォルト値を返します。
+値を取り出します。`has_value = false` の場合は型 T のデフォルト値を返します。
 
 ```taida
 Div[10, 3]().unmold()  // 3
@@ -842,13 +844,15 @@ result <= make().map(_ x = x.fooBar())  // [E1509] が出ない、silent pass
 
 #### errorInfo
 
-Lax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`Div[10, 0]()` / `@[1, 2, 3].get(99)` / `Float["not_a_number"]()` などの失敗系コンストラクタや JSON cast 失敗、`Bytes["..."]()` 派生の Lax からも同一の API で error 詳細を読み出せます。`hasValue = true` (成功) のときは戻り値の `Lax` も `hasValue = false` (中身無し) になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
+Lax が失敗 (`has_value = false`) したとき、producer が保持している error 情報を `Lax[ErrorInfo]` として取り出します。JSON パース失敗など詳細を持つ producer では `has_value = true` の `Lax[ErrorInfo]` を返します。単純な空 Lax (`Lax[T]()`、範囲外 `get()`、変換失敗など) は詳細を持たないため、戻り値も `has_value = false` です。受け側の Lax が成功している場合も戻り値は空になります。`errorInfo()` を持つ allow-list は `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系 (`RelaxedGorillaEscaped` を含む) で、それ以外の型へ呼ぶと `[E1509]` で reject されます (`Result` / `Async` には現状提供されていません)。
 
 ```taida fragment
-result <= Float["not_a_number"]()
-result.errorInfo() ]=> err
-err.hasValue()      // true (失敗、error info あり)
-err.getOrDefault(@(type <= "", message <= "", kind <= "", code <= 0)).message
+result <= JSON["not valid json", Pilot]()
+info <= result.errorInfo()
+info ]=> err
+err.type        // "JsonError"
+err.kind        // "parse"
+err.message     // "JSON parse error: ..."
 ```
 
 `ErrorInfo` シェイプ: `@(type: Str, message: Str, kind: Str, code: Int)`。詳細は `docs/reference/class_like_types.md::ErrorInfo` を参照。
@@ -876,12 +880,12 @@ Div[10, 0]().toString()  // "Lax(default: 0)"
 
 ### フィールド
 
-#### hasValue
+#### has_value
 
 値を持つかどうかを示すブールフィールドです。
 
 ```taida
-Gorillax[42]().hasValue  // true
+Gorillax[42]().has_value  // true
 ```
 
 **型**: `Bool`
@@ -902,7 +906,7 @@ Gorillax[42]().isEmpty()  // false
 
 #### errorInfo
 
-Gorillax が失敗 (`hasValue = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`__error` フィールドへの直接アクセス (`.__error.message` 等) は `[E1960]` で reject されるため、失敗詳細を読む公式 accessor として本メソッドを使います。`hasValue = true` (成功) のときは戻り値の `Lax` の `hasValue = false` (実体無し) を返します。
+Gorillax が失敗 (`has_value = false`) のときの error 情報を `Lax[ErrorInfo]` として取り出します。`__error` フィールドへの直接アクセス (`.__error.message` 等) は `[E1960]` で reject されるため、失敗詳細を読む公式 accessor として本メソッドを使います。`has_value = true` (成功) のときは戻り値の `Lax` の `has_value = false` (実体無し) を返します。
 
 ```taida fragment
 result = Cage[lodash, JSCall[@["sum"], @[items], Int]()]()
@@ -948,7 +952,7 @@ Gorillax[42]().toString()  // "Gorillax(42)"
 
 ### フィールド
 
-#### hasValue
+#### has_value
 
 値を持つかどうかを示すブールフィールドです。
 
@@ -1014,6 +1018,8 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 
 `map` / `flatMap` / `mapError` の引数型ピンは **受け側の `T` / `P` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` / `P` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
 
+`Result[T, P].flatMap(fn: T => Result[U, P])` は、受け取る関数が返す `Result` の述語型 `P` が受け側と一致することを要求します。異なる述語型の `Result` を `flatMap` で混ぜようとすると拒否されます。述語型を切り替えたいときは `mapError` を経由して明示的に変換してください。
+
 ---
 
 ## Async — 非同期メソッド
@@ -1029,3 +1035,78 @@ gorillax.relax().toString()  // "RelaxedGorillax(42)"
 | `unmold()` | `=> :T` | アンモールディング |
 
 `map` の引数型ピンは **受け側の `T` が具体型として確定しているとき** にのみ機能します。クロスモジュール import 等で `T` が未解決のまま call site に到達した場合、未解決側がサブタイプ規則のワイルドカードとして振る舞い、型不一致の関数も silent pass します。詳細とサンプルは [Lax の `map` / `flatMap` の引数型ピンの効力範囲](#map--flatmap-の引数型ピンの効力範囲) を参照してください。
+
+---
+
+## Built-in Mold Surface Index
+
+この一覧は、モールド registry と公開ドキュメントの同期確認に使う索引です。詳細な使い方は各型・パッケージの節を参照してください。
+
+| API | 引数 | Options | Return |
+|-----|------|---------|--------|
+| `Acos[a1]()` | a1 | - | Float |
+| `All[a1]()` | a1 | - | Pack |
+| `Asin[a1]()` | a1 | - | Float |
+| `Async[a1]()` | a1 | - | Pack |
+| `AsyncReject[a1]()` | a1 | - | Pack |
+| `Atan[a1]()` | a1 | - | Float |
+| `Atan2[a1, a2]()` | a1, a2 | - | Float |
+| `BuildRilla[a1]()` | a1 | - | Pack |
+| `ByteAt[a1, a2]()` | a1, a2 | - | Pack |
+| `ByteLength[a1]()` | a1 | - | Int |
+| `ByteSlice[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `BytesCursor[a1]()` | a1 | offset | Pack |
+| `BytesCursorRemaining[a1]()` | a1 | - | Int |
+| `BytesCursorTake[a1, a2]()` | a1, a2 | - | Pack |
+| `BytesCursorU8[a1]()` | a1 | - | Pack |
+| `Cancel[a1]()` | a1 | - | Pack |
+| `Chars[a1]()` | a1 | - | List |
+| `Contains[a1, a2]()` | a1, a2 | - | Bool |
+| `Cos[a1]()` | a1 | - | Float |
+| `Cosh[a1]()` | a1 | - | Float |
+| `Exp[a1]()` | a1 | - | Float |
+| `FileRilla[a1]()` | a1 | - | Pack |
+| `HttpRequest[a1, a2]()` | a1, a2 | body,headers | Pack |
+| `IndexOf[a1, a2]()` | a1, a2 | - | Int |
+| `JSRilla[a1]()` | a1 | - | Pack |
+| `LastIndexOf[a1, a2]()` | a1, a2 | - | Int |
+| `Length[a1]()` | a1 | - | Int |
+| `Ln[a1]()` | a1 | - | Float |
+| `Log[a1]()` | a1 | - | Float |
+| `Log10[a1]()` | a1 | - | Float |
+| `Log2[a1]()` | a1 | - | Float |
+| `Max[a1]()` | a1 | - | Dynamic |
+| `Min[a1]()` | a1 | - | Dynamic |
+| `Molten[]()` | - | - | Pack |
+| `Optional[]()` | - | - | Pack |
+| `PadLeft[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `PadRight[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `Pow[a1, a2]()` | a1, a2 | - | Float |
+| `Race[a1]()` | a1 | - | Pack |
+| `Reduce[a1, a2, a3]()` | a1, a2, a3 | - | Dynamic |
+| `RelaxedGorillax[a1]()` | a1 | - | Pack |
+| `ReplaceAll[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `Sin[a1]()` | a1 | - | Float |
+| `Sinh[a1]()` | a1 | - | Float |
+| `SpanContains[a1, a2, a3]()` | a1, a2, a3 | - | Bool |
+| `SpanEquals[a1, a2, a3]()` | a1, a2, a3 | - | Bool |
+| `SpanSlice[a1, a2, a3, a4]()` | a1, a2, a3, a4 | - | Pack |
+| `SpanStartsWith[a1, a2, a3]()` | a1, a2, a3 | - | Bool |
+| `Sqrt[a1]()` | a1 | - | Float |
+| `StrOf[a1, a2]()` | a1, a2 | - | Str |
+| `Stream[a1]()` | a1 | - | Pack |
+| `StreamFrom[a1]()` | a1 | - | Pack |
+| `StringRepeatJoin[a1, a2, a3]()` | a1, a2, a3 | - | Str |
+| `Stub[a1]()` | a1 | - | Pack |
+| `TODO[]()` | - | id,sol,task,unm | Pack |
+| `Tan[a1]()` | a1 | - | Float |
+| `Tanh[a1]()` | a1 | - | Float |
+| `Timeout[a1, a2]()` | a1, a2 | - | Pack |
+| `U16BE[a1]()` | a1 | - | Pack |
+| `U16BEDecode[a1]()` | a1 | - | Pack |
+| `U16LE[a1]()` | a1 | - | Pack |
+| `U16LEDecode[a1]()` | a1 | - | Pack |
+| `U32BE[a1]()` | a1 | - | Pack |
+| `U32BEDecode[a1]()` | a1 | - | Pack |
+| `U32LE[a1]()` | a1 | - | Pack |
+| `U32LEDecode[a1]()` | a1 | - | Pack |

@@ -40,9 +40,10 @@ use std::time::SystemTime;
 /// Search order:
 ///
 /// 1. `TAIDA_BIN` runtime env override (used by ad-hoc local runs)
-/// 2. Canonical `<manifest>/target/debug/taida`, then release. Debug is tried
-///    first so normal `cargo test` and nextest archive runs cannot accidentally
-///    run a stale release CLI. This is still chosen ahead of
+/// 2. Canonical `<manifest>/target/<profile>/taida` for the current test
+///    profile, then the other profile. Debug tests prefer debug and release
+///    tests prefer release so a fresh `cargo test --release` cannot
+///    accidentally run a stale debug CLI. This is still chosen ahead of
 ///    `CARGO_BIN_EXE_taida` because cargo can cache
 ///    multiple bin fingerprints under `target/<profile>/deps/taida-XXXX`
 ///    and silently point `CARGO_BIN_EXE_taida` at a stale one when test
@@ -74,7 +75,11 @@ pub fn taida_bin() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let debug = manifest.join("target").join("debug").join(BIN_NAME);
     let release = manifest.join("target").join("release").join(BIN_NAME);
-    let canonical_order = [debug, release];
+    let canonical_order = if cfg!(debug_assertions) {
+        [debug, release]
+    } else {
+        [release, debug]
+    };
     for canonical in canonical_order {
         if canonical.exists() {
             return canonical;
@@ -128,6 +133,16 @@ pub fn taida_bin() -> PathBuf {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Whether the `taida` binary selected for this test profile accepts
+/// loopback GitHub archive mocks.
+///
+/// Release binaries intentionally reject `TAIDA_GITHUB_BASE_URL` overrides,
+/// even with the mock gate set, so integration tests that require a mock
+/// archive server should skip that specific path under release nextest.
+pub fn taida_mock_github_base_url_supported() -> bool {
+    cfg!(debug_assertions) || cfg!(taida_allow_mock_github_base_url)
 }
 
 fn push_nextest_archive_roots(roots: &mut Vec<PathBuf>) {

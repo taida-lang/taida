@@ -261,7 +261,6 @@ fn walk_files_with_extension(root: &std::path::Path, ext: &str) -> Vec<PathBuf> 
 }
 
 #[test]
-#[ignore = "requires built taida binary; runs in CI lint job explicitly"]
 fn d28b_008_curated_user_facing_examples_lint_clean() {
     let workspace = env_workspace_root();
     let examples = workspace.join("examples");

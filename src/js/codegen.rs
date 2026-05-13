@@ -3229,6 +3229,16 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                if method == "fold" || method == "reduce" {
+                    self.write(if method == "fold" { "Fold(" } else { "Reduce(" });
+                    self.gen_expr(obj)?;
+                    for arg in args.iter() {
+                        self.write(", ");
+                        self.gen_expr(arg)?;
+                    }
+                    self.write(")");
+                    return Ok(());
+                }
                 // C12-2b: .toString() universal adoption. Route through a
                 // runtime helper so that plain objects (BuchiPacks) format
                 // as `@(...)` instead of JS's default `[object Object]`.
@@ -3306,20 +3316,13 @@ impl JsCodegen {
                 if field.starts_with("__") {
                     return Err(JsError {
                         message: format!(
-                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding, getOrDefault(default), or errorInfo() instead.",
                             field
                         ),
                     });
                 }
                 self.gen_expr(obj)?;
-                // F-59 fix: Lax/Gorillax hasValue is a callable function in JS runtime.
-                // When accessed as a property (field access), emit as function call
-                // so that it returns the boolean value instead of a function reference.
-                if field == "hasValue" {
-                    self.write(".hasValue()");
-                } else {
-                    self.write(&format!(".{}", field));
-                }
+                self.write(&format!(".{}", field));
                 Ok(())
             }
             // IndexAccess removed in v0.5.0 — use .get(i) instead
@@ -4342,6 +4345,24 @@ impl JsCodegen {
                         if is_removed_list_method(method) {
                             self.write("__taida_list_method_removed(");
                             self.write(&format!("{:?}", method));
+                            self.write(")");
+                            return Ok(());
+                        }
+                        if method == "fold" || method == "reduce" {
+                            self.write(if method == "fold" { "Fold(" } else { "Reduce(" });
+                            if matches!(obj.as_ref(), Expr::Placeholder(_)) {
+                                self.write("__p");
+                            } else {
+                                self.gen_expr(obj)?;
+                            }
+                            for arg in args.iter() {
+                                self.write(", ");
+                                if matches!(arg, Expr::Placeholder(_)) {
+                                    self.write("__p");
+                                } else {
+                                    self.gen_expr(arg)?;
+                                }
+                            }
                             self.write(")");
                             return Ok(());
                         }

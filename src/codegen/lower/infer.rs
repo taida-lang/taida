@@ -9,6 +9,8 @@ use super::{LowerError, Lowering};
 use crate::codegen::ir::*;
 use crate::parser::*;
 
+const LEGACY_FIELD_TYPE_BOOL: i64 = 4;
+
 impl Lowering {
     // lower_index_access removed in v0.5.0 — IndexAccess no longer exists in AST
 
@@ -60,7 +62,7 @@ impl Lowering {
                 self.float_vars.contains(name) || self.stdlib_constants.contains_key(name)
             }
             // C25B-025 Phase 5-I: math mold family returns Float. Must
-            // match the `Float` entries in `src/types/mold_returns.rs`
+            // match the `Float` entries in `src/types/mold_specs.rs`
             // so nested calls (`Sqrt[Pow[2.0, 3]()]`) skip the
             // int→float widening in the outer mold's lowering.
             Expr::MoldInst(name, _, _, _) => {
@@ -118,27 +120,35 @@ impl Lowering {
                     false
                 }
             }
+            Expr::FieldAccess(obj, field, _) => {
+                self.field_access_has_named_type(obj, field, "Str")
+                    || self.field_type_tags.get(field).copied() == Some(3)
+            }
             Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
                 self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs)
             }
             // WF-2b: MoldInst string molds (Upper, Lower, etc.) return strings
             // Note: CharAt returns Lax[Str], not raw Str (TF-15)
             // Note: Reverse is polymorphic (Str or List), so NOT included here
-            Expr::MoldInst(name, _, _, _) => matches!(
-                name.as_str(),
-                "Str"
-                    | "Upper"
-                    | "Lower"
-                    | "Trim"
-                    | "Replace"
-                    | "Slice"
-                    | "Repeat"
-                    | "Pad"
-                    | "Join"
-                    | "ToFixed"
-                    // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` returns Str.
-                    | "StrOf"
-            ),
+            Expr::MoldInst(name, _, _, _) => {
+                crate::types::mold_specs::mold_return_tag(name)
+                    == Some(crate::codegen::tag_prop::TAG_STR)
+                    || matches!(
+                        name.as_str(),
+                        "Str"
+                            | "Upper"
+                            | "Lower"
+                            | "Trim"
+                            | "Replace"
+                            | "Slice"
+                            | "Repeat"
+                            | "Pad"
+                            | "Join"
+                            | "ToFixed"
+                            // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` returns Str.
+                            | "StrOf"
+                    )
+            }
             Expr::BinaryOp(_, BinOp::Concat, _, _) => true,
             Expr::CondBranch(arms, _) => {
                 // If ANY arm body's last expression is a string, the whole branch is string
@@ -154,6 +164,21 @@ impl Lowering {
             }
             _ => false,
         }
+    }
+
+    fn field_access_has_named_type(&self, obj: &Expr, field: &str, expected: &str) -> bool {
+        self.infer_type_name(obj)
+            .and_then(|type_name| self.type_field_types.get(&type_name))
+            .is_some_and(|field_types| {
+                field_types.iter().any(|(name, ty)| {
+                    name == field
+                        && matches!(
+                            ty,
+                            Some(crate::parser::TypeExpr::Named(type_name))
+                                if type_name == expected
+                        )
+                })
+            })
     }
 
     /// FL-16: 式の型がコンパイル時に不明かどうかを判定（untyped パラメータ等）
@@ -571,7 +596,7 @@ impl Lowering {
                 self.float_vars.insert(target.to_string());
             }
             // C26B-011 (Phase 11): math molds return Float per
-            // `src/types/mold_returns.rs`. Previously `Sqrt[-1.0]() ]=> nan`
+            // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() ]=> nan`
             // left `nan` untagged and `debug(nan)` fell through to
             // `taida_debug_int`, printing the f64 bit-pattern as Int
             // (e.g. `-2251799813685248` for NaN). Must match
@@ -606,7 +631,7 @@ impl Lowering {
         if self.expr_is_string_full(expr) {
             // Already a string — no conversion needed
             Ok(var)
-        } else if self.expr_is_bool(expr) {
+        } else if self.expr_is_likely_bool(expr) {
             let result = func.alloc_var();
             func.push(IrInst::Call(
                 result,
@@ -631,6 +656,33 @@ impl Lowering {
                 vec![var],
             ));
             Ok(result)
+        }
+    }
+
+    /// Return whether codegen can safely route this expression through Bool
+    /// formatting or a Bool runtime tag when the typed side table is absent.
+    pub(crate) fn expr_is_likely_bool(&self, expr: &Expr) -> bool {
+        if self.expr_is_bool(expr) {
+            return true;
+        }
+
+        match expr {
+            Expr::Ident(name, _) => self.bool_vars.contains(name),
+            Expr::FieldAccess(obj, field, _) => {
+                field == "has_value"
+                    || self.field_access_has_named_type(obj, field, "Bool")
+                    || self.field_type_tags.get(field).copied() == Some(LEGACY_FIELD_TYPE_BOOL)
+            }
+            Expr::MethodCall(_, method, args, _) => match method.as_str() {
+                "hasValue" | "isEmpty" | "isOk" | "isError" | "isSuccess" | "isFulfilled"
+                | "isPending" | "isRejected" | "isNaN" | "isInfinite" | "isFinite"
+                | "isPositive" | "isNegative" | "isZero" => args.is_empty(),
+                "contains" | "startsWith" | "endsWith" | "has" | "any" | "all" | "none" => {
+                    args.len() == 1
+                }
+                _ => false,
+            },
+            _ => false,
         }
     }
 

@@ -180,7 +180,9 @@ fn test_js_exec_closures() {
     assert_parity(
         "closures",
         r#"
-makeAdder n = _ x = n + x => :Int
+makeAdder n =
+  _ x = n + x
+=> :Int => :Int
 add5 <= makeAdder(5)
 stdout(add5(3).toString())
 "#,
@@ -459,7 +461,7 @@ d <= Div[10, 3]()
 d ]=> val
 stdout(val.toString())
 d2 <= Div[10, 0]()
-stdout(d2.hasValue.toString())
+stdout(d2.has_value.toString())
 d2 ]=> val2
 stdout(val2.toString())
 "#,

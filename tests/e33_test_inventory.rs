@@ -3,6 +3,7 @@
 const NEXTEST: &str = include_str!("../.config/nextest.toml");
 const CI: &str = include_str!("../.github/workflows/ci.yml");
 const DOC_REFRESH: &str = include_str!("../.github/workflows/doc-baseline-refresh.yml");
+const NET_STRESS: &str = include_str!("../.github/workflows/net-stress.yml");
 
 #[test]
 fn environment_dependent_tests_are_grouped_in_nextest() {
@@ -43,5 +44,15 @@ fn doc_baseline_refresh_workflow_runs_probe_helper() {
             && DOC_REFRESH.contains("c25b_008_doc_examples_probe")
             && DOC_REFRESH.contains("--ignored --nocapture"),
         "doc-baseline-refresh workflow must run the ignored probe helper on demand"
+    );
+}
+
+#[test]
+fn net_stress_workflow_runs_portbind_long_helper() {
+    assert!(
+        NET_STRESS.contains("workflow_dispatch:")
+            && NET_STRESS.contains("c27b_003_portbind_race_long_100_iter")
+            && NET_STRESS.contains("--ignored --exact --nocapture"),
+        "net-stress workflow must run the ignored portbind race helper on demand"
     );
 }

@@ -675,6 +675,9 @@ int64_t taida_bool_not(int64_t a) { return a ? 0 : 1; }
 /* ── Forward declarations for Lax/Result/Gorillax (defined in W-5 section below) ── */
 int64_t taida_lax_new(int64_t value, int64_t default_value);
 int64_t taida_lax_empty(int64_t default_value);
+int64_t taida_lax_empty_error(int64_t default_value, int64_t error);
+int64_t taida_make_error_with_kind(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr);
+int64_t taida_make_error_with_kind_code(int64_t type_ptr, int64_t msg_ptr, int64_t kind_ptr, int64_t code);
 int64_t taida_lax_unmold(int64_t lax_ptr);
 static int _wasm_is_lax(int64_t val);
 static int _wasm_is_result(int64_t val);
@@ -703,6 +706,8 @@ static int64_t _wasm_async_to_string(int64_t async_ptr);    /* PR-4: forward dec
 #define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
 #define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
 #define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
+#define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
+#define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 #define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
 #define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
 
@@ -735,9 +740,9 @@ int64_t taida_generic_unmold(int64_t val) {
     }
     if (_wasm_is_result(val)) {
         /* Result unmold: evaluate predicate + check throw (matching native) */
-        int64_t value = taida_pack_get_idx(val, 0);      /* __value */
-        int64_t pred = taida_pack_get_idx(val, 1);        /* __predicate */
-        int64_t throw_val = taida_pack_get_idx(val, 2);   /* throw */
+        int64_t value = taida_pack_get(val, WASM_HASH___VALUE);
+        int64_t pred = taida_pack_get(val, WASM_HASH___PREDICATE);
+        int64_t throw_val = taida_pack_get(val, WASM_HASH_THROW);
 
         if (throw_val != 0) {
             if (pred != 0) {
@@ -1514,20 +1519,9 @@ static int64_t _wasm_lookup_field_type(int64_t hash);
    Centralized here for use by both display_string and the runtime constructors below. */
 /* WFX-2: corrected FNV-1a hashes (previous values were wrong, causing
    field access mismatch with compiler-generated hashes from simple_hash()) */
-#define WASM_HASH_HAS_VALUE   0x9e9c6dc733414d60LL  /* FNV-1a("hasValue") */
-#ifndef WASM_HASH___VALUE
-#define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
-#endif
-#ifndef WASM_HASH___TYPE
-#define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
-#endif
+#define WASM_HASH_HAS_VALUE   0x175d21da0757452dLL  /* FNV-1a("has_value") */
 #define WASM_HASH_IS_OK       0x6550c1c5b98b56bfLL  /* FNV-1a("isOk") */
 #define WASM_HASH___ERROR     0x15c3e6e41a99a6cbLL  /* FNV-1a("__error") */
-#ifndef WASM_HASH___DEFAULT
-#define WASM_HASH___DEFAULT   0xed4fba440f8602d4LL  /* FNV-1a("__default") */
-#endif
-#define WASM_HASH_THROW       0x5a5fe3720c9584cfLL  /* FNV-1a("throw") */
-#define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 /* BE-WASM-1: TODO field hashes (matching native_runtime.c) */
 #define WASM_HASH_TODO_ID     0x08b72e07b55c3ac0LL  /* FNV-1a("id") */
 #define WASM_HASH_TODO_TASK   0xd9603bef07a9524cLL  /* FNV-1a("task") */
@@ -1692,6 +1686,11 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
+        int render_unit  = field_val == 0
+            && (field_hash == WASM_HASH___PREDICATE
+                || field_hash == WASM_HASH_THROW
+                || _wf_strcmp(fname, "__predicate") == 0
+                || _wf_strcmp(fname, "throw") == 0);
         /* C23B-005 (2026-04-22): explicit Int branch. Packs default
            `field_tag = 0` (INT), so without a dedicated branch an
            untagged large Int value would fall through to the generic
@@ -1721,6 +1720,8 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
             _sb_append(&sb, "\"");
             if (sv) _sb_append(&sb, sv);
             _sb_append(&sb, "\"");
+        } else if (render_unit) {
+            _sb_append(&sb, "@()");
         } else if (render_int) {
             int64_t is = taida_int_to_str(field_val);
             _sb_append(&sb, (const char *)(intptr_t)is);
@@ -1761,6 +1762,11 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
+        int render_unit  = field_val == 0
+            && (field_hash == WASM_HASH___PREDICATE
+                || field_hash == WASM_HASH_THROW
+                || _wf_strcmp(fname, "__predicate") == 0
+                || _wf_strcmp(fname, "throw") == 0);
         /* C23B-005 (2026-04-22): explicit Int branch — see the
            `_wasm_pack_to_string` counterpart comment. */
         int render_int = (field_tag == WASM_TAG_INT) && !render_bool;
@@ -1781,6 +1787,8 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
             _sb_append(&sb, "\"");
             if (sv) _sb_append(&sb, sv);
             _sb_append(&sb, "\"");
+        } else if (render_unit) {
+            _sb_append(&sb, "@()");
         } else if (render_int) {
             int64_t is = taida_int_to_str(field_val);
             _sb_append(&sb, (const char *)(intptr_t)is);
@@ -2064,12 +2072,12 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
 
 /* W-5f: Detect Lax, Result, Gorillax, RelaxedGorillax by pack structure.
    These all have fc=4 with distinctive first-field hashes:
-   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)
-   - Gorillax/Relaxed: hash0 = WASM_HASH_HAS_VALUE (0x9e9c6dc733414d60)  [C24-A]
+   - Lax:              hash0 = WASM_HASH_HAS_VALUE (0x175d21da0757452d)
+   - Gorillax/Relaxed: hash0 = WASM_HASH_HAS_VALUE (0x175d21da0757452d)  [C24-A]
    - Result:           hash0 = WASM_HASH___VALUE    (0x0a7fc9f13472bbe0)
 
    C24-A (2026-04-23): Lax and Gorillax now share hash0 (both use
-   `hasValue` as the first-field name to match interpreter / JS / native).
+   `has_value` as the first-field name to match interpreter / JS / native).
    `_wasm_is_gorillax` / `_wasm_is_lax` disambiguate via the field-2
    hash — `__error` (WASM_HASH___ERROR) for Gorillax / RelaxedGorillax
    vs `__default` (WASM_HASH___DEFAULT) for Lax. The hash check is a
@@ -2093,10 +2101,16 @@ static int _wasm_is_result(int64_t val) {
     /* Need at least 13 int64_t slots (fc + 4*3 fields) = 104 bytes */
     if (!_wasm_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    /* Result: fc=4, hash0 = WASM_HASH___VALUE, hash2 = WASM_HASH_THROW */
+    /* Result: core wasm stores `throw` at field 2; wasm-wasi keeps its
+       historical display order with `throw` at field 1. Require the
+       `__type` slot too so user packs that merely contain `__value` and
+       `throw` do not route as Result. */
     if (p[0] == 4 && p[1] == WASM_HASH___VALUE) {
-        int64_t hash2 = p[1 + 2 * 3]; /* field 2 hash */
-        if (hash2 == WASM_HASH_THROW) return 1;
+        int64_t hash1 = p[1 + 1 * 3];
+        int64_t hash2 = p[1 + 2 * 3];
+        int64_t hash3 = p[1 + 3 * 3];
+        if ((hash1 == WASM_HASH_THROW || hash2 == WASM_HASH_THROW)
+            && hash3 == WASM_HASH___TYPE) return 1;
     }
     return 0;
 }
@@ -2142,7 +2156,7 @@ static int64_t _wasm_lax_value_display(int64_t val, int64_t tag) {
 
 /* W-5f: Lax.toString() — "Lax(value)" or "Lax(default: value)" */
 static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
-    int64_t has_value = taida_pack_get_idx(lax_ptr, 0); /* hasValue */
+    int64_t has_value = taida_pack_get_idx(lax_ptr, 0); /* has_value */
     int64_t value = taida_pack_get_idx(lax_ptr, 1);     /* __value */
     int64_t def = taida_pack_get_idx(lax_ptr, 2);       /* __default */
     /* TF-4: Use type tag from __value field (index 1) for type-aware display */
@@ -2205,7 +2219,7 @@ static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
 static int64_t _wasm_result_to_string(int64_t result) {
     if (!_wasm_result_is_error_check(result)) {
         /* Success case */
-        int64_t value = taida_pack_get_idx(result, 0); /* __value */
+        int64_t value = taida_pack_get(result, WASM_HASH___VALUE);
         int64_t value_str = _wasm_value_to_display_string(value);
         _wasm_strbuf sb;
         _sb_init(&sb);
@@ -2215,7 +2229,7 @@ static int64_t _wasm_result_to_string(int64_t result) {
         return _sb_finish(&sb);
     }
     /* Error case — throw_val == 0 means Unit (@()), matching interpreter */
-    int64_t throw_val = taida_pack_get_idx(result, 2); /* throw field */
+    int64_t throw_val = taida_pack_get(result, WASM_HASH_THROW);
     if (throw_val == 0) {
         return (int64_t)(intptr_t)"Result(throw <= @())";
     }
@@ -3438,7 +3452,7 @@ int64_t taida_lax_is_empty(int64_t lax_ptr);
 /* ── W-4f: taida_polymorphic_is_empty (wasm-min: Lax/List/Set/HashMap/String) ── */
 int64_t taida_polymorphic_is_empty(int64_t ptr) {
     if (ptr == 0) return 1;
-    /* Lax: isEmpty means hasValue == false */
+    /* Lax: isEmpty means has_value == false */
     if (_wasm_is_lax(ptr)) {
         return taida_lax_is_empty(ptr);
     }
@@ -3788,7 +3802,7 @@ int64_t taida_polymorphic_has_value(int64_t obj) {
     if (obj == 0) return 0;
     if (!_wasm_is_valid_ptr(obj, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)obj;
-    if (p[0] == 4) return taida_pack_get_idx(obj, 0); /* fc=4: Lax/Gorillax/Result */
+    if (p[0] == 4 || p[0] == 5) return taida_pack_get_idx(obj, 0); /* monadic has_value */
     return 0;
 }
 
@@ -3820,7 +3834,7 @@ int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
 
 /* E32B-022 (Lock-N): Lax[Int]-returning siblings of the legacy `-1`
  * sentinel `*indexOf*` helpers.  Same probe semantics as the raw
- * helpers above; the `-1` sentinel is rewritten to a hasValue=false
+ * helpers above; the `-1` sentinel is rewritten to a has_value=false
  * Lax with default 0 (PHILOSOPHY I — no magic-value sentinels).  */
 extern int64_t taida_list_find_index(int64_t list_ptr, int64_t fn_ptr);
 static int64_t _taida_int_lax_found_wasm(int64_t idx) { return taida_lax_new(idx, 0); }

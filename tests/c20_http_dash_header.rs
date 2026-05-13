@@ -351,8 +351,7 @@ fn c20_http_request_missing_url_js_build_fails() {
     // Before C20-4 the JS codegen emitted
     //   __taida_os_httpRequest(, null, null)
     // which is a JavaScript syntax error. After C20-4 the JS codegen
-    // raises `HttpRequest requires at least 2 type arguments`
-    // matching the Interpreter / Native rejection path.
+    // now raises a type-checker arity diagnostic before JS emission.
     let source = "resp <= HttpRequest[\"GET\"]()\nstdout(\"never\")\n";
     let src = write_source("root16_arity", source);
 
@@ -373,7 +372,9 @@ fn c20_http_request_missing_url_js_build_fails() {
     );
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
-        stderr.contains("HttpRequest") && stderr.contains("at least 2"),
+        stderr.contains("HttpRequest")
+            && stderr.contains("expects 2 positional")
+            && stderr.contains("got 1"),
         "JS build stderr missing ROOT-16 arity diagnostic. stderr={}",
         stderr
     );

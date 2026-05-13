@@ -330,7 +330,8 @@ handle =
 ```taida
 // NG: アーム内に副作用文が紛れ込む anti-pattern
 validateProjectRoot =
-  | Exists["./"]() == false |>
+  rootExists <= Exists["./"]()
+  | rootExists.getOrDefault(false) == false |>
     fail("error: current directory does not exist")
     writeFile(".hk_write_check", "test") => _wr   // [E1616]: discard 破棄パターンは禁止
     RemoveFile[".hk_write_check"]() => _rm
@@ -400,7 +401,7 @@ f x =
 
 短い 2 分岐なら `If` モールドが簡潔です。
 
-```taida
+```taida fragment
 result <= If[cond, doSomething(), 0]()
 ```
 

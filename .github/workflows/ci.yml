@@ -2,10 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, "feat/**"]
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,10 +26,10 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
       # C25B-003 Phase 2B: migrate from hand-rolled actions/cache to
-      # Swatinem/rust-cache@v2. Advantages:
+      # Swatinem/rust-cache. Advantages:
       #  - save-on-success semantics avoid polluting the cache with broken
       #    artefacts from failed runs
       #  - incremental target cleanup (rust-cache prunes unreferenced
@@ -34,7 +37,7 @@ jobs:
       #  - shared-key allows explicit cross-job cache sharing without the
       #    hand-maintained `cargo-base` restore-keys fallback
       #  - automatic `cargo-home` + per-job target partitioning
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -69,10 +72,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: taiki-e/install-action@285e94bf531e72a83c0923d52526fabb44c3b169 # nextest
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -121,7 +124,7 @@ jobs:
       - name: Direct taida binary path gate
         run: cargo test --test archive_path_gate -- --nocapture
       - name: Upload nextest archive
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: nextest-archive
           path: taida-nextest.tar.zst
@@ -133,20 +136,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-archive
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: taiki-e/install-action@nextest
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: taiki-e/install-action@285e94bf531e72a83c0923d52526fabb44c3b169 # nextest
       - name: Install wasmtime
         run: |
+          set -euo pipefail
           WASMTIME_VERSION=v33.0.0
+          WASMTIME_SHA256=075d491ad2c9855c6247b7ca4284a833d1f3b51e85339e0f6be4e64620ea7f40
           curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" -o wasmtime.tar.xz
+          echo "${WASMTIME_SHA256}  wasmtime.tar.xz" | sha256sum -c -
           tar xf wasmtime.tar.xz
           mv "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime-bin"
           mkdir -p "$HOME/.wasmtime/bin"
           mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - name: Download nextest archive
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: nextest-archive
       # `cargo nextest run --archive-file` skips compilation entirely and
@@ -168,15 +174,27 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
+      - name: Install wasmtime
+        run: |
+          set -euo pipefail
+          WASMTIME_VERSION=v33.0.0
+          WASMTIME_SHA256=075d491ad2c9855c6247b7ca4284a833d1f3b51e85339e0f6be4e64620ea7f40
+          curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" -o wasmtime.tar.xz
+          echo "${WASMTIME_SHA256}  wasmtime.tar.xz" | sha256sum -c -
+          tar xf wasmtime.tar.xz
+          mv "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime-bin"
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "$HOME/.wasmtime-bin" "$HOME/.wasmtime/bin/wasmtime"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - run: ./tests/run_backend_parity.sh
 
   e2e:
@@ -184,9 +202,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -199,9 +217,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -214,7 +232,7 @@ jobs:
           ./tests/run_e32_loopback_smoke.sh
       - name: Upload E32 loopback traces
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: e32-loopback-smoke-${{ github.sha }}
           path: ${{ runner.temp }}/e32-loopback-smoke
@@ -224,11 +242,11 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -238,11 +256,18 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  mold-surface:
+    name: Mold Surface Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - run: python3 scripts/lint/mold_surface_drift.py --strict
 
   # D28B-008 Round 3 wK — naming-convention lint hard-fail.
   #
@@ -274,9 +299,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -314,10 +339,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: check
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.1
-      - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@2ea1b3bdd0261867664fd125505456a7b9c3385c # 1.93.1
+      - uses: taiki-e/install-action@285e94bf531e72a83c0923d52526fabb44c3b169 # nextest
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: cargo-base
       - name: List ignored tests inventory
@@ -336,12 +361,27 @@ jobs:
     name: Workflow Lint (D29B-010)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install actionlint
         run: |
-          bash <(curl --proto '=https' --tlsv1.2 -sSfL \
-            https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          echo "$PWD" >> "$GITHUB_PATH"
+          set -euo pipefail
+          ACTIONLINT_VERSION=1.7.12
+          ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -L "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf actionlint.tar.gz -C "$RUNNER_TEMP/actionlint"
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+      - name: Reject unverified workflow shell installers
+        run: |
+          set -euo pipefail
+          curl_pipe='curl .*\| *bash'
+          wget_pipe='wget .*\| *sh'
+          bash_curl='bash +<\(curl'
+          if grep -RInE "${curl_pipe}|${wget_pipe}|${bash_curl}" .github/workflows; then
+            echo "::error::Workflow shell installers must use pinned archives with digest verification."
+            exit 1
+          fi
       - name: Run actionlint over all workflows
         run: |
           actionlint -color .github/workflows/*.yml

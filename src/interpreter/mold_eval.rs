@@ -43,7 +43,7 @@ fn eval_unary_math(
 
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     Value::pack(vec![
-        ("hasValue".into(), Value::Bool(has_value)),
+        ("has_value".into(), Value::Bool(has_value)),
         ("__value".into(), value),
         ("__default".into(), default),
         ("__type".into(), Value::str("Lax".into())),
@@ -545,7 +545,7 @@ impl Interpreter {
                         ))))
                     }
                     None => {
-                        // Out of bounds: return Lax with hasValue=false
+                        // Out of bounds: return Lax with has_value=false
                         Ok(Some(Signal::Value(make_lax_value(
                             false,
                             Value::str(String::new()),
@@ -1006,7 +1006,7 @@ impl Interpreter {
             // These interpreter implementations delegate to `f64::sqrt`,
             // `f64::powf`, etc. NaN / ±Infinity / denormal are preserved
             // as Rust's `f64` semantics. Accepting `Int` widens to `f64`
-            // first; `Pow[Int, Int]` returns Float per `mold_returns.rs`.
+            // first; `Pow[Int, Int]` returns Float per `mold_specs.rs`.
             "Sqrt" => eval_unary_math(self, type_args, "Sqrt", f64::sqrt),
             "Exp" => eval_unary_math(self, type_args, "Exp", f64::exp),
             "Ln" => eval_unary_math(self, type_args, "Ln", f64::ln),
@@ -2074,21 +2074,21 @@ impl Interpreter {
                     if result.is_truthy() {
                         let default_val = Self::default_for_value(item);
                         return Ok(Some(Signal::Value(Value::pack(vec![
-                            ("hasValue".into(), Value::Bool(true)),
+                            ("has_value".into(), Value::Bool(true)),
                             ("__value".into(), item.clone()),
                             ("__default".into(), default_val),
                             ("__type".into(), Value::str("Lax".into())),
                         ]))));
                     }
                 }
-                // Not found — return Lax with hasValue=false
+                // Not found — return Lax with has_value=false
                 let default_val = if let Some(first) = list.first() {
                     Self::default_for_value(first)
                 } else {
                     Value::Int(0)
                 };
                 Ok(Some(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(false)),
+                    ("has_value".into(), Value::Bool(false)),
                     ("__value".into(), default_val.clone()),
                     ("__default".into(), default_val),
                     ("__type".into(), Value::str("Lax".into())),
@@ -2438,7 +2438,7 @@ impl Interpreter {
                     Value::Unit
                 };
                 Ok(Some(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(true)),
+                    ("has_value".into(), Value::Bool(true)),
                     ("__value".into(), inner_value),
                     ("__error".into(), Value::Unit),
                     ("__type".into(), Value::str("Gorillax".into())),
@@ -3662,20 +3662,27 @@ impl Interpreter {
                         match serde_json::from_str::<serde_json::Value>(s) {
                             Ok(parsed) => parsed,
                             Err(e) => {
-                                // Parse error → return Lax with hasValue=false
+                                // Parse error → return Lax with has_value=false
                                 let schema = self.resolve_json_schema(&type_args[1])?;
                                 let default_val =
                                     crate::interpreter::json::default_for_schema(&schema);
-                                return Ok(Some(Signal::Value(Value::pack(vec![
-                                    ("hasValue".into(), Value::Bool(false)),
-                                    ("__value".into(), default_val.clone()),
-                                    ("__default".into(), default_val),
-                                    ("__type".into(), Value::str("Lax".into())),
+                                let _ = e;
+                                let error = Value::pack(vec![
+                                    ("type".into(), Value::str("JsonError".into())),
                                     (
-                                        "__error".into(),
-                                        Value::str(format!("JSON parse error: {}", e)),
+                                        "message".into(),
+                                        Value::str("JSON parse error: invalid input".into()),
                                     ),
-                                ]))));
+                                    ("kind".into(), Value::str("parse".into())),
+                                    ("code".into(), Value::Int(0)),
+                                    ("__type".into(), Value::str("JsonError".into())),
+                                ]);
+                                return Ok(Some(Signal::Value(
+                                    crate::interpreter::Interpreter::lax_failure_with_error(
+                                        default_val,
+                                        error,
+                                    ),
+                                )));
                             }
                         }
                     }
@@ -3696,7 +3703,7 @@ impl Interpreter {
 
                 // Return as Lax (JSON parsing can fail)
                 Ok(Some(Signal::Value(Value::pack(vec![
-                    ("hasValue".into(), Value::Bool(true)),
+                    ("has_value".into(), Value::Bool(true)),
                     ("__value".into(), typed_value),
                     ("__default".into(), default_val),
                     ("__type".into(), Value::str("Lax".into())),

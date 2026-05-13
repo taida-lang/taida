@@ -416,7 +416,7 @@ fn median_f64(mut xs: Vec<f64>) -> f64 {
 }
 
 #[test]
-#[ignore = "C26B-024 Step 1 perf gate: opt-in via TAIDA_PERF_ROUTER_ENABLED=1 (CI perf-router workflow)"]
+#[ignore = "perf-gate: opt-in via TAIDA_PERF_ROUTER_ENABLED=1 (CI perf-router workflow)"]
 fn c26b_024_router_perf_gate() {
     if !env_flag("TAIDA_PERF_ROUTER_ENABLED") {
         eprintln!(

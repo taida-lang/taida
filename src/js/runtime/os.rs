@@ -17,7 +17,7 @@ const __OS_MAX_READ_SIZE = 64 * 1024 * 1024; // 64 MB
 
 // Helper: create os Result success value
 function __taida_os_result_ok(inner) {
-  return __taida_result_create(inner, null, null);
+  return __taida_result_create(inner, null, null, 'os');
 }
 
 // Helper: build IoError value from runtime error object.
@@ -70,7 +70,7 @@ function __taida_os_result_fail(err) {
   const message = err && err.message ? err.message : String(err);
   const kind = __taida_os_classify_error_kind(err);
   const inner = Object.freeze({ ok: false, code: code, message: message, kind: kind });
-  return __taida_result_create(inner, __taida_os_io_error(err), null);
+  return __taida_result_create(inner, __taida_os_io_error(err), null, 'os');
 }
 
 // Helper: create os Result failure with explicit kind/message (non-OS errors)
@@ -79,7 +79,7 @@ function __taida_os_result_fail_with_kind(kind, message) {
   // E33B-003 Cat B: lift `code` and `kind` to top-level for `err.X` parity
   // with Interpreter / Native. Keep `fields.X` for legacy callers.
   const errVal = { __type: 'IoError', type: 'IoError', message: message, code: -1, kind: kind, fields: { code: -1, kind: kind } };
-  return __taida_result_create(inner, errVal, null);
+  return __taida_result_create(inner, errVal, null, 'os');
 }
 
 function __taida_os_gorillax_ok(inner) {
@@ -130,28 +130,98 @@ function __taida_os_extract_spawn_sync_code(result) {
 
 // ── Input molds (Read, ListDir, Stat, Exists, EnvVar) ──
 
+function __taida_os_read_error(kind) {
+  return Lax(null, '', undefined, __taida_error_pack('IoError', 'Read error', kind || 'other', 0));
+}
+
+function __taida_os_error_kind(e) {
+  const source = (e && e.code) ? e : (e && e.cause && e.cause.code ? e.cause : e);
+  const code = source && source.code ? String(source.code) : '';
+  if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
+  if (code === 'EACCES' || code === 'EPERM') return 'permission';
+  if (code === 'EAGAIN' || code === 'EWOULDBLOCK' || code === 'ETIMEDOUT') return 'timeout';
+  if (code === 'ECONNREFUSED') return 'refused';
+  if (code === 'ECONNRESET') return 'reset';
+  if (code === 'EPIPE' || code === 'ENOTCONN' || code === 'ECONNABORTED') return 'peer_closed';
+  if (code === 'EINVAL' || code === 'EBADF') return 'invalid';
+  return 'other';
+}
+
+function __taida_os_http_default_response() {
+  return Object.freeze({ status: 0, body: '', headers: Object.freeze({}) });
+}
+
+function __taida_os_http_error(kind) {
+  return Lax(
+    null,
+    __taida_os_http_default_response(),
+    undefined,
+    __taida_error_pack('IoError', 'HttpRequest error', kind || 'other', 0)
+  );
+}
+
+function __taida_os_http_url_invalid(url) {
+  const s = String(url || '');
+  return (s.includes('://') && !(s.startsWith('http://') || s.startsWith('https://')))
+    || s.includes('\r')
+    || s.includes('\n');
+}
+
+function __taida_os_str_lax_error(message, kind) {
+  return Lax(null, '', undefined, __taida_error_pack('IoError', message, kind || 'other', 0));
+}
+
+function __taida_os_bytes_lax_error(message, kind) {
+  return __taida_lax_from_bytes(
+    new Uint8Array(0),
+    false,
+    __taida_error_pack('IoError', message, kind || 'other', 0)
+  );
+}
+
+function __taida_os_udp_recv_default_payload() {
+  return Object.freeze({ host: '', port: 0, data: new Uint8Array(0), truncated: false });
+}
+
+function __taida_os_udp_recv_error(kind) {
+  return Lax(
+    null,
+    __taida_os_udp_recv_default_payload(),
+    undefined,
+    __taida_error_pack('IoError', 'UdpRecvFrom error', kind || 'other', 0)
+  );
+}
+
 function __taida_os_read(path) {
-  if (!__os_fs) return Lax(null, '');
+  if (!__os_fs) return __taida_os_read_error('unavailable');
   try {
     const stat = __os_fs.statSync(path);
-    if (stat.size > __OS_MAX_READ_SIZE) return Lax(null, '');
+    if (stat.size > __OS_MAX_READ_SIZE) return __taida_os_read_error('too_large');
     const content = __os_fs.readFileSync(path, 'utf-8');
     return Lax(content);
   } catch (e) {
-    return Lax(null, '');
+    return __taida_os_read_error(__taida_os_error_kind(e));
   }
 }
 
 function __taida_os_readBytes(path) {
-  if (!__os_fs) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (!__os_fs) return __taida_os_readBytes_error('unavailable');
   try {
     const stat = __os_fs.statSync(path);
-    if (stat.size > __OS_MAX_READ_SIZE) return __taida_lax_from_bytes(new Uint8Array(0), false);
+    if (stat.size > __OS_MAX_READ_SIZE) return __taida_os_readBytes_error('too_large');
     const content = __os_fs.readFileSync(path);
     return __taida_lax_from_bytes(new Uint8Array(content), true);
   } catch (e) {
-    return __taida_lax_from_bytes(new Uint8Array(0), false);
+    return __taida_os_readBytes_error(__taida_os_error_kind(e));
   }
+}
+
+function __taida_os_readBytes_error(kind) {
+  return __taida_lax_from_bytes(
+    new Uint8Array(0),
+    false,
+    __taida_error_pack('IoError', 'ReadBytes error', kind || 'other', 0)
+  );
 }
 
 // C26B-020 柱 1: chunked / large-file bytes read.
@@ -162,11 +232,11 @@ function __taida_os_readBytes(path) {
 //   - offset >= file size   → Lax success with empty Bytes
 //   - offset + len > size   → Lax success with truncated tail
 function __taida_os_readBytesAt(path, offset, len) {
-  if (!__os_fs) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (!__os_fs) return __taida_os_readBytesAt_error('unavailable');
   const off = typeof offset === 'bigint' ? Number(offset) : (offset | 0);
   const n = typeof len === 'bigint' ? Number(len) : (len | 0);
-  if (off < 0 || n < 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
-  if (n > __OS_MAX_READ_SIZE) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (off < 0 || n < 0) return __taida_os_readBytesAt_error('invalid');
+  if (n > __OS_MAX_READ_SIZE) return __taida_os_readBytesAt_error('too_large');
   if (n === 0) return __taida_lax_from_bytes(new Uint8Array(0), true);
   let fd = -1;
   try {
@@ -179,23 +249,52 @@ function __taida_os_readBytesAt(path, offset, len) {
     return __taida_lax_from_bytes(view, true);
   } catch (e) {
     if (fd !== -1) { try { __os_fs.closeSync(fd); } catch (_) {} }
-    return __taida_lax_from_bytes(new Uint8Array(0), false);
+    return __taida_os_readBytesAt_error(__taida_os_error_kind(e));
   }
 }
 
+function __taida_os_readBytesAt_error(kind) {
+  return __taida_lax_from_bytes(
+    new Uint8Array(0),
+    false,
+    __taida_error_pack('IoError', 'ReadBytesAt error', kind || 'other', 0)
+  );
+}
+
+function __taida_os_listdir_error(kind) {
+  return Lax(
+    null,
+    Object.freeze([]),
+    undefined,
+    __taida_error_pack('IoError', 'ListDir error', kind || 'other', 0)
+  );
+}
+
 function __taida_os_listdir(path) {
-  if (!__os_fs) return Lax(null, Object.freeze([]));
+  if (!__os_fs) return __taida_os_listdir_error('unavailable');
   try {
     const entries = __os_fs.readdirSync(path).sort();
     return Lax(Object.freeze(entries));
   } catch (e) {
-    return Lax(null, Object.freeze([]));
+    return __taida_os_listdir_error(__taida_os_error_kind(e));
   }
 }
 
+function __taida_os_stat_default() {
+  return Object.freeze({ size: 0, modified: '', isDir: false });
+}
+
+function __taida_os_stat_error(kind) {
+  return Lax(
+    null,
+    __taida_os_stat_default(),
+    undefined,
+    __taida_error_pack('IoError', 'Stat error', kind || 'other', 0)
+  );
+}
+
 function __taida_os_stat(path) {
-  const defaultStat = Object.freeze({ size: 0, modified: '', isDir: false });
-  if (!__os_fs) return Lax(null, defaultStat);
+  if (!__os_fs) return __taida_os_stat_error('unavailable');
   try {
     const stat = __os_fs.statSync(path);
     const modified = new Date(stat.mtimeMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -206,7 +305,7 @@ function __taida_os_stat(path) {
     });
     return Lax(result);
   } catch (e) {
-    return Lax(null, defaultStat);
+    return __taida_os_stat_error(__taida_os_error_kind(e));
   }
 }
 
@@ -229,7 +328,7 @@ function __taida_os_exists(path) {
 function __taida_os_envvar(name) {
   const val = typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
   if (val !== undefined) return Lax(val);
-  return Lax(null, '');
+  return Lax(null, '', undefined, __taida_error_pack('IoError', 'EnvVar error', 'not_found', 0));
 }
 
 // ── Side-effect functions (writeFile, appendFile, remove, createDir, rename) ──
@@ -478,26 +577,27 @@ function __taida_os_http_response(status, body, headers) {
 }
 
 function __taida_os_http_failure() {
-  return Lax(null, Object.freeze({ status: 0, body: '', headers: Object.freeze({}) }));
+  return __taida_os_http_error('other');
 }
 
 // ReadAsync[path]() -> Promise<Lax[Str]>
 async function __taida_os_readAsync(path) {
-  if (!__os_fs) return Lax(null, '');
+  if (!__os_fs) return __taida_os_read_error('unavailable');
   try {
     const fsp = __os_fs.promises || await import('node:fs/promises').then(m => m.default || m).catch(() => null);
-    if (!fsp) return Lax(null, '');
+    if (!fsp) return __taida_os_read_error('unavailable');
     const stat = await fsp.stat(path);
-    if (stat.size > 64 * 1024 * 1024) return Lax(null, '');
+    if (stat.size > 64 * 1024 * 1024) return __taida_os_read_error('too_large');
     const content = await fsp.readFile(path, 'utf-8');
     return Lax(content);
   } catch (e) {
-    return Lax(null, '');
+    return __taida_os_read_error(__taida_os_error_kind(e));
   }
 }
 
 // HttpGet[url]() -> Promise<Lax[@(status, body, headers)]>
 async function __taida_os_httpGet(url) {
+  if (__taida_os_http_url_invalid(url)) return __taida_os_http_error('invalid');
   try {
     const resp = await fetch(url);
     const body = await resp.text();
@@ -505,12 +605,13 @@ async function __taida_os_httpGet(url) {
     resp.headers.forEach((v, k) => headers.push([k, v]));
     return __taida_os_http_response(resp.status, body, headers);
   } catch (e) {
-    return __taida_os_http_failure();
+    return __taida_os_http_error(__taida_os_error_kind(e));
   }
 }
 
 // HttpPost[url, body]() -> Promise<Lax[@(status, body, headers)]>
 async function __taida_os_httpPost(url, body) {
+  if (__taida_os_http_url_invalid(url)) return __taida_os_http_error('invalid');
   try {
     const resp = await fetch(url, { method: 'POST', body: body || '' });
     const respBody = await resp.text();
@@ -518,7 +619,7 @@ async function __taida_os_httpPost(url, body) {
     resp.headers.forEach((v, k) => headers.push([k, v]));
     return __taida_os_http_response(resp.status, respBody, headers);
   } catch (e) {
-    return __taida_os_http_failure();
+    return __taida_os_http_error(__taida_os_error_kind(e));
   }
 }
 
@@ -536,6 +637,9 @@ async function __taida_os_httpPost(url, body) {
 //     contributes one wire header; arbitrary UTF-8 is allowed in the
 //     name, so `x-api-key`, `anthropic-version`, etc. are expressible.
 async function __taida_os_httpRequest(method, url, reqHeaders, body) {
+  if (__taida_os_http_url_invalid(url) || String(method || '').includes('\r') || String(method || '').includes('\n')) {
+    return __taida_os_http_error('invalid');
+  }
   try {
     const opts = { method: method || 'GET' };
     if (body) opts.body = body;
@@ -564,7 +668,7 @@ async function __taida_os_httpRequest(method, url, reqHeaders, body) {
     resp.headers.forEach((v, k) => headers.push([k, v]));
     return __taida_os_http_response(resp.status, respBody, headers);
   } catch (e) {
-    return __taida_os_http_failure();
+    return __taida_os_http_error(__taida_os_error_kind(e));
   }
 }
 
@@ -819,7 +923,7 @@ async function __taida_os_socketSendAll(socketOrPack, data, timeoutMs) {
 // socketRecv(socket, timeoutMs?) -> Promise<Lax[Str]>
 async function __taida_os_socketRecv(socketOrPack, timeoutMs) {
   const socket = (socketOrPack && socketOrPack.socket) ? socketOrPack.socket : socketOrPack;
-  if (!socket || !socket.once) return Lax(null, '');
+  if (!socket || !socket.once) return __taida_os_str_lax_error('SocketRecv error', 'invalid');
   const effectiveTimeout = __taida_os_network_timeout_ms(timeoutMs);
   return new Promise((resolve) => {
     let settled = false;
@@ -836,13 +940,13 @@ async function __taida_os_socketRecv(socketOrPack, timeoutMs) {
       finish(Lax(chunk.toString('utf-8')));
     };
     const onEnd = () => {
-      finish(Lax(null, ''));
+      finish(__taida_os_str_lax_error('SocketRecv error', 'peer_closed'));
     };
-    const onError = () => {
-      finish(Lax(null, ''));
+    const onError = (err) => {
+      finish(__taida_os_str_lax_error('SocketRecv error', __taida_os_error_kind(err)));
     };
     const timer = setTimeout(() => {
-      finish(Lax(null, ''));
+      finish(__taida_os_str_lax_error('SocketRecv error', 'timeout'));
     }, effectiveTimeout);
 
     socket.once('data', onData);
@@ -854,7 +958,7 @@ async function __taida_os_socketRecv(socketOrPack, timeoutMs) {
 // socketRecvBytes(socket, timeoutMs?) -> Promise<Lax[Bytes]>
 async function __taida_os_socketRecvBytes(socketOrPack, timeoutMs) {
   const socket = (socketOrPack && socketOrPack.socket) ? socketOrPack.socket : socketOrPack;
-  if (!socket || !socket.once) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (!socket || !socket.once) return __taida_os_bytes_lax_error('SocketRecvBytes error', 'invalid');
   const effectiveTimeout = __taida_os_network_timeout_ms(timeoutMs);
   return new Promise((resolve) => {
     let settled = false;
@@ -872,13 +976,13 @@ async function __taida_os_socketRecvBytes(socketOrPack, timeoutMs) {
       finish(__taida_lax_from_bytes(bytes, true));
     };
     const onEnd = () => {
-      finish(__taida_lax_from_bytes(new Uint8Array(0), false));
+      finish(__taida_os_bytes_lax_error('SocketRecvBytes error', 'peer_closed'));
     };
-    const onError = () => {
-      finish(__taida_lax_from_bytes(new Uint8Array(0), false));
+    const onError = (err) => {
+      finish(__taida_os_bytes_lax_error('SocketRecvBytes error', __taida_os_error_kind(err)));
     };
     const timer = setTimeout(() => {
-      finish(__taida_lax_from_bytes(new Uint8Array(0), false));
+      finish(__taida_os_bytes_lax_error('SocketRecvBytes error', 'timeout'));
     }, effectiveTimeout);
 
     socket.once('data', onData);
@@ -971,8 +1075,8 @@ async function __taida_os_udpSendTo(socketOrPack, host, port, data, timeoutMs) {
 // udpRecvFrom(socket, timeoutMs?) -> Promise<Lax[@(host, port, data, truncated)]>
 async function __taida_os_udpRecvFrom(socketOrPack, timeoutMs) {
   const socket = (socketOrPack && socketOrPack.socket) ? socketOrPack.socket : socketOrPack;
-  const defaultPayload = Object.freeze({ host: '', port: 0, data: new Uint8Array(0), truncated: false });
-  if (!socket || typeof socket.once !== 'function') return Lax(null, defaultPayload);
+  const defaultPayload = __taida_os_udp_recv_default_payload();
+  if (!socket || typeof socket.once !== 'function') return __taida_os_udp_recv_error('invalid');
   const effectiveTimeout = __taida_os_network_timeout_ms(timeoutMs);
   return new Promise((resolve) => {
     let settled = false;
@@ -996,11 +1100,11 @@ async function __taida_os_udpRecvFrom(socketOrPack, timeoutMs) {
       });
       finish(Lax(payload, defaultPayload));
     };
-    const onError = () => {
-      finish(Lax(null, defaultPayload));
+    const onError = (err) => {
+      finish(__taida_os_udp_recv_error(__taida_os_error_kind(err)));
     };
     const timer = setTimeout(() => {
-      finish(Lax(null, defaultPayload));
+      finish(__taida_os_udp_recv_error('timeout'));
     }, effectiveTimeout);
 
     socket.once('message', onMessage);
@@ -1058,8 +1162,9 @@ async function __taida_os_udpClose(socketOrPack) {
 // ── socketRecvExact(socket, size, timeoutMs?) → Promise<Lax[Bytes]> ──
 async function __taida_os_socketRecvExact(socketOrPack, size, timeoutMs) {
   const socket = (socketOrPack && socketOrPack.socket) ? socketOrPack.socket : socketOrPack;
-  if (!socket || !socket.once) return __taida_lax_from_bytes(new Uint8Array(0), false);
-  if (!__taida_isIntNumber(size) || size < 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (!socket || !socket.once) return __taida_os_bytes_lax_error('SocketRecvExact error', 'invalid');
+  if (!__taida_isIntNumber(size) || size < 0) return __taida_os_bytes_lax_error('SocketRecvExact error', 'invalid');
+  if (size === 0) return __taida_lax_from_bytes(new Uint8Array(0), true);
   const effectiveTimeout = __taida_os_network_timeout_ms(timeoutMs);
   return new Promise((resolve) => {
     let settled = false;
@@ -1088,9 +1193,9 @@ async function __taida_os_socketRecvExact(socketOrPack, size, timeoutMs) {
         finish(__taida_lax_from_bytes(exact, true));
       }
     };
-    const onError = () => finish(__taida_lax_from_bytes(new Uint8Array(0), false));
-    const onEnd = () => finish(__taida_lax_from_bytes(new Uint8Array(0), false));
-    const timer = setTimeout(() => finish(__taida_lax_from_bytes(new Uint8Array(0), false)), effectiveTimeout);
+    const onError = (err) => finish(__taida_os_bytes_lax_error('SocketRecvExact error', __taida_os_error_kind(err)));
+    const onEnd = () => finish(__taida_os_bytes_lax_error('SocketRecvExact error', 'peer_closed'));
+    const timer = setTimeout(() => finish(__taida_os_bytes_lax_error('SocketRecvExact error', 'timeout')), effectiveTimeout);
     socket.on('data', onData);
     socket.once('error', onError);
     socket.once('end', onEnd);
@@ -1346,7 +1451,8 @@ function __taida_lax_from_bytes_cursor_step(step, hasValue) {
     __type: 'Lax',
     __value: hasValue ? val : def,
     __default: def,
-    hasValue: __taida_hasValue(!!hasValue),
+    has_value: !!hasValue,
+    hasValue() { return !!hasValue; },
     isEmpty() { return !hasValue; },
     errorInfo() { return __taida_error_info_lax(null); },
     getOrDefault(d) { return hasValue ? val : d; },

@@ -381,7 +381,18 @@ static taida_val taida_os_http_default_response(void) {
 }
 
 static taida_val taida_os_http_failure_lax(void) {
-    return taida_lax_empty(taida_os_http_default_response());
+    taida_val error = taida_make_error_with_kind_code("IoError", "HttpRequest error", "other", 0);
+    return taida_lax_empty_error(taida_os_http_default_response(), error);
+}
+
+static taida_val taida_os_http_failure_lax_kind(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code(
+        "IoError",
+        "HttpRequest error",
+        kind ? kind : "other",
+        0
+    );
+    return taida_lax_empty_error(taida_os_http_default_response(), error);
 }
 
 /*
@@ -779,13 +790,17 @@ static taida_val taida_os_http_do_curl(const char *method, const char *url, taid
 }
 
 static taida_val taida_os_http_do(const char *method, const char *url, taida_val headers_ptr, const char *body) {
-    if (!url) return taida_async_resolved(taida_os_http_failure_lax());
+    if (!url) return taida_async_resolved(taida_os_http_failure_lax_kind("invalid"));
 
     const char *scheme_end = strstr(url, "://");
     int use_tls = 0;
     const char *host_start;
     if (scheme_end) {
-        if (strncmp(url, "https", 5) == 0) use_tls = 1;
+        if (strncmp(url, "https://", 8) == 0) {
+            use_tls = 1;
+        } else if (strncmp(url, "http://", 7) != 0) {
+            return taida_async_resolved(taida_os_http_failure_lax_kind("invalid"));
+        }
         host_start = scheme_end + 3;
     } else {
         host_start = url;
@@ -826,7 +841,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     // RCB-304: Reject URLs with CR/LF in host or path to prevent CRLF injection
     if (strchr(host_buf, '\r') || strchr(host_buf, '\n') ||
         strchr(path, '\r') || strchr(path, '\n')) {
-        return taida_async_resolved(taida_os_http_failure_lax());
+        return taida_async_resolved(taida_os_http_failure_lax_kind("invalid"));
     }
 
     struct addrinfo hints = {0}, *res = NULL;
@@ -835,19 +850,20 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
     if (getaddrinfo(host_buf, port_str, &hints, &res) != 0 || !res) {
-        return taida_async_resolved(taida_os_http_failure_lax());
+        return taida_async_resolved(taida_os_http_failure_lax_kind("dns"));
     }
 
     int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sockfd < 0) {
         freeaddrinfo(res);
-        return taida_async_resolved(taida_os_http_failure_lax());
+        return taida_async_resolved(taida_os_http_failure_lax_kind(taida_os_error_kind(errno, strerror(errno))));
     }
 
     if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {
+        int saved_errno = errno;
         close(sockfd);
         freeaddrinfo(res);
-        return taida_async_resolved(taida_os_http_failure_lax());
+        return taida_async_resolved(taida_os_http_failure_lax_kind(taida_os_error_kind(saved_errno, strerror(saved_errno))));
     }
     freeaddrinfo(res);
 
@@ -878,7 +894,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     if (req_len < 0 || (size_t)req_len >= req_cap) {
         free(request);
         close(sockfd);
-        return taida_async_resolved(taida_os_http_failure_lax());
+        return taida_async_resolved(taida_os_http_failure_lax_kind("invalid"));
     }
 
     size_t sent_total = 0;
@@ -887,7 +903,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
         if (sent <= 0) {
             free(request);
             close(sockfd);
-            return taida_async_resolved(taida_os_http_failure_lax());
+            return taida_async_resolved(taida_os_http_failure_lax_kind(taida_os_error_kind(errno, strerror(errno))));
         }
         sent_total += (size_t)sent;
     }
@@ -904,7 +920,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
         if (resp_len > MAX_HTTP_RESPONSE) {
             close(sockfd);
             free(resp_buf);
-            return taida_async_resolved(taida_os_http_failure_lax());
+            return taida_async_resolved(taida_os_http_failure_lax_kind("too_large"));
         }
         if (resp_len >= buf_cap - 1) {
             buf_cap *= 2;
@@ -918,7 +934,7 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
     char *header_end = strstr(resp_buf, "\r\n\r\n");
     if (!header_end) {
         free(resp_buf);
-        return taida_async_resolved(taida_os_http_failure_lax());
+        return taida_async_resolved(taida_os_http_failure_lax_kind("invalid"));
     }
 
     int status_code = 0;
@@ -1260,7 +1276,9 @@ taida_val taida_os_socket_recv(taida_val socket_fd, taida_val timeout_ms) {
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recv((int)socket_fd, buf, sizeof(buf) - 1, 0);
     if (n <= 0) {
-        return taida_async_resolved(taida_lax_empty((taida_val)""));
+        const char *kind = (n == 0) ? "peer_closed" : taida_os_error_kind(errno, strerror(errno));
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecv error", kind, 0);
+        return taida_async_resolved(taida_lax_empty_error((taida_val)"", error));
     }
     buf[n] = '\0';
     char *result = taida_str_new_copy(buf);
@@ -1276,7 +1294,9 @@ taida_val taida_os_socket_recv_bytes(taida_val socket_fd, taida_val timeout_ms) 
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recv((int)socket_fd, buf, sizeof(buf), 0);
     if (n <= 0) {
-        return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
+        const char *kind = (n == 0) ? "peer_closed" : taida_os_error_kind(errno, strerror(errno));
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvBytes error", kind, 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
     }
     taida_val bytes = taida_bytes_from_raw(buf, (taida_val)n);
     return taida_async_resolved(taida_lax_new(bytes, taida_bytes_default_value()));
@@ -1284,7 +1304,8 @@ taida_val taida_os_socket_recv_bytes(taida_val socket_fd, taida_val timeout_ms) 
 
 taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_val timeout_ms) {
     if (size < 0) {
-        return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "invalid", 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
     }
     if (size == 0) {
         taida_val empty = taida_bytes_default_value();
@@ -1292,12 +1313,14 @@ taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_
     }
     // M-11: Cap recv size to 256MB to prevent unbounded malloc from user input.
     if (size > (taida_val)(256 * 1024 * 1024)) {
-        return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "too_large", 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
     }
 
     unsigned char *buf = (unsigned char*)malloc((size_t)size);
     if (!buf) {
-        return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "other", 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
     }
 
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
@@ -1306,12 +1329,20 @@ taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_
         ssize_t n = recv((int)socket_fd, buf + total, (size_t)size - total, 0);
         if (n == 0) {
             free(buf);
-            return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
+            taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "peer_closed", 0);
+            return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
         }
         if (n < 0) {
             if (errno == EINTR) continue;
+            int saved_errno = errno;
             free(buf);
-            return taida_async_resolved(taida_lax_empty(taida_bytes_default_value()));
+            taida_val error = taida_make_error_with_kind_code(
+                "IoError",
+                "SocketRecvExact error",
+                taida_os_error_kind(saved_errno, strerror(saved_errno)),
+                0
+            );
+            return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
         }
         total += (size_t)n;
     }
@@ -1462,7 +1493,13 @@ taida_val taida_os_udp_recv_from(taida_val socket_fd, taida_val timeout_ms) {
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recvfrom((int)socket_fd, buf, sizeof(buf), MSG_TRUNC, (struct sockaddr*)&from_addr, &from_len);
     if (n < 0) {
-        return taida_async_resolved(taida_lax_empty(taida_os_udp_default_payload()));
+        taida_val error = taida_make_error_with_kind_code(
+            "IoError",
+            "UdpRecvFrom error",
+            taida_os_error_kind(errno, strerror(errno)),
+            0
+        );
+        return taida_async_resolved(taida_lax_empty_error(taida_os_udp_default_payload(), error));
     }
     taida_val copy_len = (taida_val)n;
     taida_val truncated = 0;

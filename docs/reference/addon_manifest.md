@@ -43,10 +43,11 @@ use the interpreter; for wasm targets, only 'wasm-full' supports addons.
 ```
 
 Tooling that matches on the policy should prefer the
-`"supported: interpreter, native"` prefix; the prefix is preserved
-verbatim across the gen-C → gen-D transition (the trailing list grew
-to include `wasm-full` as a §6.2 widening). The surface text is
-covered by `docs/STABILITY.md` §4.2.
+`"supported: interpreter, native"` prefix; that prefix is part of the
+stable surface and tooling may rely on it verbatim. The trailing list
+inside the parentheses (currently appending `wasm-full`) is additive,
+so consumers that match on the literal prefix continue to work as the
+backend allowlist widens.
 
 See `docs/guide/13_creating_addons.md` for the author-facing view of
 which facade constructs the native backend's static analyser
@@ -66,6 +67,19 @@ library = "my_addon"                     # string — cdylib filename stem (no l
 `abi`, `entry`, `package`, and `library` are all required. Any
 mismatch with the frozen ABI v1 constants is a parse error, not a
 load-time warning.
+
+## ABI 互換性
+
+アドオン ABI のバージョン (`TaidaHostV1`、エクスポートシンボル、
+呼び出し規約) は世代内で固定です。互換のある追加 — vtable 末尾への
+新しいコールバックの追加、新しい省略可能なエクスポートシンボル — は
+ビルド番号の繰り上げで land できます。既存スロットの並び替え・改名、
+あるいはシグネチャの変更は公開仕様を壊す変更として扱い、世代繰り上げが
+必要です。
+
+ABI のメジャー版自体は安定仕様の保証対象には含めません — メジャー
+改訂が必要な場合は世代をまたぎます。互換性判断の枠組み全体は
+`docs/reference/release_process.md` を参照してください。
 
 ## `targets` (optional, top-level)
 
@@ -97,8 +111,8 @@ source level but **always populated** in the parsed manifest:
 
 ### Compatibility contract
 
-The contract is the addon-side counterpart of the stable promise
-in `docs/STABILITY.md` §6 (breaking-change policy):
+The contract is the addon-side counterpart of the breaking-change
+policy in `docs/reference/release_process.md`:
 
 1. **The default value is part of the surface.** Today every
    manifest that omits `targets` resolves to `["native"]`. This
@@ -141,6 +155,7 @@ rejected at parse time.
 ```toml
 [library.prebuild]
 url = "https://example.com/releases/{version}/lib{name}-{target}.{ext}"
+allowed_prebuild_hosts = ["example.com"]
 ```
 
 Declares where `taida ingot install` should fetch the prebuild cdylib. If
@@ -151,6 +166,24 @@ the `.so` manually" mode. If this section is present:
 - Template variables are `{version}`, `{target}`, `{ext}`, `{name}`.
 - Unknown variables, unbalanced braces, and `{{` / `}}` escapes are
   rejected at parse time.
+- `allowed_prebuild_hosts`, when present, must be a non-empty array of
+  lowercase DNS host names without scheme, path, or port. After template
+  expansion, `taida ingot install` rejects any HTTPS prebuild URL whose
+  host is not listed.
+- Registry addon installs fetch GitHub Release metadata and record release
+  `published_at` plus publisher login in `.taida/taida.lock`.
+- Publisher logins that are visually confusable with known project publishers
+  are rejected before they can be pinned by the lockfile.
+- Fresh third-party releases are refused by default until the configured
+  cooling-off window has elapsed. The default is `0d` for `taida-lang/*`
+  and `3d` for other publishers.
+- The release-age window is resolved from `[security] min_release_age` in
+  `packages.tdm`, then `[security] min_release_age` in
+  `~/.taida/config.toml`, then `TAIDA_MIN_RELEASE_AGE`, then the built-in
+  default. `--allow-fresh` is the explicit one-shot override and is recorded
+  in `.taida/install-audit.log`.
+- Existing lock entries pin publisher login and publication time. A
+  publisher mismatch or publication-time regression is a hard failure.
 
 ### `[library.prebuild.targets]` (required when `[library.prebuild]` is present)
 
@@ -217,6 +250,26 @@ For `file://` URLs, the fetcher rejects:
 - Any URL scheme other than `file://` or `https://`
 
 These checks run **before** any filesystem access or network I/O.
+
+---
+
+## No install scripts
+
+Addon manifests do not support `postinstall`, `install`, `scripts`,
+or any equivalent install-time command hook. Unknown top-level keys and
+unknown sections are rejected by the strict parser, so an addon cannot
+smuggle a shell command into installation by adding a future-looking key.
+
+Prebuild installation is limited to:
+
+1. Resolve the manifest and target triple.
+2. Fetch or copy the declared prebuild artifact.
+3. Verify the recorded digest and release policy.
+4. Place the cdylib in the dependency tree.
+
+Local source builds only happen when the user explicitly passes
+`--allow-local-addon-build`, and integrity mismatches never fall back to
+a local build.
 
 ---
 
@@ -308,6 +361,8 @@ use:
 | `PrebuildInvalidSha256`                | `targets.*` not `sha256:` + 64 lowercase hex |
 | `PrebuildUnknownUrlVariable`           | `{foo}` not in `{version|target|ext|name}` |
 | `PrebuildUnbalancedBrace`              | Lone `{` or `}` in URL template |
+| `PrebuildUnknownKey`                   | Unknown key under `[library.prebuild]` |
+| `PrebuildInvalidAllowedHost`           | `allowed_prebuild_hosts` contained an invalid host |
 | `PrebuildDuplicateTarget`              | Same target listed twice under `targets` |
 | `PrebuildUnknownTarget`                | Target key not in `HostTarget::from_triple` |
 | `PrebuildInvalidSignatureFormat`       | Signature value not `gpg:<opaque>` |

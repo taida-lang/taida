@@ -284,7 +284,7 @@ impl Interpreter {
 
     /// RCB-101: Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.
     /// Returns true if they are the same type or if `thrown_type` inherits from `handler_type`.
-    fn is_error_subtype(&self, thrown_type: &str, handler_type: &str) -> bool {
+    pub(crate) fn is_error_subtype(&self, thrown_type: &str, handler_type: &str) -> bool {
         if thrown_type == handler_type {
             return true;
         }
@@ -1119,7 +1119,7 @@ impl Interpreter {
                 if field.starts_with("__") {
                     return Err(RuntimeError {
                         message: format!(
-                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding or public methods instead.",
+                            "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. Hint: use unmolding, getOrDefault(default), or errorInfo() instead.",
                             field
                         ),
                     });
@@ -1676,7 +1676,7 @@ impl Interpreter {
                         Value::Unit
                     };
                     return Ok(Value::pack(vec![
-                        ("hasValue".to_string(), Value::Bool(false)),
+                        ("has_value".to_string(), Value::Bool(false)),
                         ("__value".to_string(), inner.clone()),
                         ("__default".to_string(), inner),
                         ("__type".to_string(), Value::str("Lax".to_string())),

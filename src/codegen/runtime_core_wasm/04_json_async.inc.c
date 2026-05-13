@@ -214,7 +214,7 @@ static int _wc_is_valid_ptr(int64_t val, unsigned int min_bytes) {
 static int _wc_is_lax(int64_t val) {
     if (!_wc_is_valid_ptr(val, 104)) return 0;
     int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] == 4 && p[1] == WASM_HASH_HAS_VALUE) return 1;
+    if ((p[0] == 4 || p[0] == 5) && p[1] == WASM_HASH_HAS_VALUE) return 1;
     return 0;
 }
 
@@ -708,14 +708,14 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
 
     if (!raw || !schema) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: missing raw value or schema", (int64_t)(intptr_t)"parse"));
     }
 
     const char *p = raw;
     _wc_json_skip_ws(&p);
     if (!*p) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: empty input", (int64_t)(intptr_t)"parse"));
     }
 
     const char *before_parse = p;
@@ -723,13 +723,13 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
 
     if (p == before_parse) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: invalid input", (int64_t)(intptr_t)"parse"));
     }
 
     _wc_json_skip_ws(&p);
     if (*p != '\0') {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty(def);
+        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: trailing input", (int64_t)(intptr_t)"parse"));
     }
 
     const char *desc = schema;
@@ -953,7 +953,7 @@ static int _wc_is_monadic_pack(int64_t val) {
 /* Helper: check whether the pack is a Lax specifically
    (slot 2 hash = WASM_HASH___DEFAULT). */
 static int _wc_is_lax_specifically(int64_t *pack) {
-    if (pack[0] != 4) return 0;
+    if (pack[0] != 4 && pack[0] != 5) return 0;
     if (pack[1] != WASM_HASH_HAS_VALUE) return 0;
     return pack[1 + 2 * 3] == WASM_HASH___DEFAULT ? 1 : 0;
 }
@@ -1014,6 +1014,10 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         if (fname[0] == '_' && fname[1] == '_' && fname[2] == 't' &&
             fname[3] == 'y' && fname[4] == 'p' && fname[5] == 'e' &&
             fname[6] == '\0') continue;
+        if (_wc_is_lax_specifically(pack) &&
+            fname[0] == '_' && fname[1] == '_' && fname[2] == 'e' &&
+            fname[3] == 'r' && fname[4] == 'r' && fname[5] == 'o' &&
+            fname[6] == 'r' && fname[7] == '\0') continue;
         /* Non-monadic packs hide all __ fields. Monadic packs expose
            them so jsonEncode matches the interpreter. */
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') continue;
@@ -1165,7 +1169,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
 
     /* Check monadic types (Result, Lax, Gorillax / RelaxedGorillax).
        C25B-028: include Gorillax family so jsonEncode expands `__error`
-       and normalises `hasValue` through the monadic branch above. */
+       and normalises `has_value` through the monadic branch above. */
     if (_wc_is_result(val) || _wc_is_lax(val) || _wc_is_gorillax_local(val)) {
         int64_t *pack = (int64_t *)(intptr_t)val;
         int64_t fc = pack[0];

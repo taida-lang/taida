@@ -5,8 +5,26 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthToken {
     pub github_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_token_read: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_token_publish: Option<String>,
     pub username: String,
     pub created_at: String,
+}
+
+impl AuthToken {
+    pub fn install_token(&self) -> &str {
+        self.github_token_read
+            .as_deref()
+            .unwrap_or(self.github_token.as_str())
+    }
+
+    pub fn publish_token(&self) -> &str {
+        self.github_token_publish
+            .as_deref()
+            .unwrap_or(self.github_token.as_str())
+    }
 }
 
 /// Re-export for backward compatibility.
@@ -49,6 +67,8 @@ pub fn save_token(github_token: &str, username: &str) -> Result<(), String> {
     let now = chrono_rfc3339_now();
     let token = AuthToken {
         github_token: github_token.to_string(),
+        github_token_read: Some(github_token.to_string()),
+        github_token_publish: Some(github_token.to_string()),
         username: username.to_string(),
         created_at: now,
     };
@@ -231,6 +251,8 @@ mod tests {
         let auth_path = tmp.join("auth.json");
         let token = AuthToken {
             github_token: "gho_test123".to_string(),
+            github_token_read: Some("gho_read".to_string()),
+            github_token_publish: Some("gho_publish".to_string()),
             username: "testuser".to_string(),
             created_at: "2026-03-06T12:00:00Z".to_string(),
         };
@@ -242,6 +264,8 @@ mod tests {
         let loaded: AuthToken = serde_json::from_str(&data).unwrap();
         assert_eq!(loaded.username, "testuser");
         assert_eq!(loaded.github_token, "gho_test123");
+        assert_eq!(loaded.install_token(), "gho_read");
+        assert_eq!(loaded.publish_token(), "gho_publish");
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -289,6 +313,8 @@ mod tests {
         let loaded = loaded.unwrap();
         assert_eq!(loaded.username, "permuser");
         assert_eq!(loaded.github_token, "gho_testperms");
+        assert_eq!(loaded.install_token(), "gho_testperms");
+        assert_eq!(loaded.publish_token(), "gho_testperms");
 
         // 復元
         unsafe {

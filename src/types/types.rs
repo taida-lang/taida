@@ -200,6 +200,12 @@ impl Type {
 
             // Named type could match by name
             (Type::Named(a), Type::Named(b)) => a == b,
+            (Type::Named(a), Type::Generic(b, _)) => {
+                a == b && matches!(a.as_str(), "HashMap" | "Set")
+            }
+            (Type::Generic(a, _), Type::Named(b)) => {
+                a == b && matches!(a.as_str(), "HashMap" | "Set")
+            }
 
             // Generic types
             (Type::Generic(a_name, a_args), Type::Generic(b_name, b_args)) => {
@@ -503,6 +509,7 @@ impl TypeRegistry {
                 "Str" | "String" => Type::Str,
                 "Bytes" => Type::Bytes,
                 "Bool" | "Boolean" => Type::Bool,
+                "Unit" => Type::Unit,
                 "JSON" => Type::Json,
                 "Molten" => Type::Molten,
                 other => {
@@ -568,6 +575,15 @@ mod tests {
                 ty
             );
         }
+    }
+
+    #[test]
+    fn test_resolve_unit_type_expr() {
+        let registry = TypeRegistry::new();
+        assert_eq!(
+            registry.resolve_type(&crate::parser::TypeExpr::Named("Unit".to_string())),
+            Type::Unit
+        );
     }
 
     #[test]

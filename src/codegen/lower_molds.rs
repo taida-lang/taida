@@ -521,7 +521,7 @@ impl Lowering {
                 let default_val = func.alloc_var();
                 func.push(IrInst::ConstInt(default_val, 0));
                 // Sentinel: taida_str_byte_at returns -1 for OOB; we
-                // encode "hasValue" at the runtime layer (see
+                // encode "has_value" at the runtime layer (see
                 // taida_str_byte_at_lax helper below in core.c).
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
@@ -841,7 +841,7 @@ impl Lowering {
             // libm (`sqrt`, `pow`, `sin`, ...); wasm uses manual
             // freestanding implementations in
             // `runtime_core_wasm/03_typeof_list.inc.c`. All molds
-            // return Float per `src/types/mold_returns.rs` and widen
+            // return Float per `src/types/mold_specs.rs` and widen
             // Int arguments to Float via `taida_int_to_float` first
             // (same as interpreter's `eval_unary_math` which accepts
             // either Int or Float and widens Int to f64).
@@ -2156,7 +2156,7 @@ impl Lowering {
                     "taida_str_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_str_mold_str"
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_likely_bool(&type_args[0]) {
                     "taida_str_mold_bool"
                 } else if self.expr_is_int(&type_args[0]) {
                     // Compile-time-known Int: literal, negated literal,
@@ -2210,7 +2210,7 @@ impl Lowering {
                     ("taida_int_mold_float", vec![val])
                 } else if self.expr_is_string_full(&type_args[0]) {
                     ("taida_int_mold_str", vec![val])
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_likely_bool(&type_args[0]) {
                     ("taida_int_mold_bool", vec![val])
                 } else {
                     // Dynamic fallback (e.g. function parameters/local vars):
@@ -2237,7 +2237,7 @@ impl Lowering {
                     "taida_float_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_float_mold_str"
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_likely_bool(&type_args[0]) {
                     "taida_float_mold_bool"
                 } else {
                     // Default: Int->Float promotion
@@ -2259,7 +2259,7 @@ impl Lowering {
                     "taida_bool_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_bool_mold_str"
-                } else if self.expr_is_bool(&type_args[0]) {
+                } else if self.expr_is_likely_bool(&type_args[0]) {
                     "taida_bool_mold_bool"
                 } else {
                     // Default: Int->Bool (!=0)
@@ -2415,6 +2415,12 @@ impl Lowering {
                     "taida_result_create".to_string(),
                     vec![inner_value, throw_val, predicate],
                 ));
+                if let Some(value_expr) = type_args.first() {
+                    let value_tag = self.expr_type_tag(value_expr);
+                    if value_tag != 0 && value_tag != -1 {
+                        func.push(IrInst::PackSetTag(result, 0, value_tag));
+                    }
+                }
                 Ok(result)
             }
             // -- OS input molds (taida-lang/os) --
@@ -2467,7 +2473,7 @@ impl Lowering {
                 Ok(result)
             }
             "Exists" => {
-                // Exists[path]() -> taida_os_exists(path) -> Bool
+                // Exists[path]() -> taida_os_exists(path) -> Result[Bool]
                 if type_args.is_empty() {
                     return Err(LowerError {
                         message: "Exists requires 1 argument: Exists[path]()".into(),
@@ -2810,7 +2816,7 @@ impl Lowering {
                                         }
                                         Expr::BoolLit(_, _) => Some(false),
                                         Expr::EnumVariant(_, _, _) => Some(false),
-                                        _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                        _ if self.expr_is_likely_bool(&type_args[0]) => Some(false),
                                         _ => {
                                             // Check if the expression is a known string type
                                             if self.expr_is_string_full(&type_args[0]) {
@@ -2830,7 +2836,7 @@ impl Lowering {
                                     Expr::IntLit(_, _) | Expr::FloatLit(_, _) => Some(true),
                                     Expr::BoolLit(_, _) => Some(false),
                                     Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => Some(false),
-                                    _ if self.expr_is_bool(&type_args[0]) => Some(false),
+                                    _ if self.expr_is_likely_bool(&type_args[0]) => Some(false),
                                     _ if self.expr_is_string_full(&type_args[0]) => Some(false),
                                     _ => Some(true),
                                 },
@@ -2844,7 +2850,7 @@ impl Lowering {
                                 },
                                 "Bool" => match &type_args[0] {
                                     Expr::BoolLit(_, _) => Some(true),
-                                    _ if self.expr_is_bool(&type_args[0]) => Some(true),
+                                    _ if self.expr_is_likely_bool(&type_args[0]) => Some(true),
                                     Expr::IntLit(_, _)
                                     | Expr::FloatLit(_, _)
                                     | Expr::StringLit(_, _)

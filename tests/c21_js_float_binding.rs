@@ -176,15 +176,15 @@ fn float_fn_result_local_td() -> &'static Path {
 // ---------------------------------------------------------------------------
 
 const EXPECTED_FLOAT_LOCAL_BINDING: &str = concat!(
-    "@(hasValue <= true, __value <= 3.0, __default <= 0.0, __type <= \"Lax\")",
+    "@(has_value <= true, __value <= 3.0, __default <= 0.0, __type <= \"Lax\")",
     "\n",
-    "@(hasValue <= true, __value <= 3, __default <= 0, __type <= \"Lax\")",
+    "@(has_value <= true, __value <= 3, __default <= 0, __type <= \"Lax\")",
 );
 
 const EXPECTED_FLOAT_LOCAL_TO_STRING: &str = "3.0\n3.0";
 
 const EXPECTED_FLOAT_FN_RESULT_LOCAL: &str =
-    "@(hasValue <= true, __value <= 12.0, __default <= 0.0, __type <= \"Lax\")";
+    "@(has_value <= true, __value <= 12.0, __default <= 0.0, __type <= \"Lax\")";
 
 #[test]
 fn float_local_binding_interpreter_reference() {
@@ -303,7 +303,7 @@ fn float_local_to_string_wasm_parity() {
 //   `_wasm_stdout_display_string` + tight `_is_pack_for_stdout` guard
 //   (List / HashMap / Set / Async excluded so `stdout(@[1,2,3])` still
 //   prints the list form).
-// * `src/types/mold_returns.rs` — `Int`/`Float`/`Bool`/`Str` moved to
+// * `src/types/mold_specs.rs` — `Int`/`Float`/`Bool`/`Str` moved to
 //   the `Pack` table so `expr_type_tag(Float[x]())` no longer reports
 //   the primitive output type and mis-routes the Lax pointer through
 //   the FLOAT fast path.
