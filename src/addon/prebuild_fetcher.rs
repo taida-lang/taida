@@ -779,6 +779,13 @@ pub fn fetch_release_metadata(
             package_name, version, publisher_login
         ));
     }
+    if let Some(known) = crate::pkg::publisher_identity::confusable_known_publisher(publisher_login)
+    {
+        return Err(format!(
+            "release metadata for '{}@{}' has publisher login '{}' that is confusable with known publisher '{}'",
+            package_name, version, publisher_login, known
+        ));
+    }
 
     Ok(ReleaseMetadata {
         published_at,
@@ -1069,6 +1076,10 @@ mod tests {
         assert!(!is_valid_github_login("-org"));
         assert!(!is_valid_github_login("org-"));
         assert!(!is_valid_github_login(""));
+        assert_eq!(
+            crate::pkg::publisher_identity::confusable_known_publisher("taida-1ang"),
+            Some("taida-lang")
+        );
     }
 
     #[test]

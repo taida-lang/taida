@@ -7258,6 +7258,190 @@ stdout(r.requests)
     }
 }
 
+fn run_net_http_server_once(
+    backend: &str,
+    label: &str,
+    source: &str,
+    request: &[u8],
+) -> (String, String) {
+    let dir = setup_net_project(source, label);
+    let td_path = dir.join("main.td");
+
+    let mut child = match backend {
+        "interp" => Command::new(taida_bin())
+            .arg(&td_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn interpreter"),
+        "js" => {
+            let js_path = unique_temp_path("taida_net_http_serve_js", label, "mjs");
+            let transpile = Command::new(taida_bin())
+                .arg("build")
+                .arg("js")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&js_path)
+                .output()
+                .expect("transpile js server");
+            if !transpile.status.success() {
+                let stderr = String::from_utf8_lossy(&transpile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&js_path);
+                panic!("JS transpile failed for {label}: {stderr}");
+            }
+            let child = Command::new("node")
+                .arg(&js_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn node server");
+            thread::sleep(Duration::from_millis(500));
+            let _ = fs::remove_file(&js_path);
+            child
+        }
+        "native" => {
+            let bin_path = unique_temp_path("taida_net_http_serve_native", label, "bin");
+            let compile = Command::new(taida_bin())
+                .arg("build")
+                .arg("native")
+                .arg(&td_path)
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("compile native server");
+            if !compile.status.success() {
+                let stderr = String::from_utf8_lossy(&compile.stderr);
+                cleanup_net_project(&dir);
+                let _ = fs::remove_file(&bin_path);
+                panic!("Native compile failed for {label}: {stderr}");
+            }
+            let child = Command::new(&bin_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn native server");
+            thread::sleep(Duration::from_millis(200));
+            let _ = fs::remove_file(&bin_path);
+            child
+        }
+        _ => unreachable!("unknown net server backend {backend}"),
+    };
+
+    let mut response = Vec::new();
+    let mut got_response = false;
+    let port = extract_port_from_http_serve_source(source)
+        .unwrap_or_else(|| panic!("test source must contain httpServe(<port>, ...): {source}"));
+    for _ in 0..80 {
+        thread::sleep(Duration::from_millis(100));
+        let stream = match TcpStream::connect(format!("127.0.0.1:{port}")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+        let mut stream = stream;
+        if std::io::Write::write_all(&mut stream, request).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if !response.is_empty() {
+            got_response = true;
+            break;
+        }
+    }
+
+    if !got_response {
+        let _ = child.kill();
+        cleanup_net_project(&dir);
+        panic!("{backend} backend: server did not respond on port {port}");
+    }
+
+    let output = child.wait_with_output().expect("wait for net server");
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    let response = String::from_utf8_lossy(&response).to_string();
+    cleanup_net_project(&dir);
+    (stdout, response)
+}
+
+fn extract_port_from_http_serve_source(source: &str) -> Option<u16> {
+    let start = source.find("httpServe(")? + "httpServe(".len();
+    let rest = &source[start..];
+    let end = rest.find(',')?;
+    rest[..end].trim().parse().ok()
+}
+
+/// E37: generated response wire output and canonical request spans must
+/// stay aligned across the three full net backends.
+#[test]
+fn test_net_http_serve_status_req_shape_3way_parity() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let request =
+        b"POST /abc?x=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    let expected_body = "0:4|5:4|10:3";
+    let mut bodies = Vec::new();
+
+    for backend in ["interp", "js", "native"] {
+        let port = find_free_loopback_port();
+        let source = format!(
+            r#">>> taida-lang/net => @(httpServe)
+
+handler req =
+  body <= req.method.start.toString() + ":" + req.method.len.toString() + "|" + req.path.start.toString() + ":" + req.path.len.toString() + "|" + req.query.start.toString() + ":" + req.query.len.toString()
+  @(status <= 404, headers <= @[], body <= body)
+=> :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
+
+asyncResult <= httpServe({port}, handler, 1)
+asyncResult ]=> result
+result ]=> r
+stdout(r.requests)
+"#
+        );
+        let (stdout, response) =
+            run_net_http_server_once(backend, &format!("e37_wire_{backend}"), &source, request);
+        assert_eq!(
+            stdout, "1",
+            "{backend}: httpServe should report one request, got: {stdout:?}"
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{backend}: response should preserve 404 reason phrase, got: {response:?}"
+        );
+        let actual_body = response.split("\r\n\r\n").last().unwrap_or("").to_string();
+        assert_eq!(
+            actual_body, expected_body,
+            "{backend}: request span body mismatch, got: {response:?}"
+        );
+        bodies.push((backend, actual_body));
+    }
+
+    assert_eq!(
+        bodies[0].1, bodies[1].1,
+        "request span body mismatch: interp vs js"
+    );
+    assert_eq!(
+        bodies[0].1, bodies[2].1,
+        "request span body mismatch: interp vs native"
+    );
+}
+
 /// NET-4 review F1: malformed HTTP version "HTTP/a.b" must be rejected (Interpreter vs Native)
 #[test]
 fn test_net_parse_malformed_http_version_native_parity() {

@@ -172,6 +172,8 @@ the `.so` manually" mode. If this section is present:
   host is not listed.
 - Registry addon installs fetch GitHub Release metadata and record release
   `published_at` plus publisher login in `.taida/taida.lock`.
+- Publisher logins that are visually confusable with known project publishers
+  are rejected before they can be pinned by the lockfile.
 - Fresh third-party releases are refused by default until the configured
   cooling-off window has elapsed. The default is `0d` for `taida-lang/*`
   and `3d` for other publishers.
