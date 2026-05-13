@@ -321,16 +321,15 @@ static taida_val taida_os_stat_lax_error(const char *kind) {
 taida_val taida_os_stat(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
 
-    // Build default stat pack
-    taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
-    taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
-    taida_val is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
-    taida_val default_pack = taida_os_stat_default_pack();
-
     if (!path) return taida_os_stat_lax_error("invalid");
 
     struct stat st;
     if (stat(path, &st) != 0) return taida_os_stat_lax_error(taida_os_error_kind(errno, strerror(errno)));
+
+    taida_val size_hash = 0x4dea9618e618ae3cULL;     // FNV-1a("size")
+    taida_val modified_hash = 0xd381b19c7fd35852ULL;  // FNV-1a("modified")
+    taida_val is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
+    taida_val default_pack = taida_os_stat_default_pack();
 
     // Format modified time as RFC3339/UTC
     struct tm tm_buf;

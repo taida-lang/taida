@@ -783,7 +783,10 @@ mod tests {
         // 2026-05-13 E38 Phase 4 final producer wiring: HTTP client,
         //   ListDir/Stat, socket receive, and UDP receive failures now carry
         //   canonical IoError metadata; assembled runtime is 1,128,649 bytes.
-        const EXPECTED_TOTAL_LEN: usize = 1_128_649;
+        // 2026-05-13 E38 self-review: avoid constructing an unused Stat
+        //   default pack on Native failure paths; assembled runtime is
+        //   1,128,618 bytes.
+        const EXPECTED_TOTAL_LEN: usize = 1_128_618;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

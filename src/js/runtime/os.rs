@@ -139,11 +139,11 @@ function __taida_os_error_kind(e) {
   const code = source && source.code ? String(source.code) : '';
   if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
   if (code === 'EACCES' || code === 'EPERM') return 'permission';
-  if (code === 'ETIMEDOUT') return 'timeout';
+  if (code === 'EAGAIN' || code === 'EWOULDBLOCK' || code === 'ETIMEDOUT') return 'timeout';
   if (code === 'ECONNREFUSED') return 'refused';
   if (code === 'ECONNRESET') return 'reset';
   if (code === 'EPIPE' || code === 'ENOTCONN' || code === 'ECONNABORTED') return 'peer_closed';
-  if (code === 'EINVAL') return 'invalid';
+  if (code === 'EINVAL' || code === 'EBADF') return 'invalid';
   return 'other';
 }
 
@@ -1164,6 +1164,7 @@ async function __taida_os_socketRecvExact(socketOrPack, size, timeoutMs) {
   const socket = (socketOrPack && socketOrPack.socket) ? socketOrPack.socket : socketOrPack;
   if (!socket || !socket.once) return __taida_os_bytes_lax_error('SocketRecvExact error', 'invalid');
   if (!__taida_isIntNumber(size) || size < 0) return __taida_os_bytes_lax_error('SocketRecvExact error', 'invalid');
+  if (size === 0) return __taida_lax_from_bytes(new Uint8Array(0), true);
   const effectiveTimeout = __taida_os_network_timeout_ms(timeoutMs);
   return new Promise((resolve) => {
     let settled = false;
