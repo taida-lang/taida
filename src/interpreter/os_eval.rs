@@ -880,13 +880,20 @@ impl Interpreter {
                     // Check file size first
                     let meta_result = tokio::fs::metadata(&path).await;
                     let result = match meta_result {
-                        Ok(meta) if meta.len() > MAX_READ_SIZE => {
-                            Ok(make_lax_failure(Value::str(String::new())))
-                        }
-                        Err(_) => Ok(make_lax_failure(Value::str(String::new()))),
+                        Ok(meta) if meta.len() > MAX_READ_SIZE => Ok(make_read_lax_failure(
+                            Value::str(String::new()),
+                            "too_large",
+                        )),
+                        Err(e) => Ok(make_read_lax_failure(
+                            Value::str(String::new()),
+                            classify_io_error_kind(&e),
+                        )),
                         Ok(_) => match tokio::fs::read_to_string(&path).await {
                             Ok(content) => Ok(make_lax_success(Value::str(content))),
-                            Err(_) => Ok(make_lax_failure(Value::str(String::new()))),
+                            Err(e) => Ok(make_read_lax_failure(
+                                Value::str(String::new()),
+                                classify_io_error_kind(&e),
+                            )),
                         },
                     };
                     let _ = tx.send(result);

@@ -475,6 +475,11 @@ int64_t taida_os_read(int64_t path_ptr) {
     return taida_lax_new((int64_t)(intptr_t)buf, (int64_t)(intptr_t)"");
 }
 
+int64_t taida_os_read_async(int64_t path_ptr) {
+    int64_t lax_result = taida_os_read(path_ptr);
+    return taida_async_ok_tagged(lax_result, WASI_RT_TAG_PACK);
+}
+
 /* ── writeFile(path, content) → Result ── */
 
 /* FNV-1a hashes matching native_runtime.c */

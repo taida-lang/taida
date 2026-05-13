@@ -515,16 +515,16 @@ function __taida_os_http_failure() {
 
 // ReadAsync[path]() -> Promise<Lax[Str]>
 async function __taida_os_readAsync(path) {
-  if (!__os_fs) return Lax(null, '');
+  if (!__os_fs) return __taida_os_read_error('unavailable');
   try {
     const fsp = __os_fs.promises || await import('node:fs/promises').then(m => m.default || m).catch(() => null);
-    if (!fsp) return Lax(null, '');
+    if (!fsp) return __taida_os_read_error('unavailable');
     const stat = await fsp.stat(path);
-    if (stat.size > 64 * 1024 * 1024) return Lax(null, '');
+    if (stat.size > 64 * 1024 * 1024) return __taida_os_read_error('too_large');
     const content = await fsp.readFile(path, 'utf-8');
     return Lax(content);
   } catch (e) {
-    return Lax(null, '');
+    return __taida_os_read_error(__taida_os_error_kind(e));
   }
 }
 
