@@ -5392,6 +5392,334 @@ fn e34b_015_map_error_rejects_str_input_when_payload_is_pack() {
     );
 }
 
+#[test]
+fn e39b_001_lhs_and_method_hint_pin_unannotated_named_identity() {
+    let src = "identity x = x => :Int\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Int] <= obj.map(identity)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let result_ty = checker.lookup_var("result").unwrap();
+    assert_eq!(result_ty, Type::Generic("Lax".to_string(), vec![Type::Int]));
+    assert!(
+        checker.typed_expr_table.iter().any(|(_, ty)| {
+            matches!(ty, Type::Function(params, ret)
+                if params == &vec![Type::Int] && ret.as_ref() == &Type::Int)
+        }),
+        "expected typed_expr_table to record identity as (Int) => Int, got {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn e39b_002_unannotated_named_identity_body_infers_from_method_hint() {
+    let src = "identity x =\n  x\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Int] <= obj.map(identity)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(
+        checker.lookup_var("result").unwrap(),
+        Type::Generic("Lax".to_string(), vec![Type::Int])
+    );
+    assert!(
+        checker.typed_expr_table.iter().any(|(_, ty)| {
+            matches!(ty, Type::Function(params, ret)
+                if params == &vec![Type::Int] && ret.as_ref() == &Type::Int)
+        }),
+        "expected identity body inference to record (Int) => Int, got {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn e39b_002_unsupported_named_body_rejects_direct_expected_function_slot() {
+    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
+               choose x =\n\
+                 | x > 0 |> x\n\
+                 | _ |> 0\n\
+               result <= takes(choose)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("choose")
+                && e.message.contains("(Int) => Int")
+        }),
+        "expected concrete direct-call function slot to reject unresolved body inference, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_002_contextual_body_error_reports_function_boundary() {
+    let src = "appendWorld x =\n  x + \"world\"\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Int] <= obj.map(appendWorld)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("appendWorld")
+                && e.message.contains("(Int) => ?")
+        }),
+        "expected body inference failure to report the function boundary, got: {:?}",
+        errors
+    );
+    assert!(
+        !errors.iter().any(|e| e.message.contains("Cannot apply")),
+        "body-internal arithmetic diagnostic should not leak from hinted inference, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_003_direct_call_lambda_receives_expected_function_type() {
+    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
+               result <= takes(_ x = x)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("result").unwrap(), Type::Int);
+    assert!(
+        checker.typed_expr_table.iter().any(|(_, ty)| {
+            matches!(ty, Type::Function(params, ret)
+                if params == &vec![Type::Int] && ret.as_ref() == &Type::Int)
+        }),
+        "expected lambda to be recorded as (Int) => Int, got {:?}",
+        checker.typed_expr_table.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn e39b_003_direct_call_lambda_rejects_incompatible_body() {
+    let src = "takes fn: Int => :Int = fn(1) => :Int\n\
+               result <= takes(_ x = x.toString())\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("takes")
+                && e.message.contains("Str")
+                && e.message.contains("Int")
+        }),
+        "expected direct-call lambda mismatch to reject, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_fold_accumulator_full_pin_accepts_matching_callback() {
+    let src = "xs <= @[1, 2, 3]\n\
+               sum <= xs.fold(0, _ acc x = acc + x)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("sum").unwrap(), Type::Int);
+}
+
+#[test]
+fn e39b_004_fold_accumulator_full_pin_rejects_mismatch() {
+    let src = "badFn acc: Str x: Int = acc + x.toString() => :Str\n\
+               xs <= @[1, 2, 3]\n\
+               bad <= xs.fold(0, badFn)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("fold")
+            && e.message.contains("expected (Int, Int) => Int")),
+        "expected [E1508] for fold accumulator mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_fold_accumulator_rejects_unresolved_callback_return() {
+    let src = "choose acc x =\n\
+                 | x > 0 |> acc\n\
+                 | _ |> x\n\
+               xs <= @[1, 2, 3]\n\
+               bad <= xs.fold(0, choose)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]") && e.message.contains("(Int, Int) => ?")
+                || e.message.contains("[E1508]")
+                    && e.message.contains("choose")
+                    && e.message.contains("(Int, Int) => Int")
+        }),
+        "expected fold callback with unresolved return to reject, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_fold_unknown_init_still_checks_callback_shape() {
+    let src = "xs <= @[1, 2, 3]\n\
+               bad <= xs.fold(missingInit, 42)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("fold")
+                && e.message.contains("argument 2")
+                && e.message.contains("expected (?, Int) => ?")
+        }),
+        "expected fold callback shape check even when init is unresolved, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_004_reduce_accumulator_full_pin_accepts_matching_callback() {
+    let src = "xs <= @[1, 2, 3]\n\
+               sum <= xs.reduce(0, _ acc x = acc + x)\n";
+    let (checker, errors) = check(src);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    assert_eq!(checker.lookup_var("sum").unwrap(), Type::Int);
+}
+
+#[test]
+fn e39b_004_reduce_accumulator_full_pin_rejects_mismatch() {
+    let src = "badFn acc: Str x: Int = acc + x.toString() => :Str\n\
+               xs <= @[1, 2, 3]\n\
+               bad <= xs.reduce(0, badFn)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1508]")
+            && e.message.contains("reduce")
+            && e.message.contains("expected (Int, Int) => Int")),
+        "expected [E1508] for reduce accumulator mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_005_direct_call_shadowed_function_name_rejects_variable_type() {
+    let src = "identity x =\n  x\n\
+               takes fn: Int => :Int = fn(1) => :Int\n\
+               main =\n\
+                 identity <= 42\n\
+                 result <= takes(identity)\n\
+               => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("takes")
+                && e.message.contains("Int")
+                && e.message.contains("(Int) => Int")
+        }),
+        "expected shadowed variable to reject as Int, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_005_method_shadowed_function_name_rejects_variable_type() {
+    let src = "identity x =\n  x\n\
+               main =\n\
+                 identity <= \"shadowed\"\n\
+                 obj <= Lax[42]()\n\
+                 result: Lax[Int] <= obj.map(identity)\n\
+               => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("map")
+                && e.message.contains("Str")
+                && e.message.contains("(Int) => ?")
+        }),
+        "expected shadowed method callback variable to reject as Str, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_005_fold_shadowed_function_name_rejects_variable_type() {
+    let src = "addFn acc x =\n  acc\n\
+               main =\n\
+                 addFn <= 42\n\
+                 xs <= @[1, 2, 3]\n\
+                 bad <= xs.fold(0, addFn)\n\
+               => :Int\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("fold")
+                && e.message.contains("Int")
+                && e.message.contains("(Int, Int) => Int")
+        }),
+        "expected shadowed fold callback variable to reject as Int, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_010_named_arithmetic_body_rejects_in_expected_function_slot() {
+    let src = "addOne x =\n  x + 1\n\
+               obj <= Lax[3.14]()\n\
+               result: Lax[Float] <= obj.map(addOne)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("addOne")
+                && e.message.contains("(Float) => ?")
+        }),
+        "expected unannotated arithmetic body to reject at function boundary, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_010_named_concat_body_rejects_in_expected_function_slot() {
+    let src = "bang x =\n  x + \"!\"\n\
+               obj <= Lax[\"a\"]()\n\
+               result: Lax[Str] <= obj.map(bang)\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("bang")
+                && e.message.contains("(Str) => ?")
+        }),
+        "expected unannotated concat body to reject at function boundary, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn e39b_012_narrow_method_body_keeps_known_method_but_rejects_arbitrary_call_shape() {
+    let ok = "render x =\n  x.toString()\n\
+              obj <= Lax[42]()\n\
+              result: Lax[Str] <= obj.map(render)\n";
+    let (checker, errors) = check(ok);
+    assert!(
+        errors.is_empty(),
+        "known narrow method should pass: {:?}",
+        errors
+    );
+    assert_eq!(
+        checker.lookup_var("result").unwrap(),
+        Type::Generic("Lax".to_string(), vec![Type::Str])
+    );
+
+    let bad = "render x =\n  x.fooBar()\n\
+               obj <= Lax[42]()\n\
+               result: Lax[Str] <= obj.map(render)\n";
+    let (_, errors) = check(bad);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1508]")
+                && e.message.contains("render")
+                && e.message.contains("(Int) => ?")
+        }),
+        "unknown method shape should be rejected at function boundary, got: {:?}",
+        errors
+    );
+}
+
 // E34B-018 (Codex review #15 follow-up): Async-family dedicated arms.
 // All / Race / Timeout had no checker-side arity validation, while
 // Cancel had a dedicated arm but no arity check, so shapes like

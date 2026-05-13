@@ -21,8 +21,8 @@ docs/guide/07_control_flow.md:360
 docs/guide/08_error_handling.md:110
 docs/guide/08_error_handling.md:449
 docs/guide/08_error_handling.md:492
-docs/guide/09_functions.md:192
-docs/guide/09_functions.md:296
+docs/guide/09_functions.md:200
+docs/guide/09_functions.md:304
 docs/guide/10_modules.md:184
 docs/guide/10_modules.md:190
 docs/guide/11_async.md:81

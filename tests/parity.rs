@@ -354,6 +354,44 @@ fn run_wasm_full_src(
     Ok(Some(normalize(&String::from_utf8_lossy(&run.stdout))))
 }
 
+fn run_wasm_min_src(source: &str, label: &str) -> Result<Option<String>, String> {
+    let Some(wasmtime) = wasmtime_bin() else {
+        return Err(format!(
+            "wasmtime not available for required wasm-min parity {}",
+            label
+        ));
+    };
+    let td_path = unique_temp_path("taida_parity_wasm_min", label, "td");
+    let wasm_path = unique_temp_path("taida_parity_wasm_min", label, "wasm");
+    fs::write(&td_path, source).map_err(|e| format!("write source: {}", e))?;
+
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-min")
+        .arg(&td_path)
+        .arg("-o")
+        .arg(&wasm_path)
+        .output()
+        .map_err(|e| format!("spawn wasm-min build: {}", e))?;
+    let _ = fs::remove_file(&td_path);
+    if !build.status.success() {
+        let _ = fs::remove_file(&wasm_path);
+        return Err(String::from_utf8_lossy(&build.stderr).trim().to_string());
+    }
+
+    let run = Command::new(wasmtime)
+        .arg("run")
+        .arg(&wasm_path)
+        .output()
+        .map_err(|e| format!("spawn wasmtime: {}", e))?;
+    let _ = fs::remove_file(&wasm_path);
+    if !run.status.success() {
+        return Err(String::from_utf8_lossy(&run.stderr).trim().to_string());
+    }
+
+    Ok(Some(normalize(&String::from_utf8_lossy(&run.stdout))))
+}
+
 fn assert_backend_parity_for_source(source: &str, label: &str) {
     let interp = run_interpreter_src(source, label)
         .unwrap_or_else(|| panic!("interpreter failed for {}", label));
@@ -3703,6 +3741,161 @@ matched <= Filter[items, _ x = x.title.contains("renamed")]()
 stdout(matched.length().toString())
 "#;
     assert_backend_parity_for_source(source, "contains_field_access_lambda_three_way");
+}
+
+#[test]
+fn test_bidirectional_named_identity_lax_map_full_backend_parity() {
+    let source = r#"
+identity x =
+  x
+obj <= Lax[42]()
+result: Lax[Int] <= obj.map(identity)
+stdout(result.getOrDefault(0).toString())
+"#;
+    assert_full_backend_parity_for_source(source, "bidi_named_identity_lax_map", &[]);
+}
+
+#[test]
+fn test_bidirectional_direct_lambda_full_backend_parity() {
+    let source = r#"
+takes fn: Int => :Int =
+  fn(1)
+=> :Int
+stdout(takes(_ x = x).toString())
+"#;
+    assert_full_backend_parity_for_source(source, "bidi_direct_lambda", &[]);
+}
+
+#[test]
+fn test_bidirectional_fold_reduce_full_backend_parity() {
+    let source = r#"
+xs <= @[1, 2, 3]
+folded <= xs.fold(0, _ acc x = acc + x)
+reduced <= xs.reduce(0, _ acc x = acc + x)
+stdout(folded.toString())
+stdout(reduced.toString())
+"#;
+    assert_full_backend_parity_for_source(source, "bidi_fold_reduce", &[]);
+}
+
+#[test]
+fn test_bidirectional_direct_lambda_rejected_all_backend_paths() {
+    let source = r#"
+takes fn: Int => :Int =
+  fn(1)
+=> :Int
+result <= takes(_ x = x.toString())
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_direct_lambda_reject", "[E1506]");
+}
+
+#[test]
+fn test_bidirectional_fold_callback_rejected_all_backend_paths() {
+    let source = r#"
+badFn acc: Str x: Int =
+  acc + x.toString()
+=> :Str
+xs <= @[1, 2, 3]
+bad <= xs.fold(0, badFn)
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_fold_callback_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_shadowed_direct_function_rejected_all_backend_paths() {
+    let source = r#"
+identity x =
+  x
+takes fn: Int => :Int =
+  fn(1)
+=> :Int
+main =
+  identity <= 42
+  result <= takes(identity)
+  stdout(result.toString())
+=> :Int
+main()
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_shadow_direct_reject", "[E1506]");
+}
+
+#[test]
+fn test_bidirectional_shadowed_method_function_rejected_all_backend_paths() {
+    let source = r#"
+identity x =
+  x
+main =
+  identity <= "shadowed"
+  obj <= Lax[42]()
+  result: Lax[Int] <= obj.map(identity)
+  stdout(result.getOrDefault(0).toString())
+=> :Int
+main()
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_shadow_method_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_shadowed_fold_function_rejected_all_backend_paths() {
+    let source = r#"
+addFn acc x =
+  acc
+main =
+  addFn <= 42
+  xs <= @[1, 2, 3]
+  bad <= xs.fold(0, addFn)
+  stdout(bad.toString())
+=> :Int
+main()
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_shadow_fold_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_unannotated_arithmetic_body_rejected_all_backend_paths() {
+    let source = r#"
+addOne x =
+  x + 1
+obj1 <= Lax[5]()
+obj2 <= Lax[3.14]()
+result1: Lax[Int] <= obj1.map(addOne)
+result2: Lax[Float] <= obj2.map(addOne)
+stdout(result1.getOrDefault(0).toString())
+stdout(result2.getOrDefault(0.0).toString())
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_arithmetic_body_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_unannotated_concat_body_rejected_all_backend_paths() {
+    let source = r#"
+bang x =
+  x + "!"
+obj <= Lax["a"]()
+result: Lax[Str] <= obj.map(bang)
+stdout(result.getOrDefault("").toString())
+"#;
+    assert_all_backend_paths_reject_source(source, "bidi_concat_body_reject", "[E1508]");
+}
+
+#[test]
+fn test_bidirectional_fold_reduce_wasm_min_parity() {
+    let source = r#"
+xs <= @[1, 2, 3]
+folded <= xs.fold(0, _ acc x = acc + x)
+reduced <= xs.reduce(0, _ acc x = acc + x)
+stdout(folded.toString())
+stdout(reduced.toString())
+"#;
+    let interp = run_interpreter_src(source, "bidi_fold_reduce_wasm_min")
+        .expect("interpreter should run fold/reduce fixture");
+    let wasm = run_wasm_min_src(source, "bidi_fold_reduce_wasm_min")
+        .expect("wasm-min parity run")
+        .expect("wasm-min should produce stdout");
+    assert_eq!(
+        interp, wasm,
+        "interpreter/wasm-min mismatch for fold/reduce method form"
+    );
 }
 
 #[test]

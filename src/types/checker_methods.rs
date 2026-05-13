@@ -98,24 +98,11 @@ impl TypeChecker {
                         Box::new(Type::List(Box::new(Type::Unknown))),
                     )],
                 )),
-                // E34B-013 follow-up (Codex review #12):
-                // `xs.fold(init, fn)` -- the function value's second
-                // parameter must accept the list element type, which
-                // we *can* ground here.  The accumulator (first param)
-                // still depends on `init` at the call site and stays
-                // `Unknown` for now; closing it cleanly requires
-                // arg-aware bidirectional inference (carry-over).
-                "reduce" | "fold" => Some((
-                    2,
-                    2,
-                    vec![
-                        Type::Unknown,
-                        Type::Function(
-                            vec![Type::Unknown, inner.as_ref().clone()],
-                            Box::new(Type::Unknown),
-                        ),
-                    ],
-                )),
+                // `fold` / `reduce` callback type depends on arg0 (`init`)
+                // and is checked by the dedicated accumulator path below.
+                // The static method signature stays arity-only here so the
+                // generic param loop does not infer a weaker callback first.
+                "reduce" | "fold" => Some((2, 2, vec![Type::Unknown, Type::Unknown])),
                 "join" => Some((1, 1, vec![Type::Str])),
                 "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
                 "push" | "append" => Some((1, 1, vec![inner.as_ref().clone()])),
@@ -428,13 +415,7 @@ impl TypeChecker {
                     // lambda's untyped params with T. This lets users write
                     // `obj.map(_ x = x + 1)` without an explicit type annotation
                     // and still benefit from full pin checking.
-                    let actual_ty = if matches!(expected_ty, Type::Function(_, _))
-                        && matches!(arg, Expr::Lambda(_, _, _))
-                    {
-                        self.infer_lambda_with_hint(arg, expected_ty)
-                    } else {
-                        self.infer_expr_type(arg)
-                    };
+                    let actual_ty = self.infer_expr_type_with_expected(arg, expected_ty);
                     if actual_ty == Type::Unknown {
                         continue;
                     }
@@ -547,6 +528,20 @@ impl TypeChecker {
                     let pass = self
                         .registry
                         .is_function_arg_subtype_of(&actual_ty, expected_ty);
+                    if Self::contains_unknown(&actual_ty) && !Self::contains_unknown(expected_ty) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1508] Method '{}' argument {} has type {}, expected {}. \
+                                 Hint: Add annotations or simplify the function body so inference can resolve the argument type.",
+                                method,
+                                i + 1,
+                                actual_ty,
+                                expected_ty
+                            ),
+                            span: span.clone(),
+                        });
+                        continue;
+                    }
                     if !pass {
                         let hint = match expected_ty {
                             Type::Function(exp_params, _) => format!(
@@ -574,6 +569,98 @@ impl TypeChecker {
                     }
                 }
             }
+            self.check_list_accumulator_method_args(obj_type, method, args, span);
+        }
+    }
+
+    fn check_list_accumulator_method_args(
+        &mut self,
+        obj_type: &Type,
+        method: &str,
+        args: &[Expr],
+        span: &Span,
+    ) {
+        if !matches!(method, "fold" | "reduce") {
+            return;
+        }
+        let Type::List(inner) = obj_type else {
+            return;
+        };
+        if args.len() != 2 {
+            return;
+        }
+        let init_ty = self.infer_expr_type(&args[0]);
+        if init_ty == Type::Unknown || Self::contains_unknown(&init_ty) {
+            let fallback_fn = Type::Function(
+                vec![Type::Unknown, inner.as_ref().clone()],
+                Box::new(Type::Unknown),
+            );
+            let actual_ty = self.infer_expr_type_with_expected(&args[1], &fallback_fn);
+            if actual_ty == Type::Unknown {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1508] Method '{}' argument 2 needs a function of type {}; the callback could not be inferred. \
+                         Hint: Add parameter and return type annotations.",
+                        method, fallback_fn
+                    ),
+                    span: span.clone(),
+                });
+                return;
+            }
+            if !self
+                .registry
+                .is_function_arg_subtype_of(&actual_ty, &fallback_fn)
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1508] Method '{}' argument 2 has type {}, expected {}. \
+                         Hint: The callback must accept the list element type even when the init type is unresolved.",
+                        method, actual_ty, fallback_fn
+                    ),
+                    span: span.clone(),
+                });
+            }
+            return;
+        }
+        let expected_fn = Type::Function(
+            vec![init_ty.clone(), inner.as_ref().clone()],
+            Box::new(init_ty.clone()),
+        );
+        let actual_ty = self.infer_expr_type_with_expected(&args[1], &expected_fn);
+        if actual_ty == Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1508] Method '{}' argument 2 needs a function of type {}; the callback could not be inferred. \
+                     Hint: Add parameter and return type annotations.",
+                    method, expected_fn
+                ),
+                span: span.clone(),
+            });
+            return;
+        }
+        if Self::contains_unknown(&actual_ty) && !Self::contains_unknown(&expected_fn) {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1508] Method '{}' argument 2 has type {}, expected {}. \
+                     Hint: The accumulator parameter and callback return must resolve to the init value type {}.",
+                    method, actual_ty, expected_fn, init_ty
+                ),
+                span: span.clone(),
+            });
+            return;
+        }
+        if !self
+            .registry
+            .is_function_arg_subtype_of(&actual_ty, &expected_fn)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1508] Method '{}' argument 2 has type {}, expected {}. \
+                     Hint: The accumulator parameter and callback return must match the init value type {}.",
+                    method, actual_ty, expected_fn, init_ty
+                ),
+                span: span.clone(),
+            });
         }
     }
 
@@ -589,7 +676,7 @@ impl TypeChecker {
     /// This is the only place where a bidirectional hint flows into
     /// Lambda inference. The general lambda inference path remains
     /// unchanged (no annotation -> `Type::Unknown`).
-    fn infer_lambda_with_hint(&mut self, expr: &Expr, expected: &Type) -> Type {
+    pub(super) fn infer_lambda_with_hint(&mut self, expr: &Expr, expected: &Type) -> Type {
         let (Expr::Lambda(params, body, _), Type::Function(expected_params, _)) = (expr, expected)
         else {
             return self.infer_expr_type(expr);
@@ -710,6 +797,16 @@ impl TypeChecker {
                 }
                 _ => {}
             }
+        }
+        if let Type::List(_) = obj_type
+            && matches!(method, "fold" | "reduce")
+            && let Some(init) = args.first()
+        {
+            return self
+                .typed_expr_table
+                .lookup(init)
+                .cloned()
+                .unwrap_or_else(|| self.infer_expr_type(init));
         }
         // Delegate every non-Lax/Result/Async receiver back to the
         // arg-less variant. The Named-pack arm there unwraps a

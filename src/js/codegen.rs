@@ -3229,6 +3229,16 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                if method == "fold" || method == "reduce" {
+                    self.write(if method == "fold" { "Fold(" } else { "Reduce(" });
+                    self.gen_expr(obj)?;
+                    for arg in args.iter() {
+                        self.write(", ");
+                        self.gen_expr(arg)?;
+                    }
+                    self.write(")");
+                    return Ok(());
+                }
                 // C12-2b: .toString() universal adoption. Route through a
                 // runtime helper so that plain objects (BuchiPacks) format
                 // as `@(...)` instead of JS's default `[object Object]`.
@@ -4342,6 +4352,24 @@ impl JsCodegen {
                         if is_removed_list_method(method) {
                             self.write("__taida_list_method_removed(");
                             self.write(&format!("{:?}", method));
+                            self.write(")");
+                            return Ok(());
+                        }
+                        if method == "fold" || method == "reduce" {
+                            self.write(if method == "fold" { "Fold(" } else { "Reduce(" });
+                            if matches!(obj.as_ref(), Expr::Placeholder(_)) {
+                                self.write("__p");
+                            } else {
+                                self.gen_expr(obj)?;
+                            }
+                            for arg in args.iter() {
+                                self.write(", ");
+                                if matches!(arg, Expr::Placeholder(_)) {
+                                    self.write("__p");
+                                } else {
+                                    self.gen_expr(arg)?;
+                                }
+                            }
                             self.write(")");
                             return Ok(());
                         }

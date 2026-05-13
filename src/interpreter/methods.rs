@@ -1944,6 +1944,26 @@ impl Interpreter {
                 }
                 Ok(Signal::Value(Value::Bool(true)))
             }
+            "fold" | "reduce" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!("{}() requires init and function arguments", method),
+                    });
+                }
+                let mut acc = args[0].clone();
+                let func = match &args[1] {
+                    Value::Function(f) => f.clone(),
+                    _ => {
+                        return Err(RuntimeError {
+                            message: format!("{}() requires a function argument", method),
+                        });
+                    }
+                };
+                for item in items {
+                    acc = self.call_function_with_values(&func, &[acc, item.clone()])?;
+                }
+                Ok(Signal::Value(acc))
+            }
             // Display (C12-2b: universal .toString() adoption)
             "toString" => Ok(Signal::Value(Value::str(
                 Value::list(items.to_vec()).to_display_string(),
