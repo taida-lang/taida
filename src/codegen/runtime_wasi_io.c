@@ -791,12 +791,21 @@ static int64_t wasi_bytes_from_raw(const unsigned char *src, int64_t len) {
     return (int64_t)(intptr_t)bytes;
 }
 
+static int64_t wasi_read_bytes_at_lax_error(const char *kind) {
+    int64_t error = taida_make_error_with_kind_code(
+        (int64_t)(intptr_t)"IoError",
+        (int64_t)(intptr_t)"ReadBytesAt error",
+        (int64_t)(intptr_t)(kind ? kind : "other"),
+        0);
+    return taida_lax_empty_error(wasi_bytes_default_value(), error);
+}
+
 int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     const char *path = (const char *)(intptr_t)path_ptr;
-    if (!path) return taida_lax_empty(wasi_bytes_default_value());
-    if (offset < 0 || len < 0) return taida_lax_empty(wasi_bytes_default_value());
+    if (!path) return wasi_read_bytes_at_lax_error("invalid");
+    if (offset < 0 || len < 0) return wasi_read_bytes_at_lax_error("invalid");
     /* 64 MB chunk ceiling — matches interpreter / native. */
-    if (len > 64LL * 1024LL * 1024LL) return taida_lax_empty(wasi_bytes_default_value());
+    if (len > 64LL * 1024LL * 1024LL) return wasi_read_bytes_at_lax_error("too_large");
     if (len == 0) {
         /* Lax success with an empty Bytes value. */
         int64_t empty = wasi_bytes_from_raw((const unsigned char *)"", 0);
@@ -804,7 +813,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     }
 
     int32_t path_len = wasi_strlen(path);
-    if (path_len == 0) return taida_lax_empty(wasi_bytes_default_value());
+    if (path_len == 0) return wasi_read_bytes_at_lax_error("invalid");
 
     wasi_resolved_path rp = resolve_preopened_path(path, path_len);
 
@@ -820,7 +829,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
         0,
         &file_fd
     );
-    if (err != 0) return taida_lax_empty(wasi_bytes_default_value());
+    if (err != 0) return wasi_read_bytes_at_lax_error(wasi_error_kind(err, 0));
 
     /* Seek to offset.  If the underlying fd does not support seek or
      * the offset is past EOF, fd_seek will set newoffset to a value
@@ -831,7 +840,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     err = __wasi_fd_seek(file_fd, offset, WASI_SEEK_SET, &new_off);
     if (err != 0) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty(wasi_bytes_default_value());
+        return wasi_read_bytes_at_lax_error(wasi_error_kind(err, 0));
     }
 
     /* Read up to `len` bytes.  Tolerate short reads at EOF: loop
@@ -839,7 +848,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)len);
     if (!buf) {
         __wasi_fd_close(file_fd);
-        return taida_lax_empty(wasi_bytes_default_value());
+        return wasi_read_bytes_at_lax_error("other");
     }
 
     int64_t filled = 0;
@@ -857,7 +866,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
     __wasi_fd_close(file_fd);
 
     if (io_err != 0) {
-        return taida_lax_empty(wasi_bytes_default_value());
+        return wasi_read_bytes_at_lax_error(wasi_error_kind(io_err, 0));
     }
 
     /* Even with filled < len (truncated tail or beyond-EOF), we return

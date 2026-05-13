@@ -181,28 +181,34 @@ taida_val taida_os_read_bytes(taida_val path_ptr) {
 //   - offset >= file size         → Lax success (empty Bytes, short read)
 //   - offset + len > file size    → Lax success (truncated tail)
 //   - IO error                    → Lax failure
+static taida_val taida_os_read_bytes_at_lax_error(const char *kind) {
+    taida_val error = taida_make_error_with_kind_code("IoError", "ReadBytesAt error", kind, 0);
+    return taida_lax_empty_error(taida_bytes_default_value(), error);
+}
+
 taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val len) {
     const char *path = (const char*)path_ptr;
-    if (!path) return taida_lax_empty(taida_bytes_default_value());
-    if (offset < 0 || len < 0) return taida_lax_empty(taida_bytes_default_value());
-    if (len > 64 * 1024 * 1024) return taida_lax_empty(taida_bytes_default_value());
+    if (!path) return taida_os_read_bytes_at_lax_error("invalid");
+    if (offset < 0 || len < 0) return taida_os_read_bytes_at_lax_error("invalid");
+    if (len > 64 * 1024 * 1024) return taida_os_read_bytes_at_lax_error("too_large");
     if (len == 0) {
         taida_val empty = taida_bytes_from_raw(NULL, 0);
         return taida_lax_new(empty, taida_bytes_default_value());
     }
 
     FILE *f = fopen(path, "rb");
-    if (!f) return taida_lax_empty(taida_bytes_default_value());
+    if (!f) return taida_os_read_bytes_at_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
     if (fseeko(f, (off_t)offset, SEEK_SET) != 0) {
+        int saved_errno = errno;
         fclose(f);
-        return taida_lax_empty(taida_bytes_default_value());
+        return taida_os_read_bytes_at_lax_error(taida_os_error_kind(saved_errno, strerror(saved_errno)));
     }
 
     unsigned char *buf = (unsigned char*)malloc((size_t)len);
     if (!buf) {
         fclose(f);
-        return taida_lax_empty(taida_bytes_default_value());
+        return taida_os_read_bytes_at_lax_error("other");
     }
 
     // Tolerate short reads at EOF: loop fread until full or EOF.
@@ -217,7 +223,7 @@ taida_val taida_os_read_bytes_at(taida_val path_ptr, taida_val offset, taida_val
 
     if (io_err) {
         free(buf);
-        return taida_lax_empty(taida_bytes_default_value());
+        return taida_os_read_bytes_at_lax_error("other");
     }
 
     taida_val bytes = taida_bytes_from_raw(buf, (taida_val)filled);

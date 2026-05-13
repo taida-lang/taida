@@ -240,28 +240,35 @@ function __taida_to_bytes_payload(data) {
   return Buffer.from(String(data ?? ''), 'utf-8');
 }
 
-function __taida_lax_from_bytes(bytes, hasValue) {
+function __taida_lax_from_bytes(bytes, hasValue, error) {
   const val = bytes instanceof Uint8Array ? new Uint8Array(bytes) : new Uint8Array(0);
-  return Object.freeze({
+  const _hasValue = !!hasValue;
+  const _error = error === undefined ? null : error;
+  if (_hasValue && _error !== null) {
+    throw new __TaidaError('Lax success cannot carry ErrorInfo');
+  }
+  const pack = {
     __type: 'Lax',
     __value: val,
     __default: new Uint8Array(0),
-    hasValue: __taida_hasValue(!!hasValue),
-    isEmpty() { return !hasValue; },
-    errorInfo() { return __taida_error_info_lax(null); },
-    getOrDefault(def) { return hasValue ? val : def; },
-    map(fn) { return hasValue ? Lax(fn(val)) : this; },
+    hasValue: __taida_hasValue(_hasValue),
+    isEmpty() { return !_hasValue; },
+    errorInfo() { return __taida_error_info_lax(_error); },
+    getOrDefault(def) { return _hasValue ? val : def; },
+    map(fn) { return _hasValue ? Lax(fn(val)) : this; },
     flatMap(fn) {
-      if (!hasValue) return this;
+      if (!_hasValue) return this;
       const result = fn(val);
       if (result && result.__type === 'Lax') return result;
       return Lax(result);
     },
-    unmold() { return hasValue ? val : new Uint8Array(0); },
+    unmold() { return _hasValue ? val : new Uint8Array(0); },
     toString() {
-      return hasValue ? 'Lax(' + __taida_bytes_to_string(val) + ')' : 'Lax(default: ' + __taida_bytes_to_string(new Uint8Array(0)) + ')';
+      return _hasValue ? 'Lax(' + __taida_bytes_to_string(val) + ')' : 'Lax(default: ' + __taida_bytes_to_string(new Uint8Array(0)) + ')';
     },
-  });
+  };
+  if (_error !== null) pack.__error = _error;
+  return Object.freeze(pack);
 }
 
 function __taida_buchiPack(fields) {

@@ -267,6 +267,13 @@ fn make_read_lax_failure(default_val: Value, kind: &str) -> Value {
     make_lax_failure_with_error(default_val, make_io_error_with_kind(kind, "Read error", 0))
 }
 
+fn make_read_bytes_at_lax_failure(default_val: Value, kind: &str) -> Value {
+    make_lax_failure_with_error(
+        default_val,
+        make_io_error_with_kind(kind, "ReadBytesAt error", 0),
+    )
+}
+
 fn make_env_var_lax_failure(default_val: Value, kind: &str) -> Value {
     make_lax_failure_with_error(
         default_val,
@@ -1123,14 +1130,16 @@ impl Interpreter {
                 let len = self.eval_os_i64_arg(args, 2, "readBytesAt", "len")?;
 
                 if offset < 0 || len < 0 {
-                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                        Value::bytes(Vec::new()),
+                        "invalid",
+                    ))));
                 }
                 if (len as u64) > MAX_READ_SIZE {
-                    return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    )))));
+                    return Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                        Value::bytes(Vec::new()),
+                        "too_large",
+                    ))));
                 }
                 if len == 0 {
                     return Ok(Some(Signal::Value(make_lax_success(Value::bytes(
@@ -1141,10 +1150,11 @@ impl Interpreter {
                 use std::io::{Read, Seek, SeekFrom};
                 match std::fs::File::open(&path) {
                     Ok(mut f) => {
-                        if f.seek(SeekFrom::Start(offset as u64)).is_err() {
-                            return Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                                Vec::new(),
-                            )))));
+                        if let Err(e) = f.seek(SeekFrom::Start(offset as u64)) {
+                            return Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                                Value::bytes(Vec::new()),
+                                classify_io_error_kind(&e),
+                            ))));
                         }
                         let mut buf = vec![0u8; len as usize];
                         // read_exact would fail at EOF even for legitimate
@@ -1156,19 +1166,23 @@ impl Interpreter {
                             match f.read(&mut buf[filled..]) {
                                 Ok(0) => break, // EOF
                                 Ok(n) => filled += n,
-                                Err(_) => {
-                                    return Ok(Some(Signal::Value(make_lax_failure(
-                                        Value::bytes(Vec::new()),
-                                    ))));
+                                Err(e) => {
+                                    return Ok(Some(Signal::Value(
+                                        make_read_bytes_at_lax_failure(
+                                            Value::bytes(Vec::new()),
+                                            classify_io_error_kind(&e),
+                                        ),
+                                    )));
                                 }
                             }
                         }
                         buf.truncate(filled);
                         Ok(Some(Signal::Value(make_lax_success(Value::bytes(buf)))))
                     }
-                    Err(_) => Ok(Some(Signal::Value(make_lax_failure(Value::bytes(
-                        Vec::new(),
-                    ))))),
+                    Err(e) => Ok(Some(Signal::Value(make_read_bytes_at_lax_failure(
+                        Value::bytes(Vec::new()),
+                        classify_io_error_kind(&e),
+                    )))),
                 }
             }
 

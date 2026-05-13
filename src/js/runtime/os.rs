@@ -178,11 +178,11 @@ function __taida_os_readBytes(path) {
 //   - offset >= file size   → Lax success with empty Bytes
 //   - offset + len > size   → Lax success with truncated tail
 function __taida_os_readBytesAt(path, offset, len) {
-  if (!__os_fs) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (!__os_fs) return __taida_os_readBytesAt_error('unavailable');
   const off = typeof offset === 'bigint' ? Number(offset) : (offset | 0);
   const n = typeof len === 'bigint' ? Number(len) : (len | 0);
-  if (off < 0 || n < 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
-  if (n > __OS_MAX_READ_SIZE) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (off < 0 || n < 0) return __taida_os_readBytesAt_error('invalid');
+  if (n > __OS_MAX_READ_SIZE) return __taida_os_readBytesAt_error('too_large');
   if (n === 0) return __taida_lax_from_bytes(new Uint8Array(0), true);
   let fd = -1;
   try {
@@ -195,8 +195,16 @@ function __taida_os_readBytesAt(path, offset, len) {
     return __taida_lax_from_bytes(view, true);
   } catch (e) {
     if (fd !== -1) { try { __os_fs.closeSync(fd); } catch (_) {} }
-    return __taida_lax_from_bytes(new Uint8Array(0), false);
+    return __taida_os_readBytesAt_error(__taida_os_error_kind(e));
   }
+}
+
+function __taida_os_readBytesAt_error(kind) {
+  return __taida_lax_from_bytes(
+    new Uint8Array(0),
+    false,
+    __taida_error_pack('IoError', 'ReadBytesAt error', kind || 'other', 0)
+  );
 }
 
 function __taida_os_listdir(path) {
