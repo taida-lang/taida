@@ -1,8 +1,8 @@
 # Taida CLI リファレンス
 
-> 実装正本: `src/main.rs`
-
-このページは `@e.X` 以降の Taida CLI の単一リファレンスです。E31 は予告期間なしの破壊的変更として、旧トップレベルコマンドを `taida way` / `taida ingot` 配下へ整理します。タグごとの land 履歴は `CHANGELOG.md` を参照してください。
+このページは現行 Taida CLI の単一リファレンスです。`taida` トップレベル
+コマンドは `taida way` / `taida ingot` 配下のサブコマンド群に整理されて
+います。タグごとの land 履歴は `CHANGELOG.md` を参照してください。
 
 ---
 
@@ -43,7 +43,15 @@ taida --no-check <FILE>
 - `taida.toml` (将来予約)
 - `.git/` (git リポジトリルート)
 
-**E32 移行ノート**: `@e.32` で **`.taida` ディレクトリをプロジェクトルートマーカーから外しました**。E31 までは `~/.taida` を持つホームディレクトリ直下で `taida ./script.td` を実行すると `$HOME` がルートと誤判定されることがありましたが、E32 以降は `packages.tdm` / `taida.toml` / `.git` が無いディレクトリは「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとしてフォールバックします。`.taida/` は依然としてビルドキャッシュ (`build/`, `deps/`, `taida.lock`) の格納先ですが、ルート判定の trigger にはなりません。`packages.tdm` を持たない単発スクリプト実行で従来挙動が必要な場合は、明示的に空の `packages.tdm` を置いてください (詳細は `docs/guide/10_modules.md` の「packages.tdm」セクションを参照)。
+`.taida/` ディレクトリはプロジェクトルートマーカーには **含まれません**。
+`packages.tdm` / `taida.toml` / `.git` のいずれも持たないディレクトリは
+「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとして
+フォールバックします。`.taida/` はビルドキャッシュ (`build/`, `deps/`,
+`taida.lock`) の格納先として使われますが、ルート判定の trigger には
+なりません。`packages.tdm` を持たない単発スクリプト実行でプロジェクト
+ルート扱いが必要な場合は、明示的に空の `packages.tdm` を置いてください
+(詳細は [`docs/guide/10_modules.md`](../guide/10_modules.md) の
+「packages.tdm」セクションを参照)。
 
 ---
 

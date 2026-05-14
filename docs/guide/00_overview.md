@@ -119,7 +119,7 @@ stdout(message)  // "Hello, World!"
 | `stdout(msg)` | stdout | 即 flush（CLI） / eval 後一括（REPL・in-process テスト） | あり |
 | `stderr(msg)` | stderr | 即 flush | あり |
 | `debug(value)` | stdout | 即 flush（CLI） / eval 後一括（REPL・in-process テスト） | あり |
-| `stdin(prompt?)` | stdin | プロンプトは即 flush | — |
+| `stdin(prompt)` | stdin | プロンプトは即 flush | — |
 
 REPL と Rust 側の in-process テスト API (`Interpreter::new()`) は後方互換のため**バッファモード**のまま残してあります。CLI 実行 (`taida <file>`) だけが内部で `Interpreter::new_streaming()` を使い、即 flush に切り替わります。Taida の surface API には変更はなく、既存のコードはそのまま動きます。
 
@@ -232,7 +232,7 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 |------|-------|------------|------|--------|
 | 型安全性 | 厳格 | 中 | 極高 | 低 |
 | null 安全 | 完全排除 | partial | Option | なし |
-| メモリ管理 | 完全自動 | GC | 所有権 | GC |
+| メモリ管理 | [完全自動](../reference/memory_model.md) | GC | 所有権 | GC |
 | 学習コスト | 低 | 中 | 高 | 低 |
 | AI 親和性 | 極高 | 中 | 低 | 中 |
 | グラフ抽出 | 決定的 | 非決定的 | 非決定的 | 非決定的 |
@@ -276,6 +276,9 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 | [末尾再帰最適化](../reference/tail_recursion.md) | TCO の判定ルール |
 | [スコープルール](../reference/scope_rules.md) | スコープベース自動管理 |
 | [アドオンマニフェスト](../reference/addon_manifest.md) | addon.toml の仕様 |
+| [プリリュード関数](../api/prelude.md) | `stdout` / `stdin` / `nowMs` / `sleep` / `jsonEncode` 等のプリリュード API |
+| [同梱パッケージ index](../api/bundled_packages.md) | コア同梱パッケージの入口とバックエンド対応表 (詳細 API は [`docs/api/`](../api/)) |
+| [メモリ管理モデル](../reference/memory_model.md) | 4 バックエンドのメモリ管理戦略とアドオン所有権規約 |
 | [診断コード](../reference/diagnostic_codes.md) | コンパイラ診断コード一覧 |
 | [標準ライブラリ](../reference/standard_library.md) | プリリュードとビルトイン型 |
 | [標準メソッド](../reference/standard_methods.md) | 状態チェック・モナディックメソッド |

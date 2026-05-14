@@ -2,7 +2,7 @@
 
 外部エディタ（nvim / vim / micro 等）を Taida プログラムから起動し、ユーザーの編集結果を受け取るための典型パターンをまとめます。
 
-前提 API: [`runInteractive`](../reference/os_api.md#22-interactive-版c19-以降)（C19 以降）
+前提 API: [`runInteractive`](../api/os.md#22-interactive-版)
 
 ---
 
@@ -194,6 +194,6 @@ execShellInteractive("nvim " + path)   // shell injection リスクあり
 
 ## 6. 関連リンク
 
-- API リファレンス: [`docs/reference/os_api.md`](../reference/os_api.md)
+- API リファレンス: [`docs/api/os.md`](../api/os.md)
 - ガイド: [`docs/guide/14_os_package.md`](../guide/14_os_package.md)
 - Taida terminal アドオン: `taida-lang/terminal`（raw mode / alternate screen など）

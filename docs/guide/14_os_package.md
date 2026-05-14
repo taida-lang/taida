@@ -60,13 +60,13 @@ chunk <= readBytesAt("/data/big.bin", 0, 4096)
 | `createDir(path)` | `Result[Unit, _]` | `IoError` | `mkdir -p` 相当 |
 | `rename(from, to)` | `Result[Unit, _]` | `IoError` | 移動 / 改名（アトミック） |
 
-> 戻り値表記 `Result[T, _]` は canonical 定義 `Mold[T] => Result[T, P <= :T => :Bool]` の述語省略形です。第 2 型引数は推論プレースホルダで、I/O 操作では述語を使わず `throw` channel のみを利用します（詳細は [`docs/reference/os_api.md`](../reference/os_api.md) 冒頭、エラーハンドリングは [`docs/guide/08_error_handling.md`](08_error_handling.md) 参照）。
+> 戻り値表記 `Result[T, _]` は canonical 定義 `Mold[T] => Result[T, P <= :T => :Bool]` の述語省略形です。第 2 型引数は推論プレースホルダで、I/O 操作では述語を使わず `throw` channel のみを利用します（詳細は [`docs/api/os.md`](../api/os.md) 冒頭、エラーハンドリングは [`docs/guide/08_error_handling.md`](08_error_handling.md) 参照）。
 
 ---
 
 ## 1.5 標準入力（stdin）
 
-Taida プレリュードの `stdin(prompt?)` は、端末（cooked mode）から 1 行読み取って `Str` を返します。プロンプトは省略可能で、`stdin()` / `stdin("name: ")` の両形式が checker / Interpreter / JS / Native すべてで受理されます。
+Taida プレリュードの `stdin(prompt)` は、端末（cooked mode）から 1 行読み取って `Str` を返します。`prompt` を省略するとデフォルト値 `""` で呼び出され、プロンプトは表示されません。`stdin()` / `stdin("name: ")` の両形式が checker / Interpreter / JS / Native すべてで受理されます。
 
 ```taida
 line <= stdin("name: ")
@@ -80,9 +80,9 @@ stdout("hello, " + line)
 - 長い行も truncate されません（Native は `getline(3)` / realloc loop、JS は 4 KiB chunk stream decode で multibyte も壊れません）。
 - プロンプトは `Str` 以外でも display string 化されます（`stdin(1)` は `1` を出力してから読み取り）。
 
-### 1.5a `stdinLine(prompt?)` — UTF-8-aware 対話入力
+### 1.5a `stdinLine(prompt)` — UTF-8-aware 対話入力
 
-`stdinLine(prompt?)` は UTF-8-aware な対話入力 API です。ASCII しか扱わない簡易スクリプトなら `stdin` で十分ですが、日本語 / 中国語 / 韓国語 / 絵文字を含む入力や、実際の対話 CLI では `stdinLine` を使ってください。
+`stdinLine(prompt)` は UTF-8-aware な対話入力 API です。ASCII しか扱わない簡易スクリプトなら `stdin` で十分ですが、日本語 / 中国語 / 韓国語 / 絵文字を含む入力や、実際の対話 CLI では `stdinLine` を使ってください。`prompt` を省略するとデフォルト値 `""` で呼び出され、プロンプトは表示されません。
 
 ```taida
 stdinLine("名前: ") ]=> line
@@ -111,8 +111,8 @@ stdout("こんにちは、" + line.getOrDefault("旅人"))
 
 | API | 戻り型 | 失敗検知 | UTF-8 編集 | 推奨ユースケース |
 |-----|-------|---------|----------|----------------|
-| `stdin(prompt?)` | `Str` | 失敗時 `""` (見分け不可) | 環境依存（kernel cooked mode） | ASCII-only / 非対話 pipe 入力 |
-| `stdinLine(prompt?)` | `Async[Lax[Str]]` | `Lax.hasValue()` == false | POSIX TTY で保証（pipe は kernel 委譲） | 対話 CLI / 日本語 / UTF-8 input |
+| `stdin(prompt)` | `Str` | 失敗時 `""` (見分け不可) | 環境依存（kernel cooked mode） | ASCII-only / 非対話 pipe 入力 |
+| `stdinLine(prompt)` | `Async[Lax[Str]]` | `Lax.hasValue()` == false | POSIX TTY で保証（pipe は kernel 委譲） | 対話 CLI / 日本語 / UTF-8 input |
 
 **Scope 外** — 履歴 / tab completion / 複数行編集は別途 `taida-lang/readline` addon に分離する設計です。本 API は「最小限の UTF-8-aware line editor」として固定されています。
 
@@ -186,7 +186,7 @@ stdout(proc.stdout)   // ERROR: Field 'stdout' does not exist on type @(code: In
 
 **Note**: `execShellInteractive` は `sh -c <command>` でラップするため、job control 層が 1 つ余計に挟まります。固定の単体プログラムで足りる場合は `runInteractive` を推奨します。
 
-詳細な API リファレンスは [`docs/reference/os_api.md`](../reference/os_api.md) を参照してください。エディタ連携の典型パターンは [`docs/cookbook/editor_handoff.md`](../cookbook/editor_handoff.md) にまとまっています。
+詳細な API リファレンスは [`docs/api/os.md`](../api/os.md) を参照してください。エディタ連携の典型パターンは [`docs/cookbook/editor_handoff.md`](../cookbook/editor_handoff.md) にまとまっています。
 
 ---
 

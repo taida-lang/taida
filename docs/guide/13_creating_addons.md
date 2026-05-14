@@ -1,89 +1,88 @@
-# Creating Addons Inside Ingots
+# インゴット内でのアドオン作成
 
 > **PHILOSOPHY.md — IV.** キモい言語だ。だが、書くのも読むのもAI。眺めるのが人間の仕事。
 
-An **ingot** is the package unit. An **addon** is the native loader layer
-inside an ingot: a Rust `cdylib` plus `native/addon.toml` that pins the ABI,
-package name, function table, and optional prebuild distribution metadata.
-The manifest stays named `addon.toml`; E31 only rehomes the CLI surface under
-`taida ingot`.
+**インゴット (ingot)** はパッケージの単位です。**アドオン (addon)** は
+インゴットの中に置かれるネイティブローダー層であり、Rust の `cdylib` と
+`native/addon.toml` の組み合わせで構成されます。マニフェストには ABI、
+パッケージ名、関数表、任意のプレビルド配布メタデータが pin されます。
+マニフェストファイル名は `addon.toml` のままで、パッケージ系 CLI
+コマンドは `taida ingot` 配下に集約されています。
 
-This guide is aimed at addon *authors*. See `docs/reference/addon_manifest.md`
-for the manifest reference and forward-compat policy, and
-`docs/reference/cli.md` for the `taida ingot publish` CLI contract.
+本ガイドはアドオンの *作者* を対象としています。マニフェストスキーマと
+前方互換ポリシーは [アドオンマニフェスト](../reference/addon_manifest.md)、
+`taida ingot publish` の CLI 契約は [CLI リファレンス](../reference/cli.md)
+を参照してください。
 
-### Backend policy (what runs your addon)
+### バックエンドポリシー (どこでアドオンが動くか)
 
-The supported backend matrix for addons is:
+アドオンが対応するバックエンドの一覧は次のとおりです。
 
-| Backend        | Status      | What happens at import                                                                 |
-|----------------|-------------|----------------------------------------------------------------------------------------|
-| Interpreter    | **Supported** | Addon facade runs as a dynamic module; cdylib functions dispatch via `dlopen` when the interpreter binary is built with `feature = "native"` (the default). |
-| Native (AOT)   | **Supported** | Addon facade is statically analysed into an `AddonFacadeSummary` by `src/addon/facade.rs` and lowered through `src/codegen/lower/imports.rs`. FuncDefs become IR functions; pack / scalar / list / template bindings are replayed into the module init path. |
-| JS transpiler  | **Rejected**  | There is no JS-side addon dispatcher today. The import produces a deterministic error. |
-| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | **Rejected** | These profiles do not currently expose an addon dispatcher. Any future widening will reuse the same `src/addon/facade.rs` static analyser so authors will not need to re-write facades. The currently supported profile for addon dispatch is `wasm-full`; see `docs/reference/wasm_profiles.md`. |
+| バックエンド | 状態 | インポート時の挙動 |
+|--------------|------|--------------------|
+| インタプリタ | **対応** | アドオンファサードが動的モジュールとして動作し、`feature = "native"` でビルドされたインタプリタ (既定ビルド) では cdylib 関数が `dlopen` 経由でディスパッチされます。 |
+| ネイティブ (AOT) | **対応** | アドオンファサードはビルド時に静的解析されてサマリ化され、FuncDef は IR 関数に、pack / scalar / list / template バインディングはモジュール初期化パスに置き換えられます。 |
+| JS トランスパイラ | **非対応** | 現状 JS 側にアドオンディスパッチャは存在せず、インポートは決定的なエラーを返します。 |
+| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | **非対応** | これらのプロファイルはアドオンディスパッチャを公開していません。将来拡張する場合もインタプリタ / ネイティブと同じ静的解析器を再利用する設計のため、作者がファサードを書き直す必要はありません。アドオンディスパッチに現状対応している WASM プロファイルは `wasm-full` のみです — 詳細は [WASM プロファイル](../reference/wasm_profiles.md) を参照してください。 |
 
-Authors targeting interpreter + native do not need to write two
-facade files. The same `taida/<stem>.td` must work on both — the
-interpreter resolves user imports against the facade's live
-environment snapshot, and the native backend resolves against the
-`AddonFacadeSummary` extracted by the shared loader. Every construct
-accepted on one path is accepted on the other (see
-[What the native backend understands inside a facade](#what-the-native-backend-understands-inside-a-facade)
-immediately below).
+インタプリタとネイティブを対象とする作者は、ファサードファイルを 2
+通り書く必要はありません。同じ `taida/<stem>.td` が両方で動作します。
+インタプリタはファサードの生環境スナップショットに対してユーザー
+インポートを解決し、ネイティブバックエンドは静的解析で抽出した
+ファサードサマリに対して解決します。一方のパスで受理される構文は
+もう一方でも受理されます (詳細は次節
+[ネイティブバックエンドがファサード内で理解する構文](#ネイティブバックエンドがファサード内で理解する構文)
+を参照)。
 
-### What the native backend understands inside a facade
+### ネイティブバックエンドがファサード内で理解する構文
 
-The facade loader accepts the following top-level constructs:
+ファサードローダーは、最上位に次の構文要素を許容します。
 
-- **Aliases** — `FacadeName <= lowercaseAddonFn`, where
-  `lowercaseAddonFn` appears in the manifest's `[functions]` table.
-- **Pack literals** — `FacadeName <= @(field <= value, ...)`.
-- **Scalar / list / arithmetic / template bindings** —
-  `N <= 0`, `msg <= "hello"`, `greet <= \`hi, ${who}\``, arithmetic
-  expressions, function / method calls, field accesses, mold /
-  type instantiations.
-- **FuncDefs** — `Name args = body => :Type`. Both
-  exported (public) and private (`_`-prefixed) FuncDefs are
-  collected; privates promoted into the summary through
-  transitive reachability from an exported FuncDef body or pack
-  binding.
-- **Relative imports** — `>>> ./child.td =>
-  @(Sym1, Sym2)`. Non-relative paths (`>>> taida-lang/foo`,
-  `>>> npm:*`, versioned imports) are rejected.
-- **Export declarations** — `<<< @(Sym1, Sym2)`. When present, the
-  `<<<` clause is authoritative — symbols absent from it cannot be
-  named in user imports.
+- **エイリアス** — `FacadeName <= lowercaseAddonFn`。`lowercaseAddonFn`
+  はマニフェストの `[functions]` 表に列挙された関数名です。
+- **pack リテラル** — `FacadeName <= @(field <= value, ...)`。
+- **スカラ / リスト / 算術 / テンプレートバインディング** —
+  `N <= 0`、`msg <= "hello"`、`greet <= \`hi, ${who}\``、算術式、関数
+  呼び出し、メソッド呼び出し、フィールドアクセス、モールド / 型の
+  インスタンス化。
+- **FuncDef** — `Name args = body => :Type`。公開 (`_`-接頭辞なし) /
+  非公開 (`_`-接頭辞) のいずれも収集され、非公開のものは、公開
+  FuncDef 本体や pack バインディングからの推移的到達性を経由して
+  summary に昇格します。
+- **相対インポート** — `>>> ./child.td => @(Sym1, Sym2)`。非相対パス
+  (`>>> taida-lang/foo`、`>>> npm:*`、版指定インポート等) は拒否
+  されます。
+- **エクスポート宣言** — `<<< @(Sym1, Sym2)`。指定された場合、`<<<`
+  句が正本となり、列挙されていないシンボルはユーザーインポートで
+  名指せません。
 
-Currently rejected (no real addon in the ecosystem uses these today,
-so the rejection is informational):
+現状拒否される構文 (現実のアドオンエコシステムで利用されていないため
+情報提供にとどまります):
 
-- `TypeDef` / `EnumDef` / `MoldDef` statements inside a facade.
-- `<<< <path>` re-exports.
+- ファサード内の `TypeDef` / `EnumDef` / `MoldDef` 文。
+- `<<< <path>` 形式の再エクスポート。
 
-If your facade depends on any of these, compile errors at
-`taida build native` will indicate which construct was
-rejected. Interim workaround: expose a facade FuncDef that wraps
-the missing construct with a pure-Taida surface the loader does
-understand.
+これらに依存しているファサードがある場合、`taida build native` が
+拒否対象の構文を指摘するコンパイルエラーを出します。暫定回避策は、
+ローダーが理解する純 Taida 表現で欠落している構文をラップする
+ファサード FuncDef を公開することです。
 
-The publish and release workflow is **tag-push-only**: `taida ingot publish`
-just pushes a git tag and exits, and the addon repository's own CI
-(`.github/workflows/release.yml`, scaffolded by `taida init --target
-rust-addon`) builds and publishes the release as
-`github-actions[bot]`. See [§3 The release workflow](#3-the-release-workflow)
-below for the symmetric 4-job pipeline, and [§8 Migrating older
-addons](#8-migrating-older-addons) for the steps existing addons
-may need to take.
+公開とリリースのワークフローは **タグ push のみ**: `taida ingot publish`
+は git タグを push して即終了し、アドオンリポジトリ側の CI
+(`.github/workflows/release.yml`、`taida init --target rust-addon` で
+雛形が生成されます) が `github-actions[bot]` としてリリースをビルド
+して公開します。対称な 4 ジョブパイプラインは
+[§3 リリースワークフロー](#3-リリースワークフロー) を、既存アドオンの
+追従手順は [§8 旧来アドオンの移行](#8-旧来アドオンの移行) を
+参照してください。
 
 ---
 
-## 0. Getting started with `taida init --target rust-addon`
+## 0. `taida init --target rust-addon` で始める
 
-The fastest path from nothing to a publishable addon is the
-built-in scaffold. `taida init --target rust-addon` writes the
-complete on-disk layout you need — Rust crate, facade, manifest,
-and the C14 release workflow — in one step:
+ゼロから公開可能なアドオンへ最短で到達するには、組み込みの雛形を
+使います。`taida init --target rust-addon` は、Rust クレート、ファサード、
+マニフェスト、リリースワークフローまでを 1 ステップで書き出します。
 
 ```bash
 $ taida init --target rust-addon my-addon
@@ -98,81 +97,78 @@ Initialized Taida project 'my-addon' (rust-addon) in my-addon
   .github/workflows/release.yml
 ```
 
-What you get:
+生成される内容:
 
-- **`packages.tdm`** with a `<<<@a` placeholder identity. Before
-  your first publish, replace it with the qualified form
-  `<<<@a owner/my-addon @(MyExport, ...)` — `taida ingot publish`
-  will reject a bare identity.
-- **`Cargo.toml`** with `crate-type = ["rlib", "cdylib"]` and
-  `taida-addon = "2.0"` (the ABI v1 author crate).
-- **`src/lib.rs`** with a minimal `declare_addon!` entry point
-  exporting a sample `echo` function through
-  `taida_addon_get_v1`.
-- **`native/addon.toml`** with `abi = 1`, an `OWNER/...`
-  placeholder in `package` / `url`, and an empty
-  `[library.prebuild.targets]` table. CI fills the SHA-256
-  target entries at release time through the `addon.lock.toml`
-  path (see §3 and §5 below).
-- **`taida/<name>.td`** — your Taida-side facade. Imports from
-  this package resolve against the symbols this file exports.
-- **`.github/workflows/release.yml`** — the C14 template,
-  symmetric with Taida core's own release workflow. See §3.
+- **`packages.tdm`** — `<<<@a` プレースホルダー識別子付き。初回公開
+  前に `<<<@a owner/my-addon @(MyExport, ...)` の qualified 形式に
+  置き換えてください。bare な識別子のままだと `taida ingot publish` は
+  拒否します。
+- **`Cargo.toml`** — `crate-type = ["rlib", "cdylib"]` と
+  `taida-addon = "2.0"` (ABI v1 用作者クレート) を設定済み。
+- **`src/lib.rs`** — `declare_addon!` で `taida_addon_get_v1` から
+  サンプル `echo` 関数をエクスポートする最小エントリポイント。
+- **`native/addon.toml`** — `abi = 1`、`package` / `url` に `OWNER/...`
+  プレースホルダー、空の `[library.prebuild.targets]` テーブル。CI が
+  リリース時に `addon.lock.toml` 経由で SHA-256 ターゲットを補完します
+  (§3 と §5 を参照)。
+- **`taida/<name>.td`** — Taida 側のファサード。このパッケージから
+  のインポートは、このファイルがエクスポートしたシンボル群に解決
+  されます。
+- **`.github/workflows/release.yml`** — Taida 本体のリリースワーク
+  フローと対称なテンプレート。詳細は §3 を参照してください。
 
-Next steps:
+次にやるべきこと:
 
-1. Replace `OWNER` in `native/addon.toml` (two places) with your
-   GitHub org or user.
-2. Replace the `<<<@a` placeholder in `packages.tdm` with the
-   qualified form and declare your exports.
-3. `cargo build --release` to verify the cdylib compiles.
-4. (Optional) point `native/addon.toml`'s `prebuild.url` at a
-   relative `file://target/release/lib<name>.so` to test
-   `taida ingot install` locally against your own build output —
-   see §6.
-5. When you are ready to cut the first release, push the
-   repository to GitHub and run `taida ingot publish --dry-run`
-   to preview the version bump. `taida ingot publish` (without
-   `--dry-run`) creates and pushes the tag; CI does the
-   rest (§3, §4).
+1. `native/addon.toml` 内の `OWNER` を GitHub の組織またはユーザー名
+   (2 箇所) に置き換える。
+2. `packages.tdm` の `<<<@a` プレースホルダーを qualified 形式に
+   差し替え、エクスポートを宣言する。
+3. `cargo build --release` で cdylib がビルドできることを確認する。
+4. (任意) `native/addon.toml` の `prebuild.url` を相対 `file://target/release/lib<name>.so`
+   に向けて、自分のビルド成果物に対するローカル `taida ingot install`
+   を試す — §6 を参照。
+5. 初回リリースの準備が整ったら、リポジトリを GitHub に push し、
+   `taida ingot publish --dry-run` でバージョン繰り上げのプレビューを
+   行う。`--dry-run` なしの `taida ingot publish` がタグを作成・push
+   し、残りは CI が処理します (§3, §4)。
 
-The same scaffold is what the `taida-lang/terminal` addon is
-built on — its `.github/workflows/release.yml` is the template
-in this repo with the two placeholders substituted. If the
-scaffold ever drifts from terminal's working setup, the
-symmetry is re-asserted by
-`tests/init_release_workflow_symmetry.rs`.
+公式同梱アドオンの `taida-lang/terminal` も同じ雛形で構築されており、
+その `.github/workflows/release.yml` は本リポジトリのテンプレートに
+2 つのプレースホルダーを当てたものです。Taida 本体側のテストが雛形と
+terminal の運用設定の対称性を継続的に検証しているため、雛形が drift
+した場合は CI が落ちて検知されます。
 
 ---
 
-## 1. Directory layout
+## 1. ディレクトリ配置
 
-A minimal addon crate sits alongside (or inside) your package:
+最小構成のアドオンクレートは、対応するパッケージと並べて (あるいは内側に)
+置きます。
 
 ```
 my-addon/
-  packages.tdm                  # Taida package manifest
-  Cargo.toml                    # cdylib crate
-  src/lib.rs                    # addon entry point
+  packages.tdm                  # Taida パッケージマニフェスト
+  Cargo.toml                    # cdylib クレート
+  src/lib.rs                    # アドオンエントリポイント
   native/
-    addon.toml                  # install-time manifest
+    addon.toml                  # インストール時マニフェスト
 ```
 
-`Cargo.toml` must declare the crate as a `cdylib`:
+`Cargo.toml` ではクレートを `cdylib` として宣言してください。
 
 ```toml
 [lib]
 crate-type = ["cdylib"]
 ```
 
-and depend on the in-tree `taida-addon` crate for the ABI types.
+そして ABI 型のためにインツリーの `taida-addon` クレートに依存します。
 
 ---
 
-## 2. The addon.toml manifest
+## 2. addon.toml マニフェスト
 
-A minimal manifest without prebuild distribution (users must place
-the `.so` themselves) looks like:
+プレビルド配布を含まない最小構成のマニフェスト (利用者は `.so` を
+自分で配置する) は次のとおりです。
 
 ```toml
 abi = 1
@@ -184,164 +180,164 @@ library = "my_addon"
 greet = 1
 ```
 
-To ship a prebuild that `taida ingot install` can fetch, add a
-`[library.prebuild]` section:
+`taida ingot install` でフェッチ可能なプレビルドを配布するには
+`[library.prebuild]` セクションを追加します。
 
 ```toml
 [library.prebuild]
 url = "https://github.com/my-org/my-addon/releases/download/v{version}/lib{name}-{target}.{ext}"
 
 [library.prebuild.targets]
-"x86_64-unknown-linux-gnu"  = "sha256:<64 lowercase hex chars>"
+"x86_64-unknown-linux-gnu"  = "sha256:<小文字 16 進 64 文字>"
 "aarch64-unknown-linux-gnu" = "sha256:..."
 "x86_64-apple-darwin"       = "sha256:..."
 "aarch64-apple-darwin"      = "sha256:..."
 "x86_64-pc-windows-msvc"    = "sha256:..."
 ```
 
-### URL template variables
+### URL テンプレート変数
 
-| Variable    | Expands to |
-|-------------|------------|
-| `{version}` | The exact version resolved by `taida ingot install` |
-| `{target}`  | The host target triple (e.g. `x86_64-unknown-linux-gnu`) |
-| `{ext}`     | Platform cdylib extension (`so`, `dylib`, `dll`) |
-| `{name}`    | The `[library] name` value |
+| 変数 | 展開対象 |
+|------|----------|
+| `{version}` | `taida ingot install` が解決したバージョン |
+| `{target}` | ホストのターゲットトリプル (例: `x86_64-unknown-linux-gnu`) |
+| `{ext}` | プラットフォームの cdylib 拡張子 (`so` / `dylib` / `dll`) |
+| `{name}` | `[library] name` の値 |
 
-Unknown variables, unbalanced braces, and `{{` / `}}` escapes are
-rejected at manifest parse time — there is no tolerance for typos.
+未知の変数、対応していない波括弧、`{{` / `}}` のエスケープはマニフェスト
+パース時に拒否されます — タイプミスを許容する余地はありません。
 
-### Supported host targets
+### 対応ホストターゲット
 
-| Triple | Status |
-|--------|--------|
-| `x86_64-unknown-linux-gnu`  | Baseline |
-| `aarch64-unknown-linux-gnu` | Baseline |
-| `x86_64-apple-darwin`       | Baseline |
-| `aarch64-apple-darwin`      | Baseline |
-| `x86_64-pc-windows-msvc`    | Baseline |
-| `x86_64-unknown-linux-musl`  | Extension |
-| `aarch64-unknown-linux-musl` | Extension |
-| `i686-unknown-linux-gnu`     | Extension |
-| `riscv64gc-unknown-linux-gnu`| Extension |
-| `x86_64-unknown-freebsd`     | Extension |
+| トリプル | 状態 |
+|----------|------|
+| `x86_64-unknown-linux-gnu` | ベースライン |
+| `aarch64-unknown-linux-gnu` | ベースライン |
+| `x86_64-apple-darwin` | ベースライン |
+| `aarch64-apple-darwin` | ベースライン |
+| `x86_64-pc-windows-msvc` | ベースライン |
+| `x86_64-unknown-linux-musl` | 拡張 |
+| `aarch64-unknown-linux-musl` | 拡張 |
+| `i686-unknown-linux-gnu` | 拡張 |
+| `riscv64gc-unknown-linux-gnu` | 拡張 |
+| `x86_64-unknown-freebsd` | 拡張 |
 
-You do not have to ship binaries for every target — only the ones you
-have tested. Users on unlisted targets will get a deterministic
-`addon is not available for your platform` error at install time,
-which lists the targets your manifest does declare.
+すべてのターゲット向けにバイナリを配布する必要はありません — 検証済み
+のものだけで構いません。未掲載のターゲット上の利用者には、インストール
+時に `addon is not available for your platform` という決定的なエラーが
+返り、マニフェストで宣言済みのターゲットが列挙されます。
 
-### SHA-256 integrity
+### SHA-256 整合性
 
-The `targets` values are always lowercase `sha256:` + 64 hex chars.
-Uppercase hex is rejected for canonical form. `taida ingot install`
-streams the downloaded bytes through SHA-256 and aborts with a
-structured error on mismatch — there is no silent fallback.
+`targets` の値は常に小文字 `sha256:` + 16 進 64 文字です。正準形を
+強制するために大文字 16 進は拒否されます。`taida ingot install` は
+ダウンロード済みバイト列を SHA-256 で stream し、不一致があれば
+構造化エラーで中止します — サイレントなフォールバックはありません。
 
-### Reserved: `[library.prebuild.signatures]`
+### 予約: `[library.prebuild.signatures]`
 
-A `signatures` sub-table is reserved for future GPG / detached
-signature verification:
+将来の GPG / 分離署名検証のために `signatures` 副テーブルが予約されて
+います。
 
 ```toml
 [library.prebuild.signatures]
 "x86_64-unknown-linux-gnu" = "gpg:<opaque-identifier>"
 ```
 
-Values must start with `gpg:` and carry a non-empty printable-ASCII
-payload. Taida currently **parses and stores** these values but does
-not verify them. Adding them now is safe — older taidas that don't
-understand the section will reject the manifest, which is the
-intended forward-compat policy (see
-`docs/reference/addon_manifest.md`).
+値は `gpg:` で始まり、空でない印字可能 ASCII を続けてください。
+Taida は現状これらの値を **パースして保存するだけ** で検証は行い
+ません。今書いておいても安全です — このセクションを理解しない古い
+taida はマニフェストごと拒否します (これは意図的な前方互換挙動です。
+詳細は [アドオンマニフェスト](../reference/addon_manifest.md) を参照
+してください)。
 
 ---
 
-## 3. The release workflow
+## 3. リリースワークフロー
 
-The addon release pipeline is a **4-job CI workflow**
-(`.github/workflows/release.yml`) that is structurally symmetric
-with the Taida core's own `release.yml`. `taida init --target
-rust-addon` scaffolds this workflow automatically when you create
-a new addon crate. Older addons that pre-date this layout may
-need migration (see [§8 Migrating older addons](#8-migrating-older-addons)).
+アドオンのリリースパイプラインは **4 ジョブの CI ワークフロー**
+(`.github/workflows/release.yml`) で、Taida 本体の `release.yml` と
+構造的に対称です。`taida init --target rust-addon` で新規アドオン
+クレートを作ると、このワークフローが自動で配置されます。古いレイアウト
+のアドオンは移行が必要になる場合があります
+([§8 旧来アドオンの移行](#8-旧来アドオンの移行) を参照)。
 
-The template lives at
-`crates/addon-rs/templates/release.yml.template` in the Taida
-repository. It is rendered with two placeholders at scaffold time:
+テンプレートは `taida init --target rust-addon` の雛形生成時に
+次の 2 つのプレースホルダーが置換された形で書き出されます。
 
-| Placeholder       | Meaning                                                              |
-|-------------------|----------------------------------------------------------------------|
-| `{{LIBRARY_STEM}}` | cdylib filename stem (e.g. `taida_lang_terminal`) — without `lib` prefix and without extension |
-| `{{CRATE_DIR}}`   | Relative path from repo root to the `Cargo.toml` (usually `.`)       |
+| プレースホルダー | 意味 |
+|------------------|------|
+| `{{LIBRARY_STEM}}` | cdylib のファイル名ステム (例: `taida_lang_terminal`)。`lib` 接頭辞・拡張子は含まない |
+| `{{CRATE_DIR}}` | リポジトリルートから `Cargo.toml` までの相対パス (通常は `.`) |
 
-### Trigger
+### トリガー
 
-The workflow fires on two events:
+ワークフローは次の 2 つのイベントで発火します。
 
-- `push` to a tag matching the Taida version regex
-  `^[a-z]\.[0-9]+(\.[a-z0-9][a-z0-9-]*)?$` (bare — no `@` prefix).
-  Examples: `a.1`, `b.3.rc`, `aa.7.beta`. Semver tags (`v1.2.3`)
-  are intentionally ignored.
-- `workflow_dispatch` with a `tag` input, for manually re-running a
-  release against an already-pushed tag.
+- Taida のバージョン正規表現
+  `^[a-z]\.[0-9]+(\.[a-z0-9][a-z0-9-]*)?$` に一致するタグへの `push`
+  (bare — `@` 接頭辞なし)。例: `a.1`, `b.3.rc`, `aa.7.beta`。semver
+  形式のタグ (`v1.2.3`) は意図的に無視されます。
+- `tag` 入力付きの `workflow_dispatch`。既に push 済みのタグに対して
+  手動で再実行するための入り口です。
 
-### Jobs
+### ジョブ
 
-| Job       | Purpose                                                            |
-|-----------|--------------------------------------------------------------------|
-| `prepare` | Validate the tag regex, resolve the ref, export `release_tag` + `release_ref` outputs |
-| `gate`    | `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test --all`  |
-| `build`   | 5-platform matrix: build `cdylib` + compute SHA-256, upload artefact |
-| `publish` | Download all matrix artefacts, generate `addon.lock.toml` + `prebuild-targets.toml.txt` + `SHA256SUMS`, run `gh release create` |
+| ジョブ | 役割 |
+|--------|------|
+| `prepare` | タグ正規表現を検証し、ref を解決して `release_tag` / `release_ref` を出力 |
+| `gate` | `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test --all` |
+| `build` | 5 プラットフォームマトリクスで `cdylib` をビルドし、SHA-256 を計算してアーティファクトをアップロード |
+| `publish` | マトリクスアーティファクトをダウンロードし、`addon.lock.toml` / `prebuild-targets.toml.txt` / `SHA256SUMS` を生成して `gh release create` を実行 |
 
-The 5-platform matrix is:
+5 プラットフォームマトリクスは次のとおりです。
 
-| Runner           | Target triple                   | `cross`? |
-|------------------|----------------------------------|-----------|
-| `ubuntu-latest`  | `x86_64-unknown-linux-gnu`       | no        |
-| `ubuntu-latest`  | `aarch64-unknown-linux-gnu`      | yes       |
-| `macos-15-intel` | `x86_64-apple-darwin`            | no        |
-| `macos-14`       | `aarch64-apple-darwin`           | no        |
-| `windows-latest` | `x86_64-pc-windows-msvc`         | no        |
+| ランナー | ターゲットトリプル | `cross` 使用 |
+|----------|--------------------|-------------|
+| `ubuntu-latest` | `x86_64-unknown-linux-gnu` | しない |
+| `ubuntu-latest` | `aarch64-unknown-linux-gnu` | する |
+| `macos-15-intel` | `x86_64-apple-darwin` | しない |
+| `macos-14` | `aarch64-apple-darwin` | しない |
+| `windows-latest` | `x86_64-pc-windows-msvc` | しない |
 
-The `publish` job authenticates with `GH_TOKEN: ${{ github.token }}`,
-so the **release author is always `github-actions[bot]`** — never the
-person who ran `taida ingot publish`. This is a non-negotiable contract
-of the addon release pipeline.
+`publish` ジョブは `GH_TOKEN: ${{ github.token }}` で認証されるため、
+**リリース作成者は常に `github-actions[bot]`** であり、`taida ingot publish`
+を実行した人物ではありません。これはアドオンリリースパイプラインの
+譲れない契約です。
 
-### Release assets
+### リリース成果物
 
-A successful `publish` job attaches 8 assets to the GitHub Release:
+`publish` ジョブが成功すると、GitHub リリースに 8 つのアセットが付随
+します。
 
-- 5 × `lib<LIBRARY_STEM>-<triple>.<so|dylib|dll>` (the matrix cdylibs)
-- `addon.lock.toml` — CI-generated lockfile listing the SHA-256 of
-  each of the 5 cdylibs. `taida ingot install` reads this as the
-  authoritative source of truth.
-- `prebuild-targets.toml.txt` — a TOML fragment that could be pasted
-  into `[library.prebuild.targets]` if needed, but the lockfile is
-  the primary mechanism in the current pipeline.
-- `SHA256SUMS` — flat text listing of every asset's SHA-256 for
-  human verification.
+- 5 個の `lib<LIBRARY_STEM>-<triple>.<so|dylib|dll>` (マトリクス
+  ビルド成果物)
+- `addon.lock.toml` — CI が生成するロックファイル。各 cdylib の
+  SHA-256 を列挙し、`taida ingot install` が正本として参照します。
+- `prebuild-targets.toml.txt` — 必要に応じて
+  `[library.prebuild.targets]` に貼り付けられる TOML 断片。ただし
+  現行パイプラインではロックファイル側が主な情報源です。
+- `SHA256SUMS` — 全アセットの SHA-256 を人間が確認するためのフラット
+  なテキスト一覧。
 
-### Reference implementation
+### 参照実装
 
-`taida-lang/terminal` is the canonical reference: it is published
-through this pipeline, and its CI run is available at the addon's
-GitHub Actions tab. Both the workflow file (matching the template
-with `LIBRARY_STEM=taida_lang_terminal`) and the release asset
-structure can be used as a ground-truth example.
+`taida-lang/terminal` がこのパイプラインの正準的な参照例です。本
+パイプラインを通じて公開されており、CI 実行は同アドオンの GitHub
+Actions タブから追えます。ワークフローファイル (テンプレートで
+`LIBRARY_STEM=taida_lang_terminal` を当てたもの) もリリースアセット
+構造も、信頼できる現物として参照できます。
 
 ---
 
-## 4. Publishing a new version with `taida ingot publish`
+## 4. `taida ingot publish` で新バージョンを公開する
 
-From the addon crate root, with `packages.tdm`'s identity set to
-`<<<@<version> <owner>/<name>`, a tagged release is a two-step
-process:
+アドオンクレートのルートで、`packages.tdm` の識別子を
+`<<<@<version> <owner>/<name>` に設定したら、タグ付きリリースは 2
+ステップで完了します。
 
 ```bash
-# 1. Preview: what version would this publish?
+# 1. プレビュー: どのバージョンが公開されるか
 $ taida ingot publish --dry-run
 Publish plan for my-org/my-addon:
   Last release tag: a.3
@@ -351,234 +347,232 @@ Publish plan for my-org/my-addon:
   Remote: origin
   Dry-run: no git changes performed.
 
-# 2. Execute: push the tag, then exit immediately.
+# 2. 実行: タグを push して即終了
 $ taida ingot publish
 Created tag 'a.4' and pushed to origin.
 CI will build and publish the release.
 ```
 
-`taida ingot publish` does **not** wait for CI. Open the GitHub Actions tab
-to watch the 4 jobs complete (typically ~90 seconds for the baseline
-5-platform matrix).
+`taida ingot publish` は CI の完了を **待ちません**。GitHub Actions の
+タブを開いて 4 ジョブの進行を確認してください (ベースラインの 5
+プラットフォームマトリクスで概ね 90 秒程度)。
 
-### Automatic version bump
+### 自動バージョン繰り上げ
 
-`taida ingot publish` compares the export symbol set of `taida/*.td`
-between the previous release tag and HEAD. See
-`docs/reference/cli.md#ingot-publish` for the full bump table; the
-one-line summary is:
+`taida ingot publish` は前回リリースタグと HEAD の間で `taida/*.td` の
+エクスポートシンボル集合を比較します。繰り上げ表は
+[CLI リファレンスの ingot publish 節](../reference/cli.md#ingot-publish)
+を参照してください。1 行要約は次のとおりです。
 
-- Symbol removed / renamed → generation bump (`a.3` → `b.1`)
-- Symbol added / internal change only → number bump (`a.3` → `a.4`)
-- No previous tag → `a.1` (initial release)
+- シンボル削除 / 改名 → 世代繰り上げ (`a.3` → `b.1`)
+- シンボル追加 / 内部変更のみ → 番号繰り上げ (`a.3` → `a.4`)
+- 直前のタグが存在しない → `a.1` (初回リリース)
 
-### Escape hatches
+### エスケープハッチ
 
-| Flag                        | Use case                                                    |
-|-----------------------------|-------------------------------------------------------------|
-| `--force-version a.5`       | Override the auto-detected version (skips API diff)         |
-| `--label rc`                | Append a pre-release label (`a.4` → `a.4.rc`)               |
-| `--retag`                   | Force-replace an already-pushed tag (skips API diff)        |
+| フラグ | 用途 |
+|--------|------|
+| `--force-version a.5` | 自動検出されたバージョンを上書き (API diff をスキップ) |
+| `--label rc` | プレリリースラベルを付与 (`a.4` → `a.4.rc`) |
+| `--retag` | 既に push 済みのタグを強制置換 (API diff をスキップ) |
 
-`--force-version` and `--retag` deliberately bypass the API diff
-snapshot so that older packages (which may contain syntax now
-rejected by the parser, e.g. discard-binding `[E1616]`) can still
-be re-tagged without tripping the Taida parser on the old tag's
-`taida/*.td`.
+`--force-version` と `--retag` は意図的に API diff スナップショットを
+回避します。古いパッケージ (現行パーサーが拒否する構文 — 例:
+`[E1616]` の discard binding — を含む可能性のあるもの) を、過去タグ
+の `taida/*.td` を Taida パーサーに通さずに再タグ付けできるようにする
+ためです。
 
 ---
 
-## 5. How `taida ingot install` fetches prebuilds
+## 5. `taida ingot install` がプレビルドを取得する流れ
 
-When a package has a `native/addon.toml` with a `[library.prebuild]`
-section, `taida ingot install`:
+パッケージが `[library.prebuild]` セクション付きの `native/addon.toml`
+を持っているとき、`taida ingot install` は次の順に処理を進めます。
 
-1. Detects the host target (`HostTarget::detect_host_target`).
-2. Looks the host triple up in `[library.prebuild.targets]`.
-   Unknown host → deterministic error listing every target the
-   manifest declares.
-3. **SHA source selection**: if the `addon.toml` at the tag contains
-   a placeholder SHA (`sha256:` + 64 zeros), the resolver falls back
-   to the release asset `addon.lock.toml` for the authoritative
-   hash. This is the expected path when an addon's initial release
-   author left `[library.prebuild.targets]` as placeholders and
-   relies on CI to publish the canonical lockfile
-   (`src/pkg/resolver.rs::choose_sha_source`).
-4. Expands `{version}`, `{target}`, `{ext}`, `{name}` in the URL
-   template.
-5. Downloads the binary over HTTPS (up to 10 redirects) or reads a
-   `file://` URL (relative paths only; see
-   `docs/reference/addon_manifest.md` for the security model).
-6. Streams the bytes through SHA-256 and rejects any mismatch.
-7. Caches the verified binary under
+1. ホストのターゲットトリプルを検出する。
+2. ホストトリプルを `[library.prebuild.targets]` 内で検索する。未知の
+   ホストは決定的なエラーになり、マニフェストが宣言した全ターゲットが
+   列挙される。
+3. **SHA 取得元の選択**: タグ時点の `addon.toml` がプレースホルダー
+   SHA (`sha256:` + 0 が 64 文字) を含む場合、リゾルバはリリース
+   アセットの `addon.lock.toml` を正本としてフォールバックする。
+   初回リリース作成者が `[library.prebuild.targets]` をプレース
+   ホルダーのままにし、正準ロックファイルの公開を CI に委ねているケース
+   の標準動作。
+4. URL テンプレートの `{version}` / `{target}` / `{ext}` / `{name}` を
+   展開する。
+5. バイナリを HTTPS でダウンロード (最大 10 リダイレクト)、もしくは
+   `file://` URL を読み込み (相対パスのみ。セキュリティモデルは
+   [アドオンマニフェスト](../reference/addon_manifest.md) を参照)。
+6. バイト列を SHA-256 で stream して照合し、不一致を拒否。
+7. 検証済みバイナリを
    `~/.taida/addon-cache/<org>/<name>/<version>/<target>/lib<name>.<ext>`
-   and places a working copy at
-   `.taida/deps/<pkg>/native/lib<name>.<ext>`.
-8. Writes the target+hash pair into `taida.lock` as a
-   `[[package.addon]]` sub-table so reproducible installs can
-   verify the chain without re-downloading.
+   にキャッシュし、`.taida/deps/<pkg>/native/lib<name>.<ext>` に作業用
+   コピーを配置。
+8. ターゲットとハッシュの組を `taida.lock` に `[[package.addon]]` 副
+   テーブルとして書き込み、再現可能なインストールが再ダウンロード
+   なしで連鎖を検証できるようにします。
 
-Downloads larger than ~256 KiB show a byte-count progress indicator
-on stderr. Users can force a re-download with
-`taida ingot install --force-refresh`, or prune the cache entirely with
-`taida ingot cache clean --addons`.
+ダウンロードが概ね 256 KiB を超えた段階で、標準エラー出力にバイト数
+ベースの進捗表示が出ます。再ダウンロードを強制する場合は
+`taida ingot install --force-refresh`、キャッシュを丸ごと整理する場合は
+`taida ingot cache clean --addons` を使ってください。
 
 ---
 
-## 6. Testing locally with `file://`
+## 6. `file://` を使ったローカルテスト
 
-During development you do not need to publish to GitHub. Point the
-URL template at a relative `file://` path:
+開発中は GitHub に公開する必要はありません。URL テンプレートを
+相対 `file://` パスに向けます。
 
 ```toml
 [library.prebuild]
 url = "file://target/release/libmy_addon.so"
 
 [library.prebuild.targets]
-"x86_64-unknown-linux-gnu" = "sha256:<compute this after each build>"
+"x86_64-unknown-linux-gnu" = "sha256:<ビルドごとに再計算>"
 ```
 
-Constraints:
+制約:
 
-- Only **relative** paths are accepted under `file://`. Absolute
-  paths and `..` components are rejected before any filesystem
-  access.
-- The path is resolved relative to the project root containing
-  `packages.tdm`.
-- The SHA-256 must be updated every time you rebuild, because the
-  integrity check still runs.
+- `file://` 配下は **相対** パスのみ受け付けます。絶対パスと `..`
+  コンポーネントは、いかなるファイルシステムアクセスよりも前に拒否
+  されます。
+- パスは `packages.tdm` を含むプロジェクトルートからの相対で解決
+  されます。
+- 整合性チェックは引き続き走るため、再ビルドのたびに SHA-256 を更新
+  してください。
 
-This is how the in-tree `taida-addon-terminal-sample` crate is
-exercised in `tests/addon_terminal_install_e2e.rs`.
-
----
-
-## 7. Checklist before releasing
-
-- [ ] `packages.tdm` declares a qualified identity
-      (`<<<@<version> <owner>/<name>`) — a bare `<<<@<version>`
-      with no `<owner>/<name>` is rejected by `taida ingot publish`
-- [ ] `.github/workflows/release.yml` is the standard template
-      (4 jobs, 5-platform matrix, `github-actions[bot]` release
-      author). Older addons that still use a `prebuild.yml`
-      workflow must migrate — see
-      [§8 Migrating older addons](#8-migrating-older-addons)
-- [ ] The tag you plan to push does not already exist on origin
-      (or you've passed `--retag` intentionally)
-- [ ] `cargo build --release` succeeds locally (the CI matrix will
-      catch cross-target issues, but local x86_64 failures fail fast)
-- [ ] `taida ingot install` completes end-to-end against a local
-      `file://` URL during development
-- [ ] The `[functions]` table lists every symbol your `cdylib`
-      exports through `declare_addon!`
-- [ ] Your README tells users the **minimum supported taida
-      version** (older taidas will reject unknown manifest keys by
-      design; see `docs/reference/addon_manifest.md`)
+Taida 本体側でも、サンプルアドオンクレートをこの方法でエンドツーエンド
+テストしています。
 
 ---
 
-## 8. Migrating older addons
+## 7. リリース前チェックリスト
 
-Older addons (those that used `taida publish --target rust-addon`
-with `prebuild.yml` workflows and author=CLI-runner releases) need
-mechanical changes to run cleanly under the current publish pipeline.
+- [ ] `packages.tdm` で qualified 識別子
+      (`<<<@<version> <owner>/<name>`) を宣言している — `<owner>/<name>`
+      を伴わない bare な `<<<@<version>` は `taida ingot publish` が
+      拒否する
+- [ ] `.github/workflows/release.yml` が標準テンプレート (4 ジョブ、
+      5 プラットフォームマトリクス、リリース作成者 `github-actions[bot]`)
+      である。`prebuild.yml` を使っている旧アドオンは
+      [§8 旧来アドオンの移行](#8-旧来アドオンの移行) で移行する
+- [ ] push 予定のタグが origin にまだ存在しない (あるいは `--retag` を
+      意図的に渡している)
+- [ ] `cargo build --release` がローカルで通る (CI マトリクスがクロス
+      ターゲット問題を捕まえますが、ローカル x86_64 の失敗は早く落とす)
+- [ ] 開発中にローカル `file://` URL に対して `taida ingot install` が
+      エンドツーエンドで完了する
+- [ ] `[functions]` 表が `declare_addon!` でエクスポートしたすべての
+      シンボルを列挙している
+- [ ] README に **最小対応 taida バージョン** を記載している (古い
+      taida は未知のマニフェストキーを設計どおり拒否するため。
+      詳細は [アドオンマニフェスト](../reference/addon_manifest.md))
 
-### Step 1 — Add identity to `packages.tdm`
+---
 
-Change a packages.tdm that uses a bare version with no owner /
-name:
+## 8. 旧来アドオンの移行
+
+`taida publish --target rust-addon` と `prebuild.yml` ワークフローを
+使い、リリース作成者が CLI 実行者になっていた旧来のアドオンは、現行
+パブリッシュパイプラインで動かすために機械的な調整が必要です。
+
+### Step 1 — `packages.tdm` に識別子を付与する
+
+owner / name を伴わない bare 形式の `packages.tdm`:
 
 ```taida
-// older form
+// 旧形式
 <<<@a.1
 >>> ./main.td => @(...)
 ```
 
-to the qualified-identity form:
+を qualified 形式に変更します。
 
 ```taida
-// current form
+// 現行形式
 >>> ./main.td
 <<<@a.1 <owner>/<name> @(...)
 ```
 
-`taida ingot publish` will refuse to run against a bare `<<<@<version>`
-(no identity) because the resolver has no way to derive a fetch URL
-without qualifying `owner/name`.
+`taida ingot publish` は bare な `<<<@<version>` (識別子なし) を
+拒否します。リゾルバが `owner/name` 修飾を伴わずにフェッチ URL を
+導出できないためです。
 
-### Step 2 — Replace `prebuild.yml` with the current `release.yml` template
+### Step 2 — `prebuild.yml` を現行 `release.yml` テンプレートに置き換える
 
-The older `prebuild.yml` workflow had only 2 jobs (Build +
-Release-attach) and assumed the CLI had already run
-`gh release create` as the CLI user. In the current pipeline the CI
-owns release creation.
+旧来の `prebuild.yml` は 2 ジョブ (Build + Release-attach) しか持たず、
+`gh release create` を CLI 実行者として既に走らせている前提でした。
+現行パイプラインではリリース作成は CI 側が握ります。
 
-Option A — clean scaffold: in a *separate* scratch checkout, run
-`taida init --target rust-addon my-addon`, copy the generated
-`.github/workflows/release.yml`, and adjust the `LIBRARY_STEM` and
-`CRATE_DIR` env values at the top of the file to match your
-existing project. Replace your `prebuild.yml` with this file and
-delete the old one.
+選択肢 A — 雛形再生成: 別ディレクトリで `taida init --target rust-addon
+my-addon` を実行し、生成された `.github/workflows/release.yml` をコピー
+してファイル先頭の `LIBRARY_STEM` と `CRATE_DIR` の env 値を既存
+プロジェクトに合わせます。これで `prebuild.yml` を置き換え、旧ファイル
+を削除します。
 
-Option B — manual copy: `crates/addon-rs/templates/release.yml.template`
-in the Taida repository is the upstream. Copy it, replace
-`{{LIBRARY_STEM}}` with your cdylib stem (without `lib` prefix and
-without extension) and `{{CRATE_DIR}}` with the relative path from
-your repo root to the `Cargo.toml` (usually `.`).
+選択肢 B — 既存アドオンを参考にコピー: 公式同梱の `taida-lang/terminal`
+の `.github/workflows/release.yml` をテンプレートとしてコピーし、
+ファイル先頭の `LIBRARY_STEM` (cdylib ステム、`lib` 接頭辞・拡張子なし)
+と `CRATE_DIR` (リポジトリルートから `Cargo.toml` までの相対パス、通常
+`.`) を自分のプロジェクトに合わせて書き換えます。
 
-Either way, open a PR that:
+いずれの場合も、次の内容の PR を用意してください。
 
-- Removes `.github/workflows/prebuild.yml`
-- Adds `.github/workflows/release.yml`
-- Keeps the same tag naming scheme your tests already validate
-  (`a.1`, `b.1.rc`, etc.)
+- `.github/workflows/prebuild.yml` の削除
+- `.github/workflows/release.yml` の追加
+- 既存テストが検証しているタグ命名スキーム (`a.1`, `b.1.rc` 等) の
+  維持
 
-### Step 3 — Accept placeholder `addon.toml` + CI-generated `addon.lock.toml`
+### Step 3 — プレースホルダー `addon.toml` + CI 生成 `addon.lock.toml` を受け入れる
 
-The current template publishes an `addon.lock.toml` asset as the
-authoritative SHA source. In your tracked
-`native/addon.toml` you can either (a) keep
-`[library.prebuild.targets]` with placeholder (`sha256:` + 64 zeros)
-values on `main`, or (b) delete the section entirely. Both paths
-are supported by the resolver — option (b) is cleaner but requires
-that every release ships `addon.lock.toml`. Option (a) is defensive
-in case a future release omits the lockfile.
+現行テンプレートは `addon.lock.toml` を SHA の正本としてリリース
+アセットに添付します。追跡対象の `native/addon.toml` では次のいずれかを
+選んでください。
 
-`taida ingot install` auto-detects placeholder SHA values and falls back
-to the release asset `addon.lock.toml`
-(`is_placeholder_sha()` + `choose_sha_source()` in the Taida
-source tree). See `docs/reference/addon_manifest.md` for the full
-decision matrix.
+- (a) `[library.prebuild.targets]` を `main` 上ではプレースホルダー値
+  (`sha256:` + 0 が 64 文字) のまま残す。
+- (b) セクションごと削除する。
 
-### Step 4 — Drop obsolete CLI options from your scripts
+どちらの経路もリゾルバが対応しています — 選択肢 (b) はよりクリーン
+ですが、毎リリースが `addon.lock.toml` を出すことが前提です。選択肢
+(a) は将来のリリースがロックファイルを欠落させた場合の保険にもなり
+ます。
 
-Any `Makefile`, shell alias, or CI script that calls the old publish
-surface must move to `taida ingot publish` and stop passing the
-now-removed options:
+`taida ingot install` はプレースホルダー SHA を自動検出し、リリース
+アセットの `addon.lock.toml` にフォールバックします。完全な判定
+マトリクスは [アドオンマニフェスト](../reference/addon_manifest.md) を
+参照してください。
 
-| Older form                       | Current replacement                           |
-|----------------------------------|-----------------------------------------------|
-| `taida publish --target rust-addon` | `taida ingot publish` (target is implicit)       |
-| `taida publish --dry-run=plan`   | `taida ingot publish --dry-run`                     |
-| `taida publish --dry-run=build`  | Removed — local build happens in CI only      |
-| `TAIDA_PUBLISH_SKIP_RELEASE=1`   | Removed — the CLI never creates releases now  |
+### Step 4 — スクリプトから廃止済み CLI オプションを除去する
 
-### Step 5 — (Optional) Re-tag your initial release
+`Makefile` / シェルエイリアス / CI スクリプトが旧パブリッシュ surface
+を呼んでいる場合、`taida ingot publish` に切り替え、廃止済みオプション
+を渡さないようにしてください。
 
-If your addon's existing `a.1` tag was pushed by an older CLI
-(meaning the release author is a person, not `github-actions[bot]`),
-you can re-run the current pipeline against the same tag:
+| 旧形式 | 現行の置き換え |
+|--------|----------------|
+| `taida publish --target rust-addon` | `taida ingot publish` (target は暗黙) |
+| `taida publish --dry-run=plan` | `taida ingot publish --dry-run` |
+| `taida publish --dry-run=build` | 廃止 — ローカルビルドは CI のみで実施 |
+| `TAIDA_PUBLISH_SKIP_RELEASE=1` | 廃止 — CLI はもはやリリースを作成しない |
+
+### Step 5 — (任意) 初回リリースを再タグ付けする
+
+旧 CLI で push されたアドオンの既存 `a.1` タグ (= リリース作成者が
+人間で、`github-actions[bot]` ではない) は、同じタグに対して現行
+パイプラインを再実行できます。
 
 ```bash
 taida ingot publish --force-version a.1 --retag
 ```
 
-This force-replaces the tag on origin, fires the new `release.yml`,
-and re-creates the release with `github-actions[bot]` as the author
-and the full 8-asset payload (5 cdylibs + `addon.lock.toml` +
-`prebuild-targets.toml.txt` + `SHA256SUMS`).
+これはタグを origin 上で強制置換し、新しい `release.yml` を発火させ、
+作成者 `github-actions[bot]` でリリースを作り直し、8 アセット (5 個の
+cdylib + `addon.lock.toml` + `prebuild-targets.toml.txt` + `SHA256SUMS`)
+を再付与します。
 
-`--force-version` and `--retag` together ensure the API diff
-snapshot is skipped, so older source in your old tag's `taida/*.td`
-(containing syntax now rejected by the parser, for example) does
-not block the re-tag through the Taida parser.
+`--force-version` と `--retag` は同時に API diff スナップショットを
+スキップするため、旧タグの `taida/*.td` が含む古い構文 (現行パーサー
+が拒否するもの) によって Taida パーサーが再タグを阻むことはありません。

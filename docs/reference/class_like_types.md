@@ -33,7 +33,9 @@ MoldInst(String, Vec<Expr>, Vec<BuchiField>, Span)
 
 ## class-like 統一構文の構築検査ポリシー
 
-`Name(field <= value, ...)` のクラスライク型コンストラクタ呼び出しは、`@e.32` 以降 **closed-constructor** として検査されます。匿名 `@(...)` リテラルは引き続き open / 構造的な値として扱い、本ポリシーの対象外です。
+`Name(field <= value, ...)` のクラスライク型コンストラクタ呼び出しは
+**closed-constructor** として検査されます。匿名 `@(...)` リテラルは
+引き続き open / 構造的な値として扱われ、本ポリシーの対象外です。
 
 | ケース | 受理 / 拒否 | 診断 |
 |---|---|---|
@@ -784,7 +786,10 @@ Str[Int[3.0]()]() ]=> t  // 内側 Lax の full-form 表示:
 - `Str` → そのまま（クォート無し）
 - それ以外 (List / ぶちパック / Lax / Result / Async / HashMap / Set / Gorillax / TODO / Molten …) → 各値の display 文字列（ぶちパックは `__` で始まる内部フィールドも含む full-form、nested な HashMap / Set / ぶちパックも再帰的に full-form に展開）
 
-`Str[Gorillax[v]()]()` は C24-A 以降、WASM-wasi でも第 1 フィールド名を `has_value` に統一済みです。`tests/c23_str_parity.rs` の skip list は空で、Gorillax / Stream を含む `Str[...]()` fixtures は 4 バックエンド parity の対象です。
+`Str[Gorillax[v]()]()` は 4 バックエンド (Interpreter / JS / Native /
+WASM) すべてで第 1 フィールド名を `has_value` に統一しています。
+Gorillax / Stream を含む `Str[...]()` の出力は 4 バックエンド parity の
+対象です。
 
 ### Collection 検出と heterogeneous semantics (現在の動作)
 

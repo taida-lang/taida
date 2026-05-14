@@ -21,8 +21,8 @@ Taida は**プリリュード**と**ビルトイン型**で構成されていま
 |------|------|-----|
 | `stdout(msg)` | 標準出力に出力し、書き込んだ UTF-8 バイト数を返す（`Int`） | `bytes <= stdout("作戦開始")` |
 | `stderr(msg)` | 標準エラー出力に出力し、書き込んだ UTF-8 バイト数を返す（`Int`） | `bytes <= stderr("警告: 残弾なし")` |
-| `stdin(prompt?)` | プロンプトを表示して入力を受け取る（`Str`。EOF / IO error で `""`） | `name <= stdin("名前: ")` |
-| `stdinLine(prompt?)` | UTF-8-aware 対話入力（`Async[Lax[Str]]`、`]=>` で unmold） | `stdinLine("名前: ") ]=> name` |
+| `stdin(prompt)` | プロンプトを表示して入力を受け取る（`Str`。`prompt` 省略時はデフォルト値 `""` で表示なし。EOF / IO error で `""`） | `name <= stdin("名前: ")` |
+| `stdinLine(prompt)` | UTF-8-aware 対話入力（`Async[Lax[Str]]`、`]=>` で unmold。`prompt` 省略時の挙動は `stdin` と同じ） | `stdinLine("名前: ") ]=> name` |
 | `nowMs()` | 現在時刻（epoch ミリ秒）を取得（`Int`） | `start <= nowMs()` |
 | `sleep(ms)` | 指定ミリ秒待機する（`Async[Unit]`） | `sleep(10) ]=> _done` |
 
@@ -66,8 +66,8 @@ PHILOSOPHY I（「null/undefined の完全排除」）に沿った設計です
 | `stdout(...)` | stdout | 呼び出し毎に即 flush | eval 完了後に一括出力 | あり | `Int`（バイト数） |
 | `stderr(...)` | stderr | 呼び出し毎に即 flush | 呼び出し毎に即 flush | あり | `Int`（バイト数） |
 | `debug(v)` / `debug(v, label)` | stdout | 呼び出し毎に即 flush | eval 完了後に一括出力 | あり | `v` をそのまま返す |
-| `stdin(prompt?)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Str`（EOF で `""`） |
-| `stdinLine(prompt?)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Async[Lax[Str]]` |
+| `stdin(prompt)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Str`（EOF で `""`） |
+| `stdinLine(prompt)` | stdin（入力） | prompt は即 flush | prompt は即 flush | — | `Async[Lax[Str]]` |
 
 CLI モード（`taida <file>`）とは別に、REPL および Rust 側の in-process テスト API（`Interpreter::new()`）では後方互換のため `stdout` / `debug` を内部バッファに積み、評価完了後にまとめて出力する**バッファモード**を維持しています。Taida の surface API は両モードで完全に同じで、既存コードは無改修で動きます。
 
@@ -111,7 +111,7 @@ jsonPretty(pilot)
 // }
 ```
 
-> **注意**: JSON のパース（外部データ → Taida 値）には `JSON[raw, Schema]()` モールドを使用します。詳細は `docs/design/json_molten_iron.md` を参照してください。
+> **注意**: JSON のパース（外部データ → Taida 値）には `JSON[raw, Schema]()` モールドを使用します。詳細は [`docs/guide/03_json.md`](../guide/03_json.md) を参照してください。
 
 ### ユーティリティ
 
@@ -134,7 +134,7 @@ token <= sha256("abc")
 stdout(token)  // ba7816bf8f01cfea...f20015ad
 ```
 
-`taida-lang/crypto` の拡張契約（HMAC/KDF/安全乱数/署名検証）は `docs/design/crypto_package_contract.md` を参照してください。
+`taida-lang/crypto` の現行公開 surface は [`docs/api/bundled_packages.md`](../api/bundled_packages.md#taida-langcrypto) を参照してください。HMAC / KDF / 安全乱数 / 署名検証は将来の拡張領域として予約されています。
 
 ---
 
@@ -192,7 +192,7 @@ clone せず view として保持する zero-copy primitive です。span を
 明示的に `Str` へ materialize する **cold path** は二系統提供:
 
 - **mold form** `StrOf[span, raw]() -> Str` (3-backend parity 保証、
-  詳細は [`docs/reference/net_api.md §4.1`](./net_api.md))
+  詳細は [`docs/api/net.md §4.1`](../api/net.md))
 - **function form** `strOf(span, raw) -> Str` (gen-D 追加。
   4 バックエンドのうち interpreter / JS / native は 3 バックエンドの
   完全パリティ、wasm-full はコンパイルのみ確認。mold 形と意味的に等価で、
@@ -207,7 +207,7 @@ strEq(str_a, str_b) ]=> equal // true
 ```
 
 hot path (router の比較等) は `SpanEquals` / `SpanStartsWith` /
-`SpanContains` / `SpanSlice` (詳細は同 `net_api.md §4`) を使い、
+`SpanContains` / `SpanSlice` (詳細は同 `docs/api/net.md §4`) を使い、
 materialization を避けます。
 
 ---

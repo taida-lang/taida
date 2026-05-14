@@ -11,7 +11,7 @@
 Taida の NET surface は **zero-copy span** を基本単位とします:
 
 - `httpServe` handler / `httpParseRequestHead` が返す `req` pack の `method` / `path` / `query` / `headers[i].name` / `headers[i].value` / `body` は **`@(start: Int, len: Int)` の span pack** で、元の `req.raw: Bytes` に対する view です。
-- 原本の `Bytes` を clone せず、必要になった時点で user が明示的に **span → Str** または **span-aware 比較** を呼ぶ形にしています (clone-heavy 抑制のため、内部的には `src/interpreter/value.rs` の Arc + try_unwrap COW 共通 abstraction を用います)。
+- 原本の `Bytes` を clone せず、必要になった時点で user が明示的に **span → Str** または **span-aware 比較** を呼ぶ形にしています。clone-heavy 抑制のため、内部的にはアトミック参照カウント付きの共有バッファに対する copy-on-write 共通基盤を用います。
 - span pack を受け取る公開 mold 群は `§ 4 span-aware 比較 mold` を参照。
 - 「`req.method` を自動で `Str` に昇格する」設計は **採用していません**。span pack を zero-copy の基本単位として永続保持し、ergonomics は span-aware 公開 mold 群 (`§ 4` の `SpanEquals` / `SpanStartsWith` / `SpanContains` / `SpanSlice` / `StrOf`) で解決します。
 
@@ -22,24 +22,38 @@ Taida の NET surface は **zero-copy span** を基本単位とします:
 ### 2.1 `httpServe`
 
 ```
-httpServe(
-  port: Int,
-  handler: Fn,
-  ?maxRequests: Int,
-  ?timeoutMs: Int,
-  ?maxConnections: Int,
-  ?tls: BuchiPack
-) -> Async[Gorillax[@(ok: Bool, requests: Int)]]
+httpServe(port: Int, handler: Fn) -> Async[Gorillax[@(ok: Bool, requests: Int)]]
+httpServe(port: Int, handler: Fn, opts: BuchiPack) -> Async[Gorillax[@(ok: Bool, requests: Int)]]
 ```
 
-- `port` — bind port。`0` を渡すと OS 割り当て (割り当て後の port 観測には `getsockname` 相当の mold を別途使う想定)。
-- `handler` — 下記 2.2 / 2.3 のいずれかの arity を持つ関数値。
-- `maxRequests` (optional) — N 回処理して終了する上限。`0` または省略で無制限。
-- `timeoutMs` (optional) — accept / read 系の待ち時間上限。
-- `maxConnections` (optional) — 同時接続上限。
-- `tls` (optional) — TLS 設定 `@(cert: Str, key: Str, protocol: Str)` 等。`protocol <= "h2"` を指定すると HTTP/2 over TLS。
+指定ポートで HTTP サーバーを起動し、受信した各リクエストを `handler`
+に渡して処理する非同期処理を返します。サーバーは accept ループを
+継続し、終了条件 (リクエスト数上限・キャンセル等) に達するまで動作
+します。
 
-戻り値の `Async` を `]=>` で待つと `Gorillax[@(ok: Bool, requests: Int)]` が得られ、さらに `]=>` で summary pack を取り出します。`ok` は bind / accept loop が正常に閉じたか、`requests` は実際に処理した request 数です。
+- `port` — bind するポート番号。`0` を渡すと OS が空きポートを割り当てます。
+- `handler` — 各リクエストを処理する関数値。1 引数形式 (レスポンス値を
+  return) と 2 引数形式 (writer を介してストリーミング) を受け付け
+  ます。詳細は §2.2 / §2.3 を参照してください。
+- `opts` — 動作オプションをまとめた `BuchiPack`。省略時はすべての
+  オプションがデフォルト値で動作します。受け付けるフィールドは次の
+  とおりです。
+
+| フィールド | 型 | 省略時のデフォルト | 意味 |
+|------------|----|--------------------|------|
+| `maxRequests` | `Int` | `0` (無制限) | このリクエスト数を処理した時点でサーバーを停止 |
+| `timeoutMs` | `Int` | バックエンド既定値 | accept / read の待ち時間上限 (ミリ秒) |
+| `maxConnections` | `Int` | バックエンド既定値 | 同時接続数の上限 |
+| `tls` | `BuchiPack` | `@()` (TLS 無効) | TLS 設定。`@(cert: Str, key: Str, protocol: Str)` の形式 |
+
+`tls` を非空にして起動すると、TLS 経由の HTTPS サーバーになります。
+`protocol <= "h2"` を指定すると HTTP/2 over TLS、省略 (`""` のデフォルト
+値) または `"h1"` で HTTP/1.1 over TLS です。
+
+戻り値の `Async` を `]=>` で待つと `Gorillax[@(ok: Bool, requests: Int)]`
+が得られ、さらに `]=>` で summary pack を取り出します。`ok` は bind /
+accept loop が正常に閉じたか、`requests` は実際に処理したリクエスト数
+です。
 
 ### 2.2 1-arg handler (response-return form)
 
@@ -47,7 +61,7 @@ httpServe(
 handler req: BuchiPack = ... => :Str
 ```
 
-戻り値は HTTP wire 文字列 (`"HTTP/1.1 200 OK\r\n..."`) または `Bytes`。Interpreter / Native で **`src/interpreter/net_eval/h1.rs:1156`** の経路を通ります。
+戻り値は HTTP wire 文字列 (`"HTTP/1.1 200 OK\r\n..."`) または `Bytes`。Interpreter / Native は同じ HTTP/1.1 ライターパスを通ります。
 
 ### 2.3 2-arg handler (streaming form)
 
@@ -55,7 +69,7 @@ handler req: BuchiPack = ... => :Str
 handler req: BuchiPack writer: BuchiPack = ... => :Unit
 ```
 
-`writer` pack は下記 `writer.write(bytes)` / `writer.end()` などを持つ streaming API。Interpreter / Native で **`src/interpreter/net_eval/h1.rs:840`** の経路を通ります。
+`writer` pack は下記 `writer.write(bytes)` / `writer.end()` などを持つ streaming API。Interpreter / Native は同じ chunked ライターパスを通ります。
 
 > **Important — 2-arg handler body handling**: 2-arg form で handler 内から `req.body` を直接参照すると span の `len` が 0 になります (streaming 前提で body は eagerly 読まれない仕様)。**body を読む場合は必ず `readBody(req)` / `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使用**してください:
 >
@@ -100,12 +114,6 @@ handler req: BuchiPack writer: BuchiPack = ... => :Unit
 
 他のフィールドは 1-arg と同じ。上記差異は 3-backend で pin されています。
 
-### 3.3 Implementation references
-
-- Interpreter: `src/interpreter/net_eval/h1.rs:1131-1154` (1-arg), `:758-820` (2-arg)
-- span pack 構築: `src/interpreter/net_eval/helpers.rs:195-200` (`make_span`, zero-copy)
-- Request head parser: `src/interpreter/net_eval/helpers.rs:426-447` (`httpParseRequestHead`)
-
 ---
 
 ## 4. Span-aware 比較 mold
@@ -144,7 +152,7 @@ span を明示的に `Str` に変換します (PascalCase mold form、Span* fami
 m <= Slice[req.raw](start <= req.method.start, end <= req.method.start + req.method.len)
 ```
 
-> **Implementation note**: Native 実装は `taida_pack_get` + `taida_slice_mold` + `taida_utf8_decode_mold` + `taida_lax_get_or_default` の IR composition (`src/codegen/lower_molds.rs::StrOf`) で、専用の C runtime helper を追加せずに実現しています (core.c / net_h1_h2.c は span-aware mold の追加に対して不変)。既存の `Str[raw](start, end)` 形式は alternative として継続 support します。
+既存の `Str[raw](start, end)` 形式も継続して同じ結果を返します。
 
 ### 4.2 `SpanEquals[span, raw, needle: Str]() -> Bool`
 
@@ -208,11 +216,13 @@ response を wire bytes に encode します。
 
 | field | 上限 | 根拠 |
 |-------|------|------|
-| method | **16 byte** | `char method[16]` (Native `core.c`) |
-| path | **2048 byte** | `char path[2048]` (Native) |
-| authority | **256 byte** | `char authority[256]` (Host header) |
+| method | **16 byte** | ネイティブランタイムの固定長メソッドバッファ |
+| path | **2048 byte** | ネイティブランタイムの固定長パスバッファ |
+| authority | **256 byte** | Host ヘッダ用の固定長バッファ |
 
-> **Implementation note**: Interpreter h1 path は `HTTP_WIRE_MAX_METHOD_LEN = 16` / `HTTP_WIRE_MAX_PATH_LEN = 2048` を `src/interpreter/net_eval/h1.rs` に導入し、`parse_request_head` 後・`dispatch_request` 前で enforcement します。Native / h2 / h3 への enforcement の現況は `CHANGELOG.md` を参照してください。
+これらの上限はインタプリタ / ネイティブの両 HTTP/1.1 パーサで一貫して
+強制されます。HTTP/2 / HTTP/3 path の現況は `CHANGELOG.md` を参照
+してください。
 
 ### 5.4 Chunked transfer-encoding overflow guard
 
@@ -349,13 +359,22 @@ wsReceive(ws: WsToken) -> Lax[@(type: Str, data: Str | Bytes)]
 - close frame は payload 0 bytes、または 2 bytes 以上の valid close code + UTF-8 reason のみ受理します。1 byte payload、不正 close code、不正 UTF-8 reason は close `1002`。
 - text frame payload は strict UTF-8 必須。不正 UTF-8 は user handler に lossy `Str` として渡さず、close `1007`。
 
-### 7.4 `wsClose(ws, ?code)`
+### 7.4 `wsClose`
 
 ```
-wsClose(ws: WsToken[, code: Int]) -> Lax[Unit]
+wsClose(ws: WsToken) -> Lax[Unit]
+wsClose(ws: WsToken, code: Int) -> Lax[Unit]
 ```
 
-close frame を送り接続を閉じる。`code` 省略時は `1000` (normal closure)。`1001` (going away) / `1011` (internal error) など RFC 6455 §7.4 の status code を渡せます。
+WebSocket 接続にクローズ frame を送って閉じます。
+
+- `code` を省略した場合は `1000` (normal closure) として処理されます。
+  `1001` (going away) / `1011` (internal error) など RFC 6455 §7.4 の
+  ステータスコードを渡せます。
+- 受け付けられる `code` の範囲は `1000-4999` です。範囲外を渡すと失敗
+  `Lax` を返します。
+- 同一 `ws` に対して `wsClose` を 2 回以上呼んでもエラーにはなりません
+  (冪等)。
 
 ### 7.5 `wsCloseCode(received)`
 
@@ -476,18 +495,6 @@ body path では handler を呼ばずに `400 Bad Request`、2-arg streaming
 
 `__body_stream` sentinel が内部的に pack に入っており、`readBody*` 系はこの sentinel を検出して socket から直接読み出します。**user 側からこの sentinel を直接触る必要はありません** — `readBody*` のいずれかを呼べば透過的に動作します。
 
-### 11.5 Implementation references
-
-- Interpreter: `src/interpreter/net_eval/mod.rs:118-227` (`readBody` / `readBodyChunk` / `readBodyAll` の 1-arg / 2-arg 分岐)
-- `__body_stream` sentinel: `src/interpreter/net_eval/helpers.rs::is_body_stream_request`
-- Native: `src/codegen/native_runtime/net_h1_h2.c:721-750` (`taida_net_read_body`)
-- JS: `src/js/runtime/net.rs::__taida_net_readBody` (v4: 2-arg body-deferred で `readBodyAll` alias)
-
-### 11.6 3-backend parity tests
-
-- `tests/c26b_023_two_arg_handler_body.rs` — 2-arg handler body handling parity (本 docs と一貫性 pin)
-- `tests/parity.rs::parity_http_read_body_*` — Content-Length / empty / chunked の readBody 経路
-
 ---
 
 ## 12. References
@@ -495,5 +502,4 @@ body path では handler を呼ばずに `400 Bad Request`、2-arg streaming
 - [`docs/reference/release_process.md`](release_process.md) — 公開仕様の保証範囲と互換性判断
 - [`docs/reference/standard_methods.md`](standard_methods.md) — `Lax` / `Result` / `Async` のメソッド契約
 - `CHANGELOG.md` — タグ別の land 履歴
-- `src/interpreter/net_eval/h1.rs` / `h2.rs` — インタプリタ参照実装
-- `tests/parity.rs::test_net6_*` — 3-backend parity fixtures
+- [`docs/guide/15_net_package.md`](../guide/15_net_package.md) — `taida-lang/net` パッケージのナラティブ学習ガイド

@@ -53,8 +53,8 @@ WASM からアドオンを呼び出すマニフェストでは、`native/addon.t
 | アドオンに裏打ちされたパッケージ | 利用不可 | 利用不可 | 利用不可 | マニフェストが明示的に対応宣言した場合のみ利用可 |
 
 OS API のシンボル単位の対応範囲は `docs/reference/build_descriptors.md`
-と `docs/reference/os_api.md` を参照してください。NET API の対応方針は
-`docs/reference/net_api.md` に記載しています。
+と `docs/api/os.md` を参照してください。NET API の対応方針は
+`docs/api/net.md` に記載しています。
 
 `wasm-wasi` / `wasm-full` の net 部分集合は、WASI preview1 の継承 fd
 を使う plaintext HTTP/1.1 `httpServe` です。host が

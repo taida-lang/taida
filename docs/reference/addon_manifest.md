@@ -1,40 +1,40 @@
-# Addon Manifest Reference (`native/addon.toml`)
+# アドオンマニフェストリファレンス (`native/addon.toml`)
 
 > **PHILOSOPHY.md — IV.** キモい言語だ。だが、書くのも読むのもAI。眺めるのが人間の仕事。
 
-This reference documents the `native/addon.toml` schema accepted by
-the Rust addon foundation. An **ingot** is the package unit; an
-**addon** is the native loader layer inside that package. The manifest
-stays named `addon.toml`; E31 only rehomes package CLI commands under
-`taida ingot`. For a walkthrough of how to write and ship an addon,
-see `docs/guide/13_creating_addons.md`. Tag-by-tag land history is in
-`CHANGELOG.md`.
+本リファレンスは、Rust アドオン基盤が受け付ける `native/addon.toml`
+スキーマを定義します。**インゴット (ingot)** はパッケージ単位、
+**アドオン (addon)** はそのパッケージ内に格納されるネイティブローダー
+層の名称です。マニフェストファイル名は `addon.toml` のままで、
+パッケージ系 CLI コマンドは `taida ingot` 配下に置かれます。アドオンを
+書いて配布する手順は [アドオン作成ガイド](../guide/13_creating_addons.md)
+を、タグ別の land 履歴は `CHANGELOG.md` を参照してください。
 
-The parser is intentionally a **hand-written strict subset of TOML**
-implemented in `src/addon/manifest.rs`. It is not the upstream `toml`
-crate, and it only accepts the sections and keys listed in this
-document.
+マニフェストパーサーは意図的に **TOML の手書きストリクトサブセット**
+として実装されています。上流の `toml` クレートではなく専用パーサーを
+使うことで、本書に記載されたセクションとキーのみを受け付ける厳密な
+振る舞いを保証します。
 
 ---
 
-## Backend support policy
+## バックエンド対応ポリシー
 
-The manifest schema does **not** change between backends — the same
-`native/addon.toml` is authoritative for every backend that
-supports addons. What differs is whether a given Taida backend
-currently routes an addon-backed import through its dispatcher:
+マニフェストスキーマはバックエンドごとに変わりません — 同じ
+`native/addon.toml` がアドオンを扱うすべてのバックエンドにとっての
+正本です。バックエンドごとに異なるのは、アドオン由来のインポートを
+ディスパッチャ経由でルーティングするかどうかです。
 
-| Backend        | `supports_addons` | Notes |
-|----------------|-------------------|-------|
-| Interpreter    | **Yes**           | Dispatches through `dlopen` when the interpreter binary is built with `feature = "native"` (the default build). The addon facade runs as a dynamic Taida module in a dedicated environment. |
-| Native (AOT)   | **Yes**           | Lowered at build time. The facade is statically analysed by `src/addon/facade.rs` into an `AddonFacadeSummary`; facade FuncDefs become IR functions, pack / scalar / list / template bindings are replayed into the module init path, and cdylib calls go through `taida_addon_call`. |
-| WasmFull       | **Yes** (since `@d.X`) | Reuses the registry / facade path used by Native and Interpreter. Manifest authors opt in by adding `"wasm-full"` to the top-level `targets` array. cdylib loading at `@d.X` reuses the host's native loader; a wasm-side dispatcher inside the wasm sandbox is a post-stable improvement. |
-| JS transpiler  | **No**            | No JS-side dispatcher exists. Imports produce a deterministic error message pointing at `Run 'taida build native' or use the interpreter`. |
-| WasmMin / WasmWasi / WasmEdge | **No** | No addon dispatcher in the @d.X stable contract. These backends remain rejected even when the manifest declares `targets = ["wasm-full"]`; they are *separate* wasm profiles, not aliases. |
+| バックエンド | `supports_addons` | 補足 |
+|--------------|-------------------|------|
+| インタプリタ | **対応** | `feature = "native"` を有効化したインタプリタビルド (既定ビルド) で `dlopen` 経由にディスパッチします。アドオンファサードは専用環境上の動的 Taida モジュールとして動作します。 |
+| ネイティブ (AOT) | **対応** | ビルド時に低水準化されます。ファサードは静的解析でサマリ化され、ファサード内の FuncDef は IR 関数に、pack / scalar / list / template バインディングはモジュール初期化パスに置き換えられ、cdylib 呼び出しはホスト側ディスパッチャを経由します。 |
+| WasmFull | **対応** | ネイティブ / インタプリタと同じレジストリ / ファサード経路を再利用します。マニフェスト作成者は最上位 `targets` 配列に `"wasm-full"` を含めることで明示的に opt-in します。cdylib のロード自体はホスト側のネイティブローダーを経由します。WASM サンドボックス内部にディスパッチャを持ち込むのは安定版後の拡張対象です。 |
+| JS トランスパイラ | **非対応** | JS 側にディスパッチャは存在しません。インポート時には `Run 'taida build native' or use the interpreter` を指し示す決定的なエラーが発射されます。 |
+| WasmMin / WasmWasi / WasmEdge | **非対応** | 現行安定契約ではアドオンディスパッチャを持ちません。マニフェストが `targets = ["wasm-full"]` を宣言していても、これらはあくまで別プロファイルであり、`wasm-full` の別名ではないため拒否されます。 |
 
-### Error text for unsupported backends
+### 非対応バックエンドのエラー文面
 
-The error message emitted on an unsupported backend is fixed:
+非対応バックエンドで発射されるエラーメッセージは固定です。
 
 ```
 addon-backed package 'X' is not supported on backend 'Y' (supported:
@@ -42,31 +42,31 @@ interpreter, native, wasm-full). Run 'taida build native' or
 use the interpreter; for wasm targets, only 'wasm-full' supports addons.
 ```
 
-Tooling that matches on the policy should prefer the
-`"supported: interpreter, native"` prefix; that prefix is part of the
-stable surface and tooling may rely on it verbatim. The trailing list
-inside the parentheses (currently appending `wasm-full`) is additive,
-so consumers that match on the literal prefix continue to work as the
-backend allowlist widens.
+このポリシーに合わせて条件分岐するツールは、
+`"supported: interpreter, native"` プレフィックスへの一致を優先して
+ください。同プレフィックスは安定 surface の一部であり、リテラル一致を
+前提とした実装が許容されます。括弧内の末尾リスト (現状は末尾に
+`wasm-full` を追加) は additive であり、対応バックエンドのアロー
+リストが将来広がってもプレフィックス一致の実装はそのまま動作します。
 
-See `docs/guide/13_creating_addons.md` for the author-facing view of
-which facade constructs the native backend's static analyser
-understands.
+ネイティブバックエンドの静的解析器がファサード内で許容する構文要素は、
+作成者視点で [アドオン作成ガイド](../guide/13_creating_addons.md) に
+まとめています。
 
 ---
 
-## Required top-level keys
+## 必須トップレベルキー
 
 ```toml
-abi     = 1                              # integer — must equal TAIDA_ADDON_ABI_VERSION
-entry   = "taida_addon_get_v1"           # string — must equal TAIDA_ADDON_ENTRY_SYMBOL
-package = "my-org/my-addon"              # string — "<org>/<name>", matched against packages.tdm
-library = "my_addon"                     # string — cdylib filename stem (no lib prefix, no ext)
+abi     = 1                              # integer — TAIDA_ADDON_ABI_VERSION と一致
+entry   = "taida_addon_get_v1"           # string — TAIDA_ADDON_ENTRY_SYMBOL と一致
+package = "my-org/my-addon"              # string — "<org>/<name>" 形式、packages.tdm と照合
+library = "my_addon"                     # string — cdylib のファイル名ステム (lib 接頭辞・拡張子なし)
 ```
 
-`abi`, `entry`, `package`, and `library` are all required. Any
-mismatch with the frozen ABI v1 constants is a parse error, not a
-load-time warning.
+`abi` / `entry` / `package` / `library` はすべて必須です。固定された
+ABI v1 定数との不一致は読み込み時の警告ではなく、パースエラーとして
+扱われます。
 
 ## ABI 互換性
 
@@ -79,63 +79,63 @@ load-time warning.
 
 ABI のメジャー版自体は安定仕様の保証対象には含めません — メジャー
 改訂が必要な場合は世代をまたぎます。互換性判断の枠組み全体は
-`docs/reference/release_process.md` を参照してください。
+[リリースプロセス](release_process.md) を参照してください。
 
-## `targets` (optional, top-level)
+## `targets` (任意、トップレベル)
 
 ```toml
 targets = ["native"]
 ```
 
-`targets` declares the set of Taida backends the addon expects its
-cdylib to be dispatched through. The field is **optional** at the
-source level but **always populated** in the parsed manifest:
+`targets` は、アドオンが cdylib のディスパッチを期待する Taida
+バックエンドの集合を宣言します。このキーはソース上は **任意** ですが、
+パース後のマニフェストでは **必ず値が設定されている** 状態になります。
 
-- **Default (key omitted)**: the parser explicitly injects
-  `["native"]`. The omitted form and an explicit
-  `targets = ["native"]` produce a **bit-identical**
-  `AddonManifest` — same struct values, same diagnostic strings.
-- **Allowed entries**: drawn from a closed allowlist. The `@d.X`
-  allowlist is `{"native", "wasm-full"}`. Any other entry
-  (including `"wasm"`, `"wasm-min"`, `"wasm-wasi"`, `"wasm-edge"`,
-  `"Native"`, or `"unknown"`) is rejected at parse time.
-- **Empty array**: `targets = []` is rejected. Authors who want
-  the default must omit the key entirely; an empty array would
-  otherwise let an addon opt out of the contract by writing a
-  technically-valid value.
-- **Duplicates**: collapsed silently — `targets = ["native", "native"]`
-  is normalised to `["native"]` so the bit-identical guarantee
-  survives author typos.
-- **Wrong type**: a string, integer, or table value for `targets`
-  is rejected as `AddonTargetsTypeMismatch`.
+- **キーを省略した場合**: パーサーが明示的に `["native"]` を注入します。
+  キー省略形と `targets = ["native"]` の明示形は、生成される
+  `AddonManifest` がビット単位で同一になります — 構造体の値も診断
+  文字列もすべて同じです。
+- **許可されるエントリ**: 固定されたアローリストから選びます。
+  現行アローリストは `{"native", "wasm-full"}` です。それ以外
+  (`"wasm"`, `"wasm-min"`, `"wasm-wasi"`, `"wasm-edge"`, `"Native"`,
+  `"unknown"` 等) はパース時に拒否されます。
+- **空配列**: `targets = []` は拒否されます。既定値を望む場合は
+  キーごと省略してください。空配列が許容されると「技術的に有効な値」
+  でアドオンが契約を opt-out できてしまうため、明示的に拒否します。
+- **重複**: 暗黙に潰されます — `targets = ["native", "native"]` は
+  `["native"]` に正規化され、ビット単位同一性が著者のタイプミスでも
+  維持されます。
+- **誤った型**: `targets` の値が文字列 / 整数 / テーブルだった場合は
+  `AddonTargetsTypeMismatch` として拒否されます。
 
-### Compatibility contract
+### 互換性契約
 
-The contract is the addon-side counterpart of the breaking-change
-policy in `docs/reference/release_process.md`:
+`targets` の契約は、アドオン側から見た [リリースプロセス](release_process.md)
+の破壊的変更ポリシーに対応するものです。
 
-1. **The default value is part of the surface.** Today every
-   manifest that omits `targets` resolves to `["native"]`. This
-   default is pinned for the lifetime of the current generation.
-2. **Default changes are gen-bumps.** The default value (or the
-   meaning of the omitted form) may only change at a generation
-   boundary — never within a generation, never as a silent fallback
-   in a point release. A widened allowlist (e.g. adding `"wasm"`
-   when the wasm dispatcher lands) MAY arrive within a generation,
-   but only as an additive change: existing manifests that say
-   `targets = ["native"]` keep behaving identically.
-3. **Unknown targets reject early.** The parser refuses unknown
-   entries with `[E2001] unknown addon target` rather than falling
-   back to the default. Silent fallback would be a foot-gun that
-   forces the dispatcher to guess what the author meant.
+1. **既定値は surface の一部である。** 現在、`targets` を省略した
+   すべてのマニフェストは `["native"]` に解決されます。この既定値は
+   現行世代の寿命中、固定されています。
+2. **既定値の変更は世代繰り上げを伴う。** 既定値そのもの (あるいは
+   省略形の意味) を変更できるのは世代境界においてのみであり、世代内
+   での変更や、ポイントリリースでのサイレントなフォールバックは
+   行いません。アローリストの拡張 (wasm ディスパッチャ追加に伴う
+   `"wasm"` 受け入れ等) は世代内で land し得ますが、必ず additive
+   変更として行います — 既存の `targets = ["native"]` を持つマニ
+   フェストはそのまま同じ動作を維持します。
+3. **未知の target は早期拒否する。** パーサーは未知のエントリを
+   `[E2001] unknown addon target` として拒否し、既定値にフォール
+   バックすることはありません。サイレントなフォールバックは「著者が
+   何を意図したか」をディスパッチャに推測させる足枷になるため、
+   許容しません。
 
-### Diagnostic codes
+### 診断コード
 
-| Code     | Variant                       | When |
-|----------|-------------------------------|------|
-| `E2001`  | `UnknownAddonTarget`          | A `targets` entry is not in the supported allowlist (`@d.X`: `{"native", "wasm-full"}`). |
-| `E2002`  | `EmptyAddonTargets`           | `targets = []` — the array was present but empty. |
-| (none)   | `AddonTargetsTypeMismatch`    | `targets` was the wrong shape (e.g. a bare string or integer). |
+| コード | バリアント | 発射条件 |
+|--------|-----------|----------|
+| `E2001` | `UnknownAddonTarget` | `targets` のエントリが対応アローリストに含まれない (現行: `{"native", "wasm-full"}`)。 |
+| `E2002` | `EmptyAddonTargets` | `targets = []` (空配列)。 |
+| (なし) | `AddonTargetsTypeMismatch` | `targets` の値が配列以外 (素の文字列や整数等) だった。 |
 
 ## `[functions]`
 
@@ -145,12 +145,11 @@ greet = 1
 noop  = 0
 ```
 
-At least one function entry is required. Keys are the function name
-as it appears in Taida source; values are the declared arity as a
-non-negative integer. Non-integer arities and duplicate keys are
-rejected at parse time.
+`[functions]` セクションは最低 1 エントリ必須です。キーは Taida
+ソースに現れる関数名、値は宣言されたアリティを示す非負整数です。
+非整数のアリティと重複キーはパース時に拒否されます。
 
-## `[library.prebuild]` (optional)
+## `[library.prebuild]` (任意)
 
 ```toml
 [library.prebuild]
@@ -158,135 +157,137 @@ url = "https://example.com/releases/{version}/lib{name}-{target}.{ext}"
 allowed_prebuild_hosts = ["example.com"]
 ```
 
-Declares where `taida ingot install` should fetch the prebuild cdylib. If
-this section is absent, the addon falls back to a "developer places
-the `.so` manually" mode. If this section is present:
+`taida ingot install` がプレビルド cdylib を取得する場所を宣言する
+セクションです。本セクションを省略した場合、アドオンは「開発者が
+手動で `.so` を配置する」モードにフォールバックします。本セクションが
+存在する場合の各キーの仕様は次のとおりです。
 
-- `url` is required and must be a string.
-- Template variables are `{version}`, `{target}`, `{ext}`, `{name}`.
-- Unknown variables, unbalanced braces, and `{{` / `}}` escapes are
-  rejected at parse time.
-- `allowed_prebuild_hosts`, when present, must be a non-empty array of
-  lowercase DNS host names without scheme, path, or port. After template
-  expansion, `taida ingot install` rejects any HTTPS prebuild URL whose
-  host is not listed.
-- Registry addon installs fetch GitHub Release metadata and record release
-  `published_at` plus publisher login in `.taida/taida.lock`.
-- Publisher logins that are visually confusable with known project publishers
-  are rejected before they can be pinned by the lockfile.
-- Fresh third-party releases are refused by default until the configured
-  cooling-off window has elapsed. The default is `0d` for `taida-lang/*`
-  and `3d` for other publishers.
-- The release-age window is resolved from `[security] min_release_age` in
-  `packages.tdm`, then `[security] min_release_age` in
-  `~/.taida/config.toml`, then `TAIDA_MIN_RELEASE_AGE`, then the built-in
-  default. `--allow-fresh` is the explicit one-shot override and is recorded
-  in `.taida/install-audit.log`.
-- Existing lock entries pin publisher login and publication time. A
-  publisher mismatch or publication-time regression is a hard failure.
+- `url` は必須かつ文字列です。
+- テンプレート変数は `{version}` / `{target}` / `{ext}` / `{name}` の
+  4 種です。
+- 未知のテンプレート変数、対応していない波括弧、`{{` / `}}` のエスケープ
+  はパース時に拒否されます。
+- `allowed_prebuild_hosts` を指定する場合は、スキーマ・パス・ポートを
+  含まない小文字 DNS ホスト名の非空配列にしてください。テンプレート
+  展開後、`taida ingot install` はホストがアローリストに含まれない
+  HTTPS プレビルド URL を拒否します。
+- レジストリ経由のアドオンインストールでは、GitHub Release メタデータ
+  を取得し、リリースの `published_at` と公開者ログインを
+  `.taida/taida.lock` に記録します。
+- 既知プロジェクトの公開者ログインと視覚的に紛らわしい公開者ログインは、
+  ロックファイルへの pin 前に拒否されます。
+- 第三者のサードパーティリリースは、所定のクーリングオフ期間が経過する
+  までは既定で拒否されます。`taida-lang/*` の既定値は `0d`、その他の
+  公開者は `3d` です。
+- リリース経過時間ウィンドウは、`packages.tdm` の
+  `[security] min_release_age`、`~/.taida/config.toml` の
+  `[security] min_release_age`、環境変数 `TAIDA_MIN_RELEASE_AGE`、
+  ビルトイン既定値の順で解決されます。`--allow-fresh` はワンショットの
+  明示的なオーバーライドで、`.taida/install-audit.log` に記録されます。
+- 既存のロックエントリは公開者ログインとリリース時刻を pin します。
+  公開者の不一致やリリース時刻の後退はハードフェイルになります。
 
-### `[library.prebuild.targets]` (required when `[library.prebuild]` is present)
+### `[library.prebuild.targets]` (`[library.prebuild]` 指定時に必須)
 
 ```toml
 [library.prebuild.targets]
-"x86_64-unknown-linux-gnu"  = "sha256:abcdef0123...64 chars total"
+"x86_64-unknown-linux-gnu"  = "sha256:abcdef0123...全 64 文字"
 "aarch64-apple-darwin"      = "sha256:..."
 ```
 
-- Keys must be canonical target triples accepted by
-  `HostTarget::from_triple`. The full list of supported triples is
-  documented in `docs/guide/13_creating_addons.md`.
-- Values must be `sha256:` + exactly 64 **lowercase** hex characters.
-  Uppercase hex is rejected to enforce canonical form across
-  platforms.
-- Unknown / non-canonical target triples are rejected at parse time
-  with `PrebuildUnknownTarget` — this prevents cache-directory
-  traversal attacks by stopping attacker-controlled keys long
-  before they reach `path.join()`.
+- キーは Taida が受け付ける正準的なターゲットトリプルにしてください。
+  対応するトリプルの全リストは
+  [アドオン作成ガイド](../guide/13_creating_addons.md) に記載しています。
+- 値は `sha256:` の後に **小文字** 16 進文字をちょうど 64 個続けた
+  文字列にしてください。大文字 16 進は正準形をプラットフォーム間で
+  強制するために拒否されます。
+- 未知 / 非正準のターゲットトリプルはパース時に
+  `PrebuildUnknownTarget` として拒否されます — これにより、攻撃者が
+  制御するキーが `path.join()` に到達する前に止まり、キャッシュ
+  ディレクトリのトラバーサル攻撃を防ぎます。
 
-### `[library.prebuild.signatures]` (reserved)
+### `[library.prebuild.signatures]` (予約)
 
 ```toml
 [library.prebuild.signatures]
 "x86_64-unknown-linux-gnu" = "gpg:<opaque-identifier>"
 ```
 
-- Reserved for future GPG / detached signature verification.
-- Keys must be canonical target triples (same rule as
-  `[library.prebuild.targets]`).
-- Values must start with `gpg:` followed by a non-empty
-  printable-ASCII payload (no whitespace, no control characters).
-  Other prefixes (`sigstore:`, …) are rejected so the reserved
-  namespace stays clean for a future verifier.
-- Taida currently **parses and stores** these entries but does not
-  verify them. Adding them today is safe: when the verifier lands
-  it will read from this exact field.
+- GPG / 分離署名の将来検証のために予約されたセクションです。
+- キーは正準的なターゲットトリプルにしてください
+  (`[library.prebuild.targets]` と同じ規則)。
+- 値は `gpg:` の後に空でない印字可能 ASCII (空白 / 制御文字なし) を
+  続けた文字列にしてください。`sigstore:` 等の別プレフィックスは、
+  将来のベリファイア用に名前空間を清潔に保つため拒否されます。
+- Taida は現状これらのエントリを **パースして格納するだけ** で、
+  検証は行いません。今書いておけば、ベリファイアが land したときに
+  まったく同じフィールドから読み取られます。
 
 ---
 
-## HTTPS download limits
+## HTTPS ダウンロードの上限
 
-When `taida ingot install` downloads a prebuild over HTTPS it configures
-the HTTP client with the following explicit policies:
+`taida ingot install` がプレビルドを HTTPS でダウンロードするとき、
+HTTP クライアントは次のポリシーを明示的に適用します。
 
-| Policy           | Value                  | Notes |
-|------------------|------------------------|-------|
-| Request timeout  | 120 seconds            | End-to-end — applies to the whole request |
-| Max redirects    | **10**                 | `reqwest::redirect::Policy::limited(10)` (constant `HTTPS_MAX_REDIRECTS` in `src/addon/prebuild_fetcher.rs`) |
-| Max payload      | 100 MB                 | `Content-Length` is rejected before download starts when over the limit; streaming bodies are aborted at 100 MB |
-| HTTP downgrade   | **rejected**           | `reqwest`'s default redirect policy blocks `https → http` transitions; we do not relax it |
-| Scheme whitelist | `https://`, `file://`  | Everything else (including `http://`) is rejected before any network call |
+| ポリシー | 値 | 補足 |
+|----------|-----|------|
+| リクエストタイムアウト | 120 秒 | エンドツーエンド (リクエスト全体に適用) |
+| 最大リダイレクト数 | **10** | リダイレクトチェーンが 10 ホップを超えた時点で打ち切ります |
+| 最大ペイロード | 100 MB | `Content-Length` が上限超過なら開始前に拒否。ストリーミング本体は 100 MB で打ち切り |
+| HTTP へのダウングレード | **拒否** | `reqwest` の既定リダイレクトポリシーが `https → http` 遷移をブロック。緩めません |
+| スキームのホワイトリスト | `https://` / `file://` | それ以外 (`http://` を含む) はネットワーク呼び出し前に拒否 |
 
-Redirect chains longer than 10 hops result in a deterministic
-`DownloadFailed` error rather than a silent infinite loop. The
-limit is intentionally high enough for common CDN redirects
-(GitHub → CDN → object store) but low enough to catch redirect
-loops quickly.
+10 ホップを超えるリダイレクトチェーンは、サイレントな無限ループでは
+なく決定的な `DownloadFailed` エラーになります。上限は一般的な CDN
+リダイレクト (GitHub → CDN → オブジェクトストア) を許容しつつ、
+リダイレクトループを早期に検出できるよう意図的に設定されています。
 
-For `file://` URLs, the fetcher rejects:
+`file://` URL に対するフェッチャは次を拒否します。
 
-- Absolute paths (e.g. `file:///etc/passwd`)
-- Any path containing `..` components (path-traversal guard)
-- Any URL scheme other than `file://` or `https://`
+- 絶対パス (例: `file:///etc/passwd`)
+- `..` コンポーネントを含むパス (パストラバーサルガード)
+- `file://` および `https://` 以外のスキーム
 
-These checks run **before** any filesystem access or network I/O.
-
----
-
-## No install scripts
-
-Addon manifests do not support `postinstall`, `install`, `scripts`,
-or any equivalent install-time command hook. Unknown top-level keys and
-unknown sections are rejected by the strict parser, so an addon cannot
-smuggle a shell command into installation by adding a future-looking key.
-
-Prebuild installation is limited to:
-
-1. Resolve the manifest and target triple.
-2. Fetch or copy the declared prebuild artifact.
-3. Verify the recorded digest and release policy.
-4. Place the cdylib in the dependency tree.
-
-Local source builds only happen when the user explicitly passes
-`--allow-local-addon-build`, and integrity mismatches never fall back to
-a local build.
+これらのチェックは、いかなるファイルシステムアクセスやネットワーク I/O
+**よりも前** に実行されます。
 
 ---
 
-## Source package integrity and line endings
+## インストールスクリプトを持たない
 
-`taida ingot install --frozen` verifies local source-package trees with a
-content hash over sorted relative paths and raw file bytes:
+アドオンマニフェストは `postinstall` / `install` / `scripts` 等の
+インストール時コマンドフックを一切サポートしません。ストリクトパーサーが
+未知のトップレベルキーと未知のセクションをまるごと拒否するため、未来形の
+キーを書き足してシェルコマンドを忍ばせることもできません。
+
+プレビルドインストール時に行われる処理は以下に限定されます。
+
+1. マニフェストとターゲットトリプルを解決する。
+2. 宣言されたプレビルド成果物を取得 / コピーする。
+3. 記録された digest とリリースポリシーを検証する。
+4. cdylib を依存ツリーに配置する。
+
+ローカルソースビルドは `--allow-local-addon-build` をユーザーが明示的に
+指定したときにのみ実施され、integrity の不一致がローカルビルドに
+フォールバックすることもありません。
+
+---
+
+## ソースパッケージの整合性と改行コード
+
+`taida ingot install --frozen` は、ローカルソースパッケージツリーを
+次のコンテンツハッシュで検証します。相対パスは事前にソート済みです。
 
 ```text
 sha256(<relative-path> || 0x00 || <bytes>)
 ```
 
-The hash does **not** normalize line endings. A file checked out with CRLF
-bytes and the same file checked out with LF bytes are different package
-contents and produce different lockfile integrity values. Package authors who
-need cross-platform frozen installs should pin text normalization in
-`.gitattributes`, for example:
+ハッシュは改行コードを正規化 **しません**。CRLF でチェックアウトされた
+ファイルと、同じファイルを LF でチェックアウトしたものは、別のパッケージ
+内容として扱われ、ロックファイル上の integrity 値も異なります。
+クロスプラットフォームで frozen install を機能させたいパッケージ
+作者は、`.gitattributes` でテキスト正規化を pin してください。例:
 
 ```gitattributes
 *.td text eol=lf
@@ -296,113 +297,96 @@ native/addon.toml text eol=lf
 
 ---
 
-## Unknown-key forward-compatibility policy
+## 未知キーに対する前方互換ポリシー
 
-The manifest parser is **strict**: any section header or top-level
-key not listed in this document is a parse error. This is a
-deliberate ABI-drift guard:
+マニフェストパーサーは **ストリクト** です — 本書に記載されていない
+セクションヘッダおよびトップレベルキーはすべてパースエラーになります。
+これは意図的な ABI ドリフトガードです。
 
-- Unknown sections (e.g. `[library.experimental]`) are rejected.
-- Unknown top-level keys (e.g. `maintainer = "..."`) are rejected.
-- Unknown keys inside known sections are rejected.
-- Duplicate keys (including in `[functions]`) are rejected.
+- 未知セクション (例: `[library.experimental]`) は拒否されます。
+- 未知のトップレベルキー (例: `maintainer = "..."`) は拒否されます。
+- 既知セクション内の未知キーは拒否されます。
+- 重複キー (`[functions]` 内を含む) は拒否されます。
 
-Forward-compat rules for **manifest authors**:
+マニフェスト作者が知っておくべき前方互換ルールは次の 3 点です。
 
-1. **Adding a new section** to this reference is equivalent to an
-   ABI bump. Wait for a taida release that understands the section
-   before using it, and document the minimum supported
-   `taida` version in your addon's README.
-2. **Adding a new optional key** inside an existing reserved
-   section is also an ABI bump — authors must update the parser
-   in lock-step, and older taidas will refuse to load manifests
-   that carry the new key.
-3. **Writing a manifest with a future key** on an older taida is
-   expected to fail. This is a feature, not a bug: silent
-   tolerance would mean that a key which becomes load-bearing in a
-   later version silently breaks anyone still on the older taida.
-
-Forward-compat rules for **host tool implementers**:
-
-1. New variants of `AddonManifestError` go at the end of the
-   `#[non_exhaustive]` enum. Display format of existing variants
-   must not change (the resolver pins on the `addon manifest
-   error:` prefix).
-2. New sections must be added to every branch of
-   `parse_minimal_toml`'s section dispatcher, plus a validator in
-   `parse_addon_manifest_str`, plus tests that cover both the
-   happy path and at least one failure case.
-3. The hand-written `is_valid_key` / target-keyed section
-   detection must be updated consistently — `[library.prebuild.signatures]`
-   is the canonical example of the pattern (target-triple keyed
-   section with strict prefix validation).
+1. **本リファレンスへのセクション追加は ABI 繰り上げと等価。** その
+   セクションを理解する taida リリースを待ってから使い、対応する
+   最小 taida バージョンをアドオン README に記載してください。
+2. **既存の予約済みセクション内に任意キーを追加する場合も ABI 繰り上げ。**
+   古い taida は新キーを含むマニフェストの読み込みを拒否します。
+3. **未来のキーを書いたマニフェストが古い taida で失敗するのは仕様。**
+   サイレントに許容してしまうと、後のバージョンで load-bearing になった
+   キーが、古い taida を使い続ける利用者にとって暗黙の破壊変更になり
+   ます。
 
 ---
 
-## Error taxonomy
+## エラー条件
 
-Every error produced while parsing or validating `native/addon.toml`
-is an `AddonManifestError` variant. Display format is deterministic
-and starts with `addon manifest error:`. The variants currently in
-use:
+`native/addon.toml` のパース / バリデーションで発生するエラーは、
+常に `addon manifest error:` で始まる決定的なメッセージとして報告
+されます。`taida ingot install` / `taida ingot publish` などの CLI
+コマンドはこのプレフィックスを保ったまま、後続に具体的な原因文を
+連結して表示します。検出される代表的な失敗条件は次のとおりです。
 
-| Variant                                | When |
-|----------------------------------------|------|
-| `ReadFailed`                           | `fs::read_to_string` failed |
-| `Syntax`                               | Line outside the accepted subset |
-| `MissingKey`                           | Required top-level key absent |
-| `AbiUnsupported`                       | `abi` did not equal `TAIDA_ADDON_ABI_VERSION` |
-| `EntryMismatch`                        | `entry` did not equal `TAIDA_ADDON_ENTRY_SYMBOL` |
-| `MissingPackageId` / `MissingLibrary`  | Empty required string |
-| `NoFunctions`                          | `[functions]` absent or empty |
-| `InvalidArity`                         | Function arity not a non-negative integer |
-| `TypeMismatch`                         | Key value had wrong type |
-| `PrebuildMissingUrl`                   | `[library.prebuild]` present without `url` |
-| `PrebuildInvalidSha256`                | `targets.*` not `sha256:` + 64 lowercase hex |
-| `PrebuildUnknownUrlVariable`           | `{foo}` not in `{version|target|ext|name}` |
-| `PrebuildUnbalancedBrace`              | Lone `{` or `}` in URL template |
-| `PrebuildUnknownKey`                   | Unknown key under `[library.prebuild]` |
-| `PrebuildInvalidAllowedHost`           | `allowed_prebuild_hosts` contained an invalid host |
-| `PrebuildDuplicateTarget`              | Same target listed twice under `targets` |
-| `PrebuildUnknownTarget`                | Target key not in `HostTarget::from_triple` |
-| `PrebuildInvalidSignatureFormat`       | Signature value not `gpg:<opaque>` |
-| `PrebuildSignatureUnknownTarget`       | Signature key not a canonical triple |
-| `PrebuildDuplicateSignatureTarget`     | Same target listed twice under `signatures` |
-| `UnknownAddonTarget` (`E2001`)         | Top-level `targets` entry not in the supported allowlist |
-| `EmptyAddonTargets` (`E2002`)          | Top-level `targets = []` (empty array) |
-| `AddonTargetsTypeMismatch`             | Top-level `targets` was not an array of strings |
+| 区分 | 失敗条件 |
+|------|----------|
+| ファイル | マニフェストファイルが読み込めない |
+| 構文 | 受理されるストリクト TOML サブセットの外側にある記述 |
+| 必須キー | `abi` / `entry` / `package` / `library` のいずれかが欠落 |
+| ABI | `abi` の値が現行 Taida リリースのアドオン ABI と一致しない |
+| エントリ | `entry` の値が現行 Taida リリースのエクスポートシンボル名と一致しない |
+| 識別子 | `package` / `library` が空文字列 |
+| 関数表 | `[functions]` セクションが欠落、もしくは空 |
+| アリティ | 関数アリティが非負整数でない |
+| 型 | キーの値が宣言された型と異なる |
+| プレビルド | `[library.prebuild]` が `url` 無しで存在する |
+| SHA-256 | `targets.*` が `sha256:` + 小文字 16 進 64 文字の形式でない |
+| URL 変数 | `{foo}` が `{version|target|ext|name}` の範囲外 |
+| URL 構文 | URL テンプレートに孤立した `{` または `}` がある |
+| 未知キー | `[library.prebuild]` 配下に未知キー |
+| 許可ホスト | `allowed_prebuild_hosts` に不正なホスト |
+| ターゲット重複 | `[library.prebuild.targets]` に同じターゲットが重複 |
+| ターゲット未知 | ターゲットキーが Taida の正準トリプル集合に含まれない |
+| 署名形式 | 署名値が `gpg:<opaque>` 形式でない |
+| 署名キー | 署名セクションのキーが正準トリプルでない、もしくは重複 |
+| アドオンターゲット (`E2001`) | トップレベル `targets` のエントリが対応アローリスト外 |
+| アドオンターゲット (`E2002`) | トップレベル `targets = []` (空配列) |
+| アドオンターゲット型 | トップレベル `targets` の値が文字列配列でない |
 
 ---
 
-## `_meta.toml` store sidecar
+## `_meta.toml` ストアサイドカー
 
-`taida ingot install` writes a provenance sidecar next to every extracted
-store package at `~/.taida/store/<org>/<name>/<version>/_meta.toml`.
-The sidecar is auto-generated and should not be edited by hand.
+`taida ingot install` は、抽出された store パッケージの隣に
+`~/.taida/store/<org>/<name>/<version>/_meta.toml` という由来サイドカーを
+書き出します。サイドカーは自動生成され、手で編集する想定ではありません。
 
 ```toml
 # auto-generated by taida ingot install
 # Do not edit by hand.
 schema_version = 1
-commit_sha = "<40-char hex commit SHA the version tag pointed at>"
-tarball_sha256 = "<64-char hex SHA-256 of the tarball before extraction>"
-fetched_at = "<RFC-3339 UTC timestamp>"
+commit_sha = "<バージョンタグが指す 40 文字 16 進コミット SHA>"
+tarball_sha256 = "<抽出前 tarball の 64 文字 16 進 SHA-256>"
+fetched_at = "<RFC-3339 UTC タイムスタンプ>"
 source = "github:<org>/<name>"
-version = "<version string as requested>"
+version = "<要求されたバージョン文字列>"
 ```
 
-| Field | Purpose |
-|---|---|
-| `schema_version` | Format version (currently `1`). A future schema bump is detected via `UnknownMetaSchema` and forces a pessimistic refresh. |
-| `commit_sha` | Commit SHA the version tag pointed at when last fetched. Empty string means the SHA was not known at fetch time (e.g. first install under C17); the next install fills it in via a pessimistic refresh. |
-| `tarball_sha256` | SHA-256 of the tarball before extraction. |
-| `tarball_etag` | Optional HTTP ETag; field is omitted when absent. |
-| `fetched_at` | RFC-3339 UTC timestamp of the fetch (whole seconds). |
-| `source` | Origin identifier, e.g. `github:<org>/<name>`. |
-| `version` | Version string as requested. |
+| フィールド | 用途 |
+|------------|------|
+| `schema_version` | フォーマットバージョン (現状 `1`)。将来のスキーマ繰り上げは `UnknownMetaSchema` で検出され、強制的に悲観的リフレッシュを行います。 |
+| `commit_sha` | 最後にフェッチした時点でバージョンタグが指していたコミット SHA。空文字列はフェッチ時に SHA が不明だったことを示し (例: 初回インストール)、次回インストール時に悲観的リフレッシュで補完されます。 |
+| `tarball_sha256` | 抽出前 tarball の SHA-256。 |
+| `tarball_etag` | 任意の HTTP ETag。値が無い場合はフィールドごと省略されます。 |
+| `fetched_at` | フェッチ時刻の RFC-3339 UTC タイムスタンプ (秒単位)。 |
+| `source` | 由来識別子。例: `github:<org>/<name>`。 |
+| `version` | 要求されたバージョン文字列。 |
 
-The sidecar is consulted on every subsequent `taida ingot install` to decide
-whether the cached entry is still valid (see the decision table in
-`docs/reference/cli.md#ingot-install`). The addon manifest schema
-itself (`native/addon.toml`) is not affected; the sidecar lives inside
-the store cache, not inside the published package.
+サイドカーはその後の `taida ingot install` 呼び出しごとに参照され、
+キャッシュエントリの有効性判断に使われます (判定表は
+[CLI リファレンス](cli.md#ingot-install) を参照してください)。
+アドオンマニフェストスキーマ自体 (`native/addon.toml`) はサイドカーの
+影響を受けません — サイドカーは公開されるパッケージの中ではなく、
+ストアキャッシュ側に置かれます。

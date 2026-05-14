@@ -194,7 +194,7 @@ out <= Write[](frame.text)
 | `BufferWrite(buf, col, row, text, style)` | 文字列を `(col, row)` から右へ書き込む。右端で truncate |
 | `BufferFillRect(buf, x, y, w, h, cell)` | 矩形領域を埋める |
 | `BufferBlit(dst, src, dstX, dstY)` | 別バッファを貼り込む |
-| `BufferClear(buf, fill?)` | 全 cell をリセット |
+| `BufferClear(buf, fill)` | 全 cell をリセット (`fill` 省略時はデフォルト値の空セル) |
 | `RenderFull(buf)` | バッファ全体を ANSI 文字列で 1 度に描画 |
 | `BufferDiff(prev, next)` | 2 バッファの差分 op リスト (`@[DiffOp]`) を返す |
 | `RenderOps(ops)` | diff op リストを ANSI 文字列に展開 |
@@ -307,7 +307,7 @@ Terminal 等) で動作します。
 | Backend | サポート | 備考 |
 |---------|---------|------|
 | Interpreter (with `feature = "native"`) | ○ | Default build。addon ABI 経由で cdylib に dispatch |
-| Native (AOT) | ○ | `src/addon/facade.rs` で facade を静的解析、IR に lower |
+| Native (AOT) | ○ | ファサードがビルド時に静的解析され、IR に低水準化される |
 | JS | × | addon dispatcher が無いため `>>> taida-lang/terminal` 自体が deterministic error。stdout 系の代替は `taida-lang/os` |
 | WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | × | terminal は addon 経由のため、現状どの WASM プロファイルにも提供しません。各プロファイルとアドオンの対応関係は [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) と [`docs/reference/addon_manifest.md`](../reference/addon_manifest.md) を参照 |
 

@@ -102,8 +102,8 @@ stdout / stderr を pipe で捕捉し、文字列として返します。
 
 | API | Signature | 備考 |
 |-----|-----------|------|
-| `stdin(prompt?)` | `() -> Str` / `Str -> Str` | cooked-mode 1 行読み取り。EOF / IO エラー時は `""`（失敗検知不可）。ASCII 入力 / pipe 用途向け |
-| `stdinLine(prompt?)` | `() -> Async[Lax[Str]]` / `Str -> Async[Lax[Str]]` | UTF-8-aware line editor (rustyline / readline/promises / linenoise 派生)。caller は `]=>` で unmold して `Lax[Str]` を得る。EOF / Ctrl-C / Ctrl-D で `Lax.failure("")` |
+| `stdin(prompt: Str)` | `Str -> Str` | cooked-mode で 1 行読み取り。`prompt` を省略するとデフォルト値 `""` で呼び出され、プロンプトは表示されません。EOF / IO エラー時は `""` を返します (失敗検知不可)。ASCII 入力 / pipe 用途向け |
+| `stdinLine(prompt: Str)` | `Str -> Async[Lax[Str]]` | UTF-8-aware ライン編集対応の読み取り。`prompt` 省略時の挙動は `stdin` と同じ。`]=>` で unmold して `Lax[Str]` を得ます。EOF / Ctrl-C / Ctrl-D で `Lax.failure("")` |
 
 `stdinLine` の典型的な使い方:
 
@@ -215,14 +215,6 @@ Import path '<exact import token>' resolves outside the project root. Path trave
 であればそのリテラル）。lexical-vs-resolved の区別はなく、wire 上は
 入力 token を保ったまま fail-fast します。
 
-実装参照:
-
-- Interpreter: `src/interpreter/module_eval.rs`
-- JS codegen: `src/js/codegen.rs`
-- Native codegen: `src/codegen/driver.rs`
-- parity guard は `tests/` 配下の path traversal fixtures と
-  `tests/e32b_017_project_root.rs`
-
-> **Note**: pkg-store URL component validation
-> (`src/pkg/store.rs::validate_path_component`) は本セクションの import path
-> 境界判定とは domain disjoint です（重複なし）。
+この境界判定は 4 バックエンドすべてで同一のメッセージ・同一の挙動で
+適用されます。インストール時に行われるパッケージストアのパス検証は
+別の検査領域であり、本セクションの import path 境界判定とは重なりません。

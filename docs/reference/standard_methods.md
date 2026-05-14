@@ -260,7 +260,7 @@ stdout(m.start)      // 4  (char index, not byte index)
 
 #### Regex コンストラクタ
 
-`Regex(pattern, flags?)` で正規表現オブジェクトを作成します（後継世代で導入）。
+`Regex(pattern, flags)` で正規表現オブジェクトを作成します。`flags` を省略するとデフォルト値 `""` (フラグ無し) で呼び出されます。
 
 ```taida
 r <= Regex("[aeiou]")          // flags なし
