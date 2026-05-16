@@ -50,15 +50,6 @@ pub fn net_export_list() -> String {
     NET_EXPORT_NAMES.join(", ")
 }
 
-pub fn http_protocol_variant_to_wire(variant: &str) -> Option<&'static str> {
-    match variant {
-        "H1" => Some("h1.1"),
-        "H2" => Some("h2"),
-        "H3" => Some("h3"),
-        _ => None,
-    }
-}
-
 pub fn http_protocol_ordinal_to_wire(ordinal: i64) -> Option<&'static str> {
     match ordinal {
         0 => Some("h1.1"),

@@ -410,26 +410,7 @@ impl Lowering {
                         );
                         if let Some(v) = violations.first() {
                             return Err(LowerError {
-                                message: match v {
-                                    crate::pkg::facade::FacadeViolation::HiddenSymbol {
-                                        name,
-                                        available,
-                                    } => {
-                                        format!(
-                                            "Symbol '{}' is not part of the public API declared in packages.tdm. \
-                                             Available exports: {}",
-                                            name,
-                                            available.join(", ")
-                                        )
-                                    }
-                                    crate::pkg::facade::FacadeViolation::GhostSymbol { name } => {
-                                        format!(
-                                            "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                                             The entry module must export all symbols listed in the package facade.",
-                                            name
-                                        )
-                                    }
-                                },
+                                message: crate::pkg::facade::format_facade_violation(v),
                             });
                         }
                     }

@@ -310,10 +310,13 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 `ingot publish` はタグの push のみを行います。
 
 1. `packages.tdm` のアイデンティティ (`<<<@version owner/name`) を検証
-2. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定
-3. `git tag <version>` + `git push origin <tag>`
+2. `packages.tdm` の facade と entry module の export surface が一致することを検証
+3. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定
+4. `git tag <version>` + `git push origin <tag>`
 
 CLI はローカルビルド、`addon.lock.toml` の生成、`native/addon.toml` / `packages.tdm` の書き換え、GitHub リリースの作成、リリースアセットのアップロードのいずれも行いません。リリース作成はアドオン側 CI の責務です。
+
+facade 検証では、`packages.tdm` の `<<<@version owner/name @(symbols)` と entry module の `<<< @(symbols)` を双方向に比較します。entry module が export していない symbol を facade に書いた場合、または entry module が export している symbol を facade に書き忘れた場合、publish は tag を作成する前に拒否されます。
 
 自動バージョン繰り上げ:
 

@@ -617,20 +617,20 @@ impl Interpreter {
                 let name = &sym.name;
                 if !facade_exports.contains(name) {
                     return Err(RuntimeError {
-                        message: format!(
-                            "Symbol '{}' is not part of the public API declared in packages.tdm. \
-                             Available exports: {}",
-                            name,
-                            facade_exports.join(", ")
+                        message: crate::pkg::facade::format_facade_violation(
+                            &crate::pkg::facade::FacadeViolation::HiddenSymbol {
+                                name: name.clone(),
+                                available: facade_exports.clone(),
+                            },
                         ),
                     });
                 }
                 if !exports.contains_key(name) {
                     return Err(RuntimeError {
-                        message: format!(
-                            "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                             The entry module must export all symbols listed in the package facade.",
-                            name
+                        message: crate::pkg::facade::format_facade_violation(
+                            &crate::pkg::facade::FacadeViolation::GhostSymbol {
+                                name: name.clone(),
+                            },
                         ),
                     });
                 }

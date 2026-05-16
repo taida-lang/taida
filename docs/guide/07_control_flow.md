@@ -432,7 +432,7 @@ grade <= (
 5 => If[_ > 3, "big", "small"]() => label  // "big"
 ```
 
-非選択 branch は評価されません (short-circuit)。`_` プレースホルダの全体仕様は [`docs/guide/00_overview.md`](00_overview.md) のプレースホルダ節を参照してください。`If` を含む条件・型変換などのモールド全般のシグネチャは [`docs/api/prelude.md §7.8`](../api/prelude.md#78-条件モールド) を参照してください。
+非選択 branch は評価されません (short-circuit)。`_` プレースホルダの全体仕様は [演算子リファレンスの `_` プレースホルダ節](../reference/operators.md#_-プレースホルダ) を参照してください。`If` を含む条件・型変換などのモールド全般のシグネチャは [`docs/api/prelude.md §7.8`](../api/prelude.md#78-条件モールド) を参照してください。
 
 ---
 

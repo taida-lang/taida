@@ -661,8 +661,7 @@ impl Lowering {
                 // When omitted, pass 0 (tagged int 0 = plaintext).
                 // When provided, it's a BuchiPack expression (@() or @(cert, key)).
                 let tls_var = if let Some(arg) = args.get(5) {
-                    let tls_expr = self.rewrite_http_serve_tls_expr_for_runtime(arg);
-                    self.lower_expr(func, &tls_expr)?
+                    self.lower_expr(func, arg)?
                 } else {
                     let v = func.alloc_var();
                     func.push(IrInst::ConstInt(v, 0)); // default: 0 = plaintext

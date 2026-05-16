@@ -47,10 +47,10 @@ docs/reference/documentation_comments.md:466
 docs/reference/documentation_comments.md:74
 docs/reference/documentation_comments.md:82
 docs/reference/documentation_comments.md:92
-docs/reference/naming_conventions.md:274
+docs/reference/naming_conventions.md:318
 docs/reference/operators.md:268
 docs/reference/operators.md:408
-docs/reference/operators.md:577
+docs/reference/operators.md:593
 docs/reference/tail_recursion.md:172
 docs/reference/tail_recursion.md:190
 docs/reference/tail_recursion.md:207

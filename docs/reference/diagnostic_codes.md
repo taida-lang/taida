@@ -24,6 +24,7 @@
 | `E32K1_*` | 自己アップグレード供給網エラー | `taida upgrade` | SHA-256 検証 / cosign 署名検証 / artifact 取得失敗 |
 | `E32K2_*` | ロックファイル整合性エラー | `taida ingot` / `pkg::lockfile` | `taida.lock` schema バージョン / integrity 不一致 / migration 失敗 |
 | `E32K3_*` | ソースパッケージ整合性エラー | `pkg::store` / `pkg::manifest` / `pkg::provider` | ソース pin / cosign 検証 / sha256 sidecar / 公式 namespace 制約 |
+| `E32K4_*` | パッケージ facade 整合性エラー | `taida ingot publish` / module import | `packages.tdm` facade と entry module export surface の不一致 |
 
 ## コード一覧
 
@@ -148,7 +149,7 @@
 | `E1608` | 未定義の列挙型 / 列挙 variant が参照された | TypeChecker |
 | `E1609` | (予約) | — |
 | `E1610` | 継承関係 (`Inheritance`) に循環検出 | TypeChecker |
-| `E1611` | JS バックエンドが受け付けない API capability (例: `httpServe(..., tls <= @(..., protocol <= Http2()))`) | TypeChecker |
+| `E1611` | (予約) | — |
 | `E1612` | WASM プロファイルが受け付けない API capability (例: `wasm-min` / `wasm-edge` の `taida-lang/net` `httpServe`) | TypeChecker |
 | `E1613` | `TypeExtends` が enum variant リテラルを受け付けない | TypeChecker |
 | `E1614` | (tail-only mutual recursion detection guard — 発火は negative 形で検査、ハンドラ経路の保険コード) | TypeChecker |
@@ -318,6 +319,17 @@ verify されることを保証する診断。現行 Taida では `taida-lang/*`
 | `E32K3_SOURCE_COSIGN_REQUIRED` | source archive の cosign 検証が `Required` policy 下で skip / warn / 失敗 | `cosign` を install し、release が公式 cosign-signed であることを確認。`TAIDA_VERIFY_SIGNATURES` を緩めない |
 | `E32K3_VERIFY_SIGNATURES_RELAXED` | source package install 時に `TAIDA_VERIFY_SIGNATURES` が `required` 以外 (もしくは未設定の cosign 不在) | install を再実行し、`required` を強制する。現行 Taida では source archive は `Required` 必須 |
 | `E32K3_PACKAGES_TDM_DUPLICATE_TABLE` | 同一 `[packages."<id>"]` ブロックが `packages.tdm` に複数存在する。後続テーブルで pin が silent に上書きされてレビューで気付けない状態 | 重複ブロックを 1 つにまとめ、source pin が一意になる形に書き直す |
+
+### パッケージ facade 整合性エラー (`E32K4_*`)
+
+`packages.tdm` の公開 facade と entry module の実 export surface が一致することを保証する診断。`taida ingot publish` は tag push の前にこの検査を行います。
+
+| コード | 発生条件 | 推奨対応 |
+|--------|----------|---------|
+| `E32K4_FACADE_SYMBOL_NOT_PUBLIC` | consumer が import した symbol が `packages.tdm` の facade に含まれていない | import symbol を facade 内の公開名に直すか、publisher 側で意図した公開 symbol を `packages.tdm` に追加する |
+| `E32K4_PUBLISH_SYMBOL_NOT_IN_ENTRY` | `packages.tdm` の facade に含まれる symbol を entry module が export していない | entry module の `<<< @(...)` に symbol を追加するか、facade から削除する |
+| `E32K4_PUBLISH_SYMBOL_MISSING` | entry module が export する symbol が `packages.tdm` の facade に含まれていない | 公開するなら facade に追加し、非公開なら entry module の `<<< @(...)` から外す |
+| `E32K4_PUBLISH_ENTRY_INVALID` | publish 前検査で entry module を読めない、または parse できない | `packages.tdm` の entry 指定と entry module の構文を修正する |
 
 ## 帯域ルール
 

@@ -5561,37 +5561,36 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
   // tls is a BuchiPack (object) or undefined/null.
   // @() = empty object = plaintext (v4 compat).
   // @(cert: "path", key: "path") = HTTPS.
-  // v6 NET6-1b: @(cert: ..., key: ..., protocol: "h2") = HTTP/2 (rejected on JS).
+  // @(cert: ..., key: ..., protocol: HttpProtocol:H2()) = HTTP/2 (rejected on JS).
   let __useTls = false;
   let __tlsCert = null;
   let __tlsKey = null;
   let __requestedProtocol = null;
   if (tls !== undefined && tls !== null && typeof tls === 'object') {
     // v6 NET6-1b: Extract protocol field if present.
-    // NB6-10: Separate "field exists" from "field is Str".
-    // If protocol field exists but is not Str, reject immediately.
     if ('protocol' in tls) {
-      if (typeof tls.protocol === 'string') {
-        __requestedProtocol = tls.protocol;
-      } else if (typeof tls.protocol === 'number' && Number.isInteger(tls.protocol)) {
+      const __protocolOrdinal = __taida_isEnumVal(tls.protocol)
+        ? tls.protocol.__taida_enum_ordinal
+        : tls.protocol;
+      if (typeof __protocolOrdinal === 'number' && Number.isInteger(__protocolOrdinal)) {
         // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
-        if (tls.protocol === 0) {
+        if (__protocolOrdinal === 0) {
           __requestedProtocol = 'h1.1';
-        } else if (tls.protocol === 1) {
+        } else if (__protocolOrdinal === 1) {
           __requestedProtocol = 'h2';
-        } else if (tls.protocol === 2) {
+        } else if (__protocolOrdinal === 2) {
           __requestedProtocol = 'h3';
         } else {
           return new __TaidaAsync(
             __taida_net_result_fail('ProtocolError',
-              'httpServe: unknown HttpProtocol ordinal ' + tls.protocol +
+              'httpServe: unknown HttpProtocol ordinal ' + __protocolOrdinal +
               '. Expected 0 (H1), 1 (H2), or 2 (H3).'),
             null, 'fulfilled');
         }
       } else {
         return new __TaidaAsync(
           __taida_net_result_fail('ProtocolError',
-            'httpServe: protocol must be HttpProtocol or Str, got ' + typeof tls.protocol),
+            'httpServe: protocol must be HttpProtocol, got ' + typeof tls.protocol),
           null, 'fulfilled');
       }
     }
@@ -5664,7 +5663,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       }
       __useTls = true;
     } else if (__requestedProtocol !== null) {
-      // v6 NET6-1b: @(protocol: "h2") without cert/key — still validate protocol.
+      // v6 NET6-1b: @(protocol <= HttpProtocol:H2()) without cert/key — still validate protocol.
       // Fall through to protocol validation below.
     }
     // else: empty object @() → plaintext, fall through

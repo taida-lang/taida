@@ -6,7 +6,7 @@
 WebSocket 5 関数、SSE 出力関数、span 操作モールド 5 種を公開します。
 
 ```taida
->>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse, writeChunk)
+>>> taida-lang/net => @(httpServe, readBody, startResponse, endResponse, writeChunk, HttpProtocol)
 ```
 
 `taida-lang/net` はプレリュード非含有のため、利用するには必ず明示的な
@@ -116,7 +116,7 @@ handler req: Request  writer: Writer => :Int
 |-------|------|---------|-------------|
 | `cert` | `Str` | `""` | サーバー証明書 (PEM)。 |
 | `key` | `Str` | `""` | 秘密鍵 (PEM)。 |
-| `protocol` | `Str` | `""` (= `"h1"`) | `"h2"` で HTTP/2 over TLS、`"h1"` または空文字で HTTP/1.1 over TLS。 |
+| `protocol` | `HttpProtocol` | `:H1` | `:H1` で HTTP/1.1、`:H2` で HTTP/2 over TLS、`:H3` で HTTP/3 over QUIC。 |
 
 ### 1.5 `startResponse`
 
@@ -592,8 +592,15 @@ Enum => HttpProtocol = :H1 :H2 :H3
 | `:H2` | HTTP/2 over TLS (h2) |
 | `:H3` | HTTP/3 over QUIC |
 
-`httpServe` の `opts.tls.protocol` には `"h2"` のような文字列形式と enum
-値の両方を渡せます。
+`httpServe` の `opts.tls.protocol` は `HttpProtocol` enum だけを受け取ります。既定値は `:H1` です。
+
+| Variant | Wire protocol | Backend support |
+|---------|---------------|-----------------|
+| `:H1` | `h1.1` | Interpreter / JS / Native / WASM |
+| `:H2` | `h2` | Interpreter / Native |
+| `:H3` | `h3` | Native |
+
+JS backend は `:H1` のみ対応します。WASM backend は HTTP サーバー機能が制限されるため、`httpServe` の高度な protocol 指定を compile-time error として拒否します。
 
 ---
 

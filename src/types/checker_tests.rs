@@ -243,7 +243,15 @@ fn test_http_protocol_import_alias_registers_enum() {
 }
 
 #[test]
-fn test_http_protocol_js_h2_compile_time_reject() {
+fn test_http_protocol_js_h2_accepted_after_enum_unification() {
+    // F42B-013: HttpProtocol was unified into a single Enum surface. The
+    // legacy `[E1611]` "JS backend rejects H2" diagnostic was removed
+    // because per-backend protocol support is now documented in
+    // docs/api/net.md §7 (backend support table) rather than enforced
+    // at type-check time. The check below pins that the JS-targeted
+    // compile path no longer emits `[E1611]` for `HttpProtocol:H2()` —
+    // any per-backend runtime gating happens downstream of the type
+    // checker.
     let (_checker, errors) = check_with_target(
         ">>> taida-lang/net => @(httpServe: serve, HttpProtocol: Proto)\n\
          handler req = @(status <= 200, headers <= @[], body <= \"ok\")\n\
@@ -251,10 +259,8 @@ fn test_http_protocol_js_h2_compile_time_reject() {
         CompileTarget::Js,
     );
     assert!(
-        errors
-            .iter()
-            .any(|err| err.message.contains("not supported on the JS backend")),
-        "Expected JS compile-time reject for HttpProtocol:H2(), got {:?}",
+        !errors.iter().any(|err| err.message.contains("[E1611]")),
+        "F42B-013: JS-targeted check must no longer emit [E1611] for HttpProtocol:H2(); per-backend support is documented in docs/api/net.md §7. Got: {:?}",
         errors
     );
 }

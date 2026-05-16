@@ -129,7 +129,7 @@ struct MoldBindingDef<'a> {
 /// - `E1607` -- unary operator type mismatch
 /// - `E1608` -- unknown enum variant
 /// - `E1618` -- enum variant order mismatch across module boundary (C18-1)
-/// - `E1611` -- JS backend capability rejection
+/// - `E1611` -- reserved backend capability rejection
 /// - `E1612` -- WASM backend capability rejection
 /// - `E1613` -- TypeExtends does not accept enum variant literals
 /// - `E1617` -- Regex invariant rejection. Two emitters share this code (both C12B-023):
@@ -251,10 +251,6 @@ pub enum CompileTarget {
 }
 
 impl CompileTarget {
-    fn is_js(self) -> bool {
-        matches!(self, Self::Js)
-    }
-
     /// Native and wasm targets that lower through the
     /// C / wasm-C runtime use regular call instructions for mutual
     /// recursion (no trampoline). Deep mutual cycles therefore overflow
@@ -1260,9 +1256,9 @@ impl TypeChecker {
                     || Self::contains_unit_like_type(ret)
             }
             // F42 sweep (R4): BuchiPack 非空 fields 内の Unit 抜け道を塞ぐ。
-            Type::BuchiPack(fields) => {
-                fields.iter().any(|(_, field_ty)| Self::contains_unit_like_type(field_ty))
-            }
+            Type::BuchiPack(fields) => fields
+                .iter()
+                .any(|(_, field_ty)| Self::contains_unit_like_type(field_ty)),
             _ => false,
         }
     }
@@ -1810,30 +1806,57 @@ impl TypeChecker {
             && let Some(protocol_field) = fields.iter().find(|field| field.name == "protocol")
         {
             match &protocol_field.value {
-                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => (),
-                Expr::EnumVariant(enum_name, variant_name, span)
-                    if self.net_http_protocol_type_names.contains(enum_name)
-                        && self.compile_target.is_js()
-                        && matches!(variant_name.as_str(), "H2" | "H3") =>
+                Expr::EnumVariant(enum_name, _, _)
+                    if self.net_http_protocol_type_names.contains(enum_name) => {}
+                Expr::EnumVariant(enum_name, _, span)
+                    if !self.net_http_protocol_type_names.contains(enum_name) =>
                 {
                     self.errors.push(TypeError {
-                        message: format!(
-                            "[E1611] `httpServe(..., tls <= @(..., protocol <= {}:{}()))` is not supported on the JS backend. \
-                             Hint: JS supports only `{}:H1()`; use the interpreter or native backend for HTTP/2 and HTTP/3.",
-                            enum_name, variant_name, enum_name
-                        ),
-                        span: span.clone(),
-                    });
-                }
-                Expr::IntLit(_, span) | Expr::FloatLit(_, span) | Expr::BoolLit(_, span) => {
-                    self.errors.push(TypeError {
-                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol or Str. \
-                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()` or a legacy string like \"h1.1\"."
+                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol. \
+                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()`."
                             .to_string(),
                         span: span.clone(),
                     });
                 }
-                _ => (),
+                Expr::StringLit(_, span)
+                | Expr::TemplateLit(_, span)
+                | Expr::IntLit(_, span)
+                | Expr::FloatLit(_, span)
+                | Expr::BoolLit(_, span) => {
+                    self.errors.push(TypeError {
+                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol. \
+                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()`."
+                            .to_string(),
+                        span: span.clone(),
+                    });
+                }
+                other => {
+                    // F42 sweep follow-up: catch the dynamic case
+                    // `p <= "h2"; ... protocol <= p` where the literal
+                    // check above only sees an `Ident` / function call
+                    // expression. The HttpProtocol enum is the sole
+                    // accepted shape (Str union was withdrawn in
+                    // F42B-013), so type-check the dynamic operand and
+                    // reject anything that does not resolve to the
+                    // HttpProtocol enum (or `Unknown` from a generic
+                    // path, which is allowed for caller flexibility).
+                    let span = other.span().clone();
+                    let inferred = self.infer_expr_type(other);
+                    let is_http_protocol = matches!(&inferred, Type::Named(n)
+                        if self.net_http_protocol_type_names.contains(n));
+                    let is_permitted_unknown =
+                        matches!(inferred, Type::Unknown | Type::Molten);
+                    if !is_http_protocol && !is_permitted_unknown {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1506] `httpServe` tls.protocol must be HttpProtocol, but the dynamic operand resolves to {}. \
+                                 Hint: bind the value to `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()` before passing it in.",
+                                inferred
+                            ),
+                            span,
+                        });
+                    }
+                }
             }
         }
         if matches!(
@@ -1973,34 +1996,13 @@ impl TypeChecker {
                                     &sym_names,
                                 );
                                 for v in &violations {
-                                    match v {
-                                        crate::pkg::facade::FacadeViolation::HiddenSymbol {
-                                            name,
-                                            available,
-                                        } => {
-                                            self.errors.push(TypeError {
-                                                    message: format!(
-                                                        "[E1701] Symbol '{}' is not part of the public API declared in packages.tdm. \
-                                                         Available exports: {}",
-                                                        name,
-                                                        available.join(", ")
-                                                    ),
-                                                    span: imp.span.clone(),
-                                                });
-                                        }
-                                        crate::pkg::facade::FacadeViolation::GhostSymbol {
-                                            name,
-                                        } => {
-                                            self.errors.push(TypeError {
-                                                    message: format!(
-                                                        "[E1701] Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                                                         The entry module must export all symbols listed in the package facade.",
-                                                        name
-                                                    ),
-                                                    span: imp.span.clone(),
-                                                });
-                                        }
-                                    }
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1701] {}",
+                                            crate::pkg::facade::format_facade_violation(v)
+                                        ),
+                                        span: imp.span.clone(),
+                                    });
                                 }
                                 if !violations.is_empty() {
                                     return;
@@ -7541,8 +7543,7 @@ defaulted fields must be provided via `()`",
         // every condition arm fails. PHILOSOPHY IV — strict structure
         // for AI readability.
         let has_default = arms.iter().any(|arm| {
-            arm.condition.is_none()
-                || matches!(&arm.condition, Some(Expr::BoolLit(true, _)))
+            arm.condition.is_none() || matches!(&arm.condition, Some(Expr::BoolLit(true, _)))
         });
         if !has_default {
             self.errors.push(TypeError {

@@ -8,7 +8,7 @@
 //! `validate_facade()` and converts the returned `FacadeViolation`s into its
 //! own error type.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::parser::{self, Statement};
@@ -24,6 +24,26 @@ pub enum FacadeViolation {
     },
     /// Symbol is listed in `packages.tdm` but not defined/imported in the entry module.
     GhostSymbol { name: String },
+}
+
+pub fn format_facade_violation(violation: &FacadeViolation) -> String {
+    match violation {
+        FacadeViolation::HiddenSymbol { name, available } => {
+            format!(
+                "[E32K4_FACADE_SYMBOL_NOT_PUBLIC] Symbol '{}' is not part of the public API declared in packages.tdm. \
+                 Available exports: {}",
+                name,
+                available.join(", ")
+            )
+        }
+        FacadeViolation::GhostSymbol { name } => {
+            format!(
+                "[E32K4_PUBLISH_SYMBOL_NOT_IN_ENTRY] Symbol '{}' is declared in packages.tdm but not found in the entry module export surface. \
+                 The entry module must export all symbols listed in the package facade.",
+                name
+            )
+        }
+    }
 }
 
 /// Outcome of facade resolution for a package root import.
@@ -91,23 +111,125 @@ pub fn validate_facade(
         }
     }
 
-    // Step 2: Ghost check — verify facade-declared symbols exist in the entry module.
+    // Step 2: Ghost check — verify facade-declared symbols are exported by the entry module.
     // Only check symbols that passed the membership test.
-    let source = match std::fs::read_to_string(entry_path) {
-        Ok(s) => s,
+    let entry_exports = match collect_entry_effective_exports(entry_path) {
+        Ok(exports) => exports,
         Err(_) => return violations,
     };
-    let (program, _) = parser::parse(&source);
-
-    let defined_symbols = collect_defined_symbols(&program.statements);
 
     for sym in imported_symbols {
-        if facade_exports.contains(sym) && !defined_symbols.contains(sym.as_str()) {
+        if facade_exports.contains(sym) && !entry_exports.contains(sym.as_str()) {
             violations.push(FacadeViolation::GhostSymbol { name: sym.clone() });
         }
     }
 
     violations
+}
+
+/// Validate a package's publish-time facade contract.
+///
+/// A non-empty `packages.tdm` facade must match the entry module's effective
+/// export surface exactly. If the entry module has explicit `<<<` statements,
+/// their union is the surface. Without any `<<<`, Taida's legacy rule exports
+/// all top-level symbols, so that set is used.
+pub fn validate_publish_facade(manifest: &Manifest) -> Result<(), String> {
+    if manifest.exports.is_empty() {
+        return Ok(());
+    }
+
+    let entry_path = manifest_entry_path(manifest);
+    let entry_exports = collect_entry_effective_exports(&entry_path)?;
+    let facade_exports: BTreeSet<String> = manifest.exports.iter().cloned().collect();
+
+    let mut errors = Vec::new();
+    for sym in facade_exports.difference(&entry_exports) {
+        errors.push(format!(
+            "[E32K4_PUBLISH_SYMBOL_NOT_IN_ENTRY] package facade declares '{}' but the entry module does not export it.",
+            sym
+        ));
+    }
+    for sym in entry_exports.difference(&facade_exports) {
+        errors.push(format!(
+            "[E32K4_PUBLISH_SYMBOL_MISSING] entry module exports '{}' but packages.tdm does not include it in the package facade.",
+            sym
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Package facade validation failed for '{}':\n{}",
+            manifest.name,
+            errors.join("\n")
+        ))
+    }
+}
+
+pub fn manifest_entry_path(manifest: &Manifest) -> std::path::PathBuf {
+    if let Some(stripped) = manifest.entry.strip_prefix("./") {
+        manifest.root_dir.join(stripped)
+    } else {
+        manifest.root_dir.join(&manifest.entry)
+    }
+}
+
+pub fn collect_entry_effective_exports(entry_path: &Path) -> Result<BTreeSet<String>, String> {
+    let source = std::fs::read_to_string(entry_path).map_err(|e| {
+        format!(
+            "[E32K4_PUBLISH_ENTRY_INVALID] cannot read package entry module '{}': {}",
+            entry_path.display(),
+            e
+        )
+    })?;
+    let (program, parse_errors) = parser::parse(&source);
+    if !parse_errors.is_empty() {
+        let msgs: Vec<String> = parse_errors.iter().map(|e| e.to_string()).collect();
+        return Err(format!(
+            "[E32K4_PUBLISH_ENTRY_INVALID] package entry module '{}' has parse errors:\n{}",
+            entry_path.display(),
+            msgs.join("\n")
+        ));
+    }
+
+    let mut explicit_exports = BTreeSet::new();
+    let mut has_export = false;
+    for stmt in &program.statements {
+        if let Statement::Export(export) = stmt {
+            has_export = true;
+            for sym in &export.symbols {
+                explicit_exports.insert(sym.clone());
+            }
+        }
+    }
+    if has_export {
+        // F42 sweep follow-up: `<<<` is a re-export list, not a forward
+        // declaration. A symbol must be *actually defined or imported*
+        // in the entry module before it can be re-exported. Otherwise
+        // the package facade can advertise ghost symbols that nothing
+        // backs at runtime.
+        let defined: HashSet<String> = collect_defined_symbols(&program.statements);
+        let mut ghost: Vec<String> = explicit_exports
+            .iter()
+            .filter(|name| !defined.contains(name.as_str()))
+            .cloned()
+            .collect();
+        if !ghost.is_empty() {
+            ghost.sort();
+            return Err(format!(
+                "[E32K4_PUBLISH_ENTRY_INVALID] entry module '{}' re-exports symbols that are not defined or imported in the module: {}. \
+                 Hint: add the missing definition (or `>>>` import) to the entry module, or remove the symbol from its `<<<` export list.",
+                entry_path.display(),
+                ghost.join(", ")
+            ));
+        }
+        Ok(explicit_exports)
+    } else {
+        Ok(collect_defined_symbols(&program.statements)
+            .into_iter()
+            .collect())
+    }
 }
 
 /// Collect all symbols that are "available" in a module's top-level scope.
@@ -329,6 +451,22 @@ mod tests {
     }
 
     #[test]
+    fn test_facade_symbol_defined_but_not_exported_is_ghost() {
+        let dir = test_dir("defined_but_private");
+        let entry = dir.join("main.td");
+        fs::write(&entry, "public <= 1\nprivate <= 2\n<<< @(public)\n").unwrap();
+
+        let violations =
+            validate_facade(&["private".to_string()], &entry, &["private".to_string()]);
+
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(
+            &violations[0],
+            FacadeViolation::GhostSymbol { name } if name == "private"
+        ));
+    }
+
+    #[test]
     fn test_facade_reexport_accepted() {
         let dir = test_dir("reexport");
 
@@ -355,6 +493,64 @@ mod tests {
             "Re-exported symbol should not produce violations, got: {:?}",
             violations
         );
+    }
+
+    #[test]
+    fn test_publish_facade_rejects_manifest_symbol_missing_from_entry_exports() {
+        let dir = test_dir("publish_missing_entry");
+        let entry = dir.join("main.td");
+        fs::write(&entry, "public <= 1\n<<< @(public)\n").unwrap();
+        let manifest = Manifest {
+            name: "alice/demo".to_string(),
+            version: "a.1".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: Default::default(),
+            root_dir: dir,
+            exports: vec!["public".to_string(), "ghost".to_string()],
+        };
+
+        let err = validate_publish_facade(&manifest).unwrap_err();
+        assert!(err.contains("E32K4_PUBLISH_SYMBOL_NOT_IN_ENTRY"));
+        assert!(err.contains("ghost"));
+    }
+
+    #[test]
+    fn test_publish_facade_rejects_entry_export_missing_from_manifest() {
+        let dir = test_dir("publish_missing_manifest");
+        let entry = dir.join("main.td");
+        fs::write(&entry, "public <= 1\nextra <= 2\n<<< @(public, extra)\n").unwrap();
+        let manifest = Manifest {
+            name: "alice/demo".to_string(),
+            version: "a.1".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: Default::default(),
+            root_dir: dir,
+            exports: vec!["public".to_string()],
+        };
+
+        let err = validate_publish_facade(&manifest).unwrap_err();
+        assert!(err.contains("E32K4_PUBLISH_SYMBOL_MISSING"));
+        assert!(err.contains("extra"));
+    }
+
+    #[test]
+    fn test_publish_facade_accepts_exact_entry_surface() {
+        let dir = test_dir("publish_exact");
+        let entry = dir.join("main.td");
+        fs::write(&entry, "public <= 1\n<<< @(public)\n").unwrap();
+        let manifest = Manifest {
+            name: "alice/demo".to_string(),
+            version: "a.1".to_string(),
+            description: String::new(),
+            entry: "main.td".to_string(),
+            deps: Default::default(),
+            root_dir: dir,
+            exports: vec!["public".to_string()],
+        };
+
+        validate_publish_facade(&manifest).unwrap();
     }
 
     #[test]

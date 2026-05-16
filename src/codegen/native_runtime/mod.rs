@@ -807,7 +807,10 @@ mod tests {
         //   general "F42 sweep" expression (CLAUDE.md L13-15 — no internal
         //   blocker IDs in source doc-comments). Net diff: F1 -12, F2 +4,
         //   F5 +24, F6 0 → total +16 to 1,132,292.
-        const EXPECTED_TOTAL_LEN: usize = 1_132_292;
+        // 2026-05-17 Phase 6 (Codex follow-up: F42B-013 / F42B-026 land
+        //   work). net_h3_quic / net_h1_h2 streaming-write banner cleanup
+        //   trims 255 bytes net. Recomputed total = 1,132,037.
+        const EXPECTED_TOTAL_LEN: usize = 1_132_037;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

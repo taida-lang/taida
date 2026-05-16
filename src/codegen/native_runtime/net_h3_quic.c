@@ -3324,12 +3324,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
                 taida_val proto_val = taida_pack_get(tls, proto_hash);
                 proto_tag = taida_runtime_detect_tag(proto_val);
             }
-            if (proto_tag == TAIDA_TAG_STR) {
-                taida_val proto_val = taida_pack_get(tls, proto_hash);
-                if (proto_val && proto_val > 4096) {
-                    requested_protocol = (const char *)proto_val;
-                }
-            } else if (proto_tag == TAIDA_TAG_INT) {
+            if (proto_tag == TAIDA_TAG_INT) {
                 taida_val proto_val = taida_pack_get(tls, proto_hash);
                 int64_t ordinal = (int64_t)proto_val;
                 // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
@@ -3347,13 +3342,13 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
                     return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
                 }
             } else {
-                // protocol field exists but is not Str / HttpProtocol ordinal → ProtocolError
+                // protocol field exists but is not a HttpProtocol ordinal → ProtocolError
                 char proto_err[256];
                 taida_val proto_val = taida_pack_get(tls, proto_hash);
                 char val_buf[64];
                 taida_format_value(proto_tag, proto_val, val_buf, sizeof(val_buf));
                 snprintf(proto_err, sizeof(proto_err),
-                    "httpServe: protocol must be HttpProtocol or Str, got %s",
+                    "httpServe: protocol must be HttpProtocol, got %s",
                     val_buf);
                 return taida_async_resolved(taida_net_result_fail("ProtocolError", proto_err));
             }
@@ -3466,7 +3461,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
                 if (ssl_ctx) { taida_ossl.SSL_CTX_free(ssl_ctx); }
                 return taida_async_resolved(taida_net_result_fail("ProtocolError",
                     "httpServe: HTTP/2 (protocol: \"h2\") requires TLS. "
-                    "Provide tls: @(cert: \"...\", key: \"...\", protocol: \"h2\")."));
+                    "Provide tls: @(cert <= \"...\", key <= \"...\", protocol <= HttpProtocol:H2())."));
             }
             // ssl_ctx was created with taida_tls_create_ctx (h1 ctx) in the TLS block above.
             // taida_net_h2_serve creates its own h2-specific ssl_ctx via taida_tls_create_ctx_h2.

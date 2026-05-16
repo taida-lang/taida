@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::api_diff::{self, ApiDiff};
+use super::facade;
 use super::manifest::{Manifest, is_valid_taida_version};
 
 // ─────────────────────────────────────────────────────────────
@@ -511,6 +512,7 @@ pub fn plan_publish(
     retag: bool,
 ) -> Result<PublishPlan, String> {
     let package_id = validate_manifest_identity(manifest)?;
+    facade::validate_publish_facade(manifest)?;
 
     if let Some(l) = label {
         validate_label(l)?;

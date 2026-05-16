@@ -56,13 +56,13 @@ fn fixture_template() -> &'static str {
     // cert/key paths that the harness must generate per-run; embedding
     // the cert path in the .td via format! is the canonical pattern
     // used by every other h2 test in tests/parity.rs.
-    r#">>> taida-lang/net => @(httpServe)
+    r#">>> taida-lang/net => @(httpServe, HttpProtocol)
 
 handler req =
   @(status <= 200, headers <= @[@(name <= "content-type", value <= "text/plain")], body <= Repeat["x", 512]())
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-asyncResult <= httpServe({port}, handler, 50000, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult <= httpServe({port}, handler, 50000, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= HttpProtocol:H2()))
 asyncResult >=> result
 result >=> r
 stdout(r.ok)

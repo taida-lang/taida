@@ -83,6 +83,50 @@ Mold[T] => Pair[T, U] = @(second: U)
 - `_` prefix (public/protected/private 概念が無いため特別扱いしない、慣習として残す)。先頭が `_` の識別子は、関数 / 変数 / ぶちパックフィールドの全カテゴリで命名 lint 対象外です。
 - boolean プレフィックス (`is`, `has`, `can`, `did`, `needs` 等を多様性として許容、規約化しない)
 
+## 型エイリアスは持たない
+
+Taida には型エイリアス機構 (`type PilotId = Int` のような別名定義) は **ありません**。`Statement::TypeAlias` のような AST node も存在せず、`PilotId = Int` のような書き方を「`Int` の別名」として解釈する parser path もありません。
+
+ドメイン型として「`Int` を意味的に区別したい」場合は、フィールドを 1 つ持つぶちパックでラップしてください。
+
+```taida fragment
+// OK: ぶちパックで domain 型を表現
+PilotId = @(value: Int)
+pilot_id <= PilotId(value <= 42)
+stdout(pilot_id.value.toString())
+
+// NG: 型エイリアス機構は存在しない (way check で `[E1502] Undefined variable 'Int'`)
+PilotId = Int                // ← Taida では `Int` の別名にはならない
+```
+
+この方針は、Taida の哲学のうち次のものと整合的です。
+
+> **PHILOSOPHY.md — II.** だいじなものはふくろにしまっておきましょう
+
+意味を伴う型はぶちパック (`@(...)`) に包んで運び、生のプリミティブ型は意味を持たない値として扱います。
+
+### `Parent => Child = @()` は alias ではなく Inheritance
+
+`Int => PilotId = @()` や `Container[T] => MyContainer[T] = @()` のように `=>` を使った定義は、**型エイリアスではなく「`Parent` を親型として継承する独自のクラスライク型」** です ([`docs/guide/04_class_like.md`](../guide/04_class_like.md) 参照)。
+
+```taida
+// `PilotId` は `Int` を親に持つ独自のクラスライク型 (alias ではない)
+// `PilotId()` インスタンスは Int の値を保持せず、自身は空ぶちパック
+Int => PilotId = @()
+pid <= PilotId()           // PilotId のインスタンス (Int ではない)
+```
+
+```taida fragment
+// ジェネリック継承: parent の non-default field を継承する
+Mold[T] => Container[T] = @(value: T)
+Container[T] => MyContainer[T] = @()
+// MyContainer は parent の `value: T` を継承するため、`MyContainer[42]()` のように
+// parent header の type-param と継承 field を全て埋める必要がある
+c <= MyContainer[42, 42]()
+```
+
+「`Int` の単純な別名」を意味する構文は Taida には存在しないので、`Int` を別の名前で再エクスポートしたい場合は、上記のぶちパックラップ (`PilotId = @(value: Int)`) を使ってください。
+
 ## 例
 
 ### 型 (PascalCase)

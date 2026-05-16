@@ -36,13 +36,13 @@ fn fixture_template() -> &'static str {
     // the violation observable: pre-fix, `has_body` is false because
     // status is 204, so the `if (!has_body)` branch sends headers
     // verbatim including content-length.
-    r#">>> taida-lang/net => @(httpServe)
+    r#">>> taida-lang/net => @(httpServe, HttpProtocol)
 
 handler req =
   @(status <= 204, headers <= @[@(name <= "content-length", value <= "5"), @(name <= "x-test", value <= "d28b025")], body <= "hello")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-asyncResult <= httpServe({port}, handler, 16, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
+asyncResult <= httpServe({port}, handler, 16, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= HttpProtocol:H2()))
 asyncResult >=> result
 result >=> r
 stdout(r.ok)

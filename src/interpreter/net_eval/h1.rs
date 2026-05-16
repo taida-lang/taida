@@ -295,8 +295,7 @@ impl Interpreter {
         // ── Arg 5: tls (optional, default @() = plaintext) ──
         // v5: TLS configuration. @() means plaintext (v4 compat).
         // @(cert: "path", key: "path") means HTTPS (HTTP/1.1 over TLS).
-        // @(cert: "path", key: "path", protocol: "h2") means HTTP/2 over TLS.
-        // v6 NET6-1b: protocol field support for h2 opt-in.
+        // @(cert: "path", key: "path", protocol: HttpProtocol:H2()) means HTTP/2 over TLS.
         let tls_cert_path: Option<String>;
         let tls_key_path: Option<String>;
         let mut requested_protocol: Option<String> = None;
@@ -308,15 +307,10 @@ impl Interpreter {
                         tls_cert_path = None;
                         tls_key_path = None;
                     } else {
-                        // v6 NET6-1b: Extract protocol field if present.
-                        // NB6-10: Separate "field exists" from "field is Str".
-                        // If protocol field exists but is not Str, reject immediately.
+                        // Extract protocol field if present.
                         if let Some((_, proto_val)) = fields.iter().find(|(k, _)| k == "protocol") {
                             match proto_val {
-                                Value::Str(proto) => {
-                                    requested_protocol = Some(proto.as_string().clone());
-                                }
-                                Value::Int(ordinal) => {
+                                Value::EnumVal(_, ordinal) | Value::Int(ordinal) => {
                                     if let Some(protocol) = http_protocol_ordinal_to_wire(*ordinal)
                                     {
                                         requested_protocol = Some(protocol.to_string());
@@ -337,7 +331,7 @@ impl Interpreter {
                                     let result = make_result_failure_msg(
                                         "ProtocolError",
                                         format!(
-                                            "httpServe: protocol must be HttpProtocol or Str, got {}",
+                                            "httpServe: protocol must be HttpProtocol, got {}",
                                             proto_val
                                         ),
                                     );
@@ -378,7 +372,7 @@ impl Interpreter {
                                 return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                             }
                             _ => {
-                                // v6 NET6-1b: Allow @(protocol: "h2") without cert/key
+                                // v6 NET6-1b: Allow @(protocol <= HttpProtocol:H2()) without cert/key
                                 // to still trigger protocol validation below.
                                 if requested_protocol.is_some() {
                                     tls_cert_path = None;
