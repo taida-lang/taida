@@ -461,7 +461,11 @@ fn test_scope_type_annotation_mismatch() {
 
 #[test]
 fn test_func_def_scope() {
-    let source = "add x y =\n  x + y";
+    // F42 sweep [E1525]: `Unknown + Unknown` is rejected so the original
+    // `add x y = x + y` fixture no longer type-checks without annotations.
+    // The test's intent is verifying that `func_types` is populated for
+    // the named function, which still holds with annotations added.
+    let source = "add x: Int y: Int =\n  x + y\n=> :Int";
     let (checker, errors) = check(source);
     assert!(errors.is_empty(), "Errors: {:?}", errors);
     assert!(checker.func_types.contains_key("add"));
@@ -1882,8 +1886,10 @@ fn test_qf46_same_scope_redefinition_is_checker_rejected() {
 
 #[test]
 fn test_no_holes_is_normal_call() {
-    // C-4a: `f(1, 2)` — no holes, normal function call
-    let source = "add x y = x + y\n=> :Int\nresult <= add(1, 2)";
+    // C-4a: `f(1, 2)` — no holes, normal function call.
+    // F42 sweep [E1525]: parameters need type annotations so `x + y`
+    // resolves to a concrete operator dispatch.
+    let source = "add x: Int y: Int = x + y\n=> :Int\nresult <= add(1, 2)";
     let (_, errors) = check(source);
     // Should succeed without errors (normal call)
     assert!(
@@ -4209,6 +4215,145 @@ fn test_f42_e1520_r2_empty_buchi_tail_rejected() {
     assert!(
         has_e1520,
         "[E1520] R2: function inferring `@()` as return type must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1524]: condition branch without a default arm
+/// (`| _ |>` or `| true |>`) is rejected so every input has a
+/// defined result. PHILOSOPHY IV.
+#[test]
+fn test_f42_e1524_cond_branch_without_default_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"classify n: Int =
+  | n > 0 |> "pos"
+  | n < 0 |> "neg"
+=> :Str
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1524 = checker.errors.iter().any(|e| e.message.contains("[E1524]"));
+    assert!(
+        has_e1524,
+        "[E1524]: condition branch without default arm must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1524]: condition branch with `| _ |>` default arm is
+/// accepted. Regression guard.
+#[test]
+fn test_f42_e1524_cond_branch_with_underscore_default_accepted() {
+    let mut checker = TypeChecker::new();
+    let src = r#"classify n: Int =
+  | n > 0 |> "pos"
+  | _     |> "non-pos"
+=> :Str
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1524 = checker.errors.iter().any(|e| e.message.contains("[E1524]"));
+    assert!(
+        !has_e1524,
+        "[E1524]: condition branch with `_` default must be accepted, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1524]: condition branch with `| true |>` default arm
+/// is accepted (literal-true is recognised as a default).
+#[test]
+fn test_f42_e1524_cond_branch_with_true_default_accepted() {
+    let mut checker = TypeChecker::new();
+    let src = r#"classify n: Int =
+  | n > 0 |> "pos"
+  | true  |> "non-pos"
+=> :Str
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1524 = checker.errors.iter().any(|e| e.message.contains("[E1524]"));
+    assert!(
+        !has_e1524,
+        "[E1524]: condition branch with `true` default must be accepted, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1501] (F42B-011 Phase 2 lock = B / overload 禁止維持):
+/// same-name MoldDef with different arity must be rejected. Phase 2
+/// lock assumed this was already enforced via the existing collision
+/// check, but the `ClassLikeKind::Mold` branch was missing the guard.
+/// Phase 3 follow-up restored parity with the EnumDef / BuchiPack
+/// branches.
+#[test]
+fn test_f42b011_mold_def_same_name_collision_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = r#"Mold[T] => Box[T] = @(value: T)
+Mold[T] => Box[T, U] = @(value: T, extra: U)
+"#;
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1501 = checker.errors.iter().any(|e| e.message.contains("[E1501]"));
+    assert!(
+        has_e1501,
+        "[E1501]: same-name MoldDef with arity overload must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1523]: built-in type name written as a mold header
+/// type variable (`Mold[Int]`) is rejected because it silently masks
+/// the user's intent of a concrete type argument.
+#[test]
+fn test_f42_e1523_mold_header_builtin_type_name_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = "Mold[Int] => MyMold[Int] = @(value <= 0)\n";
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1523 = checker.errors.iter().any(|e| e.message.contains("[E1523]"));
+    assert!(
+        has_e1523,
+        "[E1523]: Mold[Int] (Int as type variable) must be rejected, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1523]: a regular alphabetic type variable name (`T`,
+/// `U`, etc.) must still parse and check cleanly. Regression guard.
+#[test]
+fn test_f42_e1523_mold_header_normal_type_variable_accepted() {
+    let mut checker = TypeChecker::new();
+    let src = "Mold[T] => MyMold[T] = @(value: T)\n";
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1523 = checker.errors.iter().any(|e| e.message.contains("[E1523]"));
+    assert!(
+        !has_e1523,
+        "[E1523]: ordinary type variable Mold[T] must be accepted, got: {:?}",
+        checker.errors
+    );
+}
+
+/// F42 sweep [E1523]: built-in mold names also trigger the diagnostic
+/// when used as a header type variable (`Mold[Lax]`).
+#[test]
+fn test_f42_e1523_mold_header_builtin_mold_name_rejected() {
+    let mut checker = TypeChecker::new();
+    let src = "Mold[Lax] => MyMold[Lax] = @(value <= 0)\n";
+    let (program, parse_errors) = parse(src);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+    checker.check_program(&program);
+    let has_e1523 = checker.errors.iter().any(|e| e.message.contains("[E1523]"));
+    assert!(
+        has_e1523,
+        "[E1523]: built-in mold name `Lax` as header type variable must be rejected, got: {:?}",
         checker.errors
     );
 }

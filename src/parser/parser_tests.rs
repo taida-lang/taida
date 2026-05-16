@@ -1428,6 +1428,34 @@ fn test_parse_nested_list_missing_closing_bracket_error() {
     );
 }
 
+/// F42 sweep [E1521]: positional buchi pack literal `@(v1, v2)` must
+/// be rejected. PHILOSOPHY II requires every buchi pack field to be
+/// named. Mold instantiation arguments (`JSNew[Server](8080)`) are
+/// unaffected — only the `@(...)` literal context enforces named-only.
+#[test]
+fn test_f42_e1521_positional_buchi_pack_literal_rejected() {
+    let source = "x <= @(42, 100)\nstdout(x)";
+    let (_, errors) = parse(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1521]")),
+        "Expected [E1521] for positional buchi pack literal, got: {:?}",
+        errors
+    );
+}
+
+/// F42 sweep [E1521]: named buchi pack literal `@(name <= value)` is
+/// still accepted. Regression guard for the F42B-001 sweep.
+#[test]
+fn test_f42_e1521_named_buchi_pack_literal_accepted() {
+    let source = "x <= @(a <= 1, b <= 2)\nstdout(x)";
+    let (_, errors) = parse(source);
+    assert!(
+        !errors.iter().any(|e| e.message.contains("[E1521]")),
+        "Named buchi pack literal must still parse cleanly, got: {:?}",
+        errors
+    );
+}
+
 #[test]
 fn test_parse_nested_pack_missing_closing_paren_error() {
     let source = "x <= @(a <= @(b <= 1)\nstdout(x)";
@@ -1436,9 +1464,18 @@ fn test_parse_nested_pack_missing_closing_paren_error() {
         !errors.is_empty(),
         "Expected parse error for nested pack delimiter mismatch"
     );
+    // After F42 sweep enforced named-only fields in literal `@(...)`
+    // (E1521), the missing-RParen path is now reachable as either an
+    // "Expected RParen" diagnostic (the legacy path) or an [E1521]
+    // positional-field diagnostic — the continuation `stdout(x)` after
+    // the unbalanced literal can no longer be interpreted as another
+    // unnamed field. Either case satisfies the original test intent:
+    // surface a parse error for the unbalanced delimiter.
     assert!(
-        errors.iter().any(|e| e.message.contains("Expected RParen")),
-        "Expected RParen parse error, got: {:?}",
+        errors
+            .iter()
+            .any(|e| e.message.contains("Expected RParen") || e.message.contains("[E1521]")),
+        "Expected RParen or [E1521] parse error, got: {:?}",
         errors
     );
 }

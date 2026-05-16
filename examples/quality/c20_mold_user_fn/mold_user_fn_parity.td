@@ -9,11 +9,11 @@
 // all three backends must produce the same output as the equivalent
 // `Fn(args)` calls.
 
-cursorMoveTo row col = "[" + row.toString() + ";" + col.toString() + "H" => :Str
+cursorMoveTo row: Int col: Int = "[" + row.toString() + ";" + col.toString() + "H" => :Str
 
-square n = n * n => :Int
+square n: Int = n * n => :Int
 
-concatWith sep a b = a + sep + b => :Str
+concatWith sep: Str a: Str b: Str = a + sep + b => :Str
 
 // Mold syntax -- must invoke the function and return its value.
 mold1 <= cursorMoveTo[1, 1]()

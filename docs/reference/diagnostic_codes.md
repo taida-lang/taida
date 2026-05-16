@@ -107,6 +107,10 @@
 | `E1518` | Cage / CageRilla: Hammer 系 schema cast facade (`JSON[raw, Schema]()` 等) を `Cage` の subject または runner に渡す boundary contract 違反。Hammer family は `Lax[T]` failure channel を維持し、`Cage` / `Gorillax` 経路には流さない | TypeChecker |
 | `E1519` | (予約) Cage / CageRilla 診断範囲の拡張用 | — |
 | `E1520` | 「値の不在を表す型」の完全排除 — `@()` (空ぶちパック) を「型」として書くことを禁止: **(R1)** 戻り型注釈 `:@()` / `:Unit` / `:Void` (実装済み)、**(R1対称)** 引数型注釈 (実装済み)、**(R2)** 関数本体末尾の `@()` / `Unit` / `Void` リテラル (実装済み)、**(R2拡張)** 注釈なしで最終推論型が `@()` 等に確定 (実装済み、中間変数経由の抜け道も塞ぐ)、**(ジェネリック)** `Mold[T]` で `T = @()` 等に具象化 (実装予定、現バージョンでは個別 blocker)、を `TypeChecker` で reject。Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が存在せず、縮小操作は別の具体ぶちパック型を返すため)。情報がない場合は意味を持った値 (書き込んだバイト数、状態を表すぶちパック、共通 Enum のバリアント等) を返す。 | TypeChecker |
+| `E1521` | ぶちパックリテラルの positional field (`@(v1, v2, ...)`) は受理されない。PHILOSOPHY II「ぶちパック `@(...)` — 名前付きフィールドの集合」と矛盾するため、すべての buchi pack field は名前付き (`@(name <= value, ...)`) でなければならない。`<<<` / `>>>` の name list (`@(name1, name2)`) や TypeDef / ClassLike の field 定義 (`@(name: Type)`) は別 context で引き続き受理される。 | Parser |
+| `E1523` | Mold header 型変数名が組み込み型名 (`Int` / `Str` / `Bool` / `Float` / `Bytes` / `Lax` / `Result` / `Async` / `Optional` / 等) と衝突。`Mold[Int]` は型変数名 `Int` として silently 解釈されるが、意図は具体型 `Int` であることが多い。`Mold[:Int]` (具体型直接指定) または `Mold[T <= :Int]` (制約付き型変数) を使う。 | TypeChecker |
+| `E1524` | 条件分岐 `\| cond \|>` から default arm が欠落。`\| _ \|>` または `\| true \|>` を追加して全入力で結果が定義されるようにする。PHILOSOPHY IV「AI が構造として読めるよう、parser が一意に解釈でき、docs と実装が同じ規約を持つ」。 | TypeChecker |
+| `E1525` | (予約) `+` (`BinOp::Add`) の両辺が `Type::Unknown` の reject 化。Lambda 構文に parameter type-annotation parser path がないため、Lambda 内の `Unknown + Unknown` を context-sensitive に reject する設計が必要。後続 cycle で land 予定。 | TypeChecker |
 
 `E1512`〜`E1519` は **Cage / CageRilla 診断範囲**。`Cage[subject, runner]()` の type rule および `CageRilla[Branch, Out]` 子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) の boundary contract を扱う。`E1513` と `E1519` は将来の runtime validation または追加診断用に予約している。
 

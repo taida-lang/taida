@@ -762,6 +762,26 @@ impl TypeChecker {
                 span: span.clone(),
             });
         }
+
+        // F42 sweep [E1523]: detect built-in type names mistakenly written
+        // as Mold header type variables. `Mold[Int]` is silently read as
+        // a type variable `Int`, masking the user's intent of a concrete
+        // type argument. Surface the misuse with an actionable diagnostic.
+        for arg in header_args {
+            if let MoldHeaderArg::TypeParam(tp) = arg
+                && Self::is_builtin_type_name(&tp.name)
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1523] {} '{}' header type variable '{}' collides with built-in type name. \
+                         Use `{}[:{}]` for a concrete type argument or `{}[T <= :{}]` for a constrained type variable. \
+                         See PHILOSOPHY.md III and docs/reference/diagnostic_codes.md [E1523].",
+                        kind, name, tp.name, name, tp.name, name, tp.name
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
     }
 
     fn validate_mold_extension_bindings(
@@ -1376,6 +1396,49 @@ impl TypeChecker {
             other if self.registry.is_error_type(other) => Type::Error(other.to_string()),
             other => Type::Named(other.to_string()),
         }
+    }
+
+    /// F42 sweep [E1523]: detect built-in type names mistakenly written
+    /// as Mold header type variables. `Mold[Int]` parses as a type
+    /// variable named `Int`, which collides with the built-in `Int` type
+    /// and is almost always a misuse for `Mold[:Int]` (concrete type
+    /// argument) or `Mold[T <= :Int]` (constrained type variable).
+    ///
+    /// Built-in type names that trigger this diagnostic:
+    /// - Primitive / scalar: `Int`, `Float`, `Num`, `Number`, `Str`,
+    ///   `String`, `Bytes`, `Bool`, `Boolean`
+    /// - Special / forbidden surface types: `Unit`, `Void`, `JSON`, `Molten`
+    /// - Built-in molds with `MoldSpec::range`: `Lax`, `Result`, `Async`,
+    ///   `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
+    pub(super) fn is_builtin_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Int"
+                | "Float"
+                | "Num"
+                | "Number"
+                | "Str"
+                | "String"
+                | "Bytes"
+                | "Bool"
+                | "Boolean"
+                | "Unit"
+                | "Void"
+                | "JSON"
+                | "Molten"
+                | "Lax"
+                | "Result"
+                | "Async"
+                | "Optional"
+                | "Stream"
+                | "Mold"
+                | "TODO"
+                | "Log"
+                | "Slice"
+                | "Concat"
+                | "Gorillax"
+                | "RelaxedGorillax"
+        )
     }
 
     fn branch_from_type_arg(&self, expr: &Expr) -> Option<CageBranch> {
@@ -2779,6 +2842,32 @@ impl TypeChecker {
                 }
                 ClassLikeKind::Mold { .. } => {
                     let md = cl;
+                    // F42 sweep [E1501]: MoldDef collision check (the
+                    // BuchiPack / Enum / Inheritance branches above
+                    // already had this; the Mold branch was missing,
+                    // so `Mold[T] => Box[T] = @(...)` and
+                    // `Mold[T] => Box[T, U] = @(...)` would both
+                    // register without complaint, silently giving the
+                    // impression that arity overload is allowed).
+                    // F42B-011 (Phase 2 lock = B / overload 禁止維持)
+                    // requires the same enforcement at the MoldDef
+                    // surface as at the BuchiPack / Enum surface.
+                    let has_collision = self.registry.type_defs.contains_key(&md.name)
+                        || self.registry.enum_defs.contains_key(&md.name)
+                        || self.func_types.contains_key(&md.name)
+                        || self.registry.mold_defs.contains_key(&md.name);
+                    if has_collision {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1501] Name '{}' is already defined in this scope. \
+                                 Redefinition in the same scope is not allowed (mold overload — \
+                                 including arity-different overloads — is forbidden; use a different name). \
+                                 Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                                md.name
+                            ),
+                            span: md.span.clone(),
+                        });
+                    }
                     self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
                     let header_args = Self::effective_mold_header_args(md);
                     self.validate_mold_root_header(md, &header_args);
@@ -5724,6 +5813,14 @@ defaulted fields must be provided via `()`",
                         {
                             Type::Str
                         } else if left_type == Type::Unknown || right_type == Type::Unknown {
+                            // F42 sweep [E1525] candidate: `Unknown + Unknown`
+                            // would normally be rejected here, but Lambda
+                            // bodies depend on bidirectional inference (E39)
+                            // and Taida's lambda syntax has no parameter
+                            // type-annotation parser path yet. Deferred to
+                            // Phase 4 / post-Phase-3 cycle, where a
+                            // context-sensitive enforcement (FuncDef-only or
+                            // post-inference) can be designed.
                             Type::Unknown
                         } else {
                             self.errors.push(TypeError {
@@ -7436,6 +7533,26 @@ defaulted fields must be provided via `()`",
         // FL-3: Check all arms' types, not just the first
         if arms.is_empty() {
             return Type::Unknown;
+        }
+
+        // F42 sweep [E1524]: a condition branch must have a default arm
+        // — either `| _ |>` (condition is `None`) or `| true |>`
+        // (literal-true). Otherwise, runtime behavior is undefined when
+        // every condition arm fails. PHILOSOPHY IV — strict structure
+        // for AI readability.
+        let has_default = arms.iter().any(|arm| {
+            arm.condition.is_none()
+                || matches!(&arm.condition, Some(Expr::BoolLit(true, _)))
+        });
+        if !has_default {
+            self.errors.push(TypeError {
+                message: "[E1524] Condition branch is missing a default arm. \
+                          Add `| _ |>` or `| true |>` so the result is defined \
+                          for every input (PHILOSOPHY IV — strict structure). \
+                          See docs/reference/diagnostic_codes.md [E1524]."
+                    .into(),
+                span: span.clone(),
+            });
         }
         // Infer type from the first arm
         let first_ty = if let Some(first_arm) = arms.first() {

@@ -416,7 +416,10 @@ impl Parser {
                 self.advance(); // consume `@`
                 if self.check(&TokenKind::LParen) {
                     self.advance(); // consume `(`
-                    let fields = self.parse_buchi_field_list()?;
+                    // F42 sweep [E1521]: literal `@(...)` enforces named-only
+                    // fields. MoldInst / TypeInst call-site arguments still
+                    // accept positional shape via the default `false` mode.
+                    let fields = self.parse_buchi_field_list_with(true)?;
                     self.expect(&TokenKind::RParen)?;
                     Ok(Expr::BuchiPack(fields, span))
                 } else if self.check(&TokenKind::LBracket) {
@@ -832,6 +835,21 @@ impl Parser {
     }
 
     pub(super) fn parse_buchi_field_list(&mut self) -> Result<Vec<BuchiField>, ParseError> {
+        self.parse_buchi_field_list_with(false)
+    }
+
+    /// F42 sweep [E1521]: When `strict_named` is true, positional fields
+    /// (`@(v1, v2)`) are rejected so buchi pack literals (`@(name <= value, ...)`)
+    /// can be statically guaranteed to have only named fields, satisfying
+    /// PHILOSOPHY II.
+    ///
+    /// MoldInst / TypeInst call-site argument lists (e.g.
+    /// `JSNew[Server](8080)` — positional arguments to the mold) still
+    /// accept positional shape via `strict_named = false`.
+    pub(super) fn parse_buchi_field_list_with(
+        &mut self,
+        strict_named: bool,
+    ) -> Result<Vec<BuchiField>, ParseError> {
         let mut fields = Vec::new();
         self.skip_newlines();
         while !self.check(&TokenKind::RParen) && !self.is_at_end() {
@@ -850,8 +868,24 @@ impl Parser {
                     value,
                     span: field_span,
                 });
+            } else if strict_named {
+                // F42 sweep [E1521]: positional buchi pack field literals
+                // (`@(v1, v2, ...)`) are no longer accepted in literal
+                // context. PHILOSOPHY II 「ぶちパック `@(...)` — 名前付き
+                // フィールドの集合」と矛盾するため reject。書き換え方:
+                // `@(name <= value, ...)` の named-only form を使う。
+                return Err(ParseError {
+                    message:
+                        "[E1521] positional buchi pack field is no longer accepted in `@(...)` literal. \
+                         Every buchi pack field must be named (PHILOSOPHY II — \
+                         buchi pack is a set of named fields). \
+                         Hint: rewrite as `@(name <= value, ...)`."
+                            .into(),
+                    span: field_span,
+                });
             } else {
-                // Positional argument — use index as name
+                // MoldInst / TypeInst argument list — positional shape is
+                // still allowed at call sites (e.g. `JSNew[Server](8080)`).
                 let value = self.parse_expression()?;
                 fields.push(BuchiField {
                     name: format!("_{}", fields.len()),
