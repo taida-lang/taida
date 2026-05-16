@@ -393,6 +393,7 @@ pub const ALL_CHECKS: &[&str] = &[
     "type-consistency",
     "mutual-recursion",
     "mutual-recursion-native",
+    "direct-non-tail-recursion",
     "unchecked-division",
     "direction-constraint",
     "unchecked-lax",
@@ -407,6 +408,7 @@ pub fn run_check(check: &str, program: &Program, file: &str) -> Vec<VerifyFindin
         "type-consistency" => check_type_consistency(program, file),
         "mutual-recursion" => check_mutual_recursion(program, file),
         "mutual-recursion-native" => check_mutual_recursion_native(program, file),
+        "direct-non-tail-recursion" => check_direct_non_tail_recursion(program, file),
         "unchecked-division" => check_unchecked_division(program, file),
         "direction-constraint" => check_direction_constraint(program, file),
         "unchecked-lax" => check_unchecked_lax(program, file),
@@ -719,7 +721,56 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
 ///
 /// A trampoline-based Native implementation is post-stable scope and
 /// tracked under `.dev/FUTURE_BLOCKERS.md` (gen-F additive option (a)).
-fn check_mutual_recursion_native(program: &Program, file: &str) -> Vec<VerifyFinding> {
+fn check_mutual_recursion_native(program: &Program, _file: &str) -> Vec<VerifyFinding> {
+    check_mutual_recursion_native_impl(program, _file)
+}
+
+/// F42 sweep [E0701]: direct (`A → A`) recursion outside the tail
+/// position is rejected at compile time. Earlier generations only
+/// surfaced mutual cycles; deep direct non-tail recursion blew the
+/// stack at runtime instead of being caught. PHILOSOPHY I — strict
+/// behaviour, no implicit unbounded recursion. Mutual recursion is
+/// handled by `check_mutual_recursion`; the `If` mold tail-position
+/// allowance (F42B-009) will be folded into `tail_pos::collect_call_sites`
+/// when that blocker lands so this check inherits the same allow-list.
+fn check_direct_non_tail_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
+    let mut findings = Vec::new();
+    for stmt in &program.statements {
+        if let Statement::FuncDef(fd) = stmt {
+            let sites = tail_pos::collect_call_sites(fd);
+            let mut reported_lines: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            for s in sites {
+                if s.callee != fd.name {
+                    continue;
+                }
+                if s.is_tail {
+                    continue;
+                }
+                if !reported_lines.insert(s.span.line) {
+                    continue;
+                }
+                findings.push(VerifyFinding {
+                    check: "direct-non-tail-recursion".to_string(),
+                    severity: Severity::Error,
+                    message: format!(
+                        "[E0701] Function '{}' calls itself outside the tail position at line {}. \
+                         Direct non-tail recursion is rejected because it can blow the stack at runtime. \
+                         Hint: convert the recursive call to a tail call (return the result of `{}` directly), \
+                         or rewrite the function with an accumulator parameter. \
+                         See docs/reference/tail_recursion.md and docs/reference/diagnostic_codes.md [E0701].",
+                        fd.name, s.span.line, fd.name
+                    ),
+                    file: Some(file.to_string()),
+                    line: Some(s.span.line),
+                });
+            }
+        }
+    }
+    findings
+}
+
+fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<VerifyFinding> {
     let mut func_defs: std::collections::HashMap<String, &FuncDef> =
         std::collections::HashMap::new();
     for stmt in &program.statements {

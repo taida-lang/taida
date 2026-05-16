@@ -253,6 +253,7 @@
 | コード (予約) | 内容 | 既存帯域 |
 |--------------|------|---------|
 | `E0700` | Native と native lowering 系 WASM で相互再帰を検出した場合の拒否 | `E07xx` コード生成エラー |
+| `E0701` | 直接再帰 (`A → A`) の非末尾位置呼び出しを reject。深い直接再帰はランタイムでスタックオーバーフローするため、コンパイル時に発見する。修正案: 末尾位置に書き換える (`return` 直接) か、accumulator を伴う末尾再帰版を別関数として書く。`If[cond, then, else]()` モールドの引数は末尾位置として扱われない (内部の自己再帰も対象。短絡評価ではあるが runtime の trampoline が `MoldInst` を tail target として認識しないため)。ガード式 `(\| cond \|>)` の各アーム本体や ErrorCeiling handler 末尾は引き続き末尾位置。詳細は `docs/reference/tail_recursion.md` を参照。 | `E07xx` コード生成エラー (verify check / way check) |
 | `E1506` | 通常の関数呼び出し引数型不整合。関数値引数では、期待される関数型へ省略推論できない場合も含む | `E15xx` 定義・意味論エラー |
 | `E1508` | `Lax[T].getOrDefault` / `map` / `flatMap`、`Result[T, P].getOrDefault` / `map` / `flatMap` / `mapError`、`Async[T].getOrDefault` / `map`、`List[T].fold` / `reduce`、および関数値を受け取るメソッド境界の引数型不整合 (関数引数型ピン違反を含む。`getOrThrow` は arity 0 のため対象外) | `E15xx` 定義・意味論エラー |
 

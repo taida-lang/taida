@@ -973,6 +973,27 @@ fn run_check_cmd(args: &[String]) {
                 suggestion,
             });
         }
+
+        // F42 sweep [E0701]: surface direct non-tail recursion at
+        // `way check` time. The verify check is registered in
+        // `verify::ALL_CHECKS` for `way verify`, but `way check` does
+        // not run the full verify pipeline; pulling this single check
+        // in keeps PHILOSOPHY I — strict, no unbounded stacks — visible
+        // during the default lint flow as well.
+        let f42_findings = verify::run_check("direct-non-tail-recursion", &program, &file_str);
+        for f in f42_findings {
+            let (code, suggestion) = split_diag_code_and_hint(&f.message);
+            diagnostics.push(CheckDiagnostic {
+                stage: "verify",
+                severity: "ERROR",
+                code,
+                message: f.message.clone(),
+                file: f.file.clone(),
+                line: f.line,
+                column: None,
+                suggestion,
+            });
+        }
     }
 
     let errors = diagnostics.iter().filter(|d| d.severity == "ERROR").count();
