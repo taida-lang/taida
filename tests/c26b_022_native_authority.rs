@@ -93,8 +93,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 4)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 "#,
         marker = body_marker,

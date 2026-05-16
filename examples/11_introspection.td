@@ -27,7 +27,7 @@ names <= @["Asuka", "Rei", "Shinji"]
 double x =
   x + x
 
-Map[names, double]() ]=> doubled
+Map[names, double]() >=> doubled
 stdout(doubled)
 
 // Entry point

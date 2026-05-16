@@ -2,8 +2,8 @@
 >>> ./mod_b.td => @(square)
 
 sumSquares items =
-  Map[items, _ x = square(x)]() ]=> squared
-  Sum[squared]() ]=> total
+  Map[items, _ x = square(x)]() >=> squared
+  Sum[squared]() >=> total
   total
 => :Int
 

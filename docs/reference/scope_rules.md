@@ -229,7 +229,7 @@ counter_updated <= counter_initial + 1
 // リストの「更新」
 original <= @[1, 2, 3]
 // 新しいリストを生成
-Map[original, _ x = x * 2]() ]=> updated
+Map[original, _ x = x * 2]() >=> updated
 // original: @[1, 2, 3] (変更されない)
 // updated: @[2, 4, 6]
 

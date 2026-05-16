@@ -16,7 +16,7 @@
 sumSquaresAt a: @[Float] i: Int n: Int acc: Float =
   | i == n |> acc
   | _ |>
-      a.get(i) ]=> av
+      a.get(i) >=> av
       sumSquaresAt(a, i + 1, n, acc + av * av)
 => :Float
 

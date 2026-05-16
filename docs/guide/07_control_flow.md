@@ -219,12 +219,12 @@ fibTail n: Int a: Int b: Int =
 findAndProcess items: @[Item] =
   | items.isEmpty() |> @(found <= false, result <= "")
   | _ |>
-    items.first() ]=> current
+    items.first() >=> current
     | current.priority > 5 |>
       processed <= transform(current)
       @(found <= true, result <= processed.name)
     | _ |>
-      Drop[items, 1]() ]=> rest
+      Drop[items, 1]() >=> rest
       findAndProcess(rest)  // 末尾再帰
 => :@(found: Bool, result: Str)
 ```
@@ -247,8 +247,8 @@ findAndProcess items: @[Item] =
 
 - `name <= expr` — 値バインディング
 - `expr => name` — 単一方向パイプラインの末尾に書かれた値バインディング
-- `expr ]=> name` — 前方アンモールド (Lax / Option 解凍)
-- `name <=[ expr` — 後方アンモールド
+- `expr >=> name` — 前方アンモールド (Lax / Option 解凍)
+- `name <=< expr` — 後方アンモールド
 
 **最終行** は次のいずれでも構いません。
 

@@ -990,7 +990,7 @@ MakeState initial =
     write_terminal_fixture(&project, terminal_td, &[]);
 
     let main_td = r#">>> taida-lang/terminal => @(MakeState)
-st <=[ MakeState("hello")
+st <=< MakeState("hello")
 stdout(`text=${st.text}`)
 stdout(`cursor=${st.cursor}`)
 stdout(`action=${st.action}`)
@@ -1059,7 +1059,7 @@ MakeState initial =
     // read must both resolve against the same binding without
     // duplicate replay.
     let main_td = r#">>> taida-lang/terminal => @(MakeState, State)
-st <=[ MakeState("hi")
+st <=< MakeState("hi")
 stdout(`via_func=${st.text}`)
 stdout(`default=${State.text}`)
 "#;

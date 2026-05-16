@@ -7,9 +7,9 @@
 
 // Parse a raw HTTP request
 bytes_lax <= Bytes["GET /hello?name=taida HTTP/1.1\r\nHost: localhost\r\nAccept: text/plain\r\n\r\n"]()
-bytes_lax ]=> bytes
+bytes_lax >=> bytes
 parse_result <= httpParseRequestHead(bytes)
-parse_result ]=> parsed
+parse_result >=> parsed
 
 // Note: use consumed (Int) instead of complete (Bool) for 3-backend parity
 stdout(parsed.consumed)
@@ -25,5 +25,5 @@ resp <= @(
   body <= "Hello, taida!"
 )
 encode_result <= httpEncodeResponse(resp)
-encode_result ]=> encoded
+encode_result >=> encoded
 stdout(encoded.bytes.length())

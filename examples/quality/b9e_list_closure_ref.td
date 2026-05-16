@@ -7,7 +7,7 @@ stdout(items.length().toString())
 
 // lambda が items をキャプチャして参照
 sumItems =
-  Fold[items, 0, _ acc x = acc + x]() ]=> s
+  Fold[items, 0, _ acc x = acc + x]() >=> s
   s
 => :Int
 stdout(sumItems().toString())

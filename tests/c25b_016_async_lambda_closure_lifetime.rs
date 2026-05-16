@@ -5,7 +5,7 @@
 //! > `src/interpreter/eval.rs:1291+` の `Expr::Lambda` は
 //! > `closure: current_env.bindings.clone()` で static snapshot。
 //! > 同期実行では問題ないが、C22B-002 実装以降に async stdout streaming
-//! > や将来の coroutine-like async 導入時に「lambda body が `]=>` await
+//! > や将来の coroutine-like async 導入時に「lambda body が `>=>` await
 //! > で suspend → resume 時に親 scope がすでに pop されている」シナリオ
 //! > で closure の一貫性が崩れる可能性。
 //!

@@ -22,22 +22,22 @@ stdout(result1)
 //   result <= Map[_, _ x = x * 2]() <= Filter[_, _ x = x > 0]() <= data
 // But this produces "Parse error: Unexpected token: LtEq"
 // Workaround: use forward pipeline or intermediate variables.
-Filter[@[1, 2, 3, 4, 5], _ n = n > 2]() ]=> filtered2
-Map[filtered2, _ n = n * 10]() ]=> result2
+Filter[@[1, 2, 3, 4, 5], _ n = n > 2]() >=> filtered2
+Map[filtered2, _ n = n * 10]() >=> result2
 stdout(result2)
 
 // 1e: Pipeline with string molds
 "  hello world  " => Trim[_]() => Upper[_]() => result3
 stdout(result3)
 
-// === 2. Unmold operators: ]=>, <=[ ===
+// === 2. Unmold operators: >=>, <=< ===
 
 // 2a: Forward unmold
-Div[10, 3]() ]=> div_result
+Div[10, 3]() >=> div_result
 stdout(div_result.toString())
 
 // 2b: Backward unmold
-back_result <=[ Div[20, 4]()
+back_result <=< Div[20, 4]()
 stdout(back_result.toString())
 
 // 2c: Unmold method
@@ -46,13 +46,13 @@ method_result <= lax.unmold()
 stdout(method_result.toString())
 
 // 2d: Chained unmolds
-Map[@[1, 2, 3], _ x = x * 3]() ]=> tripled
-Filter[tripled, _ x = x > 5]() ]=> big_ones
+Map[@[1, 2, 3], _ x = x * 3]() >=> tripled
+Filter[tripled, _ x = x > 5]() >=> big_ones
 stdout(big_ones)
 
-// 2e: Backward unmold chain (using single <=[ per step)
-tripled2 <=[ Map[@[1, 2, 3], _ x = x * 3]()
-big_ones2 <=[ Filter[tripled2, _ x = x > 5]()
+// 2e: Backward unmold chain (using single <=< per step)
+tripled2 <=< Map[@[1, 2, 3], _ x = x * 3]()
+big_ones2 <=< Filter[tripled2, _ x = x > 5]()
 stdout(big_ones2)
 
 // === 3. Condition operators: |, |> ===
@@ -190,11 +190,11 @@ stdout((1 > 0 || 2 < 0).toString())
 // === 9. Lax operations (Div/Mod) ===
 
 // 9a: Normal division
-Div[10, 3]() ]=> d1
+Div[10, 3]() >=> d1
 stdout(d1.toString())
 
 // 9b: Zero division
-Div[10, 0]() ]=> d2
+Div[10, 0]() >=> d2
 stdout(d2.toString())
 
 // 9c: hasValue check
@@ -202,36 +202,36 @@ stdout(Div[10, 3]().has_value.toString())
 stdout(Div[10, 0]().has_value.toString())
 
 // 9d: Mod
-Mod[10, 3]() ]=> m1
+Mod[10, 3]() >=> m1
 stdout(m1.toString())
-Mod[10, 0]() ]=> m2
+Mod[10, 0]() >=> m2
 stdout(m2.toString())
 
 // 9e: Float division
-Div[10.0, 3.0]() ]=> fd
+Div[10.0, 3.0]() >=> fd
 stdout(fd.toString())
 
 // === 10. Type conversion molds ===
 
 // 10a: String to Int
-Int["42"]() ]=> ti1
+Int["42"]() >=> ti1
 stdout(ti1.toString())
-Int["abc"]() ]=> ti2
+Int["abc"]() >=> ti2
 stdout(ti2.toString())
 stdout(Int["abc"]().has_value.toString())
 
 // 10b: String to Float
-Float["3.14"]() ]=> tf1
+Float["3.14"]() >=> tf1
 stdout(tf1.toString())
 
 // 10c: Number to String
-Str[42]() ]=> ts1
+Str[42]() >=> ts1
 stdout(ts1)
 
 // 10d: Bool conversion
-Bool[1]() ]=> tb1
+Bool[1]() >=> tb1
 stdout(tb1.toString())
-Bool[0]() ]=> tb2
+Bool[0]() >=> tb2
 stdout(tb2.toString())
 
 // === 11. Multibyte character indexOf/lastIndexOf (T-1) ===

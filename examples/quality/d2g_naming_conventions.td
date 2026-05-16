@@ -20,7 +20,7 @@ getPilotName pilot: Pilot =
 => :Str
 
 calculateSum items: @[Int] =
-  Fold[items, 0, _ acc x = acc + x]() ]=> total
+  Fold[items, 0, _ acc x = acc + x]() >=> total
   total
 => :Int
 

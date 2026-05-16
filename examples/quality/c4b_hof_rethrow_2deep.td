@@ -15,8 +15,8 @@ test items =
   |== outerErr: Error =
     "outer:" + outerErr.message
   => :Str
-  Map[items, _ x = innerGuard(x)]() ]=> r
-  Join[r, ","]() ]=> v
+  Map[items, _ x = innerGuard(x)]() >=> r
+  Join[r, ","]() >=> v
   v
 => :Str
 

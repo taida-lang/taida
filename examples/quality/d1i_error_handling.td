@@ -1,35 +1,35 @@
 // D-1i: docs/guide/08_error_handling.md code examples
 
 // Lax safe operations
-Div[10, 3]() ]=> div_ok
+Div[10, 3]() >=> div_ok
 stdout(div_ok.toString())
-Mod[10, 3]() ]=> mod_ok
+Mod[10, 3]() >=> mod_ok
 stdout(mod_ok.toString())
-Div[10, 0]() ]=> div_zero
+Div[10, 0]() >=> div_zero
 stdout(div_zero.toString())
-Mod[10, 0]() ]=> mod_zero
+Mod[10, 0]() >=> mod_zero
 stdout(mod_zero.toString())
 stdout(Div[10, 3]().has_value.toString())
 stdout(Div[10, 0]().has_value.toString())
 
 // List safe access
 items <= @[10, 20, 30]
-items.get(1) ]=> val1
+items.get(1) >=> val1
 stdout(val1.toString())
-items.first() ]=> val2
+items.first() >=> val2
 stdout(val2.toString())
-items.last() ]=> val3
+items.last() >=> val3
 stdout(val3.toString())
-items.get(100) ]=> val4
+items.get(100) >=> val4
 stdout(val4.toString())
 empty: @[Int] <= @[]
-empty.first() ]=> val5
+empty.first() >=> val5
 stdout(val5.toString())
 
 // Type conversion
-Int["123"]() ]=> conv1
+Int["123"]() >=> conv1
 stdout(conv1.toString())
-Int["abc"]() ]=> conv2
+Int["abc"]() >=> conv2
 stdout(conv2.toString())
 stdout(Int["abc"]().has_value.toString())
 

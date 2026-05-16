@@ -16,15 +16,15 @@
 //     MoldInst.
 //
 // Interpreter is the reference.
-Div[1, 0]() ]=> r1
+Div[1, 0]() >=> r1
 debug(r1)
-Div[1, 2]() ]=> r2
+Div[1, 2]() >=> r2
 debug(r2)
-Div[1.0, 0.0]() ]=> r3
+Div[1.0, 0.0]() >=> r3
 debug(r3)
-Div[1.0, 2.0]() ]=> r4
+Div[1.0, 2.0]() >=> r4
 debug(r4)
-Mod[5, 2]() ]=> r5
+Mod[5, 2]() >=> r5
 debug(r5)
-Mod[5.0, 2.0]() ]=> r6
+Mod[5.0, 2.0]() >=> r6
 debug(r6)

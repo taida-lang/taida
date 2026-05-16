@@ -3,7 +3,7 @@
 
 // Async 値の生成（fulfilled）
 a <= Async[42]()
-a ]=> val
+a >=> val
 debug(val)
 
 // Async 値を関数で使う
@@ -12,12 +12,12 @@ doubleAsync x: Int =
 => :Async[Int]
 
 result <= doubleAsync(21)
-result ]=> doubled
+result >=> doubled
 debug(doubled)
 
 // チェーン: Async → unmold → Async → unmold
 first <= Async[10]()
-first ]=> x
+first >=> x
 second <= Async[x + 5]()
-second ]=> y
+second >=> y
 debug(y)

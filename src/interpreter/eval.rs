@@ -145,7 +145,7 @@ pub struct Interpreter {
     /// Empty means no `<<<` was encountered (all symbols exported for backward compat).
     pub(crate) module_exported_symbols: Vec<String>,
     /// Tokio runtime for true async operations.
-    /// Used by `]=>` to block_on pending async values and by All/Race/Timeout molds.
+    /// Used by `>=>` to block_on pending async values and by All/Race/Timeout molds.
     pub(crate) tokio_runtime: Arc<tokio::runtime::Runtime>,
     /// Socket handle table for tcpConnect/socketSend/socketRecv.
     /// Key is a stable interpreter-local handle id returned to Taida code.
@@ -216,7 +216,7 @@ impl Interpreter {
 
     pub fn new() -> Self {
         // Create a dedicated current-thread tokio runtime for the interpreter.
-        // This runtime is used by `]=>` to block_on pending async values
+        // This runtime is used by `>=>` to block_on pending async values
         // and by All/Race/Timeout molds for parallel resolution.
         let tokio_runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -700,11 +700,11 @@ impl Interpreter {
                     Signal::Gorilla => return Ok(Signal::Gorilla),
                 };
                 // Unmold: extract the inner value from a Mold wrapper
-                // For Async values, ]=> acts as blocking await
+                // For Async values, >=> acts as blocking await
                 // Rejected Async throws an error (caught by error ceiling)
                 //
                 // C13-1: Return the unwrapped value as the statement's
-                // signal so tail unmold `expr ]=> name` in an expression
+                // signal so tail unmold `expr >=> name` in an expression
                 // block yields the bound value.
                 match self.unmold_value(source_val)? {
                     Signal::Value(unwrapped) => {
@@ -727,11 +727,11 @@ impl Interpreter {
                     Signal::Throw(err) => return Ok(Signal::Throw(err)),
                     Signal::Gorilla => return Ok(Signal::Gorilla),
                 };
-                // For Async values, <=[ acts as blocking await
+                // For Async values, <=< acts as blocking await
                 // Rejected Async throws an error (caught by error ceiling)
                 //
                 // C13-1: Return the unwrapped value as the statement's
-                // signal so tail unmold `name <=[ expr` in an expression
+                // signal so tail unmold `name <=< expr` in an expression
                 // block yields the bound value.
                 match self.unmold_value(source_val)? {
                     Signal::Value(unwrapped) => {

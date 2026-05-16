@@ -1,6 +1,6 @@
-Int["42"]() ]=> x
+Int["42"]() >=> x
 debug(x)
-Int["0"]() ]=> y
+Int["0"]() >=> y
 debug(y)
-Int["-123"]() ]=> z
+Int["-123"]() >=> z
 debug(z)

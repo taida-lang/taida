@@ -102,11 +102,11 @@ fn http_request_invalid_scheme_carries_error_info_across_backends() {
         concat!(
             ">>> taida-lang/os => @(HttpRequest)\n",
             "resp <= HttpRequest[\"GET\", \"ftp://example.invalid/\"]()\n",
-            "resp ]=> bad\n",
+            "resp >=> bad\n",
             "info <= bad.errorInfo()\n",
             "stdout(bad.hasValue().toString())\n",
             "stdout(info.hasValue().toString())\n",
-            "info ]=> err\n",
+            "info >=> err\n",
             "stdout(err.type)\n",
             "stdout(err.message)\n",
             "stdout(err.kind)\n",

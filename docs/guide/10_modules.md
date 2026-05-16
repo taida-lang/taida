@@ -71,14 +71,14 @@ npm からインポートされた値は **Molten** 型（branch=JS）です。M
 >>> npm:express => @(express)  // express: Molten (branch=JS)
 
 // express() を呼び出してアプリ handle を得る
-Cage[express, JSCall[@[], @[], Molten]()]() ]=> app       // app: Molten
+Cage[express, JSCall[@[], @[], Molten]()]() >=> app       // app: Molten
 
 // new express.Router() でルータを生成
-Cage[express, JSNew[@["Router"], @[], Molten]()]() ]=> router  // router: Molten
+Cage[express, JSNew[@["Router"], @[], Molten]()]() >=> router  // router: Molten
 
 // app.listen(3000) を Int として受け取る
 Cage[app, JSCall[@["listen"], @[3000], Int]()]() => result    // result: Gorillax[Int]
-result ]=> server                                              // server: Int（またはゴリラ）
+result >=> server                                              // server: Int（またはゴリラ）
 ```
 
 **型の流れ:**
@@ -88,7 +88,7 @@ npm import (Molten / branch=JS)
   -> JSRilla descriptor (JSGet / JSCall / JSNew / JSSet / JSBind / JSSpread)
   -> Cage (subject branch ↔ runner branch を照合)
   -> Gorillax[Out]
-  -> ]=> 値
+  -> >=> 値
 ```
 
 インタプリタおよび Native バックエンドで `npm:` インポートを使用するとコンパイルエラーになります。`JSRilla` 子系統 (`JSGet` / `JSCall` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) も同様です。

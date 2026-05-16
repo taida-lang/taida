@@ -363,7 +363,7 @@ impl Parser {
                     }
                     let body = self.parse_block()?;
                     // C13B-010: reject discard bindings (`=> _x` / `_x <=` /
-                    // `]=> _x` / `_x <=[`) anywhere in an expression-block
+                    // `>=> _x` / `_x <=<`) anywhere in an expression-block
                     // body — same rule as `| |>` arm body.
                     Self::reject_discard_bindings_in_expression_block(&body, "function body")?;
                     self.skip_newlines();
@@ -539,14 +539,14 @@ impl Parser {
                 self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
 
-            // `expr ]=> name` -> unmold forward
+            // `expr >=> name` -> unmold forward
             TokenKind::UnmoldForward => {
-                self.advance(); // consume `]=>`
+                self.advance(); // consume `>=>`
                 let target = self.expect_ident()?;
-                // Single-direction constraint: ]=> used, <=[ must not follow
+                // Single-direction constraint: >=> used, <=< must not follow
                 if self.check(&TokenKind::UnmoldBackward) {
                     return Err(ParseError {
-                        message: "E0302: 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
+                        message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
                         span: self.current_span(),
                     });
                 }
@@ -557,14 +557,14 @@ impl Parser {
                 }))
             }
 
-            // `name <=[ expr` -> unmold backward
+            // `name <=< expr` -> unmold backward
             TokenKind::UnmoldBackward => {
-                self.advance(); // consume `<=[`
+                self.advance(); // consume `<=<`
                 let source = self.parse_expression()?;
-                // Single-direction constraint: <=[ used, ]=> must not follow
+                // Single-direction constraint: <=< used, >=> must not follow
                 if self.check(&TokenKind::UnmoldForward) {
                     return Err(ParseError {
-                        message: "E0302: 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
+                        message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
                         span: self.current_span(),
                     });
                 }
@@ -1772,8 +1772,8 @@ impl Parser {
     /// Returns a Statement:
     /// - If the chain ends with `=> ident` (no call/access), it becomes an Assignment.
     /// - Otherwise the entire chain is wrapped as `Expr::Pipeline`.
-    /// - If `]=>` follows instead, wraps as UnmoldForward.
-    /// - If no `=>` or `]=>` follows, returns `Statement::Expr(expr)`.
+    /// - If `>=>` follows instead, wraps as UnmoldForward.
+    /// - If no `=>` or `>=>` follows, returns `Statement::Expr(expr)`.
     fn finish_expr_as_statement(
         &mut self,
         expr: Expr,
@@ -1816,7 +1816,7 @@ impl Parser {
 
             if steps.len() == 1 {
                 // No actual pipeline steps parsed (e.g., we hit `=> :Type`)
-                // Re-check for ]=>
+                // Re-check for >=>
                 if self.check(&TokenKind::UnmoldForward) {
                     let span = self.current_span();
                     self.advance();
@@ -1852,7 +1852,7 @@ impl Parser {
             Ok(Statement::Expr(Expr::Pipeline(steps, start_span)))
         } else if self.check(&TokenKind::UnmoldForward) {
             let span = self.current_span();
-            self.advance(); // consume `]=>`
+            self.advance(); // consume `>=>`
             let target = self.expect_ident()?;
             Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                 source: expr,

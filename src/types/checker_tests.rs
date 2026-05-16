@@ -3864,7 +3864,7 @@ fn test_c12_2_builtin_arg_recursion_rejects_internal_field_access() {
     // Mirrors tests/parity.rs :: rc6a_error_inheritance_basic.
     let source = "Error => AppError = @(code: Int)\n\
                   err <= AppError(type <= \"AppError\", message <= \"test\", code <= 42)\n\
-                  Str[err.code]() ]=> code_str\n\
+                  Str[err.code]() >=> code_str\n\
                   stdout(err.__type + \" \" + code_str)\n";
     let (_, errors) = check(source);
     let e1960: Vec<_> = errors
@@ -5482,7 +5482,7 @@ fn test_cage_accepts_matching_js_rilla_runner() {
 >>> npm:lodash => @(lodash)
 items <= @[1, 2, 3]
 result <= Cage[lodash, JSCall[@["sum"], @[items], Int]()]()
-result ]=> total
+result >=> total
 stdout(total.toString())
 "#;
     let (_checker, errors) = check(source);
@@ -5505,7 +5505,7 @@ Thing = @(name: Str)
 typeName <= TypeName[Thing(name <= "box")]()
 >>> npm:lodash => @(lodash)
 result <= Cage[lodash, JSCall[@["sum"], @[@[1, 2]], Int]()]()
-result.errorInfo() ]=> info
+result.errorInfo() >=> info
 stdout(typeName + ":" + info.message)
 "#;
     let (_checker, errors) = check(source);
@@ -6198,7 +6198,7 @@ fn e34b_018_all_rejects_extra_type_argument() {
     let src = "a1 <= Async[1]()\n\
                a2 <= Async[2]()\n\
                asyncs <= @[a1, a2]\n\
-               All[asyncs, \"extra\"]() ]=> bad\n";
+               All[asyncs, \"extra\"]() >=> bad\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
@@ -6214,7 +6214,7 @@ fn e34b_018_race_rejects_extra_type_argument() {
     let src = "a1 <= Async[1]()\n\
                a2 <= Async[2]()\n\
                asyncs <= @[a1, a2]\n\
-               Race[asyncs, \"extra\"]() ]=> bad\n";
+               Race[asyncs, \"extra\"]() >=> bad\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
@@ -6228,7 +6228,7 @@ fn e34b_018_race_rejects_extra_type_argument() {
 #[test]
 fn e34b_018_timeout_rejects_missing_ms() {
     let src = "a <= Async[1]()\n\
-               Timeout[a]() ]=> bad\n";
+               Timeout[a]() >=> bad\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
@@ -6242,7 +6242,7 @@ fn e34b_018_timeout_rejects_missing_ms() {
 #[test]
 fn e34b_018_timeout_rejects_non_numeric_ms() {
     let src = "a <= Async[1]()\n\
-               Timeout[a, \"5s\"]() ]=> bad\n";
+               Timeout[a, \"5s\"]() >=> bad\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1506]")
@@ -6256,7 +6256,7 @@ fn e34b_018_timeout_rejects_non_numeric_ms() {
 #[test]
 fn e34b_018_cancel_rejects_extra_type_argument() {
     let src = "a <= Async[1]()\n\
-               Cancel[a, \"extra\"]() ]=> bad\n";
+               Cancel[a, \"extra\"]() >=> bad\n";
     let (_, errors) = check(src);
     assert!(
         errors.iter().any(|e| e.message.contains("[E1505]")
@@ -6272,10 +6272,10 @@ fn e34b_018_async_family_correct_signatures_accepted() {
     let src = "a1 <= Async[1]()\n\
                a2 <= Async[2]()\n\
                asyncs <= @[a1, a2]\n\
-               All[asyncs]() ]=> all_v\n\
-               Race[asyncs]() ]=> race_v\n\
-               Timeout[a1, 5000]() ]=> to_v\n\
-               Cancel[a1]() ]=> cancel_v\n";
+               All[asyncs]() >=> all_v\n\
+               Race[asyncs]() >=> race_v\n\
+               Timeout[a1, 5000]() >=> to_v\n\
+               Cancel[a1]() >=> cancel_v\n";
     let (_, errors) = check(src);
     assert!(
         errors.is_empty(),
@@ -6378,10 +6378,10 @@ fn json_enum_has_value_field_infers_bool() {
     let src = r#"Enum => Status = :Active :Inactive
 User = @(name: Str, status: Status)
 raw <= '{"name": "Dave", "status": "Bogus"}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 statusHasValue <= user.status.has_value
 rawTop <= '"Bogus"'
-JSON[rawTop, Status]() ]=> topStatus
+JSON[rawTop, Status]() >=> topStatus
 topHasValue <= topStatus.has_value
 "#;
     let (program, parse_errors) = parse(src);

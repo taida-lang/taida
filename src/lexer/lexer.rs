@@ -22,7 +22,11 @@ impl std::error::Error for LexError {}
 /// The Taida Lang lexer.
 ///
 /// Converts source text into a stream of tokens. Handles:
-/// - All 10 Taida operators: `=`, `=>`, `<=`, `]=>`, `<=[`, `|==`, `|`, `|>`, `>>>`, `<<<`
+/// - All 10 Taida operators: `=`, `=>`, `<=`, `>=>`, `<=<`, `|==`,
+///   `(| ... |>)` (condition delimiter pair), `>>>`, `<<<`, `:`.
+///   Note: the lexer emits `|` and `|>` as separate `TokenKind::Pipe` /
+///   `TokenKind::PipeGt` tokens; the pair is counted as one semantic
+///   operator in PHILOSOPHY / CLAUDE / `docs/reference/operators.md`.
 /// - Arithmetic: `+`, `-`, `*`, `/`, `%`
 /// - Comparison: `==`, `!=`, `<`, `>`, `>=`
 /// - Logical: `&&`, `||`, `!`
@@ -213,9 +217,13 @@ impl Lexer {
 
             // Operators starting with <
             '<' => {
-                if self.peek() == '=' && self.peek_at(1) == '[' {
+                // F42 sweep: Unmold backward becomes `<=<` (was the
+                // three-character `<` `=` `[` sequence prior to F42).
+                // Lookahead order matters: `<=<` must beat `<=` (LtEq) and
+                // the legacy `<=<` shape, which is no longer recognised.
+                if self.peek() == '=' && self.peek_at(1) == '<' {
                     self.advance(); // =
-                    self.advance(); // [
+                    self.advance(); // <
                     self.emit(TokenKind::UnmoldBackward, start, start_line, start_col);
                 } else if self.peek() == '=' {
                     self.advance();
@@ -231,7 +239,16 @@ impl Lexer {
 
             // Operators starting with >
             '>' => {
-                if self.peek() == '>' && self.peek_at(1) == '>' {
+                // F42 sweep: Unmold forward becomes `>=>` (was the
+                // three-character `]` `=` `>` sequence prior to F42).
+                // Lookahead order matters: `>=>` must beat `>=` (GtEq) and
+                // `>>>` (Import); the legacy `>=>` shape is no longer
+                // recognised (the `]` branch below falls back to `RBracket`).
+                if self.peek() == '=' && self.peek_at(1) == '>' {
+                    self.advance(); // =
+                    self.advance(); // >
+                    self.emit(TokenKind::UnmoldForward, start, start_line, start_col);
+                } else if self.peek() == '>' && self.peek_at(1) == '>' {
                     self.advance(); // >
                     self.advance(); // >
                     self.emit(TokenKind::Import, start, start_line, start_col);
@@ -249,13 +266,10 @@ impl Lexer {
 
             // Operators starting with ]
             ']' => {
-                if self.peek() == '=' && self.peek_at(1) == '>' {
-                    self.advance(); // =
-                    self.advance(); // >
-                    self.emit(TokenKind::UnmoldForward, start, start_line, start_col);
-                } else {
-                    self.emit(TokenKind::RBracket, start, start_line, start_col);
-                }
+                // F42 sweep: legacy `>=>` shape removed; `]` now always
+                // closes a list / mold header bracket. Unmold forward uses
+                // `>=>` (see the `>` branch above).
+                self.emit(TokenKind::RBracket, start, start_line, start_col);
             }
 
             // Operators starting with !
@@ -1005,7 +1019,7 @@ mod tests {
     #[test]
     fn test_unmold_forward() {
         assert_eq!(
-            tok_kinds("opt ]=> value"),
+            tok_kinds("opt >=> value"),
             vec![Ident("opt".into()), UnmoldForward, Ident("value".into())]
         );
     }
@@ -1013,7 +1027,7 @@ mod tests {
     #[test]
     fn test_unmold_backward() {
         assert_eq!(
-            tok_kinds("value <=[ opt"),
+            tok_kinds("value <=< opt"),
             vec![Ident("value".into()), UnmoldBackward, Ident("opt".into())]
         );
     }
@@ -1535,9 +1549,9 @@ mod tests {
 
     #[test]
     fn test_map_operation() {
-        // Map[numbers, _ x = x * 2]() ]=> doubled
+        // Map[numbers, _ x = x * 2]() >=> doubled
         assert_eq!(
-            tok_kinds("Map[numbers, _ x = x * 2]() ]=> doubled"),
+            tok_kinds("Map[numbers, _ x = x * 2]() >=> doubled"),
             vec![
                 Ident("Map".into()),
                 LBracket,
@@ -1746,9 +1760,9 @@ mod tests {
 
     #[test]
     fn test_async_unmold_await() {
-        // response ]=> data
+        // response >=> data
         assert_eq!(
-            tok_kinds("response ]=> data"),
+            tok_kinds("response >=> data"),
             vec![
                 Ident("response".into()),
                 UnmoldForward,

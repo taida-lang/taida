@@ -206,7 +206,7 @@ mod tests {
     ///
     /// C20-2 (2026-04-20): +8,477 bytes in core.c — added the
     /// UTF-8-aware `taida_io_stdin_line` line editor (derived from
-    /// linenoise BSD-2-Clause) so that `stdinLine(prompt) ]=> line`
+    /// linenoise BSD-2-Clause) so that `stdinLine(prompt) >=> line`
     /// returns an `Async[Lax[Str]]` that survives multibyte input
     /// editing on a POSIX TTY (fixes ROOT-7). Non-TTY fallback uses
     /// getline to keep pipe / redirect parity with the other two

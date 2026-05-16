@@ -54,7 +54,7 @@ stdout(Sum[flat]().toString())
 
 // -- FindIndex
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 idx <= FindIndex[@[1, 3, 4, 7], isEven]()

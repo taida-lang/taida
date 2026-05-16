@@ -63,7 +63,7 @@ fn migrated_schema_mod_src() -> String {
         .expect("read schema_mod.td")
         .replace(
             "  | parsed.has_value |> parsed.__value.name + \"/\" + parsed.__value.age.toString()",
-            "  | parsed.has_value |>\n    parsed ]=> parsedValue\n    parsedValue.name + \"/\" + parsedValue.age.toString()",
+            "  | parsed.has_value |>\n    parsed >=> parsedValue\n    parsedValue.name + \"/\" + parsedValue.age.toString()",
         )
 }
 
@@ -280,7 +280,7 @@ fn c20b_015_interpreter_overlay_does_not_leak_to_caller_scope() {
 stdout(loadUser())
 stdout(\"\\n\")
 raw <= \"{\\\"name\\\":\\\"bob\\\",\\\"age\\\":9}\"
-JSON[raw, UserSchema]() ]=> jsResult
+JSON[raw, UserSchema]() >=> jsResult
 stdout(jsResult.name)
 ";
     fs::write(tmp.join("caller.td"), leaky_caller).expect("write caller");
@@ -330,7 +330,7 @@ Schema = @(name: Str)
 load raw: Str =
   parsed <= JSON[raw, Schema]()
   | parsed.has_value |>
-    parsed ]=> parsedValue
+    parsed >=> parsedValue
     parsedValue.name
   | _ |> \"no\"
 => :Str
@@ -349,7 +349,7 @@ wrap raw: Str = load(raw) => :Str
 
 stdout(wrap(\"{\\\"name\\\":\\\"ok\\\"}\"))
 stdout(\"\\n\")
-JSON[\"{\\\"name\\\":\\\"leak\\\"}\", Schema]() ]=> jsResult
+JSON[\"{\\\"name\\\":\\\"leak\\\"}\", Schema]() >=> jsResult
 stdout(jsResult.name)
 stdout(\"\\n\")
 ";
@@ -394,7 +394,7 @@ fn c20b_015_interpreter_truly_unknown_schema_still_errors() {
     fs::create_dir_all(&tmp).expect("mkdir");
     let src = "\
 raw <= \"{\\\"x\\\":1}\"
-JSON[raw, ThisDoesNotExist]() ]=> jsResult
+JSON[raw, ThisDoesNotExist]() >=> jsResult
 stdout(jsResult.x.toString())
 ";
     fs::write(tmp.join("prog.td"), src).expect("write prog");
@@ -486,7 +486,7 @@ Schema = @(name: Str)
 load raw: Str =
   parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
   | parsed.has_value |>
-    parsed ]=> parsedValue
+    parsed >=> parsedValue
     parsedValue.name
   | _ |> \"no\"
 => :Str
@@ -544,7 +544,7 @@ stdout(wrap(\"{\\\"name\\\":\\\"ignored\\\"}\"))
     // the bug report.
     let prog2_src = "\
 probeJson <= \"{\\\"name\\\":\\\"leak\\\"}\"
-JSON[probeJson, Schema]() ]=> probe
+JSON[probeJson, Schema]() >=> probe
 stdout(probe.name)
 ";
     let (prog2, errs2) = parse(prog2_src);
@@ -594,7 +594,7 @@ Schema = @(name: Str)
 load raw: Str =
   parsed <= JSON[raw, UnknownTypeThatDoesNotExist]()
   | parsed.has_value |>
-    parsed ]=> parsedValue
+    parsed >=> parsedValue
     parsedValue.name
   | _ |> \"no\"
 => :Str
@@ -637,7 +637,7 @@ stdout(wrap(\"{\\\"name\\\":\\\"x\\\"}\"))
     // from the independent scope-leak signal.
     let probe_src = "\
 probeJson <= \"{\\\"name\\\":\\\"leak\\\"}\"
-JSON[probeJson, Schema]() ]=> probe
+JSON[probeJson, Schema]() >=> probe
 stdout(probe.name)
 ";
     let (probe, probe_errs) = parse(probe_src);
@@ -687,7 +687,7 @@ Schema = @(name: Str)
 load payload: Str =
   parsed <= JSON[payload, UnknownTypeThatDoesNotExist]()
   | parsed.has_value |>
-    parsed ]=> parsedValue
+    parsed >=> parsedValue
     parsedValue.name
   | _ |> \"no\"
 => :Str

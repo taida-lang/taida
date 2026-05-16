@@ -24,8 +24,12 @@ impl Span {
 
 /// All token types in Taida Lang.
 ///
-/// Taida has exactly 10 custom operators plus arithmetic/comparison/logical operators,
-/// special literals, and structural tokens.
+/// Taida exposes exactly 10 semantic operators (per PHILOSOPHY.md /
+/// `docs/reference/operators.md`): `=`, `=>`, `<=`, `>=>`, `<=<`,
+/// `|==`, `(| ... |>)` (condition delimiter pair), `>>>`, `<<<`,
+/// and `:` (type marker). At the token level the condition pair is
+/// emitted as two adjacent tokens (`Pipe` + `PipeGt`); they are
+/// counted as one semantic operator.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // ── Literals ──────────────────────────────────────────────
@@ -49,22 +53,23 @@ pub enum TokenKind {
     /// Placeholder: `_`
     Placeholder,
 
-    // ── The 10 Taida Operators ───────────────────────────────
+    // ── The 10 Taida Operators (tokens; `Pipe` + `PipeGt` together
+    //    form the single semantic `(| ... |>)` delimiter pair) ──
     /// `=` Definition
     Eq,
     /// `=>` Right buchi (pipe forward / assignment right)
     FatArrow,
     /// `<=` Left buchi (assignment left / pipe backward)
     LtEq,
-    /// `]=>` Unmold forward
+    /// `>=>` Unmold forward (renamed from legacy `]=>` in the F42 sweep).
     UnmoldForward,
-    /// `<=[` Unmold backward
+    /// `<=<` Unmold backward (renamed from legacy `<=[` in the F42 sweep).
     UnmoldBackward,
     /// `|==` Error ceiling
     ErrorCeiling,
-    /// `|` Condition guard
+    /// `|` Condition guard (start of the `(| ... |>)` delimiter pair).
     Pipe,
-    /// `|>` Condition extract
+    /// `|>` Condition extract (end of the `(| ... |>)` delimiter pair).
     PipeGt,
     /// `>>>` Import
     Import,

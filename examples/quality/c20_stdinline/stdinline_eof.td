@@ -6,6 +6,6 @@
 //
 // Driver: run with stdin closed (no input piped).
 
-stdinLine("") ]=> line
+stdinLine("") >=> line
 stdout("has_value=" + line.hasValue().toString())
 stdout("val=" + line.getOrDefault("<empty>"))

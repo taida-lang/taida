@@ -74,25 +74,25 @@ debug(flat_err.isError())
 // Test 16: Lax.map(fn)
 lax_val <= Div[100, 4]()
 lax_mapped <= lax_val.map(double)
-lax_mapped ]=> lm_result
+lax_mapped >=> lm_result
 debug(lm_result)
 
 // Test 17: Empty Lax.map stays empty
 lax_empty <= Div[100, 0]()
 lax_em <= lax_empty.map(double)
-lax_em ]=> le_result
+lax_em >=> le_result
 debug(le_result)
 
 // Test 18: Lax.flatMap(fn)
 wrapLax x: Int = Lax[x * 5]() => :Lax[Int]
 lax_fm <= Div[10, 2]().flatMap(wrapLax)
-lax_fm ]=> lfm_result
+lax_fm >=> lfm_result
 debug(lfm_result)
 
 // === Result[T, P] predicate tests ===
 
-// Test 19: Result[value, _ = true]() ]=> value — predicate passes
-Result[42, _ = true]() ]=> pred_ok
+// Test 19: Result[value, _ = true]() >=> value — predicate passes
+Result[42, _ = true]() >=> pred_ok
 debug(pred_ok)
 
 // Test 20: Result[value, _ x = x >= 18]() — validation predicate
@@ -108,5 +108,5 @@ debug(Result[21, _ = true]().map(double).getOrDefault(0))
 debug(Result[21, _ = false]().map(double).isError())
 
 // Test 23: backward compatibility — no predicate
-Result[42]() ]=> bc_val
+Result[42]() >=> bc_val
 debug(bc_val)

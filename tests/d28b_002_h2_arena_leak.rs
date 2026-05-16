@@ -63,8 +63,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 50000, 30000, 128, @(cert <= "{cert}", key <= "{key}", protocol <= "h2"))
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)
 "#

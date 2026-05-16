@@ -2350,7 +2350,7 @@ fn test_nb27_empty_path_parse() {
 #[test]
 fn test_nb29_sentinel_shadow_by_unmold() {
     // Simulates: >>> taida-lang/net => @(httpServe)
-    //            someResult ]=> httpServe
+    //            someResult >=> httpServe
     // After unmold, httpServe is overwritten with a non-sentinel value.
     // try_net_func must return None (sentinel guard blocks dispatch).
     let mut interp = Interpreter::new();
@@ -2367,7 +2367,7 @@ fn test_nb29_sentinel_shadow_by_unmold() {
         "Before shadow: sentinel should be active (httpServe requires args)"
     );
 
-    // Step 2: Simulate unmold shadow (]=> httpServe overwrites with a value)
+    // Step 2: Simulate unmold shadow (>=> httpServe overwrites with a value)
     interp.env.define_force("httpServe", Value::Int(99));
 
     // Step 3: try_net_func must return None — sentinel is gone

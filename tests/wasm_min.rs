@@ -613,7 +613,7 @@ fn wasm_min_int_to_string() {
     );
 }
 
-/// W-3f F-2: Int["str"]() ]=> should work via taida_int_mold_str + taida_generic_unmold.
+/// W-3f F-2: Int["str"]() >=> should work via taida_int_mold_str + taida_generic_unmold.
 #[test]
 fn wasm_min_int_mold_str() {
     let Some(wasmtime) = require_wasmtime() else {
@@ -742,7 +742,7 @@ fn wasm_min_error_ceiling() {
     );
 }
 
-/// W-5: Lax[T] — Div/Mod molds return Lax, ]=> unmolds.
+/// W-5: Lax[T] — Div/Mod molds return Lax, >=> unmolds.
 #[test]
 fn wasm_min_lax_basic() {
     let Some(wasmtime) = require_wasmtime() else {
@@ -1295,7 +1295,7 @@ fn rc6_wasm_error_inheritance() {
     let source = r#"
 Error => AppError = @(code: Int)
 err <= AppError(type <= "AppError", message <= "test", code <= 42)
-Str[err.code]() ]=> code_str
+Str[err.code]() >=> code_str
 stdout(TypeName[err]() + " " + code_str)
 "#;
     let interp =
@@ -1314,7 +1314,7 @@ fn rc6_wasm_error_multilevel() {
 Error => AppError = @(app_code: Int)
 AppError => ValidationError = @(field_name: Str)
 ve <= ValidationError(type <= "ValidationError", message <= "bad", app_code <= 400, field_name <= "email")
-Str[ve.app_code]() ]=> ac
+Str[ve.app_code]() >=> ac
 stdout(TypeName[ve]() + " " + ac + " " + ve.field_name)
 "#;
     let interp = run_interpreter_src(source, "rc6_wasm_multi_err")
@@ -1357,8 +1357,8 @@ fn rc6_wasm_custom_inheritance() {
 Vehicle = @(name: Str, speed: Int)
 Vehicle => Car = @(doors: Int)
 car <= Car(name <= "Sedan", speed <= 120, doors <= 4)
-Str[car.speed]() ]=> sp
-Str[car.doors]() ]=> dr
+Str[car.speed]() >=> sp
+Str[car.doors]() >=> dr
 stdout(TypeName[car]() + " " + car.name + " " + sp + " " + dr)
 "#;
     let interp =
@@ -1378,9 +1378,9 @@ Shape = @(color: Str)
 Shape => Polygon = @(sides: Int)
 Polygon => Rectangle = @(width: Int, height: Int)
 rect <= Rectangle(color <= "blue", sides <= 4, width <= 10, height <= 5)
-Str[rect.sides]() ]=> s
-Str[rect.width]() ]=> w
-Str[rect.height]() ]=> h
+Str[rect.sides]() >=> s
+Str[rect.width]() >=> w
+Str[rect.height]() >=> h
 stdout(TypeName[rect]() + " " + rect.color + " " + s + " " + w + " " + h)
 "#;
     let interp = run_interpreter_src(source, "rc6_wasm_multilevel")
@@ -1417,7 +1417,7 @@ handler req =
   @(status <= 200, headers <= @[], body <= "ok")
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
-httpServe(8080, handler, 1, 1000) ]=> serverResult
+httpServe(8080, handler, 1, 1000) >=> serverResult
 stdout(serverResult.ok)
 "#;
     let td_path = std::env::temp_dir().join("taida_nb30_serve.td");
@@ -1454,9 +1454,9 @@ stdout(serverResult.ok)
 fn test_nb30_wasm_min_net_http_parse_compile_error() {
     let source = r#">>> taida-lang/net => @(httpParseRequestHead)
 bytesLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
-bytesLax ]=> bytes
+bytesLax >=> bytes
 result <= httpParseRequestHead(bytes)
-result ]=> parsed
+result >=> parsed
 stdout(parsed.consumed.toString())
 "#;
     let td_path = std::env::temp_dir().join("taida_nb30_parse.td");
@@ -1493,7 +1493,7 @@ stdout(parsed.consumed.toString())
 fn test_nb30_wasm_min_net_http_encode_compile_error() {
     let source = r#">>> taida-lang/net => @(httpEncodeResponse)
 result <= httpEncodeResponse(@(status <= 200, headers <= @[], body <= "Hello"))
-result ]=> encoded
+result >=> encoded
 stdout(encoded.kind)
 "#;
     let td_path = std::env::temp_dir().join("taida_nb30_encode.td");

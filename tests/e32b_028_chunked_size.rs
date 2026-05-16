@@ -178,8 +178,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
 
 asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)
 "#
@@ -196,8 +196,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
 
 asyncResult <= httpServe({port}, handler, 2)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)
 "#
@@ -221,8 +221,8 @@ handler req writer =
   endResponse(writer)
 
 asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)
 "#
@@ -234,7 +234,7 @@ stdout(r.requests)
 // chunk-size guard must reject malformed framing on this path even when the
 // handler only requests a single chunk before responding — otherwise an
 // attacker could bypass the eager guarantees by attaching a chunk-by-chunk
-// streaming handler. The handler unmolds the `Lax[Bytes]` via `]=>` so we
+// streaming handler. The handler unmolds the `Lax[Bytes]` via `>=>` so we
 // stay clear of the compiler-internal `__value` accessor (rejected by
 // E1960) while still exercising the readBodyChunk codepath end-to-end.
 fn streaming_chunk_source(port: u16) -> String {
@@ -243,14 +243,14 @@ fn streaming_chunk_source(port: u16) -> String {
 
 handler req writer =
   chunk <= readBodyChunk(req)
-  chunk ]=> bytes
+  chunk >=> bytes
   startResponse(writer, 200, @[@(name <= "Content-Type", value <= "application/octet-stream")])
   writeChunk(writer, bytes)
   endResponse(writer)
 
 asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)
 "#

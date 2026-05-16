@@ -7,19 +7,19 @@ Pilot = @(name: Str, age: Int, active: Bool)
 
 // Cast JSON through schema
 raw <= '{"name": "Asuka", "age": 14, "active": true}'
-JSON[raw, Pilot]() ]=> pilot
+JSON[raw, Pilot]() >=> pilot
 stdout("Name: " + pilot.name)
 stdout("Age: " + pilot.age.toString())
 
 // Schema handles missing fields (defaults applied)
 partial <= '{"name": "Rei"}'
-JSON[partial, Pilot]() ]=> pilot2
+JSON[partial, Pilot]() >=> pilot2
 stdout("Pilot2 age (default): " + pilot2.age.toString())
 stdout("Pilot2 active (default): " + pilot2.active.toString())
 
 // Schema handles null (null -> default)
 with_null <= '{"name": null, "age": null, "active": null}'
-JSON[with_null, Pilot]() ]=> pilot3
+JSON[with_null, Pilot]() >=> pilot3
 stdout("Null name -> empty: '" + pilot3.name + "'")
 
 // Convert Taida value to JSON string (output direction — still works)
@@ -34,14 +34,14 @@ stdout(pretty)
 // List schema
 PilotEntry = @(name: Str, sync_rate: Int)
 list_raw <= '[{"name": "Asuka", "sync_rate": 78}, {"name": "Rei", "sync_rate": 65}]'
-JSON[list_raw, @[PilotEntry]]() ]=> pilots
+JSON[list_raw, @[PilotEntry]]() >=> pilots
 stdout("Number of pilots: " + pilots.length().toString())
 
 // Nested schema
 Address = @(city: Str, zip: Str)
 Person = @(name: Str, address: Address)
 nested_raw <= '{"name": "Asuka", "address": {"city": "Tokyo-3", "zip": "999"}}'
-JSON[nested_raw, Person]() ]=> person
+JSON[nested_raw, Person]() >=> person
 stdout("City: " + person.address.city)
 
 // Lax result check
@@ -57,6 +57,6 @@ stdout("Bad parse has value: " + bad_result.has_value.toString())
 UserInfo = @(name: Str, age: Int)
 StatsInfo = @(score: Float, rank: Int)
 multi_raw <= '{"name": "Asuka", "age": 14, "score": 95.5, "rank": 3}'
-JSON[multi_raw, UserInfo]() ]=> user
-JSON[multi_raw, StatsInfo]() ]=> stats
+JSON[multi_raw, UserInfo]() >=> user
+JSON[multi_raw, StatsInfo]() >=> stats
 stdout("User: " + user.name + ", Rank: " + stats.rank.toString())

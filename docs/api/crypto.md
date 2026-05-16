@@ -29,7 +29,7 @@ sha256 value: Bytes => :Str
 | Name | Type | Description |
 |------|------|-------------|
 | `value` | `Str` | UTF-8 バイト列としてハッシュを計算する。 |
-| `value` | `Bytes` | バイト列をそのままハッシュする。`Bytes["..."]()` / `Bytes[@[Int]]()` は `Lax[Bytes]` を返すので、`]=>` で取り出してから渡す。 |
+| `value` | `Bytes` | バイト列をそのままハッシュする。`Bytes["..."]()` / `Bytes[@[Int]]()` は `Lax[Bytes]` を返すので、`>=>` で取り出してから渡す。 |
 
 **Returns**: `:Str` — 常に 64 文字の小文字 16 進ダイジェスト。大文字は
 含まない。空入力 (`""` または空 `Bytes`) のハッシュは
@@ -41,7 +41,7 @@ sha256 value: Bytes => :Str
 sha256("hello") => hex
 // hex = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
-Bytes["Hi"]() ]=> raw
+Bytes["Hi"]() >=> raw
 sha256(raw) => hex_bytes
 // hex_bytes = "3639efcd08abb273b1619e82e78c29a7df02c1051b1820e99fc395dcaa3326b8"
 
@@ -53,7 +53,7 @@ sha256("") => empty_hex
 副作用なし。同じ入力からは常に同じ出力を返す純粋関数。`Str` と
 `Bytes` の両方を受けるが、暗黙の型変換ではなく実装側でそれぞれを
 独立に処理する。`Lax[Bytes]` を直接渡すと意図しない経路に落ちるため、
-`Bytes[...]()` の結果は必ず `]=>` でアンモールドしてから渡すこと。
+`Bytes[...]()` の結果は必ず `>=>` でアンモールドしてから渡すこと。
 
 ---
 

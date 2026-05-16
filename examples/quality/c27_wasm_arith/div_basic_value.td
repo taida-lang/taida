@@ -2,5 +2,5 @@
 // Bit-pattern parity for `Div[1.0, 3.0]()` — exercises the truncation
 // behavior of `taida_float_to_str` across backends.
 // Reference: 0.3333333333333333
-Div[1.0, 3.0]() ]=> r
+Div[1.0, 3.0]() >=> r
 debug(r)

@@ -5,7 +5,7 @@ adder x = (_ y = x + y)(10) => :Int
 
 items <= @[1, 2, 3]
 
-Map[items, _ x = adder(x)]() ]=> result
+Map[items, _ x = adder(x)]() >=> result
 stdout(result)
 
 // Expected: @[11, 12, 13]

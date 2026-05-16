@@ -8,7 +8,7 @@ classify x =
 
 items <= @[1, 2, 3, 4, 5, 6]
 
-Filter[items, _ x = classify(x)]() ]=> evens
+Filter[items, _ x = classify(x)]() >=> evens
 stdout(evens)
 
 // Expected: @[2, 4, 6]

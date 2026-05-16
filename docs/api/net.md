@@ -37,8 +37,8 @@ httpServe port: Int  handler: HandlerFn  opts: ServeOpts => :Async[Result[@(ok: 
 | `handler` | `HandlerFn` | リクエスト処理関数。単引数形式 (応答返却) と双引数形式 (ストリーミング) のいずれか。§1.2 / §1.3 を参照。 |
 | `opts` | `ServeOpts` | 動作オプション。省略時は全項目デフォルト。§1.4 を参照。 |
 
-**Returns**: `:Async[Result[@(ok: Bool, requests: Int)]]` — `]=>` で待機
-すると `Result` が得られ、もう一度 `]=>` で終了結果 pack
+**Returns**: `:Async[Result[@(ok: Bool, requests: Int)]]` — `>=>` で待機
+すると `Result` が得られ、もう一度 `>=>` で終了結果 pack
 `@(ok: Bool, requests: Int)` を取り出します。`ok` は bind / accept ループが
 正常に閉じたかどうか、`requests` は実際に処理したリクエスト数です。
 
@@ -49,8 +49,8 @@ handler req: Request =
   "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
 => :Str
 
-httpServe(8080, handler) ]=> result    // Async unmold → Result
-result ]=> summary                     // Result unmold → @(ok, requests)。失敗時 throw
+httpServe(8080, handler) >=> result    // Async unmold → Result
+result >=> summary                     // Result unmold → @(ok, requests)。失敗時 throw
 stdout("requests: " + summary.requests.toString())
 ```
 
@@ -298,7 +298,7 @@ SpanContains[span: @(start: Int, len: Int), raw: Bytes, needle: Str]() => :Bool
 **Example**:
 
 ```taida
-req.headers.get(0) ]=> first
+req.headers.get(0) >=> first
 hasGzip <= SpanContains[first.value, req.raw, "gzip"]()
 ```
 
@@ -456,7 +456,7 @@ wsUpgrade req: Request  writer: Writer => :Lax[@(ws: WsConn)]
 ```
 
 ハンドラの冒頭 (`startResponse` / `writeChunk` / `endResponse` より前) で
-1 度だけ呼べます。戻り値を `]=>` でアンモールドして得た `ws` を以降の
+1 度だけ呼べます。戻り値を `>=>` でアンモールドして得た `ws` を以降の
 `wsSend` / `wsReceive` / `wsClose` に渡します。
 
 `Sec-WebSocket-Version: 13` (RFC 6455) 固定。GET 以外の method、または
@@ -649,7 +649,7 @@ handler req: Request  writer: Writer =
 forwardChunks req: Request  writer: Writer =
   readBodyChunk(req) => chunkLax
   | chunkLax.has_value |>
-      chunkLax ]=> chunk
+      chunkLax >=> chunk
       writeChunk(writer, chunk)
       forwardChunks(req, writer)
   | _ |> 0

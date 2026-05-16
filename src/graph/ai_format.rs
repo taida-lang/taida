@@ -568,10 +568,10 @@ fn summarize_stmt(stmt: &Statement) -> String {
         }
         Statement::Expr(expr) => summarize_expr(expr),
         Statement::UnmoldForward(uf) => {
-            format!("{} ]=> {}", summarize_expr(&uf.source), uf.target)
+            format!("{} >=> {}", summarize_expr(&uf.source), uf.target)
         }
         Statement::UnmoldBackward(ub) => {
-            format!("{} <=[ {}", ub.target, summarize_expr(&ub.source))
+            format!("{} <=< {}", ub.target, summarize_expr(&ub.source))
         }
         Statement::ErrorCeiling(ec) => {
             format!(
@@ -685,7 +685,7 @@ fn summarize_expr(expr: &Expr) -> String {
         }
 
         Expr::Unmold(inner, _) => {
-            format!("{} ]=>", summarize_expr(inner))
+            format!("{} >=>", summarize_expr(inner))
         }
 
         Expr::Lambda(params, body, _) => {

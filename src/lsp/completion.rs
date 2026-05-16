@@ -5,7 +5,9 @@
 /// - User-defined types (ClassLikeDef — BuchiPack / Mold / Inheritance kinds、E30 Phase 7.5 / E30B-006)
 /// - Built-in mold types (30+ operation molds)
 /// - Prelude functions (stdout, stderr, stdin, jsonEncode, jsonPretty, etc.)
-/// - Operators (10 Taida operators)
+/// - Operators (token-level: 10 tokens; the semantic 10-operator list
+///   in PHILOSOPHY.md splits `(| ... |>)` into two tokens and treats
+///   `:` as type-annotation grammar)
 /// - Field/method completion after `.`
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, Documentation, InsertTextFormat,
@@ -572,8 +574,8 @@ fn prelude_completions() -> Vec<CompletionItem> {
             "stdinLine",
             "stdinLine(prompt?) => :Async[Lax[Str]] -- UTF-8-aware line editor",
             "Read a line with UTF-8-aware editing (rustyline / readline/promises \
-             / linenoise-derived). Returns Async[Lax[Str]]; use `]=>` to unmold, \
-             e.g. `stdinLine(\"name: \") ]=> line`. EOF / Ctrl-C / Ctrl-D collapse \
+             / linenoise-derived). Returns Async[Lax[Str]]; use `>=>` to unmold, \
+             e.g. `stdinLine(\"name: \") >=> line`. EOF / Ctrl-C / Ctrl-D collapse \
              to Lax.failure(\"\").",
         ),
         (
@@ -856,7 +858,7 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         (
             "Lax",
             "Lax[value]() -- safe value with default guarantee",
-            "Lax[T]: BuchiPack-based mold. has_value / __value / __default / __type fields. Unmold with `]=>`.",
+            "Lax[T]: BuchiPack-based mold. has_value / __value / __default / __type fields. Unmold with `>=>`.",
         ),
         (
             "Result",
@@ -866,7 +868,7 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         (
             "Async",
             "Async[value] -- asynchronous value container",
-            "Async[T]: Wraps a value for asynchronous computation. Unmold with `]=>` to await.",
+            "Async[T]: Wraps a value for asynchronous computation. Unmold with `>=>` to await.",
         ),
         (
             "Gorillax",
@@ -938,17 +940,32 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         .collect()
 }
 
-/// Taida operator completions (10 operators).
+/// LSP operator completions. Lists the **token-level** Taida operator
+/// surface so editors can offer per-token completions; the count below
+/// (10 entries) is therefore not the same as the semantic 10-operator
+/// list documented in PHILOSOPHY.md / `docs/reference/operators.md`.
+///
+/// Semantic vs token mapping:
+/// - `(| ... |>)` is one semantic operator (a condition delimiter
+///   pair) but two tokens (`|` and `|>`) at the lexer level — both
+///   tokens are surfaced individually here for editor UX.
+/// - `:` is the 10th semantic operator (type marker) but is part of
+///   identifier/type-annotation grammar at the token level, so it is
+///   intentionally omitted from this completion list.
+///
+/// The semantic 10-operator pin lives in
+/// `docs/reference/operators.md` (canonical) and is asserted in
+/// `tests/c25b_005_diagnostic_audit.rs` / doc-tests, not here.
 fn operator_completions() -> Vec<CompletionItem> {
     let operators = [
         ("=", "Type/inheritance definition"),
         ("=>", "Forward assignment / forward pipe"),
         ("<=", "Backward assignment"),
-        ("]=>", "Unmold forward (extract value from mold)"),
-        ("<=[", "Unmold backward"),
+        (">=>", "Unmold forward (extract value from mold)"),
+        ("<=<", "Unmold backward"),
         ("|==", "Error ceiling (gorilla ceiling / try-catch)"),
-        ("|", "Condition branch arm"),
-        ("|>", "Condition branch result"),
+        ("|", "Condition branch arm (start of `(| ... |>)` pair)"),
+        ("|>", "Condition branch result (end of `(| ... |>)` pair)"),
         (">>>", "Import module"),
         ("<<<", "Export symbols"),
     ];
@@ -1136,13 +1153,22 @@ mod tests {
     }
 
     #[test]
-    fn test_operator_completions() {
+    fn test_operator_token_completions() {
+        // F42 sweep: `operator_completions` lists 10 **token-level**
+        // entries. The semantic 10-operator list (PHILOSOPHY.md /
+        // `docs/reference/operators.md`) folds `|` and `|>` into one
+        // `(| ... |>)` pair and adds `:` as the 10th — that pin lives
+        // in docs, not in this LSP completion harness.
         let items = operator_completions();
-        assert_eq!(items.len(), 10, "Taida has exactly 10 operators");
+        assert_eq!(
+            items.len(),
+            10,
+            "operator_completions returns 10 token-level entries"
+        );
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"=>"), "Should include =>");
         assert!(labels.contains(&"<="), "Should include <=");
-        assert!(labels.contains(&"]=>"), "Should include ]=>");
+        assert!(labels.contains(&">=>"), "Should include >=>");
         assert!(labels.contains(&">>>"), "Should include >>>");
         assert!(labels.contains(&"<<<"), "Should include <<<");
     }
@@ -1318,13 +1344,22 @@ Base[:Int] => Child[:Int, U] = @(
     }
 
     #[test]
-    fn test_rc4d_operator_completions_exactly_10() {
+    fn test_rc4d_operator_token_completions_exactly_10() {
+        // F42 sweep: this asserts the **token-level** completion list
+        // returned by `operator_completions`. The semantic 10-operator
+        // pin (PHILOSOPHY.md / `docs/reference/operators.md`) folds
+        // `|` + `|>` into a `(| ... |>)` delimiter pair and adds `:`
+        // as the 10th. See the doc-comment on `operator_completions`
+        // for the rationale; the canonical pin lives in docs / doc-tests.
         let items = operator_completions();
-        assert_eq!(items.len(), 10, "Taida has exactly 10 operators");
+        assert_eq!(
+            items.len(),
+            10,
+            "operator_completions returns 10 token-level entries"
+        );
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        // Verify all 10
         for op in &[
-            "=", "=>", "<=", "]=>", "<=[", "|==", "|", "|>", ">>>", "<<<",
+            "=", "=>", "<=", ">=>", "<=<", "|==", "|", "|>", ">>>", "<<<",
         ] {
             assert!(labels.contains(op), "Should include operator '{}'", op);
         }

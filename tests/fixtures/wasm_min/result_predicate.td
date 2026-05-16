@@ -6,5 +6,5 @@ stdout(Result[42, _ = false]().toString())
 stdout(Result[42, _ = true]().toString())
 
 // Result with predicate + unmold success
-Result[99, _ = true]() ]=> y
+Result[99, _ = true]() >=> y
 debug(y)

@@ -584,8 +584,8 @@ impl Parser {
     /// C12-4 (FB-17): Pure expression discipline.
     /// An arm body must be a sequence of **let-bindings** followed by
     /// **exactly one final result expression**. Allowed non-final
-    /// statement kinds: `<=` assignment, `]=>` unmold-forward,
-    /// `<=[` unmold-backward. Any other statement kind in a non-final
+    /// statement kinds: `<=` assignment, `>=>` unmold-forward,
+    /// `<=<` unmold-backward. Any other statement kind in a non-final
     /// position — including a bare function-call / pipeline statement
     /// (used for side effects) and any definition (`Name = ...`,
     /// `Mold[] => ...`, `|== ... =`, `>>> ...`, `<<< ...`) — is
@@ -637,7 +637,7 @@ impl Parser {
     /// inside what reads like a conditional branch.
     ///
     /// C13-1 loosens rule 1 so the tail bind (`name <= expr`,
-    /// `expr => name`, `expr ]=> name`, `name <=[ expr`) is accepted
+    /// `expr => name`, `expr >=> name`, `name <=< expr`) is accepted
     /// as an expression-block result without requiring a redundant
     /// trailing `name` line. FB-17's safety boundary is preserved:
     /// bare call statements, discard pipelines, and nested definitions
@@ -660,7 +660,7 @@ impl Parser {
                             message: format!(
                                 "[E1616] `| |>` arm body must end with a result expression or a binding, not a {} statement. \
                                  A condition arm is a pure expression: optional let-bindings \
-                                 (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may appear, \
+                                 (`name <= expr`, `expr >=> name`, `name <=< expr`) may appear, \
                                  and the last line may be either a result expression or a tail binding. \
                                  See docs/guide/07_control_flow.md for the pure-expression rule.",
                                 Self::statement_kind_label(stmt),
@@ -679,7 +679,7 @@ impl Parser {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: "[E1616] side-effect statement is not allowed inside a `| |>` arm body. \
-                                      Only let-bindings (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may \
+                                      Only let-bindings (`name <= expr`, `expr >=> name`, `name <=< expr`) may \
                                       appear before the final result expression — a bare function call or \
                                       pipeline used for side effects breaks the pure-expression rule. \
                                       See docs/guide/07_control_flow.md.".to_string(),
@@ -706,7 +706,7 @@ impl Parser {
     }
 
     /// C13B-010: Reject discard bindings (`expr => _name`, `_name <= expr`,
-    /// `expr ]=> _name`, `_name <=[ expr`) at any position inside an
+    /// `expr >=> _name`, `_name <=< expr`) at any position inside an
     /// expression-block body — arm body, function body, `|==` handler body,
     /// or method body. The FB-17 "throw the value away for its side effects"
     /// pattern breaks the pure-expression rule at every C13-1 tail-binding
@@ -720,7 +720,7 @@ impl Parser {
                 let span = Self::statement_span(stmt);
                 return Err(ParseError {
                     message: format!(
-                        "[E1616] `{} <= ...` / `... => {}` / `... ]=> {}` is a discard binding \
+                        "[E1616] `{} <= ...` / `... => {}` / `... >=> {}` is a discard binding \
                          and is not allowed inside a {}. The underscore-prefixed \
                          target indicates a value being thrown away for side effects, which \
                          breaks the pure-expression rule. Remove the binding or use a meaningful \
@@ -735,7 +735,7 @@ impl Parser {
     }
 
     /// C13-1: Return `Some(target)` if `stmt` is a discard-style binding
-    /// (`expr => _name`, `_name <= expr`, `expr ]=> _name`, `_name <=[ expr`)
+    /// (`expr => _name`, `_name <= expr`, `expr >=> _name`, `_name <=< expr`)
     /// — i.e. the binding target starts with `_`. Used by
     /// `reject_discard_bindings_in_expression_block`.
     fn discard_binding_target(stmt: &Statement) -> Option<&str> {
@@ -757,8 +757,8 @@ impl Parser {
         match stmt {
             Statement::Expr(_) => "expression",
             Statement::Assignment(_) => "assignment",
-            Statement::UnmoldForward(_) => "]=> binding",
-            Statement::UnmoldBackward(_) => "<=[ binding",
+            Statement::UnmoldForward(_) => ">=> binding",
+            Statement::UnmoldBackward(_) => "<=< binding",
             Statement::EnumDef(_) => "enum definition",
             // (E30 Sub-step 2.1) ClassLikeDef + kind discriminator
             Statement::ClassLikeDef(cl) => match cl.kind {

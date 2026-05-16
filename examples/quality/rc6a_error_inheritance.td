@@ -4,13 +4,13 @@
 // --- Test 1: Basic Error inheritance ---
 Error => AppError = @(code: Int)
 err1 <= AppError(type <= "AppError", message <= "test error", code <= 42)
-Str[err1.code]() ]=> code_str
+Str[err1.code]() >=> code_str
 stdout("T1: " + TypeName[err1]() + " code=" + code_str)
 
 // --- Test 2: Field composition (parent message/type + child fields) ---
 Error => DetailedError = @(detail: Str, severity: Int)
 err2 <= DetailedError(type <= "DetailedError", message <= "something failed", detail <= "db connection", severity <= 3)
-Str[err2.severity]() ]=> sev_str
+Str[err2.severity]() >=> sev_str
 stdout("T2: " + err2.type + " msg=" + err2.message + " detail=" + err2.detail + " sev=" + sev_str)
 
 // --- Test 3: Default fields (omit optional child fields) ---

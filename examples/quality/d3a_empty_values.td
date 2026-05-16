@@ -34,11 +34,11 @@ sorted <= Sort[l]()
 stdout(sorted.length().toString())
 flat <= Flatten[l]()
 stdout(flat.length().toString())
-Map[l, _ x = x * 2]() ]=> mapped
+Map[l, _ x = x * 2]() >=> mapped
 stdout(mapped.length().toString())
-Filter[l, _ x = x > 0]() ]=> filtered
+Filter[l, _ x = x > 0]() >=> filtered
 stdout(filtered.length().toString())
-Fold[l, 0, _ acc x = acc + x]() ]=> folded
+Fold[l, 0, _ acc x = acc + x]() >=> folded
 stdout(folded.toString())
 
 // === 空 BuchiPack ===

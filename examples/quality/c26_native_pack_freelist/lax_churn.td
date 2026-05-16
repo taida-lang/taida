@@ -2,7 +2,7 @@
 //
 // Purpose:
 //   Pattern this produces is the same shape as `bench_router.td`'s hot
-//   loop — repeated `list.get(i) ]=> x` inside a tail-recursive scan —
+//   loop — repeated `list.get(i) >=> x` inside a tail-recursive scan —
 //   which drove the 80%-sys-time Native regression reported in HI-009
 //   (C26B-024). With the thread-local 4-field Pack freelist landed in
 //   core.c, the repeated Lax wrapper from `list.get` cycles through
@@ -20,7 +20,7 @@
 scan items: @[Int] target: Int i: Int n: Int hits: Int =
   | i >= n |> hits
   | _ |>
-    items.get(i) ]=> v
+    items.get(i) >=> v
     | v == target |> scan(items, target, i + 1, n, hits + 1)
     | _ |> scan(items, target, i + 1, n, hits)
 => :Int

@@ -569,7 +569,7 @@ impl Lowering {
                     // C21-4: Infer homogeneous element type from ListLit.
                     // If every element of `@[...]` has the same primitive
                     // type (FloatLit / IntLit / StringLit / BoolLit), record
-                    // it so later unmold via `a.get(i) ]=> av` can tag `av`.
+                    // it so later unmold via `a.get(i) >=> av` can tag `av`.
                     if let Expr::ListLit(elems, _) = &assign.value
                         && !elems.is_empty()
                     {
@@ -1747,7 +1747,7 @@ impl Lowering {
                 Ok(())
             }
             Statement::UnmoldForward(uf) => {
-                // expr ]=> name : Async のアンモールド
+                // expr >=> name : Async のアンモールド
                 let source_var = self.lower_expr(func, &uf.source)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
@@ -1765,7 +1765,7 @@ impl Lowering {
                 Ok(())
             }
             Statement::UnmoldBackward(ub) => {
-                // name <=[ expr : Async のアンモールド（逆方向）
+                // name <=< expr : Async のアンモールド（逆方向）
                 let source_var = self.lower_expr(func, &ub.source)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(

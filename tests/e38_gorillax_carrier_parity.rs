@@ -76,7 +76,7 @@ fn relaxed_gorillax_throw_uses_canonical_error_carrier() {
             "r <= run(\"/definitely/not/a/command\", @[])\n",
             "|== err: Error =\n",
             "  info <= err.errorInfo()\n",
-            "  info ]=> e\n",
+            "  info >=> e\n",
             "  encoded <= jsonEncode(err)\n",
             "  stdout(e.type)\n",
             "  stdout((e.message.contains(\"Relaxed gorilla escaped\")).toString())\n",
@@ -86,7 +86,7 @@ fn relaxed_gorillax_throw_uses_canonical_error_carrier() {
             "  stdout((encoded.contains(\"\\\"code\\\"\")).toString())\n",
             "  stdout((encoded.contains(\"\\\"cause\\\"\")).toString())\n",
             "=> :Int\n",
-            "r.relax() ]=> value\n",
+            "r.relax() >=> value\n",
         ),
     )
     .expect("write main");

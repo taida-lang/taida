@@ -47,17 +47,17 @@ pub enum Statement {
     Import(ImportStmt),
     /// Export: `<<< @(symbols)` or `<<< symbol`
     Export(ExportStmt),
-    /// Unmold forward: `expr ]=> name`
+    /// Unmold forward: `expr >=> name`
     UnmoldForward(UnmoldForwardStmt),
-    /// Unmold backward: `name <=[ expr`
+    /// Unmold backward: `name <=< expr`
     UnmoldBackward(UnmoldBackwardStmt),
 }
 
 impl Statement {
     /// C13-1: For a "value-yielding" statement (the tail of an expression
     /// block), return a reference to the `Expr` whose value is the block
-    /// result. Tail bindings (`name <= expr`, `expr => name`, `expr ]=> name`,
-    /// `name <=[ expr`) yield their RHS source expression; a plain
+    /// result. Tail bindings (`name <= expr`, `expr => name`, `expr >=> name`,
+    /// `name <=< expr`) yield their RHS source expression; a plain
     /// `Statement::Expr(e)` yields `e`.
     ///
     /// Returns `None` for statements that do not produce a value
@@ -78,7 +78,7 @@ impl Statement {
     }
 
     /// C13-1: True if this statement represents a tail binding form
-    /// (`name <= expr`, `expr => name`, `expr ]=> name`, `name <=[ expr`)
+    /// (`name <= expr`, `expr => name`, `expr >=> name`, `name <=< expr`)
     /// whose bound target should be defined in the enclosing scope
     /// before the block result is yielded.
     pub fn is_tail_binding(&self) -> bool {
@@ -405,7 +405,7 @@ pub struct ExportStmt {
     pub span: Span,
 }
 
-/// Unmold forward: `expr ]=> name`
+/// Unmold forward: `expr >=> name`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmoldForwardStmt {
     pub source: Expr,
@@ -413,7 +413,7 @@ pub struct UnmoldForwardStmt {
     pub span: Span,
 }
 
-/// Unmold backward: `name <=[ expr`
+/// Unmold backward: `name <=< expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmoldBackwardStmt {
     pub target: String,
@@ -468,7 +468,7 @@ pub enum Expr {
     /// Mold instantiation: `TypeName[args](fields)`
     MoldInst(String, Vec<Expr>, Vec<BuchiField>, Span),
 
-    /// Unmold expression: `expr.unmold()` or `]=>` as expr
+    /// Unmold expression: `expr.unmold()` or `>=>` as expr
     Unmold(Box<Expr>, Span),
 
     /// Anonymous function: `_ x = x * 2`

@@ -23,7 +23,7 @@ showOneTodo pair =
 
 showTodos list =
   enumerated <= Enumerate[list]()
-  Map[enumerated, showOneTodo]() ]=> shown
+  Map[enumerated, showOneTodo]() >=> shown
   0
 => :Int
 
@@ -66,9 +66,9 @@ showTodos(list3)
 
 // Complete items 0 and 1
 enum3 <= Enumerate[list3]()
-Map[enum3, _ pair = toggleAt(0, pair)]() ]=> list4
+Map[enum3, _ pair = toggleAt(0, pair)]() >=> list4
 enum4 <= Enumerate[list4]()
-Map[enum4, _ pair = toggleAt(1, pair)]() ]=> list5
+Map[enum4, _ pair = toggleAt(1, pair)]() >=> list5
 
 stdout("")
 stdout("--- After completing 2 items ---")
@@ -88,7 +88,7 @@ allDone <= list5.all(isDone)
 
 // Find[] -- locate first pending item
 pending_todo <= Find[list5, isNotDone]()
-pending_todo ]=> next_todo
+pending_todo >=> next_todo
 stdout("")
 | pending_todo.has_value |>
   stdout("Next pending: " + next_todo.title)
@@ -102,8 +102,8 @@ stdout("Has any completed: " + hasAnyDone.toString())
 
 // Remove item at index 1
 enum5 <= Enumerate[list5]()
-Filter[enum5, _ pair = keepOther(1, pair)]() ]=> filtered
-Map[filtered, extractValue]() ]=> list6
+Filter[enum5, _ pair = keepOther(1, pair)]() >=> filtered
+Map[filtered, extractValue]() >=> list6
 
 stdout("")
 stdout("--- After removing item 2 ---")
@@ -143,7 +143,7 @@ showPair p =
 
 stdout("")
 stdout("--- Zip example ---")
-Map[zipped, showPair]() ]=> zipResult
+Map[zipped, showPair]() >=> zipResult
 
 // FindIndex[] demo
 idx <= FindIndex[@[10, 20, 30, 40, 50], _ x = x > 25]()

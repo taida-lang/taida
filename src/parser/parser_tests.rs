@@ -443,7 +443,7 @@ fn test_parse_mold_def_with_implicit_name_header() {
 
 #[test]
 fn test_parse_unmold_forward() {
-    match first_stmt("opt ]=> value") {
+    match first_stmt("opt >=> value") {
         Statement::UnmoldForward(uf) => {
             assert_eq!(uf.target, "value");
             match &uf.source {
@@ -700,7 +700,7 @@ fn test_parse_boolean_expression() {
 
 #[test]
 fn test_parse_unmold_backward() {
-    match first_stmt("value <=[ opt") {
+    match first_stmt("value <=< opt") {
         Statement::UnmoldBackward(ub) => {
             assert_eq!(ub.target, "value");
             assert!(matches!(ub.source, Expr::Ident(ref name, _) if name == "opt"));
@@ -711,7 +711,7 @@ fn test_parse_unmold_backward() {
 
 #[test]
 fn test_parse_unmold_backward_complex_expr() {
-    match first_stmt("doubled <=[ Map[numbers, _ x = x * 2]()") {
+    match first_stmt("doubled <=< Map[numbers, _ x = x * 2]()") {
         Statement::UnmoldBackward(ub) => {
             assert_eq!(ub.target, "doubled");
         }
@@ -820,8 +820,8 @@ fn test_single_direction_constraint_violation_arrow() {
 
 #[test]
 fn test_single_direction_constraint_violation_unmold() {
-    // ]=> and <=[ mixed should be a parse error (E0302)
-    let source = "mold ]=> x <=[ other";
+    // >=> and <=< mixed should be a parse error (E0302)
+    let source = "mold >=> x <=< other";
     let (_, errors) = parse(source);
     assert!(
         !errors.is_empty(),
@@ -836,7 +836,7 @@ fn test_single_direction_constraint_violation_unmold() {
 
 #[test]
 fn test_single_direction_ok_different_categories() {
-    // => and <=[ in same statement is allowed (different categories)
+    // => and <=< in same statement is allowed (different categories)
     // Verify that => alone and <= alone parse fine
     let source = "x <= 42";
     let (_, errors) = parse(source);
@@ -909,8 +909,8 @@ fn test_bt3_direction_ok_separate_statements() {
 
 #[test]
 fn test_bt3_unmold_direction_violation_nested() {
-    // Nested unmold direction violation: ]=> and <=[ in same statement
-    let source = "a ]=> x <=[ b";
+    // Nested unmold direction violation: >=> and <=< in same statement
+    let source = "a >=> x <=< b";
     let (_, errors) = parse(source);
     assert!(
         !errors.is_empty(),
@@ -925,7 +925,7 @@ fn test_bt3_unmold_direction_violation_nested() {
 
 #[test]
 fn test_bt3_direction_ok_arrow_and_unmold_mix() {
-    // => and <=[ in same statement is allowed (different categories)
+    // => and <=< in same statement is allowed (different categories)
     // This tests that the two constraint categories are independent
     let source = "x <= 42";
     let (_, errors) = parse(source);
@@ -2228,7 +2228,7 @@ fn test_deep_buchipack_nesting_50_levels() {
 
 // ── C12-4 / FB-17: `| |>` pure-expression discipline ────────
 //
-// An arm body must be a sequence of let-bindings (`<=`, `]=>`, `<=[`)
+// An arm body must be a sequence of let-bindings (`<=`, `>=>`, `<=<`)
 // followed by exactly one final result expression. Anything else
 // (bare function-call statement, discarded pipeline `=> _name`,
 // definitions, etc.) is rejected with `[E1616]`.
@@ -2263,12 +2263,12 @@ classify n =\n  \
 
 #[test]
 fn test_c12_4_arm_body_unmold_forward_let_passes() {
-    // `]=>` unmold-forward is a legal let-binding inside an arm body.
+    // `>=>` unmold-forward is a legal let-binding inside an arm body.
     let source = "\
 firstOrZero items =\n  \
   | items.isEmpty() |> 0\n  \
   | _ |>\n    \
-    items.first() ]=> first\n    \
+    items.first() >=> first\n    \
     first\n\
 => :Int\n";
     let (program, errors) = parse(source);
@@ -2421,13 +2421,13 @@ f x =\n  \
 
 #[test]
 fn test_c13_1_arm_body_tail_unmold_forward_accepted() {
-    // `expr ]=> name` at the tail of a `| |>` arm body is accepted
+    // `expr >=> name` at the tail of a `| |>` arm body is accepted
     // under C13-1 and yields the unmolded value.
     let source = "\
 f x =\n  \
   | x > 0 |>\n    \
     lax <= Lax[x]()\n    \
-    lax ]=> n\n  \
+    lax >=> n\n  \
   | _ |> 0\n\
 => :Int\n";
     let (_, errors) = parse(source);
@@ -2437,20 +2437,20 @@ f x =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: tail `lax ]=> n` should be accepted, got: {:?}",
+        "C13-1: tail `lax >=> n` should be accepted, got: {:?}",
         e1616
     );
 }
 
 #[test]
 fn test_c13_1_arm_body_tail_unmold_backward_accepted() {
-    // `name <=[ expr` at the tail of a `| |>` arm body is accepted
+    // `name <=< expr` at the tail of a `| |>` arm body is accepted
     // under C13-1 and yields the unmolded value.
     let source = "\
 f x =\n  \
   | x > 0 |>\n    \
     lax <= Lax[x]()\n    \
-    n <=[ lax\n  \
+    n <=< lax\n  \
   | _ |> 0\n\
 => :Int\n";
     let (_, errors) = parse(source);
@@ -2460,7 +2460,7 @@ f x =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: tail `n <=[ lax` should be accepted, got: {:?}",
+        "C13-1: tail `n <=< lax` should be accepted, got: {:?}",
         e1616
     );
 }
@@ -2490,7 +2490,7 @@ bad x =\n  \
 
 #[test]
 fn test_c13b_010_function_body_discard_binding_rejected() {
-    // C13B-010: discard bindings (`=> _x`, `_x <=`, `]=> _x`, `_x <=[`)
+    // C13B-010: discard bindings (`=> _x`, `_x <=`, `>=> _x`, `_x <=<`)
     // must be rejected anywhere inside a function body — same rule as
     // `| |>` arm body. Only `validate_cond_arm_body` previously enforced
     // this, leaving function bodies as a safety hole.

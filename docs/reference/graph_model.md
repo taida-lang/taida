@@ -79,7 +79,7 @@ Graph = @(
 | `FunctionCall` | 関数呼び出し | `func(...)` |
 | `Literal` | リテラル値 | `42`, `"hello"`, `@[...]` |
 | `BuchiPack` | ぶちパック | `@(...)` |
-| `Unmold` | アンモールディング操作 | `]=>` / `<=[` / `.unmold()` |
+| `Unmold` | アンモールド操作 | `>=>` / `<=<` / `.unmold()` |
 | `Placeholder` | プレースホルダ | `_` |
 | `Condition` | 条件分岐 | `\| cond \|>` |
 
@@ -89,8 +89,8 @@ Graph = @(
 |--------|------|------------|
 | `PipeForward` | 順方向パイプ | `=>` |
 | `PipeBackward` | 逆方向パイプ | `<=` |
-| `UnmoldForward` | 順方向アンモールド | `]=>` |
-| `UnmoldBackward` | 逆方向アンモールド | `<=[` |
+| `UnmoldForward` | 順方向アンモールド | `>=>` |
+| `UnmoldBackward` | 逆方向アンモールド | `<=<` |
 | `Argument` | 関数引数 | `func(arg)` |
 | `Return` | 戻り値 | `=> :Type` |
 | `ConditionTrue` | 条件真 | `\| cond \|> value` |
@@ -103,8 +103,8 @@ Graph = @(
 | `a => b` | `a`: Variable, `b`: Variable | `a -> b`: PipeForward |
 | `a => func(_) => b` | `a`: Variable, `func(_)`: FunctionCall, `b`: Variable | `a -> func(_)`: PipeForward, `func(_) -> b`: PipeForward |
 | `b <= a` | `a`: Variable, `b`: Variable | `a -> b`: PipeBackward |
-| `mold ]=> x` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldForward |
-| `x <=[ mold` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldBackward |
+| `mold >=> x` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldForward |
+| `x <=< mold` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldBackward |
 | `func(a, b)` | `func(a, b)`: FunctionCall, `a`: *, `b`: * | `a -> func`: Argument, `b -> func`: Argument |
 
 > **注意**: 単一方向制約により、一つの文内で `PipeForward` と `PipeBackward` が同時に出現することはありません。同様に `UnmoldForward` と `UnmoldBackward` も同時に出現しません。
@@ -211,7 +211,7 @@ Graph = @(
 |--------|------|--------|
 | `Function` | 名前付き関数 | `funcName args = ...` |
 | `AnonymousFn` | 無名関数 | `_ x = x * 2` |
-| `Method` | メソッド | ぶちパック/モールディング型内の関数 |
+| `Method` | メソッド | ぶちパック/モールド型内の関数 |
 | `Entrypoint` | エントリーポイント | `taida` コマンドで実行されるファイル |
 
 ### エッジ種別

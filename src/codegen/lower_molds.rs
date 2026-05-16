@@ -109,7 +109,7 @@ impl Lowering {
         }
     }
 
-    /// モールディング型インスタンス化: `Async[val]()`, `AsyncReject[err]()` etc.
+    /// モールド型インスタンス化: `Async[val]()`, `AsyncReject[err]()` etc.
     pub(crate) fn lower_mold_inst(
         &mut self,
         func: &mut IrFunction,

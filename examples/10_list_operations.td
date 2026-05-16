@@ -7,31 +7,31 @@ isEven x =
 numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 // Map: double each number
-Map[numbers, _ x = x * 2]() ]=> doubled
+Map[numbers, _ x = x * 2]() >=> doubled
 stdout(doubled)
 
 // Filter: even numbers only
-Filter[numbers, isEven]() ]=> evens
+Filter[numbers, isEven]() >=> evens
 stdout(evens)
 
 // Fold: sum all numbers
-Fold[numbers, 0, _ acc x = acc + x]() ]=> sum
+Fold[numbers, 0, _ acc x = acc + x]() >=> sum
 stdout(sum)
 
 // Chain: filter evens, double them, sum
-Filter[numbers, isEven]() ]=> step1
-Map[step1, _ x = x * 2]() ]=> step2
-Fold[step2, 0, _ acc x = acc + x]() ]=> total
+Filter[numbers, isEven]() >=> step1
+Map[step1, _ x = x * 2]() >=> step2
+Fold[step2, 0, _ acc x = acc + x]() >=> total
 stdout(total)
 
 // Take first 3
-Take[numbers, 3]() ]=> first3
+Take[numbers, 3]() >=> first3
 stdout(first3)
 
 // Drop first 5
-Drop[numbers, 5]() ]=> rest
+Drop[numbers, 5]() >=> rest
 stdout(rest)
 
 // TakeWhile < 5
-TakeWhile[numbers, _ x = x < 5]() ]=> under5
+TakeWhile[numbers, _ x = x < 5]() >=> under5
 stdout(under5)

@@ -49,7 +49,7 @@ fn try_build_fingerprint_set(items: &[Value]) -> Option<HashSet<u64>> {
 /// Internal representation only — the `__value` / `__default` / `__type`
 /// fields must never be observed via `.__value` etc. from user code.
 /// Direct `__` field reads are rejected with `[E1960]`, and end users must
-/// unmold via `]=>` / `getOrDefault` / `isSuccess` / `has_value` instead.
+/// unmold via `>=>` / `getOrDefault` / `isSuccess` / `has_value` instead.
 pub(crate) fn make_int_lax(idx: Option<i64>) -> Value {
     match idx {
         Some(i) => Value::pack(vec![
@@ -287,7 +287,7 @@ impl Interpreter {
                     _ => {
                         // .unmold() on custom mold: delegate to unmold_value() which
                         // handles __unmold (with Signal::Throw propagation) and
-                        // __value fallback — exactly the same path as ]=> / <=[
+                        // __value fallback — exactly the same path as >=> / <=<
                         if method == "unmold" {
                             return self.unmold_value(obj.clone());
                         }
@@ -881,7 +881,7 @@ impl Interpreter {
                 ])))
             }
             "unmold" => {
-                // Same as ]=> : hasValue → __value, otherwise → __default
+                // Same as >=> : hasValue → __value, otherwise → __default
                 if has_value {
                     Ok(Signal::Value(inner_value))
                 } else {
@@ -1493,7 +1493,7 @@ impl Interpreter {
             }
             // E32B-022 (Lock-N): Lax[Int]-returning replacements for the
             // legacy `-1` sentinel methods. PHILOSOPHY I forbids magic
-            // values; callers should use `]=>` / `<=[` / `getOrDefault(...)`
+            // values; callers should use `>=>` / `<=<` / `getOrDefault(...)`
             // off the returned Lax. Old methods stay around as
             // `@deprecated since="e.X"` (gen-F removal candidate).
             "indexOfLax" => {
@@ -1685,7 +1685,7 @@ impl Interpreter {
                 message: format!(
                     "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, indexOfLax, lastIndexOf, lastIndexOfLax, get, replace, replaceAll, split, match, search, searchLax, toString. \
                      Note: `indexOf` / `lastIndexOf` / `search` return the sentinel `-1` when the substring or pattern is not found — this is retained for migration but is discouraged because Taida values total functions over magic-number returns. \
-                     Prefer the `*Lax` variants (`indexOfLax` / `lastIndexOfLax` / `searchLax`) which return `Lax[Int]` so callers can `]=>` unmold the index or fall through with an explicit default instead of guarding against `-1`.",
+                     Prefer the `*Lax` variants (`indexOfLax` / `lastIndexOfLax` / `searchLax`) which return `Lax[Int]` so callers can `>=>` unmold the index or fall through with an explicit default instead of guarding against `-1`.",
                     method
                 ),
             }),

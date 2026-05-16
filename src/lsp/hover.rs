@@ -353,7 +353,7 @@ fn find_hover_in_statement(
             None
         }
         Statement::UnmoldForward(uf) => {
-            // Check source expression (e.g., in `expr ]=> name`)
+            // Check source expression (e.g., in `expr >=> name`)
             if let Some(info) = find_hover_in_expr(&uf.source, line, col, checker, all_stmts) {
                 return Some(info);
             }
@@ -366,7 +366,7 @@ fn find_hover_in_statement(
             None
         }
         Statement::UnmoldBackward(ub) => {
-            // Check source expression (e.g., in `name <=[ expr`)
+            // Check source expression (e.g., in `name <=< expr`)
             if let Some(info) = find_hover_in_expr(&ub.source, line, col, checker, all_stmts) {
                 return Some(info);
             }
@@ -961,8 +961,8 @@ value <= Child[1, 2]()
 
     #[test]
     fn test_rc4f_hover_unmold_forward_source() {
-        // Lax[42]() ]=> value
-        let source = "opt <= Lax[42]()\nopt ]=> value";
+        // Lax[42]() >=> value
+        let source = "opt <= Lax[42]()\nopt >=> value";
         // Hover on "opt" in the unmold forward statement (line 1)
         let result = get_hover_info(
             source,
@@ -985,8 +985,8 @@ value <= Child[1, 2]()
 
     #[test]
     fn test_rc4f_hover_unmold_backward_source() {
-        // value <=[ Lax[42]()
-        let source = "opt <= Lax[42]()\nvalue <=[ opt";
+        // value <=< Lax[42]()
+        let source = "opt <= Lax[42]()\nvalue <=< opt";
         // Hover on "opt" in the unmold backward statement (line 1)
         let result = get_hover_info(
             source,

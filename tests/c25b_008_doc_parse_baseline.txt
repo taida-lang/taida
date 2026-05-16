@@ -48,9 +48,9 @@ docs/reference/documentation_comments.md:438
 docs/reference/documentation_comments.md:451
 docs/reference/documentation_comments.md:466
 docs/reference/naming_conventions.md:274
-docs/reference/operators.md:267
-docs/reference/operators.md:407
-docs/reference/operators.md:576
+docs/reference/operators.md:268
+docs/reference/operators.md:408
+docs/reference/operators.md:577
 docs/reference/tail_recursion.md:172
 docs/reference/tail_recursion.md:190
 docs/reference/tail_recursion.md:207

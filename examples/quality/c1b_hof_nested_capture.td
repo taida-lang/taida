@@ -4,8 +4,8 @@ prefix <= "v:"
 
 data <= @[1, 2, 3, 4, 5]
 filtered <= Filter[data, _ x = x > threshold]()
-filtered ]=> fList
+filtered >=> fList
 mapped <= Map[fList, _ x = prefix + x.toString()]()
-mapped ]=> mList
+mapped >=> mList
 stdout(mList)
 // Expected: @[v:3, v:4, v:5]

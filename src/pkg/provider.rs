@@ -331,7 +331,7 @@ impl CoreBundledProvider {
     fn js_package_source() -> &'static str {
         r#"// taida-lang/js — JS interop package (core bundled)
 // JSRilla[Out] subfamily of CageRilla[Branch, Out] for Cage[subject, JSRilla[...]()]() boundaries.
-// canonical: Cage[subject, JSNew[@["Hono"], @[], Molten]()]() ]=> app
+// canonical: Cage[subject, JSNew[@["Hono"], @[], Molten]()]() >=> app
 // All descriptors are JS-backend only. Interpreter/Native will error.
 
 <<< @(JSGet, JSCall, JSNew, JSSet, JSBind, JSSpread)

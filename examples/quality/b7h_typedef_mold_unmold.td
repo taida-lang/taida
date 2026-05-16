@@ -1,11 +1,11 @@
 // Quality Test: B-7h — TypeDef メソッド内モールド + unmold
-// メソッド内で ]=> を使用
+// メソッド内で >=> を使用
 
 SafeMath = @(
   x: Int
   y: Int
   divide =
-    Div[x, y]() ]=> result
+    Div[x, y]() >=> result
     result.toString()
   => :Str
 )

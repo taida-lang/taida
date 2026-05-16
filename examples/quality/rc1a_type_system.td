@@ -35,38 +35,38 @@ stdout(greetBase(ext))
 // === 3. Type conversion molds ===
 
 // 3a: Int conversion edge cases
-Int["0"]() ]=> zero
+Int["0"]() >=> zero
 stdout(zero.toString())
-Int["-5"]() ]=> neg
+Int["-5"]() >=> neg
 stdout(neg.toString())
-Int[""]() ]=> emptyInt
+Int[""]() >=> emptyInt
 stdout(emptyInt.toString())
 stdout(Int[""]().has_value.toString())
 
 // 3b: Float conversion edge cases
-Float["0.0"]() ]=> zeroF
+Float["0.0"]() >=> zeroF
 stdout(zeroF.toString())
-Float["-3.14"]() ]=> negF
+Float["-3.14"]() >=> negF
 stdout(negF.toString())
 
 // 3c: Bool conversion
-Bool[1]() ]=> t
+Bool[1]() >=> t
 stdout(t.toString())
-Bool[0]() ]=> f
+Bool[0]() >=> f
 stdout(f.toString())
-Bool["true"]() ]=> st
+Bool["true"]() >=> st
 stdout(st.toString())
-Bool["false"]() ]=> sf
+Bool["false"]() >=> sf
 stdout(sf.toString())
 
 // 3d: Str conversion
-Str[0]() ]=> zeroS
+Str[0]() >=> zeroS
 stdout(zeroS)
-Str[3.14]() ]=> piS
+Str[3.14]() >=> piS
 stdout(piS)
-Str[true]() ]=> trueS
+Str[true]() >=> trueS
 stdout(trueS)
-Str[false]() ]=> falseS
+Str[false]() >=> falseS
 stdout(falseS)
 
 // === 4. List operations correctness ===
@@ -75,11 +75,11 @@ stdout(falseS)
 empty: @[Int] <= @[]
 stdout(empty.length().toString())
 stdout(empty.isEmpty().toString())
-empty.first() ]=> ef
+empty.first() >=> ef
 stdout(ef.toString())
-empty.last() ]=> el
+empty.last() >=> el
 stdout(el.toString())
-empty.max() ]=> em
+empty.max() >=> em
 stdout(em.toString())
 stdout(empty.first().has_value.toString())
 
@@ -92,18 +92,18 @@ stdout(nums.indexOf(4).toString())
 stdout(nums.indexOf(99).toString())
 
 // 4c: List access with get
-nums.get(0) ]=> first
+nums.get(0) >=> first
 stdout(first.toString())
-nums.get(7) ]=> last
+nums.get(7) >=> last
 stdout(last.toString())
-nums.get(100) ]=> oob
+nums.get(100) >=> oob
 stdout(oob.toString())
 stdout(nums.get(100).has_value.toString())
 
 // 4d: Max/Min
-nums.max() ]=> mx
+nums.max() >=> mx
 stdout(mx.toString())
-nums.min() ]=> mn
+nums.min() >=> mn
 stdout(mn.toString())
 
 // === 5. String operations ===
@@ -151,54 +151,54 @@ Clamp[15, 0, 10]() => clamped
 stdout(clamped.toString())
 
 // === 7. List molds ===
-Sort[@[3, 1, 4, 1, 5]]() ]=> sorted
+Sort[@[3, 1, 4, 1, 5]]() >=> sorted
 stdout(sorted)
-Sort[@[3, 1, 2]](reverse <= true) ]=> desc
+Sort[@[3, 1, 2]](reverse <= true) >=> desc
 stdout(desc)
-Reverse[@[1, 2, 3]]() ]=> rev
+Reverse[@[1, 2, 3]]() >=> rev
 stdout(rev)
-Unique[@[1, 2, 2, 3, 3, 1]]() ]=> uniq
+Unique[@[1, 2, 2, 3, 3, 1]]() >=> uniq
 stdout(uniq)
-Flatten[@[@[1, 2], @[3, 4]]]() ]=> flat
+Flatten[@[@[1, 2], @[3, 4]]]() >=> flat
 stdout(flat)
-Concat[@[1, 2], @[3, 4]]() ]=> concat
+Concat[@[1, 2], @[3, 4]]() >=> concat
 stdout(concat)
-Append[@[1, 2], 3]() ]=> appended
+Append[@[1, 2], 3]() >=> appended
 stdout(appended)
-Prepend[@[2, 3], 1]() ]=> prepended
+Prepend[@[2, 3], 1]() >=> prepended
 stdout(prepended)
-Join[@["a", "b", "c"], ","]() ]=> joined
+Join[@["a", "b", "c"], ","]() >=> joined
 stdout(joined)
-Sum[@[1, 2, 3, 4, 5]]() ]=> sum
+Sum[@[1, 2, 3, 4, 5]]() >=> sum
 stdout(sum.toString())
 
 // === 8. HOF molds ===
-Map[@[1, 2, 3], _ x = x * 2]() ]=> mapped
+Map[@[1, 2, 3], _ x = x * 2]() >=> mapped
 stdout(mapped)
-Filter[@[1, 2, 3, 4, 5], _ x = x > 3]() ]=> filtered
+Filter[@[1, 2, 3, 4, 5], _ x = x > 3]() >=> filtered
 stdout(filtered)
-Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() ]=> folded
+Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() >=> folded
 stdout(folded.toString())
-Find[@[1, 2, 3, 4, 5], _ x = x > 3]() ]=> found
+Find[@[1, 2, 3, 4, 5], _ x = x > 3]() >=> found
 stdout(found.toString())
 stdout(Find[@[1, 2, 3], _ x = x > 10]().has_value.toString())
 FindIndex[@[10, 20, 30, 40], _ x = x > 25]() => found_idx
 stdout(found_idx.toString())
 Count[@[1, 2, 3, 4, 5], _ x = x > 2]() => counted
 stdout(counted.toString())
-Take[@[1, 2, 3, 4, 5], 3]() ]=> taken
+Take[@[1, 2, 3, 4, 5], 3]() >=> taken
 stdout(taken)
-Drop[@[1, 2, 3, 4, 5], 3]() ]=> dropped
+Drop[@[1, 2, 3, 4, 5], 3]() >=> dropped
 stdout(dropped)
 
 // === 9. Lax monad operations ===
 lax1 <= Div[10, 3]()
-lax1.map(_ x = x * 2) ]=> doubled
+lax1.map(_ x = x * 2) >=> doubled
 stdout(doubled.toString())
 stdout(lax1.getOrDefault(99).toString())
 
 lax2 <= Div[10, 0]()
-lax2.map(_ x = x * 2) ]=> dbl2
+lax2.map(_ x = x * 2) >=> dbl2
 stdout(dbl2.toString())
 stdout(lax2.getOrDefault(99).toString())
 
@@ -218,7 +218,7 @@ stdout(handleErr(-1))
 
 // === 11. Result mold ===
 ok <= Result[42, _ = true]()
-ok ]=> okVal
+ok >=> okVal
 stdout(okVal.toString())
 
 // Result failure must be tested inside a function to avoid top-level termination
@@ -227,7 +227,7 @@ testResultFail =
     -1
   => :Int
   err_res <= Result[0, _ = false](throw <= Error(type <= "Error", message <= "fail"))
-  err_res ]=> errVal
+  err_res >=> errVal
   errVal
 => :Int
 stdout(testResultFail().toString())

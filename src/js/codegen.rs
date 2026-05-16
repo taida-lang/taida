@@ -21,12 +21,12 @@ pub struct JsCodegen {
     enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// Set of function names that need trampoline wrapping (self or mutual recursion)
     trampoline_funcs: std::collections::HashSet<String>,
-    /// Set of function names that contain ]=> (unmold) and need `async function` generation
+    /// Set of function names that contain >=> (unmold) and need `async function` generation
     async_funcs: std::collections::HashSet<String>,
     /// Whether we are currently generating code inside an async context.
     /// true at top-level (ESM top-level await) and inside async functions.
-    /// When true, ]=> generates `await __taida_unmold_async(...)`.
-    /// When false, ]=> generates `__taida_unmold(...)`.
+    /// When true, >=> generates `await __taida_unmold_async(...)`.
+    /// When false, >=> generates `__taida_unmold(...)`.
     in_async_context: bool,
     /// Source .td file path (for resolving package import paths)
     source_file: Option<std::path::PathBuf>,
@@ -62,7 +62,7 @@ pub struct JsCodegen {
     ///   * `x <= 3.0` / `x <= floatExpr` (Float-origin RHS)
     ///   * `x: Float <= ...` (explicit `: Float` annotation)
     ///   * `triple x: Float = ...` parameters
-    ///   * `a.get(i) ]=> av` when `a` is typed `@[Float]`
+    ///   * `a.get(i) >=> av` when `a` is typed `@[Float]`
     ///
     /// Queried by `is_float_origin_expr` on `Expr::Ident`. Lookup walks the
     /// stack from innermost to outermost — shadowing by inner scopes is
@@ -73,7 +73,7 @@ pub struct JsCodegen {
     int_origin_vars: Vec<std::collections::HashSet<String>>,
     /// C21B-seed-04 re-fix: scope stack of local bindings known to hold
     /// `@[Float]` (homogeneous list of Float). Used to propagate
-    /// `a.get(i) ]=> av` / `av <=[ a.get(i)` into `float_origin_vars`.
+    /// `a.get(i) >=> av` / `av <=< a.get(i)` into `float_origin_vars`.
     float_list_vars: Vec<std::collections::HashSet<String>>,
 }
 
@@ -444,7 +444,7 @@ impl JsCodegen {
         {
             return true;
         }
-        // An unmold of a Float-origin scalar (e.g. `someFloat ]=> y`) also
+        // An unmold of a Float-origin scalar (e.g. `someFloat >=> y`) also
         // preserves the Float origin.
         self.is_float_origin_expr(src)
     }
@@ -527,7 +527,7 @@ impl JsCodegen {
             // scalar carries Float origin so `debug(r) / stdout(r)` can
             // dispatch to `__taida_debug_f` / `__taida_stdout_f` and
             // render `0.0` / `inf` / `-inf` / `NaN` via
-            // `__taida_float_render`. Without this, `Div[1.0, 0.0]() ]=>
+            // `__taida_float_render`. Without this, `Div[1.0, 0.0]() >=>
             // r` drifts to `debug(r)` → `String(0)` → `"0"`.
             Expr::MoldInst(name, type_args, _, _) if name == "Div" || name == "Mod" => {
                 type_args.iter().any(|a| self.is_float_origin_expr(a))
@@ -780,7 +780,7 @@ impl JsCodegen {
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
         self.detect_trampoline_funcs(&program.statements);
 
-        // Pre-pass: detect functions containing ]=> (unmold) that need async generation
+        // Pre-pass: detect functions containing >=> (unmold) that need async generation
         self.detect_async_funcs(&program.statements);
 
         // C13-1 / C13B-007: collect all top-level user-defined function names
@@ -914,14 +914,14 @@ impl JsCodegen {
         on_stack.remove(node);
     }
 
-    /// Detect functions that contain ]=> on async-related mold values.
+    /// Detect functions that contain >=> on async-related mold values.
     /// Only functions that unmold async molds (Async, AsyncReject, All, Race, Timeout)
     /// need `async function` generation. Functions that only unmold sync molds
     /// (Div, Mod, Lax, Result) remain synchronous.
     /// After initial detection, propagate async transitively: if function A calls
     /// async function B, A is also async (needed for proper await in trampolined TCO).
     fn detect_async_funcs(&mut self, stmts: &[Statement]) {
-        // Phase 1: direct async detection (functions with ]=> on async molds)
+        // Phase 1: direct async detection (functions with >=> on async molds)
         for stmt in stmts {
             if let Statement::FuncDef(fd) = stmt
                 && stmts_contain_async_unmold(&fd.body)
@@ -1298,8 +1298,8 @@ impl JsCodegen {
                 if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
-                // C21B-seed-04 re-fix: `a.get(i) ]=> av` on a Float-list
-                // (or `floatVal ]=> y` on a Float scalar) preserves the
+                // C21B-seed-04 re-fix: `a.get(i) >=> av` on a Float-list
+                // (or `floatVal >=> y` on a Float scalar) preserves the
                 // Float origin of the unmolded result.
                 if self.unmold_source_is_float(&unmold.source) {
                     self.register_float_origin(&unmold.target);
@@ -1326,7 +1326,7 @@ impl JsCodegen {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
                 // C21B-seed-04 re-fix: symmetric Float-origin propagation
-                // for `y <=[ a.get(i)` / `y <=[ floatVal`.
+                // for `y <=< a.get(i)` / `y <=< floatVal`.
                 if self.unmold_source_is_float(&unmold.source) {
                     self.register_float_origin(&unmold.target);
                 } else {
@@ -1344,7 +1344,7 @@ impl JsCodegen {
         let needs_async = is_async_fn;
         let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
 
-        // Save async context — set to true for async functions so ]=> generates `await`
+        // Save async context — set to true for async functions so >=> generates `await`
         let prev_async_context = self.in_async_context;
         self.in_async_context = needs_async;
 
@@ -4683,7 +4683,7 @@ fn collect_tail_targets_from_expr(expr: &Expr, targets: &mut std::collections::H
 }
 
 /// OS API mold names that are always async sources when unmolded.
-/// These require `async function` generation when `]=>` appears inside a function.
+/// These require `async function` generation when `>=>` appears inside a function.
 const OS_ASYNC_MOLDS: &[&str] = &[
     "Read",
     "ListDir",
@@ -4854,7 +4854,7 @@ fn expr_contains_os_async_unmold(
     }
 }
 
-/// Check if statements contain ]=> that unmolds an OS async (true Promise) value.
+/// Check if statements contain >=> that unmolds an OS async (true Promise) value.
 /// Only OS API molds that return real Promises trigger async function generation.
 /// Standard Taida molds (Async, Div, Mod, etc.) use sync __TaidaAsync thenables
 /// and do NOT require async functions.
@@ -5406,34 +5406,34 @@ mod tests {
 
     #[test]
     fn test_js_codegen_jsnew_no_args() {
-        // JSNew[Hono]() ]=> app  →  const app = new Hono();
+        // JSNew[Hono]() >=> app  →  const app = new Hono();
         assert!(
-            js_contains("JSNew[Hono]() ]=> app", "new Hono()"),
+            js_contains("JSNew[Hono]() >=> app", "new Hono()"),
             "JSNew[Hono]() should generate new Hono()"
         );
     }
 
     #[test]
     fn test_js_codegen_jsnew_with_args() {
-        // JSNew[Server](8080) ]=> server  →  const server = new Server(8080);
+        // JSNew[Server](8080) >=> server  →  const server = new Server(8080);
         assert!(
-            js_contains("JSNew[Server](8080) ]=> server", "new Server(8080)"),
+            js_contains("JSNew[Server](8080) >=> server", "new Server(8080)"),
             "JSNew[Server](8080) should generate new Server(8080)"
         );
     }
 
     #[test]
     fn test_js_codegen_jsnew_with_multiple_args() {
-        // JSNew[Uint8Array](16) ]=> buf  →  const buf = new Uint8Array(16);
+        // JSNew[Uint8Array](16) >=> buf  →  const buf = new Uint8Array(16);
         assert!(
-            js_contains("JSNew[Uint8Array](16) ]=> buf", "new Uint8Array(16)"),
+            js_contains("JSNew[Uint8Array](16) >=> buf", "new Uint8Array(16)"),
             "JSNew[Uint8Array](16) should generate new Uint8Array(16)"
         );
     }
 
     #[test]
     fn test_js_codegen_jsnew_unmold_forward() {
-        let js = transpile("JSNew[Hono]() ]=> app\napp").unwrap();
+        let js = transpile("JSNew[Hono]() >=> app\napp").unwrap();
         assert!(
             js.contains("const app = await __taida_unmold_async(new Hono())"),
             "JSNew unmold forward should wrap with await __taida_unmold_async: got {}",
@@ -5443,7 +5443,7 @@ mod tests {
 
     #[test]
     fn test_js_codegen_jsnew_unmold_backward() {
-        let js = transpile("app <=[ JSNew[Hono]()\napp").unwrap();
+        let js = transpile("app <=< JSNew[Hono]()\napp").unwrap();
         assert!(
             js.contains("const app = await __taida_unmold_async(new Hono())"),
             "JSNew unmold backward should wrap with await __taida_unmold_async: got {}",
@@ -5456,7 +5456,7 @@ mod tests {
         let src = r#"
 fetchUdp p =
   s <= udpBind("127.0.0.1", 0)
-  s ]=> v
+  s >=> v
   v
 "#;
         let js = transpile(src).expect("transpile should succeed");
@@ -5477,7 +5477,7 @@ fetchUdp p =
         let src = r#"
 waitBoth p =
   all <= All[@[sleep(0), sleep(0)]]()
-  all ]=> vals
+  all >=> vals
   vals.length()
 => :Int
 "#;
@@ -5498,7 +5498,7 @@ waitBoth p =
     fn test_sleep_timeout_direct_unmold_marks_function_async() {
         let src = r#"
 waitWithTimeout p =
-  Timeout[sleep(0), 100]() ]=> done
+  Timeout[sleep(0), 100]() >=> done
   done
 => :Int
 "#;
@@ -5521,7 +5521,7 @@ waitWithTimeout p =
 waitWithTimeout p =
   s <= sleep(0)
   t <= Timeout[s, 100]()
-  t ]=> done
+  t >=> done
   done
 => :Int
 "#;
@@ -5541,7 +5541,7 @@ waitWithTimeout p =
     #[test]
     fn test_js_codegen_jsnew_import_skipped() {
         // taida-lang/js import should not generate any ESM import statement
-        let js = transpile(">>> taida-lang/js => @(JSNew)\nJSNew[Hono]() ]=> app\napp").unwrap();
+        let js = transpile(">>> taida-lang/js => @(JSNew)\nJSNew[Hono]() >=> app\napp").unwrap();
         assert!(
             !js.contains("import {"),
             "taida-lang/js import should be skipped in JS output (no ESM import): got {}",
@@ -5643,7 +5643,7 @@ Cage[target, JSSpread[@[1]]()]()
 
     #[test]
     fn test_js_codegen_jsset_unmold() {
-        let js = transpile("obj = 1\nJSSet[obj, \"x\", 42]() ]=> result\nresult").unwrap();
+        let js = transpile("obj = 1\nJSSet[obj, \"x\", 42]() >=> result\nresult").unwrap();
         assert!(
             js.contains("__taida_unmold"),
             "JSSet unmold should wrap with __taida_unmold: got {}",
@@ -5676,7 +5676,7 @@ Cage[target, JSSpread[@[1]]()]()
 
     #[test]
     fn test_js_codegen_jsbind_unmold() {
-        let js = transpile("obj = 1\nJSBind[obj, \"fetch\"]() ]=> bound\nbound").unwrap();
+        let js = transpile("obj = 1\nJSBind[obj, \"fetch\"]() >=> bound\nbound").unwrap();
         assert!(
             js.contains("__taida_unmold"),
             "JSBind unmold should wrap with __taida_unmold: got {}",
@@ -5704,7 +5704,7 @@ Cage[target, JSSpread[@[1]]()]()
 
     #[test]
     fn test_js_codegen_jsspread_unmold() {
-        let js = transpile("a = 1\nb = 2\nJSSpread[a, b]() ]=> merged\nmerged").unwrap();
+        let js = transpile("a = 1\nb = 2\nJSSpread[a, b]() >=> merged\nmerged").unwrap();
         assert!(
             js.contains("__taida_unmold"),
             "JSSpread unmold should wrap with __taida_unmold: got {}",

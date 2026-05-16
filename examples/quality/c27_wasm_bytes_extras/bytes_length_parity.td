@@ -6,5 +6,5 @@
 // `taida_polymorphic_length` lacked a Bytes branch.
 
 chunk <= readBytesAt("_c27b_020_len_tmp.bin", 0, 4)
-chunk ]=> bytes
+chunk >=> bytes
 stdout(bytes.length().toString())

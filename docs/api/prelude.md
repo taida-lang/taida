@@ -108,7 +108,7 @@ stdinLine prompt: Str => :Async[Lax[Str]]
 |------|------|-------------|
 | `prompt` | `Str` | 読み取り前に表示する文字列。`""` で表示なし。 |
 
-**Returns**: `:Async[Lax[Str]]` — `]=>` で待ち、さらに `]=>` で
+**Returns**: `:Async[Lax[Str]]` — `>=>` で待ち、さらに `>=>` で
 `Lax[Str]` を展開します。EOF / Ctrl-C / Ctrl-D / IO エラー時は
 `Lax.failure` を返します。
 
@@ -119,7 +119,7 @@ Backspace でマルチバイト 1 文字単位の削除、Ctrl-C / Ctrl-D によ
 **Example**:
 
 ```taida
-stdinLine("名前: ") ]=> name_lax
+stdinLine("名前: ") >=> name_lax
 name <= name_lax.getOrDefault("ゲスト")
 ```
 
@@ -149,7 +149,7 @@ nowMs => :Int
 
 ```taida
 start <= nowMs()
-sleep(10) ]=> _
+sleep(10) >=> _
 end <= nowMs()
 stdout((end - start).toString())   // 例: "10"
 ```
@@ -168,7 +168,7 @@ sleep ms: Int => :Async[Int]
 |------|------|-------------|
 | `ms` | `Int` | 待機ミリ秒数。`0` 以下は即座に完了 (待機なし)。`Int` の範囲は `0..=2_147_483_647`。範囲外は rejected `Async` になる。 |
 
-**Returns**: `:Async[Int]` — `]=>` で展開すると待機が完了し、実際に待機した
+**Returns**: `:Async[Int]` — `>=>` で展開すると待機が完了し、実際に待機した
 ミリ秒数 (基本的には `ms` と同値) が解決値として得られます。Taida は
 `@()` / `:Unit` を「値の不在」型として認めないため、待機時間という意味
 ある値を `:Int` として返します。
@@ -179,7 +179,7 @@ sleep ms: Int => :Async[Int]
 **Example**:
 
 ```taida
-sleep(100) ]=> elapsedMs
+sleep(100) >=> elapsedMs
 stdout("100ms 経過 (実測: " + elapsedMs.toString() + "ms)")
 ```
 
@@ -415,7 +415,7 @@ exit code: Int => :Int
 |---------|--------|------|
 | `Lax[value]()` | `Lax[T]` | 失敗可能値を必ず値へ落とす安全モールド。 |
 | `Optional[value]()` | `Lax[T]` | 値省略を `Lax` 形状で表す互換コンストラクタ。 |
-| `Result[value, pred](throw <= error)` | `Result[T, _]` | 述語付き Result。`]=>` で述語評価、真なら値、偽なら throw。 |
+| `Result[value, pred](throw <= error)` | `Result[T, _]` | 述語付き Result。`>=>` で述語評価、真なら値、偽なら throw。 |
 | `Async[value]()` | `Async[T]` | 即時 fulfilled の非同期値。 |
 | `AsyncReject[error]()` | `Async[T]` | 即時 rejected の非同期値。 |
 | `Gorillax[value]()` | `Gorillax[T]` | 覚悟のモールド型。unmold 失敗時にゴリラ (即時終了) が発動。 |
@@ -549,10 +549,10 @@ Clamp[15, 0, 10]()        // 10
 | `Enumerate[list]()` | list | — | `@[BuchiPack]` | インデックス付与 |
 
 ```taida fragment
-Map[@[1, 2, 3], _ x = x * 2]() ]=> doubled        // @[2, 4, 6]
-Filter[@[85, 92, 78], _ x = x >= 90]() ]=> high  // @[92]
-Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() ]=> total  // 15
-Sort[@[3, 1, 4, 1, 5]](reverse <= true) ]=> desc  // @[5, 4, 3, 1, 1]
+Map[@[1, 2, 3], _ x = x * 2]() >=> doubled        // @[2, 4, 6]
+Filter[@[85, 92, 78], _ x = x >= 90]() >=> high  // @[92]
+Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() >=> total  // 15
+Sort[@[3, 1, 4, 1, 5]](reverse <= true) >=> desc  // @[5, 4, 3, 1, 1]
 ```
 
 ### 7.7 演算モールド
@@ -566,8 +566,8 @@ Sort[@[3, 1, 4, 1, 5]](reverse <= true) ]=> desc  // @[5, 4, 3, 1, 1]
 | `Mod[x, y]()` | x, y | `Lax[Num]` | 剰余 (ゼロ除算で `has_value=false`) |
 
 ```taida fragment
-Div[10, 3]() ]=> q   // 3
-Div[10, 0]() ]=> q   // 0 (ゼロ除算: デフォルト値)
+Div[10, 3]() >=> q   // 3
+Div[10, 0]() >=> q   // 0 (ゼロ除算: デフォルト値)
 Div[10, 0]().has_value   // false
 ```
 
@@ -604,8 +604,8 @@ result <= If[x > 0, "positive", "negative"]()
 | `Ordinal[e]()` | e | `Int` | Enum を宣言順 ordinal Int に変換 (非 Enum は runtime error) |
 
 ```taida fragment
-Int["ff", 16]() ]=> hex   // 255
-Float["abc"]() ]=> v      // 0.0 (失敗: デフォルト値)
+Int["ff", 16]() >=> hex   // 255
+Float["abc"]() >=> v      // 0.0 (失敗: デフォルト値)
 
 Enum => Color = :Red :Green :Blue
 Ordinal[Color:Green()]()  // 1

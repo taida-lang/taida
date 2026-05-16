@@ -5,7 +5,7 @@
 
 r1 <= execShellInteractive("exit 0")
 stdout("r1.has_value=" + r1.has_value.toString())
-r1 ]=> r1V
+r1 >=> r1V
 stdout("r1.code=" + r1V.code.toString())
 
 r2 <= execShellInteractive("exit 3")

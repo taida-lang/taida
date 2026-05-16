@@ -4,8 +4,8 @@ numbers <= @[10, 3, 7, 1, 9, 5, 2, 8, 4, 6]
 
 stdout(`List: ${numbers}`)
 stdout(`Length: ${numbers.length()}`)
-numbers.first() ]=> first_val
-numbers.last() ]=> last_val
+numbers.first() >=> first_val
+numbers.last() >=> last_val
 stdout(`First: ${first_val}`)
 stdout(`Last: ${last_val}`)
 sum_val <= Sum[numbers]()

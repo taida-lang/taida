@@ -54,7 +54,7 @@ poolCreate config: PoolConfig => :Result[@(pool: Pool), _]
 ```taida
 // 成功時のみここを通る。Constraints 違反は throw され、|== が無ければ
 // ゴリラ天井で終了する。
-poolCreate(@(maxSize <= 8, acquireTimeoutMs <= 5000)) ]=> created
+poolCreate(@(maxSize <= 8, acquireTimeoutMs <= 5000)) >=> created
 pool <= created.pool
 ```
 
@@ -79,7 +79,7 @@ poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Resource, to
 | `timeoutMs` | `Int` | このコール限定の取得待ちタイムアウト (ミリ秒)。省略時は `poolCreate` 時の `acquireTimeoutMs`。明示する場合は `1` 以上の正の整数。 |
 
 **Returns**: `:Async[Result[@(resource: Resource, token: Token), _]]` —
-`]=>` で待機すると `Result` が、もう一度 `]=>` で
+`>=>` で待機すると `Result` が、もう一度 `>=>` で
 `@(resource: Resource, token: Token)` が得られます。`resource` は取り出した
 リソース本体、`token` は `poolRelease` に渡す返却用ハンドルです。
 
@@ -98,10 +98,10 @@ poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Resource, to
   stderr("acquire failed: " + error.message)
 => :Int
 
-poolAcquire(pool, 2000) ]=> result    // Async unmold → Result
-result ]=> acquired                   // Result unmold → @(resource, token)。失敗時 throw
+poolAcquire(pool, 2000) >=> result    // Async unmold → Result
+result >=> acquired                   // Result unmold → @(resource, token)。失敗時 throw
 // acquired.resource を使った処理 ...
-poolRelease(pool, acquired.token, acquired.resource) ]=> _
+poolRelease(pool, acquired.token, acquired.resource) >=> _
 ```
 
 ---
@@ -136,7 +136,7 @@ poolRelease pool: Pool  token: Token  resource: Resource => :Result[@(ok: Bool, 
 
 ```taida
 // acquired は §2.1 の poolAcquire 成功結果 (@(resource, token)) を想定。
-poolRelease(pool, acquired.token, acquired.resource) ]=> released
+poolRelease(pool, acquired.token, acquired.resource) >=> released
 | released.reused |> stdout("再利用キューへ戻った")
 | _              |> stdout("リソースは破棄された")
 ```
@@ -159,8 +159,8 @@ poolClose pool: Pool => :Async[Result[@(ok: Bool), _]]
 |------|------|-------------|
 | `pool` | `Pool` | 閉じる対象のプールハンドル。 |
 
-**Returns**: `:Async[Result[@(ok: Bool), _]]` — `]=>` で待機し、もう一度
-`]=>` で `@(ok: Bool)` を取り出します。進行中の `poolAcquire` 待ちは
+**Returns**: `:Async[Result[@(ok: Bool), _]]` — `>=>` で待機し、もう一度
+`>=>` で `@(ok: Bool)` を取り出します。進行中の `poolAcquire` 待ちは
 失敗 (`kind: "closed"`) で完了します。
 
 **AI-Context**:
@@ -169,8 +169,8 @@ poolClose pool: Pool => :Async[Result[@(ok: Bool), _]]
 **Example**:
 
 ```taida
-poolClose(pool) ]=> result    // Async unmold → Result
-result ]=> closed             // Result unmold → @(ok: Bool)。失敗時 throw
+poolClose(pool) >=> result    // Async unmold → Result
+result >=> closed             // Result unmold → @(ok: Bool)。失敗時 throw
 stdout("closed: " + closed.ok.toString())
 ```
 
@@ -238,4 +238,4 @@ stdout("idle: " + health.idle.toString() + ", in use: " + health.inUse.toString(
 
 - [`README.md`](README.md) — `docs/api/` 全体の入口
 - [`docs/api/prelude.md`](prelude.md) — `Result` / `Async` / `Lax` のメソッドとプレリュード関数
-- [`docs/guide/11_async.md`](../guide/11_async.md) — `Async[T]` と `]=>` の使い方
+- [`docs/guide/11_async.md`](../guide/11_async.md) — `Async[T]` と `>=>` の使い方

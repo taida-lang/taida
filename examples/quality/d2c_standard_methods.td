@@ -18,15 +18,15 @@ stdout(nums.contains(3).toString())
 stdout(nums.contains(99).toString())
 stdout(nums.indexOf(3).toString())
 stdout(nums.indexOf(99).toString())
-nums.get(2) ]=> got
+nums.get(2) >=> got
 stdout(got.toString())
-nums.first() ]=> fst
+nums.first() >=> fst
 stdout(fst.toString())
-nums.last() ]=> lst
+nums.last() >=> lst
 stdout(lst.toString())
-nums.max() ]=> mx
+nums.max() >=> mx
 stdout(mx.toString())
-nums.min() ]=> mn
+nums.min() >=> mn
 stdout(mn.toString())
 stdout(nums.any(_ x = x > 4).toString())
 stdout(nums.all(_ x = x > 0).toString())
@@ -41,7 +41,7 @@ lax <= Div[10, 3]()
 stdout(lax.has_value.toString())
 stdout(lax.isEmpty().toString())
 stdout(lax.getOrDefault(99).toString())
-lax ]=> unmolded
+lax >=> unmolded
 stdout(unmolded.toString())
 
 // toString on primitives

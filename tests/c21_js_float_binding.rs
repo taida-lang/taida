@@ -16,7 +16,7 @@
 //! to register local binding targets (`x <= 3.0`), typed parameters
 //! (`x: Float`), typed list parameters (`a: @[Float]`), `@[Float]`-shape
 //! homogeneous list literals, and unmold targets rooted in a Float list
-//! (`a.get(i) ]=> av`). The runtime also grows a `Float_mold_f` variant
+//! (`a.get(i) >=> av`). The runtime also grows a `Float_mold_f` variant
 //! that tags the resulting Lax with `__floatHint: true` so
 //! `stdout(Float[x]())` renders its `__value` / `__default` with `.0`.
 //!

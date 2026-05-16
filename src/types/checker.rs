@@ -2532,7 +2532,7 @@ impl TypeChecker {
     }
 
     /// Unwrap a mold type to get its inner value type.
-    /// Used for `]=>` and `<=[` unmold operations.
+    /// Used for `>=>` and `<=<` unmold operations.
     fn unmold_type(&self, ty: &Type) -> Type {
         match ty {
             // JSON unmolds to dynamic type (needs schema)
@@ -4982,7 +4982,7 @@ defaulted fields must be provided via `()`",
                             self.errors.push(TypeError {
                                 message: format!(
                                     "[E1601] Function '{}' declares return type {}, but the last statement is not an expression. \
-                                     Hint: The function body's last statement must be an expression or a tail binding (`name <= expr`, `expr => name`, `expr ]=> name`, `name <=[ expr`) that produces a value.",
+                                     Hint: The function body's last statement must be an expression or a tail binding (`name <= expr`, `expr => name`, `expr >=> name`, `name <=< expr`) that produces a value.",
                                     fd.name, ret_ty
                                 ),
                                 span: fd.span.clone(),
@@ -5170,7 +5170,7 @@ defaulted fields must be provided via `()`",
                                          but the last statement is not an expression. \
                                          Hint: The |== handler body's last statement must \
                                          be an expression or a tail binding (`name <= expr`, \
-                                         `expr => name`, `expr ]=> name`, `name <=[ expr`) \
+                                         `expr => name`, `expr >=> name`, `name <=< expr`) \
                                          that produces a value.",
                                     declared_ret
                                 ),
@@ -5217,7 +5217,7 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::UnmoldForward(uf) => {
-                // `expr ]=> target` -- target gets the unmolded (inner) value
+                // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
@@ -5228,7 +5228,7 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::UnmoldBackward(ub) => {
-                // `target <=[ expr`
+                // `target <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
@@ -6515,7 +6515,7 @@ defaulted fields must be provided via `()`",
                     self.errors.push(TypeError {
                         message: format!(
                             "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. \
-                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax values, \
+                             Hint: use `>=>` / `<=<` to unmold values, `getOrDefault(default)` for Lax values, \
                              or `errorInfo()` for failure details.",
                             field
                         ),
@@ -7573,7 +7573,7 @@ defaulted fields must be provided via `()`",
                     });
                 }
             }
-            // Each arm gets its own scope for local bindings (e.g. ]=>)
+            // Each arm gets its own scope for local bindings (e.g. >=>)
             self.push_scope();
             for body_stmt in &first_arm.body {
                 self.check_statement(body_stmt);

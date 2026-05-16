@@ -66,7 +66,7 @@ impl GraphExtractor {
                         source: src,
                         target: target_id,
                         kind: EdgeKind::UnmoldForward,
-                        label: "]=>".to_string(),
+                        label: ">=>".to_string(),
                         metadata: HashMap::new(),
                     });
                 }
@@ -81,7 +81,7 @@ impl GraphExtractor {
                         source: src,
                         target: target_id,
                         kind: EdgeKind::UnmoldBackward,
-                        label: "<=[".to_string(),
+                        label: "<=<".to_string(),
                         metadata: HashMap::new(),
                     });
                 }
@@ -508,7 +508,7 @@ impl GraphExtractor {
                 graph.add_node(GraphNode {
                     id: id.clone(),
                     kind: NodeKind::Unmold,
-                    label: "]=>".to_string(),
+                    label: ">=>".to_string(),
                     location: Location {
                         file: self.file.clone(),
                         line: span.line,
@@ -521,7 +521,7 @@ impl GraphExtractor {
                         source: iid,
                         target: id.clone(),
                         kind: EdgeKind::UnmoldForward,
-                        label: "]=>".to_string(),
+                        label: ">=>".to_string(),
                         metadata: HashMap::new(),
                     });
                 }
@@ -1698,7 +1698,7 @@ mod tests {
     #[test]
     fn test_dataflow_unmold_forward() {
         let source =
-            "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\nMap[numbers, doubleFn]() ]=> doubled";
+            "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\nMap[numbers, doubleFn]() >=> doubled";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(graph.nodes.iter().any(|n| n.label == "doubled"));
         assert!(
@@ -2060,9 +2060,9 @@ outer input =
 
     #[test]
     fn test_dataflow_unmold_stmt() {
-        // Unmold is statement-level (]=> / <=[), not expression-level
+        // Unmold is statement-level (>=> / <=<), not expression-level
         // .unmold() parses as a MethodCall
-        let source = "lax <= Lax[42]()\nlax ]=> val";
+        let source = "lax <= Lax[42]()\nlax >=> val";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(
             graph

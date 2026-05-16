@@ -7,14 +7,14 @@
 //! thread-local pool of 32 buffers (one per pthread worker).
 //!
 //! These parity tests exercise the exact access pattern that the
-//! freelist optimises (`list.get(i) ]=> v`), asserting that Interpreter
+//! freelist optimises (`list.get(i) >=> v`), asserting that Interpreter
 //! / JS / Native agree bit-for-bit on:
 //!
-//! 1. Repeated `list.get ]=> unmold` across a long list (hot path).
+//! 1. Repeated `list.get >=> unmold` across a long list (hot path).
 //! 2. OOB access (`list.get` returns empty Lax).
 //! 3. Nested scans that stress the freelist bounds (32 entries).
 //! 4. Mixed-type pack access (Lax wrappers around Str / Int / Bool).
-//! 5. BuchiPack field access with `]=> unmold` mixed with Lax wrappers.
+//! 5. BuchiPack field access with `>=> unmold` mixed with Lax wrappers.
 //!
 //! The freelist is bounded — once full, releases fall through to
 //! `free()`. These fixtures deliberately exceed 32 concurrent Lax
@@ -145,7 +145,7 @@ fn parity_assert(tag: &str, source: &str, expected: &str) {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Hot path: repeated `list.get(i) ]=> v` on an Int list.
+/// Hot path: repeated `list.get(i) >=> v` on an Int list.
 /// Exercises the freelist on every iteration (200 Lax wrappers total).
 #[test]
 fn c26b_024_lax_churn_int_parity() {
@@ -153,7 +153,7 @@ fn c26b_024_lax_churn_int_parity() {
 scan items: @[Int] target: Int i: Int n: Int hits: Int =
   | i >= n |> hits
   | _ |>
-    items.get(i) ]=> v
+    items.get(i) >=> v
     | v == target |> scan(items, target, i + 1, n, hits + 1)
     | _ |> scan(items, target, i + 1, n, hits)
 => :Int
@@ -186,7 +186,7 @@ fn c26b_024_lax_churn_str_parity() {
 findIdx items: @[Str] target: Str i: Int n: Int =
   | i >= n |> -1
   | _ |>
-    items.get(i) ]=> s
+    items.get(i) >=> s
     | s == target |> i
     | _ |> findIdx(items, target, i + 1, n)
 => :Int
@@ -210,7 +210,7 @@ stdout(idxN.toString())
 fn c26b_024_lax_oob_empty_parity() {
     let source = r#"
 probe items: @[Int] idx: Int =
-  items.get(idx) ]=> v
+  items.get(idx) >=> v
   stdout(v.toString())
 => :Int
 
@@ -222,7 +222,7 @@ _r4 <= probe(xs, -1)
 _r5 <= probe(xs, 1)
 stdout("end")
 "#;
-    // OOB returns empty Lax; `]=>` on empty Lax returns the default (0 for Int).
+    // OOB returns empty Lax; `>=>` on empty Lax returns the default (0 for Int).
     parity_assert("lax_oob_empty", source, "10\n30\n0\n0\n20\nend");
 }
 
@@ -239,7 +239,7 @@ fn c26b_024_freelist_bound_parity() {
 deepScan items: @[Int] i: Int n: Int acc: Int =
   | i >= n |> acc
   | _ |>
-    items.get(i) ]=> v
+    items.get(i) >=> v
     deepScan(items, i + 1, n, acc + v)
 => :Int
 
@@ -267,8 +267,8 @@ ints <= @[1, 2, 3, 4, 5]
 strs <= @["a", "b", "c", "d", "e"]
 
 runPair idx: Int =
-  ints.get(idx) ]=> i
-  strs.get(idx) ]=> s
+  ints.get(idx) >=> i
+  strs.get(idx) >=> s
   stdout(i.toString() + ":" + s)
 => :Int
 

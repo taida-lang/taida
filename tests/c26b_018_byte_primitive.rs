@@ -155,13 +155,13 @@ fn c26b_018_byte_at_ascii_parity() {
     let source = r#"
 s <= "GET"
 b0Lax <= ByteAt[s, 0]()
-b0Lax ]=> b0
+b0Lax >=> b0
 stdout(b0)
 b1Lax <= ByteAt[s, 1]()
-b1Lax ]=> b1
+b1Lax >=> b1
 stdout(b1)
 b2Lax <= ByteAt[s, 2]()
-b2Lax ]=> b2
+b2Lax >=> b2
 stdout(b2)
 "#;
     parity_assert("ascii", source, "71\n69\n84");
@@ -173,10 +173,10 @@ fn c26b_018_byte_at_oob_parity() {
     let source = r#"
 s <= "ab"
 oobLax <= ByteAt[s, 5]()
-oobLax ]=> oob
+oobLax >=> oob
 stdout(oob)
 negLax <= ByteAt[s, -1]()
-negLax ]=> neg
+negLax >=> neg
 stdout(neg)
 "#;
     parity_assert("oob", source, "0\n0");
@@ -251,7 +251,7 @@ fn c26b_018_hot_path_http_parse_parity() {
 line <= "POST /api/users HTTP/1.1"
 // 0x47='G' 0x50='P' 0x48='H'
 firstLax <= ByteAt[line, 0]()
-firstLax ]=> first
+firstLax >=> first
 stdout(first)
 // POST takes 4 chars
 method <= ByteSlice[line, 0, 4]()

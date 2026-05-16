@@ -7,5 +7,5 @@ delay ms: Int =
 => :Async[Int]
 
 result <= delay(100)
-result ]=> val
+result >=> val
 stdout(val.toString())

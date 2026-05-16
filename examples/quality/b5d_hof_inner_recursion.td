@@ -8,7 +8,7 @@ factorial n =
 
 items <= @[1, 2, 3, 4, 5]
 
-Map[items, _ x = factorial(x)]() ]=> result
+Map[items, _ x = factorial(x)]() >=> result
 stdout(result)
 
 // Expected: @[1, 2, 6, 24, 120]

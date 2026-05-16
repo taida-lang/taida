@@ -162,8 +162,8 @@ pilot_data <= @(
   sync_rate <= Div[780, 10]()
 )
 
-// ]=> でアンモールド
-pilot_data.sync_rate ]=> rate_value  // 78
+// >=> でアンモールド
+pilot_data.sync_rate >=> rate_value  // 78
 ```
 
 モールド型の詳細は [モールド](05_mold.md) を参照してください。
@@ -196,7 +196,7 @@ pilots: @[Pilot] <= @[
 Pilot = @(name: Str, age: Int)
 
 raw <= '{"name": "Ritsuko", "age": 30}'
-JSON[raw, Pilot]() ]=> pilot
+JSON[raw, Pilot]() >=> pilot
 // pilot: @(name <= "Ritsuko", age <= 30)
 ```
 
@@ -210,7 +210,7 @@ JSON[raw, Pilot]() ]=> pilot
 | フィールドアクセス | `pack.fieldName` | 本章 |
 | ネスト | `@(inner <= @(field <= value))` | 本章 |
 | リストリテラル | `@[elem1, elem2, ...]` | 本章 |
-| JSON 変換 | `JSON[raw, TypeName]() ]=> val` | [03_json.md](03_json.md) |
+| JSON 変換 | `JSON[raw, TypeName]() >=> val` | [03_json.md](03_json.md) |
 | クラスライク型定義 | `Name[?type-args] [=> Parent] = @(...)` | [04_class_like.md](04_class_like.md) |
 | モールド | `Upper[str]()` 等 | [05_mold.md](05_mold.md) |
 

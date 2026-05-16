@@ -251,7 +251,7 @@ impl Interpreter {
             // async-only) and the Interpreter / Native backends (rustyline
             // / linenoise are synchronous) can share a single surface
             // type. The wrapper is fulfilled immediately on this backend;
-            // callers unmold it with `]=> line` to obtain the `Lax[Str]`.
+            // callers unmold it with `>=> line` to obtain the `Lax[Str]`.
             //
             // Failure modes (all collapse to `Lax[Str].failure("")` so the
             // default-value guarantee is preserved):

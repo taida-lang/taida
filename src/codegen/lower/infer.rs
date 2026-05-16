@@ -513,12 +513,12 @@ impl Lowering {
     }
 
     /// Unmold 先の変数に型情報を伝播する
-    /// MoldInst("Str", ...) ]=> x の場合、x を string_vars に追加
+    /// MoldInst("Str", ...) >=> x の場合、x を string_vars に追加
     pub(super) fn track_unmold_type(&mut self, target: &str, source: &Expr) {
         match source {
             // C26B-011 (Phase 11): Div/Mod return Float when at least one
             // type-arg is Float (matches `taida_div_mold_f` lowering in
-            // `lower_molds.rs`). Without this, `Div[1.0, 2.0]() ]=> r`
+            // `lower_molds.rs`). Without this, `Div[1.0, 2.0]() >=> r`
             // leaves `r` untagged, `debug(r)` falls through to
             // `taida_debug_int`, and prints the f64 bit-pattern as an
             // int. `track_unmold_type_by_mold_name` only sees the mold
@@ -532,7 +532,7 @@ impl Lowering {
             }
             Expr::MoldInst(name, _, _, _) => self.track_unmold_type_by_mold_name(target, name),
             // QF-34: Ident source — look up lax_inner_types to propagate type through unmold
-            // e.g., `x <= Bool["maybe"]()` then `x ]=> val` → val is Bool
+            // e.g., `x <= Bool["maybe"]()` then `x >=> val` → val is Bool
             Expr::Ident(name, _) => {
                 if let Some(inner_type) = self.lax_inner_types.get(name).cloned() {
                     self.track_unmold_type_by_mold_name(target, &inner_type);
@@ -565,7 +565,7 @@ impl Lowering {
                 ) {
                     self.bool_vars.insert(target.to_string());
                 }
-                // C21-4: `a.get(i) ]=> av` — if `a` is a typed `@[Float]` list,
+                // C21-4: `a.get(i) >=> av` — if `a` is a typed `@[Float]` list,
                 // tag `av` as a Float so the subsequent `av * bv` arithmetic
                 // lowers to `taida_float_mul` (not `taida_int_mul`).
                 if method.as_str() == "get"
@@ -596,7 +596,7 @@ impl Lowering {
                 self.float_vars.insert(target.to_string());
             }
             // C26B-011 (Phase 11): math molds return Float per
-            // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() ]=> nan`
+            // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() >=> nan`
             // left `nan` untagged and `debug(nan)` fell through to
             // `taida_debug_int`, printing the f64 bit-pattern as Int
             // (e.g. `-2251799813685248` for NaN). Must match

@@ -13,7 +13,7 @@ stdout(m1.has("x").toString())
 stdout(m1.has("z").toString())
 
 // get returns Lax — unmold to get value
-m1.get("x") ]=> v
+m1.get("x") >=> v
 stdout(v.toString())
 
 // get missing key — hasValue is false

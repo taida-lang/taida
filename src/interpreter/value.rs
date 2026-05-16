@@ -687,7 +687,7 @@ pub enum Value {
     /// No methods, no field access. Only usable inside Cage.
     Molten,
     /// Stream value — time-series mold type. Values flow over time.
-    /// `]=>` collects all values into `@[T]` (blocking).
+    /// `>=>` collects all values into `@[T]` (blocking).
     Stream(StreamValue),
     /// C18-2 / C18-3: Tagged enum value — the ordinal carries its owning
     /// enum name so that `jsonEncode` can emit the variant name Str and
@@ -771,7 +771,7 @@ pub enum PendingState {
 /// - **Resolved** (status = Fulfilled | Rejected): value/error set immediately.
 ///   This is backward-compatible with the original synchronous simulation.
 /// - **Pending** (status = Pending, task = Some(...)): a real tokio task is running.
-///   When `]=>` is used, the interpreter calls `block_on` to wait for the result.
+///   When `>=>` is used, the interpreter calls `block_on` to wait for the result.
 #[derive(Debug, Clone)]
 pub struct AsyncValue {
     pub status: AsyncStatus,
@@ -807,7 +807,7 @@ pub enum StreamTransform {
 /// A stream value — Mold[@[T]] for time-series data.
 ///
 /// Stream[T] holds source items and a chain of lazy transforms.
-/// When `]=>` is used, the transforms are applied and items collected into a list.
+/// When `>=>` is used, the transforms are applied and items collected into a list.
 /// PHILOSOPHY.md III: カタめたいなら、鋳型を作りましょう
 #[derive(Debug, Clone)]
 pub struct StreamValue {

@@ -54,11 +54,11 @@ fn cage_rilla_js_call_and_get_execute_through_cage() {
 >>> npm:node:os => @(constants)
 
 file <= Cage[basename, JSCall[@[], @["/tmp/e33-cage-rilla.txt"], Str]()]()
-file ]=> fileName
+file >=> fileName
 stdout(fileName)
 
 sig <= Cage[constants, JSGet[@["signals", "SIGTERM"], Int]()]()
-sig ]=> sigterm
+sig >=> sigterm
 stdout(sigterm.toString())
 "#,
     );
@@ -84,7 +84,7 @@ stdout(TypeName[Thing(name <= "box")]())
 stdout(TypeName[Status:Fail()]())
 
 bad <= Cage[basename, JSCall[@["missing"], @[], Str]()]()
-bad.errorInfo() ]=> info
+bad.errorInfo() >=> info
 stdout(info.type)
 "#,
     );

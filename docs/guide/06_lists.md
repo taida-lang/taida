@@ -94,13 +94,13 @@ empty.isEmpty()                // true
 ### first / last
 
 ```taida fragment
-@[10, 20, 30].first() ]=> val   // 10
-@[10, 20, 30].last() ]=> val    // 30
+@[10, 20, 30].first() >=> val   // 10
+@[10, 20, 30].last() >=> val    // 30
 
 // 空リストでも安全です
 empty: @[Int] <= @[]
-empty.first() ]=> val            // 0 (Int のデフォルト値)
-empty.last() ]=> val             // 0
+empty.first() >=> val            // 0 (Int のデフォルト値)
+empty.last() >=> val             // 0
 ```
 
 ### get
@@ -109,9 +109,9 @@ empty.last() ]=> val             // 0
 
 ```taida fragment
 items <= @[10, 20, 30]
-items.get(0) ]=> val    // 10
-items.get(1) ]=> val    // 20
-items.get(100) ]=> val  // 0 (範囲外: デフォルト値)
+items.get(0) >=> val    // 10
+items.get(1) >=> val    // 20
+items.get(100) >=> val  // 0 (範囲外: デフォルト値)
 ```
 
 ### max / min
@@ -119,13 +119,13 @@ items.get(100) ]=> val  // 0 (範囲外: デフォルト値)
 最大値・最小値を返します。
 
 ```taida fragment
-@[3, 1, 4, 1, 5].max() ]=> val   // 5
-@[3, 1, 4, 1, 5].min() ]=> val   // 1
+@[3, 1, 4, 1, 5].max() >=> val   // 5
+@[3, 1, 4, 1, 5].min() >=> val   // 1
 
 // 空リストでも安全です
 empty: @[Int] <= @[]
-empty.max() ]=> val                // 0
-empty.min() ]=> val                // 0
+empty.max() >=> val                // 0
+empty.min() >=> val                // 0
 ```
 
 ### has_value で成功/失敗を判別する
@@ -171,7 +171,7 @@ empty.max().getOrDefault(-1)             // -1
 すべての要素が条件を満たすかを返します。
 
 ```taida
-@[2, 4, 6].all(_ x = Mod[x, 2]() ]=> r; r == 0)  // true
+@[2, 4, 6].all(_ x = Mod[x, 2]() >=> r; r == 0)  // true
 @[1, 2, 3].all(_ x = x > 0)                        // true
 @[1, 2, 3].all(_ x = x > 2)                        // false
 ```
@@ -191,21 +191,21 @@ empty.max().getOrDefault(-1)             // -1
 
 > **PHILOSOPHY.md -- III.** カタめたいなら、鋳型を作りましょう
 
-リストの操作はすべてモールドで行います。結果は `]=>` で取り出すか、パイプラインで次の処理に渡します。
+リストの操作はすべてモールドで行います。結果は `>=>` で取り出すか、パイプラインで次の処理に渡します。
 
 ここでは代表的な 4 種 (Map / Filter / Fold / Sort) の使い方を示します。リストモールドの **完全なシグネチャ一覧** (Take / Drop / Append / Prepend / Concat / Reverse / Unique / Flatten / Join / Sum / Find / FindIndex / Count / Zip / Enumerate / TakeWhile / DropWhile / Foldr) は [`docs/api/prelude.md §7.6`](../api/prelude.md#76-リストモールド) を参照してください。
 
 ### Map[list, fn]() — 各要素を変換
 
 ```taida
-Map[@[1, 2, 3], _ x = x * 2]() ]=> doubled
+Map[@[1, 2, 3], _ x = x * 2]() >=> doubled
 // doubled: @[2, 4, 6]
 
 // 条件付き変換
 Map[@[1, 2, 3, 4, 5], _ x =
   | x > 3 |> x * 10
   | _ |> x
-]() ]=> processed
+]() >=> processed
 // processed: @[1, 2, 3, 40, 50]
 ```
 
@@ -214,15 +214,15 @@ Map[@[1, 2, 3, 4, 5], _ x =
 ```taida
 scores <= @[85, 92, 78, 95, 88]
 
-Filter[scores, _ x = x >= 90]() ]=> highScores
+Filter[scores, _ x = x >= 90]() >=> highScores
 // highScores: @[92, 95]
 
 // 名前付き関数も使えます
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
-Filter[@[1, 2, 3, 4, 5, 6], isEven]() ]=> evens
+Filter[@[1, 2, 3, 4, 5, 6], isEven]() >=> evens
 // evens: @[2, 4, 6]
 ```
 
@@ -230,7 +230,7 @@ Filter[@[1, 2, 3, 4, 5, 6], isEven]() ]=> evens
 
 ```taida
 // 合計
-Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() ]=> total
+Fold[@[1, 2, 3, 4, 5], 0, _ acc x = acc + x]() >=> total
 // total: 15
 
 // 文字列の結合
@@ -238,7 +238,7 @@ names <= @["Asuka", "Rei", "Shinji"]
 Fold[names, "", _ acc name =
   | acc == "" |> name
   | _ |> acc + ", " + name
-]() ]=> joined
+]() >=> joined
 // joined: "Asuka, Rei, Shinji"
 ```
 
@@ -247,10 +247,10 @@ Fold[names, "", _ acc name =
 オプション `reverse` で降順、`by` でキー関数を指定できます。
 
 ```taida
-Sort[@[3, 1, 4, 1, 5]]() ]=> sorted
+Sort[@[3, 1, 4, 1, 5]]() >=> sorted
 // sorted: @[1, 1, 3, 4, 5]
 
-Sort[@[3, 1, 4, 1, 5]](reverse <= true) ]=> desc
+Sort[@[3, 1, 4, 1, 5]](reverse <= true) >=> desc
 // desc: @[5, 4, 3, 1, 1]
 
 pilots <= @[
@@ -258,7 +258,7 @@ pilots <= @[
   @(name <= "Shinji", age <= 14),
   @(name <= "Rei", age <= 14)
 ]
-Sort[pilots](by <= _ p = p.age) ]=> byAge
+Sort[pilots](by <= _ p = p.age) >=> byAge
 ```
 
 ---
@@ -291,13 +291,13 @@ scores => Filter[_, _ x = x >= 90]() => Map[_, _ x = x * 2]() => highDoubled
 numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 
-Filter[numbers, isEven]() ]=> evens
-Map[evens, _ x = x * 2]() ]=> doubled
-Fold[doubled, 0, _ acc x = acc + x]() ]=> sum
+Filter[numbers, isEven]() >=> evens
+Map[evens, _ x = x * 2]() >=> doubled
+Fold[doubled, 0, _ acc x = acc + x]() >=> sum
 // sum: 60
 ```
 
@@ -321,8 +321,8 @@ staff => Filter[_, _ s = s.active]() => Map[_, _ s = s.name]() => activeNames
 
 // 平均年齢を計算します
 staff => Map[_, _ s = s.age]() => ages
-Fold[ages, 0, _ acc a = acc + a]() ]=> totalAge
-Div[totalAge, ages.length()]() ]=> avgAge
+Fold[ages, 0, _ acc a = acc + a]() >=> totalAge
+Div[totalAge, ages.length()]() >=> avgAge
 // avgAge: 18
 ```
 
@@ -337,12 +337,12 @@ orders <= @[
 
 // 各注文の小計を計算し、合計します
 orders => Map[_, _ o = o.quantity * o.price]() => subtotals
-Sum[subtotals]() ]=> totalRevenue
+Sum[subtotals]() >=> totalRevenue
 // totalRevenue: 1300
 
 // 商品Aだけの合計
 orders => Filter[_, _ o = o.product == "A"]() => Map[_, _ o = o.quantity * o.price]() => aSubtotals
-Sum[aSubtotals]() ]=> aRevenue
+Sum[aSubtotals]() >=> aRevenue
 // aRevenue: 700
 ```
 

@@ -2386,10 +2386,10 @@ impl Interpreter {
             //   id   — task identifier (optional)
             //   task — description of the pending work
             //   sol  — solidify channel (`__value`): the current placeholder value
-            //   unm  — unmold channel (`__default`): the value returned by `]=>`
+            //   unm  — unmold channel (`__default`): the value returned by `>=>`
             //
             // When T is provided, both `sol` and `unm` default to `default_for_type(T)`.
-            // See unmold.rs for the unmold (`]=>`) behavior.
+            // See unmold.rs for the unmold (`>=>`) behavior.
             "TODO" => {
                 let type_default = if let Some(arg) = type_args.first() {
                     self.todo_default_from_type_arg(arg)?

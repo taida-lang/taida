@@ -464,8 +464,8 @@ Cat(name <= "Tama").errorInfo()"#,
 
     #[test]
     fn test_str_mold_unmold() {
-        // Str[42]() ]=> text, text should be "42"
-        let result = eval_ok("Str[42]() ]=> text\ntext");
+        // Str[42]() >=> text, text should be "42"
+        let result = eval_ok("Str[42]() >=> text\ntext");
         assert_eq!(result, Value::str("42".into()));
     }
 
@@ -728,7 +728,7 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_list_find() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.has_value";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.has_value";
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
 
@@ -741,7 +741,7 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_list_find_index() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nFindIndex[@[1, 3, 4, 7], isEven]()";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nFindIndex[@[1, 3, 4, 7], isEven]()";
         assert_eq!(eval_ok(source), Value::Int(2));
     }
 
@@ -753,7 +753,7 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_list_any() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\n@[1, 3, 4].any(isEven)";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\n@[1, 3, 4].any(isEven)";
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
 
@@ -777,7 +777,7 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_list_count() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nCount[@[1, 2, 3, 4, 5], isEven]()";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nCount[@[1, 2, 3, 4, 5], isEven]()";
         assert_eq!(eval_ok(source), Value::Int(2));
     }
 
@@ -822,13 +822,13 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_list_zip() {
-        let source = "Zip[@[1, 2, 3], @[\"a\", \"b\", \"c\"]]() ]=> result\nresult.length()";
+        let source = "Zip[@[1, 2, 3], @[\"a\", \"b\", \"c\"]]() >=> result\nresult.length()";
         assert_eq!(eval_ok(source), Value::Int(3));
     }
 
     #[test]
     fn test_list_enumerate() {
-        let source = "Enumerate[@[\"a\", \"b\", \"c\"]]() ]=> result\nresult.length()";
+        let source = "Enumerate[@[\"a\", \"b\", \"c\"]]() >=> result\nresult.length()";
         assert_eq!(eval_ok(source), Value::Int(3));
     }
 
@@ -908,9 +908,9 @@ result <= numbers.get(10).unmold()
 
     #[test]
     fn test_mold_charat() {
-        // CharAt returns Lax[Str]; unmold with ]=> to get the inner value
+        // CharAt returns Lax[Str]; unmold with >=> to get the inner value
         assert_eq!(
-            eval_ok("CharAt[\"hello\", 1]() ]=> x\nx"),
+            eval_ok("CharAt[\"hello\", 1]() >=> x\nx"),
             Value::str("e".into())
         );
     }
@@ -1124,7 +1124,7 @@ result <= numbers.get(10).unmold()
 
         let dec_ok = eval_ok(
             "b <= Bytes[@[112, 111, 110, 103]]()\n\
-b ]=> bb\n\
+b >=> bb\n\
 Utf8Decode[bb]()",
         );
         match dec_ok {
@@ -1256,38 +1256,38 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_find_lax() {
         // Find now returns Lax (not Optional)
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.has_value";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nresult <= Find[@[1, 3, 4, 7], isEven]()\nresult.has_value";
         assert_eq!(eval_ok(source), Value::Bool(true));
     }
 
     #[test]
     fn test_mold_find_unmold() {
         // Find Lax unmold extracts the value
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nFind[@[1, 3, 4, 7], isEven]() ]=> result\nresult";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nFind[@[1, 3, 4, 7], isEven]() >=> result\nresult";
         assert_eq!(eval_ok(source), Value::Int(4));
     }
 
     #[test]
     fn test_mold_find_index() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nFindIndex[@[1, 3, 4, 7], isEven]()";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nFindIndex[@[1, 3, 4, 7], isEven]()";
         assert_eq!(eval_ok(source), Value::Int(2));
     }
 
     #[test]
     fn test_mold_count() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\nCount[@[1, 2, 3, 4, 5], isEven]()";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\nCount[@[1, 2, 3, 4, 5], isEven]()";
         assert_eq!(eval_ok(source), Value::Int(2));
     }
 
     #[test]
     fn test_mold_zip() {
-        let source = "Zip[@[1, 2, 3], @[\"a\", \"b\", \"c\"]]() ]=> result\nresult.length()";
+        let source = "Zip[@[1, 2, 3], @[\"a\", \"b\", \"c\"]]() >=> result\nresult.length()";
         assert_eq!(eval_ok(source), Value::Int(3));
     }
 
     #[test]
     fn test_mold_enumerate() {
-        let source = "Enumerate[@[\"a\", \"b\", \"c\"]]() ]=> result\nresult.length()";
+        let source = "Enumerate[@[\"a\", \"b\", \"c\"]]() >=> result\nresult.length()";
         assert_eq!(eval_ok(source), Value::Int(3));
     }
 
@@ -1295,13 +1295,13 @@ Utf8Decode[bb]()",
     #[test]
     fn test_mold_fold_new_order() {
         let source =
-            "numbers <= @[1, 2, 3, 4, 5]\nFold[numbers, 0, _ acc x = acc + x]() ]=> sum\nsum";
+            "numbers <= @[1, 2, 3, 4, 5]\nFold[numbers, 0, _ acc x = acc + x]() >=> sum\nsum";
         assert_eq!(eval_ok(source), Value::Int(15));
     }
 
     #[test]
     fn test_mold_foldr_new_order() {
-        let source = "words <= @[\"a\", \"b\", \"c\"]\nFoldr[words, \"\", _ acc x = x + acc]() ]=> result\nresult";
+        let source = "words <= @[\"a\", \"b\", \"c\"]\nFoldr[words, \"\", _ acc x = x + acc]() >=> result\nresult";
         assert_eq!(eval_ok(source), Value::str("abc".into()));
     }
 
@@ -1314,7 +1314,7 @@ Utf8Decode[bb]()",
 
     #[test]
     fn test_mold_pipeline_list() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\n@[1, 2, 3, 4, 5] => Filter[_, isEven]() => Map[_, _ x = x * 2]() => result\nresult";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\n@[1, 2, 3, 4, 5] => Filter[_, isEven]() => Map[_, _ x = x * 2]() => result\nresult";
         if let Value::List(items) = eval_ok(source) {
             assert_eq!(items.as_slice(), &[Value::Int(4), Value::Int(8)]);
         } else {
@@ -1324,7 +1324,7 @@ Utf8Decode[bb]()",
 
     #[test]
     fn test_mold_pipeline_fold() {
-        let source = "isEven x =\n  Mod[x, 2]() ]=> r\n  r == 0\n=> :Bool\n@[1, 2, 3, 4, 5] => Filter[_, isEven]() => Map[_, _ x = x * 2]() => Fold[_, 0, _ acc x = acc + x]() => result\nresult";
+        let source = "isEven x =\n  Mod[x, 2]() >=> r\n  r == 0\n=> :Bool\n@[1, 2, 3, 4, 5] => Filter[_, isEven]() => Map[_, _ x = x * 2]() => Fold[_, 0, _ acc x = acc + x]() => result\nresult";
         assert_eq!(eval_ok(source), Value::Int(12));
     }
 
@@ -1437,7 +1437,7 @@ Utf8Decode[bb]()",
 
     #[test]
     fn test_custom_mold_filling_unmold_forward() {
-        // Custom mold with filling and custom unmold, using ]=> to extract
+        // Custom mold with filling and custom unmold, using >=> to extract
         let source = r#"Mold[T] => Container[T] = @(
   count: Int
   unmold _ =
@@ -1446,7 +1446,7 @@ Utf8Decode[bb]()",
 )
 data <= @(x <= 1, y <= 2)
 box <= Container[data](count <= 3)
-box ]=> extracted
+box >=> extracted
 extracted"#;
         let result = eval_ok(source);
         // extracted should be the filling value: @(x <= 1, y <= 2)
@@ -1460,7 +1460,7 @@ extracted"#;
 
     #[test]
     fn test_custom_mold_filling_unmold_backward() {
-        // Custom mold using <=[ (backward unmold)
+        // Custom mold using <=< (backward unmold)
         let source = r#"Mold[T] => Box[T] = @(
   label: Str
   unmold _ =
@@ -1469,7 +1469,7 @@ extracted"#;
 )
 val <= 42
 b <= Box[val](label <= "test")
-result <=[ b
+result <=< b
 result"#;
         assert_eq!(eval_ok(source), Value::Int(42));
     }
@@ -1524,7 +1524,7 @@ box.count"#;
   label: Str
 )
 s <= Simple[42](label <= "test")
-s ]=> val
+s >=> val
 val"#;
         assert_eq!(eval_ok(source), Value::Int(42));
     }
@@ -1556,7 +1556,7 @@ box.describe()"#;
 )
 items <= @[1, 2, 3]
 lb <= ListBox[items]()
-lb ]=> extracted
+lb >=> extracted
 extracted"#;
         let result = eval_ok(source);
         if let Value::List(items) = &result {
@@ -1638,7 +1638,7 @@ check(0)"#;
     #[test]
     fn test_custom_mold_unmold_method_without_unmold_override() {
         // Bug-1: .unmold() on a custom mold WITHOUT `unmold _ = ...` should
-        // fall back to __value, just like ]=> does via unmold_value().
+        // fall back to __value, just like >=> does via unmold_value().
         let source = r#"Mold[T] => Simple[T] = @(
   label: Str
 )
@@ -1651,7 +1651,7 @@ s.unmold()"#;
 
     #[test]
     fn test_custom_mold_unmold_throw_caught_by_error_ceiling_forward() {
-        // Bug-2: throw inside __unmold should be catchable by |== (via ]=>)
+        // Bug-2: throw inside __unmold should be catchable by |== (via >=>)
         let source = r#"Mold[T] => Validated[T] = @(
   unmold _ =
     Error(type <= "ValidationError", message <= "invalid").throw()
@@ -1663,8 +1663,8 @@ validate x: Int =
     "caught"
   => :Str
   v <= Validated[x]()
-  v ]=> val
-  Str[val]() ]=> s
+  v >=> val
+  Str[val]() >=> s
   s
 => :Str
 validate(0)"#;
@@ -1782,7 +1782,7 @@ check(1)"#;
     fn test_todo_unmold_returns_unm_field() {
         let source = r#"
 t <= TODO[Int](sol <= 7, unm <= 9)
-t ]=> out
+t >=> out
 out
 "#;
         assert_eq!(eval_ok(source), Value::Int(9));
@@ -1792,7 +1792,7 @@ out
     fn test_todo_unmold_falls_back_to_type_default() {
         let source = r#"
 t <= TODO[Int](sol <= 7)
-t ]=> out
+t >=> out
 out
 "#;
         assert_eq!(eval_ok(source), Value::Int(0));
@@ -1802,7 +1802,7 @@ out
     fn test_todo_stub_unmold_yields_molten() {
         let source = r#"
 t <= TODO[Stub["User data shape TBD"]]()
-t ]=> out
+t >=> out
 typeof(out)
 "#;
         assert_eq!(eval_ok(source), Value::str("Molten".to_string()));
@@ -1812,7 +1812,7 @@ typeof(out)
     fn test_todo_stub_molten_runtime_access_is_restricted() {
         let source = r#"
 t <= TODO[Stub["User data shape TBD"]]()
-t ]=> out
+t >=> out
 out.toString()
 "#;
         let result = eval(source);
@@ -1922,7 +1922,7 @@ out.toString()
         let source = r#"Error => TestError = @(message: Str)
 err <= TestError(message <= "cage fail")
 c <= @(has_value <= false, __value <= @(), __error <= err, __type <= "Gorillax")
-c.errorInfo() ]=> info
+c.errorInfo() >=> info
 info.message"#;
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
@@ -1937,10 +1937,10 @@ info.message"#;
 err <= TestError(message <= "cage fail")
 c <= @(has_value <= false, __value <= @(), __error <= err, __type <= "Gorillax")
 |== error: Error =
-  error.errorInfo() ]=> info
+  error.errorInfo() >=> info
   info.type
 => :Str
-c.relax() ]=> value
+c.relax() >=> value
 "unreachable""#;
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
@@ -1954,7 +1954,7 @@ c.relax() ]=> value
     #[test]
     fn test_molten_direct_unmold_forbidden() {
         // Molten cannot be unmolded directly — must use Cage
-        let source = "m ]=> x";
+        let source = "m >=> x";
         let (program, parse_errors) = crate::parser::parse(source);
         assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
         let mut interpreter = Interpreter::new();
@@ -2553,11 +2553,11 @@ p.y.has_value"#,
     fn test_bt18_int_conversion_failure_default() {
         // E32B-035 migration: `Int["abc"]()` returns a Lax[Int] with
         // has_value=false. The implicit default (`__default`) is 0; the
-        // user-observable replacement for that pin is `]=>` unmolding,
+        // user-observable replacement for that pin is `>=>` unmolding,
         // which falls back to the same default when has_value=false.
         let result = eval_ok(
             r#"res <= Int["abc"]()
-res ]=> v
+res >=> v
 v"#,
         );
         assert_eq!(
@@ -2569,11 +2569,11 @@ v"#,
 
     #[test]
     fn test_bt18_float_conversion_failure_default() {
-        // E32B-035 migration: same pattern as the Int variant — `]=>` on a
+        // E32B-035 migration: same pattern as the Int variant — `>=>` on a
         // Lax[Float] with has_value=false yields the implicit default 0.0.
         let result = eval_ok(
             r#"res <= Float["abc"]()
-res ]=> v
+res >=> v
 v"#,
         );
         assert_eq!(
@@ -2601,12 +2601,12 @@ v"#,
 
     #[test]
     fn test_bt18_div_zero_default() {
-        // E32B-035 migration: same `]=>` fallback pattern as the
+        // E32B-035 migration: same `>=>` fallback pattern as the
         // Int / Float conversion tests. Div[1,0]() is has_value=false and
         // unmolds to the implicit default 0.
         let result = eval_ok(
             r#"res <= Div[1,0]()
-res ]=> v
+res >=> v
 v"#,
         );
         assert_eq!(result, Value::Int(0), "Div by zero default should be 0");

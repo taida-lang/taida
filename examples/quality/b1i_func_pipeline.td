@@ -1,8 +1,8 @@
 // B-1i: 関数内パイプライン — data => Mold[...]() => result
 processNums nums =
-  Filter[nums, _ x = Mod[x, 2]().unmold() == 0]() ]=> evens
-  Map[evens, _ x = x * 10]() ]=> scaled
-  Sum[scaled]() ]=> total
+  Filter[nums, _ x = Mod[x, 2]().unmold() == 0]() >=> evens
+  Map[evens, _ x = x * 10]() >=> scaled
+  Sum[scaled]() >=> total
   total
 => :Int
 

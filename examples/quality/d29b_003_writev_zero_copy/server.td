@@ -40,7 +40,7 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Bytes)
 
 asyncResult <= httpServe(0, handler, 50)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)

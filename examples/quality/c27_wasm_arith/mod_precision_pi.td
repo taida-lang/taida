@@ -5,5 +5,5 @@
 // 2^53 mantissa precision. Post-fix wasm matches interp/native/js
 // exactly.
 // Reference (interp / native / js): 0.14357849993359384
-Mod[1000000.5, 3.14159265]() ]=> r
+Mod[1000000.5, 3.14159265]() >=> r
 debug(r)

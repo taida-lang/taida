@@ -817,11 +817,11 @@ fn check_unchecked_division(_program: &Program, _file: &str) -> Vec<VerifyFindin
 struct DirectionFlags {
     has_forward_arrow: bool,   // =>
     has_backward_arrow: bool,  // <=
-    has_unmold_forward: bool,  // ]=>
-    has_unmold_backward: bool, // <=[
+    has_unmold_forward: bool,  // >=>
+    has_unmold_backward: bool, // <=<
 }
 
-/// Verify single-direction constraint: no mixing => with <= or ]=> with <=[ within one statement.
+/// Verify single-direction constraint: no mixing => with <= or >=> with <=< within one statement.
 fn check_direction_constraint(program: &Program, file: &str) -> Vec<VerifyFinding> {
     let mut findings = Vec::new();
     for stmt in &program.statements {
@@ -866,26 +866,26 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
             }
         }
         Statement::UnmoldForward(uf) => {
-            // ]=> is used at statement level
+            // >=> is used at statement level
             let mut flags = DirectionFlags {
                 has_unmold_forward: true,
                 ..Default::default()
             };
             scan_expr_for_direction(&uf.source, &mut flags);
 
-            // Check for <=[ inside the source expression (shouldn't happen but safety net)
+            // Check for <=< inside the source expression (shouldn't happen but safety net)
             if flags.has_unmold_forward && flags.has_unmold_backward {
                 findings.push(VerifyFinding {
                     check: "direction-constraint".to_string(),
                     severity: Severity::Error,
-                    message: "[E0302] 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
+                    message: "[E0302] 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
                     file: Some(file.to_string()),
                     line: Some(uf.span.line),
                 });
             }
         }
         Statement::UnmoldBackward(ub) => {
-            // <=[ is used at statement level
+            // <=< is used at statement level
             let mut flags = DirectionFlags {
                 has_unmold_backward: true,
                 ..Default::default()
@@ -896,7 +896,7 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 findings.push(VerifyFinding {
                     check: "direction-constraint".to_string(),
                     severity: Severity::Error,
-                    message: "[E0302] 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
+                    message: "[E0302] 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
                     file: Some(file.to_string()),
                     line: Some(ub.span.line),
                 });
@@ -996,7 +996,7 @@ fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
 
 // ── Check: unchecked-lax ─────────────────────────────
 
-/// Detect Lax[T] values used without ]=> unmold or .has_value check.
+/// Detect Lax[T] values used without >=> unmold or .has_value check.
 ///
 /// Lax-returning expressions:
 /// - `Lax[...]()` mold instantiation
@@ -1005,7 +1005,7 @@ fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
 /// - `.first()`, `.last()`, `.max()`, `.min()` method calls (return Lax)
 ///
 /// Safe usage patterns (excluded from warnings):
-/// - `]=>` / `<=[` unmold (UnmoldForward/UnmoldBackward statements, Unmold expr)
+/// - `>=>` / `<=<` unmold (UnmoldForward/UnmoldBackward statements, Unmold expr)
 /// - `.has_value` field access
 /// - `.map()`, `.flatMap()` method calls (monadic operations)
 /// - Passing to another function (callee is responsible)
@@ -1038,7 +1038,7 @@ fn is_lax_producing_expr(expr: &Expr) -> bool {
     }
 }
 
-/// Check if an expression safely handles a Lax variable (via .has_value, .map, .flatMap, ]=>).
+/// Check if an expression safely handles a Lax variable (via .has_value, .map, .flatMap, >=>).
 fn is_safe_lax_usage(expr: &Expr, var_name: &str) -> bool {
     match expr {
         // .has_value field access on the variable
@@ -1049,7 +1049,7 @@ fn is_safe_lax_usage(expr: &Expr, var_name: &str) -> bool {
         Expr::MethodCall(obj, method, _, _) if method == "map" || method == "flatMap" => {
             expr_references_var(obj, var_name)
         }
-        // Unmold expression: expr ]=> (as expression)
+        // Unmold expression: expr >=> (as expression)
         Expr::Unmold(inner, _) => expr_references_var(inner, var_name),
         _ => false,
     }
@@ -1171,16 +1171,16 @@ fn scan_stmt_for_unchecked_lax(
             }
         }
 
-        // Unmold forward: `expr ]=> name` — marks the source as safely consumed
+        // Unmold forward: `expr >=> name` — marks the source as safely consumed
         Statement::UnmoldForward(uf) => {
             // If the source is a Lax variable, mark it safe
             if let Expr::Ident(name, _) = &uf.source {
                 safe_vars.insert(name.clone());
             }
-            // Also check if source is a Lax-producing expression used directly (OK — ]=> consumes it)
+            // Also check if source is a Lax-producing expression used directly (OK — >=> consumes it)
         }
 
-        // Unmold backward: `name <=[ expr` — marks the source as safely consumed
+        // Unmold backward: `name <=< expr` — marks the source as safely consumed
         Statement::UnmoldBackward(ub) => {
             if let Expr::Ident(name, _) = &ub.source {
                 safe_vars.insert(name.clone());
@@ -1232,7 +1232,7 @@ fn check_expr_for_unsafe_lax_use(
                 check: "unchecked-lax".to_string(),
                 severity: Severity::Warning,
                 message: format!(
-                    "Lax value '{}' used without ]=> unmold or .has_value check",
+                    "Lax value '{}' used without >=> unmold or .has_value check",
                     var
                 ),
                 file: Some(file.to_string()),
@@ -2043,18 +2043,18 @@ mod tests {
 
     #[test]
     fn test_direction_constraint_unmold_forward_only() {
-        // Pure ]=> — no violation
-        let program = parse_source("Lax[42]() ]=> x");
+        // Pure >=> — no violation
+        let program = parse_source("Lax[42]() >=> x");
         let findings = check_direction_constraint(&program, "test.td");
-        assert!(findings.is_empty(), "Pure ]=> should pass");
+        assert!(findings.is_empty(), "Pure >=> should pass");
     }
 
     #[test]
     fn test_direction_constraint_unmold_backward_only() {
-        // Pure <=[ — no violation
-        let program = parse_source("x <=[ Lax[42]()");
+        // Pure <=< — no violation
+        let program = parse_source("x <=< Lax[42]()");
         let findings = check_direction_constraint(&program, "test.td");
-        assert!(findings.is_empty(), "Pure <=[ should pass");
+        assert!(findings.is_empty(), "Pure <=< should pass");
     }
 
     #[test]
@@ -2101,8 +2101,8 @@ mod tests {
 
     #[test]
     fn test_direction_constraint_different_categories_ok() {
-        // => and <=[ are different categories, should be allowed
-        let program = parse_source("x <=[ Lax[42]()");
+        // => and <=< are different categories, should be allowed
+        let program = parse_source("x <=< Lax[42]()");
         let findings = check_direction_constraint(&program, "test.td");
         assert!(
             findings.is_empty(),
@@ -2180,7 +2180,7 @@ outer input =
 
     #[test]
     fn test_unchecked_lax_direct_use_warns() {
-        // Lax value used directly without ]=> or .has_value — should warn
+        // Lax value used directly without >=> or .has_value — should warn
         let program = parse_source("result <= Lax[42]()\nstdout(result)");
         let findings = check_unchecked_lax(&program, "test.td");
         assert_eq!(findings.len(), 1, "Should warn about unchecked Lax usage");
@@ -2190,8 +2190,8 @@ outer input =
 
     #[test]
     fn test_unchecked_lax_unmold_forward_safe() {
-        // Lax value consumed via ]=> — should NOT warn
-        let program = parse_source("Lax[42]() ]=> value\nstdout(value)");
+        // Lax value consumed via >=> — should NOT warn
+        let program = parse_source("Lax[42]() >=> value\nstdout(value)");
         let findings = check_unchecked_lax(&program, "test.td");
         assert!(
             findings.is_empty(),
@@ -2202,8 +2202,8 @@ outer input =
 
     #[test]
     fn test_unchecked_lax_unmold_after_assign_safe() {
-        // Lax assigned to variable, then ]=> — should NOT warn
-        let program = parse_source("result <= Lax[42]()\nresult ]=> value\nstdout(value)");
+        // Lax assigned to variable, then >=> — should NOT warn
+        let program = parse_source("result <= Lax[42]()\nresult >=> value\nstdout(value)");
         let findings = check_unchecked_lax(&program, "test.td");
         assert!(
             findings.is_empty(),
@@ -2485,15 +2485,15 @@ outer input =
 
     #[test]
     fn test_naming_unmold_target_snake_case() {
-        // ]=> target should be snake_case
-        let program = parse_source("Lax[42]() ]=> my_value");
+        // >=> target should be snake_case
+        let program = parse_source("Lax[42]() >=> my_value");
         let findings = check_naming_convention(&program, "test.td");
         assert!(findings.is_empty(), "snake_case unmold target should pass");
     }
 
     #[test]
     fn test_naming_unmold_target_camel_case_fail() {
-        let program = parse_source("Lax[42]() ]=> myValue");
+        let program = parse_source("Lax[42]() >=> myValue");
         let findings = check_naming_convention(&program, "test.td");
         assert_eq!(findings.len(), 1, "camelCase unmold target should fail");
         assert!(findings[0].message.contains("myValue"));

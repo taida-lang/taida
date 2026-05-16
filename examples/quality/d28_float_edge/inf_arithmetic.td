@@ -6,19 +6,19 @@
 // native rendered "1.5".  After fix wasi mirrors libc fmod (= native).
 
 // (1) +Infinity from overflow division.
-Div[1e308, 1e-308] ]=> big
+Div[1e308, 1e-308] >=> big
 debug(big)
 
 // (2) -Infinity from negative overflow.
-Div[-1e308, 1e-308] ]=> negbig
+Div[-1e308, 1e-308] >=> negbig
 debug(negbig)
 
 // (3) Mod[finite, +Inf] = finite (the dividend itself, sign preserved).
-Mod[1.5, big] ]=> m_pos
+Mod[1.5, big] >=> m_pos
 debug(m_pos)
 
 // (4) Mod[finite, -Inf] = finite (still the dividend).
-Mod[2.5, negbig] ]=> m_neg
+Mod[2.5, negbig] >=> m_neg
 debug(m_neg)
 
 // (5) Inf + finite = Inf.

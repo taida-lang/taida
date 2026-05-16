@@ -120,12 +120,12 @@ foo x: Int =
 => :Int
 ```
 
-### 4. unmold/]=>の右辺
+### 4. unmold/>=>の右辺
 
 ```taida
 // NOT 末尾位置
 foo x: Int =
-  asyncOp(x) ]=> result  // × 後続処理がある
+  asyncOp(x) >=> result  // × 後続処理がある
   result
 => :Int
 ```
@@ -196,8 +196,8 @@ sum list: @[Int] =
 sumTail list: @[Int] acc: Int =
   | list.isEmpty() |> acc
   | _ |>
-    list.first() ]=> head
-    Drop[list, 1]() ]=> rest
+    list.first() >=> head
+    Drop[list, 1]() >=> rest
     sumTail(rest, acc + head)
 => :Int
 ```
@@ -213,9 +213,9 @@ reverse list: @[Int] =
 reverseTail list: @[Int] acc: @[Int] =
   | list.isEmpty() |> acc
   | _ |>
-    list.first() ]=> head
-    Drop[list, 1]() ]=> rest
-    Prepend[acc, head]() ]=> newAcc
+    list.first() >=> head
+    Drop[list, 1]() >=> rest
+    Prepend[acc, head]() >=> newAcc
     reverseTail(rest, newAcc)
 => :@[Int]
 ```
@@ -247,15 +247,15 @@ binarySearch list: @[Int] target: Int =
 searchTail list: @[Int] target: Int low: Int high: Int =
   | low > high |> Lax[Int]()                           // 見つからなかった (has_value = false)
   | _ |>
-    Div[low + high, 2]() ]=> mid
-    list.get(mid) ]=> value
+    Div[low + high, 2]() >=> mid
+    list.get(mid) >=> value
     | value == target |> Lax[Int](mid)                 // 見つかった
     | value < target |> searchTail(list, target, mid + 1, high)
     | _ |> searchTail(list, target, low, mid - 1)
 => :Lax[Int]
 ```
 
-呼び出し側は `]=>` で取り出すか、`has_value` を確認してから `getOrDefault` で既定値を渡します。
+呼び出し側は `>=>` で取り出すか、`has_value` を確認してから `getOrDefault` で既定値を渡します。
 
 ### 文字列の繰り返し
 
@@ -375,8 +375,8 @@ safeSum xs: @[Int] =
 sumTail xs: @[Int] acc: Int =
   | xs.isEmpty() |> acc
   | _ |>
-    xs.first() ]=> head
-    Drop[xs, 1]() ]=> rest
+    xs.first() >=> head
+    Drop[xs, 1]() >=> rest
     value <= processOne(head)  // throw した場合は safeSum 側の ceiling が捕捉
     sumTail(rest, acc + value)  // 末尾位置
 => :Int

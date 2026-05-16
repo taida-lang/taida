@@ -121,7 +121,7 @@ pub struct Lowering {
     list_returning_funcs: std::collections::HashSet<String>,
     /// C21-4: List 変数の要素型名 (`"Float"` / `"Int"` / `"Str"` / `"Bool"`)。
     /// `a: @[Float]` のような型注釈付きパラメータ / 代入から取り出し、
-    /// `a.get(i) ]=> av` の unmold 結果型推論 (= `av` を float_vars に入れる) に使う。
+    /// `a.get(i) >=> av` の unmold 結果型推論 (= `av` を float_vars に入れる) に使う。
     /// これが無いと内積計算 `av * bv` が `taida_int_mul` に降り、Float bits が破壊される。
     list_element_types: std::collections::HashMap<String, String>,
     /// TypeDef 名 → メソッド定義リスト（メソッド名, FuncDef）
@@ -158,7 +158,7 @@ pub struct Lowering {
     exported_symbols: std::collections::HashSet<String>,
     /// Lax 変数の内部型追跡（変数名 → 内部型名）
     /// 例: `x <= Bool["maybe"]()` → lax_inner_types["x"] = "Bool"
-    /// `x ]=> val` で val の型を正しく推定するために使用
+    /// `x >=> val` で val の型を正しく推定するために使用
     lax_inner_types: std::collections::HashMap<String, String>,
     /// Net builtin names shadowed by a parameter in the current function scope.
     /// When a name is here, stdlib_runtime_funcs dispatch for that name is skipped

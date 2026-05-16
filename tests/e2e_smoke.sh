@@ -230,7 +230,7 @@ echo "=== Section 6: Error Handling ==="
 div_zero_src='
 r <= Div[10, 0]()
 stdout(r.has_value.toString())
-r ]=> val
+r >=> val
 stdout(val.toString())
 '
 div_zero_output=$(echo "$div_zero_src" | $TAIDA /dev/stdin 2>/dev/null)
@@ -245,7 +245,7 @@ oob_src='
 items <= @[1, 2, 3]
 lax <= items.get(100)
 stdout(lax.has_value.toString())
-lax ]=> val
+lax >=> val
 stdout(val.toString())
 '
 oob_output=$(echo "$oob_src" | $TAIDA /dev/stdin 2>/dev/null)
@@ -418,9 +418,9 @@ fi
 
 # Div returns default on zero
 div_fallback_src='
-Div[10, 2]() ]=> r1
+Div[10, 2]() >=> r1
 stdout(r1.toString())
-Div[10, 0]() ]=> r2
+Div[10, 0]() >=> r2
 stdout(r2.toString())
 '
 div_fallback_output=$(echo "$div_fallback_src" | $TAIDA /dev/stdin 2>/dev/null)
@@ -462,7 +462,7 @@ if command -v node >/dev/null 2>&1; then
 items: @[Int] <= @[]
 lax <= items.first()
 stdout(lax.has_value.toString())
-lax ]=> value
+lax >=> value
 stdout(value.toString())
 '
   interp_out=$(sem_run_interp "$sem_src_first")
@@ -524,7 +524,7 @@ stdout(result.toString())
 items: @[Int] <= @[]
 lax <= items.last()
 stdout(lax.has_value.toString())
-lax ]=> value
+lax >=> value
 stdout(value.toString())
 '
   interp_out=$(sem_run_interp "$sem_src_last")
@@ -635,7 +635,7 @@ s10_run() {
 
 # 10-1: Div normal
 div_normal_out=$(s10_run "div_normal" '
-Div[10, 3]() ]=> result
+Div[10, 3]() >=> result
 stdout(result.toString())
 ')
 if [ "$div_normal_out" = "3" ]; then
@@ -646,7 +646,7 @@ fi
 
 # 10-2: Div by zero returns default
 div_zero_out=$(s10_run "div_zero" '
-Div[10, 0]() ]=> result
+Div[10, 0]() >=> result
 stdout(result.toString())
 ')
 if [ "$div_zero_out" = "0" ]; then
@@ -667,7 +667,7 @@ fi
 
 # 10-4: Mod normal
 mod_normal_out=$(s10_run "mod_normal" '
-Mod[10, 3]() ]=> result
+Mod[10, 3]() >=> result
 stdout(result.toString())
 ')
 if [ "$mod_normal_out" = "1" ]; then
@@ -678,7 +678,7 @@ fi
 
 # 10-5: Mod by zero returns default
 mod_zero_out=$(s10_run "mod_zero" '
-Mod[10, 0]() ]=> result
+Mod[10, 0]() >=> result
 stdout(result.toString())
 ')
 if [ "$mod_zero_out" = "0" ]; then
@@ -689,7 +689,7 @@ fi
 
 # 10-6: Int type conversion success
 int_conv_out=$(s10_run "int_conv" '
-Int["123"]() ]=> num
+Int["123"]() >=> num
 stdout(num.toString())
 ')
 if [ "$int_conv_out" = "123" ]; then
@@ -700,7 +700,7 @@ fi
 
 # 10-7: Int type conversion failure
 int_fail_out=$(s10_run "int_fail" '
-Int["abc"]() ]=> num
+Int["abc"]() >=> num
 stdout(num.toString())
 ')
 if [ "$int_fail_out" = "0" ]; then
@@ -712,9 +712,9 @@ fi
 # 10-8: List get() returns Lax
 list_get_out=$(s10_run "list_get" '
 items <= @[10, 20, 30]
-items.get(1) ]=> val
+items.get(1) >=> val
 stdout(val.toString())
-items.get(100) ]=> val2
+items.get(100) >=> val2
 stdout(val2.toString())
 stdout(items.get(100).has_value.toString())
 ')
@@ -727,14 +727,14 @@ fi
 
 # 10-9: first()/last() return Lax on empty list
 first_last_out=$(s10_run "first_last" '
-@[1, 2, 3].first() ]=> f
+@[1, 2, 3].first() >=> f
 stdout(f.toString())
-@[].first() ]=> f2
+@[].first() >=> f2
 stdout(f2.toString())
 stdout(@[].first().has_value.toString())
-@[1, 2, 3].last() ]=> l
+@[1, 2, 3].last() >=> l
 stdout(l.toString())
-@[].last() ]=> l2
+@[].last() >=> l2
 stdout(l2.toString())
 ')
 expected_fl=$(printf "1\n0\nfalse\n3\n0")
@@ -746,13 +746,13 @@ fi
 
 # 10-10: max()/min() return Lax on empty list
 max_min_out=$(s10_run "max_min" '
-@[3, 1, 2].max() ]=> mx
+@[3, 1, 2].max() >=> mx
 stdout(mx.toString())
-@[].max() ]=> mx2
+@[].max() >=> mx2
 stdout(mx2.toString())
-@[3, 1, 2].min() ]=> mn
+@[3, 1, 2].min() >=> mn
 stdout(mn.toString())
-@[].min() ]=> mn2
+@[].min() >=> mn2
 stdout(mn2.toString())
 ')
 expected_mm=$(printf "3\n0\n1\n0")
@@ -794,9 +794,9 @@ if command -v node >/dev/null 2>&1; then
 
   # 11-1: Div parity
   lax_div_src='
-Div[10, 3]() ]=> r
+Div[10, 3]() >=> r
 stdout(r.toString())
-Div[10, 0]() ]=> r2
+Div[10, 0]() >=> r2
 stdout(r2.toString())
 stdout(Div[10, 0]().has_value.toString())
 '
@@ -810,9 +810,9 @@ stdout(Div[10, 0]().has_value.toString())
 
   # 11-2: Mod parity
   lax_mod_src='
-Mod[10, 3]() ]=> r
+Mod[10, 3]() >=> r
 stdout(r.toString())
-Mod[10, 0]() ]=> r2
+Mod[10, 0]() >=> r2
 stdout(r2.toString())
 '
   interp_out=$(lax_run_interp "$lax_mod_src")
@@ -825,9 +825,9 @@ stdout(r2.toString())
 
   # 11-3: Int type conversion parity
   lax_int_src='
-Int["42"]() ]=> r
+Int["42"]() >=> r
 stdout(r.toString())
-Int["abc"]() ]=> r2
+Int["abc"]() >=> r2
 stdout(r2.toString())
 '
   interp_out=$(lax_run_interp "$lax_int_src")
@@ -841,9 +841,9 @@ stdout(r2.toString())
   # 11-4: list.get() Lax parity
   lax_get_src='
 items <= @[10, 20, 30]
-items.get(1) ]=> v
+items.get(1) >=> v
 stdout(v.toString())
-items.get(100) ]=> v2
+items.get(100) >=> v2
 stdout(v2.toString())
 stdout(items.get(100).has_value.toString())
 '

@@ -19,14 +19,14 @@
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  upgrade ]=> upgraded
+  upgrade >=> upgraded
   msg <= wsReceive(upgraded.ws)
-  msg ]=> received
+  msg >=> received
   wsSend(upgraded.ws, received.data)
   wsClose(upgraded.ws)
 => :Int
 
 asyncResult <= httpServe(8082, handler, 1)
-asyncResult ]=> result
-result ]=> served
+asyncResult >=> result
+result >=> served
 stdout(served.ok.toString())

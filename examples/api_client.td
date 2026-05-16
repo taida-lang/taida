@@ -1,7 +1,7 @@
 // api_client.td -- JSON API Client Example (Molten Iron)
 //
 // Demonstrates: JSON schema casting (JSON[raw, Schema]()),
-// ]=> unmolding, error handling, and pipeline operators.
+// >=> unmolding, error handling, and pipeline operators.
 
 
 // ── JSON Molten Iron Pattern ──────────────────────────────
@@ -25,7 +25,7 @@ raw_response <= '{"pilots":[{"id":1,"name":"Asuka","active":true},{"id":2,"name"
 
 // ── Step 1: Cast JSON through schema ─────────────────────
 
-JSON[raw_response, ApiResponse]() ]=> data
+JSON[raw_response, ApiResponse]() >=> data
 
 stdout("=== API Client Demo ===")
 stdout("")
@@ -54,7 +54,7 @@ printPilot pilot =
   pilot.active
 => :Bool
 
-Map[pilots, printPilot]() ]=> activeFlags
+Map[pilots, printPilot]() >=> activeFlags
 
 stdout("")
 
@@ -64,7 +64,7 @@ identity x =
   x
 => :Bool
 
-Count[activeFlags, identity]() ]=> activeCount
+Count[activeFlags, identity]() >=> activeCount
 stdout("Active pilots: " + activeCount.toString())
 
 hasAnyActive <= activeFlags.any(identity)
@@ -99,7 +99,7 @@ stdout("=== JSON Round-Trip ===")
 
 // Parse the payload back with a schema
 RequestData = @(action: Str, metadata: @(updated_by: Str, reason: Str))
-JSON[payload, RequestData]() ]=> parsed
+JSON[payload, RequestData]() >=> parsed
 
 stdout("Action: " + parsed.action)
 stdout("Reason: " + parsed.metadata.reason)

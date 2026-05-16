@@ -2967,7 +2967,7 @@ void taida_release_any(taida_val ptr) {
 // C26B-024 (Round 8 / wT): thread-local freelist for fixed-size packs.
 // The hottest path in the Native runtime is the Lax wrapper allocation
 // (`taida_lax_new` + `taida_lax_empty` — called on every `list.get(i)`,
-// every `.get(i) ]=> x`, and every `pack.field ]=> x`). Each Lax is a
+// every `.get(i) >=> x`, and every `pack.field >=> x`). Each Lax is a
 // 4-field pack (112 bytes: 2-slot header + 4*3 field slots * 8 bytes).
 // In bench_router.td @ N=1000 / M=5000 this dominates sys time (2m0s
 // of 2m31s wall = 80% sys). A bounded thread-local freelist lets the

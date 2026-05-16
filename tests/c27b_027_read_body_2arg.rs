@@ -124,12 +124,12 @@ fn spawn_2arg_server_and_post_body(backend: &str, port: u16, body: &[u8]) -> (St
 handler req writer =
   bodyBytes <= readBody(req)
   decoded <= Utf8Decode[bodyBytes]()
-  decoded ]=> bodyText
+  decoded >=> bodyText
   @(status <= 200, headers <= @[@(name <= "Content-Type", value <= "text/plain")], body <= bodyText)
 
 asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.requests)
 "#
     );

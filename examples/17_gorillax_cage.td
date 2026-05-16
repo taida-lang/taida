@@ -12,7 +12,7 @@
 // Direct Gorillax creation (success case)
 Gorillax[42]() => g
 stdout(g.hasValue())
-g ]=> num
+g >=> num
 stdout(num)
 
 // Gorillax toString
@@ -22,7 +22,7 @@ stdout(g.toString())
 Gorillax[99]() => g2
 g2.relax() => relaxed
 stdout(relaxed.hasValue())
-relaxed ]=> val
+relaxed >=> val
 stdout(val)
 
 // RelaxedGorillax toString

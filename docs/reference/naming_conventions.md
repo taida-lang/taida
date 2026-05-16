@@ -94,7 +94,7 @@ Pilot = @(
   age: Int
 )
 
-// モールディング型
+// モールド型
 Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 
 // エラー型 (Error を継承)
@@ -112,7 +112,7 @@ getPilotName pilot: Pilot =
 
 // 複数単語の関数名
 calculateTotalPrice items: @[Item] =
-  Fold[0, items, _ acc item = acc + item.price]() ]=> total
+  Fold[0, items, _ acc item = acc + item.price]() >=> total
   total
 => :Int
 

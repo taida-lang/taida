@@ -12,7 +12,7 @@
 import 不要で利用できます。
 
 本ファイルはリファレンスと利用ガイドを兼ねます。公開 API の戻り値型に登場する
-`Lax[T]` / `Result[T, _]` / `Gorillax[T]` の意味と `]=>` (アンモールド) 時の挙動は
+`Lax[T]` / `Result[T, _]` / `Gorillax[T]` の意味と `>=>` (アンモールド) 時の挙動は
 [`docs/guide/08_error_handling.md`](../guide/08_error_handling.md) と
 [`docs/api/prelude.md §8`](prelude.md) を参照してください。
 
@@ -108,7 +108,7 @@ Stat[path: Str]() => :Lax[@(size: Int, modified: Int, isDir: Bool)]
 Exists[path: Str]() => :Result[Bool, _]
 ```
 
-**Returns**: `:Result[Bool, _]` — symlink は follow します。`]=>` で
+**Returns**: `:Result[Bool, _]` — symlink は follow します。`>=>` で
 アンモールドすると内側の `Bool` が得られます。
 
 **Throws**: `IoError` — 権限不足等の I/O 失敗時のみ throw。通常の
@@ -346,14 +346,14 @@ stdin prompt: Str => :Str
 stdinLine prompt: Str => :Async[Lax[Str]]
 ```
 
-**Returns**: `:Async[Lax[Str]]` — `]=>` で待機し、もう一度 `]=>` で
+**Returns**: `:Async[Lax[Str]]` — `>=>` で待機し、もう一度 `>=>` で
 `Lax[Str]` を取り出します。EOF / Ctrl-C / Ctrl-D 等で `Lax.failure("")`
 になります。UTF-8 を正しく扱い、矢印キー等のライン編集に対応します。
 
 **Example**:
 
 ```taida
-stdinLine("お名前: ") ]=> line
+stdinLine("お名前: ") >=> line
 stdout("こんにちは、" + line.getOrDefault("旅人"))
 ```
 
@@ -418,7 +418,7 @@ arity error)。
 
 ## 7. 非同期ソケット
 
-各関数は非同期で、戻り値は `Async[Result[T, _]]` 形式です。`]=>` で
+各関数は非同期で、戻り値は `Async[Result[T, _]]` 形式です。`>=>` で
 2 段アンモールドして内側の値を取り出します。`timeoutMs` を末尾に渡すと
 タイムアウトを指定できます (省略時はバックエンド既定値)。
 
@@ -639,5 +639,5 @@ Import path '<exact import token>' resolves outside the project root. Path trave
 
 - [`docs/api/net.md`](net.md) — HTTP サーバー / WebSocket / SSE を扱う `taida-lang/net` パッケージ
 - [`docs/api/prelude.md`](prelude.md) — `Result[T, P]` / `Lax[T]` / `Gorillax[T]` のメソッドと型コンストラクタ
-- [`docs/guide/08_error_handling.md`](../guide/08_error_handling.md) — `Lax` / `Result` / `Gorillax` の意味と `]=>` (アンモールド) の挙動
+- [`docs/guide/08_error_handling.md`](../guide/08_error_handling.md) — `Lax` / `Result` / `Gorillax` の意味と `>=>` (アンモールド) の挙動
 - [`docs/reference/diagnostic_codes.md`](../reference/diagnostic_codes.md) — `[E1602]` / `[E1960]` 等の診断コード一覧

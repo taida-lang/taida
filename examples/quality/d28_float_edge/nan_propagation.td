@@ -15,16 +15,16 @@
 
 // (1) Sqrt[-1.0]() unmold -> NaN. `nan` carries the IEEE-754 quiet NaN
 // produced by libm sqrt.
-Sqrt[-1.0]() ]=> nan
+Sqrt[-1.0]() >=> nan
 debug(nan)
 
 // (2) NaN propagates through Div: NaN / 2.0 = NaN.
-Div[nan, 2.0] ]=> nan_div
+Div[nan, 2.0] >=> nan_div
 debug(nan_div)
 
 // (3) NaN propagates through Mod: NaN % 3.0 = NaN. Pre-fix wasi
 // silently produced 0.0 here.
-Mod[nan, 3.0] ]=> nan_mod
+Mod[nan, 3.0] >=> nan_mod
 debug(nan_mod)
 
 // (4) Float `+` on a NaN-bearing Lax projects the NaN through the

@@ -36,7 +36,7 @@ handler req =
 // itself stops sending after its smoke window so we never reach the
 // cap in the regression test.
 asyncResult <= httpServe(18092, handler, 50000)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)

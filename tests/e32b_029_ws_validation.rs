@@ -146,17 +146,17 @@ fn ws_source(port: u16) -> String {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  upgrade ]=> accepted
+  upgrade >=> accepted
   ws <= accepted.ws
   msg <= wsReceive(ws)
-  msg ]=> received
+  msg >=> received
   wsSend(ws, received.data)
   wsClose(ws)
 => :Int
 
 asyncResult <= httpServe({port}, handler, 1)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.requests)
 "#
     )
@@ -168,17 +168,17 @@ fn ws_source_two_request(port: u16) -> String {
 
 handler req writer =
   upgrade <= wsUpgrade(req, writer)
-  upgrade ]=> accepted
+  upgrade >=> accepted
   ws <= accepted.ws
   msg <= wsReceive(ws)
-  msg ]=> received
+  msg >=> received
   wsSend(ws, received.data)
   wsClose(ws)
 => :Int
 
 asyncResult <= httpServe({port}, handler, 2)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.requests)
 "#
     )
