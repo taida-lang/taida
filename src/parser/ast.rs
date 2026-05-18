@@ -6,7 +6,7 @@ pub struct Program {
     pub statements: Vec<Statement>,
 }
 
-/// C20-1 (ROOT-5): Context tag used while parsing a `| cond |> body` branch.
+/// Context tag used while parsing a `| cond |> body` branch.
 ///
 /// The parser switches into `LetRhs` while reading the right-hand side of
 /// a `<=` binding (`name <= expr` / `name: T <= expr`). In that context a
@@ -15,7 +15,7 @@ pub struct Program {
 /// as continuation arms). `TopLevel` is the default and preserves the classic
 /// top-level / `| |>` match expression semantics.
 ///
-/// A parenthesised `(| ... |> ...)` resets to `TopLevel`, so `name <= (...)`
+/// A parenthesised `(|... |>...)` resets to `TopLevel`, so `name <= (...)`
 /// stays a legal escape hatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CondBranchContext {
@@ -33,7 +33,7 @@ pub enum Statement {
     Expr(Expr),
     /// Enum definition: `Enum => Name = :A :B`
     EnumDef(EnumDef),
-    /// Class-like definition (E30 Phase 2 Sub-step 2.1, Lock-F 軸 1):
+    /// Class-like definition:
     /// 旧 `TypeDef` / `MoldDef` / `InheritanceDef` を統合。`ClassLikeKind`
     /// discriminator で 3 系統 (BuchiPack / Mold / Inheritance) を内部分類する。
     ClassLikeDef(ClassLikeDef),
@@ -54,7 +54,7 @@ pub enum Statement {
 }
 
 impl Statement {
-    /// C13-1: For a "value-yielding" statement (the tail of an expression
+    /// For a "value-yielding" statement (the tail of an expression
     /// block), return a reference to the `Expr` whose value is the block
     /// result. Tail bindings (`name <= expr`, `expr => name`, `expr >=> name`,
     /// `name <=< expr`) yield their RHS source expression; a plain
@@ -77,7 +77,7 @@ impl Statement {
         }
     }
 
-    /// C13-1: True if this statement represents a tail binding form
+    /// True if this statement represents a tail binding form
     /// (`name <= expr`, `expr => name`, `expr >=> name`, `name <=< expr`)
     /// whose bound target should be defined in the enclosing scope
     /// before the block result is yielded.
@@ -106,7 +106,7 @@ pub struct EnumVariantDef {
     pub span: Span,
 }
 
-/// Class-like definition (E30 Phase 2 Sub-step 2.1, Lock-F 軸 1):
+/// Class-like definition:
 /// 旧 `TypeDef` / `MoldDef` / `InheritanceDef` を `Statement::ClassLikeDef`
 /// 単一 variant に統合。3 系統の残存差は `ClassLikeKind` discriminator で
 /// 内部分類する。
@@ -129,11 +129,11 @@ pub struct ClassLikeDef {
 }
 
 /// `ClassLikeDef` の kind discriminator。surface 上は migration / docs history 以外には
-/// 出さず、内部 dispatch 用のみで使う (Lock-F 軸 1: 旧語彙退避)。
+/// 出さず、内部 dispatch 用のみで使う ( 軸 1: 旧語彙退避)。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClassLikeKind {
     /// 旧 `TypeDef` 系: `Pilot = @(...)` (zero-arity sugar `Pilot[] = @(...)` は
-    /// Sub-step 2.2 で受理予定、本 Sub-step では旧構文のみ)。
+    /// で受理予定、本 Sub-step では旧構文のみ)。
     BuchiPack,
     /// 旧 `MoldDef` 系: `Mold[T] => Name[T] = @(...)`。
     /// `mold_args` は親側 `Mold[...]` 内の引数。
@@ -188,25 +188,24 @@ impl ClassLikeDef {
         matches!(self.kind, ClassLikeKind::BuchiPack)
     }
 
-    /// E30 legacy-form detector: 本 ClassLikeDef が旧構文か判定する。
+    /// Legacy-form detector: 本 ClassLikeDef が旧構文か判定する。
     ///
-    /// E30 Phase 0 Lock-B verdict に従い、以下を旧構文として扱う:
+    /// 以下を旧構文として扱う:
     /// - `Mold[T] => Foo[T] = @(...)` 形式 (`ClassLikeKind::Mold`) — 新構文では
-    ///   `Mold[T] =>` prefix 撤廃で `Foo[T] = @(...)` (zero-or-more arity の
-    ///   type-def 形式) として書き換え可能 (Sub-step 2.2 で受理済)。
+    /// `Mold[T] =>` prefix 撤廃で `Foo[T] = @(...)` (zero-or-more arity の
+    /// type-def 形式) として書き換え可能。
     ///
     /// 以下は旧構文ではない:
-    /// - `Pilot = @(...)` (Lock-B Sub-B1 で `Pilot[] = @(...)` と等価、
-    ///   migration は推奨 ≠ 必須)
-    /// - `Error => NotFound = @(...)` (Lock-B Sub-B2 で「prefix 撤廃」 = 必須でなくなる、
-    ///   撤廃 ≠ 禁止。Error 継承構文は新仕様でも保持される)
+    /// - `Pilot = @(...)` (`Pilot[] = @(...)` と等価、migration は推奨 ≠ 必須)
+    /// - `Error => NotFound = @(...)` (prefix 撤廃は必須ではない。
+    /// Error 継承構文は新仕様でも保持される)
     ///
     /// 用途: 旧構文診断 / compatibility audit hook。
     pub fn is_legacy_e30_syntax(&self) -> bool {
         matches!(self.kind, ClassLikeKind::Mold { .. })
     }
 
-    /// E30 legacy-form 表示ラベル。
+    /// Legacy-form 表示ラベル。
     ///
     /// `is_legacy_e30_syntax()` が true のときに、旧構文の category 名を
     /// 返す (dry-run 出力 / diagnostic 用)。
@@ -236,32 +235,35 @@ pub struct FieldDef {
 }
 
 impl FieldDef {
-    /// E30 Phase 4 / E30B-002: declare-only function field detection.
+    /// Declare-only function field detection.
     ///
     /// A declare-only function field is a field declared with a function type
     /// annotation (e.g. `greet: Str => :Str`) but **without** a method body
     /// (`is_method == false`) and **without** an explicit default value
     /// (`default_value.is_none()`). Such a field is effectively an interface
     /// member: the type is fixed by the declaration, but the value is supplied
-    /// either at instantiation time (via `(name <= ...)`) or, after Phase 6
-    /// (E30B-004), by an automatically-generated `defaultFn`.
+    /// either at instantiation time (via `(name <= ...)`) or by an
+    /// automatically-generated `defaultFn`.
     ///
-    /// Phase 4 (E30B-002) extends declare-only function field acceptance from
-    /// the class-like (TypeDef / `BuchiPack` kind) variant to the Mold and
-    /// Inheritance (Error) variants. The checker uses this helper to exclude
-    /// declare-only function fields from the "required positional `[]`
-    /// argument" set in `validate_custom_mold_inst_bindings` and from the
-    /// extra-type-arg binding-target count in
-    /// `validate_mold_extension_bindings`. Phase 6 (E30B-004, DONE
-    /// 2026-04-28) replaced the runtime `Value::Unit` placeholder with a
-    /// synthetic `defaultFn` per Lock-D verdict (interpreter / JS / native /
-    /// wasm-wasi all materialise the proper return-type default on call);
-    /// this helper is unchanged.
+    /// The checker uses this helper to exclude declare-only function fields
+    /// from the "required positional `[]` argument" set in
+    /// `validate_custom_mold_inst_bindings` and from the extra-type-arg
+    /// binding-target count in `validate_mold_extension_bindings`.
     pub fn is_declare_only_fn_field(&self) -> bool {
         if self.is_method || self.default_value.is_some() {
             return false;
         }
         matches!(self.type_annotation, Some(TypeExpr::Function(_, _)))
+    }
+}
+
+impl BuchiField {
+    /// True for parser-synthesized positional call arguments (`_0`, `_1`, ...)
+    /// used internally by mold-call lowering.
+    pub fn is_synthetic_positional(&self) -> bool {
+        self.name
+            .strip_prefix('_')
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
     }
 }
 
@@ -314,7 +316,7 @@ pub struct Assignment {
 }
 
 impl Assignment {
-    /// E30B-007 Lock-G Sub-G5 (2026-04-28): If this assignment is the
+    /// If this assignment is the
     /// explicit addon-binding form `target <= RustAddon["fn"](arity <= N)`,
     /// returns `Some((fn_name, arity))`. Otherwise returns `None`.
     ///
@@ -357,7 +359,7 @@ pub enum MoldHeaderArg {
     Concrete(TypeExpr),
 }
 
-// (E30 Phase 2 Sub-step 2.1) 旧 `MoldDef` / `InheritanceDef` struct は廃止。
+// 旧 `MoldDef` / `InheritanceDef` struct は廃止。
 // 統合先は `ClassLikeDef` (上に定義) + `ClassLikeKind::Mold|Inheritance` discriminator。
 
 /// Type parameter, optionally with constraint.
@@ -440,7 +442,7 @@ pub enum Expr {
     Ident(String, Span),
     /// Placeholder `_`
     Placeholder(Span),
-    /// Hole: empty slot in function call for partial application `f(5, )`
+    /// Hole: empty slot in function call for partial application `f(5)`
     Hole(Span),
 
     /// Buchi pack literal: `@(field <= value, ...)`

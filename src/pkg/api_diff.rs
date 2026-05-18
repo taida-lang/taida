@@ -1,4 +1,4 @@
-//! C14-2a: Public API diff detector (symbol-level).
+//! Public API diff detector (symbol-level).
 //!
 //! This module compares the set of exported symbols between a package's
 //! HEAD tree and a previous release tag, and reports whether the next
@@ -8,21 +8,21 @@
 //! Non-negotiable (C14_DESIGN.md §4):
 //!
 //! - Must reuse the existing Taida parser (`crate::parser::parse`).
-//!   No independent parser is allowed.
-//! - Phase 2a covers the **symbol name set** only. Function signatures,
-//!   type pack fields, and `native/addon.toml` `[functions]` arity are
-//!   intentionally deferred to C14.rc2+ (C14-2b/c/d).
+//! No independent parser is allowed.
+//! - covers the **symbol name set** only. Function signatures,
+//! type pack fields, and `native/addon.toml` `[functions]` arity are
+//! intentionally deferred to a later compatibility pass.
 //! - `rename` is not detected as a distinct operation — `foo -> foo2`
-//!   is reported as `removed + added` and therefore classified as
-//!   Breaking.
+//! is reported as `removed + added` and therefore classified as
+//! Breaking.
 //!
 //! ## Snapshot sources
 //!
 //! - `snapshot_head(root)` — walks `root/taida/*.td` from the working
-//!   tree (ignoring hidden / build directories).
+//! tree (ignoring hidden / build directories).
 //! - `snapshot_at_tag(root, tag)` — uses `git ls-tree` + `git show` to
-//!   read the contents of `taida/*.td` as they existed at the tag,
-//!   without checking out the tree.
+//! read the contents of `taida/*.td` as they existed at the tag,
+//! without checking out the tree.
 //!
 //! Both paths feed through the same parser + export extractor so the
 //! behaviour is byte-identical modulo the file source.
@@ -36,7 +36,7 @@ use crate::parser::{Statement, parse};
 /// A snapshot of the public API of a Taida package at a specific
 /// point in time (either HEAD on disk or a git tag).
 ///
-/// Phase 2a only populates the `exports` set. Later phases will add
+/// only populates the `exports` set. Later phases will add
 /// signature / pack / arity fields alongside without removing this.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PublicApiSnapshot {
@@ -70,8 +70,8 @@ pub enum ApiDiff {
     /// addition). Breaking → generation bump.
     Breaking {
         removed: Vec<String>,
-        /// Reserved for Phase 2b (signature changes). Always empty
-        /// in Phase 2a.
+        /// Reserved for (signature changes). Always empty
+        /// in.
         changed: Vec<String>,
     },
 }

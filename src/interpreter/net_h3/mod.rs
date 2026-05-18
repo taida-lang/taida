@@ -2,22 +2,22 @@ mod connection;
 mod frame;
 /// HTTP/3 parity implementation for `taida-lang/net` v7.
 ///
-/// **NB7-42: Phase 6+** — split into `qpack.rs` / `frame.rs` / `request.rs` / `connection.rs`.
+/// **: +** — split into `qpack.rs` / `frame.rs` / `request.rs` / `connection.rs`.
 ///
-/// Phase 6 additions (NET7-6a):
+/// additions:
 /// - QPACK dynamic table support (RFC 9204 Section 4.3)
 /// - Encoder/decoder instruction streams
 /// - Ring buffer with absolute/relative index mapping
 /// - Capacity management with eviction
 /// - `H3DynamicTable` integrated into `H3Connection`
 ///
-/// NET7-6b (NB7-27): `H3DecodeError` enum for error traceability.
-/// NET7-6c (NB7-22): Idle timeout tracking on `H3Connection`.
-/// NET7-7b: Graceful shutdown QUIC-level (GOAWAY -> drain -> close pipeline).
-/// NET7-7c: QUIC transport state integration (NB7-20, NB7-26, NB7-28).
+/// `H3DecodeError` enum for error traceability.
+/// Idle timeout tracking on `H3Connection`.
+/// Graceful shutdown QUIC-level (GOAWAY -> drain -> close pipeline).
+/// QUIC transport state integration .
 ///
 /// This module implements the HTTP/3 protocol layer for the Interpreter backend,
-/// mirroring the Native reference implementation (Phase 2) for parity.
+/// mirroring the Native reference implementation () for parity.
 ///
 /// # Architecture
 ///
@@ -33,15 +33,15 @@ mod frame;
 /// 8. **Request extraction**: Pseudo-header validation matching H2 semantics
 /// 9. **Response builders**: QPACK-encoded HEADERS + DATA frames
 /// 10. **Self-tests**: QPACK round-trip and request validation (parity with Native)
-/// 11. **QUIC Transport Substrate (NET7-9b)**: quinn-based UDP + TLS ALPN h3 accept
+/// 11. **QUIC Transport Substrate ()**: quinn-based UDP + TLS ALPN h3 accept
 /// 12. **Design Decisions**
 ///
 /// # Design Decisions
 ///
 /// - Native is the reference backend; this module follows Native semantics exactly
 /// - QUIC transport is gated on external library availability (same as Native)
-/// - Transport I/O does NOT use the existing `Transport` trait (NB7-7 decision)
-/// - QPACK uses static table only (no dynamic table in Phase 2/3; dynamic table in Phase 6+)
+/// - Transport I/O does NOT use the existing `Transport` trait ( decision)
+/// - QPACK uses static table only (no dynamic table in; dynamic table in +)
 /// - Handler contract is the same 14-field request pack as h1/h2
 /// - Bounded-copy discipline: 1 packet = at most 1 materialization
 /// - 0-RTT: default-off, not exposed
@@ -514,7 +514,7 @@ mod tests {
 
     // ── OPEN Blocker Tests (NB7-19, NB7-30, NB7-38, NB7-39, NB7-43) ──
 
-    /// NB7-19: QPACK integer overflow boundary verification at m=62.
+    /// QPACK integer overflow boundary verification at m=62.
     /// RFC 9204 Section 4.1.1: m=62 means prefix can hold 2^62-2, continuation
     /// bytes add 7 bits each. m > 62 would collide with u64 sign bit.
     #[test]
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(consumed, written);
     }
 
-    /// NB7-19: Verify overflow guard triggers when m > 62.
+    /// Verify overflow guard triggers when m > 62.
     #[test]
     fn test_qpack_decode_int_overflow_guard() {
         // With prefix_bits=8, send all continuation bytes (0xFF = continue).
@@ -547,7 +547,7 @@ mod tests {
         );
     }
 
-    /// NB7-30: req_insert_count != 0 must be rejected (dynamic table not supported).
+    /// req_insert_count != 0 must be rejected (dynamic table not supported).
     #[test]
     fn test_qpack_decode_block_nonzero_insert_count() {
         // Encoded field section with req_insert_count != 0
@@ -565,8 +565,8 @@ mod tests {
         );
     }
 
-    /// NB7-38: Non-canonical QUIC varint forms must be rejected.
-    /// Tests various non-canonical encoding patterns beyond NB7-16's 8-byte guard.
+    /// Non-canonical QUIC varint forms must be rejected.
+    /// Tests various non-canonical encoding patterns beyond 's 8-byte guard.
     #[test]
     fn test_quic_varint_non_canonical_forms() {
         // Value 0 in 2-byte form (canonical: 1-byte [0x00])
@@ -586,7 +586,7 @@ mod tests {
         );
     }
 
-    /// NB7-39: QPACK static table index verification for selected indices.
+    /// QPACK static table index verification for selected indices.
     /// Verifies that representative static table entries round-trip correctly.
     #[test]
     fn test_qpack_static_table_selected_indices() {
@@ -631,7 +631,7 @@ mod tests {
         }
     }
 
-    /// NB7-43: max_field_section_size validation in qpack_decode_block.
+    /// max_field_section_size validation in qpack_decode_block.
     #[test]
     fn test_qpack_decode_block_max_field_section_size() {
         // Encode a small header block
@@ -654,7 +654,7 @@ mod tests {
         );
     }
 
-    /// NB7-24: Verify decode_frame rejects oversized frames on 32-bit systems.
+    /// Verify decode_frame rejects oversized frames on 32-bit systems.
     #[test]
     fn test_decode_frame_oversized_32bit_guard() {
         // Construct a frame with frame_length = u64::MAX (way larger than any usize)
@@ -2535,8 +2535,8 @@ mod tests {
 
     // ── NET7-11b: Runtime Malformed H3 Reject Tests ──────────────────────
 
-    /// NET7-11b-1: Runtime rejection of malformed H3 input.
-    /// Phase 5 (NET7-5a) did source audits; NET7-11b verifies runtime behavior.
+    /// -1: Runtime rejection of malformed H3 input.
+    /// did source audits; verifies runtime behavior.
     #[test]
     fn test_net7_11b_runtime_malformed_h3_reject() {
         use frame::{
@@ -2663,7 +2663,7 @@ mod tests {
         ));
     }
 
-    /// NET7-11b-2: 0-RTT is not exposed in the public API surface.
+    /// -2: 0-RTT is not exposed in the public API surface.
     /// Verifies that no 0-RTT / early_data / resumption functions exist in the H3 layer.
     //
     // NOTE: The QPACK static table entry index 86 has name "early-data" and value "1"
@@ -2704,7 +2704,7 @@ mod tests {
         }
     }
 
-    /// NET7-11b-3: Verify that QPACK encode/decode round-trip works for the
+    /// -3: Verify that QPACK encode/decode round-trip works for the
     /// RFC 9204 static table "early-data" header entry (index 86).
     /// This is a normal header field, NOT a 0-RTT signal.
     #[test]
@@ -2739,7 +2739,7 @@ mod tests {
         assert_eq!(headers_out[1].value, "1");
     }
 
-    /// NET7-11b-4: Verify bounded-copy discipline at runtime boundary.
+    /// -4: Verify bounded-copy discipline at runtime boundary.
     /// Ensures that decode functions do not allocate beyond bounded buffers.
     #[test]
     fn test_net7_11b_runtime_bounded_copy_guards() {

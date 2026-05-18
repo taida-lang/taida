@@ -1,6 +1,6 @@
-// D28B-014 (Round 2 wI): 24h soak fixture for `.dev/D28_SOAK_RUNBOOK.md`.
+// 24-hour HTTP soak fixture for the long-running net runtime.
 //
-// Identical in shape to the 30-min proxy fixture inlined by
+// Identical in shape to the 30-minute proxy fixture inlined by
 // `scripts/soak/fast-soak-proxy.sh` and to
 // `examples/quality/d28b_006_scatter_gather_smoke/server.td`, with
 // two intentional differences:
@@ -11,19 +11,17 @@
 //     contention.
 //
 //   * Request cap raised from 50,000 to 2,000,000,000 (effectively
-//     unlimited for the duty cycle the runbook expects). A 24h run at
-//     wF baseline rates (~1k-10k req/s steady-state) reaches ~10^8
-//     to 10^9 requests; the 50k cap used by the smoke fixtures would
-//     trip well before the soak window closes and crash the run.
-//     2 G is the next round number the i32 request counter can reach
-//     without overflow concerns under the documented load.
+//     unlimited for the duty cycle this fixture expects). A 24-hour
+//     run at the documented steady-state rate (~1k-10k req/s) reaches
+//     ~10^8 to 10^9 requests; the 50k cap used by the smoke fixtures
+//     would trip well before the soak window closes and crash the
+//     run. 2 G is the next round number the i32 request counter can
+//     reach without overflow concerns under the documented load.
 //
 // Body shape is the same 512 B Repeat-fill the smoke fixture uses so
-// the wF baseline (5,556 KiB plateau, 0.89 MiB/h proxy rate, 60-sample
-// bit-identical post-warmup distribution) is directly comparable.
-//
-// See `.dev/D28_SOAK_RUNBOOK.md` for the full operating procedure,
-// `.dev/D28_BLOCKERS.md::D28B-014` for the acceptance contract.
+// the long-running net baseline (~5,556 KiB plateau, ~0.89 MiB/h
+// proxy rate, 60-sample bit-identical post-warmup distribution) is
+// directly comparable.
 
 >>> taida-lang/net => @(httpServe)
 

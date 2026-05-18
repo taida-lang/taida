@@ -1,6 +1,6 @@
 # エラー処理
 
-> **PHILOSOPHY.md -- I.** 深く考えずに適当にぶちこんでけ
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
 > Error 系のクラスライク型定義 (`Error => MyError = @(...)`) は **クラスライク型定義の単一構文** に統合されており、[クラスライク型定義 / エラー系統](04_class_like.md#エラー系統) で説明します。本章では throw / `|==` / ゴリラ天井 / Result / Gorillax といった **エラー処理の挙動** を中心に扱います。
 
@@ -153,6 +153,36 @@ ValidationError(type <= "ValidationError", message <= "Invalid", field <= "email
 // NG: 通常のぶちパックは throw できません
 @(name <= "Asuka").throw()  // コンパイルエラー
 ```
+
+### `message <= ""` は「明示的な空メッセージ」として保持される
+
+`Error` 系の `message` フィールドに **明示的な空文字列** `""` を渡した場合と、`message` を省略した場合は別物として扱われます。
+
+| 書き方 | 表示時の挙動 | 意味 |
+|--------|--------------|------|
+| `MyError(message <= "Boom!", ...)` | `"Boom!"` をそのまま表示 | 通常のメッセージ |
+| `MyError(message <= "", ...)` | 空文字列 `""` を **そのまま** 表示 | 「メッセージは空でよい」と明示 |
+| `MyError(...)` (`message` 省略) | 型名 (`__type`) または default 文字列を表示 | 「メッセージは未指定」 |
+
+明示的な `""` をデフォルト fallback と同一視しないのは、
+
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
+
+の系「null/undefined/Unit/Voidの完全排除」と「暗黙の型変換なし」の原則がエラー表示にも及ぶためです。書き手が「空でよい」と書いた値を、表示側で勝手に別の文字列に差し替えると、それは事実上の暗黙変換 (空 → "メッセージ未指定") になり、Taida の厳格性を破ります。
+
+```taida
+Error => SilentError = @(detail: Str)
+
+// 明示的な空メッセージ
+SilentError(type <= "SilentError", message <= "", detail <= "ignored").throw()
+//   → toString / display では message="" がそのまま出る (型名 fallback は使われない)
+
+// 省略
+SilentError(type <= "SilentError", detail <= "ignored").throw()
+//   → toString / display では型名 ("SilentError" 等) が表示される
+```
+
+この区別は Interpreter / JS / Native / WASM の 4 バックエンドすべてで同じ挙動になります。
 
 ---
 
@@ -498,7 +528,7 @@ calculateAverage scores: @[Int] =
   Sum[scores]() >=> total
   Div[total, scores.length()]() >=> avg
   avg
-=> :Int
+=> :Num
 
 // 不要: ゼロ除算のためにエラー処理を書く必要はありません
 // | scores.isEmpty() |> Error(...).throw()  // これは過剰です

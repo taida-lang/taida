@@ -3545,7 +3545,7 @@ stdout(Pair[40, 2]().toString())
 #[test]
 fn test_inherited_custom_mold_required_positional_binding_three_way_parity() {
     let source = r#"
-Mold[T] => PairBase[T] = @()
+Mold[T] => PairBase[T] = @(marker: Int <= 0)
 PairBase[T] => Pair[T, U] = @(
   second: U
   solidify =
@@ -3628,7 +3628,7 @@ Mold[T] => BadField[T] = @(
         (
             "custom_mold_def_unbound_type_param",
             r#"
-Mold[T] => BadBind[T, U] = @()
+Mold[T] => BadBind[T, U] = @(marker: Int <= 0)
 "#,
         ),
     ];
@@ -6209,8 +6209,8 @@ stdout(catch_fn(1))
 #[test]
 fn rc6e_custom_error_typed_ceiling_filter() {
     let source = r#"
-Error => BaseErr = @()
-BaseErr => ChildErr = @()
+Error => BaseErr = @(detail: Str <= "")
+BaseErr => ChildErr = @(child_detail: Str <= "")
 
 throwChild msg =
   ChildErr(type <= "ChildErr", message <= msg).throw()
@@ -29700,7 +29700,7 @@ stdout(outcome.message)
 ///   1. protocol="h3" without cert/key
 ///   2. unknown protocol "h4"
 ///
-/// F42 sweep follow-up: the F42B-013 work tightened the `tls.protocol`
+/// F42 sweep follow-up: the `tls.protocol`
 /// type contract so that dynamic non-HttpProtocol operands (`badProtocol
 /// <= 99`) are rejected at compile time with `[E1506]`. The runtime
 /// `ProtocolError` path this test exercises is therefore no longer
@@ -41292,8 +41292,8 @@ single <= plusOne(7)
 stdout(single.toString())
 "#;
     assert_backend_parity_for_source(source, "lt_chain");
-    let out = run_interpreter_src(source, "lt_chain_expected")
-        .expect("interpreter output should exist");
+    let out =
+        run_interpreter_src(source, "lt_chain_expected").expect("interpreter output should exist");
     assert_eq!(out, "9\n21\n8");
 }
 

@@ -1,4 +1,4 @@
-//! C25B-018: best-effort terminal-state restoration on panic / fatal signal.
+//! best-effort terminal-state restoration on panic / fatal signal.
 //!
 //! Addons in the `taida-lang/terminal` family put the terminal into raw
 //! mode, enter the alternate screen, hide the cursor, and enable mouse
@@ -9,44 +9,42 @@
 //!
 //! The frozen addon ABI v1 does not include a host-callback through
 //! which an addon can register a drop guard, so the comprehensive fix
-//! (an `on_panic_cleanup` entry on `TaidaHostV1`) is a **D26** breaking
+//! (an `on_panic_cleanup` entry on `TaidaHostV1`) is a breaking
 //! change. For the `@c.25.rc*` cycle we install a **best-effort
 //! fallback** inside the Taida CLI host itself that:
 //!
 //! 1. Registers a [`std::panic::set_hook`] chain that writes a
-//!    well-known ANSI reset sequence to stderr before forwarding to the
-//!    previous hook. The reset sequence unconditionally shows the
-//!    cursor, leaves the alternate screen, disables mouse reporting,
-//!    and emits a soft terminal reset (`ESC c`-class, but we use the
-//!    narrower `ESC[!p` DECSTR that does not wipe scrollback).
+//! well-known ANSI reset sequence to stderr before forwarding to the
+//! previous hook. The reset sequence unconditionally shows the
+//! cursor, leaves the alternate screen, disables mouse reporting,
+//! and emits a soft terminal reset (`ESC c`-class, but we use the
+//! narrower `ESC[!p` DECSTR that does not wipe scrollback).
 //!
 //! 2. Installs signal handlers for SIGHUP / SIGTERM / SIGQUIT /
-//!    SIGABRT (UNIX only; a no-op stub on Windows so higher-level code
-//!    compiles unchanged) that do the same reset and then re-raise the
-//!    signal with the default disposition so the process exits with
-//!    the expected status code.
+//! SIGABRT (UNIX only; a no-op stub on Windows so higher-level code
+//! compiles unchanged) that do the same reset and then re-raise the
+//! signal with the default disposition so the process exits with
+//! the expected status code.
 //!
 //! 3. Remains a **no-op** when stderr is not a TTY. Non-interactive
-//!    CI invocations will not have their log output polluted with ANSI
-//!    escapes, and the hook's only cost is one syscall to `isatty(2)`
-//!    on panic.
+//! CI invocations will not have their log output polluted with ANSI
+//! escapes, and the hook's only cost is one syscall to `isatty(2)`
+//! on panic.
 //!
 //! ## Scope boundaries
 //!
 //! - The hook lives in the host CLI, not in the `taida-lang/terminal`
-//!   addon. The terminal addon (`.dev/official-package-repos/terminal/`)
-//!   is a git submodule and is not changed by this patch (C25 session
-//!   non-negotiable; D26 is the correct phase for in-addon
-//!   integration).
+//! addon. The terminal addon is maintained separately and is not changed
+//! by this module.
 //! - The hook does **not** attempt to restore the caller's `termios`
-//!   state. A future D26 addition will add a dedicated `TaidaHostV1`
-//!   slot through which `raw_mode.rs` can register a saved `termios`
-//!   pointer; until then, the best the host can do is emit the ANSI
-//!   sequences above, which at minimum gets the user back to a usable
-//!   shell prompt even if `tcsetattr(3)` state remains partly dirty.
+//! state. A future addition will add a dedicated `TaidaHostV1`
+//! slot through which `raw_mode.rs` can register a saved `termios`
+//! pointer; until then, the best the host can do is emit the ANSI
+//! sequences above, which at minimum gets the user back to a usable
+//! shell prompt even if `tcsetattr(3)` state remains partly dirty.
 //! - SIGWINCH / SIGCONT and other non-terminal signals are not
-//!   handled — they are not produced by panic-like conditions and
-//!   don't require cleanup.
+//! handled — they are not produced by panic-like conditions and
+//! don't require cleanup.
 //!
 //! The panic hook is installed by [`install_panic_cleanup_hook`],
 //! which is idempotent (guarded by a [`std::sync::OnceLock`]) so
@@ -57,7 +55,7 @@
 //!
 //! Both functions are called unconditionally from `fn main()` at
 //! process start, before `libc::signal(SIGPIPE, SIG_IGN)` so that the
-//! SIGPIPE disposition established for `taida run ... | head`
+//! SIGPIPE disposition established for `taida run... | head`
 //! pipelines is unaffected.
 
 use std::io::{self, IsTerminal, Write};
@@ -70,7 +68,7 @@ use std::sync::OnceLock;
 /// prompt even if a later step fails; then leave the alternate screen
 /// so the shell's scrollback becomes visible; then disable mouse and
 /// bracketed-paste modes; then apply a soft DECSTR so character-set
-/// / origin-mode / insertion state is reset.
+/// origin-mode / insertion state is reset.
 const RESET_SEQUENCE: &str = concat!(
     "\x1b[?25h",   // DECTCEM: show cursor
     "\x1b[?1049l", // leave alternate screen buffer

@@ -85,7 +85,7 @@ stdout(h(100).toString())
 /// function; the defining frame has already returned when we invoke
 /// the captured lambda through a field access.
 ///
-/// F42B-004 update: the original fixture annotated the return type as
+/// The original fixture annotated the return type as
 /// `:@()` ("value-absence" type) to suppress checker noise — that is now
 /// rejected by `[E1520]`. Replaced with a meaningful structured BuchiPack
 /// annotation (`:@(add: Int => :Int, mul: Int => :Int)`) that documents

@@ -324,7 +324,7 @@ stdout(Pair[40, 2]().toString())
 #[test]
 fn test_native_inherited_custom_mold_required_positional_binding_matches_interpreter() {
     let source = r#"
-Mold[T] => PairBase[T] = @()
+Mold[T] => PairBase[T] = @(marker: Int <= 0)
 PairBase[T] => Pair[T, U] = @(
   second: U
   solidify =
@@ -375,7 +375,7 @@ stdout(check(7).toString())
 #[test]
 fn test_native_custom_mold_default_unmold_matches_interpreter() {
     let source = r#"
-Mold[T] => Boxed[T] = @()
+Mold[T] => Boxed[T] = @(marker: Int <= 0)
 b <= Boxed[7]()
 b >=> v
 stdout(v.toString())
@@ -397,7 +397,7 @@ Mold[T] => BadField[T] = @(
         (
             "native_custom_mold_def_unbound_type_param",
             r#"
-Mold[T] => BadBind[T, U] = @()
+Mold[T] => BadBind[T, U] = @(marker: Int <= 0)
 "#,
         ),
     ];

@@ -7,24 +7,24 @@
 //!
 //! ## Diagnostic code mapping
 //!
-//! | Code    | Category                                                               |
+//! | Code | Category |
 //! |---------|------------------------------------------------------------------------|
-//! | E1801   | クラスライク型 / モールド型 / スキーマ / エラー variant が PascalCase でない |
-//! | E1802   | 関数が camelCase でない                                                |
-//! | E1803   | 変数 (関数値の束縛) が camelCase でない                                |
-//! | E1804   | 変数 (非関数値) が snake_case でない                                   |
-//! | E1805   | 定数が SCREAMING_SNAKE_CASE でない (将来拡張、現状 reserved)           |
-//! | E1806   | エラー variant (Enum:Variant) が PascalCase でない                     |
-//! | E1807   | 型変数が単一大文字でない (T1/T2 series 例外)                           |
-//! | E1808   | ぶちパックフィールドの値型と命名規則が不整合                           |
-//! | E1809   | 戻り値型注釈の `:` マーカー欠落                                        |
+//! | E1801 | クラスライク型 / モールド型 / スキーマ / エラー variant が PascalCase でない |
+//! | E1802 | 関数が camelCase でない |
+//! | E1803 | 変数 (関数値の束縛) が camelCase でない |
+//! | E1804 | 変数 (非関数値) が snake_case でない |
+//! | E1805 | 定数が SCREAMING_SNAKE_CASE でない (将来拡張、現状 reserved) |
+//! | E1806 | エラー variant (Enum:Variant) が PascalCase でない |
+//! | E1807 | 型変数が単一大文字でない (T1/T2 series 例外) |
+//! | E1808 | ぶちパックフィールドの値型と命名規則が不整合 |
+//! | E1809 | 戻り値型注釈の `:` マーカー欠落 |
 //!
-//! ## Severity / out-of-scope (per D28B-008 Acceptance)
+//! ## Severity / out-of-scope (per Acceptance)
 //!
 //! - `_` prefix (慣習として開放): not flagged
 //! - boolean prefix (`is`/`has`/`can`/`did`/`needs`): not flagged
-//! - 引数 / フィールド型注釈の形式 A (`arg: Type`) と 形式 B (`arg :Type`):
-//!   どちらも valid → not flagged
+//! - 引数 / フィールド型注釈の形式 A (`arg: Type`) と 形式 B (`arg:Type`):
+//! どちらも valid → not flagged
 //!
 //! ## Reserved-for-now codes
 //!
@@ -65,7 +65,7 @@ impl LintDiagnostic {
 // Public entry point
 // ─────────────────────────────────────────────────────────────────────
 
-/// Run the D28B-008 naming-convention lint pass over a parsed program.
+/// Run the naming-convention lint pass over a parsed program.
 ///
 /// Returns every violation surfaced (does not stop on the first hit).
 /// An empty `Vec` means the program is naming-rule compliant.
@@ -172,7 +172,7 @@ fn is_non_function_field_name(name: &str) -> bool {
     is_lint_exempt_name(name) || is_snake_case(name)
 }
 
-/// Single-letter ASCII upper (`T`, `U`, `V`, `E`, `K`, `P`, `R`, ...).
+/// Single-letter ASCII upper (`T`, `U`, `V`, `E`, `K`, `P`, `R`,...).
 /// These are the primary form of type variables under the Lock.
 fn is_single_letter_type_var(name: &str) -> bool {
     name.len() == 1 && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
@@ -356,7 +356,7 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
 // TypeDef / MoldDef / FuncDef
 // ─────────────────────────────────────────────────────────────────────
 
-/// (E30 Sub-step 2.1) ClassLikeDef 用の lint。kind discriminator で旧 3 系統の lint を内部 dispatch。
+/// ClassLikeDef 用の lint。kind discriminator で旧 3 系統の lint を内部 dispatch。
 fn lint_class_like_def(cl: &ClassLikeDef, diags: &mut Vec<LintDiagnostic>) {
     match &cl.kind {
         ClassLikeKind::BuchiPack => {
@@ -826,10 +826,10 @@ fn check_type_expr_return_marker(ty: &TypeExpr, _anchor: &Span, _diags: &mut Vec
 ///
 /// The detection rule (E1809):
 /// - For each `FuncDef` with a `return_type`, look up the source slice
-///   between the byte after the function body's last statement and the
-///   `=>` arrow that precedes the return-type declaration. The Lock
-///   requires the form `=> :Type`. If the slice immediately following
-///   `=>` (after whitespace) does not begin with `:`, surface E1809.
+/// between the byte after the function body's last statement and the
+/// `=>` arrow that precedes the return-type declaration. The Lock
+/// requires the form `=>:Type`. If the slice immediately following
+/// `=>` (after whitespace) does not begin with `:`, surface E1809.
 ///
 /// Implementation note: since FuncDef does not retain a span for the
 /// arrow position, we use a robust heuristic — search the source from

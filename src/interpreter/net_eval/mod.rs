@@ -3,43 +3,43 @@
 /// Implements `taida-lang/net` (core-bundled):
 ///
 /// HTTP surface:
-///   httpServe, httpParseRequestHead, httpEncodeResponse, readBody
-///   startResponse, writeChunk, endResponse, sseEvent
-///   readBodyChunk, readBodyAll
-///   wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
+/// httpServe, httpParseRequestHead, httpEncodeResponse, readBody
+/// startResponse, writeChunk, endResponse, sseEvent
+/// readBodyChunk, readBodyAll
+/// wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 ///
-/// C12B-025 (2026-04-15): mechanical split from a single 12,591-line file
+/// (2026-04-15): mechanical split from a single 12,591-line file
 /// into a directory module:
-///   - types.rs   — type definitions (Writer state, body framing, ConnStream)
-///   - helpers.rs — free helper functions (parser / encoder / chunked / Result)
-///   - mod.rs     — `impl Interpreter { ... }` (try_net_func dispatch + all evaluators)
-///   - tests.rs   — `#[cfg(test)] mod tests` extracted verbatim
+/// - types.rs — type definitions (Writer state, body framing, ConnStream)
+/// - helpers.rs — free helper functions (parser / encoder / chunked / Result)
+/// - mod.rs — `impl Interpreter {... }` (try_net_func dispatch + all evaluators)
+/// - tests.rs — `#[cfg(test)] mod tests` extracted verbatim
 ///
-/// C13-3 (2026-04-16): further mechanical split of the 4,208-line `mod.rs`
+/// (2026-04-16): further mechanical split of the 4,208-line `mod.rs`
 /// (only the `impl Interpreter` evaluator block) into responsibility-aligned
-/// sibling modules. Each sibling hosts its own `impl Interpreter { ... }`
+/// sibling modules. Each sibling hosts its own `impl Interpreter {... }`
 /// block — Rust allows the same type to be extended across multiple
-/// `impl` blocks in the same crate, so `Self::` / associated-item lookup
+/// `impl` blocks in the same crate, so `Self:` / associated-item lookup
 /// still resolves uniformly. The `try_net_func` dispatcher below is the
 /// sole public-ish surface referenced by `module_eval.rs` / `eval.rs`.
 ///
-///   - stream.rs — v3 streaming (startResponse/writeChunk/endResponse/sseEvent)
-///                 + v4 body streaming (readBodyChunk/readBodyAll) and their
-///                 chunked-body helpers
-///   - ws.rs     — WebSocket implementation (wsUpgrade/wsSend/wsReceive/
-///                 wsClose/wsCloseCode) + frame helpers + finalize_websocket_close
-///   - h1.rs     — HTTP/1.1 accept loop (eval_http_serve) + per-connection
-///                 head read (try_read_request) + dispatch_request
-///   - h2.rs     — HTTP/2 serve loop (serve_h2 / h2_connection_loop /
-///                 send_h2_response)
-///   - h3.rs     — HTTP/3 serve entry point (serve_h3)
+/// - stream.rs — v3 streaming (startResponse/writeChunk/endResponse/sseEvent)
+/// + v4 body streaming (readBodyChunk/readBodyAll) and their
+/// chunked-body helpers
+/// - ws.rs — WebSocket implementation (wsUpgrade/wsSend/wsReceive/
+/// wsClose/wsCloseCode) + frame helpers + finalize_websocket_close
+/// - h1.rs — HTTP/1.1 accept loop (eval_http_serve) + per-connection
+/// head read (try_read_request) + dispatch_request
+/// - h2.rs — HTTP/2 serve loop (serve_h2 / h2_connection_loop /
+/// send_h2_response)
+/// - h3.rs — HTTP/3 serve entry point (serve_h3)
 ///
 /// Public API surface (path-stable via re-exports):
-///   - `pub(crate) const NET_SYMBOLS`           (re-exported from types.rs)
-///   - `pub(crate) struct ActiveStreamingWriter` (re-exported from types.rs)
-///   - `pub(crate) fn try_net_func`              (defined in this file)
+/// - `pub(crate) const NET_SYMBOLS` (re-exported from types.rs)
+/// - `pub(crate) struct ActiveStreamingWriter` (re-exported from types.rs)
+/// - `pub(crate) fn try_net_func` (defined in this file)
 pub(crate) mod h1;
 pub(crate) mod h2;
 pub(crate) mod h3;
@@ -316,7 +316,7 @@ impl Interpreter {
     /// dispatch entry points that take opaque byte payloads (e.g.
     /// `httpParseRequestHead`).
     ///
-    /// C13-3: kept here (next to `try_net_func`) rather than moved into
+    /// kept here (next to `try_net_func`) rather than moved into
     /// a sibling module, since the dispatcher is its only caller.
     fn eval_net_bytes_arg(
         &mut self,

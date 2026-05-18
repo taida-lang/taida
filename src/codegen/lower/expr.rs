@@ -1479,8 +1479,8 @@ impl Lowering {
 
     /// パイプライン: `a => f(_) => g(_)` → 各段の結果を次の引数に
     ///
-    /// C13-1 / C13B-007: An intermediate `=> name` step (where `name` is
-    /// not a user-defined function or known builtin) acts as a
+    /// An intermediate `=> name` step (where `name` is not a
+    /// user-defined function or known builtin) acts as a
     /// **bind-and-forward**: the current value is bound to `name` via
     /// `DefVar` and passed through unchanged. Steps that explicitly
     /// reference the bound `name` skip the classic auto-injection of
@@ -1524,9 +1524,9 @@ impl Lowering {
         Ok(current)
     }
 
-    /// C13-1 / C13B-007: True if `name` is a callable reference for the
-    /// Native pipeline lowerer (user function, prelude builtin with a
-    /// pipeline form, etc.), rather than a bind-and-forward target.
+    /// True if `name` is a callable reference for the Native pipeline
+    /// lowerer (user function, prelude builtin with a pipeline form,
+    /// etc.), rather than a bind-and-forward target.
     fn is_native_pipeline_callable_ident(&self, name: &str) -> bool {
         if self.user_funcs.contains(name) {
             return true;
@@ -1849,7 +1849,7 @@ impl Lowering {
         Ok(result)
     }
 
-    /// 空スロット部分適用: `func(5, )` → ラムダ（クロージャ）を生成
+    /// 空スロット部分適用: `func(5)` → ラムダ（クロージャ）を生成
     /// Hole 位置のパラメータを持つクロージャを作り、non-hole 引数はキャプチャする。
     /// 旧 `_` (Placeholder) 部分適用は checker (E1502) で拒否済み。
     pub(super) fn lower_partial_application(
@@ -2264,7 +2264,7 @@ impl Lowering {
     }
 }
 
-/// C13-1 / C13B-007: True if `expr` references any name in `bound_names`
+/// True if `expr` references any name in `bound_names`
 /// anywhere in its subtree. Used by `lower_pipeline` to decide whether a
 /// pipeline step should skip the classic `prev_result` auto-injection
 /// because the user explicitly consumed a pipeline-scope binding.

@@ -8,7 +8,7 @@
 
 /// Check that a decoded varint value is valid for the given encoding length.
 /// RFC 9000 Section 16 requires **smallest encoding** — values that could
-/// fit in fewer bytes but use a larger encoding form are malformed (NET7-5a).
+/// fit in fewer bytes but use a larger encoding form are malformed.
 pub(crate) fn is_canonical_varint(value: u64, prefix: u8) -> bool {
     match prefix {
         0 => true,                  // 1 byte: 0..=63 always valid
@@ -22,7 +22,7 @@ pub(crate) fn is_canonical_varint(value: u64, prefix: u8) -> bool {
 /// Decode a QUIC variable-length integer.
 /// Returns `Some((value, bytes_consumed))`, or `None` on error.
 /// **RFC 9000 Section 16**: Rejects non-canonical (over-sized) encoding
-/// as malformed input (NET7-5a hardening).
+/// as malformed input ( hardening).
 pub(crate) fn varint_decode(data: &[u8]) -> Option<(u64, usize)> {
     if data.is_empty() {
         return None;
@@ -44,9 +44,9 @@ pub(crate) fn varint_decode(data: &[u8]) -> Option<(u64, usize)> {
     Some((val, len))
 }
 
-/// Maximum number of SETTINGS pairs before rejection (NET7-5a hardening).
+/// Maximum number of SETTINGS pairs before rejection ( hardening).
 /// RFC 9114 does not specify a maximum. 64 is a reasonable DoS mitigation limit
-/// (typical servers send 3-5 pairs). NB7-31, NB7-37
+/// (typical servers send 3-5 pairs).,
 pub(crate) const H3_MAX_SETTINGS_PAIRS: usize = 64;
 
 /// Encode a QUIC variable-length integer.
@@ -115,7 +115,7 @@ pub(crate) const H3_ERROR_INTERNAL_ERROR: u64 = 0x0102;
 pub(crate) const H3_ERROR_STREAM_CREATION_ERROR: u64 = 0x0103;
 #[allow(dead_code)]
 pub(crate) const H3_ERROR_CLOSED_CRITICAL_STREAM: u64 = 0x0104;
-/// NB7-92: IANA-registered H3 application error code for unexpected frames.
+/// IANA-registered H3 application error code for unexpected frames.
 pub(crate) const H3_ERROR_FRAME_UNEXPECTED: u64 = 0x0105;
 #[allow(dead_code)]
 pub(crate) const H3_ERROR_FRAME_ERROR: u64 = 0x0106;
@@ -173,12 +173,12 @@ pub(crate) fn decode_frame_header(data: &[u8]) -> Option<(u64, u64, usize)> {
     Some((frame_type, frame_length, tc + lc))
 }
 
-/// Decode a complete H3 frame with bounds-checking (NET7-5a hardening).
+/// Decode a complete H3 frame with bounds-checking ( hardening).
 /// **Bounded-copy discipline**: declared payload length is validated against
 /// the actual available buffer. Rejects truncated / oversized frame declarations.
 /// Returns `Some((frame_type, payload_slice))` on success, `None` on malformed input.
-/// **NB7-24**: `frame_length` is guarded against usize overflow on 32-bit systems.
-///   64-bit onlyの場合は常に安全。32-bit systemでもusize overflowをgraceful reject。
+/// ****: `frame_length` is guarded against usize overflow on 32-bit systems.
+/// 64-bit onlyの場合は常に安全。32-bit systemでもusize overflowをgraceful reject。
 pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
     let (frame_type, frame_length, header_size) = decode_frame_header(data)?;
     // NB7-27 / NB7-77: use try_into() instead of `as usize` to prevent silent truncation
@@ -194,7 +194,7 @@ pub(crate) fn decode_frame(data: &[u8]) -> Option<(u64, &[u8])> {
 // ── H3 SETTINGS ──────────────────────────────────────────────────────────
 
 /// Encode a SETTINGS frame payload.
-/// Phase 2/3: send QPACK_MAX_TABLE_CAPACITY=0, QPACK_BLOCKED_STREAMS=0.
+/// send QPACK_MAX_TABLE_CAPACITY=0, QPACK_BLOCKED_STREAMS=0.
 pub(crate) fn encode_settings() -> Option<Vec<u8>> {
     let mut buf = [0u8; 32];
     let mut pos = 0;
@@ -213,7 +213,7 @@ pub(crate) fn encode_settings() -> Option<Vec<u8>> {
 
 /// Decode a SETTINGS frame payload.
 /// Returns the parsed settings on success.
-/// **NET7-5a**: bounded iteration — rejects oversized SETTINGS frames.
+/// ****: bounded iteration — rejects oversized SETTINGS frames.
 /// **RFC 9114 §7.2.4.2**: duplicate settings are rejected.
 pub(crate) fn decode_settings(data: &[u8]) -> Option<H3Settings> {
     let mut settings = H3Settings::default();
@@ -283,7 +283,7 @@ impl Default for H3Settings {
 const H3_MAX_STREAM_ID: u64 = (1 << 62) - 1;
 
 /// Encode a GOAWAY frame. Payload is a single varint (stream ID).
-/// NB7-62: Validates stream_id is within QUIC varint range (62-bit).
+/// Validates stream_id is within QUIC varint range (62-bit).
 pub(crate) fn encode_goaway(stream_id: u64) -> Option<Vec<u8>> {
     if stream_id > H3_MAX_STREAM_ID {
         return None;

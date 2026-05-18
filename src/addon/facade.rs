@@ -1,20 +1,20 @@
-//! C25B-030 Phase 1G: shared addon-facade static analyser.
+//! Shared addon-facade static analyser.
 //!
 //! This module hosts the backend-agnostic static analysis of an
 //! addon-backed package's Taida-side facade (`<pkg_dir>/taida/
 //! <stem>.td`). Both the native codegen lowering path
-//! (`src/codegen/lower/imports.rs`) and the D26-planned WASM
+//! (`src/codegen/lower/imports.rs`) and the planned WASM
 //! backend will consume the same [`AddonFacadeSummary`] value:
 //!
 //! 1. Parse the facade entry file with the standard Taida parser.
-//! 2. Recursively follow facade-internal `>>> ./X.td` relative
-//!    imports, building a universe map of every local binding
-//!    (public + private) seen across the file tree.
+//! 2. Recursively follow facade-internal `>>>./X.td` relative
+//! imports, building a universe map of every local binding
+//! (public + private) seen across the file tree.
 //! 3. Merge the user-visible surface (aliases / pack bindings /
-//!    FuncDefs honoured by `<<<` or the implicit export rule)
-//!    into an [`AddonFacadeSummary`].
+//! FuncDefs honoured by `<<<` or the implicit export rule)
+//! into an [`AddonFacadeSummary`].
 //! 4. Transitively expand the summary with any private
-//!    `_`-prefixed helpers that reachable exports reference.
+//! `_`-prefixed helpers that reachable exports reference.
 //!
 //! The interpreter's addon facade path
 //! (`src/interpreter/module_eval.rs::load_addon_facade`) still
@@ -27,17 +27,17 @@
 //!
 //! Error surface: every diagnostic is a [`FacadeLoadError`] whose
 //! `message` includes an actionable pointer (addon author vs.
-//! language core vs. `C25B-030 Phase 1E-γ pending`) and the
+//! language core vs. unsupported facade-local class-like definitions) and the
 //! originating facade path so IDE / CI tooling can navigate
 //! directly to the offending source.
 //!
-//! Non-goals for Phase 1G:
+//! Non-goals:
 //!
 //! - TypeDef / EnumDef / MoldDef statements inside a facade
-//!   (tracked for Phase 1E-γ; the real `taida-lang/terminal`
-//!   tree does not use them today).
+//! (not yet supported; the real `taida-lang/terminal`
+//! tree does not use them today).
 //! - Non-relative facade `>>>` targets (`>>> taida-lang/foo`,
-//!   `>>> npm:*`, versioned imports).
+//! `>>> npm:*`, versioned imports).
 //! - `<<< <path>` re-export clauses.
 //!
 //! These are rejected deterministically with diagnostic
@@ -59,23 +59,23 @@ use super::manifest::AddonManifest;
 /// Semantics:
 ///
 /// - `aliases` — facade-written `FacadeName <= lowercaseFn`
-///   bindings. The `lowercaseFn` must appear in the addon
-///   manifest's `[functions]` table; the backend resolves it back
-///   to the ABI entry when emitting call sites.
+/// bindings. The `lowercaseFn` must appear in the addon
+/// manifest's `[functions]` table; the backend resolves it back
+/// to the ABI entry when emitting call sites.
 /// - `pack_bindings` — facade-written `FacadeName <= <expr>`
-///   bindings whose RHS is a pure-Taida value (pack literal,
-///   scalar, list, template, arithmetic, method/function call,
-///   field access, mold/type instantiation). The backend replays
-///   each expression verbatim into the module's init path.
+/// bindings whose RHS is a pure-Taida value (pack literal,
+/// scalar, list, template, arithmetic, method/function call,
+/// field access, mold/type instantiation). The backend replays
+/// each expression verbatim into the module's init path.
 /// - `facade_funcs` — facade-declared `Name args = body => :Type`
-///   FuncDefs. Both public (in `exports` or implicitly exported)
-///   and private (`_`-prefixed) helpers are collected so the
-///   backend can lower internal sibling / recursion calls. Only
-///   names that appear in `exports` are visible to user code.
+/// FuncDefs. Both public (in `exports` or implicitly exported)
+/// and private (`_`-prefixed) helpers are collected so the
+/// backend can lower internal sibling / recursion calls. Only
+/// names that appear in `exports` are visible to user code.
 /// - `exports` — symbols listed in the facade's `<<<` export
-///   statement, if any. When empty, every alias / pack binding /
-///   FuncDef is implicitly exported (same rule the interpreter
-///   uses for module-level snapshots).
+/// statement, if any. When empty, every alias / pack binding /
+/// FuncDef is implicitly exported (same rule the interpreter
+/// uses for module-level snapshots).
 #[derive(Debug, Default, Clone)]
 pub struct AddonFacadeSummary {
     /// Map `FacadeName` -> lowercase addon function name.
@@ -187,23 +187,23 @@ pub fn load_facade_summary(
 
 /// Recursive facade file loader. Walks a single file's
 /// statements, harvests aliases / pack bindings / FuncDefs, and
-/// drives recursion into every relative `>>> ./X.td` child.
+/// drives recursion into every relative `>>>./X.td` child.
 ///
 /// Arguments mirror the legacy in-codegen loader so the
 /// extraction is semantics-preserving:
 ///
 /// - `facade_path` — absolute path of the file to load.
 /// - `manifest` — owning addon's manifest (aliases consult the
-///   `[functions]` table).
+/// `[functions]` table).
 /// - `import_path` — user-visible package id (used in diagnostics).
 /// - `restrict_to` — `Some(set)` means "merge only these symbols"
-///   (the parent's `>>> ./X.td => @(a, b)` surface); `None`
-///   means "merge everything understood from this facade".
+/// (the parent's `>>>./X.td => @(a, b)` surface); `None`
+/// means "merge everything understood from this facade".
 /// - `out_summary` — accumulator for aliases / packs / funcs /
-///   exports.
+/// exports.
 /// - `visiting` — recursion stack for circular-import detection.
 /// - `universe_*` — per-facade-tree maps of every binding,
-///   consulted later by `expand_reachable_symbols`.
+/// consulted later by `expand_reachable_symbols`.
 #[allow(clippy::too_many_arguments)]
 fn load_facade_file(
     facade_path: &Path,
@@ -274,7 +274,7 @@ fn load_facade_file(
                             message: format!(
                                 "addon facade '{}' aliases '{}' to '{}' which is not listed \
                                  in [functions] of '{}'. Chained facade aliasing across \
-                                 pure-Taida helpers is not yet supported (C25B-030 Phase 1E-γ).",
+                                 pure-Taida helpers is not yet supported.",
                                 facade_path.display(),
                                 assign.target,
                                 target_fn,
@@ -393,11 +393,10 @@ fn load_facade_file(
                     visiting.remove(&canonical);
                     return Err(FacadeLoadError {
                         message: format!(
-                            "addon facade '{}' binds '{}' to an unsupported expression shape \
-                             (C25B-030 Phase 1E-β supports `Name <= lowercaseFn` aliases, \
+                            "addon facade '{}' binds '{}' to an unsupported expression shape. \
+                             Supported top-level shapes are `Name <= lowercaseFn` aliases, \
                              `Name <= @(...)` pack literals, scalar / list / arithmetic \
-                             value bindings, and FuncDef statements; other top-level \
-                             shapes are tracked for Phase 1E-γ).",
+                             value bindings, and FuncDef statements.",
                             facade_path.display(),
                             assign.target
                         ),
@@ -411,8 +410,7 @@ fn load_facade_file(
                     return Err(FacadeLoadError {
                         message: format!(
                             "addon facade '{}' uses `>>> {}` — only relative `>>> ./X.td` \
-                             or `>>> ../X.td` imports are supported in addon facades \
-                             (C25B-030 Phase 1E-α).",
+                             or `>>> ../X.td` imports are supported in addon facades.",
                             facade_path.display(),
                             p
                         ),
@@ -498,7 +496,6 @@ fn load_facade_file(
                 }
                 local_funcs.insert(fd.name.clone(), fd.clone());
             }
-            // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
             Statement::ClassLikeDef(cl) => {
                 visiting.remove(&canonical);
                 let kind_label = match &cl.kind {
@@ -509,8 +506,7 @@ fn load_facade_file(
                 return Err(FacadeLoadError {
                     message: format!(
                         "addon facade '{}' declares {} '{}' — class-like definitions \
-                         inside addon facades are not yet supported for native codegen \
-                         (C25B-030 Phase 1E-γ pending).",
+                         inside addon facades are not yet supported for native codegen.",
                         facade_path.display(),
                         kind_label,
                         cl.name
@@ -522,8 +518,7 @@ fn load_facade_file(
                 return Err(FacadeLoadError {
                     message: format!(
                         "addon facade '{}' declares EnumDef '{}' — EnumDef statements \
-                         inside addon facades are not yet supported for native codegen \
-                         (C25B-030 Phase 1E-γ pending).",
+                         inside addon facades are not yet supported for native codegen.",
                         facade_path.display(),
                         ed.name
                     ),
@@ -533,10 +528,9 @@ fn load_facade_file(
                 visiting.remove(&canonical);
                 return Err(FacadeLoadError {
                     message: format!(
-                        "addon facade '{}' contains an unsupported top-level construct \
-                         (C25B-030 Phase 1E-β supports assignments, FuncDefs, \
-                         `>>> ./X.td` relative imports, and `<<<` exports; TypeDef / \
-                         EnumDef / MoldDef are tracked for Phase 1E-γ).",
+                        "addon facade '{}' contains an unsupported top-level construct. \
+                         Supported top-level constructs are assignments, FuncDefs, \
+                         `>>> ./X.td` relative imports, and `<<<` exports.",
                         facade_path.display()
                     ),
                 });
@@ -649,7 +643,7 @@ fn load_facade_file(
                         "addon facade '{}' requested symbol '{}' from '{}' but that file \
                          (and its child facades) did not produce a matching binding. \
                          Possible causes: the symbol is declared via a TypeDef / EnumDef / \
-                         MoldDef (C25B-030 Phase 1E-γ pending), the symbol is misspelled, \
+                         MoldDef that is not yet supported in addon facades, the symbol is misspelled, \
                          or the symbol lives in a sibling facade not yet imported.",
                         import_path,
                         name,
@@ -1015,8 +1009,11 @@ Point = @(
         let pkg_dir = facade_pkg_dir(&tmp, "tst/td");
         let err = load_facade_summary(&pkg_dir, &manifest, "tst/td").unwrap_err();
         assert!(
-            err.message.contains("TypeDef") && err.message.contains("Phase 1E-γ pending"),
-            "error must name TypeDef and point at Phase 1E-γ, got: {}",
+            err.message.contains("TypeDef")
+                && err
+                    .message
+                    .contains("class-like definitions inside addon facades are not yet supported"),
+            "error must name TypeDef and the unsupported class-like facade restriction, got: {}",
             err.message
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1092,7 +1089,7 @@ Wrap word = `${word}${_suffix}` => :Str
 
     // ── E30B-007 / Lock-G: explicit RustAddon[...] binding ──
 
-    /// Lock-G: `Name <= RustAddon["fn"](arity <= N)` is recognised by
+    /// `Name <= RustAddon["fn"](arity <= N)` is recognised by
     /// the codegen-side facade summary as an alias entry, identical
     /// in shape to today's `Name <= fn` legacy alias path. This
     /// guarantees native / JS / wasm lowering needs no per-backend
@@ -1122,18 +1119,18 @@ TerminalSize <= RustAddon["terminalSize"](arity <= 0)
         assert_eq!(
             got.aliases.get("TerminalSize").map(|s| s.as_str()),
             Some("terminalSize"),
-            "Lock-G: explicit binding must surface as alias, got {:?}",
+            "explicit binding must surface as alias, got {:?}",
             got.aliases
         );
         assert!(
             !got.pack_bindings.contains_key("TerminalSize"),
-            "Lock-G: explicit binding must NOT fall through to pack_bindings"
+            "explicit binding must NOT fall through to pack_bindings"
         );
         assert!(got.exports.contains("TerminalSize"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Lock-G drift: arity mismatch between facade and manifest is
+    /// drift: arity mismatch between facade and manifest is
     /// rejected with [E1412].
     #[test]
     fn load_facade_summary_rejects_rust_addon_arity_drift() {
@@ -1168,7 +1165,7 @@ TerminalSize <= RustAddon["terminalSize"](arity <= 5)
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Lock-G: function not in manifest [functions] is rejected.
+    /// function not in manifest [functions] is rejected.
     #[test]
     fn load_facade_summary_rejects_rust_addon_unknown_fn() {
         let tmp = std::env::temp_dir().join(format!(

@@ -1,12 +1,12 @@
 //! HTTP streaming response writer (v3) and request body streaming (v4)
-//! implementations, split out from `net_eval/mod.rs` (C13-3).
+//! implementations, split out from `net_eval/mod.rs`.
 //!
 //! This module owns the `impl Interpreter` methods for the v3 streaming
 //! API (`startResponse` / `writeChunk` / `endResponse` / `sseEvent`) and
 //! the v4 body streaming API (`readBodyChunk` / `readBodyAll`) together
 //! with the chunked-body helpers they depend on.
 //!
-//! C13-3 note: pure mechanical move — no behavior change. The `try_net_func`
+//! note: pure mechanical move — no behavior change. The `try_net_func`
 //! dispatcher in `mod.rs` continues to route these calls; this file merely
 //! hosts the implementations.
 
@@ -362,25 +362,25 @@ impl Interpreter {
     /// `sseEvent(writer, event, data)`
     ///
     /// SSE convenience API. Sends one Server-Sent Event in wire format:
-    ///   event: <event>\n
-    ///   data: <line1>\n
-    ///   data: <line2>\n
-    ///   \n
+    /// event: <event>\n
+    /// data: <line1>\n
+    /// data: <line2>\n
+    /// \n
     ///
-    /// Auto-header behavior (NET3-3b, NET3-3c):
-    ///   - If Content-Type is not already set in pending headers, sets
-    ///     `text/event-stream; charset=utf-8`
-    ///   - If Cache-Control is not already set, sets `no-cache`
-    ///   - These are applied once (sse_mode flag prevents re-checking)
+    /// Auto-header behavior:
+    /// - If Content-Type is not already set in pending headers, sets
+    /// `text/event-stream; charset=utf-8`
+    /// - If Cache-Control is not already set, sets `no-cache`
+    /// - These are applied once (sse_mode flag prevents re-checking)
     ///
-    /// Multiline data (NET3-3d):
-    ///   - Splits `data` on `\n` and emits a `data: ` line for each
+    /// Multiline data:
+    /// - Splits `data` on `\n` and emits a `data: ` line for each
     ///
     /// Zero-copy note:
-    ///   - Each SSE line is a separate small String; no aggregate String
-    ///     is built for the entire event.
-    ///   - All lines are sent as one chunked frame via vectored I/O
-    ///     (IoSlice), so the event arrives atomically to the client.
+    /// - Each SSE line is a separate small String; no aggregate String
+    /// is built for the entire event.
+    /// - All lines are sent as one chunked frame via vectored I/O
+    /// (IoSlice), so the event arrives atomically to the client.
     pub(super) fn eval_sse_event(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         if self.active_streaming_writer.is_none() {
             return Err(RuntimeError {
@@ -861,16 +861,16 @@ impl Interpreter {
     /// before a CRLF is observed; callers translate that into a connection
     /// abort (parity with the eager `chunked_body_complete` policy).
     ///
-    /// NB5-21: After leftover is exhausted, reads in 64-byte chunks from the
+    /// After leftover is exhausted, reads in 64-byte chunks from the
     /// stream instead of byte-by-byte. Excess bytes beyond the LF are pushed
     /// back into `body.leftover` so they are available for subsequent reads.
     /// This reduces syscall count from O(line_length) to O(1) for typical
     /// chunk-size lines (4-8 bytes), and avoids per-byte rustls overhead on TLS.
     ///
-    /// NB6-7: Returns Vec<u8> instead of String to avoid per-line UTF-8 validation
+    /// Returns Vec<u8> instead of String to avoid per-line UTF-8 validation
     /// and String heap allocation. Chunk-size lines are always ASCII hex digits.
     ///
-    /// NB6-8: Excess pushback now uses in-place splice (drain + insert) on
+    /// Excess pushback now uses in-place splice (drain + insert) on
     /// body.leftover instead of allocating a new Vec per pushback.
     pub(super) fn read_line_from_body(
         body: &mut RequestBodyState,
@@ -950,7 +950,7 @@ impl Interpreter {
         Ok(line)
     }
 
-    /// NB6-7: Trim ASCII whitespace from a byte slice (equivalent to str::trim()).
+    /// Trim ASCII whitespace from a byte slice (equivalent to str::trim()).
     #[inline]
     pub(super) fn trim_bytes(data: &[u8]) -> &[u8] {
         let start = data
@@ -964,10 +964,10 @@ impl Interpreter {
         &data[start..end]
     }
 
-    /// NB6-7: Parse hex chunk size directly from byte slice.
+    /// Parse hex chunk size directly from byte slice.
     ///
     /// Strips the trailing CRLF terminator and the chunk-extension after `;`.
-    /// E32B-053: per RFC 7230 §4.1, no OWS is allowed within `chunk-size`, so
+    /// per RFC 7230 §4.1, no OWS is allowed within `chunk-size`, so
     /// the hex slice is forwarded to `parse_chunk_size_hex_bytes` without any
     /// internal trim — any whitespace yields a malformed-chunk diagnostic.
     #[inline]
@@ -993,7 +993,7 @@ impl Interpreter {
     /// Read up to `count` bytes from leftover buffer then stream.
     /// Returns a Vec of the bytes actually read (may be less than count on EOF).
     ///
-    /// NB5-19: Single allocation — `result` is pre-sized to `count` and the stream
+    /// Single allocation — `result` is pre-sized to `count` and the stream
     /// reads directly into the unfilled tail, avoiding the previous intermediate
     /// `vec![0u8; remaining]` allocation per read call.
     pub(super) fn read_exact_from_body(

@@ -1,57 +1,51 @@
 //! Taida native runtime — single translation unit assembled from five
 //! responsibility-aligned C source files plus a declarative header.
 //!
-//! **History**:
+//! The runtime is split into five `.c` source files (`core.c`, `os.c`,
+//! `tls.c`, `net_h1_h2.c`, `net_h3_quic.c`) plus a shared `runtime.h`
+//! header. The files are concatenated at Rust load time and passed to
+//! `clang` as a single translation unit; DCE / static helper
+//! cross-references / forward declarations therefore behave
+//! byte-identically to the equivalent monolithic source.
 //!
-//! - C12B-026 (C12-9 Phase 9 Step 2) で `src/codegen/native_runtime.c`
-//!   (20,866 行 / 886,457 bytes) を 7 フラグメント (`01_core.inc.c` ..
-//!   `07_net_h3_main.inc.c`) に機械的に分割した。
-//! - C13-4 (C13B-004) で、`.dev/C13_DESIGN.md §C13-4` の責務境界に合わせて
-//!   フラグメントを 5 責務ファイル + 共有ヘッダ (`runtime.h`) に再配置した。
-//!   この再配置は **物理的なリネーム + 連結のみ** で、連結ストリームの
-//!   バイト列は C12B-026 時点と完全一致する (886,457 bytes)。
+//! Concatenation uses `LazyLock<&'static str>` + `Box::leak`, matching
+//! the strategy in `runtime_core_wasm/`. `driver.rs` writes the merged
+//! C source via `fs::write` before invoking `clang`.
 //!
-//! **採用方式**: Rust-level 連結 (`LazyLock<&'static str>` + `Box::leak`) —
-//! `runtime_core_wasm/` (C12-7a / C12B-027) と同一。clang 視点では完全に
-//! 1 translation unit として振る舞う (driver.rs が `fs::write` で連結済み
-//! の C ソースを書き出してから clang に渡す) ため、DCE / static helper
-//! の cross-reference / forward declaration は分割前とバイト単位で同一。
-//!
-//! **責務境界** (C13-4a, 詳細は `runtime.h`):
+//! **Responsibility boundaries** (see `runtime.h` for the detailed
+//! invariants):
 //!
 //! - [`CORE_SECTION`] (7,838 行, `core.c`): libc stubs / safe-malloc /
-//!   allocator / type conversion molds / ref-counting / heap strings /
-//!   BuchiPack / globals / Closure / List / Bytes / String / Regex /
-//!   polymorphic dispatchers / template strings / Int/Float/Bool/Num
-//!   methods / HashMap / Set / polymorphic length / collection methods /
-//!   Error ceiling (setjmp/longjmp) / Result / Lax methods / polymorphic
-//!   monadic dispatch / Async pthread support / Async aggregation /
-//!   Debug for list / JSON Molten Iron / stdlib math / Field registry /
-//!   jsonEncode/jsonPretty / stdlib I/O / SHA-256
+//! allocator / type conversion molds / ref-counting / heap strings /
+//! BuchiPack / globals / Closure / List / Bytes / String / Regex /
+//! polymorphic dispatchers / template strings / Int/Float/Bool/Num
+//! methods / HashMap / Set / polymorphic length / collection methods /
+//! Error ceiling (setjmp/longjmp) / Result / Lax methods / polymorphic
+//! monadic dispatch / Async pthread support / Async aggregation /
+//! Debug for list / JSON Molten Iron / stdlib math / Field registry /
+//! jsonEncode/jsonPretty / stdlib I/O / SHA-256
 //! - [`OS_SECTION`] (668 行, `os.c`): taida-lang/os package
-//!   (Read / readBytes / ListDir / Stat / Exists / EnvVar / writeFile /
-//!   writeBytes / appendFile / remove / createDir / rename / run /
-//!   execShell / allEnv / ReadAsync)
-//! - [`TLS_SECTION`] (1,720 行, `tls.c`): NET5-4a OpenSSL dlopen /
-//!   TLS-aware I/O wrappers / HTTP/1.1 over raw TCP / TCP socket APIs /
-//!   pool package runtime
+//! (Read / readBytes / ListDir / Stat / Exists / EnvVar / writeFile /
+//! writeBytes / appendFile / remove / createDir / rename / run /
+//! execShell / allEnv / ReadAsync)
+//! - [`TLS_SECTION`] (1,720 行, `tls.c`): OpenSSL dlopen /
+//! TLS-aware I/O wrappers / HTTP/1.1 over raw TCP / TCP socket APIs /
+//! pool package runtime
 //! - [`NET_H1_H2_SECTION`] (6,336 行, `net_h1_h2.c`): taida-lang/net HTTP
-//!   v1 runtime (httpParseRequestHead / httpEncodeResponse / readBody /
-//!   keep-alive / chunked / streaming / WebSocket / thread pool) +
-//!   Native HTTP/2 server (HPACK / H2 frames / taida_net_h2_serve)
+//! v1 runtime (httpParseRequestHead / httpEncodeResponse / readBody /
+//! keep-alive / chunked / streaming / WebSocket / thread pool) +
+//! Native HTTP/2 server (HPACK / H2 frames / taida_net_h2_serve)
 //! - [`NET_H3_QUIC_SECTION`] (4,458 行, `net_h3_quic.c`): H3/QPACK
-//!   constants / H3 frame I/O / libquiche dlopen FFI / QUIC connection
-//!   pool / taida_net_h3_serve / httpServe entry / RC2.5 addon dispatch /
-//!   main()
+//! constants / H3 frame I/O / libquiche dlopen FFI / QUIC connection
+//! pool / taida_net_h3_serve / httpServe entry / addon dispatch /
+//! main()
 //!
-//! 分割配置表: `.dev/taida-logs/docs/design/file_boundaries.md §4` +
-//! `src/codegen/native_runtime/runtime.h`
+//! See `src/codegen/native_runtime/runtime.h` for the responsibility table.
 
 use std::sync::LazyLock;
 
 /// Fragment 1: C runtime core primitives + Error / Result / Async / JSON.
-/// Merged from C12B-026 fragments 1 (`01_core.inc.c`) + 2
-/// (`02_error_json.inc.c`). (7,838 lines)
+/// (7,838 lines)
 pub const CORE_SECTION: &str = include_str!("core.c");
 
 /// Fragment 2: taida-lang/os package (668 lines).
@@ -60,9 +54,7 @@ pub const OS_SECTION: &str = include_str!("os.c");
 /// Fragment 3: OpenSSL TLS, TCP sockets, pool (1,720 lines).
 pub const TLS_SECTION: &str = include_str!("tls.c");
 
-/// Fragment 4: HTTP/1 + WebSocket + HTTP/2 runtime.
-/// Merged from C12B-026 fragments 5 (`05_net_v1.inc.c`) + 6
-/// (`06_net_h2.inc.c`). (6,182 lines)
+/// Fragment 4: HTTP/1 + WebSocket + HTTP/2 runtime. (6,182 lines)
 pub const NET_H1_H2_SECTION: &str = include_str!("net_h1_h2.c");
 
 /// Fragment 5: HTTP/3 + QPACK + QUIC + httpServe entry + addon dispatch +
@@ -72,22 +64,20 @@ pub const NET_H3_QUIC_SECTION: &str = include_str!("net_h3_quic.c");
 /// Full native runtime C source, assembled from the five responsibility
 /// fragments on first access and cached for the process lifetime.
 ///
-/// Byte-identical to the pre-split monolithic `native_runtime.c` as well
-/// as to the C12B-026 seven-fragment layout (see
+/// Byte-identical to the equivalent monolithic `native_runtime.c` — see
 /// `test_native_runtime_fragment_concat_preserves_bytes` below for the
-/// invariant assertion).
+/// invariant assertion. The concatenation order
+/// (`core` → `os` → `tls` → `net_h1_h2` → `net_h3_quic`) is fixed so
+/// that DCE, static helper cross-references, and forward declarations
+/// see the same byte stream regardless of how the files are physically
+/// split on disk.
 ///
-/// C13-4 note: the physical files were merged / renamed but the
-/// concatenation order (core -> os -> tls -> net_h1_h2 -> net_h3_quic)
-/// corresponds 1:1 to the C12B-026 fragment 1..7 concatenation order,
-/// so DCE / static helper cross-reference / forward declarations see the
-/// same byte stream as before.
-///
-/// Strategy note: `concat!()` cannot be used because that macro requires
-/// literal arguments; `LazyLock<&'static str>` + `Box::leak` exposes a
-/// `&'static str` without adding a crate dependency. Same strategy as
-/// `src/codegen/runtime_core_wasm/mod.rs::RUNTIME_CORE_WASM` (C12-7a /
-/// C12B-027) and `src/js/runtime/mod.rs::RUNTIME_JS` (C12-9d).
+/// `concat!()` cannot be used because that macro requires literal
+/// arguments; `LazyLock<&'static str>` + `Box::leak` exposes a
+/// `&'static str` without adding a crate dependency. The wasm core
+/// runtime (`src/codegen/runtime_core_wasm/mod.rs::RUNTIME_CORE_WASM`)
+/// and the JS runtime (`src/js/runtime/mod.rs::RUNTIME_JS`) use the
+/// same strategy.
 pub static NATIVE_RUNTIME_C: LazyLock<&'static str> = LazyLock::new(|| {
     let total = CORE_SECTION.len()
         + OS_SECTION.len()
@@ -108,186 +98,20 @@ pub static NATIVE_RUNTIME_C: LazyLock<&'static str> = LazyLock::new(|| {
 mod tests {
     use super::*;
 
-    /// C12B-026 / C13-4 invariant: the concatenation of the five
-    /// responsibility fragments must be byte-identical to the pre-split
-    /// monolithic `native_runtime.c` as well as to the C12B-026 seven-
-    /// fragment concatenation. We anchor the total byte length + a check
+    /// Invariant: the concatenation of the five responsibility
+    /// fragments must be byte-identical to the equivalent monolithic
+    /// `native_runtime.c`. We anchor the total byte length + a check
     /// of the first / last meaningful lines of the assembled source to
     /// detect accidental edits that would break DCE or shift static
     /// helper references across fragment boundaries.
     ///
-    /// Total bytes snapshot: 886,457 (at C12B-026 split time; preserved
-    /// through C13-4 rename / merge). If a future change intentionally
-    /// modifies the runtime C source, update both the relevant fragment
-    /// file and the `EXPECTED_TOTAL_LEN` constant below in the same
-    /// commit.
-    ///
-    /// C16 (2026-04-16): +2,074 bytes in core.c from `E{...}` enum schema
-    /// descriptor support in `json_apply_schema` / `json_default_value_for_desc`.
-    /// New total: 888,531.
-    ///
-    /// C16B-001 (2026-04-16): +4,359 bytes in core.c — rewrote
-    /// `json_default_value_for_desc` to a dedicated `json_pure_default_apply`
-    /// walker so TypeDef defaults embed `Int(0)` for Enum fields instead of
-    /// routing through `json_apply_schema(NULL, ...)` which produced
-    /// `Lax[Enum]` and broke 3-backend parity (Interpreter/JS correctly
-    /// returned `Int(0)`). New total: 892,890.
-    ///
-    /// C18-2 (2026-04-17): +3,998 bytes in core.c — added
-    /// `taida_register_field_enum`, `taida_lookup_field_enum_desc`, the
-    /// `enum_desc` slot in the per-field registry, `json_append_enum_variant`,
-    /// and the tag-5 (Enum) branch in `json_serialize_pack_fields`. These
-    /// changes let `jsonEncode` emit the variant-name Str (e.g. `"Running"`)
-    /// for Enum fields, symmetric with the C16 `JSON[raw, Schema]()`
-    /// decoder. Legacy total after C18-2: 896,888.
-    ///
-    /// C18B-003/005 (2026-04-17): +5,086 bytes in core.c — added the
-    /// per-pack enum registry (`taida_register_pack_field_enum` /
-    /// `taida_lookup_pack_field_enum_desc` with `__pack_field_enum_registry`)
-    /// so two packs sharing a field name with different Enum types no
-    /// longer collide in `jsonEncode` (C18B-003); plus
-    /// `taida_runtime_panic(msg)` for the strict `Ordinal[]` runtime
-    /// contract (C18B-005). Intermediate total: 901,974.
-    ///
-    /// C18B-006 (2026-04-17): +2,272 bytes in core.c — added
-    /// `json_parse_string_raw_len` (length-aware variant) + `str_len`
-    /// field in `json_val` so the enum validation in `json_apply_schema`
-    /// uses the decoded byte count instead of `strlen(js)`. This stops
-    /// embedded-NUL JSON strings from silently truncating into a
-    /// successful variant match (carry from C16B-005). New total:
-    /// 904,246.
-    ///
-    /// C19 (2026-04-19): +195 bytes in core.c (two new forward
-    /// declarations `taida_os_run_interactive` /
-    /// `taida_os_exec_shell_interactive`) and +4,228 bytes in os.c
-    /// (new `taida_os_process_inner_code_only` / `taida_os_extract_wait_code`
-    /// helpers plus the two TTY-passthrough functions). Fragment 1 grew
-    /// by +195 bytes (boundary now at 211,525); fragment 2 is unchanged.
-    /// New total: 908,669.
-    ///
-    /// C19B-001 (2026-04-19): +19 bytes in core.c (added `#include <fcntl.h>`
-    /// preamble required for `FD_CLOEXEC` / `F_SETFD` in the errno pipe used
-    /// by the interactive exec helpers) and +4,429 bytes in os.c (rewrote
-    /// `taida_os_run_interactive` / `taida_os_exec_shell_interactive` to
-    /// propagate child `execvp` errno to the parent via a CLOEXEC self-pipe
-    /// so ENOENT surfaces as `IoError` instead of `ProcessError(127)`,
-    /// plus two shared `taida_os_write_all` / `taida_os_read_all` helpers).
-    /// Fragment 1 grew by +19 bytes (boundary now at 211,544); fragment 2
-    /// is unchanged. Intermediate total: 913,117.
-    ///
-    /// C19B-002 (2026-04-19): +396 bytes in core.c — introduced the
-    /// `HASH___ERROR` field-hash constant (FNV-1a of `"__error"`) and
-    /// threaded it through `taida_gorillax_new` / `taida_gorillax_err` /
-    /// `taida_gorillax_relax` so Taida code can actually look up
-    /// `gorillax.__error.<field>` at runtime. Before this fix the slot was
-    /// stored under `HASH___DEFAULT` and field access silently missed.
-    /// This unblocks the failure-path parity test which asserts that
-    /// ENOENT surfaces as an observable `IoError` on all three backends.
-    /// Fragment 1 grew by +396 bytes (boundary now at 211,940); fragment 2
-    /// is unchanged. New total: 913,513.
-    ///
-    /// C20-3 (2026-04-20): +1,106 bytes in core.c — rewrote
-    /// `taida_io_stdin` to use `getline` (POSIX) / realloc-loop
-    /// (Windows) instead of a fixed `char[4096]` stack buffer so long
-    /// stdin lines are no longer truncated (ROOT-8). Also keeps JS /
-    /// Interpreter `""`-on-error behaviour (ROOT-9) — Interpreter
-    /// side-change is Rust, not C. Fragment 1 is unchanged; fragment 2
-    /// grew from 123,746 to 124,852. New total: 914,619.
-    ///
-    /// C20-4 (2026-04-20): +3,186 bytes in tls.c — added the
-    /// list-of-record headers shape `@[@(name <= "...", value <= "...")]`
-    /// for `HttpRequest` (C19B-007), complementing the legacy
-    /// buchi-pack identifier shape. Two helpers
-    /// (`taida_os_http_append_header_line`,
-    /// `taida_os_http_pack_str_field`) were introduced and both
-    /// `taida_os_http_headers_to_lines` and the curl header loop in
-    /// `taida_os_http_do_curl` now accept both shapes. core.c and
-    /// other fragments are unchanged. New total: 917,805.
-    ///
-    /// C20-2 (2026-04-20): +8,477 bytes in core.c — added the
-    /// UTF-8-aware `taida_io_stdin_line` line editor (derived from
-    /// linenoise BSD-2-Clause) so that `stdinLine(prompt) >=> line`
-    /// returns an `Async[Lax[Str]]` that survives multibyte input
-    /// editing on a POSIX TTY (fixes ROOT-7). Non-TTY fallback uses
-    /// getline to keep pipe / redirect parity with the other two
-    /// backends. Include of `<termios.h>` / `<unistd.h>` is local to
-    /// this block. Other fragments unchanged. New total: 926,282.
-    ///
-    /// C21-4 (2026-04-21): +3,228 bytes in core.c — FLOAT-tag dispatch
-    /// in `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag`
-    /// (decode the boxed f64 bit-pattern via `memcpy` and render through
-    /// `taida_float_to_str`) and the `taida_float_to_str` formatter
-    /// rewritten to match the interpreter's Rust-f64::Display contract
-    /// ("X.0" for integer-valued floats, shortest-round-trip via a
-    /// `%.*g` + `strtod` loop for non-integers — matches Grisu/Ryu).
-    /// Fixes the seed-03 / C21B-008 family: `stdout(triple(4.0))` now
-    /// prints `12.0` on native (was a raw i64 bit pattern) and avoids
-    /// spurious `3.14 → 3.1400000000000001` rendering. New total:
-    /// 929,510.
-    ///
-    /// C21B-seed-07 (2026-04-22): +6,295 bytes in core.c — primitive-mold
-    /// Lax constructors (`taida_{int,float,bool,str}_mold_*`) now stamp
-    /// the output primitive tag on the Lax's `__value` / `__default`
-    /// fields via a new `taida_lax_tag_value_default` helper; the pack
-    /// display paths (`taida_pack_to_display_string` / `_full`) consult
-    /// the per-field tag before falling back to the legacy global
-    /// field-name/type registry; and `taida_io_stdout_with_tag` /
-    /// `_stderr_with_tag` route any runtime-detected BuchiPack (Lax /
-    /// Result / Gorillax / user-defined) through the full-form display.
-    /// Fixes the C21B-seed-07 symptom where `stdout(Float[x]())` decoded
-    /// the Lax pointer as an f64 bit pattern via the FLOAT fast path (→
-    /// `3.958e-315`) and `stdout(Int[x]())` printed the short
-    /// `.toString()` form `Lax(3)` instead of the interpreter's full
-    /// `@(has_value <= true, __value <= 3, __default <= 0, __type <=
-    /// "Lax")`. F1 moves from 214,240 to 216,753; F2 moves from 134,257
-    /// to 138,039. New total: 935,805.
-    ///
-    /// C23B-003 reopen (2026-04-22): +6,301 bytes in core.c. Added
-    /// `taida_hashmap_to_display_string_full` and
-    /// `taida_set_to_display_string_full` (synthetic full-form pack
-    /// renderers mirroring the interpreter's
-    /// `BuchiPack(__entries/__items, __type)` layout for HashMap/Set);
-    /// `taida_stdout_display_string` now routes through those helpers so
-    /// `Str[hm]()` / `Str[s]()` emit the interpreter's full form instead
-    /// of the short-form `HashMap({…})` / `Set({…})`. Additionally,
-    /// `taida_register_lax_field_names` also registers `__error`, and
-    /// `taida_gorillax_new` calls the registration + tags its `__error`
-    /// slot as `TAIDA_TAG_PACK` so `taida_pack_to_display_string_full`
-    /// renders Unit as `@()` (matches interpreter `Value::Unit.to_debug_string`)
-    /// — fixes `Str[Gorillax[v]()]()` rendering as `@()`. F1 moves from
-    /// 216,753 to 223,054 (the other fragments are unchanged). New
-    /// total: 943,160.
-    ///
-    /// C23B-003 reopen 2 (2026-04-22): F2 grew by +7,037 bytes from the
-    /// new `taida_value_to_debug_string_full` helper + the three call
-    /// sites in `taida_hashmap_to_display_string_full` /
-    /// `taida_set_to_display_string_full` /
-    /// `taida_pack_to_display_string_full` that route nested typed
-    /// runtime objects (HashMap / Set / BuchiPack) through the full-form
-    /// recursion, plus a List branch in `taida_stdout_display_string`
-    /// that uses the same full-form helper so top-level
-    /// `Str[@[hashMap()...]]()` produces `@[@(__entries <= …, __type <=
-    /// "HashMap"), …]` instead of collapsing the items to the
-    /// `HashMap({…})` short form. Without these changes, nested
-    /// HashMap-in-HashMap / Set-in-HashMap / List-of-HashMap collapsed
-    /// back to short-form `.toString()` output, breaking 4-backend
-    /// parity with the interpreter's `Value::to_debug_string()` →
-    /// recursive `to_display_string()` contract on BuchiPack. Total:
-    /// 943,160 → 950,197.
-    ///
-    /// C23B-007 / C23B-008 (2026-04-22): 950,197 → 958,672 (+8,475).
-    /// - C23B-007 native symmetry: introduced `TAIDA_TAG_HETEROGENEOUS
-    ///   = -2`, taught `taida_list_set_elem_tag` /
-    ///   `taida_hashmap_set_value_tag` to latch on it once two
-    ///   disagreeing primitive tags collide. Retain/release keep the
-    ///   UNKNOWN leak-rather-than-crash behaviour for the new sentinel.
-    /// - C23B-008 native HashMap insertion-order side-index: added
-    ///   macros (`TAIDA_HM_ORD_HEADER_SLOT`, `TAIDA_HM_ORD_SLOT`,
-    ///   `TAIDA_HM_TOTAL_SLOTS`) and grew the allocation by `1 + cap`
-    ///   slots. `taida_hashmap_set` / `_remove` / `_clone` /
-    ///   `_resize` / `_entries` / `_keys` / `_values` / `_merge` /
-    ///   `taida_hashmap_to_string` / `taida_hashmap_to_display_string_full` /
-    ///   JSON serializer walk the new side-index.
+    /// If a future change intentionally modifies the runtime C source,
+    /// update both the relevant fragment file and the
+    /// `EXPECTED_TOTAL_LEN` constant below in the same commit. The
+    /// historical byte-count growth log used to live here in `///` doc
+    /// form; commit messages and the test's failure output cover the
+    /// same ground without rotting the source surface, so the log is
+    /// no longer kept inline.
     #[test]
     fn test_native_runtime_fragment_concat_preserves_bytes() {
         // C24-B (2026-04-23): +4,014 bytes in core.c total. F1 region
@@ -791,7 +615,7 @@ mod tests {
         // 2026-05-16 F42 sweep `taida_time_sleep_task` returns `ms` (Int)
         //   instead of an empty pack; assembled runtime is 1,128,851 bytes.
         // 2026-05-16 F42 sweep net_h1_h2 streaming/ws API comments updated
-        //   ("Unit" → "F42 sweep: Int(0) ..."); assembled runtime grows by
+        //   Unit placeholder comments now describe Int(0)); assembled runtime grows by
         //   1,345 bytes to 1,130,196.
         // 2026-05-16 F42 sweep (R4): `taida_assert` Native helper added to
         //   core.c (prototype declaration + 1,876-byte implementation
@@ -802,15 +626,14 @@ mod tests {
         // 2026-05-16 F42 sweep (R4) final: net_h1_h2 wsSend/wsClose comment
         //   contract updated (Unit → Int / F42 sweep R3). +3 bytes to F5
         //   (header-comment text only). Total grows to 1,132,276.
-        // 2026-05-16 F42 sweep (R6, NEEDS_DECISION C): doc-comment inside
-        //   net_h1_h2 / core.c rewrote `F42B-004` literal label to the
-        //   general "F42 sweep" expression (CLAUDE.md L13-15 — no internal
-        //   blocker IDs in source doc-comments). Net diff: F1 -12, F2 +4,
+        // 2026-05-16 F42 sweep (R6): doc-comment inside net_h1_h2 / core.c
+        //   rewrote the contract label so source doc-comments do not carry
+        //   internal blocker IDs. Net diff: F1 -12, F2 +4,
         //   F5 +24, F6 0 → total +16 to 1,132,292.
-        // 2026-05-17 Phase 6 (Codex follow-up: F42B-013 / F42B-026 land
-        //   work). net_h3_quic / net_h1_h2 streaming-write banner cleanup
-        //   trims 255 bytes net. Recomputed total = 1,132,037.
-        const EXPECTED_TOTAL_LEN: usize = 1_132_037;
+        // 2026-05-17 net_h3_quic addon-load hint message: replaced the
+        //   internal `(see .dev/...)` reference with a self-contained
+        //   user-facing hint. Net +31 bytes. Recomputed total = 1,132,061.
+        const EXPECTED_TOTAL_LEN: usize = 1_132_061;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -836,7 +659,7 @@ mod tests {
     /// Each fragment must be a proper C suffix / prefix — no fragment
     /// should begin mid-statement. Fragment `core.c` starts with the
     /// `#include` preamble; the other four each begin with a `// ──`
-    /// section divider comment at column 0 (inherited from C12B-026).
+    /// section divider comment at column 0 (inherited from).
     #[test]
     fn test_native_runtime_fragment_boundaries_are_top_level() {
         assert!(
@@ -862,7 +685,7 @@ mod tests {
     /// Smoke test that none of the fragments are empty or suspiciously
     /// small (would indicate a boundary mis-calculation).
     /// Lower bounds chosen with a comfortable margin below the actual
-    /// C13-4 sizes (see `mod.rs` docstring for the observed line counts).
+    /// sizes (see `mod.rs` docstring for the observed line counts).
     #[test]
     fn test_native_runtime_fragments_nonempty() {
         assert!(
@@ -884,9 +707,9 @@ mod tests {
         );
     }
 
-    /// C13-4 invariant: the five responsibility fragments must concatenate
+    /// invariant: the five responsibility fragments must concatenate
     /// in the order `core -> os -> tls -> net_h1_h2 -> net_h3_quic`, which
-    /// is byte-identical to the C12B-026 seven-fragment order
+    /// is byte-identical to the seven-fragment order
     /// `01_core -> 02_error_json -> 03_os -> 04_tls_tcp -> 05_net_v1 ->
     /// 06_net_h2 -> 07_net_h3_main`. The fragment 1+2 merge (core) and
     /// the fragment 5+6 merge (net_h1_h2) must preserve the historical
@@ -921,7 +744,7 @@ mod tests {
         // core.c growth is +3,998 bytes, splitting across the historical
         // fragment boundary. The F2_PREFIX anchor lands at offset
         // 210,216 (was 209,911). These changes let jsonEncode emit the
-        // variant-name Str (e.g. `"Running"`) in symmetry with the C16
+        // variant-name Str (e.g. `"Running"`) in symmetry with the
         // `JSON[raw, Schema]()` decoder.
         //
         // C18B-003/005 (2026-04-17): fragment 1 grew by +1,114 bytes
@@ -1381,16 +1204,16 @@ mod tests {
         //   314,355. The implementation lives in F2 and adds 1,876 bytes
         //   (1,028-char contract comment + 26-line C body). F2 grows
         //   from 165,426 → 167,302.
-        // 2026-05-16 F42 sweep (R6): doc-comment label rewrite (F42B-004
-        //   → "F42 sweep") inside `taida_assert` contract trims 12 bytes
+        // 2026-05-16 F42 sweep (R6): doc-comment label rewrite inside
+        //   `taida_assert` contract trims 12 bytes
         //   from F1 (taida_assert prototype area) and adds 4 bytes to F2
         //   (implementation contract comment). F1 314,355 → 314,343 and
         //   F2 167,302 → 167,306.
         const F1_LEN: usize = 314_343;
         assert_eq!(
             CORE_SECTION.len(),
-            314_343 + 167_306,
-            "core.c total byte length must equal legacy fragment1 + fragment2 (C25B-001 / C25B-028 / C25B-025 / C26B-011 / C26B-020 / C26B-016 / C26B-018 / C26B-011-wS / C26B-024 / C26B-024-wepsilon adjusted; CI-red 2026-04-24 cppcheck clean-up adds 881/409 to F1/F2; @c.27 PR41 CI-red follow-up adds 61 to F1 for the cppcheck-suppress comment on the new taida_release_any helper; D28B-012 wF adds 4,821 to F1 for taida_arena_request_reset; D28B-026 review follow-up adds 425 to F1 for the active_chunk defensive corner; D29B-003 Track-β adds 6,407 to F1 for TAIDA_BYTES_CONTIG primitives + writev hot-path reflection; D29B-004 Track-ε adds 803 to F1 for taida_slice_mold inline note documenting deferred Native zero-copy view integration; D29B-005/012 Track-η adds 3,291 to F1 for taida_net_raw_as_bytes ABI Option-D rewrite + Span* release sites + taida_slice_mold CONTIG view fast path + subtraction-based Span* bounds checks; D29B-015 Track-β-2 adds 8,418 to F1 and 1,234 to F2 for Bytes dispatcher polymorphism + producer flip; D29B-016 Track-θ adds 910 to F1 for TAIDA_STR_ROPE_MAGIC sentinel + design rationale comment block; E32B-022 Lock-N adds 2,783 to F1 for the Lax[Int]-returning *indexOf*/search/FindIndex sibling helpers; E33B-003 Cat B adds 1,541 to F1 for `taida_make_error_with_kind` parity helper; F42 sweep sleep-task return-value adds 199 to F2; F42 sweep (R4) `taida_assert` declaration adds 201 to F1 and 1,876 to F2)"
+            314_343 + 167_299,
+            "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
         let tail = &CORE_SECTION.as_bytes()[F1_LEN..F1_LEN + F2_PREFIX.len()];
@@ -1561,14 +1384,14 @@ mod tests {
         // 2026-05-16 F42 sweep (R4): wsSend/wsClose header-comment contract
         //   updated (Unit → Int / F42 sweep). +3 bytes to F5; F6 unchanged.
         //   F5 grows from 223,890 → 223,893.
-        // 2026-05-16 F42 sweep (R6): F42B-004 → "F42 sweep" label rewrite
+        // 2026-05-16 F42 sweep (R6): contract label rewrite
         //   across the streaming/WS contract comments adds 24 bytes to F5.
         //   F6 unchanged. F5 223,893 → 223,917.
         const F5_LEN: usize = 223_917;
         assert_eq!(
             NET_H1_H2_SECTION.len(),
             223_917 + 106_128,
-            "net_h1_h2.c total byte length must equal legacy fragment5 + fragment6 (C26B-026 / C26B-022-wS / C27B-014 / C27B-026 / D28B-012 wF / D28B-002 wG / D28B-025 review follow-up / D29B-003 Track-β contig writev hot-path / D29B-001 Track-ζ h2 arena+span request pack / D29B-015 Track-β-2 producer flip + consumer polymorphism adjusted; E33B-003 Cat B adds 210 to F5 for taida_net_result_fail switching to taida_make_error_with_kind; F42 sweep streaming/WS Unit-comment sweep adds 1,345 bytes to F5; F42 sweep (R4) wsSend/wsClose header-comment polish adds 3 bytes)"
+            "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
         let tail = &NET_H1_H2_SECTION.as_bytes()[F5_LEN..F5_LEN + F6_PREFIX.len()];

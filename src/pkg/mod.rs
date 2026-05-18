@@ -15,7 +15,7 @@ pub mod lockfile;
 /// Dependencies are resolved through a provider chain:
 /// 1. **WorkspaceProvider** — local path dependencies (`Dependency::Path`)
 /// 2. **CoreBundledProvider** — core packages bundled with Taida (`taida-lang/*`)
-/// 3. **StoreProvider** — external registry packages (stub, Phase 3+)
+/// 3. **StoreProvider** — external registry packages (stub, +)
 ///
 /// Resolved dependencies are recorded in `.taida/taida.lock` for reproducibility.
 pub mod manifest;

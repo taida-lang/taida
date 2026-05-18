@@ -55,11 +55,11 @@ pub struct LockedPackage {
     pub source: String,
     /// Integrity hash.
     pub integrity: String,
-    /// RC1.5: Optional addon binary info.
+    /// Optional addon binary info.
     pub addon: Option<LockedAddon>,
 }
 
-/// RC1.5: Locked addon binary metadata.
+/// Locked addon binary metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LockedAddon {
     /// Target triple (e.g. "x86_64-unknown-linux-gnu").
@@ -95,7 +95,7 @@ impl Lockfile {
         }
     }
 
-    /// RC1.5: Attach addon info to a package entry.
+    /// Attach addon info to a package entry.
     /// Returns Err if the package is not in the lockfile.
     pub fn with_addon(
         &mut self,

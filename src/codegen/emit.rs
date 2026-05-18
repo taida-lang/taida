@@ -90,7 +90,7 @@ impl AbiHelper {
 enum AbiKind {
     /// 整数値 (Int, Bool, Hash, tag, count, index, dummy) → value_ty()
     Val,
-    /// ヒープポインタ (Str, Pack, List, HashMap, Set, Async, Closure, Lax, Result, ...) → ptr_ty()
+    /// ヒープポインタ (Str, Pack, List, HashMap, Set, Async, Closure, Lax, Result,...) → ptr_ty()
     Ptr,
     /// 関数ポインタ → fn_ptr_ty()
     FnPtr,
@@ -110,7 +110,7 @@ struct RuntimeAbi {
 /// 分類基準:
 /// - Val: 数値・真偽値・ハッシュ・タグ・カウント・インデックス・ダミー戻り値
 /// - Ptr: ヒープ確保オブジェクト（Str, Pack, List, HashMap, Set, Async, Closure,
-///   Lax, Result, Gorillax, Bytes, JSON, Molten 等）
+/// Lax, Result, Gorillax, Bytes, JSON, Molten 等）
 /// - FnPtr: 関数ポインタ（クロージャ生成・list_map/filter 等のコールバック）
 /// - F64: 浮動小数点数（bitcast 経由で boxed value と変換される場合あり）
 fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {

@@ -4133,8 +4133,8 @@ static void taida_addon_fail(const char *pkg, const char *detail) {
             pkg ? pkg : "(unknown)", detail ? detail : "(unknown)");
     fprintf(stderr,
             "taida: hint: cdylib path was resolved at build time; "
-            "RC2.5 v1 does not re-search at runtime "
-            "(see .dev/RC2_5_BLOCKERS.md::RC2.5B-004)\n");
+            "the runtime does not re-search after the binary is built. "
+            "Rebuild the host program if the cdylib path changed.\n");
     exit(1);
 }
 

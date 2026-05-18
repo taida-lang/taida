@@ -1,23 +1,19 @@
 //! Taida JS ランタイム — トランスパイル後の JS に埋め込むヘルパー関数。
 //!
-//! C12-9 (FB-21) で `src/js/runtime.rs` (6,496 行) を機能単位に分割した。
 //! `RUNTIME_JS` は `LazyLock<&'static str>` で core / os / net の 3
-//! チャンクを連結した const `&str` であり、従来の単一ファイル時代と
-//! バイト単位で同一である。
+//! チャンクを連結した const `&str` である。
 //!
 //! - [`core`]: helpers / 型 / 算術 / Lax / Result / BuchiPack / throw /
-//!   Async / Regex / stream / stdout / stderr / stdin / format /
-//!   toString / HashMap / Set / equals / typeof / spread
-//!   (original lines 4..2003)
+//! Async / Regex / stream / stdout / stderr / stdin / format /
+//! toString / HashMap / Set / equals / typeof / spread
+//! (original lines 4..2003)
 //! - [`os`]: `taida-lang/os` — readFile / writeFile / stat / listdir /
-//!   exists / envvar / exec / http / process / pool + `sha256` crypto
-//!   (original lines 2005..3137)
+//! exists / envvar / exec / http / process / pool + `sha256` crypto
+//! (original lines 2005..3137)
 //! - [`net`]: `taida-lang/net` HTTP v1 runtime (parser / encoder /
-//!   chunked / streaming writer / SSE / body reader / WebSocket)
-//!   (original lines 3139..6381)
+//! chunked / streaming writer / SSE / body reader / WebSocket)
+//! (original lines 3139..6381)
 //!
-//! 分割配置表: `.dev/taida-logs/docs/design/file_boundaries.md`
-
 mod core;
 mod net;
 mod os;
@@ -28,9 +24,9 @@ use std::sync::LazyLock;
 /// access and cached for the process lifetime. Byte-identical to the
 /// pre-split monolithic `RUNTIME_JS`.
 ///
-/// C12-9 note: `concat!()` cannot be used because the macro requires
-/// literal arguments; `LazyLock<&'static str>` + `Box::leak` exposes
-/// a `&'static str` without adding a crate dependency.
+/// `concat!()` cannot be used because the macro requires literal
+/// arguments; `LazyLock<&'static str>` + `Box::leak` exposes a
+/// `&'static str` without adding a crate dependency.
 pub static RUNTIME_JS: LazyLock<&'static str> = LazyLock::new(|| {
     let mut s = String::with_capacity(core::CORE_JS.len() + os::OS_JS.len() + net::NET_JS.len());
     s.push_str(core::CORE_JS);
@@ -48,7 +44,7 @@ mod tests {
         *RUNTIME_JS
     }
 
-    /// FL-28: Verify stdin does not use /dev/stdin (Windows incompatible)
+    /// Verify stdin does not use /dev/stdin (Windows incompatible).
     #[test]
     fn test_stdin_no_dev_stdin_hardcode() {
         let js = runtime();
@@ -106,7 +102,7 @@ mod tests {
     }
 
     /// Regression: JS drain listener must not accumulate across keep-alive
-    /// requests.  The old code added `socket.on('drain', ...)` per request
+    /// requests. The old code added `socket.on('drain',...)` per request
     /// but never removed it, causing listener leak on keep-alive connections.
     /// The fix removes drain listeners in afterResponseWritten alongside
     /// timeout/end/error cleanup.
@@ -123,8 +119,8 @@ mod tests {
     }
 
     /// Regression: JS drain listener must store a removable reference.
-    /// The old code used an anonymous function in `socket.on('drain', ...)`,
-    /// making targeted removal impossible.  The fix stashes the handler
+    /// The old code used an anonymous function in `socket.on('drain',...)`,
+    /// making targeted removal impossible. The fix stashes the handler
     /// as `writer._onDrain` for per-listener removal, and also uses
     /// `removeAllListeners('drain')` for bulk cleanup.
     #[test]
@@ -163,7 +159,7 @@ mod tests {
         );
     }
 
-    /// C12-9 (FB-21): guard the split invariants. Verifies chunk
+    /// guard the split invariants. Verifies chunk
     /// boundaries are preserved exactly once in the concat output.
     #[test]
     fn test_runtime_js_chunk_concat_invariants() {

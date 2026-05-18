@@ -1069,7 +1069,7 @@ impl GraphExtractor {
     /// Propagates edge semantics:
     /// - `ErrorCeiling -> Function`: the ceiling covers the callee's throws (cross-function coverage)
     /// - `Function(caller) -> Function(callee)`: callee's throws propagate to caller
-    ///   (allows transitive coverage: if caller is covered by a ceiling, callee is too)
+    /// (allows transitive coverage: if caller is covered by a ceiling, callee is too)
     fn extract_error_expr(
         &mut self,
         graph: &mut Graph,
@@ -1523,9 +1523,12 @@ impl GraphExtractor {
                 }
             }
 
-            Expr::MoldInst(_, type_args, _, _) => {
+            Expr::MoldInst(_, type_args, fields, _) => {
                 for arg in type_args {
                     self.extract_calls_expr(graph_snapshot, graph, caller_id, arg, false);
+                }
+                for field in fields {
+                    self.extract_calls_expr(graph_snapshot, graph, caller_id, &field.value, false);
                 }
             }
 
@@ -1644,13 +1647,22 @@ impl GraphExtractor {
                     }
                 }
             }
-            Expr::MoldInst(_, type_args, _, _) => {
+            Expr::MoldInst(_, type_args, fields, _) => {
                 for arg in type_args {
                     self.extract_func_ref_from_expr(
                         graph_snapshot,
                         graph,
                         caller_id,
                         arg,
+                        func_names,
+                    );
+                }
+                for field in fields {
+                    self.extract_func_ref_from_expr(
+                        graph_snapshot,
+                        graph,
+                        caller_id,
+                        &field.value,
                         func_names,
                     );
                 }

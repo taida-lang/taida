@@ -1,12 +1,12 @@
 //! WebSocket implementation (RFC 6455) for the Taida interpreter's net
-//! package, split out from `net_eval/mod.rs` (C13-3).
+//! package, split out from `net_eval/mod.rs`.
 //!
 //! Owns the `impl Interpreter` methods for the WebSocket surface
 //! (`wsUpgrade` / `wsSend` / `wsReceive` / `wsClose` / `wsCloseCode`),
 //! as well as the frame-level reader/writer helpers and the
 //! `finalize_websocket_close` hook invoked by the HTTP/1.1 dispatcher.
 //!
-//! C13-3 note: pure mechanical move — no behavior change. The
+//! note: pure mechanical move — no behavior change. The
 //! `try_net_func` dispatcher in `mod.rs` continues to route these calls;
 //! this file merely hosts the implementations.
 
@@ -69,7 +69,7 @@ impl Interpreter {
             })
     }
 
-    /// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (NET4-2b).
+    /// Compute Sec-WebSocket-Accept from Sec-WebSocket-Key.
     /// SHA-1(key + GUID) → Base64.
     pub(super) fn compute_ws_accept(key: &str) -> String {
         use base64::Engine;
@@ -82,7 +82,7 @@ impl Interpreter {
     }
 
     /// Validate a WebSocket ws token argument (similar to validate_writer_token).
-    /// NB4-10: Validate ws token — checks both sentinel AND connection-scoped token.
+    /// Validate ws token — checks both sentinel AND connection-scoped token.
     pub(super) fn validate_ws_token(
         &mut self,
         args: &[Expr],
@@ -144,7 +144,7 @@ impl Interpreter {
         }
     }
 
-    /// `wsUpgrade(req, writer)` → `Lax[@(ws: WsConn)]` (NET4-2a).
+    /// `wsUpgrade(req, writer)` → `Lax[@(ws: WsConn)]`.
     ///
     /// Validates the WebSocket upgrade request, sends 101 response if valid,
     /// and transitions writer state to WebSocket.
@@ -397,7 +397,7 @@ impl Interpreter {
         ])
     }
 
-    /// `wsSend(ws, data)` → Unit (NET4-2e).
+    /// `wsSend(ws, data)` → Unit.
     ///
     /// Sends a WebSocket text or binary frame.
     /// - Str → text frame (opcode 0x1)
@@ -467,7 +467,7 @@ impl Interpreter {
     /// Server-to-client: FIN=1, MASK=0.
     /// Uses vectored write (header on stack, payload direct).
     ///
-    /// F42 sweep: returns the total number of bytes written to wire (header +
+    /// returns the total number of bytes written to wire (header +
     /// payload). Callers that don't observe the byte count can use
     /// `let _ = write_ws_frame(...)?` or `.ok()` to discard.
     pub(super) fn write_ws_frame(
@@ -513,7 +513,7 @@ impl Interpreter {
         Ok(header_len + payload_len)
     }
 
-    /// `wsReceive(ws)` → `Lax[@(type: Str, data: Bytes)]` (NET4-2d).
+    /// `wsReceive(ws)` → `Lax[@(type: Str, data: Bytes)]`.
     ///
     /// Receives the next WebSocket data frame.
     /// - ping: auto pong, advance to next frame
@@ -737,7 +737,7 @@ impl Interpreter {
         Ok(buf)
     }
 
-    /// Read and parse one WebSocket frame from the stream (NET4-2c).
+    /// Read and parse one WebSocket frame from the stream.
     pub(super) fn read_ws_frame(stream: &mut ConnStream) -> Result<WsFrame, RuntimeError> {
         // Read first 2 bytes: FIN+opcode, MASK+payload_len7.
         let header = Self::read_exact_bytes(stream, 2)?;
@@ -871,17 +871,17 @@ impl Interpreter {
         }
     }
 
-    /// `wsClose(ws)` → Int (F42 sweep / NET4-2f).
+    /// `wsClose(ws)` → Int.
     ///
     /// Sends a close frame. Idempotent (second call returns 0).
     /// Handler return auto-close is handled in dispatch_request.
-    /// `wsClose(ws)` or `wsClose(ws, code)` → Int (F42 sweep / NET4-2f, v5 revision).
+    /// `wsClose(ws)` or `wsClose(ws, code)` → Int (v5 revision).
     ///
     /// Sends a close frame. Optional close code (default 1000).
     /// v5: accepts an explicit close code in the range 1000-4999
     /// (excluding reserved codes 1004, 1005, 1006, 1015).
     /// Idempotent (second call is a no-op and returns Int(0)).
-    /// F42 sweep: returns total wire bytes written by this call.
+    /// returns total wire bytes written by this call.
     pub(super) fn eval_ws_close(&mut self, args: &[Expr]) -> Result<Option<Signal>, RuntimeError> {
         if self.active_streaming_writer.is_none() {
             return Err(RuntimeError {
@@ -956,7 +956,7 @@ impl Interpreter {
         Ok(Some(Signal::Value(Value::Int(bytes_written as i64))))
     }
 
-    /// `wsCloseCode(ws)` → Int (v5 NET5-0d).
+    /// `wsCloseCode(ws)` → Int (v5 ).
     ///
     /// Returns the close code received from the peer's close frame.
     /// - 0: no close frame received yet
@@ -988,15 +988,15 @@ impl Interpreter {
         let close_code = active.ws_close_code;
         Ok(Some(Signal::Value(Value::Int(close_code))))
     }
-    /// C12B-041: Finalize a WebSocket close by flushing and gracefully shutting
+    /// Finalize a WebSocket close by flushing and gracefully shutting
     /// down the TCP write half so the client observes the close frame + FIN
     /// before the process terminates.
     ///
     /// Applied at the two WS close confirmation points inside `dispatch_request`:
-    ///   1. Success auto-close (handler returned normally from a WS handler)
-    ///   2. Error-close 1011 (handler raised, WS still in WebSocket state)
+    /// 1. Success auto-close (handler returned normally from a WS handler)
+    /// 2. Error-close 1011 (handler raised, WS still in WebSocket state)
     ///
-    /// This mirrors the C12B-028 pattern applied to the H2 bounded-exit path.
+    /// This mirrors the pattern applied to the H2 bounded-exit path.
     /// Without this sequence the kernel can send RST instead of FIN when the
     /// process exits with pending close-frame bytes still in the send buffer,
     /// causing `test_net4_ws_auto_close_on_return_interp` and similar WS

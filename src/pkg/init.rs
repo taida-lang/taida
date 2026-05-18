@@ -1,21 +1,21 @@
 //! Project initialisation logic for `taida init`.
 //!
-//! RC2.6-3a: extracted from `src/main.rs::run_init` so the CLI layer
+//! extracted from `src/main.rs::run_init` so the CLI layer
 //! remains a thin wrapper and the core logic is testable / reusable.
 //!
 //! The module exposes a single entry point — [`init_project`] — that
 //! writes a complete project skeleton to `dir`. The skeleton varies
 //! by [`InitTarget`]:
 //!
-//! * **SourceOnly** — the pre-RC2.6 behaviour: `packages.tdm`,
-//!   `main.td`, `.taida/`, `.gitignore`.
+//! * **SourceOnly** — source-only project layout: `packages.tdm`,
+//! `main.td`, `.taida/`, `.gitignore`.
 //! * **RustAddon** — everything needed to build and publish a Rust
-//!   addon package via the C14 tag-push workflow:
-//!   `packages.tdm`, `Cargo.toml`, `src/lib.rs`, `native/addon.toml`,
-//!   `taida/<name>.td`, `.gitignore`, `README.md`,
-//!   `.github/workflows/release.yml`.
+//! addon package via the tag-push workflow:
+//! `packages.tdm`, `Cargo.toml`, `src/lib.rs`, `native/addon.toml`,
+//! `taida/<name>.td`, `.gitignore`, `README.md`,
+//! `.github/workflows/release.yml`.
 //!
-//! C14-3: the `release.yml` template is sourced from
+//! the `release.yml` template is sourced from
 //! `crates/addon-rs/templates/release.yml.template` and kept
 //! structurally symmetric with `taida-lang/taida`'s core release
 //! workflow (prepare -> gate -> build -> publish, `github-actions[bot]`
@@ -33,7 +33,7 @@ use super::manifest::Manifest;
 /// The kind of project skeleton to generate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitTarget {
-    /// Traditional Taida source-only project (pre-RC2.6 default).
+    /// Traditional Taida source-only project.
     SourceOnly,
     /// Rust addon project with cdylib + facade + addon manifest.
     RustAddon,
@@ -208,7 +208,7 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
 
 // ── Template generators (RC2.6-3b) ─────────────────────────────
 
-/// `.gitignore` for source-only projects (pre-RC2.6 content).
+/// `.gitignore` for source-only projects.
 const GITIGNORE_SOURCE_ONLY: &str = "\
 # Taida build artifacts (regeneratable)
 .taida/deps/
@@ -366,7 +366,7 @@ Echo <= echo
     )
 }
 
-/// Static template for `.github/workflows/release.yml` (C14-3).
+/// Static template for `.github/workflows/release.yml`.
 ///
 /// The template lives as a sibling file so it can be edited / diffed
 /// as plain YAML, and so its structure remains symmetric with the
@@ -374,8 +374,8 @@ Echo <= echo
 /// `.github/workflows/release.yml` in `taida-lang/taida`.
 ///
 /// Variables substituted at scaffold time:
-///   * `{{LIBRARY_STEM}}` — underscored crate / library stem.
-///   * `{{CRATE_DIR}}`    — path to the cargo crate root (usually `.`).
+/// * `{{LIBRARY_STEM}}` — underscored crate / library stem.
+/// * `{{CRATE_DIR}}` — path to the cargo crate root (usually `.`).
 const RELEASE_YML_TEMPLATE: &str =
     include_str!("../../crates/addon-rs/templates/release.yml.template");
 
@@ -385,9 +385,8 @@ const RELEASE_YML_TEMPLATE: &str =
 /// The output is the exact YAML that will be written to the
 /// scaffolded addon repository. The function is pure — no I/O.
 ///
-/// # Rationale (C14-3)
-///
-/// Under the C14 publish workflow, the `taida ingot publish` CLI only pushes
+/// # Rationale///
+/// Under the publish workflow, the `taida ingot publish` CLI only pushes
 /// the tag. All build / SHA-256 / `addon.lock.toml` / release creation
 /// responsibilities live in this workflow and are performed by
 /// `github-actions[bot]`, mirroring the Taida core release contract.

@@ -3,9 +3,9 @@
 /// Provides:
 /// - Parse errors (severity: Error)
 /// - Type errors from TypeChecker (severity: Warning)
-///   - Type mismatches in assignments
-///   - Undefined variable warnings (when TypeChecker reports unknown types)
-///   - Empty list literal without type annotation
+/// - Type mismatches in assignments
+/// - Undefined variable warnings (when TypeChecker reports unknown types)
+/// - Empty list literal without type annotation
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use crate::parser::{ParseError, parse};

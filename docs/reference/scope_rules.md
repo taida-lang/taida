@@ -115,7 +115,7 @@ result <= outer(3)  // 18 (3 + 10 + 5)
 
 ```taida
 processValue value: Int =
-  // 複数行の多アーム条件は丸括弧で包みます（C20 / E0303）。
+  // 複数行の多アーム条件は丸括弧で包みます（E0303）。
   result <= (
     | value > 100 |>
       message <= "large"  // この分岐内でのみ有効

@@ -26,7 +26,7 @@ impl Span {
 ///
 /// Taida exposes exactly 10 semantic operators (per PHILOSOPHY.md /
 /// `docs/reference/operators.md`): `=`, `=>`, `<=`, `>=>`, `<=<`,
-/// `|==`, `(| ... |>)` (condition delimiter pair), `>>>`, `<<<`,
+/// `|==`, `(|... |>)` (condition delimiter pair), `>>>`, `<<<`,
 /// and `:` (type marker). At the token level the condition pair is
 /// emitted as two adjacent tokens (`Pipe` + `PipeGt`); they are
 /// counted as one semantic operator.
@@ -61,15 +61,15 @@ pub enum TokenKind {
     FatArrow,
     /// `<=` Left buchi (assignment left / pipe backward)
     LtEq,
-    /// `>=>` Unmold forward (renamed from legacy `]=>` in the F42 sweep).
+    /// `>=>` Unmold forward (renamed from legacy `]=>`).
     UnmoldForward,
-    /// `<=<` Unmold backward (renamed from legacy `<=[` in the F42 sweep).
+    /// `<=<` Unmold backward (renamed from legacy `<=[`).
     UnmoldBackward,
     /// `|==` Error ceiling
     ErrorCeiling,
-    /// `|` Condition guard (start of the `(| ... |>)` delimiter pair).
+    /// `|` Condition guard (start of the `(|... |>)` delimiter pair).
     Pipe,
-    /// `|>` Condition extract (end of the `(| ... |>)` delimiter pair).
+    /// `|>` Condition extract (end of the `(|... |>)` delimiter pair).
     PipeGt,
     /// `>>>` Import
     Import,
@@ -135,11 +135,11 @@ pub enum TokenKind {
     Indent(usize),
 
     // ── Comments ─────────────────────────────────────────────
-    /// Single-line comment `// ...`
+    /// Single-line comment `//...`
     LineComment(String),
-    /// Multi-line comment `/* ... */`
+    /// Multi-line comment `/*... */`
     BlockComment(String),
-    /// Documentation comment `///@ ...`
+    /// Documentation comment `///@...`
     DocComment(String),
 
     // ── Special ──────────────────────────────────────────────

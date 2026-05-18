@@ -918,7 +918,7 @@ value <= Child[1, 2]()
             vec![TypeExpr::Named("Int".to_string())],
             Box::new(TypeExpr::Named("Bool".to_string())),
         );
-        assert_eq!(format_type_expr(&te), "(Int) => :Bool");
+        assert_eq!(format_type_expr(&te), "Int => :Bool");
     }
 
     #[test]

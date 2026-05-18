@@ -17,33 +17,33 @@ fn signal_name(sig: &Signal) -> &'static str {
 /// Implements the 34 APIs of `taida-lang/os` (core-bundled):
 ///
 /// Input molds (-> Lax/Bool):
-///   Read[path](), ListDir[path](), Stat[path](), Exists[path](), EnvVar[name]()
+/// Read[path](), ListDir[path](), Stat[path](), Exists[path](), EnvVar[name]()
 ///
 /// Async input molds (-> Async[Lax[T]]):
-///   ReadAsync[path](), HttpGet[url](), HttpPost[url, body](),
-///   HttpRequest[method, url](headers, body)
+/// ReadAsync[path](), HttpGet[url](), HttpPost[url, body](),
+/// HttpRequest[method, url](headers, body)
 ///
 /// Side-effect functions (-> Result):
-///   writeFile(path, content), writeBytes(path, content), appendFile(path, content), remove(path),
-///   createDir(path), rename(from, to)
+/// writeFile(path, content), writeBytes(path, content), appendFile(path, content), remove(path),
+/// createDir(path), rename(from, to)
 ///
 /// Binary file query function:
-///   readBytes(path) -> Lax[Bytes]
-///   readBytesAt(path, offset, len) -> Lax[Bytes]  (C26B-020 柱 1, chunked)
+/// readBytes(path) -> Lax[Bytes]
+/// readBytesAt(path, offset, len) -> Lax[Bytes] ( 柱 1, chunked)
 ///
 /// Dangerous side-effect functions (-> Gorillax):
-///   run(program, args), execShell(command)
+/// run(program, args), execShell(command)
 ///
 /// Async functions:
-///   tcpConnect(host, port), tcpListen(port), tcpAccept(listener),
-///   socketSend(socket, data), socketSendAll(socket, data), socketRecv(socket),
-///   socketSendBytes(socket, data), socketRecvBytes(socket), socketRecvExact(socket, size),
-///   udpBind(host, port), udpSendTo(socket, host, port, data), udpRecvFrom(socket),
-///   socketClose(socket), listenerClose(listener), udpClose(socket)
+/// tcpConnect(host, port), tcpListen(port), tcpAccept(listener),
+/// socketSend(socket, data), socketSendAll(socket, data), socketRecv(socket),
+/// socketSendBytes(socket, data), socketRecvBytes(socket), socketRecvExact(socket, size),
+/// udpBind(host, port), udpSendTo(socket, host, port, data), udpRecvFrom(socket),
+/// socketClose(socket), listenerClose(listener), udpClose(socket)
 ///
 /// Query functions:
-///   allEnv() -> HashMap[Str, Str]
-///   argv() -> List[Str] (user args; interpreter strips `taida` and script path)
+/// allEnv() -> HashMap[Str, Str]
+/// argv() -> List[Str] (user args; interpreter strips `taida` and script path)
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use std::sync::{Arc, Mutex};
@@ -55,7 +55,7 @@ const DEFAULT_NETWORK_TIMEOUT_MS: u64 = 30_000;
 
 /// The symbols exported by the os package.
 ///
-/// NOTE (C19): the first 35 entries match the C18 layout exactly. New entries
+/// NOTE: the first 35 entries match the original layout exactly. New entries
 /// must be **appended** to the end — moving an existing entry would change the
 /// index observed by downstream tooling that snapshots OS_SYMBOLS ordering.
 pub(crate) const OS_SYMBOLS: &[&str] = &[
@@ -135,14 +135,14 @@ fn make_lax_failure_with_error(default_val: Value, error: Value) -> Value {
     Interpreter::lax_failure_with_error(default_val, error)
 }
 
-/// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
+/// pub(crate) re-exports so that `prelude.rs::stdinLine` (and
 /// any other prelude-scope builder that needs to hand back a Lax[T])
 /// can build `Lax` values without duplicating the BuchiPack shape.
 pub(crate) fn make_lax_success_pub(val: Value) -> Value {
     make_lax_success(val)
 }
 
-/// C20-2: pub(crate) counterpart for `make_lax_failure`. See
+/// pub(crate) counterpart for `make_lax_failure`. See
 /// `make_lax_success_pub` above.
 pub(crate) fn make_lax_failure_pub(default_val: Value) -> Value {
     make_lax_failure(default_val)
@@ -378,14 +378,14 @@ fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
     ])
 }
 
-/// C19: Build a code-only inner BuchiPack `@(code: Int)` for the interactive
+/// Build a code-only inner BuchiPack `@(code: Int)` for the interactive
 /// exec variants. Intentionally does **not** carry stdout / stderr fields
 /// (stdio is passthrough, nothing to capture).
 fn process_inner_code_only(code: i64) -> Value {
     Value::pack(vec![("code".into(), Value::Int(code))])
 }
 
-/// C19: Extract an exit code from a `std::process::ExitStatus`, following the
+/// Extract an exit code from a `std::process::ExitStatus`, following the
 /// `128 + signal` POSIX convention when the child was terminated by a signal.
 /// This mirrors the convention used by the JS `spawnSync` and Native
 /// `waitpid(WIFSIGNALED)` branches so the 3 backends agree.
@@ -3112,7 +3112,7 @@ mod tests {
         interp.output.clone()
     }
 
-    /// E32B-035 migration helper — returns the last evaluated Value alongside
+    /// migration helper — returns the last evaluated Value alongside
     /// captured stdout. Useful when a test must pin runtime layout that lives
     /// only inside compiler-internal `__value` / `__error` fields, since
     /// `[E1960]` rejects user-side access to those fields. We bypass the
@@ -3837,7 +3837,7 @@ stdout(lax.has_value)"#;
         assert!(OS_SYMBOLS.contains(&"execShellInteractive"));
     }
 
-    /// C19: the pre-C19 35 symbols must keep their original relative order.
+    /// The original 35 symbols must keep their relative order.
     /// If this test fails, some consumer that snapshots OS_SYMBOLS indices
     /// (e.g. a cached dispatch table) may have silently broken.
     #[test]
@@ -3882,11 +3882,11 @@ stdout(lax.has_value)"#;
         for (i, name) in c18_prefix.iter().enumerate() {
             assert_eq!(
                 OS_SYMBOLS[i], *name,
-                "OS_SYMBOLS[{}] changed: expected {:?}, got {:?} (C19 must append, not reorder)",
+                "OS_SYMBOLS[{}] changed: expected {:?}, got {:?} (new symbols must append, not reorder)",
                 i, name, OS_SYMBOLS[i]
             );
         }
-        // And the C19 additions live strictly after the C18 prefix.
+        // And the additions live strictly after the original prefix.
         assert_eq!(OS_SYMBOLS[35], "runInteractive");
         assert_eq!(OS_SYMBOLS[36], "execShellInteractive");
     }
@@ -4022,7 +4022,7 @@ r"#;
         }
     }
 
-    /// C19-4: runtime-level pin. Accessing `stdout` / `stderr` on a
+    /// runtime-level pin. Accessing `stdout` / `stderr` on a
     /// `runInteractive` result must not silently succeed — it must raise
     /// a runtime error (missing field). This is the safety net that
     /// prevents callers from mistaking the interactive variant for the
@@ -4077,7 +4077,7 @@ stdout(proc.stdout)"#;
     }
 
     /// Sanity check: the captured `run` still has `stdout`. This exists
-    /// to fail loudly if the C19 additive change ever accidentally strips
+    /// to fail loudly if additive changes ever accidentally strip
     /// fields from the legacy captured API.
     #[test]
     fn test_c19_run_captured_stdout_field_still_present() {

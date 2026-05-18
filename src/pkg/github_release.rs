@@ -1,4 +1,4 @@
-//! GitHub Release REST API driver (RC2.7 Phase 2).
+//! GitHub Release REST API driver.
 //!
 //! Provides release ensure + asset ensure semantics so that
 //! `taida ingot publish` can create GitHub Releases
@@ -14,7 +14,7 @@
 //! ## API flow
 //!
 //! 1. `POST /repos/{owner}/{repo}/releases` to create.
-//! 2. If 422 (already exists), `GET .../releases/tags/{tag}` to retrieve.
+//! 2. If 422 (already exists), `GET.../releases/tags/{tag}` to retrieve.
 //! 3. For each asset: check existing, delete if name collision, upload.
 //! 4. Upload URL: strip `{?name,label}` suffix, append `?name=<name>`.
 
@@ -79,7 +79,7 @@ fn make_client(token: &str) -> Result<reqwest::blocking::Client, String> {
 /// Strip the `{?name,label}` URI template suffix from an upload URL.
 ///
 /// GitHub returns upload URLs like:
-///   `https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}`
+/// `https://uploads.github.com/repos/o/r/releases/123/assets{?name,label}`
 ///
 /// We need to strip the `{?...}` and append `?name=<asset_name>` ourselves.
 pub fn normalize_upload_url(raw: &str) -> String {
@@ -408,7 +408,7 @@ fn upload_asset_impl(
 /// It is idempotent: re-running after a partial failure will
 /// create the release if missing and re-upload any missing assets.
 ///
-/// RC2.7B-008: creates a single HTTP client and reuses it for all
+/// creates a single HTTP client and reuses it for all
 /// API calls, avoiding redundant TLS handshakes.
 pub fn ensure_release_with_assets(
     token: &str,

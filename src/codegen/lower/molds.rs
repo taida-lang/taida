@@ -379,7 +379,7 @@ impl Lowering {
     /// that don't have a _taida_main to batch-register field names.
     /// The C runtime's registry handles duplicates safely (skips if already registered).
     ///
-    /// C18-2: `type_tag == 5` is an Enum field — we emit
+    /// `type_tag == 5` is an Enum field — we emit
     /// `taida_register_field_enum(hash, name, variants_csv)` so the
     /// runtime can look up the variant name by ordinal when serializing
     /// to JSON.
@@ -613,7 +613,7 @@ impl Lowering {
         }
     }
 
-    /// E30 Phase 6 / E30B-004: Emit a synthetic defaultFn lambda whose body
+    /// Emit a synthetic defaultFn lambda whose body
     /// returns the lowered default value of `ret`. Returns the IR var of the
     /// resulting closure (boxed value).
     fn lower_default_fn_synthetic(

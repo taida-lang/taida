@@ -1,12 +1,12 @@
 //! HTTP/3 serve entry point for the Taida interpreter's net package,
-//! split out from `net_eval/mod.rs` (C13-3).
+//! split out from `net_eval/mod.rs`.
 //!
 //! Owns the `impl Interpreter` method `serve_h3` which mirrors the
 //! native backend's `taida_net_h3_serve()`: runs protocol self-tests,
 //! wires up the handler closure that materializes a 14-field request
 //! pack, and hands control to `super::super::super::net_h3::serve_h3_loop`.
 //!
-//! C13-3 note: pure mechanical move — no behavior change. The HTTP/1.1
+//! note: pure mechanical move — no behavior change. The HTTP/1.1
 //! `eval_http_serve` implementation in `h1.rs` delegates into
 //! `self.serve_h3(...)` when `protocol: "h3"` is requested.
 
@@ -18,27 +18,27 @@ use super::helpers::{
 };
 
 impl Interpreter {
-    /// HTTP/3 serve entry point (NET7-3a: Interpreter parity backend).
+    /// HTTP/3 serve entry point (: Interpreter parity backend).
     ///
     /// Mirrors the Native backend's `taida_net_h3_serve()`:
-    ///   1. Run H3 protocol layer self-tests (QPACK round-trip, request validation)
-    ///   2. Build handler closure (H3RequestData -> 14-field request pack -> handler -> H3ResponseData)
-    ///   3. Run serve_h3_loop with sequential accept + handler dispatch
-    ///   4. Return @(ok: true, requests: N) on success
+    /// 1. Run H3 protocol layer self-tests (QPACK round-trip, request validation)
+    /// 2. Build handler closure (H3RequestData -> 14-field request pack -> handler -> H3ResponseData)
+    /// 3. Run serve_h3_loop with sequential accept + handler dispatch
+    /// 4. Return @(ok: true, requests: N) on success
     ///
-    /// NET7-12b: The handler closure builds the same 14-field request pack
+    /// The handler closure builds the same 14-field request pack
     /// as h1/h2, calls the user function synchronously, and extracts the
     /// response. The serve loop alternates between async I/O and sync handler
     /// dispatch, matching the Interpreter's single-threaded serial model.
     ///
-    /// Design contracts (NET_DESIGN.md):
-    ///   - cert/key required (validated before reaching here)
-    ///   - 0-RTT: default-off, not exposed
-    ///   - Handler dispatch: same 14-field request pack as h1/h2
-    ///   - request_count: incremented only on valid HEADERS + handler success
-    ///   - Graceful shutdown: GOAWAY -> drain -> close
-    ///   - Bounded-copy discipline: 1 packet = at most 1 materialization
-    ///   - Transport I/O does NOT use the existing Transport trait (NB7-7)
+    /// Design contracts:
+    /// - cert/key required (validated before reaching here)
+    /// - 0-RTT: default-off, not exposed
+    /// - Handler dispatch: same 14-field request pack as h1/h2
+    /// - request_count: incremented only on valid HEADERS + handler success
+    /// - Graceful shutdown: GOAWAY -> drain -> close
+    /// - Bounded-copy discipline: 1 packet = at most 1 materialization
+    /// - Transport I/O does NOT use the existing Transport trait
     pub(super) fn serve_h3(
         &mut self,
         cert_path: String,
@@ -49,7 +49,7 @@ impl Interpreter {
     ) -> Result<Option<Signal>, RuntimeError> {
         use super::super::net_h3;
 
-        // NB7-9/NB7-10: Run embedded self-tests to validate QPACK round-trip
+        // Run embedded self-tests to validate QPACK round-trip
         // and H3 request pseudo-header validation, matching Native behavior.
         match net_h3::run_selftests() {
             net_h3::SelftestResult::Ok => {}
@@ -77,7 +77,7 @@ impl Interpreter {
             }
         }
 
-        // NET7-12b: Connect to the real QUIC transport loop with handler dispatch.
+        // Connect to the real QUIC transport loop with handler dispatch.
         //
         // The Interpreter H3 path uses quinn (pure Rust, tokio-native) as the
         // QUIC substrate. Unlike the Native backend which uses libquiche via

@@ -2614,7 +2614,7 @@ v"#,
 
     // ── E30B-007 / Lock-G: explicit RustAddon[...] binding ──
 
-    /// Lock-G: outside of a facade load context, evaluating a
+    /// outside of a facade load context, evaluating a
     /// `RustAddon["fn"](arity <= 0)` expression must reject with
     /// `[E1412]` because user-side code is not allowed to construct
     /// addon sentinels directly.
@@ -2638,7 +2638,7 @@ v"#,
         );
     }
 
-    /// Lock-G: inside a facade load context with a matching manifest
+    /// inside a facade load context with a matching manifest
     /// arity, `RustAddon["fn"](arity <= 0)` evaluates to the addon
     /// sentinel string identical to what `define_force` pre-injection
     /// produces today.
@@ -2665,12 +2665,12 @@ v"#,
         };
         assert_eq!(
             s, "__taida_addon_call::taida-lang/terminal::terminalSize",
-            "Lock-G: explicit binding must produce the same sentinel as \
+            "explicit binding must produce the same sentinel as \
              the legacy pre-inject path"
         );
     }
 
-    /// Lock-G drift check: declared `arity` in the binding must
+    /// drift check: declared `arity` in the binding must
     /// match the manifest `[functions]` arity. Mismatch → [E1412].
     #[test]
     fn test_e30b_007_rust_addon_arity_drift_rejects() {
@@ -2694,7 +2694,7 @@ v"#,
         );
     }
 
-    /// Lock-G: function name must exist in the addon manifest.
+    /// function name must exist in the addon manifest.
     #[test]
     fn test_e30b_007_rust_addon_unknown_fn_rejects() {
         let mut interp = Interpreter::new();
@@ -2715,7 +2715,7 @@ v"#,
         );
     }
 
-    /// Lock-G surface: function name MUST be a string literal.
+    /// surface: function name MUST be a string literal.
     /// IntLit (or any non-string) → [E1412].
     #[test]
     fn test_e30b_007_rust_addon_non_string_fn_arg_rejects() {
@@ -2737,7 +2737,7 @@ v"#,
         );
     }
 
-    /// E30B-007 sub-step B-5 / Lock-G Sub-G4 (2026-04-28): inside an
+    /// sub-step B-5 / Sub-G4 (2026-04-28): inside an
     /// addon facade load context, a **bare reference** to a manifest
     /// function (without `RustAddon["..."]` binding) must reject with
     /// `[E1413]` and a hint pointing to the explicit binding form. This
@@ -2778,7 +2778,7 @@ v"#,
         );
     }
 
-    /// E30B-007 sub-step B-5: outside an addon facade load context, an
+    /// sub-step B-5: outside an addon facade load context, an
     /// undefined identifier still surfaces the generic message
     /// (`Undefined variable: '...'`) — `[E1413]` is **not** spuriously
     /// emitted for non-facade callers.

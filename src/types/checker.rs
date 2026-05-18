@@ -23,7 +23,7 @@ use crate::parser::*;
 /// errors where types are fully known.
 use std::collections::{HashMap, HashSet};
 
-/// C12B-023 bypass closure (2026-04-15, root fix): field names reserved
+/// bypass closure (2026-04-15, root fix): field names reserved
 /// for compiler-internal use. A user-authored `Expr::BuchiPack` /
 /// `Expr::TypeInst` literal that assigns any of these is rejected at
 /// type-check time with `[E1617]`.
@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 /// callers fabricate fake nominal packs that bypass the official
 /// constructors' validation. The earlier narrower fix (literal
 /// `__type <= "Regex"` only) was bypassed by variable binding
-/// (`tag <= "Regex"; @(__type <= tag, ...)`) and by expression
+/// (`tag <= "Regex"; @(__type <= tag,...)`) and by expression
 /// composition (`"Re" + "gex"`, `if(c, "Regex", "X")`). The root
 /// remedy is to reject **all** user assignments to `__`-prefixed
 /// field names, regardless of the value expression.
@@ -128,16 +128,15 @@ struct MoldBindingDef<'a> {
 /// - `E1606` -- logical operator type mismatch
 /// - `E1607` -- unary operator type mismatch
 /// - `E1608` -- unknown enum variant
-/// - `E1618` -- enum variant order mismatch across module boundary (C18-1)
-/// - `E1611` -- reserved backend capability rejection
+/// - `E1618` -- enum variant order mismatch across module boundary/// - `E1611` -- reserved backend capability rejection
 /// - `E1612` -- WASM backend capability rejection
 /// - `E1613` -- TypeExtends does not accept enum variant literals
-/// - `E1617` -- Regex invariant rejection. Two emitters share this code (both C12B-023):
-///   (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
-///   `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
-///   (2) Manual `__type <= "Regex"` BuchiPack construction rejection
-///   (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
-///   by its official constructor to enforce eager pattern validation.
+/// - `E1617` -- Regex invariant rejection. Two emitters share this code (both ):
+/// (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
+/// `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
+/// (2) Manual `__type <= "Regex"` BuchiPack construction rejection
+/// (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
+/// by its official constructor to enforce eager pattern validation.
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -225,10 +224,10 @@ pub struct TypeChecker {
     /// remains the public type; this side table records the branch only
     /// when the checker can prove it.
     branch_scope_stack: Vec<HashMap<String, BranchInfo>>,
-    /// D28B-023 / D28B-024: stack of type parameter declarations for the
+    /// stack of type parameter declarations for the
     /// enclosing generic functions. Pushed on `Statement::FuncDef` body
     /// entry, popped on exit. Used to resolve constrained type variables
-    /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
+    /// inside the body (e.g. arithmetic on `T <=:Num`, calling `F <=:T =>:T`).
     current_func_type_params: Vec<Vec<TypeParam>>,
     /// Re-entrancy guard for expected-type named function body inference.
     hinted_func_stack: Vec<String>,
@@ -320,7 +319,7 @@ impl TypeChecker {
         checker
     }
 
-    /// C19B-002: install pinned signatures for the C19 interactive os
+    /// install pinned signatures for the interactive os
     /// variants. Idempotent — `register_os_import_symbol` delegates here
     /// for the same symbol names, so the import path remains a no-op
     /// overwrite with the identical `Gorillax[@(code: Int)]` shape.
@@ -525,10 +524,10 @@ impl TypeChecker {
         }
     }
 
-    /// C19B-002: register typed signatures for `taida-lang/os` symbols that
+    /// register typed signatures for `taida-lang/os` symbols that
     /// need compile-time Gorillax inner-shape pinning.
     ///
-    /// Currently only the C19 interactive variants are pinned, because
+    /// Currently only the interactive variants are pinned, because
     /// their inner shape `@(code: Int)` is strictly narrower than the
     /// captured `run` / `execShell` form `@(stdout, stderr, code)` — and
     /// callers who reach for `.__value.stdout` on an interactive result
@@ -1211,7 +1210,7 @@ impl TypeChecker {
         }
     }
 
-    /// F42 sweep [E1520]: Is this type a "value-absence" type that must not
+    /// [E1520]: Is this type a "value-absence" type that must not
     /// appear on Taida surface as a return / parameter / type argument?
     ///
     /// Detects (shallow):
@@ -1230,7 +1229,7 @@ impl TypeChecker {
         }
     }
 
-    /// F42 sweep [E1520]: Recursive check that detects value-absence types
+    /// [E1520]: Recursive check that detects value-absence types
     /// nested inside `Async[Unit]`, `Result[Unit, _]`, `Optional[Unit]`,
     /// `List[Unit]`, `Function([Unit], Unit)`, **BuchiPack fields**, etc.
     ///
@@ -1266,11 +1265,11 @@ impl TypeChecker {
     /// RCB-50: Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
-    /// an unresolved generic type parameter (e.g. `T`, `U`).  When
+    /// an unresolved generic type parameter (e.g. `T`, `U`). When
     /// either the body type or the declared return type contains such
     /// a variable, the return-type check must be suppressed because
     /// the checker cannot meaningfully compare them.
-    /// D28B-023 / D28B-024: look up an active enclosing function's `TypeParam`
+    /// look up an active enclosing function's `TypeParam`
     /// by name, walking the stack of nested generic functions inside-out.
     /// Returns `None` if the name does not refer to any active type parameter.
     fn lookup_active_type_param(&self, name: &str) -> Option<&TypeParam> {
@@ -1282,9 +1281,9 @@ impl TypeChecker {
         None
     }
 
-    /// D28B-024: returns true when `name` is an active generic type parameter
+    /// returns true when `name` is an active generic type parameter
     /// whose declared subtype constraint is a numeric primitive (`Num` / `Int`
-    /// / `Float`). Such a type variable is treated as numeric for arithmetic
+    /// `Float`). Such a type variable is treated as numeric for arithmetic
     /// (`+` / `-` / `*`) and ordering operators inside the function body.
     fn type_param_is_numeric(&self, name: &str) -> bool {
         let Some(tp) = self.lookup_active_type_param(name) else {
@@ -1296,8 +1295,8 @@ impl TypeChecker {
         )
     }
 
-    /// D28B-023: if `name` is an active generic type parameter whose
-    /// declared subtype constraint is a function type (e.g. `F <= :T => :T`),
+    /// if `name` is an active generic type parameter whose
+    /// declared subtype constraint is a function type (e.g. `F <=:T =>:T`),
     /// return the resolved `Type::Function(...)` for that constraint.
     /// Returns `None` for non-function constraints (or unconstrained vars).
     fn type_param_function_constraint(&self, name: &str) -> Option<Type> {
@@ -1331,7 +1330,7 @@ impl TypeChecker {
     /// Custom mold instantiations (e.g. `AlwaysFail[x]()`) return
     /// `Type::Named("AlwaysFail")` from `infer_expr_type`, but the
     /// checker cannot predict what the mold's `solidify` function
-    /// actually produces at runtime.  We suppress E1601 in this case.
+    /// actually produces at runtime. We suppress E1601 in this case.
     fn is_mold_defined_named(&self, ty: &Type) -> bool {
         matches!(ty, Type::Named(name) if self.registry.mold_defs.contains_key(name))
     }
@@ -1394,18 +1393,18 @@ impl TypeChecker {
         }
     }
 
-    /// F42 sweep [E1523]: detect built-in type names mistakenly written
+    /// [E1523]: detect built-in type names mistakenly written
     /// as Mold header type variables. `Mold[Int]` parses as a type
     /// variable named `Int`, which collides with the built-in `Int` type
     /// and is almost always a misuse for `Mold[:Int]` (concrete type
-    /// argument) or `Mold[T <= :Int]` (constrained type variable).
+    /// argument) or `Mold[T <=:Int]` (constrained type variable).
     ///
     /// Built-in type names that trigger this diagnostic:
     /// - Primitive / scalar: `Int`, `Float`, `Num`, `Number`, `Str`,
-    ///   `String`, `Bytes`, `Bool`, `Boolean`
+    /// `String`, `Bytes`, `Bool`, `Boolean`
     /// - Special / forbidden surface types: `Unit`, `Void`, `JSON`, `Molten`
     /// - Built-in molds with `MoldSpec::range`: `Lax`, `Result`, `Async`,
-    ///   `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
+    /// `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
     pub(super) fn is_builtin_type_name(name: &str) -> bool {
         matches!(
             name,
@@ -1844,8 +1843,7 @@ impl TypeChecker {
                     let inferred = self.infer_expr_type(other);
                     let is_http_protocol = matches!(&inferred, Type::Named(n)
                         if self.net_http_protocol_type_names.contains(n));
-                    let is_permitted_unknown =
-                        matches!(inferred, Type::Unknown | Type::Molten);
+                    let is_permitted_unknown = matches!(inferred, Type::Unknown | Type::Molten);
                     if !is_http_protocol && !is_permitted_unknown {
                         self.errors.push(TypeError {
                             message: format!(
@@ -2097,23 +2095,22 @@ impl TypeChecker {
     ///
     /// Behaviour:
     /// 1. Resolve the import path (relative, package, or submodule) using the same
-    ///    logic as `validate_import_symbols`.
+    /// logic as `validate_import_symbols`.
     /// 2. Parse the target module and collect every `EnumDef` / `FuncDef`
-    ///    whose name is being imported by the current statement.
+    /// whose name is being imported by the current statement.
     /// 3. If the importer has **not** already defined an enum with the same local
-    ///    name, register it into `self.registry`. The wire-order is the import
-    ///    origin (source of truth).
+    /// name, register it into `self.registry`. The wire-order is the import
+    /// origin (source of truth).
     /// 4. If the importer **has** already defined the enum locally (common pattern
-    ///    during the C18 transition), check that the variant list is identical;
-    ///    any mismatch emits `[E1618] Enum '<name>' variant order mismatch across
-    ///    module boundary.` to catch the silent-bug risk raised in ROOT-5.
+    /// during the enum-schema transition), check that the variant list is identical;
+    /// any mismatch emits `[E1618] Enum '<name>' variant order mismatch across
+    /// module boundary to catch enum-order drift.
     ///
     /// Notes:
     /// - `[E1618]` is allocated for this check because `[E1610]` is already
-    ///   occupied by cyclic-inheritance detection. The design rationale is
-    ///   recorded in `.dev/C18_BLOCKERS.md` (C18B-001).
-    /// - Aliased imports (`>>> ./m.td => @(Color: Paint)`) register the enum
-    ///   under the alias, mirroring the interpreter behaviour.
+    /// occupied by cyclic-inheritance detection.
+    /// - Aliased imports (`>>>./m.td => @(Color: Paint)`) register the enum
+    /// under the alias, mirroring the interpreter behaviour.
     fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
@@ -2473,17 +2470,17 @@ impl TypeChecker {
         self.define_branch_info(name, BranchInfo::None);
     }
 
-    /// C13-1 / C13B-007: True if `name` in an intermediate pipeline
+    /// True if `name` in an intermediate pipeline
     /// step should be treated as a function-like reference (classic
     /// pipeline semantics: call it with the current value). False means
     /// bind-and-forward: the current step's value is bound to `name` and
     /// passed through unchanged.
     ///
     /// A name is considered callable if:
-    ///   - the variable is declared with a `Function` type in scope, or
-    ///   - the name is registered as a user-defined (possibly generic)
-    ///     function / type / mold, or
-    ///   - it is a known builtin identifier.
+    /// - the variable is declared with a `Function` type in scope, or
+    /// - the name is registered as a user-defined (possibly generic)
+    /// function / type / mold, or
+    /// - it is a known builtin identifier.
     fn is_pipeline_callable_ident(&self, name: &str) -> bool {
         if let Some(ty) = self.lookup_var(name)
             && matches!(ty, Type::Function(_, _))
@@ -3257,7 +3254,7 @@ impl TypeChecker {
         }
     }
 
-    /// C12B-023 bypass closure (3rd layer): reject `FieldDef` whose name
+    /// bypass closure (3rd layer): reject `FieldDef` whose name
     /// starts with the reserved internal-field prefix (`__`). Shared by
     /// TypeDef / MoldDef / InheritanceDef. Emits `[E1617]` — the same
     /// diagnostic code used for (1) the AST-level `Expr::BuchiPack`/
@@ -3375,15 +3372,14 @@ impl TypeChecker {
             None => return,
         };
 
-        // (E30 Phase 4 / E30B-002) declare-only function fields are excluded
-        // from the required-positional `[]` set: they are interface members
+        // Declare-only function fields are excluded from the
+        // required-positional `[]` set: they are interface members
         // (`fn: A => :B` form, no body, no default) whose values are filled in
-        // at instantiation time via `()` (override) or, after Phase 6, by an
-        // automatically-generated `defaultFn`. They are also classified as
+        // at instantiation time via `()` overrides. They are also classified as
         // "optional" so that explicit `(transform <= ...)` overrides in `()`
-        // are accepted (no `[E1406]` "undefined option"). Phase 6 (E30B-004)
-        // will keep this classification while adding the auto-generated
-        // defaultFn that replaces the current `Value::Unit` placeholder.
+        // are accepted without an "undefined option" diagnostic. A future
+        // default function path should keep this classification while removing
+        // the current `Value::Unit` placeholder.
         let required_fields: Vec<String> = mold_fields
             .iter()
             .filter(|f| {
@@ -4327,11 +4323,11 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    /// C19B-002: narrow walker that triggers full type inference only on
+    /// narrow walker that triggers full type inference only on
     /// FieldAccess nodes inside builtin call arguments (e.g.
     /// `stdout(r.__value.stdout)`). This lets us surface pinned-Gorillax
     /// field-access rejections without retroactively tightening other
-    /// builtin arg subtrees (BinaryOp / MethodCall / etc.) that pre-C19
+    /// builtin arg subtrees (BinaryOp / MethodCall / etc.) that earlier
     /// callers were silently relying on.
     ///
     /// The returned type is intentionally discarded; we only care about
@@ -7351,7 +7347,7 @@ defaulted fields must be provided via `()`",
     }
 
     /// Closed-constructor validation for class-like
-    /// `Name(field <= value, ...)` instantiations.
+    /// `Name(field <= value,...)` instantiations.
     ///
     /// Anonymous packs (`@(...)`) keep their open / structural shape and
     /// are intentionally left untouched by this validator. Named
@@ -7360,23 +7356,23 @@ defaulted fields must be provided via `()`",
     ///
     /// 1. Duplicate field names → `[E1404]` (single appearance per call).
     /// 2. Undeclared field names → `[E1406]` (the typo path that
-    ///    previously fell back to a default value at runtime — e.g.
-    ///    `Pilot(typo_age <= 14)` silently dropping the typo and giving
-    ///    `age = 0`).
+    /// previously fell back to a default value at runtime — e.g.
+    /// `Pilot(typo_age <= 14)` silently dropping the typo and giving
+    /// `age = 0`).
     /// 3. Method fields (`is_method = true`) cannot be passed as
-    ///    constructor arguments — methods are part of the type's
-    ///    behaviour, not its data — `[E1407]`.
+    /// constructor arguments — methods are part of the type's
+    /// behaviour, not its data — `[E1407]`.
     /// 4. Declared field value type must be compatible with the field's
-    ///    declared type → `[E1506]` (existing arg-type code).
+    /// declared type → `[E1506]` (existing arg-type code).
     /// 5. Error-derived types' `type` field is auto-set to the concrete
-    ///    type name. Passing `type <= "Same"` is allowed (idempotent
-    ///    legacy aid); any other literal / non-literal value is rejected
-    ///    via `[E1408]` so `type` cannot be spoofed.
+    /// type name. Passing `type <= "Same"` is allowed (idempotent
+    /// legacy aid); any other literal / non-literal value is rejected
+    /// via `[E1408]` so `type` cannot be spoofed.
     /// 6. Omitted fields are NOT rejected — the value is filled by the
-    ///    declared default / by the `defaultFn` synthesised in E30B-004
-    ///    for declare-only function fields. This honours the "every type
-    ///    has a default" PHILOSOPHY without forcing every constructor
-    ///    call site to enumerate every field.
+    /// declared default / by the `defaultFn` synthesised in
+    /// for declare-only function fields. This honours the "every type
+    /// has a default" PHILOSOPHY without forcing every constructor
+    /// call site to enumerate every field.
     fn validate_type_inst_constructor(&mut self, name: &str, fields: &[BuchiField], _span: &Span) {
         let Some(field_defs) = self.mold_field_defs.get(name).cloned() else {
             // Name is not a registered class-like / mold-like type
@@ -7458,8 +7454,8 @@ defaulted fields must be provided via `()`",
             // subclasses. Without this hoisted check the validator below
             // would happily accept `MyError(type <= someVar)` (variable
             // bypass) or `MyError(type <= "Other")` because the field is
-            // not "undeclared". Per E32B-058 the validator must always
-            // require a string literal whose value matches the type name.
+            // not "undeclared". The validator must always require a string
+            // literal whose value matches the type name.
             if is_error_type && field.name == "type" {
                 if let Expr::StringLit(value, _) = &field.value
                     && value == name
@@ -7634,11 +7630,11 @@ defaulted fields must be provided via `()`",
         first_ty
     }
 
-    /// C13-1: Infer the type of an arm's result. The result is:
+    /// Infer the type of an arm's result. The result is:
     /// - `Statement::Expr(e)` → the inferred type of `e`
     /// - `Statement::Assignment(_)` / `UnmoldForward(_)` / `UnmoldBackward(_)`
-    ///   → the registered type of the bound target (already recorded by
-    ///   the preceding `check_statement` loop).
+    /// → the registered type of the bound target (already recorded by
+    /// the preceding `check_statement` loop).
     /// - Anything else (definitions, imports, …) → `Type::Unknown`.
     ///
     /// Must be called *after* `check_statement` has processed the arm
@@ -7691,7 +7687,7 @@ impl Default for TypeChecker {
 // consistent with actual default-value materialisation.
 
 /// Returns true iff a defaultFn can be synthesised for the given function /
-/// value type per Lock-D verdict (E30 Phase 0, 2026-04-28).
+/// value type per verdict.
 ///
 /// `visiting` carries the names already in the recursion stack so that
 /// self-referential / mutually-recursive types are treated as generatable

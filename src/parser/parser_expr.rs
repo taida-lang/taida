@@ -581,14 +581,14 @@ impl Parser {
     /// If the body is on the same line, parse a single expression.
     /// If the body continues on the next line (indented), parse as a block.
     ///
-    /// C12-4 (FB-17): Pure expression discipline.
+    /// Pure expression discipline.
     /// An arm body must be a sequence of **let-bindings** followed by
     /// **exactly one final result expression**. Allowed non-final
     /// statement kinds: `<=` assignment, `>=>` unmold-forward,
     /// `<=<` unmold-backward. Any other statement kind in a non-final
     /// position — including a bare function-call / pipeline statement
-    /// (used for side effects) and any definition (`Name = ...`,
-    /// `Mold[] => ...`, `|== ... =`, `>>> ...`, `<<< ...`) — is
+    /// (used for side effects) and any definition (`Name =...`,
+    /// `Mold[] =>...`, `|==... =`, `>>>...`, `<<<...`) — is
     /// rejected with `[E1616]`. The final statement must be an
     /// expression statement that produces the arm's value.
     pub(super) fn parse_cond_arm_body(&mut self) -> Result<Vec<Statement>, ParseError> {
@@ -616,30 +616,30 @@ impl Parser {
         }
     }
 
-    /// C12-4 (FB-17) + C13-1: pure-expression discipline on a parsed
-    /// condition-arm body, relaxed for C13.
+    /// +: pure-expression discipline on a parsed
+    /// condition-arm body.
     ///
     /// Rules:
-    ///   1. The **final** statement may be:
-    ///      - `Statement::Expr(_)` — arm's result expression (classic form), or
-    ///      - `Statement::Assignment(_)` / `Statement::UnmoldForward(_)` /
-    ///        `Statement::UnmoldBackward(_)` — C13-1 tail-binding form
-    ///        that yields the bound value as the arm's result.
-    ///   2. **Non-final** statements must be `Assignment`,
-    ///      `UnmoldForward`, or `UnmoldBackward` — i.e. let-bindings
-    ///      that name a value for subsequent statements.
-    ///   3. Any other statement kind anywhere in the arm body is
-    ///      rejected with `[E1616]`.
+    /// 1. The **final** statement may be:
+    /// - `Statement::Expr(_)` — arm's result expression (classic form), or
+    /// - `Statement::Assignment(_)` / `Statement::UnmoldForward(_)` /
+    /// `Statement::UnmoldBackward(_)` — tail-binding form
+    /// that yields the bound value as the arm's result.
+    /// 2. **Non-final** statements must be `Assignment`,
+    /// `UnmoldForward`, or `UnmoldBackward` — i.e. let-bindings
+    /// that name a value for subsequent statements.
+    /// 3. Any other statement kind anywhere in the arm body is
+    /// rejected with `[E1616]`.
     ///
-    /// The rule stops the FB-17 "context leak" pattern where a
+    /// The rule stops the "context leak" pattern where a
     /// discarded side-effect call (`writeFile(...) => _wr`, a bare
     /// function-call statement, or a top-level definition) can hide
     /// inside what reads like a conditional branch.
     ///
-    /// C13-1 loosens rule 1 so the tail bind (`name <= expr`,
+    /// loosens rule 1 so the tail bind (`name <= expr`,
     /// `expr => name`, `expr >=> name`, `name <=< expr`) is accepted
     /// as an expression-block result without requiring a redundant
-    /// trailing `name` line. FB-17's safety boundary is preserved:
+    /// trailing `name` line. 's safety boundary is preserved:
     /// bare call statements, discard pipelines, and nested definitions
     /// in non-final positions remain rejected.
     fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
@@ -705,11 +705,11 @@ impl Parser {
         Ok(())
     }
 
-    /// C13B-010: Reject discard bindings (`expr => _name`, `_name <= expr`,
+    /// Reject discard bindings (`expr => _name`, `_name <= expr`,
     /// `expr >=> _name`, `_name <=< expr`) at any position inside an
     /// expression-block body — arm body, function body, `|==` handler body,
-    /// or method body. The FB-17 "throw the value away for its side effects"
-    /// pattern breaks the pure-expression rule at every C13-1 tail-binding
+    /// or method body. The "throw the value away for its side effects"
+    /// pattern breaks the pure-expression rule at every tail-binding
     /// position, so the rejection is context-independent.
     pub(crate) fn reject_discard_bindings_in_expression_block(
         block: &[Statement],
@@ -734,7 +734,7 @@ impl Parser {
         Ok(())
     }
 
-    /// C13-1: Return `Some(target)` if `stmt` is a discard-style binding
+    /// Return `Some(target)` if `stmt` is a discard-style binding
     /// (`expr => _name`, `_name <= expr`, `expr >=> _name`, `_name <=< expr`)
     /// — i.e. the binding target starts with `_`. Used by
     /// `reject_discard_bindings_in_expression_block`.
@@ -838,7 +838,7 @@ impl Parser {
         self.parse_buchi_field_list_with(false)
     }
 
-    /// F42 sweep [E1521]: When `strict_named` is true, positional fields
+    /// [E1521]: When `strict_named` is true, positional fields
     /// (`@(v1, v2)`) are rejected so buchi pack literals (`@(name <= value, ...)`)
     /// can be statically guaranteed to have only named fields, satisfying
     /// PHILOSOPHY II.

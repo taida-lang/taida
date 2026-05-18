@@ -19,12 +19,9 @@
 //
 // The fixture body is intentionally identical in shape to the soak
 // fixture inlined by `scripts/soak/fast-soak-proxy.sh` (a 512 B body
-// served by a single-arg handler) so the wF baseline (5,556 KiB
-// plateau, 0.89 MiB/h drift recorded under `D28B-012` Acceptance) is
-// directly comparable to anything this test catches.
-//
-// See `.dev/D28_BLOCKERS.md::D28B-006` and
-// `.dev/D28_SOAK_RUNBOOK.md` for the full acceptance.
+// served by a single-arg handler) so the long-running net baseline
+// (~5,556 KiB plateau, ~0.89 MiB/h drift) is directly comparable to
+// anything this test catches.
 
 >>> taida-lang/net => @(httpServe)
 

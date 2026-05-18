@@ -1,6 +1,6 @@
 # JSON 溶鉄
 
-> **PHILOSOPHY.md -- III.** カタめたいなら、鋳型を作りましょう
+> **PHILOSOPHY.md — III.** カタめたいなら、鋳型を作りましょう
 
 ---
 

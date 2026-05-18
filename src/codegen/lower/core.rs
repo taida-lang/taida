@@ -200,7 +200,7 @@ impl Lowering {
         self.typed_expr_table = table;
     }
 
-    /// RC2.5: set the addon backend for this lowering run. Called by the
+    /// Set the addon backend for this lowering run. Called by the
     /// driver immediately after `Lowering::new()` for non-native targets
     /// so that `lower_addon_import` can surface the correct backend-policy
     /// error. Native lowering can skip this call (defaults to Native).
@@ -245,7 +245,7 @@ impl Lowering {
     }
 
     /// グローバル変数のハッシュキーを計算する。
-    /// ライブラリモジュールの場合は "module_key:var_name" で名前空間化する。
+    /// ライブラリモジュールの場合は "module_key::var_name" で名前空間化する。
     pub(super) fn global_var_hash(&self, var_name: &str) -> i64 {
         if let Some(ref module_key) = self.module_key
             && self.is_library_module
@@ -259,7 +259,7 @@ impl Lowering {
         format!("m{:016x}", simple_hash(path))
     }
 
-    /// E30 Phase 8 / E30B-011: Register the IR var holding the return-tag
+    /// Register the IR var holding the return-tag
     /// captured immediately after a callback / closure invocation, so
     /// downstream tag-aware ops (`taida_to_string_dispatch` /
     /// `stdout_with_tag`) can render the value with the correct type

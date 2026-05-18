@@ -2,7 +2,7 @@
 ///
 /// This module implements the HTTP/2 protocol as defined in RFC 9113 for the
 /// Interpreter backend. It serves as the reference implementation that the
-/// Native backend (Phase 3) will follow.
+/// Native backend () will follow.
 ///
 /// # Architecture
 ///
@@ -183,7 +183,7 @@ const HPACK_STATIC_TABLE: &[(&str, &str)] = &[
     ("www-authenticate", ""),             // 61
 ];
 
-/// NB6-39: Pre-built HashMap for O(1) static table name lookup (encoder).
+/// Pre-built HashMap for O(1) static table name lookup (encoder).
 /// Maps header name -> first 1-based index in HPACK_STATIC_TABLE.
 static STATIC_NAME_MAP: std::sync::LazyLock<HashMap<&'static str, usize>> =
     std::sync::LazyLock::new(|| {
@@ -194,7 +194,7 @@ static STATIC_NAME_MAP: std::sync::LazyLock<HashMap<&'static str, usize>> =
         m
     });
 
-/// NB6-39: Pre-built HashMap for O(1) static table exact (name+value) lookup.
+/// Pre-built HashMap for O(1) static table exact (name+value) lookup.
 /// Maps (name, value) -> 1-based index. Only includes entries with non-empty values.
 static STATIC_EXACT_MAP: std::sync::LazyLock<HashMap<(&'static str, &'static str), usize>> =
     std::sync::LazyLock::new(|| {
@@ -524,13 +524,13 @@ impl HpackEncoder {
     }
 
     /// Find exact match in static table. Returns 1-based index.
-    /// NB6-39: O(1) HashMap lookup instead of O(62) linear scan.
+    /// O(1) HashMap lookup instead of O(62) linear scan.
     fn find_static_exact(&self, name: &str, value: &str) -> Option<usize> {
         STATIC_EXACT_MAP.get(&(name, value)).copied()
     }
 
     /// Find name-only match in static table. Returns 1-based index.
-    /// NB6-39: O(1) HashMap lookup instead of O(62) linear scan.
+    /// O(1) HashMap lookup instead of O(62) linear scan.
     fn find_static_name(&self, name: &str) -> Option<usize> {
         STATIC_NAME_MAP.get(name).copied()
     }
@@ -1069,7 +1069,7 @@ pub(crate) struct H2Connection {
     pub goaway_sent: bool,
     /// Total requests processed (for bounded shutdown).
     pub request_count: i64,
-    /// NB6-38: Reusable payload buffer for frame reading (avoids per-frame heap alloc).
+    /// Reusable payload buffer for frame reading (avoids per-frame heap alloc).
     #[allow(dead_code)]
     pub payload_buf: Vec<u8>,
     /// Buffered header block fragment during HEADERS/CONTINUATION sequence.
@@ -1208,7 +1208,7 @@ pub(crate) fn validate_connection_preface<R: Read>(reader: &mut R) -> Result<(),
 
 /// Read a single HTTP/2 frame (header + payload) from the stream.
 /// Returns (FrameHeader, payload_bytes).
-/// Note: Production hot path uses read_frame_reuse() instead (NB6-38).
+/// Note: Production hot path uses read_frame_reuse() instead.
 /// This allocating variant is retained for unit tests.
 #[allow(dead_code)]
 pub(crate) fn read_frame<R: Read>(
@@ -1237,7 +1237,7 @@ pub(crate) fn read_frame<R: Read>(
     Ok((header, payload))
 }
 
-/// NB6-38: Read an HTTP/2 frame reusing the provided buffer to avoid per-frame heap alloc.
+/// Read an HTTP/2 frame reusing the provided buffer to avoid per-frame heap alloc.
 /// Used by h2_connection_loop() on the hot path instead of read_frame() which allocates per frame.
 pub(crate) fn read_frame_reuse<'a, R: Read>(
     reader: &mut R,
@@ -1268,7 +1268,7 @@ pub(crate) fn read_frame_reuse<'a, R: Read>(
 }
 
 /// Write an HTTP/2 frame to the stream (without flushing).
-/// NB6-35: Removed per-frame flush(). Callers should use BufWriter and flush
+/// Removed per-frame flush(). Callers should use BufWriter and flush
 /// once per logical response unit (e.g., after HEADERS+DATA sequence) to avoid
 /// 5+ TLS records / syscalls per response.
 pub(crate) fn write_frame<W: Write>(
@@ -2100,7 +2100,7 @@ pub(crate) type RequestFields = (String, String, String, Vec<(String, String)>);
 /// - Pseudo-headers MUST appear before all regular headers.
 /// - `:method`, `:path`, and `:scheme` are required for requests.
 ///
-/// NB6-36: Accept actual stream_id to embed in errors instead of hardcoded 0.
+/// Accept actual stream_id to embed in errors instead of hardcoded 0.
 /// Backward-compat wrapper with stream_id=0 for unit tests.
 #[allow(dead_code)]
 pub(crate) fn extract_request_fields(

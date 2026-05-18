@@ -260,7 +260,7 @@ node_id    := IDENTIFIER
 
 ### クエリの扱い
 
-上記の query vocabulary は内部モデルと検証器が使う概念です。E31 の公開 CLI
+上記の query vocabulary は内部モデルと検証器が使う概念です。現在の公開 CLI
 には graph query subcommand はありません。安全性検査は `taida way verify`、
 機械処理用の構造抽出は `taida graph` の JSON を使います。
 
@@ -310,7 +310,7 @@ taida graph ./src/main.td
 }
 ```
 
-Mermaid / DOT は E31 CLI の公開出力形式ではありません。必要な場合は
+Mermaid / DOT は公開 CLI の出力形式ではありません。必要な場合は
 `taida graph` の JSON を外部ツールで変換してください。
 
 ---

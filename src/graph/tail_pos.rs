@@ -1,4 +1,4 @@
-//! Tail-position analyzer for the `mutual-recursion` verify check (C12-3 / FB-8).
+//! Tail-position analyzer for the `mutual-recursion` verify check ( / ).
 //!
 //! This module walks the AST of a single [`FuncDef`] and emits a [`CallSite`]
 //! entry for every direct function call (`Expr::FuncCall` where the callee is
@@ -7,25 +7,25 @@
 //! function's body.
 //!
 //! Conservative rules (intentionally narrower than the runtime TCO so that
-//! the C12-3 compile-time reject does not over-reject programs that happen
+//! the compile-time reject does not over-reject programs that happen
 //! to work at runtime):
 //!
 //! - The final statement of a function body is in tail position. Earlier
-//!   statements (including assignments and unmold binds) are not.
+//! statements (including assignments and unmold binds) are not.
 //! - Inside a [`Expr::CondBranch`], the final statement of each arm
-//!   inherits the enclosing tail flag.
+//! inherits the enclosing tail flag.
 //! - Inside an [`Expr::Pipeline`], **only** the last stage inherits tail,
-//!   and even then only if the last stage is itself a direct `FuncCall`
-//!   (e.g., `x => foo(_)`). A bare `Ident` pipeline stage is conservatively
-//!   treated as non-tail (it is morally a reference, not a tail call site).
+//! and even then only if the last stage is itself a direct `FuncCall`
+//! (e.g., `x => foo(_)`). A bare `Ident` pipeline stage is conservatively
+//! treated as non-tail (it is morally a reference, not a tail call site).
 //! - Function arguments, `MoldInst` header / body args, `BuchiPack` field
-//!   values, list elements, binary-op operands, lambda bodies, and
-//!   `ErrorCeiling` handler bodies are all **non-tail** — they feed a
-//!   surrounding construct and therefore cannot be the last operation.
+//! values, list elements, binary-op operands, lambda bodies, and
+//! `ErrorCeiling` handler bodies are all **non-tail** — they feed a
+//! surrounding construct and therefore cannot be the last operation.
 //! - Lambdas introduce their own tail frame; calls inside a lambda body
-//!   are scoped to the lambda, not the outer function. For the purpose of
-//!   the mutual-recursion check they are treated as non-tail of the outer
-//!   function.
+//! are scoped to the lambda, not the outer function. For the purpose of
+//! the mutual-recursion check they are treated as non-tail of the outer
+//! function.
 //!
 //! The analyzer intentionally does **not** try to reason about
 //! `|== Error =` ceilings' return values. A call inside an error handler

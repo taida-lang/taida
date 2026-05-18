@@ -31,7 +31,7 @@ pub struct Parser {
     errors: Vec<ParseError>,
     /// Current recursion depth for expression parsing (RCB-301).
     depth: usize,
-    /// C20-1 (ROOT-5): Context while reading a `| cond |> body` branch.
+    /// Context while reading a `| cond |> body` branch.
     /// Switched to `LetRhs` while parsing the right-hand side of a `<=`
     /// assignment so that a multi-line multi-arm guard is rejected with
     /// `[E0303]` instead of greedily swallowing later top-level statements.
@@ -133,9 +133,9 @@ impl Parser {
         &self.peek().kind
     }
 
-    /// Look ahead by `offset` tokens.  There is no hard cap on `offset` because
+    /// Look ahead by `offset` tokens. There is no hard cap on `offset` because
     /// the token stream is finite (bounded by source length) and all callers use
-    /// small constant offsets (0, 1, or 2).  `saturating_add` prevents overflow.
+    /// small constant offsets (0, 1, or 2). `saturating_add` prevents overflow.
     fn peek_at(&self, offset: usize) -> &Token {
         let idx = self.pos.saturating_add(offset);
         if idx < self.tokens.len() {
@@ -260,7 +260,7 @@ impl Parser {
     /// Error recovery: skip tokens until the next newline (statement boundary).
     ///
     /// Taida is indentation-based, so a newline always terminates the current
-    /// (logical) line.  This is intentionally simpler than brace-delimited
+    /// (logical) line. This is intentionally simpler than brace-delimited
     /// languages that must skip to `;` or `}` — here, newline sync is sufficient
     /// because each logical line is a complete statement.
     fn synchronize(&mut self) {
@@ -844,7 +844,7 @@ impl Parser {
         }))
     }
 
-    /// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1): zero-or-more arity の class-like 定義。
+    /// Zero-or-more arity の class-like 定義。
     ///
     /// 形式: `Name[args?] = @(...)`
     ///
@@ -1161,15 +1161,15 @@ impl Parser {
     ///
     /// Grammar (state machine):
     /// ```text
-    ///   start ──Ident(gen)──> gen_only ──Dot──Int(num)──> exact
-    ///                                                       │
-    ///                                            Dot──label──> labeled
-    ///   start ──Float/Int──> legacy_semver ──Dot──Int(patch)──> semver_full
+    /// start ──Ident(gen)──> gen_only ──Dot──Int(num)──> exact
+    /// │
+    /// Dot──label──> labeled
+    /// start ──Float/Int──> legacy_semver ──Dot──Int(patch)──> semver_full
     /// ```
     ///
     /// Examples:
     /// - `@a.3` -> "a.3" (exact: generation a, publish #3)
-    /// - `@b`   -> "b"   (generation-only: latest in generation b)
+    /// - `@b` -> "b" (generation-only: latest in generation b)
     /// - `@aa.12` -> "aa.12" (multi-letter generation)
     /// - `@a.1.beta` -> "a.1.beta" (labeled release)
     /// - `@a.3.gen-2-stable` -> "a.3.gen-2-stable" (hyphenated label)
@@ -1889,7 +1889,7 @@ impl Parser {
         self.tokens[self.pos - 1].span.line
     }
 
-    /// After parsing an initial expression, check for `=> ...` pipeline chains.
+    /// After parsing an initial expression, check for `=>...` pipeline chains.
     /// Returns a Statement:
     /// - If the chain ends with `=> ident` (no call/access), it becomes an Assignment.
     /// - Otherwise the entire chain is wrapped as `Expr::Pipeline`.

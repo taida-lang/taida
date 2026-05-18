@@ -1,4 +1,6 @@
-/// RC1 -- Native addon foundation host bindings.
+#![allow(clippy::doc_lazy_continuation)]
+
+/// Native addon foundation host bindings.
 ///
 /// `addon::backend_policy` is always available so non-Native backends
 /// can produce the deterministic unsupported-backend diagnostic.

@@ -1,7 +1,7 @@
-/// コンパイルドライバ — .td → パース → IR → CLIF → .o → バイナリ
+/// コンパイルドライバ — `.td` → パース → IR → CLIF → `.o` → バイナリ
 ///
-/// cranelift-object で .o を出力し、システムリンカでバイナリを生成。
-/// wasm-min ターゲット時は wasm-ld で .wasm を生成する。
+/// cranelift-object で `.o` を出力し、システムリンカでバイナリを生成。
+/// wasm-min ターゲット時は wasm-ld で `.wasm` を生成する。
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -20,19 +20,19 @@ type ModuleImports = Vec<(String, Vec<String>, Option<String>)>;
 /// L-1: Shared clang flags used for both cache key computation and compilation.
 /// Keeping them in one place prevents cache_key / wasm_clang_base_args drift.
 ///
-/// C21-3 (seed-02): `WASM_CLANG_FLAGS` was a single profile-agnostic constant
+/// `WASM_CLANG_FLAGS` was previously a single profile-agnostic constant
 /// that lacked `-msimd128`. That closed the SIMD path at the clang layer even
-/// after Phase 2 taught the wasm codegen to emit f64 Float operations. We now
+/// after wasm codegen learned to emit f64 Float operations. We now
 /// split the flags into a profile-independent base plus per-profile extensions:
 ///
 /// * `wasm-min` — stays on the original flag set (no `-msimd128`). It exists
-///   precisely for environments that do not want to require the simd128
-///   feature, so we must not silently upgrade it.
+/// precisely for environments that do not want to require the simd128
+/// feature, so we must not silently upgrade it.
 /// * `wasm-wasi` / `wasm-edge` / `wasm-full` — add `-msimd128` so clang's wasm
-///   backend is allowed to lower f32/f64 hot loops to `v128.*` when the
-///   auto-vectorizer finds a match. wasmtime 42+ and the target edge runtimes
-///   all default-enable the simd128 feature, so this is compatible with the
-///   existing execution story.
+/// backend is allowed to lower f32/f64 hot loops to `v128.*` when the
+/// auto-vectorizer finds a match. wasmtime 42+ and the target edge runtimes
+/// all default-enable the simd128 feature, so this is compatible with the
+/// existing execution story.
 ///
 /// Cache keys are profile-scoped via `cache_key()` so wasm-min never picks up
 /// a cached `rt_core.o` that was built with `-msimd128` and vice versa.
@@ -62,20 +62,20 @@ pub(crate) fn wasm_clang_flags_for(profile: emit_wasm_c::WasmProfile) -> Vec<&'s
     v
 }
 
-/// Process-wide counter to produce unique .o file names.
+/// Process-wide counter to produce unique `.o` file names.
 static OBJ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Return a unique .o path derived from `input_path` by appending PID and a
-/// monotonic counter.  This prevents races when two threads (or two processes)
-/// compile the same .td file concurrently.
+/// Return a unique `.o` path derived from `input_path` by appending PID and a
+/// monotonic counter. This prevents races when two threads (or two processes)
+/// compile the same `.td` file concurrently.
 ///
 /// N-41: `unwrap_or` usage in driver.rs
 /// Throughout this module, `.parent().unwrap_or(Path::new("."))` and similar
-/// fallbacks are used intentionally.  `Path::parent()` returns `None` only for
+/// fallbacks are used intentionally. `Path::parent()` returns `None` only for
 /// root-less single-component paths (e.g. `Path::new("file.td")`), so falling
 /// back to `"."` (the current working directory) is the correct behaviour —
 /// it matches the user's expectation that output artifacts land next to the
-/// source file.  The same reasoning applies to `.file_stem()` / `.to_str()`
+/// source file. The same reasoning applies to `.file_stem()` / `.to_str()`
 /// fallbacks elsewhere in this file.
 fn unique_obj_path(input_path: &Path) -> PathBuf {
     let pid = std::process::id();
@@ -110,7 +110,7 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-/// Output of wasm-edge compilation: .wasm binary + JS glue for Workers deployment.
+/// Output of wasm-edge compilation: `.wasm` binary + JS glue for Workers deployment.
 #[derive(Debug)]
 pub struct WasmEdgeOutput {
     pub wasm_path: PathBuf,
@@ -121,18 +121,18 @@ pub struct WasmEdgeOutput {
 // RC-8a/8d: WASM runtime .o cache
 // ---------------------------------------------------------------------------
 
-/// Filesystem-based cache for pre-compiled WASM runtime .o files.
+/// Filesystem-based cache for pre-compiled WASM runtime `.o` files.
 ///
-/// The WASM compilation pipeline compiles C runtime sources to .o files
+/// The WASM compilation pipeline compiles C runtime sources to `.o` files
 /// via clang on every invocation. Since the runtime sources are embedded
 /// via `include_str!` and never change between invocations, caching the
-/// .o files eliminates the most expensive step of WASM compilation.
+/// `.o` files eliminates the most expensive step of WASM compilation.
 ///
 /// Cache key: FNV-1a of (runtime_source + clang_version_string + clang_flags).
 /// Cache location:
-///   - Tests: `target/wasm-rt-cache/`
-///   - Production: `.taida/cache/wasm-rt/`
-///   - Override: `TAIDA_WASM_RT_CACHE` environment variable
+/// - Tests: `target/wasm-rt-cache/`
+/// - Production: `.taida/cache/wasm-rt/`
+/// - Override: `TAIDA_WASM_RT_CACHE` environment variable
 pub struct WasmRuntimeCache {
     cache_dir: PathBuf,
     clang: String,
@@ -145,7 +145,7 @@ impl WasmRuntimeCache {
     ///
     /// S-3: If clang version cannot be determined ("unknown"), the cache is
     /// effectively disabled — every invocation produces a different key because
-    /// "unknown" is a degenerate version string.  A warning is emitted to stderr.
+    /// "unknown" is a degenerate version string. A warning is emitted to stderr.
     pub fn new(cache_dir: PathBuf) -> Result<Self, CompileError> {
         fs::create_dir_all(&cache_dir).map_err(|e| CompileError {
             message: format!(
@@ -184,7 +184,7 @@ impl WasmRuntimeCache {
     /// `std::hash::DefaultHasher` whose algorithm is not guaranteed
     /// stable across Rust versions.
     ///
-    /// C21-3: the per-profile clang flag vector (`wasm_clang_flags_for`) is
+    /// the per-profile clang flag vector (`wasm_clang_flags_for`) is
     /// hashed here, so `rt_core` compiled for `wasm-min` (no `-msimd128`) and
     /// `rt_core` compiled for `wasm-wasi` (with `-msimd128`) land on distinct
     /// cache entries even though the C source itself is identical.
@@ -209,12 +209,12 @@ impl WasmRuntimeCache {
         format!("{:016x}", state)
     }
 
-    /// Get a cached .o file or compile the runtime source and cache the result.
+    /// Get a cached `.o` file or compile the runtime source and cache the result.
     ///
-    /// N-3: When a new cache entry is created, stale .o files for the same
+    /// When a new cache entry is created, stale `.o` files for the same
     /// runtime `name` but with a different key are automatically removed.
     ///
-    /// C21-3: `profile` selects the per-profile clang flag set (affects the
+    /// `profile` selects the per-profile clang flag set (affects the
     /// cache key) so e.g. a `-msimd128`-free `rt_core.o` cached for `wasm-min`
     /// is never reused by `wasm-wasi` after we split the flags.
     fn get_or_compile(
@@ -323,15 +323,15 @@ impl WasmRuntimeCache {
         Ok(cached_obj)
     }
 
-    /// Get or compile the core runtime .o (wasm-min / wasm-wasi / wasm-edge / wasm-full).
+    /// Get or compile the core runtime `.o` (wasm-min / wasm-wasi / wasm-edge / wasm-full).
     ///
-    /// C12-7 (FB-26): the core wasm runtime was split into four fragments
+    /// the core wasm runtime was split into four fragments
     /// under `runtime_core_wasm/`. The assembled source is byte-identical
     /// to the pre-split monolithic file (see
     /// `runtime_core_wasm::RUNTIME_CORE_WASM`), so the cache key remains
     /// stable across the refactor.
     ///
-    /// C21-3: `profile` feeds the cache key so the `-msimd128`-free wasm-min
+    /// `profile` feeds the cache key so the `-msimd128`-free wasm-min
     /// build does not accidentally share an entry with the `-msimd128`-enabled
     /// wasi/edge/full builds.
     pub fn rt_core(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
@@ -339,19 +339,19 @@ impl WasmRuntimeCache {
         self.get_or_compile("rt_core", source, profile)
     }
 
-    /// Get or compile the WASI I/O runtime .o
+    /// Get or compile the WASI I/O runtime `.o`
     pub fn rt_wasi(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_wasi_io.c");
         self.get_or_compile("rt_wasi", source, profile)
     }
 
-    /// Get or compile the edge host runtime .o
+    /// Get or compile the edge host runtime `.o`
     pub fn rt_edge(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_edge_host.c");
         self.get_or_compile("rt_edge", source, profile)
     }
 
-    /// Get or compile the full runtime .o
+    /// Get or compile the full runtime `.o`
     pub fn rt_full(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_full_wasm.c");
         self.get_or_compile("rt_full", source, profile)
@@ -367,24 +367,24 @@ impl WasmRuntimeCache {
         &self.include_dir
     }
 
-    /// S-1: Shared helper — compile generated C and link with cached runtime .o files.
+    /// Shared helper: compile generated C and link with cached runtime `.o` files.
     ///
     /// This eliminates ~240 lines of near-identical code across the four cached
     /// compilation branches (wasm-min, wasm-wasi, wasm-edge, wasm-full).
     ///
-    /// `rt_objs`: pre-compiled runtime .o files from the cache (e.g. `[rt_core.o]`
-    ///            or `[rt_core.o, rt_wasi.o, rt_full.o]`).
+    /// `rt_objs`: pre-compiled runtime `.o` files from the cache (e.g. `[rt_core.o]`
+    /// or `[rt_core.o, rt_wasi.o, rt_full.o]`).
     /// `generated_c`: the C source emitted from the IR.
-    /// `wasm_path`: final output .wasm path.
+    /// `wasm_path`: final output `.wasm` path.
     /// `tmp_suffix`: suffix for temp files to avoid collisions between profiles
-    ///               (e.g. `"_wasm_tmp"`, `"_wasm_wasi_tmp"`).
+    /// (e.g. `"_wasm_tmp"`, `"_wasm_wasi_tmp"`).
     /// `extra_ld_args`: additional wasm-ld flags for profile-specific linking
-    ///                  (e.g. `--export=memory` for edge profile).
-    /// `profile`: C21-3 — drives the clang flag set applied to the generated C
-    ///            (only `Min` skips `-msimd128`). This must match whatever the
-    ///            runtime `.o` files in `rt_objs` were built with, or the link
-    ///            step would fuse objects with mismatched SIMD feature
-    ///            requirements. Callers obtain both from the same profile.
+    /// (e.g. `--export=memory` for edge profile).
+    /// `profile`: drives the clang flag set applied to the generated C
+    /// (only `Min` skips `-msimd128`). This must match whatever the
+    /// runtime `.o` files in `rt_objs` were built with, or the link
+    /// step would fuse objects with mismatched SIMD feature
+    /// requirements. Callers obtain both from the same profile.
     #[allow(clippy::too_many_arguments)]
     fn link_wasm_cached(
         &self,
@@ -511,7 +511,7 @@ pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
     PathBuf::from("target/wasm-rt-cache")
 }
 
-/// 単一 .td ファイルを Native .o にコンパイル（リンクなし）
+/// 単一 `.td` ファイルを Native `.o` にコンパイル（リンクなし）
 fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), CompileError> {
     let source = fs::read_to_string(input_path).map_err(|e| CompileError {
         message: format!("failed to read '{}': {}", input_path.display(), e),
@@ -574,7 +574,7 @@ fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), Comp
     Ok((obj_path, imports))
 }
 
-/// .td ファイルをコンパイルしてネイティブバイナリを生成
+/// `.td` ファイルをコンパイルしてネイティブバイナリを生成
 pub fn compile_file(
     input_path: &Path,
     output_path: Option<&Path>,
@@ -779,20 +779,20 @@ fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>
     path
 }
 
-/// C26B-015: Lexically determine whether `path` escapes `project_root`.
+/// Lexically determine whether `path` escapes `project_root`.
 ///
 /// Called when either side cannot be canonicalized (typically because
 /// the imported file has not been materialised on disk yet — native
 /// build stage). The function:
 ///
 /// 1. Picks the best absolute form for each input (`canonicalize()`
-///    result if available, otherwise `absolutize()` the component
-///    sequence against cwd).
+/// result if available, otherwise `absolutize()` the component
+/// sequence against cwd).
 /// 2. Walks the components of the target path, popping on `..`,
-///    skipping `.`, pushing otherwise. Result is the lexical
-///    resolution of the path — no disk access.
+/// skipping `.`, pushing otherwise. Result is the lexical
+/// resolution of the path — no disk access.
 /// 3. Returns true if the resolved path is NOT a prefix of (or equal
-///    to) the project root's absolute form.
+/// to) the project root's absolute form.
 ///
 /// This accepts legitimate in-project traversals (`examples/foo.td`
 /// importing `../src/bar.td` where both live under the same project
@@ -845,7 +845,7 @@ fn lexical_escapes_root(path: &Path, project_root: &Path) -> bool {
     !normalised.starts_with(&root_abs)
 }
 
-/// C27B-022: Detect the `<path traversal rejected: ...>` placeholder
+/// Detect the `<path traversal rejected:...>` placeholder
 /// produced by `resolve_module_path()` when a relative or absolute
 /// import escapes the project root, and recover the original module
 /// path string so the caller can emit the canonical 3-backend
@@ -865,7 +865,7 @@ fn find_project_root(start_dir: &Path) -> PathBuf {
     crate::project_root::find_project_root(start_dir)
 }
 
-/// 複数 .o ファイルをリンクしてバイナリを生成
+/// 複数 `.o` ファイルをリンクしてバイナリを生成
 fn link_objects(obj_paths: &[PathBuf], bin_path: &Path) -> Result<(), CompileError> {
     // メイン .o のパスからエントリポイント C ファイルの場所を決定
     let obj_path = &obj_paths[0];
@@ -1524,16 +1524,16 @@ fn wasm_frontend(
     Ok((generated_c, wasm_path))
 }
 
-/// RCB-20: Uncached WASM backend -- compile runtime C sources and link into .wasm.
+/// Uncached WASM backend -- compile runtime C sources and link into `.wasm`.
 ///
 /// `runtime_sources`: list of (name, C source content) pairs for runtime layers.
-///   e.g. `[("rt", runtime_core_wasm.c)]` for wasm-min,
-///        `[("rt_core", ...), ("rt_wasi", ...)]` for wasm-wasi.
+/// e.g. `[("rt", runtime_core_wasm.c)]` for wasm-min,
+/// `[("rt_core",...), ("rt_wasi",...)]` for wasm-wasi.
 /// `tmp_suffix`: unique suffix to avoid temp file collisions between profiles.
-/// `profile`: C21-3 — picks the clang flag set; `Min` skips `-msimd128`,
-///   the other three enable it so LLVM's wasm auto-vectorizer is permitted
-///   to lower f32/f64 hot loops to `v128.*` instructions.
-/// C25B-026 / Phase 5-G: translate `TAIDA_WASM_INITIAL_PAGES` /
+/// `profile`: picks the clang flag set; `Min` skips `-msimd128`,
+/// the other three enable it so LLVM's wasm auto-vectorizer is permitted
+/// to lower f32/f64 hot loops to `v128.*` instructions.
+/// translate `TAIDA_WASM_INITIAL_PAGES` /
 /// `TAIDA_WASM_MAX_PAGES` env vars into wasm-ld flags.
 ///
 /// Each WASM page is 64 KiB. The env vars accept a positive integer
@@ -1545,10 +1545,10 @@ fn wasm_frontend(
 /// Example: `TAIDA_WASM_INITIAL_PAGES=64 TAIDA_WASM_MAX_PAGES=256` →
 /// `["--initial-memory=4194304", "--max-memory=16777216"]`.
 ///
-/// This is the runtime knob called out by `C25B-026` for tuning
+/// This is the runtime knob called out by `` for tuning
 /// linear-memory growth strategy per build, paired with the runtime-C
 /// `wasm_arena_enter` / `wasm_arena_leave` arena-scope helpers.
-/// C25B-026 / Phase 5-G: wasm-ld flags that export the arena-release
+/// wasm-ld flags that export the arena-release
 /// helpers (`wasm_arena_enter` / `wasm_arena_leave` / `wasm_arena_used`
 /// plus the `wasm_arena_roundtrip_test` test harness) so `--gc-sections`
 /// keeps them and wasmtime / host harnesses can invoke them directly.
@@ -1760,11 +1760,11 @@ fn wasm_compile_and_link_uncached(
 // WASM profile compilation functions
 // ---------------------------------------------------------------------------
 
-/// .td ファイルを wasm-min ターゲットでコンパイルし .wasm を生成する
+/// `.td` ファイルを wasm-min ターゲットでコンパイルし `.wasm` を生成する
 ///
 /// モジュールインポート対応: 依存モジュールを IR レベルでインライン展開し、
 /// 単一の IR モジュールとして C emit に渡す (Option C: AST/IR インライン展開)。
-/// パイプライン: .td -> parse -> IR -> (依存 IR 融合) -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
+/// パイプライン: `.td` -> parse -> IR -> (依存 IR 融合) -> C source -> clang(wasm32) -> `.o` -> wasm-ld -> `.wasm`
 ///
 /// Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang ルートを採用する。
 pub fn compile_file_wasm(
@@ -1811,10 +1811,10 @@ pub fn compile_file_wasm_cached(
 // WW-2: wasm-wasi コンパイルパス
 // ---------------------------------------------------------------------------
 
-/// .td ファイルを wasm-wasi ターゲットでコンパイルし .wasm を生成する
+/// `.td` ファイルを wasm-wasi ターゲットでコンパイルし `.wasm` を生成する
 ///
 /// wasm-wasi は wasm-min の上位互換で、WASI I/O (env, file read/write) を追加する。
-/// パイプライン: .td -> parse -> IR -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
+/// パイプライン: `.td` -> parse -> IR -> C source -> clang(wasm32) -> `.o` -> wasm-ld -> `.wasm`
 ///
 /// リンク構成: gen.o + rt_core.o + rt_wasi.o -> wasm-ld -> output.wasm
 pub fn compile_file_wasm_wasi(
@@ -1869,7 +1869,7 @@ pub fn compile_file_wasm_wasi_cached(
 /// wasm-min の上に host import (taida_host) ベースの env API を追加する。
 /// WASI import はそのまま残し、JS glue が wasi_snapshot_preview1.fd_write を提供する。
 ///
-/// パイプライン: .td -> parse -> IR -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
+/// パイプライン: `.td` -> parse -> IR -> C source -> clang(wasm32) -> `.o` -> wasm-ld -> `.wasm`
 ///
 /// リンク構成: gen.o + rt_core.o + rt_edge.o -> wasm-ld -> output.wasm
 pub fn compile_file_wasm_edge(
@@ -1938,7 +1938,7 @@ pub fn compile_file_wasm_edge_cached(
 /// wasm-wasi の上位互換として、文字列/数値 molds, 拡張 list/hashmap/set,
 /// JSON, bytes, bitwise 等の重い runtime を追加する。
 ///
-/// パイプライン: .td -> parse -> IR -> C source -> clang(wasm32) -> .o -> wasm-ld -> .wasm
+/// パイプライン: `.td` -> parse -> IR -> C source -> clang(wasm32) -> `.o` -> wasm-ld -> `.wasm`
 ///
 /// リンク構成: gen.o + rt_core.o + rt_wasi.o + rt_full.o -> wasm-ld -> output.wasm
 pub fn compile_file_wasm_full(
@@ -2683,7 +2683,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// S-4: default_wasm_cache_dir falls back to target/ when no .taida/ exists.
+    /// S-4: default_wasm_cache_dir falls back to target/ when no.taida/ exists.
     #[test]
     fn test_default_wasm_cache_dir_fallback() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -2704,7 +2704,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// S-4: default_wasm_cache_dir uses .taida/cache/wasm-rt/ when project root found.
+    /// S-4: default_wasm_cache_dir uses.taida/cache/wasm-rt/ when project root found.
     #[test]
     fn test_default_wasm_cache_dir_taida_dir() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -2727,7 +2727,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// S-4: .taida/ without packages.tdm falls back to target/wasm-rt-cache.
+    /// S-4:.taida/ without packages.tdm falls back to target/wasm-rt-cache.
     #[test]
     fn test_default_wasm_cache_dir_taida_without_manifest() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -2775,7 +2775,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// RCB-56: Does not pick up ancestor .taida/ without packages.tdm.
+    /// RCB-56: Does not pick up ancestor.taida/ without packages.tdm.
     #[test]
     fn test_default_wasm_cache_dir_ignores_non_project_taida() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -2802,7 +2802,7 @@ mod tests {
     // ── NET3 regression tests for native_runtime.c ──────────────────────
 
     /// The C runtime source used by the native compilation path.
-    /// C12B-026 (C12-9 Phase 9 Step 2): previously
+    /// ( Step 2): previously
     /// `const NATIVE_C: &str = include_str!("native_runtime.c")` — now
     /// we resolve through the assembled `LazyLock<&'static str>` since
     /// the source lives in 7 fragment files under
@@ -2835,7 +2835,7 @@ mod tests {
 
     /// Regression: Native v3 streaming API must validate the writer token.
     /// The old code accepted any value as the writer argument, so
-    /// `startResponse(0, ...)` would silently operate on the current request.
+    /// `startResponse(0,...)` would silently operate on the current request.
     /// The fix validates __writer_id === "__v3_streaming_writer" (parity with
     /// Interpreter/JS).
     #[test]
@@ -2869,7 +2869,7 @@ mod tests {
     }
 
     /// Regression: auto-end must NOT send chunk terminator when commit_head
-    /// fails.  The old code logged the error but still wrote `0\r\n\r\n`,
+    /// fails. The old code logged the error but still wrote `0\r\n\r\n`,
     /// producing an invalid wire (no head followed by a bare terminator).
     /// The fix introduces `auto_end_failed` to skip the terminator and
     /// force connection close.

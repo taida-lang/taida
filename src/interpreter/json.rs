@@ -41,9 +41,9 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
 
 /// Convert a Taida Value to a serde_json::Value.
 ///
-/// C18-2 contract: Enum values (`Value::EnumVal(enum_name, ordinal)`) are
+/// contract: Enum values (`Value::EnumVal(enum_name, ordinal)`) are
 /// emitted as the variant name Str (e.g. `"Running"`). This makes
-/// `jsonEncode` symmetric with the C16 `JSON[raw, Schema]()` decoder,
+/// `jsonEncode` symmetric with the `JSON[raw, Schema]()` decoder,
 /// which accepts the variant-name Str wire format. `Value::Int` values
 /// that are not tagged as EnumVal continue to emit as JSON numbers.
 pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
@@ -94,9 +94,9 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
     }
 }
 
-/// C18-2: Enrich `taida_value_to_json` with an `enum_defs` registry so
+/// Enrich `taida_value_to_json` with an `enum_defs` registry so
 /// Enum values can be emitted as their declared variant-name Str. This is
-/// the wire form used by `jsonEncode` and symmetric with the C16
+/// the wire form used by `jsonEncode` and symmetric with the
 /// `JSON[raw, Schema]()` decoder. See `src/interpreter/prelude.rs`
 /// for the `jsonEncode` dispatch that routes through this function.
 pub fn taida_value_to_json_with_enum_defs(
@@ -191,7 +191,7 @@ pub struct SchemaField {
 
 /// Build a JsonSchema from a TypeDef's field definitions, resolving nested types.
 /// `type_defs` maps type names to their field definitions.
-/// `enum_defs` maps enum names to their variant names in ordinal order (C16).
+/// `enum_defs` maps enum names to their variant names in ordinal order.
 pub fn build_schema_from_typedef(
     type_name: &str,
     fields: &[FieldDef],
@@ -220,7 +220,7 @@ pub fn build_schema_from_typedef(
 /// Resolution order for `TypeExpr::Named`:
 /// 1. Primitives (`Int`/`Str`/`Float`/`Bool`)
 /// 2. `type_defs` (TypeDef — record-like schema)
-/// 3. `enum_defs` (C16 — Enum variant set)
+/// 3. `enum_defs` — Enum variant set
 /// 4. Fallback to `Primitive(Str)` for unknown names
 fn type_expr_to_schema(
     type_expr: &crate::parser::TypeExpr,
@@ -354,7 +354,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
     }
 }
 
-/// C16: Default value for a JSON schema field whose key is missing / null.
+/// Default value for a JSON schema field whose key is missing / null.
 ///
 /// For most schemas this is identical to `default_for_schema` (Int(0), Str(""),
 /// nested defaults, etc.). For `JsonSchema::Enum` we diverge: a missing Enum
@@ -376,11 +376,11 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
     }
 }
 
-/// C16: Lax[Enum] shape for JSON mold Enum validation failure.
+/// Lax[Enum] shape for JSON mold Enum validation failure.
 ///
 /// Kept identical to `mold_eval::make_lax_value(false, Int(0), Int(0))` so that
 /// the 3-backend parity can be verified structurally:
-///   @(has_value=false, __value=Int(0), __default=Int(0), __type="Lax")
+/// @(has_value=false, __value=Int(0), __default=Int(0), __type="Lax")
 ///
 /// `Int(0)` encodes the first variant's ordinal — Taida's "最初のバリアント = デフォルト"
 /// rule (`docs/guide/01_types.md:609`) is preserved as the Lax fallback.
@@ -471,7 +471,7 @@ pub fn default_for_schema(schema: &JsonSchema) -> Value {
 /// jsonEncode(value) -> Str
 /// Converts a Taida value to a compact JSON string.
 ///
-/// C18-2: This legacy function does NOT use the enum-aware variant-name
+/// This legacy function does NOT use the enum-aware variant-name
 /// encoder because it has no access to `enum_defs`. The prelude dispatcher
 /// in `src/interpreter/prelude.rs` routes `jsonEncode` through the
 /// enum-aware path (`taida_value_to_json_with_enum_defs`). This
@@ -489,7 +489,7 @@ pub fn stdlib_json_encode(args: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// jsonPretty(value) -> Str — see `stdlib_json_encode` for the C18-2
+/// jsonPretty(value) -> Str — see `stdlib_json_encode` for the
 /// variant-name contract. Retained for tests.
 #[cfg(test)]
 pub fn stdlib_json_pretty(args: &[Value]) -> Result<Value, String> {

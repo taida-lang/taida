@@ -23,10 +23,10 @@ impl std::error::Error for LexError {}
 ///
 /// Converts source text into a stream of tokens. Handles:
 /// - All 10 Taida operators: `=`, `=>`, `<=`, `>=>`, `<=<`, `|==`,
-///   `(| ... |>)` (condition delimiter pair), `>>>`, `<<<`, `:`.
-///   Note: the lexer emits `|` and `|>` as separate `TokenKind::Pipe` /
-///   `TokenKind::PipeGt` tokens; the pair is counted as one semantic
-///   operator in PHILOSOPHY / CLAUDE / `docs/reference/operators.md`.
+/// `(|... |>)` (condition delimiter pair), `>>>`, `<<<`, `:`.
+/// Note: the lexer emits `|` and `|>` as separate `TokenKind::Pipe` /
+/// `TokenKind::PipeGt` tokens; the pair is counted as one semantic
+/// operator in PHILOSOPHY / CLAUDE / `docs/reference/operators.md`.
 /// - Arithmetic: `+`, `-`, `*`, `/`, `%`
 /// - Comparison: `==`, `!=`, `<`, `>`, `>=`
 /// - Logical: `&&`, `||`, `!`

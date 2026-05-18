@@ -115,7 +115,7 @@ fn c25b_017_multiple_errors_are_all_reported() {
 fn c25b_017_recovery_leaves_next_statement_intact() {
     // The leading `= 99` triggers a parse error at column 1 of line 1.
     // After synchronize() rewinds past the newline, line 2's binding
-    // `good = 42` (or lambda binding interpretation thereof) and line 3's
+    // `good <= 42` and line 3's
     // `stdout(good)` must remain parseable. We assert by checking that
     // AT LEAST one survivor node mentions `good` / `stdout` somewhere,
     // rather than binding to a specific AST shape — the audit is about
@@ -123,7 +123,7 @@ fn c25b_017_recovery_leaves_next_statement_intact() {
     // classify the survivor as exactly this node kind".
     let src = "\
 = 99
-good = 42
+good <= 42
 stdout(good)
 ";
     let (prog, errs) = parse(src);
@@ -162,9 +162,9 @@ fn c25b_017_recovery_at_eof_terminates_cleanly() {
 #[test]
 fn c25b_017_well_formed_source_yields_zero_errors() {
     let src = "\
-x = 1
-y = 2
-z = x + y
+x <= 1
+y <= 2
+z <= x + y
 stdout(z)
 ";
     let (prog, errs) = parse(src);

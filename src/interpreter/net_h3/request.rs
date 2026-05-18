@@ -156,7 +156,7 @@ pub(crate) fn run_selftests() -> SelftestResult {
     SelftestResult::Ok
 }
 
-/// NB7-9: QPACK encode/decode round-trip self-test.
+/// QPACK encode/decode round-trip self-test.
 pub(crate) fn selftest_qpack_roundtrip() -> i32 {
     // Encode a response with 4 custom headers
     let headers = vec![
@@ -213,7 +213,7 @@ pub(crate) fn selftest_qpack_roundtrip() -> i32 {
     0
 }
 
-/// NB7-10: H3 request pseudo-header validation self-test.
+/// H3 request pseudo-header validation self-test.
 pub(crate) fn selftest_request_validation() -> i32 {
     // Test 1: Valid request
     {

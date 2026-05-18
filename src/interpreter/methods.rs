@@ -14,7 +14,7 @@ use super::value_key::ValueKey;
 use crate::parser::FuncDef;
 use std::collections::HashSet;
 
-/// C25B-022 (Phase 5-C) / C25B-023 (Phase 5-E) — fast-path helper.
+/// Fast-path helper for set-like list operations.
 ///
 /// Try to build a set of `u64` fingerprints (derived from `ValueKey`)
 /// over `items`. Returns `None` if any element is not key-eligible
@@ -373,18 +373,19 @@ impl Interpreter {
             }
             Value::BuchiPack(fields) => {
                 // TypeInst error: look for message field, then type field.
-                // An empty `message` is treated as "no message" so the
-                // four backends agree on the `__type` fallback (the JS
-                // Error factory always emits `message: ''` defaults
-                // which would otherwise diverge from Interpreter /
-                // Native).
+                // An explicit empty `message` is a real payload and must stay
+                // distinct from a missing field in Result.toString().
                 fields
                     .iter()
                     .find(|(n, _)| n == "message")
                     .and_then(|(_, v)| {
                         if let Value::Str(s) = v {
                             let s = s.as_string();
-                            if s.is_empty() { None } else { Some(s.clone()) }
+                            if s.is_empty() {
+                                Some("\"\"".to_string())
+                            } else {
+                                Some(s.clone())
+                            }
                         } else {
                             None
                         }
@@ -1421,7 +1422,7 @@ impl Interpreter {
     /// Only state-check methods remain. Operations moved to molds:
     /// Upper[], Lower[], Trim[], Split[], Replace[], Slice[], CharAt[], Repeat[], Reverse[], Pad[]
     ///
-    /// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache dispatch
+    /// # Char-index cache dispatch
     ///
     /// The receiver is `&StrValue` (instead of `&str`) so that `length`,
     /// `get`, `indexOf`, and `lastIndexOf` can hit the shared char-offset

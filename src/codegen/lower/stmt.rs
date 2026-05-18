@@ -2041,7 +2041,7 @@ impl Lowering {
         }
     }
 
-    /// C25B-030 Phase 1F helper: walk a `TemplateLit` body for
+    /// helper: walk a `TemplateLit` body for
     /// free-variable references. Mirrors
     /// `lower_template_lit`'s `${...}` parser so the free-var
     /// collection sees exactly the same identifiers the native
@@ -2402,7 +2402,7 @@ impl Lowering {
     /// Lower a condition arm body (Vec<Statement>) to IR.
     /// Returns the IR variable holding the result of the last expression.
     ///
-    /// C13-1: A tail binding statement (`Assignment` / `UnmoldForward` /
+    /// A tail binding statement (`Assignment` / `UnmoldForward` /
     /// `UnmoldBackward`) yields the bound value as the arm result, so the
     /// IR variable produced by that statement becomes `last_var`.
     pub(super) fn lower_cond_arm_body(
@@ -2436,7 +2436,7 @@ impl Lowering {
     /// Lower a condition arm body in tail position.
     /// The last expression is lowered with tail-call optimization.
     ///
-    /// C13-1: Tail-binding statements cannot be TCO'd (the value is bound
+    /// Tail-binding statements cannot be TCO'd (the value is bound
     /// first and then yielded), so they are lowered via the normal path
     /// and the IR variable for the binding becomes the tail value.
     pub(super) fn lower_cond_arm_body_tail(
@@ -2471,7 +2471,7 @@ impl Lowering {
         Ok(last_var)
     }
 
-    /// C13-1: If `stmt` is a tail-binding statement that was just lowered
+    /// If `stmt` is a tail-binding statement that was just lowered
     /// via `lower_statement`, return the IR variable bound by the trailing
     /// `DefVar(target, value)` instruction so the caller can treat it as
     /// the block's yield value.

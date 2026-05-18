@@ -401,6 +401,9 @@ function Error(fields) {
     type: __taida_ensureNotNull(fields && fields.type, ''),
     message: __taida_ensureNotNull(fields && fields.message, ''),
   };
+  if (fields && Object.prototype.hasOwnProperty.call(fields, 'message')) {
+    Object.defineProperty(obj, '__taidaExplicitMessageField', { value: true, enumerable: false });
+  }
   return Object.freeze(obj);
 }
 
@@ -902,6 +905,7 @@ function __taida_result_create(value, throwVal, predicate, displayOrder) {
           ? __taida_format(mapped)
           : String(mapped);
         newThrow = { __type: 'ResultError', message: msg, type: 'ResultError' };
+        Object.defineProperty(newThrow, '__taidaExplicitMessageField', { value: true, enumerable: false });
       }
       return __taida_result_create(null, newThrow, null);
     },
@@ -923,14 +927,16 @@ function __taida_result_create(value, throwVal, predicate, displayOrder) {
       if (!_checkError()) return 'Result(' + String(_value) + ')';
       let errDisplay;
       if (_throw && typeof _throw === 'object') {
-        // The JS Error factory always materialises `message: ''` for
-        // Error-derived packs, so an empty string is indistinguishable
-        // from a missing message. Treat `message === ''` as "no
-        // message" and fall back to the declared `__type` name; the
-        // four backends agree on this even though Interpreter / Native
-        // can technically tell the two states apart.
-        if (typeof _throw.message === 'string' && _throw.message.length > 0) {
-          errDisplay = _throw.message;
+        if (typeof _throw.message === 'string') {
+          if (_throw.message.length > 0) {
+            errDisplay = _throw.message;
+          } else if (_throw.__taidaExplicitMessageField === true) {
+            errDisplay = '""';
+          } else if (_throw.__type) {
+            errDisplay = _throw.__type;
+          } else {
+            errDisplay = '""';
+          }
         } else if (_throw.__type) {
           errDisplay = _throw.__type;
         } else {

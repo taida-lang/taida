@@ -1,16 +1,14 @@
-//! C12B-038: Type-tag propagation primitives.
+//! Type-tag propagation primitives.
 //!
 //! This module collects the **pure, state-independent** helpers that
 //! participate in runtime type-tag propagation. Historically the full
 //! tag-propagation state (HashSets of Bool-returning functions, the
 //! `param_tag_vars` map, per-Expr inference) lived scattered through
-//! `src/codegen/lower.rs` (7,489 lines, 69 call sites for the state
-//! maps alone — see C12B-038 in `.dev/C12_BLOCKERS.md`). The C12 design
-//! document's Workstream K planned a full tag-prop module; for C12 we
-//! establish the module boundary with the pieces that *are* free of
+//! `src/codegen/lower.rs`. This module establishes the boundary with
+//! the pieces that *are* free of
 //! `self: &Lowering` state, so that the `lower.rs` mechanical split
-//! (C12B-024) can migrate the remaining state-dependent helpers in a
-//! follow-up PR without needing to first invent the module.
+//! can migrate the remaining state-dependent helpers without needing
+//! to first invent the module.
 //!
 //! # Tag values
 //!
@@ -20,16 +18,16 @@
 //! `src/codegen/runtime_core_wasm/01_core.inc.c` for the switch that
 //! reads these values.
 //!
-//! | Constant         | Value | Meaning                                    |
+//! | Constant | Value | Meaning |
 //! |------------------|-------|--------------------------------------------|
-//! | `TAG_INT`        | 0     | `:Int`                                     |
-//! | `TAG_FLOAT`      | 1     | `:Float`                                   |
-//! | `TAG_BOOL`       | 2     | `:Bool`                                    |
-//! | `TAG_STR`        | 3     | `:Str`                                     |
-//! | `TAG_PACK`       | 4     | BuchiPack / TypeInst / Lax / Result / Async / HashMap / Set |
-//! | `TAG_LIST`       | 5     | `:List[T]`                                 |
-//! | `TAG_CLOSURE`    | 6     | `Lambda` / function-valued                 |
-//! | `TAG_UNKNOWN`    | -1    | Cannot be determined at compile time       |
+//! | `TAG_INT` | 0 | `:Int` |
+//! | `TAG_FLOAT` | 1 | `:Float` |
+//! | `TAG_BOOL` | 2 | `:Bool` |
+//! | `TAG_STR` | 3 | `:Str` |
+//! | `TAG_PACK` | 4 | BuchiPack / TypeInst / Lax / Result / Async / HashMap / Set |
+//! | `TAG_LIST` | 5 | `:List[T]` |
+//! | `TAG_CLOSURE` | 6 | `Lambda` / function-valued |
+//! | `TAG_UNKNOWN` | -1 | Cannot be determined at compile time |
 //!
 //! These constants replace a handful of magic numbers in
 //! `src/codegen/lower.rs` so that tag-prop readers can grep for a single
@@ -58,7 +56,7 @@ pub(crate) const TAG_CLOSURE: i64 = 6;
 /// to polymorphic dispatch on this tag. Kept as a named constant even
 /// though the main consumer (`Lowering::expr_type_tag`) currently
 /// inlines the literal `-1`; swapping to the named constant is part of
-/// the follow-up migration tracked in C12B-038.
+/// a follow-up migration.
 #[allow(dead_code)]
 pub(crate) const TAG_UNKNOWN: i64 = -1;
 
@@ -69,8 +67,8 @@ pub(crate) const TAG_UNKNOWN: i64 = -1;
 /// Generic envelopes (`Lax`, `Gorillax`, `RelaxedGorillax`, `Result`,
 /// `Async`, `HashMap`, `Set`) are all treated as [`TAG_PACK`] because
 /// they are represented internally as typed BuchiPacks. Unknown generic
-/// names fall back to [`TAG_INT`] to preserve pre-existing behaviour
-/// (the fallback was previously hard-coded inside `lower.rs`).
+/// names use [`TAG_UNKNOWN`] so backend lowering keeps the value on the
+/// dynamic path instead of pretending it is an `Int`.
 ///
 /// Note that `TypeExpr::Named("Bytes")` also preserves the historical
 /// fallback-to-pack behaviour here. Some runtime detection paths treat
@@ -93,7 +91,7 @@ pub(crate) fn type_expr_to_tag(ty: &crate::parser::TypeExpr) -> i64 {
             "Lax" | "Gorillax" | "RelaxedGorillax" | "Result" | "Async" => TAG_PACK,
             "HashMap" => TAG_PACK,
             "Set" => TAG_PACK,
-            _ => TAG_INT,
+            _ => TAG_UNKNOWN,
         },
     }
 }
@@ -151,11 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_generic_falls_back_to_int() {
+    fn unknown_generic_uses_unknown_tag() {
         let unknown = TypeExpr::Generic("Foo".into(), vec![TypeExpr::Named("Int".into())]);
-        // Pre-C12 behaviour preserved: fallback is `TAG_INT` (0), not
-        // `TAG_UNKNOWN`. A future refactor may tighten this.
-        assert_eq!(type_expr_to_tag(&unknown), TAG_INT);
+        assert_eq!(type_expr_to_tag(&unknown), TAG_UNKNOWN);
     }
 
     #[test]

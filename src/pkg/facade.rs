@@ -91,7 +91,7 @@ pub fn resolve_facade_context(pkg_dir: &Path) -> Option<FacadeContext> {
 /// Performs two checks:
 /// 1. **Membership**: each symbol must be listed in `facade_exports`.
 /// 2. **Ghost**: each facade-matching symbol must actually be defined or
-///    imported in the entry module (not a phantom declaration).
+/// imported in the entry module (not a phantom declaration).
 ///
 /// Returns all violations found (not just the first).
 pub fn validate_facade(
@@ -236,8 +236,8 @@ pub fn collect_entry_effective_exports(entry_path: &Path) -> Result<BTreeSet<Str
 ///
 /// This includes:
 /// - Local definitions: FuncDef, Assignment, ClassLikeDef (BuchiPack / Mold /
-///   Inheritance — E30 Phase 7.5 / E30B-006 で 3 kind を統一登録)、EnumDef
-/// - Imported symbols: `>>> ./other.td => @(sym)` makes `sym` available
+/// Inheritance — 3 kind を統一登録)、EnumDef
+/// - Imported symbols: `>>>./other.td => @(sym)` makes `sym` available
 ///
 /// B11B-022: Import-sourced symbols are included so that re-exports are not
 /// falsely flagged as ghost symbols.

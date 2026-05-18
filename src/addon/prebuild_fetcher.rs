@@ -1,4 +1,4 @@
-//! Prebuild addon binary fetcher (RC1.5 Phase 2).
+//! Prebuild addon binary fetcher.
 //!
 //! Downloads prebuild `.so`/`.dylib`/`.dll` binaries from a URL,
 //! verifies SHA-256 integrity, and places them atomically into
@@ -104,7 +104,7 @@ fn cache_io(message: impl Into<String>) -> FetchError {
 /// Maximum allowed prebuild binary size (100 MB).
 const MAX_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 
-/// RC15B-106: HTTPS redirect limit.
+/// HTTPS redirect limit.
 ///
 /// `reqwest`'s default redirect policy follows up to 10 redirects. We pin
 /// that limit explicitly so the contract is visible in source code and
@@ -126,7 +126,7 @@ const HTTPS_MAX_REDIRECTS: usize = 10;
 ///
 /// - Once at the start with `(0, total)`.
 /// - Periodically as bytes are appended (throttled so it fires at most
-///   about 20 times per second regardless of chunk size).
+/// about 20 times per second regardless of chunk size).
 /// - Once at the end with `(final_size, Some(final_size))`.
 ///
 /// The callback must not panic; a panicking callback aborts the download.
@@ -141,7 +141,7 @@ fn noop_progress(_: u64, _: Option<u64>) {}
 /// Returns the addon cache root (`~/.taida/addon-cache`).
 ///
 /// Exposed to the crate so that CLI commands like `taida ingot cache clean`
-/// (RC15B-001) can locate the directory without duplicating the path
+/// can locate the directory without duplicating the path
 /// logic.
 pub(crate) fn cache_root() -> Result<PathBuf, FetchError> {
     let home = std::env::var("HOME")
@@ -170,7 +170,7 @@ pub struct AddonCacheCleanSummary {
 /// Remove every cached addon binary under `~/.taida/addon-cache`.
 ///
 /// This is the `taida ingot cache clean --addons` implementation for
-/// RC15B-001. Unlike the WASM runtime cache cleaner, addon binaries are
+///. Unlike the WASM runtime cache cleaner, addon binaries are
 /// keyed by `<org>/<name>/<version>/<target>/` so the directory tree is
 /// walked recursively. The walk is conservative: it only removes files
 /// whose basename matches the cached layout (`lib<name>.<ext>` or
@@ -263,7 +263,7 @@ fn sha256_sidecar(cache_dir: &Path) -> PathBuf {
 /// first CI release has computed real digests, and an addon author who
 /// forgets to move the handback row after first release leaves the
 /// placeholder frozen in the tag's tree forever (the tarball is
-/// immutable — see [C14B-012]).
+/// immutable — see []).
 ///
 /// The install resolver uses this check to route to the
 /// `addon.lock.toml` release-asset fallback when an addon.toml row is
@@ -279,7 +279,7 @@ fn sha256_sidecar(cache_dir: &Path) -> PathBuf {
 ///
 /// Matches:
 /// - `"sha256:0000000000000000000000000000000000000000000000000000000000000000"`
-///   (terminal `@a.1` shape)
+/// (terminal `@a.1` shape)
 /// - case-insensitive: both lowercase and uppercase hex zeros.
 pub fn is_placeholder_sha(value: &str) -> bool {
     let Some(hex) = value.strip_prefix("sha256:") else {
@@ -313,8 +313,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), FetchError> {
 
 /// Splits `"taida-lang/terminal"` into `("taida-lang", "terminal")`.
 ///
-/// # Security (RC15B-102)
-///
+/// # Security///
 /// Both `org` and `name` must match `[a-zA-Z0-9._-]+` to prevent
 /// cache directory traversal (e.g. `"../../../malicious"`).
 fn split_package_id(package_id: &str) -> Option<(&str, &str)> {
@@ -343,11 +342,11 @@ fn split_package_id(package_id: &str) -> Option<(&str, &str)> {
 /// 4. Writes a `.manifest-sha256` sidecar for cheap lookup.
 ///
 /// `package_id`: e.g. `"taida-lang/terminal"` (used to build cache path)
-/// `version`:    e.g. `"a.1"`
+/// `version`: e.g. `"a.1"`
 /// `target_triple`: canonical triple e.g. `"x86_64-unknown-linux-gnu"`
-/// `lib_name`:    cdylib stem e.g. `"terminal"`
-/// `ext`:         platform extension e.g. `"so"`
-/// `url`:         full download URL or `file://` path
+/// `lib_name`: cdylib stem e.g. `"terminal"`
+/// `ext`: platform extension e.g. `"so"`
+/// `url`: full download URL or `file://` path
 /// `expected_sha256`: `sha256:` prefix + 64 hex chars (the exact hex part)
 pub fn fetch_prebuild(
     package_id: &str,
@@ -372,7 +371,7 @@ pub fn fetch_prebuild(
     )
 }
 
-/// RC15B-002: progress-aware variant of [`fetch_prebuild`].
+/// progress-aware variant of [`fetch_prebuild`].
 ///
 /// The CLI calls this directly so it can render a byte-count progress
 /// indicator during long downloads. The `progress` callback is invoked
@@ -465,12 +464,11 @@ fn download_from_url(
 
 /// Copy a file from local path with SHA-256 verification.
 ///
-/// # Security (RC15B-101)
-///
+/// # Security///
 /// - Absolute paths are rejected to prevent reading arbitrary system files.
 /// - Path traversal components (`..`) are rejected before any filesystem
-///   access to prevent attacker-controlled manifest paths from escaping
-///   the intended directory scope.
+/// access to prevent attacker-controlled manifest paths from escaping
+/// the intended directory scope.
 /// - Only relative paths from the project root are allowed.
 fn download_from_file(
     file_path: &str,
@@ -524,7 +522,7 @@ fn download_from_file(
 
 /// Download from HTTPS URL with streaming SHA-256 verification.
 ///
-/// ## RC15B-106: redirect limits
+/// ##: redirect limits
 ///
 /// The client is built with an explicit
 /// [`reqwest::redirect::Policy::limited`] ceiling of
@@ -533,7 +531,7 @@ fn download_from_file(
 /// defend against redirect loops and to keep the contract between
 /// manifest author and the fetcher obvious.
 ///
-/// ## RC15B-002: progress callback
+/// ##: progress callback
 ///
 /// The supplied `progress` callback is invoked at the start of the
 /// download with the content length (if known), every ~64 KiB while
@@ -650,8 +648,8 @@ fn download_from_https(
 /// payload). Size-limited to 1 MB as a sanity check.
 ///
 /// `package_name`: `"org/name"` form, e.g. `"shijimic/terminal"`
-/// `version`:      exact tag, e.g. `"a.1"` (NO `v` prefix — Taida tags
-///                 are `a.1`, not `va.1`)
+/// `version`: exact tag, e.g. `"a.1"` (NO `v` prefix — Taida tags
+/// are `a.1`, not `va.1`)
 #[cfg(feature = "community")]
 pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<String, String> {
     let (org, name) = package_name
@@ -861,7 +859,7 @@ mod tests {
     ///
     /// We cannot use `tempfile::TempDir` directly because
     /// `download_from_file` enforces a relative-path-only policy on
-    /// `file://` URLs (RC15B-101), but `tempfile::TempDir` canonicalizes
+    /// `file://` URLs, but `tempfile::TempDir` canonicalizes
     /// its path to an absolute form. Instead we pick a unique relative
     /// directory name under CWD and clean it up on drop.
     struct RelativeTempDir {
@@ -878,7 +876,7 @@ mod tests {
     /// as a relative path so it can be used with the `file://`
     /// relative-path-only constraint enforced by `download_from_file`.
     ///
-    /// C12-8 (FB-24): each test gets its own unique directory rooted at
+    /// each test gets its own unique directory rooted at
     /// the crate CWD. The returned `RelativeTempDir` guard must be kept
     /// alive for the duration of the test; dropping it removes the
     /// whole directory, so sibling tests never share a parent and cannot

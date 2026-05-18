@@ -536,14 +536,14 @@ fn check_type_consistency(program: &Program, file: &str) -> Vec<VerifyFinding> {
 /// Detect mutual recursion (function call cycles) where at least one edge
 /// of the cycle is in **non-tail** position. Such a cycle is guaranteed to
 /// blow the stack at runtime and is therefore promoted to a compile-time
-/// error (C12-3 / FB-8).
+/// error ( / ).
 ///
 /// Tail-only mutual recursion is supported by the runtime (Interpreter /
 /// JS via the `mutual_tail_call_target` trampoline) and is left to pass
 /// with no finding from this check. The Native backend emits its own
 /// warning elsewhere — here we only enforce the "unbounded stack" hard
 /// rule. A separate `mutual-recursion-native-warning` pipeline can be
-/// added in a future Phase if needed.
+/// added in a future needed.
 ///
 /// Error code: `[E1614]`.
 fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
@@ -719,20 +719,19 @@ fn check_mutual_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
 /// `CompileTarget::is_native_lowering()` holds (gated by the
 /// `TypeChecker::check_mutual_recursion_errors` caller).
 ///
-/// A trampoline-based Native implementation is post-stable scope and
-/// tracked under `.dev/FUTURE_BLOCKERS.md` (gen-F additive option (a)).
+/// A trampoline-based Native implementation is future additive scope.
 fn check_mutual_recursion_native(program: &Program, _file: &str) -> Vec<VerifyFinding> {
     check_mutual_recursion_native_impl(program, _file)
 }
 
-/// F42 sweep [E0701]: direct (`A → A`) recursion outside the tail
+/// [E0701]: direct (`A → A`) recursion outside the tail
 /// position is rejected at compile time. Earlier generations only
 /// surfaced mutual cycles; deep direct non-tail recursion blew the
 /// stack at runtime instead of being caught. PHILOSOPHY I — strict
 /// behaviour, no implicit unbounded recursion. Mutual recursion is
 /// handled by `check_mutual_recursion`; the `If` mold tail-position
-/// allowance (F42B-009) will be folded into `tail_pos::collect_call_sites`
-/// when that blocker lands so this check inherits the same allow-list.
+/// allowance should be folded into `tail_pos::collect_call_sites` so this
+/// check inherits the same allow-list.
 fn check_direct_non_tail_recursion(program: &Program, file: &str) -> Vec<VerifyFinding> {
     let mut findings = Vec::new();
     for stmt in &program.statements {
@@ -1047,7 +1046,7 @@ fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
 
 // ── Check: unchecked-lax ─────────────────────────────
 
-/// Detect Lax[T] values used without >=> unmold or .has_value check.
+/// Detect Lax[T] values used without >=> unmold or.has_value check.
 ///
 /// Lax-returning expressions:
 /// - `Lax[...]()` mold instantiation
@@ -1089,7 +1088,7 @@ fn is_lax_producing_expr(expr: &Expr) -> bool {
     }
 }
 
-/// Check if an expression safely handles a Lax variable (via .has_value, .map, .flatMap, >=>).
+/// Check if an expression safely handles a Lax variable (via.has_value,.map,.flatMap, >=>).
 fn is_safe_lax_usage(expr: &Expr, var_name: &str) -> bool {
     match expr {
         // .has_value field access on the variable
@@ -2147,6 +2146,17 @@ mod tests {
         assert!(
             findings.is_empty(),
             "Different directions in separate statements should pass"
+        );
+    }
+
+    #[test]
+    fn test_direction_constraint_ignores_type_context_arrows() {
+        let program = parse_source("predicate: Int => :Bool <= _ x = x > 0");
+        let findings = check_direction_constraint(&program, "test.td");
+        assert!(
+            findings.is_empty(),
+            "Type annotation function arrows should not conflict with assignment direction: {:?}",
+            findings
         );
     }
 

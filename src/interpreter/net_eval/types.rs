@@ -1,12 +1,12 @@
-/// Type definitions for net_eval (C12B-025 mechanical split).
+/// Type definitions for net_eval (mechanical split).
 ///
 /// This file contains all type definitions extracted from net_eval.rs:
-///   - Writer state machine types (WriterState, StreamingWriter, ActiveStreamingWriter)
-///   - Body framing types (BodyEncoding, RequestBodyState, ChunkedDecoderState)
-///   - WebSocket frame types (WsFrame)
-///   - Connection stream types (ConnStream, HttpConnection, ConnReadResult, ConnAction)
-///   - Internal helper types (ChunkedCompactResult, ChunkedBodyError, ResponseFields)
-///   - Global atomic counters (NEXT_REQUEST_TOKEN, NEXT_WS_TOKEN)
+/// - Writer state machine types (WriterState, StreamingWriter, ActiveStreamingWriter)
+/// - Body framing types (BodyEncoding, RequestBodyState, ChunkedDecoderState)
+/// - WebSocket frame types (WsFrame)
+/// - Connection stream types (ConnStream, HttpConnection, ConnReadResult, ConnAction)
+/// - Internal helper types (ChunkedCompactResult, ChunkedBodyError, ResponseFields)
+/// - Global atomic counters (NEXT_REQUEST_TOKEN, NEXT_WS_TOKEN)
 use super::super::value::Value;
 use crate::net_surface::NET_RUNTIME_BUILTIN_NAMES;
 
@@ -155,7 +155,7 @@ impl StreamingWriter {
 
 /// RFC 7230 §3.2.6 token = 1*tchar.
 /// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." / "^"
-///       / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+/// "_" / "`" / "|" / "~" / DIGIT / ALPHA
 /// Underscore is allowed by RFC but reserved/rejected separately by the
 /// caller because reverse proxies vary on `underscores_in_headers`.
 pub(crate) fn is_rfc7230_token_byte(b: u8) -> bool {
@@ -182,14 +182,14 @@ pub(crate) fn is_rfc7230_field_value_byte(b: u8) -> bool {
 /// - The Interpreter is single-threaded (!Send).
 /// - The pointers are set before `call_function_with_values` and cleared after it returns.
 /// - The pointees (StreamingWriter, TcpStream) live on the stack in `dispatch_request`
-///   and outlive the handler call.
-/// - NB3-9: `borrowed` flag prevents re-entrant access to the raw pointers,
-///   eliminating the theoretical UB from nested streaming API calls (e.g.
-///   `writeChunk(writer, writeChunk(writer, "data"))`).
+/// and outlive the handler call.
+/// -: `borrowed` flag prevents re-entrant access to the raw pointers,
+/// eliminating the theoretical UB from nested streaming API calls (e.g.
+/// `writeChunk(writer, writeChunk(writer, "data"))`).
 pub(crate) struct ActiveStreamingWriter {
     pub writer: *mut StreamingWriter,
     pub stream: *mut ConnStream,
-    /// NB3-9: Re-entrancy guard. Set to true while a streaming API function
+    /// Re-entrancy guard. Set to true while a streaming API function
     /// holds `&mut *self.writer` / `&mut *self.stream`. If another streaming
     /// API call is attempted while this is true, it returns a RuntimeError
     /// instead of creating a second `&mut` to the same pointee.
@@ -200,7 +200,7 @@ pub(crate) struct ActiveStreamingWriter {
     pub body_state: *mut RequestBodyState,
     /// v4: WebSocket close state. True after wsClose has been sent.
     pub ws_closed: bool,
-    /// NB4-10: Connection-scoped WebSocket token for identity verification.
+    /// Connection-scoped WebSocket token for identity verification.
     /// Set when wsUpgrade succeeds; verified by wsSend/wsReceive/wsClose.
     pub ws_token: u64,
     /// v5: Received close code from peer's close frame.
@@ -324,7 +324,7 @@ impl BodyEncoding {
         matches!(self, BodyEncoding::Empty { .. })
     }
 
-    /// C12B-032: `true` when the `Empty` classification came from an
+    /// `true` when the `Empty` classification came from an
     /// explicit `Content-Length: 0` header (as opposed to the header
     /// being absent). Only meaningful for the `Empty` variant — the
     /// other two variants return `false`. Used by the HTTP/2 / v2
@@ -351,7 +351,7 @@ impl BodyEncoding {
 /// `readBodyChunk` can read incrementally from the TcpStream without
 /// buffering the full body.
 pub(crate) struct RequestBodyState {
-    /// C12-12 / FB-2: canonical internal body framing.
+    /// canonical internal body framing.
     /// Derived from request headers at parse time and used by the
     /// runtime read loop. The sibling `is_chunked` / `content_length`
     /// fields remain on the struct so existing consumers across
@@ -378,16 +378,16 @@ pub(crate) struct RequestBodyState {
     pub leftover_pos: usize,
     /// Chunked decoder state: pending partial chunk header bytes.
     pub chunked_state: ChunkedDecoderState,
-    /// NB4-7: Request-scoped token to verify that readBody*/readBodyChunk/readBodyAll
+    /// Request-scoped token to verify that readBody*/readBodyChunk/readBodyAll
     /// are called with the correct request pack (not a fake or stale pack).
     pub request_token: u64,
 }
 
-/// Global monotonic counter for generating unique request tokens (NB4-7).
+/// Global monotonic counter for generating unique request tokens.
 pub(crate) static NEXT_REQUEST_TOKEN: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
-/// NB4-10: Global monotonic counter for generating unique WebSocket connection tokens.
+/// Global monotonic counter for generating unique WebSocket connection tokens.
 pub(crate) static NEXT_WS_TOKEN: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -426,7 +426,7 @@ pub(crate) enum ChunkedDecoderState {
 impl RequestBodyState {
     /// Construct a `RequestBodyState` from parser signals.
     ///
-    /// C12B-032 / FB-2: `had_content_length_header` distinguishes
+    /// `had_content_length_header` distinguishes
     /// explicit `Content-Length: 0` (true) from an absent
     /// Content-Length header (false). Both produce identical wire
     /// behaviour on HTTP/1.1 (empty body) but the bit is preserved in
@@ -434,7 +434,7 @@ impl RequestBodyState {
     /// chunked-trailers / HTTP/2 DATA promotion path can reconstruct
     /// the correct framing without re-parsing the raw request.
     ///
-    /// Legacy callers that did not pre-C12B-032 thread the presence
+    /// Legacy callers that did not pre- thread the presence
     /// bit can use `RequestBodyState::new_legacy` below, which
     /// conservatively infers `had_content_length_header` from the
     /// numeric `content_length > 0` signal (the backward-compatible
@@ -468,11 +468,11 @@ impl RequestBodyState {
         }
     }
 
-    /// C12B-032 / FB-2: Legacy 3-arg constructor retained for unit
+    /// Legacy 3-arg constructor retained for unit
     /// tests and legacy callers that do not yet thread the
     /// `had_content_length_header` presence bit. Conservative
     /// behaviour: infer the bit from `content_length > 0`, which
-    /// matches the pre-C12B-032 classification.
+    /// matches the pre- classification.
     #[cfg(test)]
     pub(crate) fn new_legacy(is_chunked: bool, content_length: i64, leftover: Vec<u8>) -> Self {
         RequestBodyState::new(is_chunked, content_length, content_length > 0, leftover)
@@ -557,7 +557,7 @@ impl ConnStream {
     /// For TLS: send `close_notify`, flush all buffered ciphertext, then shutdown
     /// the TCP write half. For plaintext: shutdown TCP write half directly.
     ///
-    /// C12B-028: called on H2 `max_requests`-bounded exit so the kernel sends a
+    /// called on H2 `max_requests`-bounded exit so the kernel sends a
     /// clean FIN instead of an RST when the process terminates with pending
     /// response bytes still in-flight on the socket.
     pub(crate) fn shutdown_write_graceful(&mut self) -> std::io::Result<()> {
@@ -608,7 +608,7 @@ pub(crate) struct HttpConnection {
 /// Result of a non-blocking read attempt on a connection.
 pub(crate) enum ConnReadResult {
     /// Complete request head parsed: (fields, head_consumed, content_length, is_chunked, had_content_length_header).
-    /// C12B-032 / FB-2: `had_content_length_header` distinguishes the two
+    /// `had_content_length_header` distinguishes the two
     /// "empty body" sub-cases (explicit `Content-Length: 0` vs. absent
     /// header) so the internal `BodyEncoding` can preserve the bit.
     Ready(Vec<(String, Value)>, usize, i64, bool, bool),

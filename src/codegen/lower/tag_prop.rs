@@ -92,18 +92,18 @@ impl Lowering {
         }
     }
 
-    /// C18-2: If `expr` is (or produces) a known Enum value, return the
+    /// If `expr` is (or produces) a known Enum value, return the
     /// enum type name. Used by anonymous BuchiPack field registration so
-    /// `@(state <= HiveState:Running())` marks `state` as an Enum field
+    /// `@(state <= HiveState::Running())` marks `state` as an Enum field
     /// for jsonEncode variant-name output.
     ///
     /// Handled cases:
-    /// - `Enum:Variant()` literal
+    /// - `Enum::Variant()` literal
     /// - Identifier whose let-binding we previously recorded as Enum-typed
-    ///   (either by literal initializer, by type annotation `x: HiveState <= ...`,
-    ///   or by being copied from another known Enum variable).
+    /// (either by literal initializer, by type annotation `x: HiveState <= ...`,
+    /// or by being copied from another known Enum variable).
     /// - Function call to a user-defined function whose declared return
-    ///   type is a known Enum name.
+    /// type is a known Enum name.
     ///
     /// Deeper inference (through pipelines, condition branches, HOF
     /// callbacks) is intentionally skipped; the returned ordinal still
@@ -143,7 +143,7 @@ impl Lowering {
         self.field_type_tags.get(field_name).copied().unwrap_or(0)
     }
 
-    /// C18B-003 fix: Resolve a TypeDef field's annotated Enum type name,
+    /// fix: Resolve a TypeDef field's annotated Enum type name,
     /// or `None` if the field isn't declared as an Enum.
     ///
     /// Walks `type_field_types` for `type_name`, and if the annotation
@@ -332,7 +332,7 @@ impl Lowering {
         }
     }
 
-    /// C12B-022: Scan a function body for `TypeIs[ident, :PrimitiveType]()`
+    /// Scan a function body for `TypeIs[ident,:PrimitiveType]()`
     /// where `ident` is a parameter name. Used to mark callees that need
     /// full arg tag propagation (including INT=0 default) at the call site.
     pub(super) fn body_uses_typeis_on_ident(
@@ -397,7 +397,7 @@ impl Lowering {
         }
     }
 
-    /// C12B-038: Predicate helper extracted from `lower/expr.rs` so the
+    /// Predicate helper extracted from `lower/expr.rs` so the
     /// stdout/stderr `_with_tag` dispatch site reads as a single `match`
     /// on compile-time state. Returns true when `arg` is `Expr::Ident(n, _)`
     /// for a parameter whose runtime tag is available in `param_tag_vars`.
@@ -442,9 +442,9 @@ impl Lowering {
         self.emit_call_arg_tags_full(func, args, false);
     }
 
-    /// C12B-022: Variant of `emit_call_arg_tags` that also emits the
+    /// Variant of `emit_call_arg_tags` that also emits the
     /// default INT=0 tag when `include_int_default` is true. Used for
-    /// callees that do `TypeIs[param, :PrimitiveType]()` — the tag
+    /// callees that do `TypeIs[param,:PrimitiveType]()` — the tag
     /// frame initialises to 0xFF (UNKNOWN), so without an explicit
     /// write the callee reads UNKNOWN and the runtime match returns
     /// false even for Int arguments.
@@ -548,7 +548,7 @@ impl Lowering {
         }
     }
 
-    /// C12B-038: Lower the stdout/stderr `_with_tag` dispatch. Extracted from
+    /// Lower the stdout/stderr `_with_tag` dispatch. Extracted from
     /// `lower/expr.rs::lower_func_call` so the two-path dispatch (compile-time
     /// Str fast path vs. polymorphic `_with_tag`) lives in a single, grep-able
     /// helper.
@@ -558,26 +558,26 @@ impl Lowering {
     /// stdlib runtime symbol (e.g. `"taida_io_stdout"`) used for the Str fast
     /// path; the `_with_tag` variant is derived internally.
     ///
-    /// # Two-path behaviour (C12B-016 contract)
+    /// # Two-path behaviour (contract)
     ///
     /// 1. **Compile-time Str fast path** — when `expr_type_tag(arg) == TAG_STR`
-    ///    the plain `taida_io_stdout(char*)` call is emitted. This is the hot
-    ///    path for `stdout("literal")` and keeps wasm-min Hello World small
-    ///    (the `_with_tag` symbol stays unreferenced for STR-only programs
-    ///    and wasm-ld `--gc-sections` drops it).
+    /// the plain `taida_io_stdout(char*)` call is emitted. This is the hot
+    /// path for `stdout("literal")` and keeps wasm-min Hello World small
+    /// (the `_with_tag` symbol stays unreferenced for STR-only programs
+    /// and wasm-ld `--gc-sections` drops it).
     /// 2. **Polymorphic dispatch path** — every other tag (Bool / Int / Float /
-    ///    Pack / List / UNKNOWN) reaches `taida_io_{stdout,stderr}_with_tag`
-    ///    with the compile-time tag (or `-1` for UNKNOWN). The runtime does
-    ///    the final formatting.
+    /// Pack / List / UNKNOWN) reaches `taida_io_{stdout,stderr}_with_tag`
+    /// with the compile-time tag (or `-1` for UNKNOWN). The runtime does
+    /// the final formatting.
     ///
-    /// # C12-11 (FB-1) Ident-param coverage
+    /// # () Ident-param coverage
     ///
     /// When `arg` is an `Expr::Ident` whose name lives in `param_tag_vars`,
     /// the caller's runtime tag IrVar is threaded through `_with_tag` so that
     /// Bool values flowing through function parameters are rendered as
     /// `"true"/"false"` instead of `"1"/"0"` on Native.
     ///
-    /// # B11B-004 FieldAccess double-eval guard
+    /// # FieldAccess double-eval guard
     ///
     /// For a FieldAccess whose compile-time tag is UNKNOWN, the parent object
     /// is evaluated exactly once and both the field value and its runtime tag

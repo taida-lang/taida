@@ -1,4 +1,4 @@
-//! C27B-018 Option B (@c.27 Round 3 wf018B): codegen lifetime tracking pass.
+//! Option B (@c.27 Round 3 wf018B): codegen lifetime tracking pass.
 //!
 //! ## 背景
 //!
@@ -6,11 +6,11 @@
 //! `taida_release` IR を emit せず、関数末尾の一括 Release に頼っていた。
 //! しかし関数末尾の Release は以下のケースで実行されない:
 //!
-//!   1. **末尾再帰 (TCO)**: `iter(n - 1)` が `TailCall` に置換され entry
-//!      block にジャンプするため、本体末尾の Release 列を skip する。
-//!   2. **CondBranch arm 内 binding**: arm 内で生まれて arm 内で死ぬ binding
-//!      は `current_heap_vars` に登録される pass がそもそも辿り着かない
-//!      (current_heap_vars は top-level Assignment 経由でしか push されない)。
+//! 1. **末尾再帰 (TCO)**: `iter(n - 1)` が `TailCall` に置換され entry
+//! block にジャンプするため、本体末尾の Release 列を skip する。
+//! 2. **CondBranch arm 内 binding**: arm 内で生まれて arm 内で死ぬ binding
+//! は `current_heap_vars` に登録される pass がそもそも辿り着かない
+//! (current_heap_vars は top-level Assignment 経由でしか push されない)。
 //!
 //! その結果、`iter n = | _ |> s <= Repeat["x", 512](); iter(n - 1)` 形の
 //! 1M iter native binary は peak RSS が **533 MB** まで膨らんでいた。
@@ -20,28 +20,28 @@
 //! Lowering 完了後・rc_opt 適用前に `IrFunction.body` (および全 nested
 //! `CondArm.body`) を走査し、各 `DefVar(name, value_var)` について:
 //!
-//!   1. その body 内で `name` が以降に `UseVar` 参照されない、
-//!   2. 関数の他 (outer / sibling arm / nested arm) の本体でも参照されない、
-//!   3. 関数戻り値式から到達不能、
-//!   4. `value_var` が以降の Retain/Release/Call/Pack/List 操作に渡されない、
+//! 1. その body 内で `name` が以降に `UseVar` 参照されない、
+//! 2. 関数の他 (outer / sibling arm / nested arm) の本体でも参照されない、
+//! 3. 関数戻り値式から到達不能、
+//! 4. `value_var` が以降の Retain/Release/Call/Pack/List 操作に渡されない、
 //!
 //! のすべてを満たす場合、`DefVar` 直後に `IrInst::ReleaseAuto(value_var)`
 //! を挿入する。`ReleaseAuto` は `taida_release_any` runtime helper を呼び、
 //! heap-string (hidden header) と Pack/List/Closure (magic header) を
 //! runtime に判定して dispatch する。
 //!
-//! ## Phase 1 (このパスがカバーする範囲)
+//! ## (このパスがカバーする範囲)
 //!
 //! - 関数 body 直下の linear binding
 //! - CondArm body 直下の linear binding (各 arm 独立に処理)
 //! - escape 解析: binding が後続のいずれかに該当すると release 抑制:
-//!     - 同じ name を `UseVar` で参照する instruction が後続に存在する
-//!     - 同じ value_var を引数とする `Retain` / `Release` / `ReleaseAuto`
-//!       / `Call` / `CallUser` / `CallIndirect` / `PackSet` / `MakeClosure`
-//!       / `Return` / `TailCall` が後続に存在する (= 値が逃げる)
-//!     - DefVar より「前」に同名 binding が存在する (rebinding は危険)
+//! - 同じ name を `UseVar` で参照する instruction が後続に存在する
+//! - 同じ value_var を引数とする `Retain` / `Release` / `ReleaseAuto`
+//! `Call` / `CallUser` / `CallIndirect` / `PackSet` / `MakeClosure`
+//! `Return` / `TailCall` が後続に存在する (= 値が逃げる)
+//! - DefVar より「前」に同名 binding が存在する (rebinding は危険)
 //!
-//! Phase 2/3 (関数戻り値・分岐合流の精密化) は将来拡張。
+//! (関数戻り値・分岐合流の精密化) は将来拡張。
 
 use super::ir::*;
 use std::collections::HashSet;
@@ -142,7 +142,7 @@ fn process_body(body: &mut Vec<IrInst>, function_end_releases: &std::collections
     }
 }
 
-/// `body[start_idx + 1 ..]` および各 nested CondArm.body 内に
+/// `body[start_idx + 1..]` および各 nested CondArm.body 内に
 /// `name` への UseVar 参照、または `value_var` 自体を引数に取る命令が
 /// 存在するかを返す。
 fn is_referenced_after(body: &[IrInst], start_idx: usize, name: &str, value_var: IrVar) -> bool {

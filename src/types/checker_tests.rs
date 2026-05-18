@@ -244,7 +244,7 @@ fn test_http_protocol_import_alias_registers_enum() {
 
 #[test]
 fn test_http_protocol_js_h2_accepted_after_enum_unification() {
-    // F42B-013: HttpProtocol was unified into a single Enum surface. The
+    // HttpProtocol was unified into a single Enum surface. The
     // legacy `[E1611]` "JS backend rejects H2" diagnostic was removed
     // because per-backend protocol support is now documented in
     // docs/api/net.md §7 (backend support table) rather than enforced
@@ -260,7 +260,7 @@ fn test_http_protocol_js_h2_accepted_after_enum_unification() {
     );
     assert!(
         !errors.iter().any(|err| err.message.contains("[E1611]")),
-        "F42B-013: JS-targeted check must no longer emit [E1611] for HttpProtocol:H2(); per-backend support is documented in docs/api/net.md §7. Got: {:?}",
+        "JS-targeted check must no longer emit [E1611] for HttpProtocol:H2(); per-backend support is documented in docs/api/net.md §7. Got: {:?}",
         errors
     );
 }
@@ -1502,8 +1502,8 @@ Expanded[T, U] => Child[T] = @()"#;
 
 // ── E30 Phase 3 / Lock-B Sub-B1 / Sub-B3 / E30B-008 confirmation tests ──
 
-/// E30 Lock-B Sub-B1: zero-arity sugar `Pilot[] = @(...)` ≡ `Pilot = @(...)`
-/// checker 側の受理確認 (parser Sub-step 2.2 で既に受理、checker でも arity 0 として
+/// zero-arity sugar `Pilot[] = @(...)` ≡ `Pilot = @(...)`
+/// checker 側の受理確認 (parser で既に受理、checker でも arity 0 として
 /// 通常の class-like 定義と同等に処理される)。
 #[test]
 fn test_e30_lock_b_sub_b1_zero_arity_sugar_class_like_accepted_by_checker() {
@@ -1517,7 +1517,7 @@ rei <= Pilot(name <= "Rei", age <= 14)"#;
     );
 }
 
-/// E30 Lock-B Sub-B1: zero-arity 明示と省略形が等価に扱われること。
+/// zero-arity 明示と省略形が等価に扱われること。
 #[test]
 fn test_e30_lock_b_sub_b1_zero_arity_sugar_equivalence() {
     let with_brackets = r#"Pilot[] = @(name: Str)
@@ -1538,7 +1538,7 @@ rei <= Pilot(name <= "Rei")"#;
     );
 }
 
-/// E30 Lock-B Sub-B3: 親型 arity に対し子側で **追加** の型引数を持つことは OK
+/// 親型 arity に対し子側で **追加** の型引数を持つことは OK
 /// (`CustomType[T, U] => CustomSubType[T, U, V] = @(...)`)。
 #[test]
 fn test_e30_lock_b_sub_b3_child_can_add_type_params_after_parent_prefix() {
@@ -1552,9 +1552,9 @@ Result[T, P <= :T => :Bool] => CustomResult[T, P <= :T => :Bool, V] = @(meta: V)
     );
 }
 
-/// E30 Lock-B Sub-B3: 親型 arity 不一致 (`shrink`) は `[E1407]` umbrella で reject。
+/// 親型 arity 不一致 (`shrink`) は `[E1407]` umbrella で reject。
 /// 既存 `test_generic_inheritance_cannot_shrink_parent_header_arity` と意味的に同じだが、
-/// E30 Phase 3 で umbrella 化された `[E1407]` 新意味の pin として独立追加。
+/// umbrella 化された `[E1407]` 新意味の pin として独立追加。
 #[test]
 fn test_e30_lock_b_sub_b3_parent_arity_mismatch_shrink_rejected_via_e1407_umbrella() {
     let source = r#"Mold[T] => Result[T, P <= :T => :Bool] = @(value: T)
@@ -1566,12 +1566,12 @@ Result[T, P <= :T => :Bool] => Bad[T] = @()"#;
                 && e.message
                     .contains("cannot shrink header arity below parent")
         }),
-        "Expected `[E1407]` umbrella (Lock-B Sub-B3 親型適用 arity mismatch) to fire on shrink, got: {:?}",
+        "Expected `[E1407]` umbrella for parent-type arity mismatch to fire on shrink, got: {:?}",
         errors
     );
 }
 
-/// E30 Phase 3 / E30B-008: 旧 `[E1410]` 意味 (InheritanceDef 子フィールド型互換違反)
+/// 旧 `[E1410]` 意味 (InheritanceDef 子フィールド型互換違反)
 /// が `[E1411]` に番号移動されたことを pin。`[E1410]` は新意味 (declare-only function
 /// field requires defaultFn) 用に予約され、本 Phase では発火しない。
 #[test]
@@ -1583,12 +1583,12 @@ Parent => Child = @(value: Str)"#;
         errors
             .iter()
             .any(|e| { e.message.contains("[E1411]") && e.message.contains("redefines field") }),
-        "Expected `[E1411]` (旧 [E1410] の意味、E30 Phase 3 で番号移動) to fire on incompatible field redefinition, got: {:?}",
+        "Expected `[E1411]` to fire on incompatible field redefinition, got: {:?}",
         errors
     );
     assert!(
         !errors.iter().any(|e| e.message.contains("[E1410]")),
-        "Expected `[E1410]` to NOT fire (reserved for new meaning, E30 Phase 6 で full 発火 path 実装予定), got: {:?}",
+        "Expected `[E1410]` to NOT fire for incompatible field redefinition, got: {:?}",
         errors
     );
 }
@@ -3019,7 +3019,7 @@ fn test_c13_1_tail_binding_yields_bound_value() {
         .collect();
     assert!(
         e1601.is_empty(),
-        "C13-1: `x <= 42` as tail binding should satisfy `=> :Int`, got: {:?}",
+        "`x <= 42` as tail binding should satisfy `=> :Int`, got: {:?}",
         e1601
     );
 }
@@ -3050,7 +3050,7 @@ fn test_c13_1_func_body_tail_forward_assignment_ok() {
         .collect();
     assert!(
         e1601.is_empty(),
-        "C13-1: `one + 2 => total` tail yields Int, got: {:?}",
+        "`one + 2 => total` tail yields Int, got: {:?}",
         e1601
     );
 }
@@ -3068,7 +3068,7 @@ fn test_c13_1_error_ceiling_tail_binding_ok() {
         .collect();
     assert!(
         e1601.is_empty(),
-        "C13-1: handler tail `fallback <= \"default\"` yields Str, got: {:?}",
+        "handler tail `fallback <= \"default\"` yields Str, got: {:?}",
         e1601
     );
 }
@@ -3087,7 +3087,7 @@ fn test_c13_1_pipeline_intermediate_bind_and_forward_ok() {
         .collect();
     assert!(
         e1502.is_empty(),
-        "C13-1: intermediate pipeline bind must not raise E1502, got: {:?}",
+        "intermediate pipeline bind must not raise E1502, got: {:?}",
         e1502
     );
 }
@@ -3844,7 +3844,7 @@ fn test_c12_2_tostring_int_with_arg_rejected() {
     );
 }
 
-/// C12-2c: the checker must catch `.toString(arg)` even when the method
+/// the checker must catch `.toString(arg)` even when the method
 /// call is nested inside a builtin argument (e.g. `stdout(...)`). Before
 /// this fix, only bind-forms like `s <= n.toString(16)` were caught.
 #[test]
@@ -3862,7 +3862,7 @@ fn test_c12_2_tostring_with_arg_in_builtin_rejected() {
     );
 }
 
-/// E32B-018: the recursion into builtin args must reject user-facing
+/// the recursion into builtin args must reject user-facing
 /// internal-field access (`__type`) with E1960 instead of letting it
 /// through as an introspection shortcut.
 #[test]
@@ -3884,7 +3884,7 @@ fn test_c12_2_builtin_arg_recursion_rejects_internal_field_access() {
     );
 }
 
-/// C12-2b: `.toString()` without arguments on primitives is valid and
+/// `.toString()` without arguments on primitives is valid and
 /// returns Str. No errors should be produced.
 #[test]
 fn test_c12_2_tostring_no_args_accepted() {
@@ -3908,8 +3908,8 @@ fn test_c12_2_tostring_no_args_accepted() {
     );
 }
 
-/// C12-2b: `.toString()` on List / BuchiPack must type-check to Str.
-/// Before C12-2 the interpreter's List had no toString entry and JS
+/// `.toString()` on List / BuchiPack must type-check to Str.
+/// Before the interpreter's List had no toString entry and JS
 /// fell back to `[object Object]`; now all three backends agree.
 #[test]
 fn test_c12_2_tostring_composite_return_type_is_str() {
@@ -4061,7 +4061,7 @@ loopB n =
 
 // ─── C12-5 Phase 5 — FB-18: `Value::Unit` elimination on stdout/stderr ───
 
-/// C12-5d: `stdout(...)` return type is now `Type::Int` (byte count),
+/// `stdout(...)` return type is now `Type::Int` (byte count),
 /// not `Type::Unit`. The checker's builtin table must reflect that so
 /// `n <= stdout("hi")` infers `n: Int` and subsequent arithmetic
 /// typechecks without any special coercion.
@@ -4082,7 +4082,7 @@ stdout(total)
     );
 }
 
-/// C12-5d: `stderr(...)` return type is `Type::Int` as well so the
+/// `stderr(...)` return type is `Type::Int` as well so the
 /// two builtins remain symmetric (both write, both report bytes).
 #[test]
 fn test_c12_5_stderr_return_type_is_int() {
@@ -4101,7 +4101,7 @@ stdout(total)
     );
 }
 
-/// F42 sweep: `exit(...)` now returns `Type::Int` (annotation-only, since
+/// `exit(...)` now returns `Type::Int` (annotation-only, since
 /// the function never actually returns normally). PHILOSOPHY I forbids
 /// `Type::Unit` from leaking to Taida surface; `exit` therefore declares
 /// `:Int` and the post-exit code is unreachable (dead code). A dedicated
@@ -4119,12 +4119,12 @@ fn test_f42_exit_return_type_is_int() {
     checker.check_program(&program);
     assert!(
         checker.errors.is_empty(),
-        "F42 sweep: exit must return Type::Int so dead-code arithmetic still type-checks, got: {:?}",
+        "exit must return Type::Int so dead-code arithmetic still type-checks, got: {:?}",
         checker.errors
     );
 }
 
-/// F42 sweep [E1520] R1: `:Unit` as a function return type annotation must
+/// [E1520] R1: `:Unit` as a function return type annotation must
 /// be rejected on Taida surface. PHILOSOPHY I の系「値の不在は値の不在」.
 #[test]
 fn test_f42_e1520_r1_unit_return_type_rejected() {
@@ -4144,7 +4144,7 @@ fn test_f42_e1520_r1_unit_return_type_rejected() {
     );
 }
 
-/// F42 sweep [E1520] R1: `:Void` is treated identically to `:Unit`.
+/// [E1520] R1: `:Void` is treated identically to `:Unit`.
 #[test]
 fn test_f42_e1520_r1_void_return_type_rejected() {
     let mut checker = TypeChecker::new();
@@ -4163,7 +4163,7 @@ fn test_f42_e1520_r1_void_return_type_rejected() {
     );
 }
 
-/// F42 sweep [E1520] R1 対称版: `:Unit` / `:Void` / `:@()` as a parameter
+/// [E1520] R1 対称版: `:Unit` / `:Void` / `:@()` as a parameter
 /// type annotation must be rejected on Taida surface.
 #[test]
 fn test_f42_e1520_r1_symmetric_unit_param_type_rejected() {
@@ -4183,7 +4183,7 @@ fn test_f42_e1520_r1_symmetric_unit_param_type_rejected() {
     );
 }
 
-/// F42 sweep [E1520] R1: meaningful return types (`:Int`, `:Bool`, etc.)
+/// [E1520] R1: meaningful return types (`:Int`, `:Bool`, etc.)
 /// must NOT trigger the diagnostic — only "value-absence" types do.
 #[test]
 fn test_f42_e1520_r1_meaningful_return_types_accepted() {
@@ -4206,7 +4206,7 @@ g y: Bool =
     );
 }
 
-/// F42 sweep [E1520] R2: function body's final value resolves to an empty
+/// [E1520] R2: function body's final value resolves to an empty
 /// BuchiPack `@()` with no return annotation. Closes the bypass.
 #[test]
 fn test_f42_e1520_r2_empty_buchi_tail_rejected() {
@@ -4225,7 +4225,7 @@ fn test_f42_e1520_r2_empty_buchi_tail_rejected() {
     );
 }
 
-/// F42 sweep [E1524]: condition branch without a default arm
+/// [E1524]: condition branch without a default arm
 /// (`| _ |>` or `| true |>`) is rejected so every input has a
 /// defined result. PHILOSOPHY IV.
 #[test]
@@ -4247,7 +4247,7 @@ fn test_f42_e1524_cond_branch_without_default_rejected() {
     );
 }
 
-/// F42 sweep [E1524]: condition branch with `| _ |>` default arm is
+/// [E1524]: condition branch with `| _ |>` default arm is
 /// accepted. Regression guard.
 #[test]
 fn test_f42_e1524_cond_branch_with_underscore_default_accepted() {
@@ -4268,7 +4268,7 @@ fn test_f42_e1524_cond_branch_with_underscore_default_accepted() {
     );
 }
 
-/// F42 sweep [E1524]: condition branch with `| true |>` default arm
+/// [E1524]: condition branch with `| true |>` default arm
 /// is accepted (literal-true is recognised as a default).
 #[test]
 fn test_f42_e1524_cond_branch_with_true_default_accepted() {
@@ -4289,11 +4289,11 @@ fn test_f42_e1524_cond_branch_with_true_default_accepted() {
     );
 }
 
-/// F42 sweep [E1501] (F42B-011 Phase 2 lock = B / overload 禁止維持):
-/// same-name MoldDef with different arity must be rejected. Phase 2
+/// [E1501]: overload remains forbidden:
+/// same-name MoldDef with different arity must be rejected.
 /// lock assumed this was already enforced via the existing collision
 /// check, but the `ClassLikeKind::Mold` branch was missing the guard.
-/// Phase 3 follow-up restored parity with the EnumDef / BuchiPack
+/// follow-up restored parity with the EnumDef / BuchiPack
 /// branches.
 #[test]
 fn test_f42b011_mold_def_same_name_collision_rejected() {
@@ -4312,7 +4312,7 @@ Mold[T] => Box[T, U] = @(value: T, extra: U)
     );
 }
 
-/// F42 sweep [E1523]: built-in type name written as a mold header
+/// [E1523]: built-in type name written as a mold header
 /// type variable (`Mold[Int]`) is rejected because it silently masks
 /// the user's intent of a concrete type argument.
 #[test]
@@ -4330,7 +4330,7 @@ fn test_f42_e1523_mold_header_builtin_type_name_rejected() {
     );
 }
 
-/// F42 sweep [E1523]: a regular alphabetic type variable name (`T`,
+/// [E1523]: a regular alphabetic type variable name (`T`,
 /// `U`, etc.) must still parse and check cleanly. Regression guard.
 #[test]
 fn test_f42_e1523_mold_header_normal_type_variable_accepted() {
@@ -4347,7 +4347,7 @@ fn test_f42_e1523_mold_header_normal_type_variable_accepted() {
     );
 }
 
-/// F42 sweep [E1523]: built-in mold names also trigger the diagnostic
+/// [E1523]: built-in mold names also trigger the diagnostic
 /// when used as a header type variable (`Mold[Lax]`).
 #[test]
 fn test_f42_e1523_mold_header_builtin_mold_name_rejected() {
@@ -4364,7 +4364,7 @@ fn test_f42_e1523_mold_header_builtin_mold_name_rejected() {
     );
 }
 
-/// F42 sweep [E1520] R2 拡張: 中間変数経由の抜け道もこの helper で塞ぐ
+/// [E1520] R2 拡張: 中間変数経由の抜け道もこの helper で塞ぐ
 /// — `x <= @() => x` 形式でも reject。
 #[test]
 fn test_f42_e1520_r2_extended_intermediate_var_rejected() {
@@ -4384,7 +4384,7 @@ fn test_f42_e1520_r2_extended_intermediate_var_rejected() {
     );
 }
 
-/// F42 sweep [E1520] Round 5 (Codex 第 4 ラウンド指摘): Cage runner の
+/// [E1520] Cage runner の
 /// Out 型引数として `@()` literal を書く抜け道を塞ぐ。`type_arg_expr_to_type`
 /// が `Expr::BuchiPack` を `Type::BuchiPack` に正しく変換するようになるまで、
 /// `JSGet[@["x"], @()]()` 等は errors=0 で通っていた。
@@ -4406,7 +4406,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5: 同様に `JSCall[..., @()]()` も reject。
+/// [E1520] R5: 同様に `JSCall[..., @()]()` も reject。
 #[test]
 fn test_f42_e1520_r5_cage_runner_jscall_empty_pack_out_rejected() {
     let mut checker = TypeChecker::new();
@@ -4425,7 +4425,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5: `JSNew[..., @()]()` も reject。
+/// [E1520] R5: `JSNew[..., @()]()` も reject。
 #[test]
 fn test_f42_e1520_r5_cage_runner_jsnew_empty_pack_out_rejected() {
     let mut checker = TypeChecker::new();
@@ -4444,7 +4444,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5: 子系統 `JSRilla[@()]()` の Out も reject。
+/// [E1520] R5: 子系統 `JSRilla[@()]()` の Out も reject。
 #[test]
 fn test_f42_e1520_r5_jsrilla_empty_pack_out_rejected() {
     let mut checker = TypeChecker::new();
@@ -4463,7 +4463,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5: 関数戻り型注釈での nested empty pack も再帰
+/// [E1520] R5: 関数戻り型注釈での nested empty pack も再帰
 /// 検出される (`contains_unit_like_type` 再帰版の regression guard)。
 /// Cage runner Out 引数経由の generic nested form (`Async[Unit]`,
 /// `Result[Unit, Str]` 等) は別途 R5-follow up テスト 3 件で carry。
@@ -4485,7 +4485,7 @@ fn test_f42_e1520_r5_function_return_nested_empty_pack_rejected() {
     );
 }
 
-/// F42 sweep [E1520] R5 follow-up (Codex 第 5 ラウンド指摘): Cage runner Out
+/// [E1520] R5 follow-up: Cage runner Out
 /// に書かれた `Async[Unit]` を `[E1520]` で reject する。`type_arg_expr_to_type`
 /// の `Expr::MoldInst` arm 追加までは `Type::Unknown` に落ちて検出網を
 /// すり抜けていた。
@@ -4507,7 +4507,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5 follow-up: `JSRilla[Async[Unit]]()` も同じ経路で
+/// [E1520] R5 follow-up: `JSRilla[Async[Unit]]()` も同じ経路で
 /// reject される (子系統 Cage runner Out)。
 #[test]
 fn test_f42_e1520_r5_jsrilla_async_unit_out_rejected() {
@@ -4527,7 +4527,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5 follow-up: `Result[Unit, Str]` 等の更にネストした
+/// [E1520] R5 follow-up: `Result[Unit, Str]` 等の更にネストした
 /// generic 形も `contains_unit_like_type` の再帰で reject される。
 /// `Optional[Void]` / `List[Unit]` 系も同経路で塞がれることを確認する
 /// (`Generic` arm 再帰呼び出しの regression guard)。
@@ -4549,7 +4549,7 @@ stdout("unreachable")
     );
 }
 
-/// F42 sweep [E1520] R5 follow-up (Codex 第 5 ラウンド最終ゲート指摘):
+/// [E1520] R5 follow-up:
 /// `CageRilla[JS, Async[Unit]]` 自身を Cage runner として使う形でも、
 /// `Expr::MoldInst` arm 経由で type-arg が `Type::Generic("Async", [Unit])`
 /// に解決されて E1520 で reject される。MoldInst arm の再帰 fan-out が
@@ -4572,10 +4572,10 @@ stdout("unreachable")
     );
 }
 
-/// C12-5d: `stdout` in a pipeline — the checker sees the RHS of
+/// `stdout` in a pipeline — the checker sees the RHS of
 /// `<=` as `stdout("hi")` and must type the bound variable as Int.
 /// This is the direct analog of the `n <= stdout("hi")` pattern from
-/// FB-18's motivating example.
+/// 's motivating example.
 #[test]
 fn test_c12_5_stdout_in_let_binding_infers_int() {
     let mut checker = TypeChecker::new();
@@ -4598,7 +4598,7 @@ fn test_c12_5_stdout_in_let_binding_infers_int() {
     );
 }
 
-/// C12-5d: same for stderr — locks the builtin table entry.
+/// same for stderr — locks the builtin table entry.
 #[test]
 fn test_c12_5_stderr_in_let_binding_infers_int() {
     let mut checker = TypeChecker::new();
@@ -4614,18 +4614,14 @@ fn test_c12_5_stderr_in_let_binding_infers_int() {
         span,
     );
     let ty = checker.infer_expr_type(&call);
-    assert_eq!(
-        ty,
-        Type::Int,
-        "stderr(...) must infer as Type::Int (C12-5 FB-18)"
-    );
+    assert_eq!(ty, Type::Int, "stderr(...) must infer as Type::Int");
 }
 
 // ────────────────────────────────────────────────────────────────
 // C12B-031: Str.match / Str.search require :Regex argument
 // ────────────────────────────────────────────────────────────────
 
-/// C12B-031: `str.match("literal")` must be rejected at type-check
+/// `str.match("literal")` must be rejected at type-check
 /// time because `match` is a Regex-only API. Prior to the fix the
 /// checker accepted a Str argument and the runtime behaviour diverged:
 /// Interpreter / JS threw at runtime, Native silently returned an
@@ -4647,7 +4643,7 @@ stdout(res.toString())
     );
 }
 
-/// C12B-031: Mirror of the above for `search`.
+/// Mirror of the above for `search`.
 #[test]
 fn test_c12b_031_str_search_with_string_literal_rejected() {
     let source = r#"idx <= "hello".search("l")
@@ -4664,9 +4660,9 @@ stdout(idx.toString())
     );
 }
 
-/// C12B-031 positive case: `str.match(Regex(...))` must still be
+/// positive case: `str.match(Regex(...))` must still be
 /// accepted — the tightening must not regress the canonical Regex
-/// overload path introduced in C12-6.
+/// overload path introduced in.
 #[test]
 fn test_c12b_031_str_match_with_regex_constructor_accepted() {
     let source = r#"r <= Regex("h")
@@ -4683,7 +4679,7 @@ stdout(res.full)
     );
 }
 
-/// C12B-031 positive case: Mirror of the above for `search`.
+/// positive case: Mirror of the above for `search`.
 #[test]
 fn test_c12b_031_str_search_with_regex_constructor_accepted() {
     let source = r#"r <= Regex("l")
@@ -4755,7 +4751,7 @@ fn check_file(path: &std::path::Path) -> (TypeChecker, Vec<TypeError>) {
     (checker, errors)
 }
 
-/// C18-1 happy path: `>>> ./m.td => @(Color)` followed by `Color:Red()`
+/// happy path: `>>>./m.td => @(Color)` followed by `Color:Red()`
 /// no longer triggers [E1608]. The imported enum is registered in the
 /// importer's type registry with the exporting module's variant order.
 #[test]
@@ -4772,7 +4768,7 @@ fn test_c18_1_enum_cross_module_resolves() {
     let (checker, errors) = check_file(&consumer);
     assert!(
         !errors.iter().any(|e| e.message.contains("[E1608]")),
-        "E1608 should not fire after C18-1, got: {:?}",
+        "E1608 should not fire for an allowed `type` field override, got: {:?}",
         errors
     );
     assert!(
@@ -4789,7 +4785,7 @@ fn test_c18_1_enum_cross_module_resolves() {
     );
 }
 
-/// C18-1: `>>> ./m.td => @(Color: Paint)` aliases the enum under the local
+/// `>>>./m.td => @(Color: Paint)` aliases the enum under the local
 /// name, mirroring the interpreter behaviour.
 #[test]
 fn test_c18_1_enum_cross_module_alias() {
@@ -4812,7 +4808,7 @@ fn test_c18_1_enum_cross_module_alias() {
     assert!(!checker.registry.is_enum_type("Color"));
 }
 
-/// C18-1: Local redefinition whose variant order differs from the exporter
+/// Local redefinition whose variant order differs from the exporter
 /// is rejected with [E1618]. The match case is `test_c18_1_enum_cross_module_resolves`
 /// (implicitly: no local redefinition at all, so no mismatch).
 #[test]
@@ -4836,7 +4832,7 @@ fn test_c18_1_enum_variant_order_mismatch_rejected_e1618() {
     );
 }
 
-/// C18-1: Local redefinition with the **same** variant order is accepted
+/// Local redefinition with the **same** variant order is accepted
 /// (no [E1618]), because the order matches the source of truth. Users may
 /// keep local redefinitions during transition without silent bugs.
 #[test]
@@ -4860,8 +4856,8 @@ fn test_c18_1_enum_variant_order_matching_accepted() {
     );
 }
 
-/// C18-1: `[E1608]` still fires when the enum is used without any import.
-/// (Regression guard — Phase 1 must not silently accept unknown enums.)
+/// `[E1608]` still fires when the enum is used without any import.
+/// (Regression guard — must not silently accept unknown enums.)
 #[test]
 fn test_c18_1_unknown_enum_without_import_still_rejected() {
     let (_checker, errors) = check("c <= Color:Red()");
@@ -4872,9 +4868,9 @@ fn test_c18_1_unknown_enum_without_import_still_rejected() {
     );
 }
 
-/// C18-1 (#6): Function whose return type is an Enum imported from the
-/// same module round-trips cleanly. This pins that ROOT-5 (function
-/// boundary contract) disappears once ROOT-1 is fixed.
+/// (#6): Function whose return type is an Enum imported from the
+/// same module round-trips cleanly. This pins that (function
+/// boundary contract) disappears once is fixed.
 #[test]
 fn test_c18_1_function_returning_imported_enum_is_usable() {
     let dir = C18TempDir::new("fnret");
@@ -4993,7 +4989,7 @@ viaValue <= f(10)\n",
 
 // ── C19B-002: runInteractive / execShellInteractive Gorillax[@(code)] pin ──
 
-/// E32B-018: `runInteractive` must be unwrapped through unmolding;
+/// `runInteractive` must be unwrapped through unmolding;
 /// direct `.__value` access is compiler-internal and rejected.
 #[test]
 fn test_c19b_002_run_interactive_rejects_stdout_field() {
@@ -5182,7 +5178,7 @@ fn test_c19b_002_captured_run_bare_rejects_direct_internal_value() {
 }
 
 /// Error-subtype `__type` access is no longer an introspection escape
-/// hatch; E32B-018 rejects every user-facing `__*` field read.
+/// hatch; rejects every user-facing `__*` field read.
 #[test]
 fn test_c19b_002_error_inheriting_named_type_type_access_rejected() {
     let source = "Error => AppError = @(code: Int)\n\
@@ -5228,9 +5224,9 @@ fn test_e30b_002_mold_with_declare_only_fn_field_check_passes() {
 }
 
 /// Mold instantiation must NOT count the declare-only function field
-/// as a required positional `[]` argument. Before Phase 4 the user
+/// as a required positional `[]` argument. Before the user
 /// would see `[E1402] requires 3 positional [] argument(s)` because
-/// `transform` was treated as required. After Phase 4 only the regular
+/// `transform` was treated as required. After only the regular
 /// fields (`filling` + `name`) are required positional.
 #[test]
 fn test_e30b_002_mold_with_declare_only_fn_field_instantiate_no_e1402() {
@@ -5268,7 +5264,7 @@ f <= Foo[1, "x"](transform <= _ x = x)"#;
 /// Error-inheritance variant accepts a declare-only function field
 /// (recovery hook). Instantiation only requires the regular fields.
 ///
-/// F42 sweep update: the original fixture used `recovery: Unit => :Unit`,
+/// The original fixture used `recovery: Unit => :Unit`,
 /// which now triggers `[E1520]` (PHILOSOPHY I forbids `:Unit` annotations).
 /// The fixture has been updated to use meaningful concrete types
 /// (`recovery: Str => :Bool`) — the field's purpose (a hook the user
@@ -5293,7 +5289,7 @@ err <= NotFound(msg <= "missing")"#;
 /// required for `[]` positional binding (the declare-only fn field
 /// `greet` is excluded from the required-positional count). Here we
 /// pass `filling` (`7`) and the inherited `item` (`42`) — without
-/// Phase 4 the user would also need to supply a third `[]` arg for
+/// the user would also need to supply a third `[]` arg for
 /// `greet`, which is wrong for an interface declaration.
 #[test]
 fn test_e30b_002_inheritance_with_declare_only_fn_field_instantiate_ok() {
@@ -5313,7 +5309,7 @@ g <= Greeter[7, 42]()"#;
 
 /// Regression guard: a Mold definition with **only** a declare-only
 /// function field still surfaces unbound type-parameter errors when
-/// the type-arg count exceeds the parent + non-fn-field count. Phase 4
+/// the type-arg count exceeds the parent + non-fn-field count.
 /// must not silently consume the extra type-arg with the declare-only
 /// fn field (see `validate_mold_extension_bindings`).
 #[test]
@@ -5338,7 +5334,7 @@ fn test_e30b_002_mold_extension_bindings_ignore_declare_only_fn_field() {
 
 use std::collections::HashSet;
 
-/// Lock-D: primitive return types are always generatable.
+/// primitive return types are always generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_primitive() {
     let registry = TypeRegistry::new();
@@ -5352,7 +5348,7 @@ fn test_e30b_004_default_fn_generatable_primitive() {
     }
 }
 
-/// Lock-D: registered class-like types (TypeDef / Mold / Error) are
+/// registered class-like types (TypeDef / Mold / Error) are
 /// generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_typedef() {
@@ -5367,7 +5363,7 @@ fn test_e30b_004_default_fn_generatable_typedef() {
     );
 }
 
-/// Lock-D: function return type recursion — `Int => :Str` ok because Str
+/// function return type recursion — `Int => :Str` ok because Str
 /// is generatable; `Int => :OpaqueExternal` is not generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_function_recursive() {
@@ -5395,7 +5391,7 @@ fn test_e30b_004_default_fn_generatable_function_recursive() {
     );
 }
 
-/// Lock-D: Async[T] is generatable iff T is generatable.
+/// Async[T] is generatable iff T is generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_async() {
     let registry = TypeRegistry::new();
@@ -5414,7 +5410,7 @@ fn test_e30b_004_default_fn_generatable_async() {
     assert!(!default_fn_generatable(&bad, &registry, &mut visiting));
 }
 
-/// Lock-D: opaque / unknown alias is not generatable.
+/// opaque / unknown alias is not generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_unknown_alias_is_false() {
     let registry = TypeRegistry::new();
@@ -5426,7 +5422,7 @@ fn test_e30b_004_default_fn_generatable_unknown_alias_is_false() {
     );
 }
 
-/// Lock-D: cycle guard — recursive self-referential type is generatable.
+/// cycle guard — recursive self-referential type is generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_recursive_cycle_is_true() {
     // `Node = @(value: Int, next: Node)` — recursive but generatable
@@ -5443,7 +5439,7 @@ fn test_e30b_004_default_fn_generatable_recursive_cycle_is_true() {
     );
 }
 
-/// Lock-D: BuchiPack inline is generatable iff all fields are generatable.
+/// BuchiPack inline is generatable iff all fields are generatable.
 #[test]
 fn test_e30b_004_default_fn_generatable_buchi_pack() {
     let registry = TypeRegistry::new();

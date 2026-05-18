@@ -6,7 +6,7 @@
 /// ```taida
 /// >>> taida-lang/os@1.0.0
 /// >>> taida-community/http@2.1.0
-/// >>> ./main.td => @(func)
+/// >>>./main.td => @(func)
 /// <<<@1.0.0 @(capitalize, truncate)
 /// ```
 ///
@@ -22,7 +22,7 @@
 /// name <= "my-project"
 /// version <= "0.1.0"
 /// deps <= @(
-///   utils <= @(path <= "../shared/utils")
+/// utils <= @(path <= "../shared/utils")
 /// )
 /// ```
 use std::collections::BTreeMap;
@@ -85,9 +85,9 @@ impl Manifest {
     ///
     /// Detects format automatically:
     /// - `[packages."org/name"]` tables are extracted before Taida parsing and
-    ///   carry pinned source package integrity.
+    /// carry pinned source package integrity.
     /// - If the AST contains versioned imports (`>>> pkg@ver`) or versioned exports
-    ///   (`<<<@ver`), use new format extraction.
+    /// (`<<<@ver`), use new format extraction.
     /// - Otherwise, fall back to legacy format (assignments only, reject side-effects).
     pub fn parse(source: &str, root_dir: &Path) -> Result<Self, String> {
         let (table_deps, source_without_tables) = extract_package_tables(source)?;
@@ -470,8 +470,8 @@ fn is_valid_version_label(s: &str) -> bool {
 
 /// Parse "org/name" from an import path.
 /// "taida-lang/string-utils" -> Some(("taida-lang", "string-utils"))
-/// "string-utils"            -> Some(("", "string-utils"))
-/// "./main.td"               -> None (local path)
+/// "string-utils" -> Some(("", "string-utils"))
+/// "./main.td" -> None (local path)
 fn parse_org_name(path: &str) -> Option<(String, String)> {
     if path.starts_with('.') || path.starts_with('/') {
         return None;
@@ -1052,7 +1052,7 @@ integrity = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
     /// A duplicate `[packages."x"]` after a `>>>` import of the same package
     /// must also reject — the import branch is detected first
-    /// (`declared both ... table and a >>> import`), but a third occurrence
+    /// (`declared both... table and a >>> import`), but a third occurrence
     /// after parsing a second table must still trip the table-duplicate path.
     #[test]
     fn test_package_table_duplicate_after_partial_parse() {

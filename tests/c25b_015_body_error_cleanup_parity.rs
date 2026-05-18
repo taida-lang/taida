@@ -252,7 +252,7 @@ fn c25b_015_trial_does_not_leak_private_tag_to_top_level_interpreter() {
     let tmp = unique_temp("c25b015_leak_check", "dir");
     fs::create_dir_all(&tmp).expect("mkdir");
     let src = "\
-Error => MyError = @()
+Error => MyError = @(detail: Str <= \"\")
 
 throwOops msg =
   MyError(type <= \"MyError\", message <= msg).throw()

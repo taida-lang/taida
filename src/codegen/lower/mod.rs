@@ -18,7 +18,7 @@
 //! facade types, free helpers). The `impl Lowering` method set lives in
 //! the submodules `core` / `imports` / `stdlib` / `net` / `os` /
 //! `molds` / `stmt` / `expr` / `infer` / `tag_prop` per placement
-//! table §2 (extended by C13-2).
+//! table §2 (extended by ).
 
 use super::ir::*;
 use crate::parser::*;
@@ -77,22 +77,22 @@ pub struct Lowering {
     field_names: std::collections::HashSet<String>,
     /// フィールド名 → 型タグ (0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool, 5=Enum)
     field_type_tags: std::collections::HashMap<String, i64>,
-    /// C18-2: フィールド名 → Enum variants CSV (例: "Red,Green,Blue")。
+    /// フィールド名 → Enum variants CSV (例: "Red,Green,Blue")。
     /// `taida_register_field_enum` 呼び出しで native runtime に渡され、
     /// jsonEncode が variant-name Str 出力に使用する。
     field_enum_descriptors: std::collections::HashMap<String, String>,
-    /// C18-2: 変数名 → その変数が保持する Enum 型名。
-    /// `a <= HiveState:Running()` のような束縛を検出して記録し、後で
+    /// 変数名 → その変数が保持する Enum 型名。
+    /// `a <= HiveState::Running()` のような束縛を検出して記録し、後で
     /// `@(state <= a)` のような anonymous BuchiPack 構築時に field を
     /// Enum-tagged として登録できるようにする。型注釈付き束縛
     /// (`state: HiveState <= ...`) も同様に記録する。
     enum_vars: std::collections::HashMap<String, String>,
-    /// C18-2: 関数名 → 宣言戻り値が Enum 型名である場合の型名。
+    /// 関数名 → 宣言戻り値が Enum 型名である場合の型名。
     /// `pickColor n = ... => :HiveState` を検出して、呼び出しサイトで
     /// `@(state <= pickColor(n))` の field を Enum-tagged として登録する。
     enum_returning_funcs: std::collections::HashMap<String, String>,
     /// Mold 定義レジストリ（custom mold lowering 用）。
-    /// (E30 Phase 2 Sub-step 2.1) `MoldDef` 廃止に伴い `ClassLikeDef` を保持し、
+    /// `MoldDef` 廃止に伴い `ClassLikeDef` を保持し、
     /// 登録時は `ClassLikeKind::Mold` のみを許容する。
     pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::ClassLikeDef>,
     /// Enum definitions: enum_name -> variants in ordinal order
@@ -103,7 +103,7 @@ pub struct Lowering {
     pub(crate) mold_solidify_funcs: std::collections::HashMap<String, String>,
     /// 戻り値が Str のユーザー定義関数名セット
     string_returning_funcs: std::collections::HashSet<String>,
-    /// C12B-022: 関数本体で `TypeIs[param, :T]()` を呼び出す関数。
+    /// 関数本体で `TypeIs[param,:T]()` を呼び出す関数。
     /// 呼び出し側で param tag を full propagation する必要がある
     /// (INT=0 も明示的に `taida_set_call_arg_tag` する)
     param_type_check_funcs: std::collections::HashSet<String>,
@@ -119,7 +119,7 @@ pub struct Lowering {
     list_vars: std::collections::HashSet<String>,
     /// List を返すユーザー定義関数名セット（retain-on-store 型タグ推論用）
     list_returning_funcs: std::collections::HashSet<String>,
-    /// C21-4: List 変数の要素型名 (`"Float"` / `"Int"` / `"Str"` / `"Bool"`)。
+    /// List 変数の要素型名 (`"Float"` / `"Int"` / `"Str"` / `"Bool"`)。
     /// `a: @[Float]` のような型注釈付きパラメータ / 代入から取り出し、
     /// `a.get(i) >=> av` の unmold 結果型推論 (= `av` を float_vars に入れる) に使う。
     /// これが無いと内積計算 `av * bv` が `taida_int_mul` に降り、Float bits が破壊される。
@@ -175,24 +175,24 @@ pub struct Lowering {
     /// NB-14: When true, the current CallUser is in tail position (return value).
     /// Skip get_return_tag to preserve C compiler tail call optimization (WASM/mutual recursion).
     in_tail_call_return: bool,
-    /// NB3-4: Variable alias tracking for identity assignments (e.g., `h <= handler`).
+    /// Variable alias tracking for identity assignments (e.g., `h <= handler`).
     /// Maps target variable name to source variable name.
     var_aliases: std::collections::HashMap<String, String>,
-    /// NB3-4: Lambda parameter count tracking for lambda assignments (e.g., `h <= req, writer => @(...)`).
+    /// Lambda parameter count tracking for lambda assignments (e.g., `h <= req, writer => @(...)`).
     /// Maps variable name to the number of lambda parameters.
     lambda_param_counts: std::collections::HashMap<String, usize>,
-    /// NB3-4 fix: Parameter names whose type was inferred from return-type annotation
+    /// fix: Parameter names whose type was inferred from return-type annotation
     /// (not from explicit type annotations or literal assignments).
     /// These are unreliable for callable_type_tag because the parameter might actually
     /// be a function/closure passed at runtime.
     return_type_inferred_params: std::collections::HashSet<String>,
-    /// RC2.5: addon function reference table.
+    /// Addon function reference table.
     /// Maps an imported symbol (alias or original name) to the addon dispatch
     /// metadata needed by `lower_func_call` to emit a `taida_addon_call` IR
     /// call. Populated in `lower_addon_import` during the `Statement::Import`
     /// pass.
     addon_func_refs: std::collections::HashMap<String, AddonFuncRef>,
-    /// RC2.5 Phase 2: facade-declared pure-Taida value bindings pulled in
+    /// Facade-declared pure-Taida value bindings pulled in
     /// through an addon-backed package import. Each entry is an assignment
     /// of the form `Name <= <expr>` (e.g. `KeyKind <= @(Char <= 0, ...)`)
     /// that the facade file exports. They are replayed at the top of
@@ -202,7 +202,7 @@ pub struct Lowering {
     /// Keyed by the local binding name. The order field controls
     /// replay ordering so facade authors can express value dependencies.
     addon_facade_pack_bindings: Vec<(String, Expr)>,
-    /// C25B-030 Phase 1E-β: facade-declared FuncDefs harvested across
+    /// β: facade-declared FuncDefs harvested across
     /// every addon-backed package imported by the current lowering
     /// run.
     ///
@@ -227,13 +227,13 @@ pub struct Lowering {
     /// only the first entry wins. The loader canonicalises paths
     /// before deriving the mangle so this check is O(1).
     addon_facade_funcs: Vec<(String, FuncDef, String)>,
-    /// C25B-030 Phase 1E-β: set of mangled facade link symbols
+    /// β: set of mangled facade link symbols
     /// already collected. Used by the facade loader for O(1)
     /// dedup when the same addon is referenced by more than one
     /// import statement (`>>> taida-lang/terminal => @(A)` then
     /// `>>> taida-lang/terminal => @(B)`).
     addon_facade_mangled: std::collections::HashSet<String>,
-    /// RC2.5: the addon backend this lowering run targets. Only `Native`
+    /// The addon backend this lowering run targets. Only `Native`
     /// accepts addon imports; all WASM targets and JS/Interpreter path
     /// through the backend-policy error with a deterministic message.
     /// Defaults to `Native` so existing Cranelift callers do not need to
@@ -247,7 +247,7 @@ pub struct Lowering {
     pub(crate) typed_expr_table: crate::types::TypedExprTable,
 }
 
-/// RC2.5: metadata for a single addon function import.
+/// Metadata for a single addon function import.
 ///
 /// `package_id` / `cdylib_path` / `function_name` become static strings
 /// emitted into `.rodata` via `IrInst::ConstStr`; `arity` is enforced at
@@ -260,8 +260,7 @@ struct AddonFuncRef {
     arity: u32,
 }
 
-/// RC2.5 Phase 2 / C25B-030 Phase 1E-α + 1E-β: shallow summary of an
-/// addon facade file.
+/// Shallow summary of an addon facade file.
 ///
 /// Facades are parsed for top-level bindings and passed through to
 /// the native lowering pipeline. The following constructs are
@@ -269,25 +268,25 @@ struct AddonFuncRef {
 ///
 /// - Alias assignments `Name <= lowercaseFn` (`aliases`)
 /// - Pure-Taida pack assignments `Name <= @(...)` (`pack_bindings`)
-/// - Facade-internal relative imports `>>> ./X.td => @(syms...)`
-///   (C25B-030 Phase 1E-α) — the referenced file is recursively
-///   loaded under the same rules and its exports for the requested
-///   symbols are merged into the parent summary
+/// - Facade-internal relative imports `>>> ./X.td => @(syms, ...)`;
+/// the referenced file is recursively loaded under the same rules and
+/// its exports for the requested symbols are merged into the parent
+/// summary
 /// - **Function definitions** `Name args = body => :Type`
-///   (C25B-030 Phase 1E-β) — lowered as sibling IR functions under
-///   a mangled symbol derived from the addon package id so they do
-///   not collide with user-defined functions of the same name.
+/// lowered as sibling IR functions under a mangled symbol derived from
+/// the addon package id so they do not collide with user-defined
+/// functions of the same name.
 /// - A single `<<<` export clause (`exports`)
 ///
 /// TypeDef / EnumDef / MoldDef statements are still rejected
 /// deterministically; the public addon authoring contract only
 /// requires FuncDef + Assignment + Import. Lifting those remaining
-/// constraints is tracked as C25B-030 Phase 1E-γ (module-graph
-/// integration and full sibling module linkage via
-/// `src/addon/facade.rs`).
-/// C25B-030 Phase 1G: the codegen's addon-facade view is now a
-/// thin wrapper around the shared `crate::addon::facade::
-/// AddonFacadeSummary` produced by the backend-agnostic loader.
+/// constraints requires module-graph integration and full sibling
+/// module linkage via `src/addon/facade.rs`.
+///
+/// The codegen's addon-facade view is a thin wrapper around the shared
+/// [`crate::addon::facade::AddonFacadeSummary`] produced by the
+/// backend-agnostic loader.
 /// We keep the private `struct` shape instead of a `pub use` to
 /// preserve the lowering crate's encapsulation (downstream code
 /// should route through `lower_addon_import`, not build facade

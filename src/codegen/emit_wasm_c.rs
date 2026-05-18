@@ -1,6 +1,6 @@
 /// wasm-min C emitter -- Taida IR を C コードに変換し、clang で wasm32 object を生成
 ///
-/// wasm-min は Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang -> wasm32 .o
+/// wasm-min は Cranelift の ISA に wasm32 が存在しないため、IR -> C -> clang -> wasm32.o
 /// というパイプラインを採用する。サポートする IR 命令:
 ///
 /// - ConstInt, ConstFloat, ConstBool, ConstStr
@@ -131,7 +131,7 @@ fn validate_net_http_api_for_wasm(
     Ok(())
 }
 
-/// C12B-023: early-out validation for the Regex type / builtins on WASM profiles.
+/// early-out validation for the Regex type / builtins on WASM profiles.
 ///
 /// The wasm runtime (`runtime_core_wasm/02_containers.inc.c`) only ships
 /// *stubs* for `taida_regex_new` / `taida_str_match_regex` /
@@ -150,7 +150,7 @@ fn validate_net_http_api_for_wasm(
 /// - `taida_str_search_regex` — emitted for `str.search(re)`
 /// - `taida_str_search_regex_lax` — emitted for `str.searchLax(re)`
 ///
-/// `str.replace(Regex(...), ...)` / `str.replaceAll(Regex(...), ...)` go
+/// `str.replace(Regex(...),...)` / `str.replaceAll(Regex(...),...)` go
 /// through the `_poly` dispatchers which are safe for plain-Str callers; the
 /// `Regex(...)` construction on the arg side already emits `taida_regex_new`,
 /// so those cases are caught transitively. `searchLax` is listed explicitly
@@ -1900,7 +1900,7 @@ fn contains_tail_call(insts: &[IrInst]) -> bool {
     false
 }
 
-/// パラメータ名からインデックスを生成（IrVar はパラメータ順に 0, 1, 2, ...）
+/// パラメータ名からインデックスを生成（IrVar はパラメータ順に 0, 1, 2,...）
 fn param_to_var_idx(_name: &str, idx: usize) -> u32 {
     idx as u32
 }
@@ -1971,7 +1971,7 @@ mod tests {
         }
     }
 
-    /// E37: wasm-wasi accepts httpServe and rejects the remaining net HTTP API.
+    /// wasm-wasi accepts httpServe and rejects the remaining net HTTP API.
     #[test]
     fn test_wasm_wasi_accepts_http_serve_and_rejects_other_net_http_api() {
         let serve = runtime_func_prototype("taida_net_http_serve", WasmProfile::Wasi)
@@ -2037,7 +2037,7 @@ mod tests {
         }
     }
 
-    /// E37: wasm-full follows the wasm-wasi superset rule for httpServe.
+    /// wasm-full follows the wasm-wasi superset rule for httpServe.
     #[test]
     fn test_wasm_full_accepts_http_serve_and_rejects_other_net_http_api() {
         let serve = runtime_func_prototype("taida_net_http_serve", WasmProfile::Full)
@@ -2074,7 +2074,7 @@ mod tests {
         }
     }
 
-    /// NET-6f / E37: unsupported net API error messages contain profile name.
+    /// Unsupported net API error messages contain the profile name.
     #[test]
     fn test_net_http_error_contains_profile_name() {
         let profiles = [
@@ -2128,7 +2128,7 @@ mod tests {
         }
     }
 
-    /// NET-6 / E37: wasm-full does not silently accept net functions through
+    /// wasm-full does not silently accept net functions through
     /// wasm_full_runtime_prototype. httpServe is enabled by the explicit
     /// wasm-wasi / wasm-full arm in runtime_func_prototype.
     #[test]

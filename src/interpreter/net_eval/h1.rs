@@ -1,6 +1,6 @@
 //! HTTP/1.1 serve loop, connection dispatcher, and HTTP accessor helpers
 //! for the Taida interpreter's net package, split out from
-//! `net_eval/mod.rs` (C13-3).
+//! `net_eval/mod.rs`.
 //!
 //! Owns the `impl Interpreter` methods that implement the HTTP/1.1 accept
 //! path (`eval_http_serve`), the per-connection non-blocking request head
@@ -13,7 +13,7 @@
 //! `protocol: "h3"` is negotiated, this module calls `self.serve_h2(...)`
 //! or `self.serve_h3(...)` and returns.
 //!
-//! C13-3 note: pure mechanical move — no behavior change.
+//! note: pure mechanical move — no behavior change.
 
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
@@ -30,15 +30,15 @@ use super::types::{
 use crate::net_surface::http_protocol_ordinal_to_wire;
 use crate::parser::Expr;
 
-/// C26B-022 Step 2 (wE Round 3, 2026-04-24): HTTP wire byte upper
+/// Step 2 (wE Round 3, 2026-04-24): HTTP wire byte upper
 /// limits enforced at the parser boundary so that downstream Native
 /// codegen fixed-size stack buffers (`char method[16]` / `char path[2048]`
-/// / `char authority[256]`) can never silently truncate.
+/// `char authority[256]`) can never silently truncate.
 ///
 /// Option confirmation: **Step 3 Option B** (parser-level reject with
 /// `400 Bad Request`). Option A (dynamic buffers) was discarded at
-/// Phase 0 Design Lock because it conflicts with the clone-heavy
-/// abstraction direction of C26B-018/020/024.
+/// Design Lock because it conflicts with the clone-heavy
+/// abstraction direction of /020/024.
 ///
 /// These constants are the authoritative limits for 3-backend parity;
 /// the Native C codegen struct field sizes must match (see
@@ -98,7 +98,7 @@ fn span_equals_ascii_ci(raw: &[u8], start: usize, len: usize, reference: &[u8]) 
         .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-/// C26B-022 Step 2 (wJ Round 4, 2026-04-24 authority extension):
+/// Step 2 (wJ Round 4, 2026-04-24 authority extension):
 /// Check if method / path / Host-header-value exceeds its wire-limit.
 ///
 /// Returns `Some(&'static str)` with a short descriptor of the violating

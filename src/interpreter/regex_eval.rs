@@ -1,4 +1,4 @@
-//! C12 Phase 6 (FB-5 Phase 2-3) — Regex type support.
+//! Regex type support.
 //!
 //! The Taida `:Regex` type is represented as a typed BuchiPack with
 //! `__type <= "Regex"`, `pattern <= Str`, `flags <= Str`. The constructor
@@ -9,18 +9,18 @@
 //!
 //! **Philosophy alignment**:
 //! * I. No `null`/`undefined`: construction with an invalid pattern yields
-//!   an `Error` BuchiPack (via `RuntimeError::Throw`), never a silent
-//!   undefined state.
+//! an `Error` BuchiPack (via `RuntimeError::Throw`), never a silent
+//! undefined state.
 //! * II. "Bag" form: `Regex(...)` is a BuchiPack, introspectable via
-//!   `typeof(r) == "Regex"` and `r.pattern` / `r.flags`.
+//! `typeof(r) == "Regex"` and `r.pattern` / `r.flags`.
 //! * No implicit coercion: Str methods dispatch explicitly by detecting
-//!   the BuchiPack `__type` tag; everything else is a literal string match.
+//! the BuchiPack `__type` tag; everything else is a literal string match.
 //!
-//! **Escape semantics** (design lock `C12_DESIGN.md` §C12-6):
+//! **Escape semantics** (design lock `C12_DESIGN.md` §):
 //! * `\d` / `\w` / `\s` / `\b` / `\D` / `\W` / `\S` / `\B`
 //! * `\x{HH}` / `\u{HHHH}` (via Rust `regex` crate defaults)
 //! * JS `$&` / `$$` / `$1` meta-syntax in the replacement string is
-//!   disabled: replacements are applied literally.
+//! disabled: replacements are applied literally.
 //!
 //! **Flags**: `i` (case-insensitive), `m` (multiline `^`/`$`), `s`
 //! (dotall). `g` is implicit — `replace` replaces first, `replaceAll`
@@ -36,7 +36,7 @@ use std::collections::HashMap;
 /// Regex values.
 pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
 
-/// C12B-036 / C25B-024: per-thread cache for compiled regex objects.
+/// per-thread cache for compiled regex objects.
 ///
 /// Each Str-method overload (`replace`, `replaceAll`, `split`, `match`,
 /// `search`) and `build_regex_value` used to call [`compile`] — which
@@ -48,29 +48,29 @@ pub(crate) const REGEX_TYPE_TAG: &str = "Regex";
 ///
 /// Notes:
 /// * Thread-local: `Regex` is `Sync + Send` but we keep the cache
-///   private per thread to avoid locking on the hot path. The worst
-///   case is a small per-thread memory footprint.
-/// * **C25B-024 migration (2026-04-23)**: the C12B-036 VecDeque-based
-///   FIFO cache was replaced with a `HashMap<(String, String), Regex>`
-///   plus an eviction-order `VecDeque<(String, String)>` to keep
-///   lookups at O(1) while preserving the fixed capacity of 64.
-///   Previous behaviour walked the entire VecDeque on every cache
-///   lookup, which dominated regex-heavy loops (lexers, tokenisers,
-///   template substitution). Per-lookup cost drops from O(capacity)
-///   to O(1). FIFO semantics are preserved so saturation behaviour
-///   is identical.
+/// private per thread to avoid locking on the hot path. The worst
+/// case is a small per-thread memory footprint.
+/// * ** migration (2026-04-23)**: the VecDeque-based
+/// FIFO cache was replaced with a `HashMap<(String, String), Regex>`
+/// plus an eviction-order `VecDeque<(String, String)>` to keep
+/// lookups at O(1) while preserving the fixed capacity of 64.
+/// Previous behaviour walked the entire VecDeque on every cache
+/// lookup, which dominated regex-heavy loops (lexers, tokenisers,
+/// template substitution). Per-lookup cost drops from O(capacity)
+/// to O(1). FIFO semantics are preserved so saturation behaviour
+/// is identical.
 /// * Capacity 64 mirrors the JS runtime's `__TAIDA_REGEX_CACHE_CAPACITY`
-///   so the three backends behave similarly under memory pressure.
+/// so the three backends behave similarly under memory pressure.
 /// * Invalid patterns are never cached: [`compile`] returns `Err`
-///   before reaching [`cached_compile`].
+/// before reaching [`cached_compile`].
 const REGEX_CACHE_CAPACITY: usize = 64;
 
 thread_local! {
-    /// The compiled regex table, keyed on (pattern, flags).
+ /// The compiled regex table, keyed on (pattern, flags).
     static REGEX_CACHE: RefCell<HashMap<(String, String), Regex>> =
         RefCell::new(HashMap::with_capacity(REGEX_CACHE_CAPACITY));
-    /// FIFO eviction order — the key at the front is the next to evict
-    /// when the table reaches capacity.
+ /// FIFO eviction order — the key at the front is the next to evict
+ /// when the table reaches capacity.
     static REGEX_CACHE_ORDER: RefCell<std::collections::VecDeque<(String, String)>> =
         RefCell::new(std::collections::VecDeque::with_capacity(REGEX_CACHE_CAPACITY));
 }
@@ -184,7 +184,7 @@ fn compile(pattern: &str, flags: &str) -> Result<Regex, String> {
 
 /// Apply `replace` (first match only) using the Regex semantics. The
 /// replacement string is treated as a literal — no `$1` / `$&`
-/// expansion — to match JS / Native parity (see design lock §C12-6).
+/// expansion — to match JS / Native parity (see design lock §).
 pub(crate) fn replace_first(
     s: &str,
     pattern: &str,

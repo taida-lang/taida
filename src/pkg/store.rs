@@ -5,15 +5,15 @@
 /// Layout:
 /// ```text
 /// ~/.taida/store/{org}/{name}/{gen}.{num}[.{label}]/
-///   main.td
-///   mod.td
-///   packages.tdm       <- used for transitive dependency resolution
-///   ...
-///   .taida_installed   <- download completion marker
-///   _meta.toml         <- C17 sidecar: provenance + stale-check metadata
+/// main.td
+/// mod.td
+/// packages.tdm <- used for transitive dependency resolution
+///...
+///.taida_installed <- download completion marker
+/// _meta.toml <- sidecar: provenance + stale-check metadata
 /// ```
 ///
-/// ## C17 sidecar (`_meta.toml`)
+/// ## Store sidecar (`_meta.toml`)
 ///
 /// The package store writes a provenance sidecar alongside `.taida_installed`.
 /// The sidecar records the tarball SHA-256, the resolved commit SHA (filled
@@ -178,19 +178,18 @@ impl GlobalStore {
     ///
     /// Downloads the tarball from `https://github.com/{org}/{name}/archive/refs/tags/{version}.tar.gz`,
     /// extracts it to `~/.taida/store/{org}/{name}/{version}/`, creates a
-    /// `.taida_installed` marker, and writes a C17 `_meta.toml` provenance
+    /// `.taida_installed` marker, and writes a `_meta.toml` provenance
     /// sidecar with the tarball SHA-256.
     pub fn fetch_and_cache(&self, org: &str, name: &str, version: &str) -> Result<PathBuf, String> {
         self.fetch_and_cache_with_meta(org, name, version, None, None)
     }
 
-    /// C17-2: Remove a cached package directory so the next
+    /// Remove a cached package directory so the next
     /// `fetch_and_cache*` call re-downloads and re-extracts it.
     ///
     /// This is the shared invalidation primitive used by:
-    /// - `taida ingot cache clean --store-pkg` (Phase 3)
-    ///
-    /// C17B-001: the stale-detection path and `--force-refresh` no longer
+    /// - `taida ingot cache clean --store-pkg`    ///
+    /// the stale-detection path and `--force-refresh` no longer
     /// call this directly; they use the stage/commit/rollback trio
     /// (`stage_invalidation` + `commit_invalidation` + `rollback_invalidation`)
     /// so a failed fetch can restore the previous install.
@@ -235,7 +234,7 @@ impl GlobalStore {
     // The staging name embeds PID + nanosecond timestamp so concurrent
     // processes do not collide on the same suffix.
 
-    /// C17B-001: Stage an existing package directory aside so a subsequent
+    /// Stage an existing package directory aside so a subsequent
     /// `fetch_and_cache_with_meta` can write a fresh extraction. Returns
     /// the backup path (if one was created), or `None` if nothing was
     /// cached.
@@ -279,7 +278,7 @@ impl GlobalStore {
         Ok(Some(stash))
     }
 
-    /// C17B-001: Finalise a successful refresh by removing the staged
+    /// Finalise a successful refresh by removing the staged
     /// backup. Best-effort: I/O errors bubble up so the caller can warn
     /// the user (the new install is already in place).
     pub fn commit_invalidation(&self, stash: &Path) -> Result<(), String> {
@@ -290,7 +289,7 @@ impl GlobalStore {
             .map_err(|e| format!("Cannot remove refresh backup '{}': {}", stash.display(), e))
     }
 
-    /// C17B-001: Roll back a failed refresh by restoring the staged
+    /// Roll back a failed refresh by restoring the staged
     /// backup. Removes any partial `pkg_dir` the fetcher created before
     /// renaming the backup back into place.
     pub fn rollback_invalidation(&self, stash: &Path, pkg_dir: &Path) -> Result<(), String> {
@@ -319,7 +318,7 @@ impl GlobalStore {
         Ok(())
     }
 
-    /// C17B-009: Acquire an advisory lock scoped to
+    /// Acquire an advisory lock scoped to
     /// `<org>/<name>/<version>` so two concurrent `taida ingot install`
     /// processes do not race on the same store entry.
     ///
@@ -358,7 +357,7 @@ impl GlobalStore {
     /// Read the sidecar for a cached package, if present.
     ///
     /// Returns `Ok(None)` when the package is not cached or the sidecar is
-    /// missing (pre-C17 install). Errors propagate parse / schema mismatches.
+    /// missing (legacy install). Errors propagate parse / schema mismatches.
     pub fn read_package_meta(
         &self,
         org: &str,
@@ -416,11 +415,11 @@ impl GlobalStore {
     /// Fetch a package from GitHub and cache it, optionally recording a
     /// resolver-supplied commit SHA in the `_meta.toml` sidecar.
     ///
-    /// C17-1 (Phase 1): records `tarball_sha256`, `fetched_at`, `source`,
-    /// `version`. The `commit_sha` is supplied by C17-2 (Phase 2) once the
+    /// records `tarball_sha256`, `fetched_at`, `source`,
+    /// `version`. The `commit_sha` is supplied by () once the
     /// resolver learns the SHA via `git ls-remote`. When `commit_sha` is
     /// `None` the sidecar stores an empty string -- the decision table in
-    /// Phase 2 treats that as "sidecar present but SHA unknown".
+    /// treats that as "sidecar present but SHA unknown".
     pub fn fetch_and_cache_with_meta(
         &self,
         org: &str,
@@ -435,7 +434,7 @@ impl GlobalStore {
         Self::validate_path_component(version, "version")?;
         if org != "taida-lang" {
             return Err(format!(
-                "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted in E32 Phase 0; source packages are limited to taida-lang/*",
+                "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted under the current source package policy; source packages are limited to taida-lang/*",
                 org, name, version
             ));
         }
@@ -914,14 +913,14 @@ pub const STORE_META_FILENAME: &str = "_meta.toml";
 
 /// Current schema version for `_meta.toml`. An older sidecar with a
 /// different `schema_version` is treated as "unknown provenance" so the
-/// caller (Phase 2) can force a refresh.
+/// caller () can force a refresh.
 pub const STORE_META_SCHEMA_VERSION: u32 = 1;
 
 /// Provenance metadata written alongside an extracted store package.
 ///
 /// Written atomically via `write_meta_atomic` (tempfile + rename) so a
 /// crashed install leaves either a complete sidecar or no sidecar at all.
-/// Read via `read_meta`; missing sidecar returns `Ok(None)` (Phase 2
+/// Read via `read_meta`; missing sidecar returns `Ok(None)` (
 /// treats that as pessimistic refresh).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreMeta {
@@ -929,8 +928,8 @@ pub struct StoreMeta {
     pub schema_version: u32,
     /// Commit SHA the version tag pointed at when fetched.
     ///
-    /// Empty string means "unknown at fetch time" -- C17-1 writes this
-    /// when the resolver has not yet queried the remote HEAD. The Phase 2
+    /// Empty string means "unknown at fetch time" -- writes this
+    /// when the resolver has not yet queried the remote HEAD. The
     /// decision table treats `commit_sha.is_empty()` as "sidecar present
     /// but SHA unknown" and falls back to pessimistic refresh.
     pub commit_sha: String,
@@ -954,7 +953,7 @@ pub struct StoreMeta {
     pub version: String,
 }
 
-/// Errors produced by the C17 store sidecar helpers.
+/// Errors produced by the store sidecar helpers.
 #[derive(Debug)]
 pub enum StoreError {
     /// I/O error while reading/writing the sidecar.
@@ -962,7 +961,7 @@ pub enum StoreError {
     /// Sidecar could not be parsed (malformed TOML).
     Parse(String),
     /// Sidecar is well-formed but declares a schema version this build
-    /// does not understand. Phase 2 treats this as pessimistic-refresh.
+    /// does not understand. treats this as pessimistic-refresh.
     UnknownMetaSchema { actual: u32, expected: u32 },
     /// Sidecar is missing a required key.
     MissingField(&'static str),
@@ -995,7 +994,7 @@ pub fn meta_path_for(pkg_dir: &Path) -> PathBuf {
 /// Read and parse a store sidecar.
 ///
 /// Returns `Ok(None)` when the file does not exist (no sidecar is a valid
-/// state for pre-C17 installs and is handled by the Phase 2 decision
+/// state for legacy installs and is handled by the decision
 /// table). Returns `Err` for malformed TOML or schema-version mismatches.
 pub fn read_meta(path: &Path) -> Result<Option<StoreMeta>, StoreError> {
     let source = match std::fs::read_to_string(path) {
@@ -1104,11 +1103,11 @@ pub fn write_meta_atomic(path: &Path, meta: &StoreMeta) -> Result<(), StoreError
 
 /// Serialize a `StoreMeta` to the on-disk TOML form.
 ///
-/// Kept as a free function (not `Display`) so tests and Phase 2 callers
+/// Kept as a free function (not `Display`) so tests and callers
 /// can round-trip without relying on inherent method location.
 fn serialize_meta(meta: &StoreMeta) -> String {
     let mut out = String::new();
-    out.push_str("# auto-generated by taida ingot install (C17)\n");
+    out.push_str("# auto-generated by taida ingot install\n");
     out.push_str("# Do not edit by hand.\n");
     out.push_str(&format!("schema_version = {}\n", meta.schema_version));
     out.push_str(&format!(
@@ -1283,7 +1282,7 @@ fn escape_toml_basic_string(s: &str) -> String {
 }
 
 /// Compute the SHA-256 (hex) of a file by streaming it through the
-/// in-tree hasher. Used by C17-1 to record `tarball_sha256` in the
+/// in-tree hasher. Used by to record `tarball_sha256` in the
 /// sidecar.
 ///
 /// The tarball is read fully into memory. Addon tarballs are typically
@@ -1297,7 +1296,7 @@ fn compute_file_sha256(path: &Path) -> Result<String, String> {
 
 /// Format `SystemTime::now()` as RFC-3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`).
 ///
-/// Kept as a free function so the C17 sidecar can be written without
+/// Kept as a free function so the sidecar can be written without
 /// pulling in a time crate. Precision is whole seconds, matching the
 /// granularity `taida ingot install` needs for stale detection.
 fn rfc3339_now() -> String {
@@ -1346,7 +1345,7 @@ fn format_rfc3339_utc(unix_secs: u64) -> String {
 pub struct StorePruneReport {
     /// `~/.taida/store/` existed before the prune ran. When false,
     /// nothing was removed and the caller should print
-    /// "No store cache found at ...".
+    /// "No store cache found at...".
     pub root_existed: bool,
     /// Number of real store entries (`<org>/<name>/<version>/`) removed.
     /// Excludes scratch directories (`.tmp-*`, `.refresh-staging-*`);
@@ -1362,7 +1361,7 @@ pub struct StorePruneReport {
     /// before a destructive prune. Excludes scratch directories so the
     /// preview does not show `alice/http@.tmp-a.3`.
     pub packages: Vec<String>,
-    /// C17B-011: Number of scratch directories removed. These are
+    /// Number of scratch directories removed. These are
     /// `.tmp-<ver>` (leftover extraction scratch) and
     /// `.refresh-staging-<pid>-<nanos>` (abandoned refresh backups from a
     /// crashed `taida ingot install`). Counted separately from real packages so
@@ -1370,11 +1369,11 @@ pub struct StorePruneReport {
     pub scratch_removed: u64,
 }
 
-/// C17B-011: Classify a version-level directory name.
+/// Classify a version-level directory name.
 ///
-/// - `.tmp-<ver>`                     -> scratch (extraction temp)
+/// - `.tmp-<ver>` -> scratch (extraction temp)
 /// - `.refresh-staging-<pid>-<nanos>` -> scratch (abandoned rollback backup)
-/// - `<ver>`                          -> real package directory
+/// - `<ver>` -> real package directory
 fn is_scratch_dir_name(name: &str) -> bool {
     if name.starts_with(".tmp-") {
         return true;
@@ -1563,7 +1562,7 @@ pub fn prune_store_package(
 }
 
 impl GlobalStore {
-    /// C17-3: absolute path to the store root. Used by
+    /// absolute path to the store root. Used by
     /// `taida ingot cache clean --store` to surface the location in user-facing
     /// summaries.
     pub fn root(&self) -> &Path {
@@ -1588,7 +1587,7 @@ impl GlobalStore {
 // `--no-remote-check` skips the remote lookup, so `classify_stale` is
 // called with `remote_sha = None` and sidecar presence governs the outcome.
 
-/// Outcome of the Phase 2 decision table.
+/// Outcome of the decision table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleDecision {
     /// Fast path: sidecar present and SHA matches remote. No refresh.
@@ -1607,7 +1606,7 @@ pub enum StaleDecision {
 /// Why the installer decided to refresh the store entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshReason {
-    /// No sidecar at all (legacy install from before C17, or a previous
+    /// No sidecar at all (legacy install, or a previous
     /// crash between extract and sidecar write).
     MissingSidecar,
     /// Sidecar present but `commit_sha` is the empty string because Phase
@@ -1615,15 +1614,15 @@ pub enum RefreshReason {
     /// since we cannot prove freshness.
     SidecarShaUnknown,
     /// Remote commit SHA differs from sidecar. Carries the old/new pair
-    /// for the info log `remote moved: ... sha <old>..<new>`.
+    /// for the info log `remote moved:... sha <old>..<new>`.
     RemoteMoved { old_sha: String, new_sha: String },
 }
 
-/// Phase 2 decision table. Inputs:
-///   - `sidecar`: the parsed sidecar of the cached package, or `None` if
-///     the package is not cached / sidecar missing.
-///   - `remote_sha`: the commit SHA resolved via `resolve_version_to_sha`,
-///     or `None` if the remote lookup was skipped / failed.
+/// decision table. Inputs:
+/// - `sidecar`: the parsed sidecar of the cached package, or `None` if
+/// the package is not cached / sidecar missing.
+/// - `remote_sha`: the commit SHA resolved via `resolve_version_to_sha`,
+/// or `None` if the remote lookup was skipped / failed.
 ///
 /// The table is the authoritative contract for cache freshness decisions.
 pub fn classify_stale(sidecar: Option<&StoreMeta>, remote_sha: Option<&str>) -> StaleDecision {
@@ -1694,7 +1693,7 @@ fn truncate_sha(sha: &str) -> String {
 /// Resolve a Taida version tag to the commit SHA it points at on origin.
 ///
 /// Uses `GET {api}/repos/{org}/{name}/git/refs/tags/{version}` which GitHub
-/// returns as JSON containing `"object": { "sha": "..." , "type": "commit" | "tag" }`.
+/// returns as JSON containing `"object": { "sha": "...", "type": "commit" | "tag" }`.
 /// Annotated tags (type = "tag") dereference to the underlying commit via a
 /// second request; unannotated tags (type = "commit") return the commit SHA
 /// directly.
@@ -1704,11 +1703,11 @@ fn truncate_sha(sha: &str) -> String {
 /// Returns:
 /// - `Ok(Some(sha))` on a successful lookup.
 /// - `Ok(None)` when the remote cannot be reached (network error, or the
-///   mock/API returned a transient error). Callers map `None` to the
-///   pessimistic-skip branch of the decision table.
+/// mock/API returned a transient error). Callers map `None` to the
+/// pessimistic-skip branch of the decision table.
 /// - `Err(msg)` when the response is malformed or the tag does not exist
-///   (the latter is a hard failure that the caller surfaces as an install
-///   error, not a silent skip).
+/// (the latter is a hard failure that the caller surfaces as an install
+/// error, not a silent skip).
 pub fn resolve_version_to_sha(
     org: &str,
     name: &str,
@@ -1800,7 +1799,7 @@ pub fn resolve_version_to_sha(
     Ok(Some(sha))
 }
 
-/// C17B-018: Process-local memoization cache for `resolve_version_to_sha`.
+/// Process-local memoization cache for `resolve_version_to_sha`.
 ///
 /// Keyed on `"{api_url}|{org}|{name}|{version}"` so tests that swap the
 /// `TAIDA_GITHUB_API_URL` mock between stages do not see stale hits. The
@@ -1822,7 +1821,7 @@ fn sha_cache_put(key: String, value: Option<String>) {
     }
 }
 
-/// C17B-018 test support: clear the memo cache. Exposed for tests that
+/// test support: clear the memo cache. Exposed for tests that
 /// rely on back-to-back SHA resolutions returning fresh results.
 #[cfg(test)]
 pub fn _test_only_clear_sha_cache() {
@@ -1850,17 +1849,17 @@ fn validate_component_free(component: &str, label: &str) -> Result<(), String> {
 /// GET `url` via `curl -fsSL`. Returns:
 /// - `Ok(Some(body))` on HTTP 2xx.
 /// - `Ok(None)` when curl exits non-zero (network unreachable, DNS
-///   failure, 5xx, 4xx, ...). This is the "cannot verify" branch --
-///   callers pair it with an offline warning, never a silent skip.
+/// failure, 5xx, 4xx,...). This is the "cannot verify" branch --
+/// callers pair it with an offline warning, never a silent skip.
 /// - `Err(msg)` only when curl itself cannot be launched.
 ///
-/// C17B-005: When `GH_TOKEN` / `GITHUB_TOKEN` is set in the environment
+/// When `GH_TOKEN` / `GITHUB_TOKEN` is set in the environment
 /// (or `~/.taida/auth.json` contains a token), add an
 /// `Authorization: Bearer <token>` header so unauthenticated rate limits
 /// (60 requests/hr/IP on GitHub) do not silently demote the stale-check
 /// into offline mode.
 ///
-/// C17B-006: Cap the network wait with `--connect-timeout 10` and
+/// Cap the network wait with `--connect-timeout 10` and
 /// `--max-time 30`. A slow / dead network must not hang `taida ingot install`
 /// indefinitely; we fall back to the offline branch instead.
 ///
@@ -1870,19 +1869,18 @@ fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
     github_curl_api_get_optional(url, "application/vnd.github+json")
 }
 
-/// C17 HOLD fix (C1/M1 — 2026-04-17): unified GitHub API GET helper.
+/// Unified GitHub API GET helper.
 ///
 /// Applies the standard hardening to every JSON API call:
 ///
 /// - `-fsSL` (fail fast on HTTP errors, follow redirects)
-/// - `--connect-timeout 10 --max-time 30` (C17B-006: bound network wait)
+/// - `--connect-timeout 10 --max-time 30` (: bound network wait)
 /// - `-H "User-Agent: taida-install"` (GitHub API recommends a UA)
 /// - `-H "Accept: <accept>"` as requested by the caller
 /// - `Authorization: Bearer <token>` when a token is configured
-///   (C17B-005)
-///
+/// ///
 /// Security (HOLD C1 fix, 2026-04-17): the bearer token is **never**
-/// passed on argv. Historically we used `-H "Authorization: ..."` which
+/// passed on argv. Historically we used `-H "Authorization:..."` which
 /// makes the secret visible via `/proc/<pid>/cmdline` to any user on
 /// the machine. Instead, when a token is configured we enable
 /// `--config -` and write the header line through the child's stdin.
@@ -1892,10 +1890,10 @@ fn curl_get_optional(url: &str) -> Result<Option<String>, String> {
 /// Return contract:
 /// - `Ok(Some(body))` on HTTP 2xx
 /// - `Ok(None)` on any non-zero exit (offline / 4xx / 5xx / rate
-///   limited / DNS fail). The caller pairs this with an explicit
-///   stderr warning so the fallback is never silent.
+/// limited / DNS fail). The caller pairs this with an explicit
+/// stderr warning so the fallback is never silent.
 /// - `Err(msg)` only when the curl process itself cannot be launched
-///   or stdin writing fails.
+/// or stdin writing fails.
 fn github_curl_api_get_optional(url: &str, accept: &str) -> Result<Option<String>, String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args([
@@ -1953,7 +1951,7 @@ fn github_curl_api_get_optional(url: &str, accept: &str) -> Result<Option<String
     Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
-/// C17 HOLD fix (C1 — 2026-04-17): archive download variant of
+/// Archive download variant of
 /// `github_curl_api_get_optional`.
 ///
 /// Writes the response body to `dest` and returns `Ok(true)` on
@@ -2015,27 +2013,27 @@ fn github_curl_download_to_file(url: &str, dest: &Path) -> Result<bool, String> 
     Ok(true)
 }
 
-/// C17B-005: Best-effort lookup of a GitHub auth token.
+/// Best-effort lookup of a GitHub auth token.
 ///
 /// Precedence (first match wins):
-///   1. `GH_TOKEN`
-///   2. `GITHUB_TOKEN`
-///   3. `~/.taida/auth.json` read/install token via `load_token`
+/// 1. `GH_TOKEN`
+/// 2. `GITHUB_TOKEN`
+/// 3. `~/.taida/auth.json` read/install token via `load_token`
 ///
 /// Returns `None` if none are available; callers degrade gracefully to
 /// unauthenticated requests.
 ///
-/// C18B-007 (carry from C17B-020): reject tokens containing `"` / `\`
-/// / `\n` / `\r` since the curl config stdin we pipe into looks like
-///   `header = "Authorization: Bearer <token>"`
+/// (carry from ): reject tokens containing `"` / `\`
+/// `\n` / `\r` since the curl config stdin we pipe into looks like
+/// `header = "Authorization: Bearer <token>"`
 /// and those characters would either escape out of the quoted value
 /// or inject additional config directives. Silent failure is avoided
 /// by emitting a `warning:` line to stderr and treating the source as
 /// if the token were absent (offline fallback).
 ///
-/// C18B-008 (carry from C17B-021): reject whitespace-only tokens for
-/// the same reason. A literal `"    "` would have produced an
-/// `Authorization: Bearer     ` header that GitHub rejects with 401,
+/// (carry from ): reject whitespace-only tokens for
+/// the same reason. A literal `" "` would have produced an
+/// `Authorization: Bearer ` header that GitHub rejects with 401,
 /// silently masquerading as anonymous rate-limited access.
 fn github_auth_token() -> Option<String> {
     if let Ok(t) = std::env::var("GH_TOKEN")
@@ -2054,19 +2052,19 @@ fn github_auth_token() -> Option<String> {
     }
 }
 
-/// C18B-007/008 helper: validate a GitHub auth token before it is
+/// 008 helper: validate a GitHub auth token before it is
 /// piped into `curl --config -`. Returns `Some(token)` when the token
 /// is safe to interpolate into
-///   `header = "Authorization: Bearer <token>"`,
+/// `header = "Authorization: Bearer <token>"`,
 /// `None` otherwise. On rejection we emit a `warning:` line to stderr
 /// naming the source so the fallback to unauthenticated requests is
 /// visible in CI logs rather than silent.
 ///
 /// Rejected shapes (each produces its own warning):
-///   - empty or whitespace-only tokens
-///   - tokens containing `"` / `\` / `\n` / `\r` — would either break
-///     out of the quoted curl config directive or inject another
-///     directive on a fresh line.
+/// - empty or whitespace-only tokens
+/// - tokens containing `"` / `\` / `\n` / `\r` — would either break
+/// out of the quoted curl config directive or inject another
+/// directive on a fresh line.
 fn sanitize_auth_token(raw: &str, source: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3020,7 +3018,7 @@ mod tests {
     fn test_serialize_meta_emits_generated_header() {
         let out = serialize_meta(&sample_meta());
         assert!(
-            out.starts_with("# auto-generated by taida ingot install (C17)\n"),
+            out.starts_with("# auto-generated by taida ingot install\n"),
             "header missing, got:\n{}",
             out
         );
@@ -3781,12 +3779,12 @@ mod tests {
     /// stdin-config AND must not leak through the child's argv.
     ///
     /// Checks:
-    ///   1. Mock received `Authorization: Bearer <token>`
-    ///   2. Authorization header is NOT carried in the argv invocation
-    ///      (we can't inspect curl's argv directly after the process
-    ///      exits, but we verify the security-relevant construction
-    ///      side-effect: when a token is set, the command line uses
-    ///      `--config -` and does not include the raw header string).
+    /// 1. Mock received `Authorization: Bearer <token>`
+    /// 2. Authorization header is NOT carried in the argv invocation
+    /// (we can't inspect curl's argv directly after the process
+    /// exits, but we verify the security-relevant construction
+    /// side-effect: when a token is set, the command line uses
+    /// `--config -` and does not include the raw header string).
     #[test]
     fn test_github_curl_api_get_optional_passes_token_via_stdin() {
         let _guard = crate::util::env_test_lock().lock().unwrap();
@@ -3936,16 +3934,16 @@ mod tests {
         );
     }
 
-    // ── C18B-007 / C18B-008 regression: sanitize_auth_token ──
+    // Regression: sanitize_auth_token.
     //
     // The helper is a pure function (env-free); we exercise it
     // directly to pin the rejection rules:
     //   - empty → None (no warning, treated as "unset")
-    //   - whitespace-only → None (with warning per C18B-008)
-    //   - contains `"` → None (per C18B-007)
-    //   - contains `\` → None (per C18B-007)
-    //   - contains `\n` → None (per C18B-007)
-    //   - contains `\r` → None (per C18B-007)
+    //   - whitespace-only → None with warning
+    //   - contains `"` → None
+    //   - contains `\` → None
+    //   - contains `\n` → None
+    //   - contains `\r` → None
     //   - well-formed token → Some(trimmed)
 
     #[test]

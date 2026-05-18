@@ -10,14 +10,14 @@
 //! ## Design notes
 //!
 //! - **`ExprId` is a span-based hash** so the parser does not have to
-//!   carry a node id field. The id is `(start, end, discriminant_tag)`.
-//!   Within a single program every observed span is unique.
+//! carry a node id field. The id is `(start, end, discriminant_tag)`.
+//! Within a single program every observed span is unique.
 //! - **Side table, not an AST mirror**. The table lives next to the
-//!   untyped AST and is keyed by id; consumers query it explicitly.
+//! untyped AST and is keyed by id; consumers query it explicitly.
 //! - **`record(&Expr, Type)` is idempotent**: a second record for the
-//!   same expression overwrites the first, which lets bidirectional
-//!   lambda inference replace an earlier `Type::Unknown` placeholder
-//!   with a hint-resolved function type.
+//! same expression overwrites the first, which lets bidirectional
+//! lambda inference replace an earlier `Type::Unknown` placeholder
+//! with a hint-resolved function type.
 
 use std::collections::HashMap;
 

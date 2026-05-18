@@ -142,7 +142,7 @@
 | `E1517` | Cage / CageRilla: validation pass 終了時点で subject branch または runner branch が未解決 (`Cage[target, runner]()` の boundary contract を静的に証明できない) | TypeChecker |
 | `E1518` | Cage / CageRilla: Hammer 系 schema cast facade (`JSON[raw, Schema]()` 等) を `Cage` の subject または runner に渡す boundary contract 違反。Hammer family は `Lax[T]` failure channel を維持し、`Cage` / `Gorillax` 経路には流さない | TypeChecker |
 | `E1519` | (予約) Cage / CageRilla 診断範囲の拡張用 | — |
-| `E1520` | 「値の不在を表す型」の完全排除 — `@()` (空ぶちパック) を「型」として書くことを禁止: **(R1)** 戻り型注釈 `:@()` / `:Unit` / `:Void` (実装済み)、**(R1対称)** 引数型注釈 (実装済み)、**(R2)** 関数本体末尾の `@()` / `Unit` / `Void` リテラル (実装済み)、**(R2拡張)** 注釈なしで最終推論型が `@()` 等に確定 (実装済み、中間変数経由の抜け道も塞ぐ)、**(ジェネリック)** `Mold[T]` で `T = @()` 等に具象化 (実装予定、現バージョンでは個別 blocker)、を `TypeChecker` で reject。Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が存在せず、縮小操作は別の具体ぶちパック型を返すため)。情報がない場合は意味を持った値 (書き込んだバイト数、状態を表すぶちパック、共通 Enum のバリアント等) を返す。 | TypeChecker |
+| `E1520` | 「値の不在を表す型」の完全排除 — `@()` (空ぶちパック) を「型」として書くことを禁止: **(R1)** 戻り型注釈 `:@()` / `:Unit` / `:Void`、**(R1対称)** 引数型注釈、**(R2)** 関数本体末尾の `@()` / `Unit` / `Void` リテラル、**(R2拡張)** 注釈なしで最終推論型が `@()` 等に確定 (中間変数経由の抜け道も塞ぐ)、**(R3)** ClassLike / Mold / Inheritance 宣言の body が空 (`Pilot = @()` / `Int => PilotId = @()` / `Mold[T] => Box[T] = @()` 等) で、Parser が `[E1520]` を即時 reject、**(ジェネリック)** `Mold[T]` で `T = @()` 等に具象化、を `Parser` / `TypeChecker` で reject。Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が存在せず、縮小操作は別の具体ぶちパック型を返すため)。情報がない場合は意味を持った値 (書き込んだバイト数、状態を表すぶちパック、共通 Enum のバリアント等) を返す。空リスト `@[]` は「空のリスト」として明確な意味を持つので別物。 | Parser / TypeChecker |
 | `E1521` | ぶちパックリテラルの positional field (`@(v1, v2, ...)`) は受理されない。PHILOSOPHY II「ぶちパック `@(...)` — 名前付きフィールドの集合」と矛盾するため、すべての buchi pack field は名前付き (`@(name <= value, ...)`) でなければならない。`<<<` / `>>>` の name list (`@(name1, name2)`) や TypeDef / ClassLike の field 定義 (`@(name: Type)`) は別 context で引き続き受理される。 | Parser |
 | `E1523` | Mold header 型変数名が組み込み型名 (`Int` / `Str` / `Bool` / `Float` / `Bytes` / `Lax` / `Result` / `Async` / `Optional` / 等) と衝突。`Mold[Int]` は型変数名 `Int` として silently 解釈されるが、意図は具体型 `Int` であることが多い。`Mold[:Int]` (具体型直接指定) または `Mold[T <= :Int]` (制約付き型変数) を使う。 | TypeChecker |
 | `E1524` | 条件分岐 `\| cond \|>` から default arm が欠落。`\| _ \|>` または `\| true \|>` を追加して全入力で結果が定義されるようにする。PHILOSOPHY IV「AI が構造として読めるよう、parser が一意に解釈でき、docs と実装が同じ規約を持つ」。 | TypeChecker |
@@ -163,12 +163,18 @@
 2. **R1 対称版** 引数型注釈 `:@()` / `:Unit` / `:Void`
 3. **R2** 関数本体末尾で `@()` / `Unit` / `Void` リテラル
 4. **R2 拡張** 注釈なしで関数の最終推論型が `@()` / `Unit` / `Void` に確定 (中間変数経由の抜け道を塞ぐ)
-5. **ジェネリック制約** `Mold[T]` で `T` が `@()` / `Unit` / `Void` 等に具象化される
-6. **パターンマッチ** で `@()` パターンを書く (warning レベル、要検討)
+5. **R3** ClassLike / Mold / Inheritance 宣言の body が `@()` で空 (`Pilot = @()` / `Int => PilotId = @()` / `Mold[T] => Box[T] = @()` 等) — Parser が即時 reject し、空ぶちパック型を class-like 経由で導入する経路を閉じる
+6. **空ぶちパック型注釈** `x: @()` / `field: @()` — Parser が `[E1520]` を発火し、識別子位置でも空ぶちパック型を書けないようにする
+7. **ジェネリック制約** `Mold[T]` で `T` が `@()` / `Unit` / `Void` 等に具象化される
+8. **パターンマッチ** で `@()` パターンを書く (warning レベル、要検討)
+
+空リスト `@[]` は「空のリスト」という明確な意味を持つので別物であり、`[E1520]` の対象ではありません。空ぶちパックリテラル `@()` を **値** として書く場面そのものが Taida 言語仕様には存在しません (汎用 filter が存在せず、ぶちパックのフィールド集合を変える操作は別の具体ぶちパック型を戻り型として定義する → II の系参照)。
 
 ぶちパックのフィールド集合を変える操作は、戻り型を別の具体ぶちパック型として定義する (例: `removePrice item: @(name: Str, price: Int) = ... => :@(name: Str)`)。汎用 filter は Taida に存在せず、「フィールドを完全に削り尽くす操作」は戻り型 `:@()` が禁止されるため関数として定義不可能。これにより型と実値のズレが構造的に発生しない設計を保証する。
 
-実装状況 (現バージョン): **R1 / R1対称 / R2 / R2拡張 は実装済み**。`Statement::FuncDef` 戻り型・引数型、`Statement::ErrorCeiling` の error_param / return_type、ClassLike / Mold / InheritanceDef の field 型注釈、Cage runner の Out 型引数で `[E1520]` を発火させる。`contains_unit_like_type` 再帰判定により、`:Async[Unit]` / `:Result[Unit, _]` / `:List[Unit]` / `:Function([Unit], Unit)` / `:@(payload: @())` のようなネスト形も検出する。ジェネリック制約 (`Mold[T]` で `T = @()` 等に具象化) は後続 fix cycle で land 予定。
+ClassLike / Inheritance で「親型を継承するだけで自前のフィールドを追加しない」ケースは、`taida-lang/prelude` の `marker: :Type` のような **意味を持つ単一フィールド** を追加するか、共通 `Enum` のバリアントとして表現します。空のまま継承して情報のない型を作ることは認めません。
+
+実装状況: R1 / R1対称 / R2 / R2拡張 / R3 / 空ぶちパック型注釈 は実装済み。`Statement::FuncDef` 戻り型・引数型、`Statement::ErrorCeiling` の error_param / return_type、ClassLike / Mold / InheritanceDef の field 型注釈、Cage runner の Out 型引数、ClassLike / Mold / Inheritance の空 body で `[E1520]` を発火させる。`contains_unit_like_type` 再帰判定により、`:Async[Unit]` / `:Result[Unit, _]` / `:List[Unit]` / `:Function([Unit], Unit)` / `:@(payload: @())` のようなネスト形も検出する。
 
 ### 型推論・演算意味論エラー (`E16xx`)
 

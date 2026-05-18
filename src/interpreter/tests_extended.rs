@@ -2758,7 +2758,7 @@ stderr("error msg")
         );
     }
 
-    /// F42B-004: sleep returns Async[Int] (elapsed ms approximation),
+    /// sleep returns Async[Int] (elapsed ms approximation),
     /// not Async[Unit]. PHILOSOPHY I forbids Unit on Taida surface.
     #[test]
     fn test_prelude_sleep_zero_resolves_to_int_zero() {
@@ -2772,7 +2772,7 @@ done
         assert_eq!(v, Value::Int(0));
     }
 
-    /// F42B-004: sleep(N) resolves to Int(N) (the requested ms count).
+    /// sleep(N) resolves to Int(N) (the requested ms count).
     #[test]
     fn test_prelude_sleep_waits_short_duration() {
         let start = Instant::now();

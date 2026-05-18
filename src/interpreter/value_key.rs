@@ -1,11 +1,11 @@
-//! C25B-021 / C25B-022 / C25B-023 common foundation — `ValueKey`.
+//! / common foundation — `ValueKey`.
 //!
 //! A hashable view over [`Value`] for use as a HashSet / HashMap key.
 //! Used by the fast paths in `Set.union` / `Set.intersect` / `Set.diff` /
 //! `HashMap.merge` / `Unique` to lift their core comparison loop from
 //! `Vec::contains` (O(N*M)) to a pre-built `HashSet<ValueKey>` (O(N+M)).
 //!
-//! # Design lock (C25 Phase 5-D / 2026-04-23)
+//! # Design lock
 //!
 //! The set of [`Value`] variants that can participate in the fast path
 //! is deliberately narrow. A value is **key-eligible** if, and only if,
@@ -20,25 +20,25 @@
 //! * `Gorilla`
 //! * `List(Vec<Value>)` — recursive; each element must be key-eligible
 //! * `BuchiPack(Vec<(String, Value)>)` — recursive; order-independent
-//!   (matches the existing `PartialEq` contract on BuchiPack)
+//! (matches the existing `PartialEq` contract on BuchiPack)
 //!
 //! Excluded variants (the caller retains the existing linear-scan
 //! fallback when it encounters any of these):
 //!
 //! * `Float(f64)` — f64 has no `Eq`; NaN breaks reflexivity. We never
-//!   store Float in the hash domain; callers that mix Float into a
-//!   Set / HashMap / Unique operand still get correct results via the
-//!   unchanged linear path.
+//! store Float in the hash domain; callers that mix Float into a
+//! Set / HashMap / Unique operand still get correct results via the
+//! unchanged linear path.
 //! * `Function` / closures — not meaningfully hashable.
 //! * `Async` / `Stream` — runtime state; equality is identity-ish.
 //! * `Error` — carries runtime metadata; not a stable key.
 //! * `Molten` / `Json` — opaque to the Taida surface.
 //!
-//! # Cross-type equality (C25B-022 / C25B-023 REOPEN fix, 2026-04-23)
+//! # Cross-type equality ( / REOPEN fix, 2026-04-23)
 //!
 //! `Value::eq` treats `Int(n)`, `EnumVal(_, n)` and `Float(n as f64)` as
 //! equal when they share the same numeric ordinal (see `value.rs:465`
-//! `PartialEq for Value`, C18-2 rule). An earlier iteration of
+//! `PartialEq for Value`, rule). An earlier iteration of
 //! `ValueKey` deliberately *diverged* from this rule and treated
 //! `Int(3)` / `EnumVal(X, 3)` as distinct keys — see the original
 //! comment block in `f721c6d`. That divergence caused
@@ -48,19 +48,19 @@
 //! The current design restores `Value::eq` as the single source of
 //! truth for the fast paths:
 //!
-//!   * `Int(n)` and `EnumVal(_, n)` hash to the same fingerprint
-//!     (numeric ordinal tag, EnumVal name ignored for hashing).
-//!   * `ValueKey::eq` mirrors `Value::eq`'s cross-type rule for the
-//!     hashable subset — `Int(n) == EnumVal(_, n)` returns true.
-//!   * Intra-Enum equality still requires matching names: two
-//!     `EnumVal(a, n)` / `EnumVal(b, n)` with different enum names
-//!     hash to the same fingerprint (by design) but `ValueKey::eq`
-//!     reports them as different — the caller's Value::eq confirmation
-//!     path upgrades the fingerprint collision into a correct linear
-//!     disambiguation.
-//!   * `Float(f)` is still excluded from key domain (no `Eq`), so the
-//!     `Int(n) ↔ Float(n)` cross-type rule is handled by the linear
-//!     fallback path at the caller.
+//! * `Int(n)` and `EnumVal(_, n)` hash to the same fingerprint
+//! (numeric ordinal tag, EnumVal name ignored for hashing).
+//! * `ValueKey::eq` mirrors `Value::eq`'s cross-type rule for the
+//! hashable subset — `Int(n) == EnumVal(_, n)` returns true.
+//! * Intra-Enum equality still requires matching names: two
+//! `EnumVal(a, n)` / `EnumVal(b, n)` with different enum names
+//! hash to the same fingerprint (by design) but `ValueKey::eq`
+//! reports them as different — the caller's Value::eq confirmation
+//! path upgrades the fingerprint collision into a correct linear
+//! disambiguation.
+//! * `Float(f)` is still excluded from key domain (no `Eq`), so the
+//! `Int(n) ↔ Float(n)` cross-type rule is handled by the linear
+//! fallback path at the caller.
 //!
 //! The callers (`Set.union`, `Set.intersect`, `Set.diff`,
 //! `HashMap.merge`, `Unique`) already confirm fingerprint hits with
@@ -145,7 +145,7 @@ fn is_hashable(v: &Value) -> bool {
 }
 
 /// Structural equality for key-eligible values, aligned with
-/// `Value::eq` (C25B-022 / C25B-023 REOPEN fix). BuchiPack is
+/// `Value::eq` ( / REOPEN fix). BuchiPack is
 /// order-independent. `Int(n)` and `EnumVal(_, n)` compare equal
 /// (matches `Value::eq` line 502). Intra-enum equality still requires
 /// matching names (matches `Value::eq` line 499-501).
@@ -178,7 +178,7 @@ fn exact_eq(a: &Value, b: &Value) -> bool {
 /// the XOR-reduction of per-field hashes so that `@(a<=1, b<=2)` and
 /// `@(b<=2, a<=1)` produce the same fingerprint.
 ///
-/// C25B-022 / C25B-023 REOPEN fix (2026-04-23): `Int(n)` and
+/// REOPEN fix (2026-04-23): `Int(n)` and
 /// `EnumVal(_, n)` hash to the same fingerprint (tag `0u8` + ordinal
 /// `n`) so that `Value::eq`'s cross-type rule is honoured by the fast
 /// paths. Two distinct `EnumVal(a, n)` / `EnumVal(b, n)` also collide

@@ -7555,15 +7555,15 @@ taida_val taida_result_get_or_throw(taida_val result) {
 static taida_val taida_throw_to_display_string(taida_val throw_val) {
     if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
     // If it's a BuchiPack (Error TypeDef), extract the "message" field.
-    // An empty message is treated as "no message" so the JS Error
-    // factory's mandatory `message: ''` default does not diverge from
-    // the Interpreter / Native rendering.
+    // An explicit empty message renders as "" instead of falling back to
+    // the declared type name.
     if (taida_is_buchi_pack(throw_val)) {
         if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
             taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
             if (msg != 0) {
                 size_t sl = 0;
-                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl) && sl > 0) {
+                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl)) {
+                    if (sl == 0) return (taida_val)taida_str_new_copy("\"\"");
                     return (taida_val)taida_str_new_copy((const char*)msg);
                 }
             }

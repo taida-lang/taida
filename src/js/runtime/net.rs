@@ -1,7 +1,7 @@
 //! JS runtime: `taida-lang/net` HTTP v1 runtime (server + WebSocket).
 //!
-//! Split out from monolithic `src/js/runtime.rs` as part of C12-9
-//! (FB-21 mechanical file split). Covers the HTTP parser, response
+//! Split out from monolithic `src/js/runtime.rs` as part of
+//! ( mechanical file split). Covers the HTTP parser, response
 //! encoder, chunked transfer state, streaming writer, SSE, request
 //! body reader, and WebSocket. Original source line range: 3139..6381.
 //!
@@ -673,7 +673,7 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
     if (readPos >= dataLen) return -1; // need more data
 
     // Find CRLF after chunk-size, capped at MAX_CHUNK_LINE_BYTES so a chunk
-    // -ext flood is treated as malformed rather than "incomplete" (E32B-051).
+    // -ext flood is treated as malformed rather than "incomplete".
     // Off-by-one parity with Rust/C: we scan `cap` bytes total, i.e. up to
     // absolute index `readPos + cap - 1` inclusive, hence `i < readPos + cap - 1`.
     let crlfPos = -1;

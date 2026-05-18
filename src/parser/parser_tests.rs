@@ -1636,7 +1636,7 @@ fn test_parse_nested_list_missing_closing_bracket_error() {
     );
 }
 
-/// F42 sweep [E1521]: positional buchi pack literal `@(v1, v2)` must
+/// [E1521]: positional buchi pack literal `@(v1, v2)` must
 /// be rejected. PHILOSOPHY II requires every buchi pack field to be
 /// named. Mold instantiation arguments (`JSNew[Server](8080)`) are
 /// unaffected — only the `@(...)` literal context enforces named-only.
@@ -1651,8 +1651,8 @@ fn test_f42_e1521_positional_buchi_pack_literal_rejected() {
     );
 }
 
-/// F42 sweep [E1521]: named buchi pack literal `@(name <= value)` is
-/// still accepted. Regression guard for the F42B-001 sweep.
+/// [E1521]: named buchi pack literal `@(name <= value)` is
+/// still accepted. Regression guard for the named-field rule.
 #[test]
 fn test_f42_e1521_named_buchi_pack_literal_accepted() {
     let source = "x <= @(a <= 1, b <= 2)\nstdout(x)";
@@ -1783,6 +1783,22 @@ fn test_function_type_no_arg() {
                 }
                 other => panic!("Expected Function type annotation, got {:?}", other),
             }
+        }
+        other => panic!("Expected Assignment, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_type_context_allows_constraint_and_function_arrow_mix() {
+    // The `=>` inside `Int => :Bool` is a type arrow, while `<=` is the
+    // assignment operator. Type-context arrows must not trip direction parsing.
+    let source = "predicate: Int => :Bool <= _ x = x > 0";
+    let program = parse_ok(source);
+    assert_eq!(program.statements.len(), 1);
+    match &program.statements[0] {
+        Statement::Assignment(a) => {
+            assert_eq!(a.target, "predicate");
+            assert!(matches!(a.type_annotation, Some(TypeExpr::Function(_, _))));
         }
         other => panic!("Expected Assignment, got {:?}", other),
     }
@@ -2559,7 +2575,7 @@ broken n =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: trailing `x <= n + 1` should be accepted as a tail binding, got: {:?}",
+        "trailing `x <= n + 1` should be accepted as a tail binding, got: {:?}",
         e1616
     );
 }
@@ -2600,7 +2616,7 @@ f x =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: tail `result <= doubled + 1` should be accepted, got: {:?}",
+        "tail `result <= doubled + 1` should be accepted, got: {:?}",
         e1616
     );
 }
@@ -2622,7 +2638,7 @@ f x =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: tail `x * 2 => doubled` should be accepted, got: {:?}",
+        "tail `x * 2 => doubled` should be accepted, got: {:?}",
         e1616
     );
 }
@@ -2645,7 +2661,7 @@ f x =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: tail `lax >=> n` should be accepted, got: {:?}",
+        "tail `lax >=> n` should be accepted, got: {:?}",
         e1616
     );
 }
@@ -2668,7 +2684,7 @@ f x =\n  \
         .collect();
     assert!(
         e1616.is_empty(),
-        "C13-1: tail `n <=< lax` should be accepted, got: {:?}",
+        "tail `n <=< lax` should be accepted, got: {:?}",
         e1616
     );
 }
@@ -2686,7 +2702,7 @@ bad x =\n  \
     let (_, errors) = parse(source);
     assert!(
         errors.iter().any(|e| e.message.contains("E1616")),
-        "C13-1: `=> _wr` must stay rejected as a discard pattern, got: {:?}",
+        "`=> _wr` must stay rejected as a discard pattern, got: {:?}",
         errors
     );
     assert!(
@@ -2710,14 +2726,14 @@ f =\n  \
     let (_, errors) = parse(source);
     assert!(
         errors.iter().any(|e| e.message.contains("E1616")),
-        "C13B-010: `=> _x` inside function body must be rejected, got: {:?}",
+        "`=> _x` inside function body must be rejected, got: {:?}",
         errors
     );
     assert!(
         errors
             .iter()
             .any(|e| e.message.contains("function body") && e.message.contains("discard binding")),
-        "C13B-010: error must mention `function body` and `discard binding`, got: {:?}",
+        "error must mention `function body` and `discard binding`, got: {:?}",
         errors
     );
 }
@@ -2733,7 +2749,7 @@ f =\n  \
     let (_, errors) = parse(source);
     assert!(
         errors.iter().any(|e| e.message.contains("E1616")),
-        "C13B-010: `_y <=` inside function body must be rejected, got: {:?}",
+        "`_y <=` inside function body must be rejected, got: {:?}",
         errors
     );
 }
@@ -2754,7 +2770,7 @@ boom =\n  \
     let (_, errors) = parse(source);
     assert!(
         errors.iter().any(|e| e.message.contains("E1616")),
-        "C13B-010: `=> _x` inside `|==` handler body must be rejected, got: {:?}",
+        "`=> _x` inside `|==` handler body must be rejected, got: {:?}",
         errors
     );
     assert!(
@@ -2762,7 +2778,7 @@ boom =\n  \
             .iter()
             .any(|e| e.message.contains("`|==` handler body")
                 && e.message.contains("discard binding")),
-        "C13B-010: error must mention `|==` handler body, got: {:?}",
+        "error must mention `|==` handler body, got: {:?}",
         errors
     );
 }
@@ -2779,7 +2795,7 @@ f =\n  \
     let (_, errors) = parse(source);
     assert!(
         !errors.iter().any(|e| e.message.contains("E1616")),
-        "C13B-010: `x <= 1` (non-discard) must be accepted, got: {:?}",
+        "`x <= 1` (non-discard) must be accepted, got: {:?}",
         errors
     );
 }
@@ -2798,7 +2814,7 @@ bad x =\n  \
     let (_, errors) = parse(source);
     assert!(
         errors.iter().any(|e| e.message.contains("E1616")),
-        "C13-1: bare call at non-tail must stay rejected, got: {:?}",
+        "bare call at non-tail must stay rejected, got: {:?}",
         errors
     );
 }
@@ -2904,7 +2920,7 @@ fn test_e30b_007_rust_addon_binding_rejects_missing_quotes() {
     };
     assert!(
         matches!(&type_args[0], Expr::StringLit(_, _)),
-        "Lock-G requires string literal for fn name, got {:?}",
+        "explicit addon binding requires string literal for fn name, got {:?}",
         type_args[0]
     );
 }

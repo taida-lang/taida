@@ -321,7 +321,7 @@ fn test_js_exec_inherited_custom_mold_required_positional_binding() {
     assert_parity(
         "inherited_custom_mold_required_positional",
         r#"
-Mold[T] => PairBase[T] = @()
+Mold[T] => PairBase[T] = @(marker: Int <= 0)
 PairBase[T] => Pair[T, U] = @(
   second: U
   solidify =

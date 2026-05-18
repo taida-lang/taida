@@ -215,7 +215,7 @@ impl CoreBundledProvider {
         org == "taida-lang" && matches!(name, "os" | "js" | "crypto" | "net" | "pool")
     }
 
-    /// C26B-014: materialize a core-bundled package on-demand even when
+    /// materialize a core-bundled package on-demand even when
     /// `packages.tdm` does not declare it. `resolve()` requires a full
     /// `Manifest` because it participates in the `taida ingot deps` pipeline;
     /// at runtime we only need the bundled directory path so that
@@ -519,17 +519,16 @@ impl PackageProvider for CoreBundledProvider {
 /// Downloads packages from GitHub repositories and caches them
 /// in the global store (`~/.taida/store/`).
 ///
-/// C17-2: consults a stale-detection decision table before reusing a
-/// cached entry. See `store::classify_stale` and
-/// `.dev/C17_IMPL_SPEC.md` Phase 2.
+/// consults a stale-detection decision table before reusing a
+/// cached entry. See `store::classify_stale`.
 pub struct StoreProvider {
     store: GlobalStore,
     /// When true, bypass local cache for generation resolution (used by `taida ingot update`).
     force_remote: bool,
-    /// C17-2 / C17-4: when true, invalidate any cached entry and re-extract
+    /// when true, invalidate any cached entry and re-extract
     /// unconditionally. Skips the decision table.
     force_refresh: bool,
-    /// C17-2: when true, skip the remote HEAD lookup entirely -- the
+    /// when true, skip the remote HEAD lookup entirely -- the
     /// decision table is evaluated with `remote_sha = None` so sidecar
     /// presence alone governs skip/warn. Mutually exclusive with
     /// `force_refresh`; the CLI rejects the combination up front.
@@ -563,7 +562,7 @@ impl StoreProvider {
         }
     }
 
-    /// C17-2 / C17-4: configure the store-side refresh behaviour.
+    /// configure the store-side refresh behaviour.
     ///
     /// Panics if both `force_refresh` and `no_remote_check` are set --
     /// the CLI should reject the combination at argument parsing time.
@@ -587,27 +586,27 @@ impl StoreProvider {
         }
     }
 
-    /// C17-2: consult the decision table for a cached package.
+    /// consult the decision table for a cached package.
     ///
     /// Returns a `StaleOutcome` telling the caller (`resolve`) what to do:
     /// - `Skip` -> fast-path / offline-warning / strong-warning / no-remote-check
-    ///   skip. The caller does not touch the cache.
+    /// skip. The caller does not touch the cache.
     /// - `Refresh { sha }` -> the caller must stage-swap the existing
-    ///   package directory out of the way, call `fetch_and_cache_with_meta`
-    ///   with this SHA, and then commit or rollback the swap depending on
-    ///   whether the fetch succeeded. `sha` is `None` when the remote lookup
-    ///   failed but a refresh was still requested (e.g. `--force-refresh`
-    ///   without online access).
+    /// package directory out of the way, call `fetch_and_cache_with_meta`
+    /// with this SHA, and then commit or rollback the swap depending on
+    /// whether the fetch succeeded. `sha` is `None` when the remote lookup
+    /// failed but a refresh was still requested (e.g. `--force-refresh`
+    /// without online access).
     ///
-    /// C17B-001: This function intentionally does NOT call
+    /// This function intentionally does NOT call
     /// `invalidate_package` any more. The old contract deleted `pkg_dir`
     /// unconditionally before the fetch, so a failed fetch destroyed the
     /// user's working install. The stage-swap lives in `resolve()`.
     ///
     /// Side effects:
     /// - stderr warning on rows 4 and 5 (`offline, cannot verify
-    ///   staleness` / `unknown provenance, use --force-refresh`).
-    /// - stderr info on a refresh (`remote moved: ...; refreshing store`).
+    /// staleness` / `unknown provenance, use --force-refresh`).
+    /// - stderr info on a refresh (`remote moved:...; refreshing store`).
     ///
     /// Never silent: every non-happy-path outcome emits stderr output so
     /// the user can see what happened.
@@ -763,17 +762,17 @@ impl StoreProvider {
     }
 }
 
-/// C17B-001: outcome of the Phase 2 stale-detection decision table, as
+/// outcome of the stale-detection decision table, as
 /// consumed by `StoreProvider::resolve`.
 ///
 /// - `Skip`: the cached entry is trustworthy (fast-path / offline-warned /
-///   strong-warned / no-remote-check). The caller does NOT touch the store.
+/// strong-warned / no-remote-check). The caller does NOT touch the store.
 /// - `Refresh { sha }`: the caller must stage-swap the directory, call the
-///   fetcher, and commit or rollback depending on the fetch result. `sha`
-///   is the remote commit SHA to record in the new sidecar (`None` when
-///   the lookup failed but a refresh was still requested, e.g. under
-///   `--force-refresh` while offline; the sidecar will carry `commit_sha=""`
-///   and the next install will upgrade it via row 2b).
+/// fetcher, and commit or rollback depending on the fetch result. `sha`
+/// is the remote commit SHA to record in the new sidecar (`None` when
+/// the lookup failed but a refresh was still requested, e.g. under
+/// `--force-refresh` while offline; the sidecar will carry `commit_sha=""`
+/// and the next install will upgrade it via row 2b).
 #[derive(Debug)]
 enum StaleOutcome {
     Skip,
@@ -799,7 +798,7 @@ impl PackageProvider for StoreProvider {
             } => {
                 if org != "taida-lang" {
                     return ProviderResult::Error(format!(
-                        "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted in E32 Phase 0; source packages are limited to taida-lang/*",
+                        "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted under the current source package policy; source packages are limited to taida-lang/*",
                         org, name, version
                     ));
                 }
@@ -844,14 +843,14 @@ impl PackageProvider for StoreProvider {
                     Err(e) => return ProviderResult::Error(e),
                 };
 
-                // C17-2: stale-detection decision table.
+                // Stale-detection decision table.
                 //
                 // Only engaged when the package is already cached -- an
                 // uncached install always falls through to
                 // `fetch_and_cache_with_meta` below, which is the natural
-                // "first install" path and is unchanged from C17-1.
+                // "first install" path.
                 //
-                // C17B-001: when the outcome is `Refresh`, we stage the
+                // When the outcome is `Refresh`, we stage the
                 // existing directory aside (rename to `<dir>.refresh-staging`)
                 // BEFORE calling the fetcher. If the fetch fails we
                 // restore the backup so the user's working install is
@@ -1830,7 +1829,7 @@ mod tests {
         let with_meta = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_meta,
-            "_meta.toml must NOT affect integrity hash (C17B-002)"
+            "_meta.toml must NOT affect integrity hash"
         );
 
         // Change sidecar content -> still same hash.
@@ -1842,7 +1841,7 @@ mod tests {
         let with_meta2 = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_meta2,
-            "mutating _meta.toml must NOT change integrity (C17B-002)"
+            "mutating _meta.toml must NOT change integrity"
         );
 
         // Add `.taida_installed` marker -> still same.
@@ -1850,7 +1849,7 @@ mod tests {
         let with_marker = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_marker,
-            ".taida_installed marker must NOT affect integrity (C17B-002)"
+            ".taida_installed marker must NOT affect integrity"
         );
 
         // Add a `.foo.tmp` scratch file -> still same.
@@ -1858,7 +1857,7 @@ mod tests {
         let with_tmp = compute_dir_hash(&dir).unwrap();
         assert_eq!(
             baseline, with_tmp,
-            ".foo.tmp scratch must NOT affect integrity (C17B-002)"
+            ".foo.tmp scratch must NOT affect integrity"
         );
 
         // Sanity: a *real* content change still flips the hash.

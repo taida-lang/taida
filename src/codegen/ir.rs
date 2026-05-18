@@ -78,9 +78,9 @@ pub enum IrInst {
     // ── 制御フロー ──
     /// 条件分岐: CondBranch(result, arms)
     /// arms: Vec<(Option<IrVar>, Vec<IrInst>, IrVar)>
-    ///   - condition (None = default case)
-    ///   - body instructions
-    ///   - result var of body
+    /// - condition (None = default case)
+    /// - body instructions
+    /// - result var of body
     CondBranch(IrVar, Vec<CondArm>),
 
     // ── 参照カウント（Phase N7） ──
@@ -97,7 +97,7 @@ pub enum IrInst {
     /// `ReleaseAuto` は両方のレイアウトを runtime に判定して dispatch する
     /// `taida_release_any` ヘルパーへ展開され、codegen の lifetime tracking
     /// pass が dead binding の last use 直後に挿入する。
-    /// (C27B-018 Option B / @c.27 Round 3 wf018B)
+    /// ( Option B / @c.27 Round 3 wf018B)
     ReleaseAuto(IrVar),
 
     /// 末尾再帰呼び出し: 引数を再代入してエントリブロックにジャンプ

@@ -105,7 +105,7 @@ pub fn format_ai_json_recursive(entry_path: &str) -> Result<String, String> {
 /// (transitively) imported local modules.
 ///
 /// Import paths may include the `.td` extension (e.g. `./models.td`) or omit
-/// it (e.g. `./models`).  When the literal path does not exist on disk, the
+/// it (e.g. `./models`). When the literal path does not exist on disk, the
 /// function tries appending `.td` — matching the interpreter's resolution
 /// behaviour in `resolve_module_path()`.
 fn collect_modules_recursive(
@@ -424,7 +424,12 @@ fn format_type_expr(te: &TypeExpr) -> String {
         }
         TypeExpr::Function(params, ret) => {
             let params_str: Vec<String> = params.iter().map(format_type_expr).collect();
-            format!("({}) => :{}", params_str.join(", "), format_type_expr(ret))
+            let args_str = match params_str.as_slice() {
+                [] => "_".to_string(),
+                [single] => single.clone(),
+                _ => format!("({})", params_str.join(", ")),
+            };
+            format!("{} => :{}", args_str, format_type_expr(ret))
         }
     }
 }
@@ -528,9 +533,12 @@ fn collect_from_expr(
         Expr::Lambda(_, body, _) => {
             collect_from_expr(body, func_names, calls, throws, has_error_ceiling);
         }
-        Expr::MoldInst(_, args, _, _) => {
+        Expr::MoldInst(_, args, fields, _) => {
             for arg in args {
                 collect_from_expr(arg, func_names, calls, throws, has_error_ceiling);
+            }
+            for field in fields {
+                collect_from_expr(&field.value, func_names, calls, throws, has_error_ceiling);
             }
         }
         Expr::Unmold(inner, _) => {
@@ -674,12 +682,21 @@ fn summarize_expr(expr: &Expr) -> String {
             if fields.is_empty() {
                 format!("{}[{}]()", name, args_str.join(", "))
             } else {
-                let field_names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                let field_parts: Vec<String> = fields
+                    .iter()
+                    .map(|f| {
+                        if f.is_synthetic_positional() {
+                            summarize_expr(&f.value)
+                        } else {
+                            f.name.clone()
+                        }
+                    })
+                    .collect();
                 format!(
                     "{}[{}]({})",
                     name,
                     args_str.join(", "),
-                    field_names.join(", ")
+                    field_parts.join(", ")
                 )
             }
         }
@@ -1002,6 +1019,24 @@ mod tests {
         let json_str = parse_and_ai_json(source);
         serde_json::from_str(&json_str)
             .unwrap_or_else(|e| panic!("Invalid JSON: {}\n---\n{}", e, json_str))
+    }
+
+    #[test]
+    fn test_mold_positional_call_summary_hides_internal_field_names() {
+        let (program, errors) = crate::parser::parse("part <= Slice[data](start, end)");
+        assert!(errors.is_empty(), "Parse errors: {:?}", errors);
+        let Statement::Assignment(assign) = &program.statements[0] else {
+            panic!("expected assignment");
+        };
+        let Expr::MoldInst(_, _, fields, _) = &assign.value else {
+            panic!("expected mold instantiation");
+        };
+        assert!(fields.iter().all(BuchiField::is_synthetic_positional));
+        assert_eq!(
+            summarize_expr(&assign.value),
+            "Slice[data](start, end)",
+            "AI summary must not expose parser-internal positional field names"
+        );
     }
 
     // ── Basic validity ──

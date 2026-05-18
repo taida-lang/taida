@@ -2,12 +2,12 @@
 ///
 /// Provides context-aware completion items:
 /// - Variables and functions defined in the current document
-/// - User-defined types (ClassLikeDef — BuchiPack / Mold / Inheritance kinds、E30 Phase 7.5 / E30B-006)
+/// - User-defined types (ClassLikeDef — BuchiPack / Mold / Inheritance kinds)
 /// - Built-in mold types (30+ operation molds)
 /// - Prelude functions (stdout, stderr, stdin, jsonEncode, jsonPretty, etc.)
 /// - Operators (token-level: 10 tokens; the semantic 10-operator list
-///   in PHILOSOPHY.md splits `(| ... |>)` into two tokens and treats
-///   `:` as type-annotation grammar)
+/// in PHILOSOPHY.md splits `(|... |>)` into two tokens and treats
+/// `:` as type-annotation grammar)
 /// - Field/method completion after `.`
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, Documentation, InsertTextFormat,
@@ -211,7 +211,7 @@ fn partial_source_completions(statements: &[Statement]) -> Vec<CompletionItem> {
 
     for stmt in statements {
         match stmt {
-            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // Explicit addon bindings are surfaced as function completions.
             // `Name <= RustAddon["fn"](arity <= N)` binding を `FUNCTION`
             // として補完候補に出す。AST 上は Assignment だが、public
             // callable surface であり、user perspective では関数。
@@ -946,12 +946,12 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
 /// list documented in PHILOSOPHY.md / `docs/reference/operators.md`.
 ///
 /// Semantic vs token mapping:
-/// - `(| ... |>)` is one semantic operator (a condition delimiter
-///   pair) but two tokens (`|` and `|>`) at the lexer level — both
-///   tokens are surfaced individually here for editor UX.
+/// - `(|... |>)` is one semantic operator (a condition delimiter
+/// pair) but two tokens (`|` and `|>`) at the lexer level — both
+/// tokens are surfaced individually here for editor UX.
 /// - `:` is the 10th semantic operator (type marker) but is part of
-///   identifier/type-annotation grammar at the token level, so it is
-///   intentionally omitted from this completion list.
+/// identifier/type-annotation grammar at the token level, so it is
+/// intentionally omitted from this completion list.
 ///
 /// The semantic 10-operator pin lives in
 /// `docs/reference/operators.md` (canonical) and is asserted in
@@ -1051,7 +1051,7 @@ fn format_func_params(fd: &FuncDef) -> String {
 }
 
 /// Find doc_comments for a TypeDef by name.
-/// (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+/// ClassLikeDef + kind dispatch
 fn find_type_doc_comments(statements: &[Statement], name: &str) -> Option<Documentation> {
     for stmt in statements {
         if let Statement::ClassLikeDef(cl) = stmt
@@ -1065,7 +1065,7 @@ fn find_type_doc_comments(statements: &[Statement], name: &str) -> Option<Docume
 }
 
 /// Find doc_comments for a MoldDef by name.
-/// (E30 Sub-step 2.1) ClassLikeDef + kind dispatch
+/// ClassLikeDef + kind dispatch
 fn find_mold_doc_comments(statements: &[Statement], name: &str) -> Option<Documentation> {
     for stmt in statements {
         if let Statement::ClassLikeDef(cl) = stmt

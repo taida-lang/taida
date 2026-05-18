@@ -1,14 +1,14 @@
-//! `native/addon.lock.toml` read/write for RC2.6 addon publish flow.
+//! `native/addon.lock.toml` read/write for addon publish flow.
 //!
-//! `.dev/RC2_6_DESIGN.md` v2 introduces a **new file** alongside the
-//! frozen `native/addon.toml`: the addon lockfile. The frozen ABI v1
+//! The addon lockfile is a separate file alongside the frozen
+//! `native/addon.toml`. The frozen ABI v1
 //! manifest (`[library.prebuild]`) is never mutated by `taida ingot publish`;
 //! instead, the per-host `sha256:<hex>` rows live in this lockfile and
 //! are uploaded as a GitHub Release asset so `taida ingot install` can fetch
 //! them for any tagged version without checking out the source tree.
 //!
-//! This solves the tag/commit ordering problem spelled out in RC2.6B-005:
-//! since `taida ingot install` downloads the **tarball at the exact tag**, any
+//! This solves the tag/commit ordering problem: since `taida ingot install`
+//! downloads the **tarball at the exact tag**, any
 //! host-specific SHA-256 committed after the tag would be invisible to
 //! the installer. By splitting the data into a release asset, we
 //! preserve the "tarball is immutable" invariant while still letting
@@ -23,32 +23,32 @@
 //!
 //! [targets]
 //! "x86_64-unknown-linux-gnu" = "sha256:abc..."
-//! "aarch64-apple-darwin"     = "sha256:def..."
+//! "aarch64-apple-darwin" = "sha256:def..."
 //! ```
 //!
 //! * The presence of the file is the **publish marker**. No other
-//!   top-level keys are accepted in v1.
+//! top-level keys are accepted in v1.
 //! * `[targets]` keys are host triples, values are the exact
-//!   `"sha256:<64 lowercase hex>"` strings produced by CI during the
-//!   release workflow (C14 tag-only publish delegates SHA computation
-//!   to the addon `release.yml`; the CLI never hashes local cdylibs).
+//! `"sha256:<64 lowercase hex>"` strings produced by CI during the
+//! release workflow (tag-only publish delegates SHA computation
+//! to the addon `release.yml`; the CLI never hashes local cdylibs).
 //! * Future fields (signatures, timestamps, version-pin) are reserved
-//!   for v2 and SHOULD be added as new sections rather than by bending
-//!   the `[targets]` schema.
+//! for v2 and SHOULD be added as new sections rather than by bending
+//! the `[targets]` schema.
 //!
 //! # Parser contract
 //!
 //! Like `src/addon/manifest.rs`, this module is a **hand-written TOML
-//! subset parser** (RC2.6 Should Fix S1: "no new TOML crate
+//! subset parser** ("no new TOML crate"
 //! dependency"). It accepts:
 //!
 //! * Blank lines and `#` line comments.
 //! * `[targets]` section header (exactly once; duplicates are rejected).
 //! * `"<key>" = "<value>"` pairs inside `[targets]`. Keys MUST be
-//!   double-quoted (host triples contain `-` but the quoting removes
-//!   any ambiguity with other TOML subsets we may add later).
+//! double-quoted (host triples contain `-` but the quoting removes
+//! any ambiguity with other TOML subsets we may add later).
 //! * Values MUST be double-quoted strings with the `"sha256:"` prefix
-//!   followed by 64 lowercase hex characters.
+//! followed by 64 lowercase hex characters.
 //!
 //! Anything else is an error — silent acceptance is forbidden so that
 //! a malformed lockfile cannot downgrade integrity checks.
@@ -59,7 +59,7 @@
 //!
 //! * Existing entries for OTHER host triples are preserved verbatim.
 //! * The caller-supplied host row is inserted (or overwrites any row
-//!   with the same triple key).
+//! with the same triple key).
 //!
 //! This matches the CI matrix model where each host runner contributes
 //! its own digest independently. Wiping entries for other hosts would

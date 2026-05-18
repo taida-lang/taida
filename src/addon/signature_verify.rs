@@ -1,4 +1,4 @@
-//! C26B-030 / SEC-011 — install-side signature verification wiring.
+//! SEC-011 — install-side signature verification wiring.
 //!
 //! Closes the install-side half of the Sigstore / SLSA supply-chain
 //! gate. The release side (`.github/workflows/release.yml` — the
@@ -8,19 +8,19 @@
 //!
 //! # Policy matrix
 //!
-//! | `TAIDA_VERIFY_SIGNATURES` | Official URL | Behaviour                        |
+//! | `TAIDA_VERIFY_SIGNATURES` | Official URL | Behaviour |
 //! |---------------------------|--------------|----------------------------------|
-//! | unset / empty             | yes          | `BestEffort` (warn if missing)   |
-//! | unset / empty             | no           | `Disabled`                       |
-//! | `0` / `off` / `false`     | any          | `Disabled`                       |
-//! | `1` / `on` / `best-effort`| any          | `BestEffort`                     |
-//! | `required` / `enforce`    | any          | `Required` (hard fail on gap)    |
+//! | unset / empty | yes | `BestEffort` (warn if missing) |
+//! | unset / empty | no | `Disabled` |
+//! | `0` / `off` / `false` | any | `Disabled` |
+//! | `1` / `on` / `best-effort`| any | `BestEffort` |
+//! | `required` / `enforce` | any | `Required` (hard fail on gap) |
 //!
 //! # Trust boundary
 //!
 //! The heavy-lifting cryptography is performed by `cosign verify-blob`
 //! via the already-audited `scripts/release/verify-signatures.sh`
-//! (C26B-007 Sub-phase 7.4). This module only handles:
+//! ( Sub-phase 7.4). This module only handles:
 //!
 //! 1. deciding whether verification should run at all for a given URL,
 //! 2. fetching the `.cosign.bundle` file next to the artefact,
@@ -62,15 +62,15 @@ impl VerifyPolicy {
     /// Resolve the policy for a single fetch, given the artefact URL.
     ///
     /// - `TAIDA_VERIFY_SIGNATURES=required` → [`VerifyPolicy::Required`]
-    ///   for every URL (including `file://` — used by the failing-
-    ///   path integration test).
+    /// for every URL (including `file://` — used by the failing-
+    /// path integration test).
     /// - `TAIDA_VERIFY_SIGNATURES=0` / `off` / `false` →
-    ///   [`VerifyPolicy::Disabled`] unconditionally.
+    /// [`VerifyPolicy::Disabled`] unconditionally.
     /// - `TAIDA_VERIFY_SIGNATURES=1` / `on` / `best-effort` →
-    ///   [`VerifyPolicy::BestEffort`] unconditionally.
+    /// [`VerifyPolicy::BestEffort`] unconditionally.
     /// - Unset / empty:
-    ///   - [`is_official_release_url`] returns `true` → [`BestEffort`]
-    ///   - otherwise → [`Disabled`]
+    /// - [`is_official_release_url`] returns `true` → [`BestEffort`]
+    /// - otherwise → [`Disabled`]
     pub fn resolve(url: &str) -> Self {
         match std::env::var("TAIDA_VERIFY_SIGNATURES")
             .ok()

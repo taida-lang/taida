@@ -2184,17 +2184,26 @@ static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
    matching native's taida_throw_to_display_string. */
 static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
     if (throw_val == 0) return (int64_t)(intptr_t)"error";
-    /* If it's a BuchiPack, look for "message" field. Empty messages
-       are skipped so the JS Error factory's mandatory `message: ''`
-       default does not diverge from the Interpreter / Native fallback
-       to the `__type` name. */
+    /* If it's a BuchiPack, look for "message" field. Explicit empty
+       messages render as "" instead of falling back to the type name. */
     if (_looks_like_pack(throw_val)) {
         int64_t *p = (int64_t *)(intptr_t)throw_val;
         int64_t fc = p[0];
         for (int64_t i = 0; i < fc; i++) {
             if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
+                int64_t tag = p[1 + i * 3 + 1];
                 int64_t msg = p[1 + i * 3 + 2];
-                if (msg && _looks_like_string(msg)) return msg;
+                if (msg == 0) return (int64_t)(intptr_t)"\"\"";
+                if (tag == WASM_TAG_STR) {
+                    const char *ms = (const char *)(intptr_t)msg;
+                    if (ms[0] == '\0') return (int64_t)(intptr_t)"\"\"";
+                    return msg;
+                }
+                if (msg && _looks_like_string(msg)) {
+                    const char *ms = (const char *)(intptr_t)msg;
+                    if (ms[0] == '\0') return (int64_t)(intptr_t)"\"\"";
+                    return msg;
+                }
                 break;
             }
         }
