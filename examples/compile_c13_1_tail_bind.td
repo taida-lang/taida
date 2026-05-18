@@ -2,7 +2,7 @@
 //
 // Under C13-1 the tail statement of a `| |>` arm body, a function
 // body, or an error-ceiling body may be a binding
-// (`name <= expr`, `expr => name`, `expr ]=> name`, `name <=[ expr`).
+// (`name <= expr`, `expr => name`, `expr >=> name`, `name <=< expr`).
 // The bound value becomes the block's result, so a redundant trailing
 // `name` line is no longer required.
 //
@@ -30,11 +30,11 @@ armTailForward x =
 
 stdout(armTailForward(7).toString())
 
-// ── 3. arm body, tail `expr ]=> name` (unmold forward) ──────
+// ── 3. arm body, tail `expr >=> name` (unmold forward) ──────
 armTailUnmold x =
   | x > 0 |>
     lax <= Lax[x * 10]()
-    lax ]=> n
+    lax >=> n
   | _ |> 0
 => :Int
 

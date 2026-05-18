@@ -217,8 +217,8 @@ fn run_list_of_record_backend(backend: &str) {
   ],
   body <= "ping",
 )
-resp ]=> out
-out ]=> outV
+resp >=> out
+out >=> outV
 stdout(outV.status.toString())
 stdout(outV.body)
 "#
@@ -286,8 +286,8 @@ fn run_legacy_buchi_pack_backend(backend: &str) {
   headers <= @(x_test <= "abc"),
   body <= "ping",
 )
-resp ]=> out
-out ]=> outV
+resp >=> out
+out >=> outV
 stdout(outV.status.toString())
 "#
     );

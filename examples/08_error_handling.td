@@ -4,8 +4,8 @@
 Error => ValidationError = @(field: Str, code: Int)
 
 // Function with safe division via Div mold
-safeDivide x y =
-  Div[x, y]() ]=> result
+safeDivide x: Int y: Int =
+  Div[x, y]() >=> result
   result
 => :Int
 

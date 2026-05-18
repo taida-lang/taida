@@ -132,7 +132,7 @@ fn json_parse_failure_carries_error_info_across_backends() {
          info <= bad.errorInfo()\n\
          stdout(bad.hasValue().toString())\n\
          stdout(info.hasValue().toString())\n\
-         info ]=> err\n\
+         info >=> err\n\
          stdout(err.type)\n\
          stdout(err.kind)\n\
          stdout(err.code.toString())\n\
@@ -141,7 +141,7 @@ fn json_parse_failure_carries_error_info_across_backends() {
          stdout(bad.toString())\n\
          stdout(jsonEncode(bad))\n\
          stdout(bad.getOrDefault(99).toString())\n\
-         bad ]=> value\n\
+         bad >=> value\n\
          stdout(value.toString())\n\
          mapped <= bad.map(_ x = x)\n\
          mappedInfo <= mapped.errorInfo()\n\

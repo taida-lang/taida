@@ -4,7 +4,7 @@
 Transformer = @(
   items: @[Int]
   doubled =
-    Map[items, _ x = x * 2]() ]=> result
+    Map[items, _ x = x * 2]() >=> result
     Join[result, ","]()
   => :Str
 )

@@ -1,38 +1,38 @@
-//! C14-1: `taida ingot publish` tag-push-only implementation.
+//! `taida ingot publish` tag-push-only implementation.
 //!
 //! This module used to orchestrate `cargo build`, SHA-256 computation,
 //! `addon.lock.toml` generation, `packages.tdm` rewriting, `git commit`,
 //! `git push origin HEAD`, and `gh release create`. All of that is
-//! gone in C14: publish now does exactly three things.
+//! gone: publish now does exactly three things.
 //!
 //! 1. Validate the manifest identity (qualified `owner/name` required).
 //! 2. Compute the next version from the API diff (or honour
-//!    `--force-version`).
+//! `--force-version`).
 //! 3. `git tag <version>` + `git push origin <tag>`, then exit.
 //!
 //! Release artefact building, SHA-256 digest computation, and asset
-//! upload are the exclusive responsibility of CI — see the addon
-//! `release.yml` template introduced by C14-3 and Taida's own
-//! `.github/workflows/release.yml` which serves as the symmetric
-//! reference.
+//! upload are the exclusive responsibility of CI. The addon `release.yml`
+//! template and Taida's own `.github/workflows/release.yml` are the
+//! symmetric references.
 //!
-//! Non-negotiable contracts carried over from `.dev/C14_DESIGN.md`:
+//! Non-negotiable publish contracts:
 //!
 //! - `taida ingot publish` MUST NOT push anything to `main` (no `git push
-//!   origin HEAD`). Only `git push origin <tag>` is allowed.
+//! origin HEAD`). Only `git push origin <tag>` is allowed.
 //! - `taida ingot publish` MUST NOT call `gh release create`. The addon
-//!   `release.yml` creates the release as `github-actions[bot]`.
+//! `release.yml` creates the release as `github-actions[bot]`.
 //! - `taida ingot publish` MUST exit immediately after the tag push. It does
-//!   not wait for CI.
+//! not wait for CI.
 //! - The manifest identity MUST be qualified (`<<<@version owner/name`);
-//!   bare names are rejected.
+//! bare names are rejected.
 //! - API diff detection MUST reuse the existing Taida parser
-//!   (`crate::pkg::api_diff`).
+//! (`crate::pkg::api_diff`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::api_diff::{self, ApiDiff};
+use super::facade;
 use super::manifest::{Manifest, is_valid_taida_version};
 
 // ─────────────────────────────────────────────────────────────
@@ -300,11 +300,11 @@ pub fn read_git_tags(project_dir: &Path) -> Result<Vec<String>, String> {
 
 /// Compare two Taida generation strings using the base-26-like
 /// progression that `next_generation` walks forward (`a..z`, then
-/// `aa..zz`, then `aaa..`, ...). Ordering is length-first, then
+/// `aa..zz`, then `aaa..`,...). Ordering is length-first, then
 /// lexicographic within the same length, so `"z" < "aa" < "ab" < "zz" < "aaa"`.
 ///
 /// Plain `str::cmp` would put `"aa" < "z"` and silently re-age any
-/// repo that has crossed the `z -> aa` boundary (C14B-013).
+/// repo that has crossed the `z -> aa` boundary.
 fn compare_generation(a: &str, b: &str) -> std::cmp::Ordering {
     a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
@@ -472,7 +472,7 @@ fn sanitize_publish_token(raw: &str, source: &str) -> Option<String> {
     Some(token.to_string())
 }
 
-/// C26B-025: Compare the `<<<@<version>` self-identity from
+/// Compare the `<<<@<version>` self-identity from
 /// `packages.tdm` against the next tag this publish run is about to
 /// push. A valid match requires byte-equal strings, with one
 /// convenience: `manifest.version` may omit a trailing label
@@ -511,6 +511,7 @@ pub fn plan_publish(
     retag: bool,
 ) -> Result<PublishPlan, String> {
     let package_id = validate_manifest_identity(manifest)?;
+    facade::validate_publish_facade(manifest)?;
 
     if let Some(l) = label {
         validate_label(l)?;

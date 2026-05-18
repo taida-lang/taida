@@ -17,7 +17,7 @@ const RUNNER_CASES: &[RunnerCase] = &[
         source: r#"
 >>> npm:node:os => @(constants)
 sig <= Cage[constants, JSGet[@["signals", "SIGTERM"], Int]()]()
-sig ]=> value
+sig >=> value
 stdout(value.toString())
 "#,
         expected: "15",
@@ -29,7 +29,7 @@ stdout(value.toString())
         source: r#"
 >>> npm:node:path => @(basename)
 file <= Cage[basename, JSCall[@[], @["/tmp/e33-cage-rilla.txt"], Str]()]()
-file ]=> value
+file >=> value
 stdout(value)
 "#,
         expected: "e33-cage-rilla.txt",
@@ -41,9 +41,9 @@ stdout(value)
         source: r#"
 >>> npm:node:url => @(URL)
 url <= Cage[URL, JSNew[@[], @["https://example.com/a"], Molten]()]()
-url ]=> obj
+url >=> obj
 href <= Cage[obj, JSGet[@["href"], Str]()]()
-href ]=> value
+href >=> value
 stdout(value)
 "#,
         expected: "https://example.com/a",
@@ -55,9 +55,9 @@ stdout(value)
         source: r#"
 >>> npm:node:process => @(env)
 set <= Cage[env, JSSet[@["TAIDA_E33_TEST"], "ok"]()]()
-set ]=> env2
-got <= Cage[env2, JSGet[@["TAIDA_E33_TEST"], Str]()]()
-got ]=> value
+set >=> ok
+got <= Cage[env, JSGet[@["TAIDA_E33_TEST"], Str]()]()
+got >=> value
 stdout(value)
 "#,
         expected: "ok",
@@ -69,11 +69,11 @@ stdout(value)
         source: r#"
 >>> npm:node:url => @(URL)
 url <= Cage[URL, JSNew[@[], @["https://example.com/a"], Molten]()]()
-url ]=> obj
+url >=> obj
 bound <= Cage[obj, JSBind[@["toString"]]()]()
-bound ]=> fn
+bound >=> fn
 called <= Cage[fn, JSCall[@[], @[], Str]()]()
-called ]=> value
+called >=> value
 stdout(value)
 "#,
         expected: "https://example.com/a",
@@ -85,9 +85,9 @@ stdout(value)
         source: r#"
 >>> npm:node:process => @(env)
 merged <= Cage[env, JSSpread[@(TAIDA_E33_SPREAD <= "yes")]()]()
-merged ]=> env2
+merged >=> env2
 got <= Cage[env2, JSGet[@["TAIDA_E33_SPREAD"], Str]()]()
-got ]=> value
+got >=> value
 stdout(value)
 "#,
         expected: "yes",

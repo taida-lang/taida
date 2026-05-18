@@ -681,6 +681,9 @@ taida_ptr taida_io_stdin_line(taida_ptr prompt_ptr);
 taida_ptr taida_sha256(taida_val value);
 taida_val taida_time_now_ms(void);
 taida_val taida_time_sleep(taida_val ms);
+// F42 sweep: assert(cond, msg?) -> Bool. Native parity with
+// the interpreter and JS backends; throws AssertionError on cond=false.
+taida_val taida_assert(taida_val cond, taida_val msg);
 taida_ptr taida_json_encode(taida_val val);
 taida_ptr taida_json_pretty(taida_val val);
 taida_val taida_register_field_name(taida_val hash, taida_ptr name_ptr);
@@ -2964,7 +2967,7 @@ void taida_release_any(taida_val ptr) {
 // C26B-024 (Round 8 / wT): thread-local freelist for fixed-size packs.
 // The hottest path in the Native runtime is the Lax wrapper allocation
 // (`taida_lax_new` + `taida_lax_empty` — called on every `list.get(i)`,
-// every `.get(i) ]=> x`, and every `pack.field ]=> x`). Each Lax is a
+// every `.get(i) >=> x`, and every `pack.field >=> x`). Each Lax is a
 // 4-field pack (112 bytes: 2-slot header + 4*3 field slots * 8 bytes).
 // In bench_router.td @ N=1000 / M=5000 this dominates sys time (2m0s
 // of 2m31s wall = 80% sys). A bounded thread-local freelist lets the
@@ -7552,15 +7555,15 @@ taida_val taida_result_get_or_throw(taida_val result) {
 static taida_val taida_throw_to_display_string(taida_val throw_val) {
     if (throw_val == 0) return (taida_val)taida_str_new_copy("error");
     // If it's a BuchiPack (Error TypeDef), extract the "message" field.
-    // An empty message is treated as "no message" so the JS Error
-    // factory's mandatory `message: ''` default does not diverge from
-    // the Interpreter / Native rendering.
+    // An explicit empty message renders as "" instead of falling back to
+    // the declared type name.
     if (taida_is_buchi_pack(throw_val)) {
         if (taida_pack_has_hash(throw_val, (taida_val)HASH_MESSAGE)) {
             taida_val msg = taida_pack_get(throw_val, (taida_val)HASH_MESSAGE);
             if (msg != 0) {
                 size_t sl = 0;
-                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl) && sl > 0) {
+                if (taida_read_cstr_len_safe((const char*)msg, 65536, &sl)) {
+                    if (sl == 0) return (taida_val)taida_str_new_copy("\"\"");
                     return (taida_val)taida_str_new_copy((const char*)msg);
                 }
             }
@@ -10480,7 +10483,10 @@ static taida_val taida_time_sleep_task(taida_val ms) {
     req.tv_nsec = (taida_val)((ms % 1000) * 1000000L);
     while (nanosleep(&req, &req) == -1 && errno == EINTR) {
     }
-    return taida_pack_new(0);
+    // F42 sweep: return the requested ms count (Int) instead of an empty
+    // BuchiPack (which would be Unit on Taida surface). PHILOSOPHY I
+    // forbids `Async[Unit]` — `sleep` now resolves to `Async[Int]`.
+    return ms;
 }
 
 taida_val taida_time_sleep(taida_val ms) {
@@ -10491,6 +10497,43 @@ taida_val taida_time_sleep(taida_val ms) {
         return taida_async_err(taida_make_error("RangeError", msg));
     }
     return taida_async_spawn((taida_val)taida_time_sleep_task, ms);
+}
+
+// F42 sweep / Phase 1 Round 4: `assert(cond, msg)` prelude function.
+//
+// Native parity with `src/interpreter/prelude.rs::"assert"` and
+// `src/js/runtime/core.rs::__taida_assert`: a successful assertion returns
+// `Value::Bool(true)` (Taida surface `:Bool`). On failure, throws an
+// `AssertionError`. PHILOSOPHY I forbids Unit on Taida surface, so the
+// success path returns a meaningful boolean value (and the type checker
+// — `src/types/checker.rs:437` — declares `assert` returns `Type::Bool`).
+//
+// Without this helper the Native lowering fell back to a generic name
+// resolution that yielded `0` (NULL function pointer) and segfaulted at
+// call time (Phase 1 R3 review verdict: exit 139). The fix registers a
+// real C function so `lower/core.rs::stdlib_runtime_funcs` can map
+// `assert -> taida_assert` like the other prelude builtins.
+taida_val taida_assert(taida_val cond, taida_val msg) {
+    if (!cond) {
+        // F42 sweep: surface assertion failure as a Taida AssertionError so
+        // the program path matches the interpreter and JS backends. The
+        // `msg` argument is a C-string Taida value when provided.
+        const char *msg_cstr = "Assertion failed";
+        if (msg) {
+            // The message is a Taida `Str` value (C-string). Use a safe
+            // length probe to avoid reading past unmapped memory if the
+            // caller forgot to pass a real string.
+            size_t mlen = 0;
+            if (taida_read_cstr_len_safe((const char *)msg, 4096, &mlen) && mlen > 0) {
+                msg_cstr = (const char *)msg;
+            }
+        }
+        return taida_throw(taida_make_error("AssertionError", msg_cstr));
+    }
+    // F42 sweep: success path returns Bool(true). Native `Bool` is encoded
+    // as the integer `1` in `taida_val` (see `taida_pack_set_tag` callers
+    // for `TAIDA_TAG_BOOL`).
+    return 1;
 }
 
 // ── SHA-256 prelude function (builtin, no external dependency) ─────────

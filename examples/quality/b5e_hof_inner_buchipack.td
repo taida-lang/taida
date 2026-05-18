@@ -3,7 +3,7 @@
 
 items <= @[1, 2, 3]
 
-Map[items, _ x = @(val <= x, doubled <= x * 2)]() ]=> packs
+Map[items, _ x = @(val <= x, doubled <= x * 2)]() >=> packs
 stdout(packs.length().toString())
 stdout(packs.first().unmold().val.toString())
 stdout(packs.first().unmold().doubled.toString())

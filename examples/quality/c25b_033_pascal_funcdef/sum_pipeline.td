@@ -3,7 +3,7 @@
 // fall-through in `gen_pipeline` emits `{name}(__p)` which pre-fix would
 // produce a reference to the prelude `Sum`; post-fix it resolves to the
 // mangled `_td_user_Sum(__p)` so the call lands on the user's definition.
-Sum a b =
+Sum a: Int b: Int =
   a + b
 => :Int
 

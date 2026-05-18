@@ -23,7 +23,7 @@ use crate::parser::*;
 /// errors where types are fully known.
 use std::collections::{HashMap, HashSet};
 
-/// C12B-023 bypass closure (2026-04-15, root fix): field names reserved
+/// bypass closure (2026-04-15, root fix): field names reserved
 /// for compiler-internal use. A user-authored `Expr::BuchiPack` /
 /// `Expr::TypeInst` literal that assigns any of these is rejected at
 /// type-check time with `[E1617]`.
@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 /// callers fabricate fake nominal packs that bypass the official
 /// constructors' validation. The earlier narrower fix (literal
 /// `__type <= "Regex"` only) was bypassed by variable binding
-/// (`tag <= "Regex"; @(__type <= tag, ...)`) and by expression
+/// (`tag <= "Regex"; @(__type <= tag,...)`) and by expression
 /// composition (`"Re" + "gex"`, `if(c, "Regex", "X")`). The root
 /// remedy is to reject **all** user assignments to `__`-prefixed
 /// field names, regardless of the value expression.
@@ -128,16 +128,15 @@ struct MoldBindingDef<'a> {
 /// - `E1606` -- logical operator type mismatch
 /// - `E1607` -- unary operator type mismatch
 /// - `E1608` -- unknown enum variant
-/// - `E1618` -- enum variant order mismatch across module boundary (C18-1)
-/// - `E1611` -- JS backend capability rejection
+/// - `E1618` -- enum variant order mismatch across module boundary/// - `E1611` -- reserved backend capability rejection
 /// - `E1612` -- WASM backend capability rejection
 /// - `E1613` -- TypeExtends does not accept enum variant literals
-/// - `E1617` -- Regex invariant rejection. Two emitters share this code (both C12B-023):
-///   (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
-///   `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
-///   (2) Manual `__type <= "Regex"` BuchiPack construction rejection
-///   (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
-///   by its official constructor to enforce eager pattern validation.
+/// - `E1617` -- Regex invariant rejection. Two emitters share this code (both ):
+/// (1) WASM backend Regex rejection (`emit_wasm_c::validate_regex_api_for_wasm`) —
+/// `Regex(...)` ctor / `.match(re)` / `.search(re)` are unsupported on wasm;
+/// (2) Manual `__type <= "Regex"` BuchiPack construction rejection
+/// (`checker::check_mold_errors_in_expr`) — nominal `:Regex` must be produced
+/// by its official constructor to enforce eager pattern validation.
 ///
 /// Some internal diagnostic messages (e.g., inheritance validation, mold binding
 /// checks) do not yet carry error codes. These are emitted during registration
@@ -225,10 +224,10 @@ pub struct TypeChecker {
     /// remains the public type; this side table records the branch only
     /// when the checker can prove it.
     branch_scope_stack: Vec<HashMap<String, BranchInfo>>,
-    /// D28B-023 / D28B-024: stack of type parameter declarations for the
+    /// stack of type parameter declarations for the
     /// enclosing generic functions. Pushed on `Statement::FuncDef` body
     /// entry, popped on exit. Used to resolve constrained type variables
-    /// inside the body (e.g. arithmetic on `T <= :Num`, calling `F <= :T => :T`).
+    /// inside the body (e.g. arithmetic on `T <=:Num`, calling `F <=:T =>:T`).
     current_func_type_params: Vec<Vec<TypeParam>>,
     /// Re-entrancy guard for expected-type named function body inference.
     hinted_func_stack: Vec<String>,
@@ -251,10 +250,6 @@ pub enum CompileTarget {
 }
 
 impl CompileTarget {
-    fn is_js(self) -> bool {
-        matches!(self, Self::Js)
-    }
-
     /// Native and wasm targets that lower through the
     /// C / wasm-C runtime use regular call instructions for mutual
     /// recursion (no trampoline). Deep mutual cycles therefore overflow
@@ -324,7 +319,7 @@ impl TypeChecker {
         checker
     }
 
-    /// C19B-002: install pinned signatures for the C19 interactive os
+    /// install pinned signatures for the interactive os
     /// variants. Idempotent — `register_os_import_symbol` delegates here
     /// for the same symbol names, so the import path remains a no-op
     /// overwrite with the identical `Gorillax[@(code: Int)]` shape.
@@ -432,21 +427,23 @@ impl TypeChecker {
             "typeOf" | "typeof" => Some(Type::Str),
             "jsonEncode" | "jsonPretty" => Some(Type::Str),
             "nowMs" => Some(Type::Int),
-            "assert" => Some(Type::Unit),
+            // F42 sweep: assert returns Bool(true) on success, throws on failure.
+            // Aligned with `src/interpreter/prelude.rs:801` (Value::Bool(true)).
+            "assert" => Some(Type::Bool),
             "range" => Some(Type::List(Box::new(Type::Int))),
             "enumerate" => Some(Type::List(Box::new(Type::Unknown))),
             "zip" => Some(Type::List(Box::new(Type::Unknown))),
             "hashMap" => Some(Type::Named("HashMap".to_string())),
             "setOf" => Some(Type::Named("Set".to_string())),
             "stdout" | "stderr" => Some(Type::Int),
-            "exit" => Some(Type::Unit),
+            "exit" => Some(Type::Int),
             "stdin" => Some(Type::Str),
             "stdinLine" => Some(Self::async_type(Type::Generic(
                 "Lax".to_string(),
                 vec![Type::Str],
             ))),
             "argv" => Some(Type::List(Box::new(Type::Str))),
-            "sleep" => Some(Self::async_type(Type::Unit)),
+            "sleep" => Some(Self::async_type(Type::Int)),
             "Regex" => Some(Type::Named("Regex".to_string())),
             "readBytes" | "readBytesAt" => {
                 Some(Type::Generic("Lax".to_string(), vec![Type::Bytes]))
@@ -527,10 +524,10 @@ impl TypeChecker {
         }
     }
 
-    /// C19B-002: register typed signatures for `taida-lang/os` symbols that
+    /// register typed signatures for `taida-lang/os` symbols that
     /// need compile-time Gorillax inner-shape pinning.
     ///
-    /// Currently only the C19 interactive variants are pinned, because
+    /// Currently only the interactive variants are pinned, because
     /// their inner shape `@(code: Int)` is strictly narrower than the
     /// captured `run` / `execShell` form `@(stdout, stderr, code)` — and
     /// callers who reach for `.__value.stdout` on an interactive result
@@ -759,6 +756,26 @@ impl TypeChecker {
                 ),
                 span: span.clone(),
             });
+        }
+
+        // F42 sweep [E1523]: detect built-in type names mistakenly written
+        // as Mold header type variables. `Mold[Int]` is silently read as
+        // a type variable `Int`, masking the user's intent of a concrete
+        // type argument. Surface the misuse with an actionable diagnostic.
+        for arg in header_args {
+            if let MoldHeaderArg::TypeParam(tp) = arg
+                && Self::is_builtin_type_name(&tp.name)
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1523] {} '{}' header type variable '{}' collides with built-in type name. \
+                         Use `{}[:{}]` for a concrete type argument or `{}[T <= :{}]` for a constrained type variable. \
+                         See PHILOSOPHY.md III and docs/reference/diagnostic_codes.md [E1523].",
+                        kind, name, tp.name, name, tp.name, name, tp.name
+                    ),
+                    span: span.clone(),
+                });
+            }
         }
     }
 
@@ -1193,14 +1210,66 @@ impl TypeChecker {
         }
     }
 
+    /// [E1520]: Is this type a "value-absence" type that must not
+    /// appear on Taida surface as a return / parameter / type argument?
+    ///
+    /// Detects (shallow):
+    /// - `Type::Unit` (resolved from `:Unit` / `:Void` named types)
+    /// - `Type::BuchiPack` with no fields (resolved from `:@()`)
+    /// - `Type::Named("Unit" | "Void")` (un-resolved alias form)
+    ///
+    /// PHILOSOPHY.md I の系「値の不在は値の不在」と CLAUDE.md「Taida 実装側
+    /// の絶対ルール」を整合的に実装するための判定 helper。
+    pub(super) fn is_unit_like_type(ty: &Type) -> bool {
+        match ty {
+            Type::Unit => true,
+            Type::BuchiPack(fields) if fields.is_empty() => true,
+            Type::Named(name) if name == "Unit" || name == "Void" => true,
+            _ => false,
+        }
+    }
+
+    /// [E1520]: Recursive check that detects value-absence types
+    /// nested inside `Async[Unit]`, `Result[Unit, _]`, `Optional[Unit]`,
+    /// `List[Unit]`, `Function([Unit], Unit)`, **BuchiPack fields**, etc.
+    ///
+    /// The shallow `is_unit_like_type` is preserved for direct comparisons
+    /// (e.g. checking whether the immediate return type is `:Unit`). This
+    /// recursive variant is intended for callers that need to reject
+    /// `Async[Unit]` annotations, `Optional[Void]` annotations, and other
+    /// nested forms — every Type::Unit / empty BuchiPack hidden in the
+    /// composite is reachable from Taida surface.
+    ///
+    /// **Round-4 補強**: `Type::BuchiPack(fields)` の非空 fields 内に
+    /// `:Unit` / `:Void` / `:@()` を書く抜け道 (`:@(payload: @())` 等) を
+    /// 塞ぐため、非空 BuchiPack の各 field type を再帰的にチェック。
+    pub(super) fn contains_unit_like_type(ty: &Type) -> bool {
+        if Self::is_unit_like_type(ty) {
+            return true;
+        }
+        match ty {
+            Type::List(inner) => Self::contains_unit_like_type(inner),
+            Type::Generic(_, args) => args.iter().any(Self::contains_unit_like_type),
+            Type::Function(params, ret) => {
+                params.iter().any(Self::contains_unit_like_type)
+                    || Self::contains_unit_like_type(ret)
+            }
+            // F42 sweep (R4): BuchiPack 非空 fields 内の Unit 抜け道を塞ぐ。
+            Type::BuchiPack(fields) => fields
+                .iter()
+                .any(|(_, field_ty)| Self::contains_unit_like_type(field_ty)),
+            _ => false,
+        }
+    }
+
     /// RCB-50: Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
-    /// an unresolved generic type parameter (e.g. `T`, `U`).  When
+    /// an unresolved generic type parameter (e.g. `T`, `U`). When
     /// either the body type or the declared return type contains such
     /// a variable, the return-type check must be suppressed because
     /// the checker cannot meaningfully compare them.
-    /// D28B-023 / D28B-024: look up an active enclosing function's `TypeParam`
+    /// look up an active enclosing function's `TypeParam`
     /// by name, walking the stack of nested generic functions inside-out.
     /// Returns `None` if the name does not refer to any active type parameter.
     fn lookup_active_type_param(&self, name: &str) -> Option<&TypeParam> {
@@ -1212,9 +1281,9 @@ impl TypeChecker {
         None
     }
 
-    /// D28B-024: returns true when `name` is an active generic type parameter
+    /// returns true when `name` is an active generic type parameter
     /// whose declared subtype constraint is a numeric primitive (`Num` / `Int`
-    /// / `Float`). Such a type variable is treated as numeric for arithmetic
+    /// `Float`). Such a type variable is treated as numeric for arithmetic
     /// (`+` / `-` / `*`) and ordering operators inside the function body.
     fn type_param_is_numeric(&self, name: &str) -> bool {
         let Some(tp) = self.lookup_active_type_param(name) else {
@@ -1226,8 +1295,8 @@ impl TypeChecker {
         )
     }
 
-    /// D28B-023: if `name` is an active generic type parameter whose
-    /// declared subtype constraint is a function type (e.g. `F <= :T => :T`),
+    /// if `name` is an active generic type parameter whose
+    /// declared subtype constraint is a function type (e.g. `F <=:T =>:T`),
     /// return the resolved `Type::Function(...)` for that constraint.
     /// Returns `None` for non-function constraints (or unconstrained vars).
     fn type_param_function_constraint(&self, name: &str) -> Option<Type> {
@@ -1261,7 +1330,7 @@ impl TypeChecker {
     /// Custom mold instantiations (e.g. `AlwaysFail[x]()`) return
     /// `Type::Named("AlwaysFail")` from `infer_expr_type`, but the
     /// checker cannot predict what the mold's `solidify` function
-    /// actually produces at runtime.  We suppress E1601 in this case.
+    /// actually produces at runtime. We suppress E1601 in this case.
     fn is_mold_defined_named(&self, ty: &Type) -> bool {
         matches!(ty, Type::Named(name) if self.registry.mold_defs.contains_key(name))
     }
@@ -1276,6 +1345,34 @@ impl TypeChecker {
             Expr::ListLit(items, _) if items.len() == 1 => {
                 Type::List(Box::new(self.type_arg_expr_to_type(&items[0])))
             }
+            // F42 sweep (R5) (Codex 第 4 ラウンド指摘): 型引数として書かれた
+            // `@()` / `@(name: T, ...)` を `Type::BuchiPack` に正しく変換する。
+            // これ以前は `Expr::BuchiPack(...)` がすべて `Type::Unknown` に落ち、
+            // `JSGet[@["x"], @()]` のような Cage runner Out が
+            // `contains_unit_like_type` の検出網をすり抜けていた (E1520 抜け道)。
+            Expr::BuchiPack(fields, _) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|f| (f.name.clone(), self.type_arg_expr_to_type(&f.value)))
+                    .collect(),
+            ),
+            // F42 sweep (R5) follow-up (Codex 第 5 ラウンド指摘): 型引数として
+            // 書かれた `Async[Unit]` / `Result[Unit, Str]` / `Optional[Void]` 等の
+            // generic な mold instantiation を `Type::Generic` に変換する。これ以前は
+            // `Expr::MoldInst(...)` がすべて `Type::Unknown` に落ち、Cage runner Out
+            // で `JSGet[..., Async[Unit]]` のような nested unit-like 型が
+            // `contains_unit_like_type` の検出網をすり抜けていた (E1520 抜け道)。
+            // 関数戻り型注釈位置で書かれた `Async[Unit]` は別経路 `resolve_type` 経由で
+            // 既に reject されており、ここは Cage runner Out 等の type-arg 位置専用の
+            // 補完。`registry.resolve_type` を呼ぶと scope error を起こすので、
+            // shallow に `Type::Generic(name, args)` を構築するに留める。
+            Expr::MoldInst(name, type_args, _fields, _) => Type::Generic(
+                name.clone(),
+                type_args
+                    .iter()
+                    .map(|arg| self.type_arg_expr_to_type(arg))
+                    .collect(),
+            ),
             _ => Type::Unknown,
         }
     }
@@ -1294,6 +1391,49 @@ impl TypeChecker {
             other if self.registry.is_error_type(other) => Type::Error(other.to_string()),
             other => Type::Named(other.to_string()),
         }
+    }
+
+    /// [E1523]: detect built-in type names mistakenly written
+    /// as Mold header type variables. `Mold[Int]` parses as a type
+    /// variable named `Int`, which collides with the built-in `Int` type
+    /// and is almost always a misuse for `Mold[:Int]` (concrete type
+    /// argument) or `Mold[T <=:Int]` (constrained type variable).
+    ///
+    /// Built-in type names that trigger this diagnostic:
+    /// - Primitive / scalar: `Int`, `Float`, `Num`, `Number`, `Str`,
+    /// `String`, `Bytes`, `Bool`, `Boolean`
+    /// - Special / forbidden surface types: `Unit`, `Void`, `JSON`, `Molten`
+    /// - Built-in molds with `MoldSpec::range`: `Lax`, `Result`, `Async`,
+    /// `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
+    pub(super) fn is_builtin_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Int"
+                | "Float"
+                | "Num"
+                | "Number"
+                | "Str"
+                | "String"
+                | "Bytes"
+                | "Bool"
+                | "Boolean"
+                | "Unit"
+                | "Void"
+                | "JSON"
+                | "Molten"
+                | "Lax"
+                | "Result"
+                | "Async"
+                | "Optional"
+                | "Stream"
+                | "Mold"
+                | "TODO"
+                | "Log"
+                | "Slice"
+                | "Concat"
+                | "Gorillax"
+                | "RelaxedGorillax"
+        )
     }
 
     fn branch_from_type_arg(&self, expr: &Expr) -> Option<CageBranch> {
@@ -1347,7 +1487,7 @@ impl TypeChecker {
             }
             "JSSet" if type_args.len() == 2 => Some(CageRunnerType {
                 branch: CageBranch::Js,
-                output: Type::Molten,
+                output: Type::Bool,
             }),
             "JSBind" | "JSSpread" if type_args.len() == 1 => Some(CageRunnerType {
                 branch: CageBranch::Js,
@@ -1493,6 +1633,28 @@ impl TypeChecker {
                             "[E1517] Cage runner branch is unresolved for `{}`. \
                              Hint: pass a CageRilla child descriptor such as `JSCall[path, args, Out]()`.",
                             name
+                        ),
+                    );
+                }
+
+                // F42 sweep [E1520] Cage runner Out 検査: `Out = :@()` /
+                // `:Unit` / `:Void` (再帰形) を Cage runner の出力型として
+                // 書くことを禁止する。docs/api/js.md は「Out に Unit/@()/Void
+                // 不可」を明文化しているが、これまで type checker は enforce
+                // していなかった。
+                if let Some(ref runner_info) = info
+                    && Self::contains_unit_like_type(&runner_info.output)
+                {
+                    self.push_cage_error(
+                        "[E1520]",
+                        runner_span,
+                        format!(
+                            "[E1520] Cage runner `{}` declares output type {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`) as the \
+                             Cage descriptor's Out type. Use a meaningful concrete type instead (e.g., `:Int` for byte counts, \
+                             `:Bool` for status, a structured BuchiPack). See PHILOSOPHY.md I, docs/reference/diagnostic_codes.md \
+                             [E1520], and docs/api/js.md (Out section).",
+                            name, runner_info.output
                         ),
                     );
                 }
@@ -1643,30 +1805,56 @@ impl TypeChecker {
             && let Some(protocol_field) = fields.iter().find(|field| field.name == "protocol")
         {
             match &protocol_field.value {
-                Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => (),
-                Expr::EnumVariant(enum_name, variant_name, span)
-                    if self.net_http_protocol_type_names.contains(enum_name)
-                        && self.compile_target.is_js()
-                        && matches!(variant_name.as_str(), "H2" | "H3") =>
+                Expr::EnumVariant(enum_name, _, _)
+                    if self.net_http_protocol_type_names.contains(enum_name) => {}
+                Expr::EnumVariant(enum_name, _, span)
+                    if !self.net_http_protocol_type_names.contains(enum_name) =>
                 {
                     self.errors.push(TypeError {
-                        message: format!(
-                            "[E1611] `httpServe(..., tls <= @(..., protocol <= {}:{}()))` is not supported on the JS backend. \
-                             Hint: JS supports only `{}:H1()`; use the interpreter or native backend for HTTP/2 and HTTP/3.",
-                            enum_name, variant_name, enum_name
-                        ),
-                        span: span.clone(),
-                    });
-                }
-                Expr::IntLit(_, span) | Expr::FloatLit(_, span) | Expr::BoolLit(_, span) => {
-                    self.errors.push(TypeError {
-                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol or Str. \
-                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()` or a legacy string like \"h1.1\"."
+                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol. \
+                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()`."
                             .to_string(),
                         span: span.clone(),
                     });
                 }
-                _ => (),
+                Expr::StringLit(_, span)
+                | Expr::TemplateLit(_, span)
+                | Expr::IntLit(_, span)
+                | Expr::FloatLit(_, span)
+                | Expr::BoolLit(_, span) => {
+                    self.errors.push(TypeError {
+                        message: "[E1506] `httpServe` tls.protocol literal must be HttpProtocol. \
+                             Hint: Use `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()`."
+                            .to_string(),
+                        span: span.clone(),
+                    });
+                }
+                other => {
+                    // F42 sweep follow-up: catch the dynamic case
+                    // `p <= "h2"; ... protocol <= p` where the literal
+                    // check above only sees an `Ident` / function call
+                    // expression. The HttpProtocol enum is the sole
+                    // accepted shape (Str union was withdrawn in
+                    // F42B-013), so type-check the dynamic operand and
+                    // reject anything that does not resolve to the
+                    // HttpProtocol enum (or `Unknown` from a generic
+                    // path, which is allowed for caller flexibility).
+                    let span = other.span().clone();
+                    let inferred = self.infer_expr_type(other);
+                    let is_http_protocol = matches!(&inferred, Type::Named(n)
+                        if self.net_http_protocol_type_names.contains(n));
+                    let is_permitted_unknown = matches!(inferred, Type::Unknown | Type::Molten);
+                    if !is_http_protocol && !is_permitted_unknown {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1506] `httpServe` tls.protocol must be HttpProtocol, but the dynamic operand resolves to {}. \
+                                 Hint: bind the value to `HttpProtocol:H1()` / `HttpProtocol:H2()` / `HttpProtocol:H3()` before passing it in.",
+                                inferred
+                            ),
+                            span,
+                        });
+                    }
+                }
             }
         }
         if matches!(
@@ -1806,34 +1994,13 @@ impl TypeChecker {
                                     &sym_names,
                                 );
                                 for v in &violations {
-                                    match v {
-                                        crate::pkg::facade::FacadeViolation::HiddenSymbol {
-                                            name,
-                                            available,
-                                        } => {
-                                            self.errors.push(TypeError {
-                                                    message: format!(
-                                                        "[E1701] Symbol '{}' is not part of the public API declared in packages.tdm. \
-                                                         Available exports: {}",
-                                                        name,
-                                                        available.join(", ")
-                                                    ),
-                                                    span: imp.span.clone(),
-                                                });
-                                        }
-                                        crate::pkg::facade::FacadeViolation::GhostSymbol {
-                                            name,
-                                        } => {
-                                            self.errors.push(TypeError {
-                                                    message: format!(
-                                                        "[E1701] Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                                                         The entry module must export all symbols listed in the package facade.",
-                                                        name
-                                                    ),
-                                                    span: imp.span.clone(),
-                                                });
-                                        }
-                                    }
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1701] {}",
+                                            crate::pkg::facade::format_facade_violation(v)
+                                        ),
+                                        span: imp.span.clone(),
+                                    });
                                 }
                                 if !violations.is_empty() {
                                     return;
@@ -1928,23 +2095,22 @@ impl TypeChecker {
     ///
     /// Behaviour:
     /// 1. Resolve the import path (relative, package, or submodule) using the same
-    ///    logic as `validate_import_symbols`.
+    /// logic as `validate_import_symbols`.
     /// 2. Parse the target module and collect every `EnumDef` / `FuncDef`
-    ///    whose name is being imported by the current statement.
+    /// whose name is being imported by the current statement.
     /// 3. If the importer has **not** already defined an enum with the same local
-    ///    name, register it into `self.registry`. The wire-order is the import
-    ///    origin (source of truth).
+    /// name, register it into `self.registry`. The wire-order is the import
+    /// origin (source of truth).
     /// 4. If the importer **has** already defined the enum locally (common pattern
-    ///    during the C18 transition), check that the variant list is identical;
-    ///    any mismatch emits `[E1618] Enum '<name>' variant order mismatch across
-    ///    module boundary.` to catch the silent-bug risk raised in ROOT-5.
+    /// during the enum-schema transition), check that the variant list is identical;
+    /// any mismatch emits `[E1618] Enum '<name>' variant order mismatch across
+    /// module boundary to catch enum-order drift.
     ///
     /// Notes:
     /// - `[E1618]` is allocated for this check because `[E1610]` is already
-    ///   occupied by cyclic-inheritance detection. The design rationale is
-    ///   recorded in `.dev/C18_BLOCKERS.md` (C18B-001).
-    /// - Aliased imports (`>>> ./m.td => @(Color: Paint)`) register the enum
-    ///   under the alias, mirroring the interpreter behaviour.
+    /// occupied by cyclic-inheritance detection.
+    /// - Aliased imports (`>>>./m.td => @(Color: Paint)`) register the enum
+    /// under the alias, mirroring the interpreter behaviour.
     fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
@@ -2304,17 +2470,17 @@ impl TypeChecker {
         self.define_branch_info(name, BranchInfo::None);
     }
 
-    /// C13-1 / C13B-007: True if `name` in an intermediate pipeline
+    /// True if `name` in an intermediate pipeline
     /// step should be treated as a function-like reference (classic
     /// pipeline semantics: call it with the current value). False means
     /// bind-and-forward: the current step's value is bound to `name` and
     /// passed through unchanged.
     ///
     /// A name is considered callable if:
-    ///   - the variable is declared with a `Function` type in scope, or
-    ///   - the name is registered as a user-defined (possibly generic)
-    ///     function / type / mold, or
-    ///   - it is a known builtin identifier.
+    /// - the variable is declared with a `Function` type in scope, or
+    /// - the name is registered as a user-defined (possibly generic)
+    /// function / type / mold, or
+    /// - it is a known builtin identifier.
     fn is_pipeline_callable_ident(&self, name: &str) -> bool {
         if let Some(ty) = self.lookup_var(name)
             && matches!(ty, Type::Function(_, _))
@@ -2365,7 +2531,7 @@ impl TypeChecker {
     }
 
     /// Unwrap a mold type to get its inner value type.
-    /// Used for `]=>` and `<=[` unmold operations.
+    /// Used for `>=>` and `<=<` unmold operations.
     fn unmold_type(&self, ty: &Type) -> Type {
         match ty {
             // JSON unmolds to dynamic type (needs schema)
@@ -2675,6 +2841,32 @@ impl TypeChecker {
                 }
                 ClassLikeKind::Mold { .. } => {
                     let md = cl;
+                    // F42 sweep [E1501]: MoldDef collision check (the
+                    // BuchiPack / Enum / Inheritance branches above
+                    // already had this; the Mold branch was missing,
+                    // so `Mold[T] => Box[T] = @(...)` and
+                    // `Mold[T] => Box[T, U] = @(...)` would both
+                    // register without complaint, silently giving the
+                    // impression that arity overload is allowed).
+                    // F42B-011 (Phase 2 lock = B / overload 禁止維持)
+                    // requires the same enforcement at the MoldDef
+                    // surface as at the BuchiPack / Enum surface.
+                    let has_collision = self.registry.type_defs.contains_key(&md.name)
+                        || self.registry.enum_defs.contains_key(&md.name)
+                        || self.func_types.contains_key(&md.name)
+                        || self.registry.mold_defs.contains_key(&md.name);
+                    if has_collision {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1501] Name '{}' is already defined in this scope. \
+                                 Redefinition in the same scope is not allowed (mold overload — \
+                                 including arity-different overloads — is forbidden; use a different name). \
+                                 Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                                md.name
+                            ),
+                            span: md.span.clone(),
+                        });
+                    }
                     self.validate_class_like_fields("MoldDef", &md.name, &md.fields);
                     let header_args = Self::effective_mold_header_args(md);
                     self.validate_mold_root_header(md, &header_args);
@@ -2997,6 +3189,27 @@ impl TypeChecker {
                 });
             }
 
+            // F42 sweep [E1520] field-type check: reject value-absence types
+            // (`:@()` / `:Unit` / `:Void`) and nested forms (`:Async[Unit]` /
+            // `:Function([Unit], Unit)`) as a field's type annotation.
+            // ClassLike / Mold / InheritanceDef field definitions are part of
+            // the Taida surface contract, so the same prohibition applies.
+            if let Some(type_annotation) = &field.type_annotation {
+                let field_ty = self.registry.resolve_type(type_annotation);
+                if Self::contains_unit_like_type(&field_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1520] {} '{}' field '{}' has type annotation {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]` or \
+                             `:Function([Unit], Unit)`) as field type annotations. Use a meaningful concrete type instead. \
+                             See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                            kind, def_name, field.name, field_ty
+                        ),
+                        span: field.span.clone(),
+                    });
+                }
+            }
+
             // (E30 Phase 5 / E30B-003) `[E1410]` reject path —
             // declare-only function fields whose return type cannot be
             // auto-generated by `defaultFn` (Lock-D verdict, Phase 6 land)
@@ -3041,7 +3254,7 @@ impl TypeChecker {
         }
     }
 
-    /// C12B-023 bypass closure (3rd layer): reject `FieldDef` whose name
+    /// bypass closure (3rd layer): reject `FieldDef` whose name
     /// starts with the reserved internal-field prefix (`__`). Shared by
     /// TypeDef / MoldDef / InheritanceDef. Emits `[E1617]` — the same
     /// diagnostic code used for (1) the AST-level `Expr::BuchiPack`/
@@ -3159,15 +3372,14 @@ impl TypeChecker {
             None => return,
         };
 
-        // (E30 Phase 4 / E30B-002) declare-only function fields are excluded
-        // from the required-positional `[]` set: they are interface members
+        // Declare-only function fields are excluded from the
+        // required-positional `[]` set: they are interface members
         // (`fn: A => :B` form, no body, no default) whose values are filled in
-        // at instantiation time via `()` (override) or, after Phase 6, by an
-        // automatically-generated `defaultFn`. They are also classified as
+        // at instantiation time via `()` overrides. They are also classified as
         // "optional" so that explicit `(transform <= ...)` overrides in `()`
-        // are accepted (no `[E1406]` "undefined option"). Phase 6 (E30B-004)
-        // will keep this classification while adding the auto-generated
-        // defaultFn that replaces the current `Value::Unit` placeholder.
+        // are accepted without an "undefined option" diagnostic. A future
+        // default function path should keep this classification while removing
+        // the current `Value::Unit` placeholder.
         let required_fields: Vec<String> = mold_fields
             .iter()
             .filter(|f| {
@@ -4111,11 +4323,11 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    /// C19B-002: narrow walker that triggers full type inference only on
+    /// narrow walker that triggers full type inference only on
     /// FieldAccess nodes inside builtin call arguments (e.g.
     /// `stdout(r.__value.stdout)`). This lets us surface pinned-Gorillax
     /// field-access rejections without retroactively tightening other
-    /// builtin arg subtrees (BinaryOp / MethodCall / etc.) that pre-C19
+    /// builtin arg subtrees (BinaryOp / MethodCall / etc.) that earlier
     /// callers were silently relying on.
     ///
     /// The returned type is intentionally discarded; we only care about
@@ -4618,6 +4830,48 @@ defaulted fields must be provided via `()`",
                             .unwrap_or(Type::Unknown)
                     })
                     .collect();
+
+                // F42 sweep [E1520] R1: reject `:@()` / `:Unit` / `:Void` as
+                // return type annotation on Taida-surface function definitions.
+                // PHILOSOPHY I の系「値の不在は値の不在」: 「情報なしを意味する型」を関数戻り型に書くこと自体を禁止する。
+                // 再帰的に Async[Unit] / Result[Unit, _] / Optional[Unit] / List[Unit] /
+                // Function([Unit], Unit) 等のネストした unit-like 型も検出する。
+                if fd.return_type.is_some() && Self::contains_unit_like_type(&ret_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1520] Function '{}' declares return type {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`, \
+                             `:Result[Unit, _]`, `:List[Unit]`, `:Function([Unit], Unit)`) as function return type \
+                             annotations. Return a meaningful value instead (e.g., `:Int` for byte count, `:Bool` \
+                             for status, a structured BuchiPack, or a common Enum variant such as `:OpStatus`). \
+                             See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                            fd.name, ret_ty
+                        ),
+                        span: fd.span.clone(),
+                    });
+                }
+
+                // F42 sweep [E1520] R1 対称版: reject `:@()` / `:Unit` / `:Void` as
+                // parameter type annotation on Taida-surface function definitions
+                // (再帰検出も含む).
+                for (idx, param) in fd.params.iter().enumerate() {
+                    if param.type_annotation.is_some()
+                        && let Some(pty) = param_types.get(idx)
+                        && Self::contains_unit_like_type(pty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1520] Function '{}' parameter '{}' has type annotation {} ('value-absence' type, possibly nested). \
+                                 Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`, \
+                                 `:Result[Unit, _]`) as parameter type annotations. Use a meaningful concrete type instead. \
+                                 See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                                fd.name, param.name, pty
+                            ),
+                            span: fd.span.clone(),
+                        });
+                    }
+                }
+
                 // Register the name in scope so duplicate detection still works.
                 // Invalid generic functions stay non-callable by using `Unknown`.
                 let function_value_ty = if self.invalid_func_defs.contains(&fd.name) {
@@ -4726,7 +4980,7 @@ defaulted fields must be provided via `()`",
                             self.errors.push(TypeError {
                                 message: format!(
                                     "[E1601] Function '{}' declares return type {}, but the last statement is not an expression. \
-                                     Hint: The function body's last statement must be an expression or a tail binding (`name <= expr`, `expr => name`, `expr ]=> name`, `name <=[ expr`) that produces a value.",
+                                     Hint: The function body's last statement must be an expression or a tail binding (`name <= expr`, `expr => name`, `expr >=> name`, `name <=< expr`) that produces a value.",
                                     fd.name, ret_ty
                                 ),
                                 span: fd.span.clone(),
@@ -4752,6 +5006,30 @@ defaulted fields must be provided via `()`",
                         }
                         _ => Type::Unknown,
                     };
+
+                    // F42 sweep [E1520] R2 / R2 拡張: reject functions whose
+                    // inferred return type is a "value-absence" type when no
+                    // return annotation is provided. This closes the
+                    // intermediate-variable bypass `x <= @() => x` and the
+                    // direct tail `... => @()` form simultaneously.
+                    if fd.type_params.is_empty()
+                        && body_ty != Type::Unknown
+                        && !Self::contains_unknown(&body_ty)
+                        && Self::is_unit_like_type(&body_ty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1520] Function '{}' has no return type annotation, but its body's final value resolves to {} \
+                                 ('value-absence' type). Taida forbids `:@()` / `:Unit` / `:Void` from leaking as a function's \
+                                 inferred return type. Return a meaningful value instead (e.g. `:Int` byte count, `:Bool` status, \
+                                 a structured BuchiPack, or a common Enum variant). \
+                                 See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                                fd.name, body_ty
+                            ),
+                            span: fd.span.clone(),
+                        });
+                    }
+
                     if fd.type_params.is_empty()
                         && body_ty != Type::Unknown
                         && !Self::contains_unknown(&body_ty)
@@ -4781,6 +5059,21 @@ defaulted fields must be provided via `()`",
 
                 // Register the error parameter
                 let err_ty = self.registry.resolve_type(&ec.error_type);
+
+                // F42 sweep [E1520] R1 対称版: reject `:@()` / `:Unit` / `:Void`
+                // (recursive) as error-handler parameter type annotation.
+                if Self::contains_unit_like_type(&err_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1520] ErrorCeiling parameter '{}' has type annotation {} ('value-absence' type, possibly nested). \
+                             Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms) as handler parameter type annotations. \
+                             See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                            ec.error_param, err_ty
+                        ),
+                        span: ec.span.clone(),
+                    });
+                }
+
                 self.define_var(&ec.error_param, err_ty);
 
                 for body_stmt in &ec.handler_body {
@@ -4795,6 +5088,22 @@ defaulted fields must be provided via `()`",
                 // - Named/List/BuchiPack body: mold/fold inference imprecision
                 if let Some(ref ret_type_expr) = ec.return_type {
                     let declared_ret = self.registry.resolve_type(ret_type_expr);
+
+                    // F42 sweep [E1520] R1: reject `:@()` / `:Unit` / `:Void`
+                    // (recursive) as ErrorCeiling return-type annotation.
+                    if Self::contains_unit_like_type(&declared_ret) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1520] ErrorCeiling declares return type {} ('value-absence' type, possibly nested). \
+                                 Taida forbids `:@()` / `:Unit` / `:Void` (including nested forms like `:Async[Unit]`) \
+                                 as ErrorCeiling return type annotations. Return a meaningful value instead. \
+                                 See PHILOSOPHY.md I and docs/reference/diagnostic_codes.md [E1520].",
+                                declared_ret
+                            ),
+                            span: ec.span.clone(),
+                        });
+                    }
+
                     let is_unit_ret = matches!(declared_ret, Type::Unit)
                         || matches!(&declared_ret, Type::Named(n) if n == "Unit");
                     if !matches!(declared_ret, Type::Unknown)
@@ -4859,7 +5168,7 @@ defaulted fields must be provided via `()`",
                                          but the last statement is not an expression. \
                                          Hint: The |== handler body's last statement must \
                                          be an expression or a tail binding (`name <= expr`, \
-                                         `expr => name`, `expr ]=> name`, `name <=[ expr`) \
+                                         `expr => name`, `expr >=> name`, `name <=< expr`) \
                                          that produces a value.",
                                     declared_ret
                                 ),
@@ -4906,7 +5215,7 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::UnmoldForward(uf) => {
-                // `expr ]=> target` -- target gets the unmolded (inner) value
+                // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
@@ -4917,7 +5226,7 @@ defaulted fields must be provided via `()`",
                 }
             }
             Statement::UnmoldBackward(ub) => {
-                // `target <=[ expr`
+                // `target <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
@@ -5502,6 +5811,14 @@ defaulted fields must be provided via `()`",
                         {
                             Type::Str
                         } else if left_type == Type::Unknown || right_type == Type::Unknown {
+                            // F42 sweep [E1525] candidate: `Unknown + Unknown`
+                            // would normally be rejected here, but Lambda
+                            // bodies depend on bidirectional inference (E39)
+                            // and Taida's lambda syntax has no parameter
+                            // type-annotation parser path yet. Deferred to
+                            // Phase 4 / post-Phase-3 cycle, where a
+                            // context-sensitive enforcement (FuncDef-only or
+                            // post-inference) can be designed.
                             Type::Unknown
                         } else {
                             self.errors.push(TypeError {
@@ -6196,7 +6513,7 @@ defaulted fields must be provided via `()`",
                     self.errors.push(TypeError {
                         message: format!(
                             "[E1960] Field '{}' is compiler-internal and cannot be accessed from Taida code. \
-                             Hint: use `]=>` / `<=[` to unmold values, `getOrDefault(default)` for Lax values, \
+                             Hint: use `>=>` / `<=<` to unmold values, `getOrDefault(default)` for Lax values, \
                              or `errorInfo()` for failure details.",
                             field
                         ),
@@ -7030,7 +7347,7 @@ defaulted fields must be provided via `()`",
     }
 
     /// Closed-constructor validation for class-like
-    /// `Name(field <= value, ...)` instantiations.
+    /// `Name(field <= value,...)` instantiations.
     ///
     /// Anonymous packs (`@(...)`) keep their open / structural shape and
     /// are intentionally left untouched by this validator. Named
@@ -7039,23 +7356,23 @@ defaulted fields must be provided via `()`",
     ///
     /// 1. Duplicate field names → `[E1404]` (single appearance per call).
     /// 2. Undeclared field names → `[E1406]` (the typo path that
-    ///    previously fell back to a default value at runtime — e.g.
-    ///    `Pilot(typo_age <= 14)` silently dropping the typo and giving
-    ///    `age = 0`).
+    /// previously fell back to a default value at runtime — e.g.
+    /// `Pilot(typo_age <= 14)` silently dropping the typo and giving
+    /// `age = 0`).
     /// 3. Method fields (`is_method = true`) cannot be passed as
-    ///    constructor arguments — methods are part of the type's
-    ///    behaviour, not its data — `[E1407]`.
+    /// constructor arguments — methods are part of the type's
+    /// behaviour, not its data — `[E1407]`.
     /// 4. Declared field value type must be compatible with the field's
-    ///    declared type → `[E1506]` (existing arg-type code).
+    /// declared type → `[E1506]` (existing arg-type code).
     /// 5. Error-derived types' `type` field is auto-set to the concrete
-    ///    type name. Passing `type <= "Same"` is allowed (idempotent
-    ///    legacy aid); any other literal / non-literal value is rejected
-    ///    via `[E1408]` so `type` cannot be spoofed.
+    /// type name. Passing `type <= "Same"` is allowed (idempotent
+    /// legacy aid); any other literal / non-literal value is rejected
+    /// via `[E1408]` so `type` cannot be spoofed.
     /// 6. Omitted fields are NOT rejected — the value is filled by the
-    ///    declared default / by the `defaultFn` synthesised in E30B-004
-    ///    for declare-only function fields. This honours the "every type
-    ///    has a default" PHILOSOPHY without forcing every constructor
-    ///    call site to enumerate every field.
+    /// declared default / by the `defaultFn` synthesised in
+    /// for declare-only function fields. This honours the "every type
+    /// has a default" PHILOSOPHY without forcing every constructor
+    /// call site to enumerate every field.
     fn validate_type_inst_constructor(&mut self, name: &str, fields: &[BuchiField], _span: &Span) {
         let Some(field_defs) = self.mold_field_defs.get(name).cloned() else {
             // Name is not a registered class-like / mold-like type
@@ -7137,8 +7454,8 @@ defaulted fields must be provided via `()`",
             // subclasses. Without this hoisted check the validator below
             // would happily accept `MyError(type <= someVar)` (variable
             // bypass) or `MyError(type <= "Other")` because the field is
-            // not "undeclared". Per E32B-058 the validator must always
-            // require a string literal whose value matches the type name.
+            // not "undeclared". The validator must always require a string
+            // literal whose value matches the type name.
             if is_error_type && field.name == "type" {
                 if let Expr::StringLit(value, _) = &field.value
                     && value == name
@@ -7215,6 +7532,25 @@ defaulted fields must be provided via `()`",
         if arms.is_empty() {
             return Type::Unknown;
         }
+
+        // F42 sweep [E1524]: a condition branch must have a default arm
+        // — either `| _ |>` (condition is `None`) or `| true |>`
+        // (literal-true). Otherwise, runtime behavior is undefined when
+        // every condition arm fails. PHILOSOPHY IV — strict structure
+        // for AI readability.
+        let has_default = arms.iter().any(|arm| {
+            arm.condition.is_none() || matches!(&arm.condition, Some(Expr::BoolLit(true, _)))
+        });
+        if !has_default {
+            self.errors.push(TypeError {
+                message: "[E1524] Condition branch is missing a default arm. \
+                          Add `| _ |>` or `| true |>` so the result is defined \
+                          for every input (PHILOSOPHY IV — strict structure). \
+                          See docs/reference/diagnostic_codes.md [E1524]."
+                    .into(),
+                span: span.clone(),
+            });
+        }
         // Infer type from the first arm
         let first_ty = if let Some(first_arm) = arms.first() {
             // Check condition type
@@ -7234,7 +7570,7 @@ defaulted fields must be provided via `()`",
                     });
                 }
             }
-            // Each arm gets its own scope for local bindings (e.g. ]=>)
+            // Each arm gets its own scope for local bindings (e.g. >=>)
             self.push_scope();
             for body_stmt in &first_arm.body {
                 self.check_statement(body_stmt);
@@ -7294,11 +7630,11 @@ defaulted fields must be provided via `()`",
         first_ty
     }
 
-    /// C13-1: Infer the type of an arm's result. The result is:
+    /// Infer the type of an arm's result. The result is:
     /// - `Statement::Expr(e)` → the inferred type of `e`
     /// - `Statement::Assignment(_)` / `UnmoldForward(_)` / `UnmoldBackward(_)`
-    ///   → the registered type of the bound target (already recorded by
-    ///   the preceding `check_statement` loop).
+    /// → the registered type of the bound target (already recorded by
+    /// the preceding `check_statement` loop).
     /// - Anything else (definitions, imports, …) → `Type::Unknown`.
     ///
     /// Must be called *after* `check_statement` has processed the arm
@@ -7351,7 +7687,7 @@ impl Default for TypeChecker {
 // consistent with actual default-value materialisation.
 
 /// Returns true iff a defaultFn can be synthesised for the given function /
-/// value type per Lock-D verdict (E30 Phase 0, 2026-04-28).
+/// value type per verdict.
 ///
 /// `visiting` carries the names already in the recursion stack so that
 /// self-referential / mutually-recursive types are treated as generatable

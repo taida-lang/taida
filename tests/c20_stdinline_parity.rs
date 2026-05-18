@@ -1,10 +1,10 @@
 //! C20-2: 3-backend parity harness for the new `stdinLine` prelude API.
 //!
-//! `stdinLine(prompt) ]=> line` returns an `Async[Lax[Str]]`. The Async
+//! `stdinLine(prompt) >=> line` returns an `Async[Lax[Str]]`. The Async
 //! wrapper exists so that the JS backend (`node:readline/promises` is
 //! async-only) and the Interpreter / Native backends (rustyline /
 //! linenoise-derived termios editor are synchronous) can share a single
-//! surface type; callers unmold the Async with `]=>` to obtain the
+//! surface type; callers unmold the Async with `>=>` to obtain the
 //! inner `Lax[Str]` and then `getOrDefault("")` on it.
 //!
 //! This file pins the CI-testable invariants:
@@ -19,7 +19,7 @@
 //!     the manual smoke in Hachikuma Phase 11).
 //!   * **Checker**: `stdinLine()` (no prompt) and
 //!     `stdinLine("…")` both type-check; the return type is
-//!     `Async[Lax[Str]]`, so `]=>` is the idiomatic unmold.
+//!     `Async[Lax[Str]]`, so `>=>` is the idiomatic unmold.
 //!
 //! Red test ゼロ容認 — any divergence between the three backends (or any
 //! regression vs. the fixtures) is a C20-2 blocker. The interactive
@@ -311,11 +311,11 @@ fn c20_stdin_line_native_utf8_preserves_multibyte() {
     assert_native_matches("stdinline_utf8");
 }
 
-// ── Checker: stdinLine() / stdinLine("…") / ]=> narrowing ──
+// ── Checker: stdinLine() / stdinLine("…") / >=> narrowing ──
 
 #[test]
 fn c20_stdin_line_checker_accepts_no_prompt_form() {
-    let script = "stdinLine() ]=> line\nstdout(\"ok\")\n";
+    let script = "stdinLine() >=> line\nstdout(\"ok\")\n";
     let src = unique_temp("c20_stdinline_noprompt", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())
@@ -334,7 +334,7 @@ fn c20_stdin_line_checker_accepts_no_prompt_form() {
 
 #[test]
 fn c20_stdin_line_checker_accepts_str_prompt_form() {
-    let script = "stdinLine(\"name: \") ]=> line\nstdout(line.getOrDefault(\"\"))\n";
+    let script = "stdinLine(\"name: \") >=> line\nstdout(line.getOrDefault(\"\"))\n";
     let src = unique_temp("c20_stdinline_strprompt", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())
@@ -353,7 +353,7 @@ fn c20_stdin_line_checker_accepts_str_prompt_form() {
 
 #[test]
 fn c20_stdin_line_checker_rejects_too_many_args() {
-    let script = "stdinLine(\"a\", \"b\") ]=> line\nstdout(\"never\")\n";
+    let script = "stdinLine(\"a\", \"b\") >=> line\nstdout(\"never\")\n";
     let src = unique_temp("c20_stdinline_arity", "td");
     fs::write(&src, script).expect("write temp td");
     let out = Command::new(taida_bin())

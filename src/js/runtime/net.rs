@@ -1,7 +1,7 @@
 //! JS runtime: `taida-lang/net` HTTP v1 runtime (server + WebSocket).
 //!
-//! Split out from monolithic `src/js/runtime.rs` as part of C12-9
-//! (FB-21 mechanical file split). Covers the HTTP parser, response
+//! Split out from monolithic `src/js/runtime.rs` as part of
+//! ( mechanical file split). Covers the HTTP parser, response
 //! encoder, chunked transfer state, streaming writer, SSE, request
 //! body reader, and WebSocket. Original source line range: 3139..6381.
 //!
@@ -673,7 +673,7 @@ function __taida_net_chunkedBodyComplete(buf, bodyOffset) {
     if (readPos >= dataLen) return -1; // need more data
 
     // Find CRLF after chunk-size, capped at MAX_CHUNK_LINE_BYTES so a chunk
-    // -ext flood is treated as malformed rather than "incomplete" (E32B-051).
+    // -ext flood is treated as malformed rather than "incomplete".
     // Off-by-one parity with Rust/C: we scan `cap` bytes total, i.e. up to
     // absolute index `readPos + cap - 1` inclusive, hence `i < readPos + cap - 1`.
     let crlfPos = -1;
@@ -812,37 +812,36 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
   // tls is a BuchiPack (object) or undefined/null.
   // @() = empty object = plaintext (v4 compat).
   // @(cert: "path", key: "path") = HTTPS.
-  // v6 NET6-1b: @(cert: ..., key: ..., protocol: "h2") = HTTP/2 (rejected on JS).
+  // @(cert: ..., key: ..., protocol: HttpProtocol:H2()) = HTTP/2 (rejected on JS).
   let __useTls = false;
   let __tlsCert = null;
   let __tlsKey = null;
   let __requestedProtocol = null;
   if (tls !== undefined && tls !== null && typeof tls === 'object') {
     // v6 NET6-1b: Extract protocol field if present.
-    // NB6-10: Separate "field exists" from "field is Str".
-    // If protocol field exists but is not Str, reject immediately.
     if ('protocol' in tls) {
-      if (typeof tls.protocol === 'string') {
-        __requestedProtocol = tls.protocol;
-      } else if (typeof tls.protocol === 'number' && Number.isInteger(tls.protocol)) {
+      const __protocolOrdinal = __taida_isEnumVal(tls.protocol)
+        ? tls.protocol.__taida_enum_ordinal
+        : tls.protocol;
+      if (typeof __protocolOrdinal === 'number' && Number.isInteger(__protocolOrdinal)) {
         // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
-        if (tls.protocol === 0) {
+        if (__protocolOrdinal === 0) {
           __requestedProtocol = 'h1.1';
-        } else if (tls.protocol === 1) {
+        } else if (__protocolOrdinal === 1) {
           __requestedProtocol = 'h2';
-        } else if (tls.protocol === 2) {
+        } else if (__protocolOrdinal === 2) {
           __requestedProtocol = 'h3';
         } else {
           return new __TaidaAsync(
             __taida_net_result_fail('ProtocolError',
-              'httpServe: unknown HttpProtocol ordinal ' + tls.protocol +
+              'httpServe: unknown HttpProtocol ordinal ' + __protocolOrdinal +
               '. Expected 0 (H1), 1 (H2), or 2 (H3).'),
             null, 'fulfilled');
         }
       } else {
         return new __TaidaAsync(
           __taida_net_result_fail('ProtocolError',
-            'httpServe: protocol must be HttpProtocol or Str, got ' + typeof tls.protocol),
+            'httpServe: protocol must be HttpProtocol, got ' + typeof tls.protocol),
           null, 'fulfilled');
       }
     }
@@ -915,7 +914,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       }
       __useTls = true;
     } else if (__requestedProtocol !== null) {
-      // v6 NET6-1b: @(protocol: "h2") without cert/key — still validate protocol.
+      // v6 NET6-1b: @(protocol <= HttpProtocol:H2()) without cert/key — still validate protocol.
       // Fall through to protocol validation below.
     }
     // else: empty object @() → plaintext, fall through
@@ -2126,7 +2125,11 @@ function __taida_net_startResponse(writer, status, headers) {
   writer._pendingHeaders = h;
   writer._state = 1; // HeadPrepared
 
-  return undefined; // Unit
+  // F42 sweep: return prepared head byte size (Int). Actual wire commit is
+  // deferred to writeChunk/endResponse; the returned :Int represents the
+  // start-line + headers byte size that will be written on commit.
+  const preparedHead = __taida_net_buildStreamingHead(s, h);
+  return Buffer.byteLength(preparedHead);
 }
 
 // NET3-4b/4c/4d: writeChunk(writer, data)
@@ -2155,8 +2158,9 @@ function __taida_net_writeChunk(writer, data) {
   }
 
   // Empty chunk is no-op (avoid colliding with terminator)
+  // F42 sweep: return Int(0) instead of undefined (no bytes written).
   const payloadLen = (typeof payload === 'string') ? Buffer.byteLength(payload) : payload.length;
-  if (payloadLen === 0) return undefined;
+  if (payloadLen === 0) return 0;
 
   // Bodyless status check
   if (__taida_net_isBodylessStatus(writer._pendingStatus)) {
@@ -2177,20 +2181,22 @@ function __taida_net_writeChunk(writer, data) {
   // Send chunk using cork/uncork (no Buffer.concat).
   // Track drain state: if sock.write returns false the kernel buffer
   // is full and the 'drain' event will fire to clear _needsDrain.
-  // writeChunk always returns undefined (Unit) per NET_DESIGN contract.
-  // Backpressure is handled by Node.js internal buffering; the drain
-  // listener resets the flag for observability but no Promise is exposed.
+  // F42 sweep: writeChunk returns :Int (total bytes written) instead of
+  // undefined. Backpressure is handled by Node.js internal buffering; the
+  // drain listener resets the flag for observability but no Promise is exposed.
   const hexPrefix = payloadLen.toString(16) + '\r\n';
+  const suffix = '\r\n';
   sock.cork();
   sock.write(hexPrefix);
   sock.write(payload);
-  const ok = sock.write('\r\n');
+  const ok = sock.write(suffix);
   sock.uncork();
   if (!ok) {
     writer._needsDrain = true;
   }
 
-  return undefined; // Unit
+  // F42 sweep: return total bytes written (hex_prefix + payload + suffix).
+  return Buffer.byteLength(hexPrefix) + payloadLen + Buffer.byteLength(suffix);
 }
 
 // NET3-4b: endResponse(writer)
@@ -2205,23 +2211,30 @@ function __taida_net_endResponse(writer) {
   }
 
   // Idempotent
-  if (writer._state === 3) return undefined;
+  // F42 sweep: return Int(0) instead of undefined for idempotent no-op.
+  if (writer._state === 3) return 0;
 
   const sock = writer._socket;
+
+  // F42 sweep: track bytes written in this call.
+  let bytesWritten = 0;
 
   // Commit head if not yet committed
   if (writer._state === 0 || writer._state === 1) {
     const headBytes = __taida_net_buildStreamingHead(writer._pendingStatus, writer._pendingHeaders);
     sock.write(headBytes);
+    bytesWritten += Buffer.byteLength(headBytes);
   }
 
   // Send chunked terminator (only for non-bodyless status)
   if (!__taida_net_isBodylessStatus(writer._pendingStatus)) {
-    sock.write('0\r\n\r\n');
+    const terminator = '0\r\n\r\n';
+    sock.write(terminator);
+    bytesWritten += Buffer.byteLength(terminator);
   }
   writer._state = 3; // Ended
 
-  return undefined; // Unit
+  return bytesWritten;
 }
 
 // NET3-4e: sseEvent(writer, event, data)
@@ -2326,6 +2339,7 @@ function __taida_net_sseEvent(writer, event, data) {
 
   // Send as one chunked frame using cork (pieces written separately).
   const hexPrefix = payloadLen.toString(16) + '\r\n';
+  const suffix = '\r\n';
   sock.cork();
   sock.write(hexPrefix);
   if (event.length > 0) {
@@ -2335,13 +2349,14 @@ function __taida_net_sseEvent(writer, event, data) {
     sock.write('data: ' + dataLines[i] + '\n');
   }
   sock.write('\n');
-  const ok = sock.write('\r\n');
+  const ok = sock.write(suffix);
   sock.uncork();
   if (!ok) {
     writer._needsDrain = true;
   }
 
-  return undefined; // Unit
+  // F42 sweep: return total wire bytes (hex_prefix + payload + suffix).
+  return Buffer.byteLength(hexPrefix) + payloadLen + Buffer.byteLength(suffix);
 }
 
 // readBody(req) -> Bytes
@@ -2962,6 +2977,10 @@ function __taida_net_writeWsFrame(sock, opcode, payload) {
       sock.uncork();
     }
   }
+  // F42 sweep: return total bytes written (header + payload). Internal
+  // call sites that don't observe the byte count can discard the return
+  // value. wsSend / wsClose surface this byte count to Taida.
+  return header.length + payloadLen;
 }
 
 // Synchronous write helper: write all bytes to fd with EAGAIN retry.
@@ -3418,7 +3437,8 @@ let __taida_net_activeWsWriter = null;
 // NB4-10: Monotonic WebSocket connection token counter for identity verification.
 let __taida_net_wsTokenCounter = 0;
 
-// NET4-3d: wsSend(ws, data) → Unit
+// wsSend(ws, data) → Int (NET4-3d / F42 sweep R3).
+// Returns total bytes written to wire (header + masked payload).
 function __taida_net_wsSend(ws, data) {
   __taida_net_validateWs(ws, 'wsSend');
   const writer = __taida_net_getWriterForWs(ws, 'wsSend');
@@ -3442,8 +3462,8 @@ function __taida_net_wsSend(ws, data) {
     throw new __NativeError('wsSend: data must be Str (text frame) or Bytes (binary frame)');
   }
 
-  __taida_net_writeWsFrame(sock, opcode, payload);
-  return undefined; // Unit
+  // F42 sweep: return total wire bytes (header + masked payload) as :Int.
+  return __taida_net_writeWsFrame(sock, opcode, payload);
 }
 
 // NET4-3d: wsReceive(ws) → Lax[@(type: Str, data: Bytes|Str)]
@@ -3548,8 +3568,9 @@ function __taida_net_wsReceive(ws) {
   }
 }
 
-// NET4-3d: wsClose(ws) → Unit
-// v5: wsClose(ws) or wsClose(ws, code) → Unit
+// wsClose(ws) → Int (NET4-3d / F42 sweep R3).
+// v5: wsClose(ws) or wsClose(ws, code) → Int (bytes written by this call;
+// idempotent path returns 0 because no frame is sent again).
 function __taida_net_wsClose(ws, code) {
   __taida_net_validateWs(ws, 'wsClose');
   const writer = __taida_net_getWriterForWs(ws, 'wsClose');
@@ -3559,7 +3580,8 @@ function __taida_net_wsClose(ws, code) {
   }
 
   // Idempotent: no-op if already closed.
-  if (writer._wsClosed) return undefined;
+  // F42 sweep: return 0 instead of undefined (no bytes written on idempotent path).
+  if (writer._wsClosed) return 0;
 
   // v5: Optional close code (default 1000).
   let closeCode = 1000;
@@ -3578,10 +3600,11 @@ function __taida_net_wsClose(ws, code) {
   }
 
   const sock = writer._socket;
-  __taida_net_writeWsFrame(sock, 0x8, Buffer.from([(closeCode >> 8) & 0xFF, closeCode & 0xFF]));
+  // F42 sweep: capture bytes_written and surface to caller.
+  const bytesWritten = __taida_net_writeWsFrame(sock, 0x8, Buffer.from([(closeCode >> 8) & 0xFF, closeCode & 0xFF]));
   writer._wsClosed = true;
 
-  return undefined; // Unit
+  return bytesWritten;
 }
 
 // v5: wsCloseCode(ws) → Int

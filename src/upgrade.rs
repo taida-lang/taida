@@ -1,4 +1,4 @@
-//! Self-upgrade for the `taida` binary (RC5 Phase 3).
+//! Self-upgrade for the `taida` binary.
 //!
 //! ## Design
 //!
@@ -6,7 +6,7 @@
 //! - Parses Taida version tags `@<gen>.<num>.<label?>`.
 //! - Resolves the best matching version based on CLI filters.
 //! - Downloads the platform-appropriate **archive** asset
-//!   (`taida-<tag>-<target>.tar.gz` on Unix, `.zip` on Windows).
+//! (`taida-<tag>-<target>.tar.gz` on Unix, `.zip` on Windows).
 //! - Verifies the shared `SHA256SUMS` file with Sigstore cosign.
 //! - Verifies SHA-256 integrity against the release-signed `SHA256SUMS` file.
 //! - Extracts the `taida` binary from the archive.
@@ -15,9 +15,9 @@
 //! ## Release artifact contract
 //!
 //! ```text
-//! scripts/release/package-unix.sh   → taida-<tag>-<target>.tar.gz
+//! scripts/release/package-unix.sh → taida-<tag>-<target>.tar.gz
 //! scripts/release/package-windows.ps1 → taida-<tag>-<target>.zip
-//! .github/workflows/release.yml     → SHA256SUMS (shared, all archives)
+//!.github/workflows/release.yml → SHA256SUMS (shared, all archives)
 //! ```
 //!
 //! Archive layout: `<archive_base>/taida` (or `taida.exe` on Windows).
@@ -25,8 +25,8 @@
 //! ## Version scheme
 //!
 //! ```text
-//! @b.10.rc2   -> gen="b", num=10, label=Some("rc2")
-//! @b.11       -> gen="b", num=11, label=None        (stable)
+//! @b.10.rc2 -> gen="b", num=10, label=Some("rc2")
+//! @b.11 -> gen="b", num=11, label=None (stable)
 //! @b.11.stable-> gen="b", num=11, label=Some("stable") (also stable)
 //! ```
 
@@ -515,7 +515,7 @@ pub fn extract_binary_from_tar_gz(
 
 /// Look up the SHA-256 hash for a specific file from a `SHA256SUMS` blob.
 ///
-/// The format matches `sha256sum` output: `<hex>  <filename>` per line.
+/// The format matches `sha256sum` output: `<hex> <filename>` per line.
 pub fn lookup_sha256(sha256sums: &str, target_filename: &str) -> Option<String> {
     for line in sha256sums.lines() {
         // Format: "<hex>  <filename>" or "<hex> <filename>"
@@ -971,7 +971,7 @@ pub fn self_replace(new_binary: &[u8]) -> Result<(), String> {
 /// `taida-lang/taida` is the source of truth. `shijimic/taida` is a
 /// development fork and must NOT be used as a release source —
 /// mirroring releases across the two caused `@c.14.rc3` to be invisible
-/// to the C13 CLI's `taida upgrade` path. The fix is to point the
+/// to the CLI's `taida upgrade` path. The fix is to point the
 /// CLI at the canonical org and keep every external reference
 /// (`install.sh`, docs, scaffolded `release.yml`) consistent.
 const TAIDA_OWNER: &str = "taida-lang";

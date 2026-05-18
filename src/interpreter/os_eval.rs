@@ -17,33 +17,33 @@ fn signal_name(sig: &Signal) -> &'static str {
 /// Implements the 34 APIs of `taida-lang/os` (core-bundled):
 ///
 /// Input molds (-> Lax/Bool):
-///   Read[path](), ListDir[path](), Stat[path](), Exists[path](), EnvVar[name]()
+/// Read[path](), ListDir[path](), Stat[path](), Exists[path](), EnvVar[name]()
 ///
 /// Async input molds (-> Async[Lax[T]]):
-///   ReadAsync[path](), HttpGet[url](), HttpPost[url, body](),
-///   HttpRequest[method, url](headers, body)
+/// ReadAsync[path](), HttpGet[url](), HttpPost[url, body](),
+/// HttpRequest[method, url](headers, body)
 ///
 /// Side-effect functions (-> Result):
-///   writeFile(path, content), writeBytes(path, content), appendFile(path, content), remove(path),
-///   createDir(path), rename(from, to)
+/// writeFile(path, content), writeBytes(path, content), appendFile(path, content), remove(path),
+/// createDir(path), rename(from, to)
 ///
 /// Binary file query function:
-///   readBytes(path) -> Lax[Bytes]
-///   readBytesAt(path, offset, len) -> Lax[Bytes]  (C26B-020 柱 1, chunked)
+/// readBytes(path) -> Lax[Bytes]
+/// readBytesAt(path, offset, len) -> Lax[Bytes] ( 柱 1, chunked)
 ///
 /// Dangerous side-effect functions (-> Gorillax):
-///   run(program, args), execShell(command)
+/// run(program, args), execShell(command)
 ///
 /// Async functions:
-///   tcpConnect(host, port), tcpListen(port), tcpAccept(listener),
-///   socketSend(socket, data), socketSendAll(socket, data), socketRecv(socket),
-///   socketSendBytes(socket, data), socketRecvBytes(socket), socketRecvExact(socket, size),
-///   udpBind(host, port), udpSendTo(socket, host, port, data), udpRecvFrom(socket),
-///   socketClose(socket), listenerClose(listener), udpClose(socket)
+/// tcpConnect(host, port), tcpListen(port), tcpAccept(listener),
+/// socketSend(socket, data), socketSendAll(socket, data), socketRecv(socket),
+/// socketSendBytes(socket, data), socketRecvBytes(socket), socketRecvExact(socket, size),
+/// udpBind(host, port), udpSendTo(socket, host, port, data), udpRecvFrom(socket),
+/// socketClose(socket), listenerClose(listener), udpClose(socket)
 ///
 /// Query functions:
-///   allEnv() -> HashMap[Str, Str]
-///   argv() -> List[Str] (user args; interpreter strips `taida` and script path)
+/// allEnv() -> HashMap[Str, Str]
+/// argv() -> List[Str] (user args; interpreter strips `taida` and script path)
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use std::sync::{Arc, Mutex};
@@ -55,7 +55,7 @@ const DEFAULT_NETWORK_TIMEOUT_MS: u64 = 30_000;
 
 /// The symbols exported by the os package.
 ///
-/// NOTE (C19): the first 35 entries match the C18 layout exactly. New entries
+/// NOTE: the first 35 entries match the original layout exactly. New entries
 /// must be **appended** to the end — moving an existing entry would change the
 /// index observed by downstream tooling that snapshots OS_SYMBOLS ordering.
 pub(crate) const OS_SYMBOLS: &[&str] = &[
@@ -135,14 +135,14 @@ fn make_lax_failure_with_error(default_val: Value, error: Value) -> Value {
     Interpreter::lax_failure_with_error(default_val, error)
 }
 
-/// C20-2: pub(crate) re-exports so that `prelude.rs::stdinLine` (and
+/// pub(crate) re-exports so that `prelude.rs::stdinLine` (and
 /// any other prelude-scope builder that needs to hand back a Lax[T])
 /// can build `Lax` values without duplicating the BuchiPack shape.
 pub(crate) fn make_lax_success_pub(val: Value) -> Value {
     make_lax_success(val)
 }
 
-/// C20-2: pub(crate) counterpart for `make_lax_failure`. See
+/// pub(crate) counterpart for `make_lax_failure`. See
 /// `make_lax_success_pub` above.
 pub(crate) fn make_lax_failure_pub(default_val: Value) -> Value {
     make_lax_failure(default_val)
@@ -378,14 +378,14 @@ fn process_inner(stdout: String, stderr: String, code: i64) -> Value {
     ])
 }
 
-/// C19: Build a code-only inner BuchiPack `@(code: Int)` for the interactive
+/// Build a code-only inner BuchiPack `@(code: Int)` for the interactive
 /// exec variants. Intentionally does **not** carry stdout / stderr fields
 /// (stdio is passthrough, nothing to capture).
 fn process_inner_code_only(code: i64) -> Value {
     Value::pack(vec![("code".into(), Value::Int(code))])
 }
 
-/// C19: Extract an exit code from a `std::process::ExitStatus`, following the
+/// Extract an exit code from a `std::process::ExitStatus`, following the
 /// `128 + signal` POSIX convention when the child was terminated by a signal.
 /// This mirrors the convention used by the JS `spawnSync` and Native
 /// `waitpid(WIFSIGNALED)` branches so the 3 backends agree.
@@ -807,7 +807,7 @@ impl Interpreter {
             // distinguish the three cases that `std::path::Path::exists()`
             // silently conflates (exists=true, exists=false,
             // permission-denied / IO error). The inner Bool is obtained
-            // via `.value` or the `]=>` unmold. Programs that only cared
+            // via `.value` or the `>=>` unmold. Programs that only cared
             // about the "reachable-and-present" bit continue to work by
             // writing `Exists[p]().ok` (true if the check itself
             // succeeded AND the path exists — which matches the old
@@ -3112,7 +3112,7 @@ mod tests {
         interp.output.clone()
     }
 
-    /// E32B-035 migration helper — returns the last evaluated Value alongside
+    /// migration helper — returns the last evaluated Value alongside
     /// captured stdout. Useful when a test must pin runtime layout that lives
     /// only inside compiler-internal `__value` / `__error` fields, since
     /// `[E1960]` rejects user-side access to those fields. We bypass the
@@ -3154,7 +3154,7 @@ mod tests {
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.has_value)
-result ]=> v
+result >=> v
 stdout(v)"#,
             path
         );
@@ -3215,7 +3215,7 @@ stdout(result.has_value)"#;
         let code = format!(
             r#"result <= Stat["{}"]()
 stdout(result.has_value)
-result ]=> info
+result >=> info
 stdout(info.size)
 stdout(info.isDir)"#,
             path
@@ -3237,7 +3237,7 @@ stdout(info.isDir)"#,
         let path = dir.to_string_lossy().to_string();
         let code = format!(
             r#"result <= Stat["{}"]()
-result ]=> info
+result >=> info
 stdout(info.isDir)"#,
             path
         );
@@ -3273,7 +3273,7 @@ stdout(result.has_value)"#;
         let code = format!(
             r#"r <= Exists["{}"]()
 stdout(r.isSuccess())
-r ]=> exists
+r >=> exists
 stdout(exists)"#,
             path
         );
@@ -3287,7 +3287,7 @@ stdout(exists)"#,
     fn test_exists_false() {
         let code = r#"r <= Exists["/tmp/taida_nonexistent_xyz"]()
 stdout(r.isSuccess())
-r ]=> exists
+r >=> exists
 stdout(exists)"#;
         let output = run_code(code);
         // The probe succeeded (isSuccess=true) and found no such path (exists=false).
@@ -3333,7 +3333,7 @@ stdout(result.has_value)"#;
         let code = format!(
             r#"result <= writeFile("{}", "Hello!")
 stdout(result.isSuccess())
-result ]=> bytesWritten
+result >=> bytesWritten
 stdout(bytesWritten)"#,
             path
         );
@@ -3356,14 +3356,14 @@ stdout(bytesWritten)"#,
         let path = dir.join("bytes.bin").to_string_lossy().to_string();
         let code = format!(
             r#"payloadLax <= Bytes["hello"]()
-payloadLax ]=> payload
+payloadLax >=> payload
 writeRes <= writeBytes("{}", payload)
 stdout(writeRes.isSuccess())
 readRes <= readBytes("{}")
 stdout(readRes.has_value)
-readRes ]=> rawBytes
+readRes >=> rawBytes
 decoded <= Utf8Decode[rawBytes]()
-decoded ]=> txt
+decoded >=> txt
 stdout(txt)"#,
             path, path
         );
@@ -3389,7 +3389,7 @@ stdout(txt)"#,
         let code = format!(
             r#"result <= appendFile("{}", "Line2\n")
 stdout(result.isSuccess())
-result ]=> bytesAppended
+result >=> bytesAppended
 stdout(bytesAppended)"#,
             path
         );
@@ -3417,7 +3417,7 @@ stdout(bytesAppended)"#,
         let code = format!(
             r#"result <= remove("{}")
 stdout(result.isSuccess())
-result ]=> removedCount
+result >=> removedCount
 stdout(removedCount)"#,
             path
         );
@@ -3441,7 +3441,7 @@ stdout(removedCount)"#,
         let code = format!(
             r#"result <= remove("{}")
 stdout(result.isSuccess())
-result ]=> removedCount
+result >=> removedCount
 stdout(removedCount)"#,
             path
         );
@@ -3464,7 +3464,7 @@ stdout(removedCount)"#,
         let code = format!(
             r#"result <= createDir("{}")
 stdout(result.isSuccess())
-result ]=> createdCount
+result >=> createdCount
 stdout(createdCount)"#,
             path
         );
@@ -3489,7 +3489,7 @@ stdout(createdCount)"#,
         let to = dir.join("new.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= rename("{}", "{}")
-result ]=> info
+result >=> info
 stdout(info.ok)"#,
             from, to
         );
@@ -3506,7 +3506,7 @@ stdout(info.ok)"#,
     #[test]
     fn test_run_success() {
         let code = r#"result <= run("echo", @["hello"])
-result ]=> proc
+result >=> proc
 stdout(proc.stdout)"#;
         let output = run_code(code);
         assert_eq!(output[0].trim(), "hello");
@@ -3526,7 +3526,7 @@ stdout(result.has_value)"#;
     #[test]
     fn test_execshell_success() {
         let code = r#"result <= execShell("echo world")
-result ]=> proc
+result >=> proc
 stdout(proc.stdout)"#;
         let output = run_code(code);
         assert_eq!(output[0].trim(), "world");
@@ -3597,7 +3597,7 @@ stdout(typeof(args))"#,
         let path = dir.join("ts.txt").to_string_lossy().to_string();
         let code = format!(
             r#"result <= Stat["{}"]()
-result ]=> info
+result >=> info
 stdout(info.modified)"#,
             path
         );
@@ -3629,14 +3629,14 @@ stdout(info.modified)"#,
         std::fs::write(dir.join("test.txt"), "Async Hello").unwrap();
 
         let path = dir.join("test.txt").to_string_lossy().to_string();
-        // ReadAsync returns Async[Lax[Str]], ]=> unwraps the Async to get
-        // Lax[Str]; the second `]=>` then unwraps the Lax to the Str default
+        // ReadAsync returns Async[Lax[Str]], >=> unwraps the Async to get
+        // Lax[Str]; the second `>=>` then unwraps the Lax to the Str default
         // (or the read content when has_value=true).
         let code = format!(
             r#"result <= ReadAsync["{}"]()
-result ]=> lax
+result >=> lax
 stdout(lax.has_value)
-lax ]=> contents
+lax >=> contents
 stdout(contents)"#,
             path
         );
@@ -3649,7 +3649,7 @@ stdout(contents)"#,
     #[test]
     fn test_readasync_nonexistent_file() {
         let code = r#"result <= ReadAsync["/tmp/taida_nonexistent_readasync_xyz.txt"]()
-result ]=> lax
+result >=> lax
 stdout(lax.has_value)"#;
         let output = run_code(code);
         assert_eq!(output, vec!["false"]);
@@ -3837,7 +3837,7 @@ stdout(lax.has_value)"#;
         assert!(OS_SYMBOLS.contains(&"execShellInteractive"));
     }
 
-    /// C19: the pre-C19 35 symbols must keep their original relative order.
+    /// The original 35 symbols must keep their relative order.
     /// If this test fails, some consumer that snapshots OS_SYMBOLS indices
     /// (e.g. a cached dispatch table) may have silently broken.
     #[test]
@@ -3882,11 +3882,11 @@ stdout(lax.has_value)"#;
         for (i, name) in c18_prefix.iter().enumerate() {
             assert_eq!(
                 OS_SYMBOLS[i], *name,
-                "OS_SYMBOLS[{}] changed: expected {:?}, got {:?} (C19 must append, not reorder)",
+                "OS_SYMBOLS[{}] changed: expected {:?}, got {:?} (new symbols must append, not reorder)",
                 i, name, OS_SYMBOLS[i]
             );
         }
-        // And the C19 additions live strictly after the C18 prefix.
+        // And the additions live strictly after the original prefix.
         assert_eq!(OS_SYMBOLS[35], "runInteractive");
         assert_eq!(OS_SYMBOLS[36], "execShellInteractive");
     }
@@ -3903,7 +3903,7 @@ stdout(lax.has_value)"#;
     fn test_c19_run_interactive_exit_0() {
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
 stdout(r.has_value)
-r ]=> proc
+r >=> proc
 stdout(proc.code)"#;
         let out = run_code(code);
         assert_eq!(out, vec!["true", "0"]);
@@ -3985,7 +3985,7 @@ r"#;
     fn test_c19_exec_shell_interactive_exit_0() {
         let code = r#"r <= execShellInteractive("exit 0")
 stdout(r.has_value)
-r ]=> proc
+r >=> proc
 stdout(proc.code)"#;
         let out = run_code(code);
         assert_eq!(out, vec!["true", "0"]);
@@ -4022,7 +4022,7 @@ r"#;
         }
     }
 
-    /// C19-4: runtime-level pin. Accessing `stdout` / `stderr` on a
+    /// runtime-level pin. Accessing `stdout` / `stderr` on a
     /// `runInteractive` result must not silently succeed — it must raise
     /// a runtime error (missing field). This is the safety net that
     /// prevents callers from mistaking the interactive variant for the
@@ -4035,12 +4035,12 @@ r"#;
     /// will immediately scream.
     #[test]
     fn test_c19_run_interactive_stdout_field_is_absent_at_runtime() {
-        // E32B-035 migration: unmold via `]=>` (instead of compiler-internal
+        // E32B-035 migration: unmold via `>=>` (instead of compiler-internal
         // `__value`) so the test still pins the inner-shape contract — the
         // "stdout field is absent" assertion only fires when reaching the
         // inner BuchiPack via the public unmold path.
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
-r ]=> proc
+r >=> proc
 stdout(proc.stdout)"#;
         let result = run_code_result(code);
         assert!(
@@ -4053,7 +4053,7 @@ stdout(proc.stdout)"#;
     #[test]
     fn test_c19_run_interactive_stderr_field_is_absent_at_runtime() {
         let code = r#"r <= runInteractive("/bin/sh", @["-c", "exit 0"])
-r ]=> proc
+r >=> proc
 stdout(proc.stderr)"#;
         let result = run_code_result(code);
         assert!(
@@ -4066,7 +4066,7 @@ stdout(proc.stderr)"#;
     #[test]
     fn test_c19_exec_shell_interactive_stdout_field_is_absent_at_runtime() {
         let code = r#"r <= execShellInteractive("exit 0")
-r ]=> proc
+r >=> proc
 stdout(proc.stdout)"#;
         let result = run_code_result(code);
         assert!(
@@ -4077,12 +4077,12 @@ stdout(proc.stdout)"#;
     }
 
     /// Sanity check: the captured `run` still has `stdout`. This exists
-    /// to fail loudly if the C19 additive change ever accidentally strips
+    /// to fail loudly if additive changes ever accidentally strip
     /// fields from the legacy captured API.
     #[test]
     fn test_c19_run_captured_stdout_field_still_present() {
         let code = r#"r <= run("/bin/sh", @["-c", "exit 0"])
-r ]=> proc
+r >=> proc
 stdout(proc.stdout)
 stdout(proc.code)"#;
         let out = run_code(code);
@@ -4158,13 +4158,13 @@ stdout(proc.code)"#;
 
     #[test]
     fn test_bt11_read_nonexistent_returns_lax_false() {
-        // E32B-035 migration: `]=>` on a Lax with has_value=false unmolds to
+        // E32B-035 migration: `>=>` on a Lax with has_value=false unmolds to
         // the implicit default (empty string for Lax[Str]), giving us the
         // same assertion as the old `result.__default` path without
         // touching compiler-internal fields.
         let code = r#"result <= Read["/tmp/taida_bt11_nonexistent_xyz.txt"]()
 stdout(result.has_value)
-result ]=> contents
+result >=> contents
 stdout(contents)"#;
         let output = run_code(code);
         assert_eq!(
@@ -4199,7 +4199,7 @@ stdout(result.has_value)"#;
     fn test_bt11_exists_nonexistent() {
         let code = r#"r <= Exists["/tmp/taida_bt11_nonexistent_xyz"]()
 stdout(r.isSuccess())
-r ]=> exists
+r >=> exists
 stdout(exists)"#;
         let output = run_code(code);
         assert_eq!(
@@ -4237,7 +4237,7 @@ stdout(exists)"#;
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.has_value)
-result ]=> contents
+result >=> contents
 stdout(contents)"#,
             path
         );
@@ -4258,7 +4258,7 @@ stdout(contents)"#,
             r#"writeFile("{path}", "")
 result <= Read["{path}"]()
 stdout(result.has_value)
-result ]=> contents
+result >=> contents
 stdout(contents)"#,
             path = path
         );
@@ -4280,7 +4280,7 @@ stdout(contents)"#,
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.has_value)
-result ]=> contents
+result >=> contents
 stdout(contents)"#,
             path
         );
@@ -4301,7 +4301,7 @@ stdout(contents)"#,
         let code = format!(
             r#"result <= Read["{}"]()
 stdout(result.has_value)
-result ]=> contents
+result >=> contents
 stdout(contents)"#,
             path
         );

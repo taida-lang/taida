@@ -40,9 +40,9 @@ Taida には subtyping ベースの型制約システムがあります (`T <= :
 // 単純な型変数
 Mold[T] => Box[T] = @(value: T)
 
-// subtype 制約で意味を表現
-Mold[T <= :Num] => NumBox[T <= :Num] = @()      // Int / Float 両方 valid
-Mold[T <= :User] => UserMold[T <= :User] = @()   // structural width subtyping
+// subtype 制約で意味を表現 (body には意味を持つ field を必ず 1 つ以上置く)
+Mold[T <= :Num] => NumBox[T <= :Num] = @(value: T)      // Int / Float 両方 valid
+Mold[T <= :User] => UserMold[T <= :User] = @(target: T)  // structural width subtyping
 
 // 関数型制約 (前方参照型変数)
 Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
@@ -75,6 +75,38 @@ Mold[T] => Pair[T, U] = @(second: U)
 - 戻り値型注釈: **`=> :Type`** (`:` マーカー必須)。`=> Type` のように `:` を欠いた形は parser が lenient に受理しますが、lint で `[E1809]` を発射します
 - 引数 / フィールド型注釈の形式 A (`arg: Type` コロン分離) と 形式 B (`arg :Type` スペース分離) は **どちらも valid** で lint 対象外 — 後置型注釈言語との親和性のため形式 A も maintain
 
+## 値の不在を表す語は予約 — 値にも名前にも使えない
+
+`null` / `undefined` / `none` / `nil` / `unit` / `void` の 6 語は **値の不在を表す語** として予約されており、識別子としても型名としても使えません。
+
+- 変数 / 関数 / 定数 / 型 / Enum variant / モールドの型変数の **どの位置にも書けません**。書くと Parser が即時 reject します。
+- 既存言語の `null` / `undefined` / `none` / `nil` / `unit` / `void` の意図で Taida コードに登場することは仕様上ありません。これらは「値の不在」という発想自体を Taida から排除するための予約です。
+- 大文字始まり (`Null`, `None`, `Unit`, `Void`) も同じ意図で書かれることが多いため、型注釈位置 (`:Unit` / `:Void` / `:@()`) の場合は `[E1520]` で reject されます。識別子位置は lower-case 6 語の Parser reject、型位置は `:Unit` / `:Void` / `:@()` を TypeChecker が `[E1520]` で reject、というのが現行の検出範囲です。
+
+```taida
+// NG: 識別子位置 (Parser reject)
+null <= 42                       // `null` is reserved for value absence
+unit u: Int = u => :Int          // `unit` is reserved for value absence
+Enum => Status = :None :Ok       // `None` variant は `none` と同じ意図で書かれることが多いため非推奨 — 意味のある variant 名にする
+
+// NG: 型位置 ([E1520])
+makeWidget = ... => :Unit         // [E1520]
+sleepFor _ : @() = ...           // [E1520]
+
+// OK: フィールドラベルは別カテゴリ (snake_case / camelCase)
+config <= @(retry_after <= 3)
+```
+
+ぶちパックフィールド名や JSON のキー名にこれらの語が **文字列として** 出てくることは禁止していません (たとえば外部 JSON が `{"unit": "kg"}` を持つ場合、Schema 側で `unit: Str` フィールドを定義できます)。あくまで **Taida の識別子 / 型としての使用** を禁止しています。
+
+ビルトイン型のメソッド名 (例: `List` の `.any(_)` / `.all(_)` / `.none(_)`) は別名前空間として共存します。`.none(_ x = x < 0)` は 「述語に一致する要素が 1 つもない」 を返す述語メソッドであり、 「値の不在」 を意味する binding `none` ではありません。`>>> ./m.td => @(none)` のような **ユーザー側の binding** は引き続き `[E1520]` 系の予約語チェックで reject されます。
+
+「情報がない」「未知」「初期化されていない」を表現したい場合は、共通の Enum (`Enum => OpStatus = :Pending :Ready :Failed` のような意味のあるバリアント) を用意するか、`Lax[T]` / `Result[T, P]` のような明示的なモールドで包んでください。これは
+
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
+
+の系「値の不在は値の不在」の直接的な帰結です。
+
 ## 触らない項目 (慣習として開放)
 
 以下は CI lint の対象外です:
@@ -82,6 +114,51 @@ Mold[T] => Pair[T, U] = @(second: U)
 - テスト関数命名 (関数規則 camelCase を踏襲する以上の規則は設けない)
 - `_` prefix (public/protected/private 概念が無いため特別扱いしない、慣習として残す)。先頭が `_` の識別子は、関数 / 変数 / ぶちパックフィールドの全カテゴリで命名 lint 対象外です。
 - boolean プレフィックス (`is`, `has`, `can`, `did`, `needs` 等を多様性として許容、規約化しない)
+
+## 型エイリアスは持たない
+
+Taida には型エイリアス機構 (`type PilotId = Int` のような別名定義) は **ありません**。`Statement::TypeAlias` のような AST node も存在せず、`PilotId = Int` のような書き方を「`Int` の別名」として解釈する parser path もありません。
+
+ドメイン型として「`Int` を意味的に区別したい」場合は、フィールドを 1 つ持つぶちパックでラップしてください。
+
+```taida fragment
+// OK: ぶちパックで domain 型を表現
+PilotId = @(value: Int)
+pilot_id <= PilotId(value <= 42)
+stdout(pilot_id.value.toString())
+
+// NG: 型エイリアス機構は存在しない (way check で `[E1502] Undefined variable 'Int'`)
+PilotId = Int                // ← Taida では `Int` の別名にはならない
+```
+
+この方針は、Taida の哲学のうち次のものと整合的です。
+
+> **PHILOSOPHY.md — II.** だいじなものはふくろにしまっておきましょう
+
+意味を伴う型はぶちパック (`@(...)`) に包んで運び、生のプリミティブ型は意味を持たない値として扱います。
+
+### `Parent => Child = @(...)` は alias ではなく Inheritance
+
+`Int => PilotId = @(value: Int)` や `Container[T] => MyContainer[T] = @(extra: Str)` のように `=>` を使った定義は、**型エイリアスではなく「`Parent` を親型として継承する独自のクラスライク型」** です ([`docs/guide/04_class_like.md`](../guide/04_class_like.md) 参照)。
+
+子クラスは必ず意味のあるフィールドを少なくとも 1 つ持たせます。空 body `= @()` は `[E1520]`「値の不在を表す型の完全排除」に該当し、Parser が即時 reject します。「親を継承するだけで自分のフィールドがない型」は、Taida 言語仕様としては「情報のない型」と区別できず、null と同レベルの抜け道として禁止されています。
+
+```taida
+// `PilotId` は `Int` を親に持つ独自のクラスライク型 (alias ではない)
+// 自前のフィールド `value` を 1 つ持ち、空ぶちパック型にならない
+Int => PilotId = @(value: Int)
+pid <= PilotId(value <= 42)
+```
+
+```taida fragment
+// ジェネリック継承: parent の non-default field を継承する
+Mold[T] => Container[T] = @(value: T)
+Container[T] => MyContainer[T] = @(label: Str)
+// MyContainer は parent の `value: T` を継承し、自前 field `label` を追加する
+c <= MyContainer[42, "name"]()
+```
+
+「`Int` の単純な別名」を意味する構文は Taida には存在しません。`Int` を別の名前で運びたい場合は、ぶちパックラップ (`PilotId = @(value: Int)`) または上記の継承 (`Int => PilotId = @(value: Int)`) を使ってください。空 body `= @()` は許可されません。
 
 ## 例
 
@@ -94,7 +171,7 @@ Pilot = @(
   age: Int
 )
 
-// モールディング型
+// モールド型
 Mold[T] => Result[T, P <= :T => :Bool] = @(throw: Error)
 
 // エラー型 (Error を継承)
@@ -112,7 +189,7 @@ getPilotName pilot: Pilot =
 
 // 複数単語の関数名
 calculateTotalPrice items: @[Item] =
-  Fold[0, items, _ acc item = acc + item.price]() ]=> total
+  Fold[0, items, _ acc item = acc + item.price]() >=> total
   total
 => :Int
 
@@ -180,7 +257,7 @@ MAX_VALUE <= loadMaxValue()
 Enum => HttpStatus = :Ok :NotFound :ServerError
 
 Error => ApiError = @(reason: Str)
-ApiError => NotAuthorized = @()
+ApiError => NotAuthorized = @(realm: Str)
 ApiError => RateLimited = @(retry_after: Int)
 ```
 

@@ -39,11 +39,11 @@ stdout(profile.active.toString())
 
 // Lambda functions
 numbers <= @[1, 2, 3, 4, 5]
-Map[numbers, _ x = x * 2]() ]=> doubled
+Map[numbers, _ x = x * 2]() >=> doubled
 stdout(doubled)
-Filter[numbers, _ x = x > 3]() ]=> filtered
+Filter[numbers, _ x = x > 3]() >=> filtered
 stdout(filtered)
-Fold[numbers, 0, _ acc x = acc + x]() ]=> total
+Fold[numbers, 0, _ acc x = acc + x]() >=> total
 stdout(total.toString())
 
 // Forward pipeline

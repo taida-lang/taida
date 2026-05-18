@@ -1,14 +1,14 @@
-// RC1 Phase 4 -- addon-backed package usage example.
+// Addon-backed package usage example.
 //
 // This example demonstrates how Taida user code calls a function
 // implemented in a Rust addon (cdylib) without ever seeing a raw
 // pointer or FFI detail.
 //
-// The addon-backed package layout (`.dev/RC1_DESIGN.md` Phase 4 Lock):
+// The addon-backed package layout:
 //
 //   .taida/deps/taida-lang/addon-rs-sample/
 //     native/
-//       addon.toml              <-- ABI v1, function table, library stem
+//       addon.toml              <-- function table, library stem
 //       libtaida_addon_sample.so <-- the cdylib
 //
 // Native interpreter only: this example fails on JS / WASM / Cranelift

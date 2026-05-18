@@ -1,8 +1,8 @@
 // B-2h: ラムダ内モールド + unmold
-// ラムダ内で ]=> 使用
+// ラムダ内で >=> 使用
 
 safeDivide x y =
-  Div[x, y]() ]=> result
+  Div[x, y]() >=> result
   result
 => :Int
 

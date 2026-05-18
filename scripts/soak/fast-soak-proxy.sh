@@ -143,8 +143,8 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe(${PORT}, handler, ${FIXTURE_MAX_REQS})
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)
 TAIDA

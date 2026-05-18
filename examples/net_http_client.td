@@ -25,7 +25,7 @@ resp <= HttpRequest["GET", url](
   headers <= @[@(name <= "user-agent", value <= "taida-net-example/1.0")],
   body <= ""
 )
-resp ]=> result
+resp >=> result
 response <= result.getOrDefault(@(status <= 0, headers <= @[], body <= ""))
 failure <= result.errorInfo().getOrDefault(@(type <= "IoError", message <= "request failed", kind <= "other", code <= 0))
 report <= (

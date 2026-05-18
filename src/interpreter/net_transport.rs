@@ -5,60 +5,60 @@
 /// trait so that TLS can be introduced without changing handler dispatch or
 /// streaming logic.
 ///
-/// # Design (NET_DESIGN.md Phase 1)
+/// # Design (NET_DESIGN.md )
 ///
 /// Transport operations:
-///   - `read`     — read bytes from the connection (plaintext or TLS-decrypted)
-///   - `write`    — write bytes to the connection (plaintext or TLS-encrypted)
-///   - `flush`    — flush any buffered write data
-///   - `shutdown` — shutdown the write side (TCP shutdown or TLS close_notify + TCP shutdown)
-///   - `set_read_timeout` / `set_write_timeout` — per-connection deadline control
+/// - `read` — read bytes from the connection (plaintext or TLS-decrypted)
+/// - `write` — write bytes to the connection (plaintext or TLS-encrypted)
+/// - `flush` — flush any buffered write data
+/// - `shutdown` — shutdown the write side (TCP shutdown or TLS close_notify + TCP shutdown)
+/// - `set_read_timeout` / `set_write_timeout` — per-connection deadline control
 ///
 /// TLS / plaintext branching happens once at `httpServe` startup:
-///   - `tls <= @()` → `PlaintextTransport` wrapping `TcpStream`
-///   - `tls <= @(cert: ..., key: ...)` → `TlsTransport` wrapping `rustls::ServerConnection` + `TcpStream`
+/// - `tls <= @()` → `PlaintextTransport` wrapping `TcpStream`
+/// - `tls <= @(cert:..., key:...)` → `TlsTransport` wrapping `rustls::ServerConnection` + `TcpStream`
 ///
 /// The `TransportAcceptor` trait abstracts the listener-level accept, producing
 /// either a plaintext or TLS transport for each incoming connection.
 ///
-/// # v7 QUIC Transport Contract (NET7-1a / NET7-1b)
+/// # v7 QUIC Transport Contract ( / )
 ///
 /// v7 extends the transport layer with a QUIC substrate for HTTP/3.
 /// The QUIC transport operates over UDP + TLS 1.3, distinct from the TCP-based
 /// h1/h2 path. The transport contract is defined here; implementation will be
-/// filled in Phase 2 (Native reference) and Phase 3 (Interpreter parity).
+/// filled in (Native reference) and (Interpreter parity).
 ///
-/// ## Transport Abstraction (NET7-1a) -- NB7-7 Design Decision
+/// ## Transport Abstraction () -- Design Decision
 ///
 /// QUIC transport differs from TCP in several fundamental ways:
-///   - **UDP-based**: No connection-oriented socket; uses `UdpSocket` for send/recv
-///   - **TLS 1.3 mandatory**: Encryption is built into the QUIC handshake (not layered above)
-///   - **Stream multiplexing**: A single QUIC connection carries multiple bidirectional streams
-///   - **Connection-level vs stream-level I/O**: Read/write operate on streams, not on the connection
+/// - **UDP-based**: No connection-oriented socket; uses `UdpSocket` for send/recv
+/// - **TLS 1.3 mandatory**: Encryption is built into the QUIC handshake (not layered above)
+/// - **Stream multiplexing**: A single QUIC connection carries multiple bidirectional streams
+/// - **Connection-level vs stream-level I/O**: Read/write operate on streams, not on the connection
 ///
-/// ### QUIC / TCP Transport Separation (NB7-7 resolution)
+/// ### QUIC / TCP Transport Separation ( resolution)
 ///
 /// The existing `Transport` trait and `TransportAcceptor` / `TransportConnection` types
 /// are designed around TCP semantics:
-///   - `as_tcp_stream_mut()` returns `&mut TcpStream` (TCP-only)
-///   - `TransportAcceptor::try_accept()` returns 1 connection per accept (no stream mux)
-///   - `TransportConnection` bundles per-connection buffer and request count for a
-///     single-stream-per-connection model
+/// - `as_tcp_stream_mut()` returns `&mut TcpStream` (TCP-only)
+/// - `TransportAcceptor::try_accept()` returns 1 connection per accept (no stream mux)
+/// - `TransportConnection` bundles per-connection buffer and request count for a
+/// single-stream-per-connection model
 ///
 /// These cannot directly represent QUIC's connection-to-multi-stream relationship.
 /// Rather than force-fitting QUIC into the TCP abstraction (which would require
 /// breaking changes to h1/h2 code paths), v7 adopts a **separate QUIC transport
 /// path**:
 ///
-///   - The `Transport` trait, `TransportAcceptor`, and `TransportConnection` remain
-///     **TCP-only** and continue to serve h1/h2 without modification.
-///   - The h3 path (Phase 2 Native, Phase 3 Interpreter) will use a dedicated
-///     QUIC accept/connection/stream model that does NOT implement `Transport`.
-///   - The h3 handler dispatch will map QUIC streams to the existing
-///     `httpServe` handler contract at the request/response level, not at the
-///     transport I/O level.
-///   - Interpreter parity (Phase 3) will mirror the Native QUIC path structure,
-///     using the same dedicated types rather than wrapping `Transport`.
+/// - The `Transport` trait, `TransportAcceptor`, and `TransportConnection` remain
+/// **TCP-only** and continue to serve h1/h2 without modification.
+/// - The h3 path ( Native, Interpreter) will use a dedicated
+/// QUIC accept/connection/stream model that does NOT implement `Transport`.
+/// - The h3 handler dispatch will map QUIC streams to the existing
+/// `httpServe` handler contract at the request/response level, not at the
+/// transport I/O level.
+/// - Interpreter parity () will mirror the Native QUIC path structure,
+/// using the same dedicated types rather than wrapping `Transport`.
 ///
 /// This separation is intentional: the handler contract is shared across h1/h2/h3,
 /// but the transport layer beneath it is protocol-specific. Forcing a single
@@ -66,42 +66,40 @@
 /// code or produce an abstraction that pappers over fundamental protocol differences.
 ///
 /// Copy discipline (bounded-copy):
-///   - 1 packet = at most 1 materialization (no aggregate buffer above packet boundary)
-///   - Connection-local and stream-local buffers are reused
-///   - No `true zero-copy` claim (QUIC includes AEAD encryption)
+/// - 1 packet = at most 1 materialization (no aggregate buffer above packet boundary)
+/// - Connection-local and stream-local buffers are reused
+/// - No `true zero-copy` claim (QUIC includes AEAD encryption)
 ///
-/// ## Lifecycle Contract (NET7-1b)
-///
+/// ## Lifecycle Contract///
 /// Stream lifecycle:
-///   - Streams are created by the QUIC library on incoming request
-///   - Each stream maps to one HTTP/3 request/response exchange
-///   - Stream close is handled by the HTTP/3 layer (HEADERS + DATA + trailers)
-///   - Half-close semantics: client can close send side while server writes response
+/// - Streams are created by the QUIC library on incoming request
+/// - Each stream maps to one HTTP/3 request/response exchange
+/// - Stream close is handled by the HTTP/3 layer (HEADERS + DATA + trailers)
+/// - Half-close semantics: client can close send side while server writes response
 ///
 /// Connection lifecycle:
-///   - Connection established via QUIC handshake (includes TLS 1.3)
-///   - Multiple streams share one connection
-///   - Connection idle timeout follows existing `timeout` parameter from `httpServe`
-///   - No QUIC-specific timeout knobs exposed to user-land (v7 design lock)
+/// - Connection established via QUIC handshake (includes TLS 1.3)
+/// - Multiple streams share one connection
+/// - Connection idle timeout follows existing `timeout` parameter from `httpServe`
+/// - No QUIC-specific timeout knobs exposed to user-land (v7 design lock)
 ///
 /// Shutdown lifecycle:
-///   - Graceful: GOAWAY frame → drain in-flight streams → close connection
-///   - Maps to existing `maxRequests` / server shutdown contract
-///   - No user-facing QUIC drain period knob (v7 design lock)
+/// - Graceful: GOAWAY frame → drain in-flight streams → close connection
+/// - Maps to existing `maxRequests` / server shutdown contract
+/// - No user-facing QUIC drain period knob (v7 design lock)
 ///
-/// Security boundaries (NET7-0g):
-///   - 0-RTT: default-off, no user-facing opt-in in v7
-///   - Resumption/stateless reset/connection migration: runtime-internal only
-///   - None of these are exposed in the `Transport` trait or `httpServe` contract
+/// Security boundaries:
+/// - 0-RTT: default-off, no user-facing opt-in in v7
+/// - Resumption/stateless reset/connection migration: runtime-internal only
+/// - None of these are exposed in the `Transport` trait or `httpServe` contract
 ///
-/// ## Protocol Selection (NET7-1c)
-///
+/// ## Protocol Selection///
 /// The `protocol` field in the `tls` BuchiPack determines the transport:
-///   - `"h1.1"` / `"http/1.1"` → TCP + optional TLS → HTTP/1.1
-///   - `"h2"`                   → TCP + TLS (required) → HTTP/2
-///   - `"h3"`                   → UDP + QUIC/TLS1.3 (required) → HTTP/3
-///   - absent / `None`          → TCP + optional TLS → HTTP/1.1 (default)
-///   - unknown value             → `ProtocolError` (immediate reject, no fallback)
+/// - `"h1.1"` / `"http/1.1"` → TCP + optional TLS → HTTP/1.1
+/// - `"h2"` → TCP + TLS (required) → HTTP/2
+/// - `"h3"` → UDP + QUIC/TLS1.3 (required) → HTTP/3
+/// - absent / `None` → TCP + optional TLS → HTTP/1.1 (default)
+/// - unknown value → `ProtocolError` (immediate reject, no fallback)
 ///
 /// Protocol selection happens at `httpServe` startup and is immutable for the
 /// lifetime of the server. No mixed-protocol, no automatic Alt-Svc, no silent fallback.
@@ -114,14 +112,14 @@ use std::time::Duration;
 
 /// Protocol kind selected by the caller via `tls.protocol` field.
 ///
-/// v7 NET7-1c: This enum formalizes the protocol selection contract.
+/// v7: This enum formalizes the protocol selection contract.
 /// It is determined once at `httpServe` startup and is immutable for the
 /// lifetime of the server instance.
 ///
 /// Variants:
-///   - `H1` -- HTTP/1.1 (default, TCP, optionally over TLS)
-///   - `H2` -- HTTP/2 (TCP + TLS required, ALPN negotiation)
-///   - `H3` -- HTTP/3 (UDP + QUIC/TLS1.3, Native reference in Phase 2)
+/// - `H1` -- HTTP/1.1 (default, TCP, optionally over TLS)
+/// - `H2` -- HTTP/2 (TCP + TLS required, ALPN negotiation)
+/// - `H3` -- HTTP/3 (UDP + QUIC/TLS1.3, Native reference in )
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtocolKind {
     /// HTTP/1.1 over TCP (plaintext or TLS).
@@ -129,8 +127,8 @@ pub(crate) enum ProtocolKind {
     /// HTTP/2 over TCP + TLS. Requires cert/key. ALPN negotiation.
     H2,
     /// HTTP/3 over UDP + QUIC/TLS1.3. Requires cert/key.
-    /// Phase 2: Native reference backend (QPACK, frames, stream state, handler mapping).
-    /// Phase 3: Interpreter parity backend (unlock target).
+    /// Native reference backend (QPACK, frames, stream state, handler mapping).
+    /// Interpreter parity backend (unlock target).
     H3,
 }
 
@@ -160,11 +158,11 @@ impl ProtocolKind {
 
 /// Unified read/write interface for a single TCP connection (h1/h2 only).
 ///
-/// Implementors: `PlaintextTransport` (v4 path), `TlsTransport` (v5 Phase 2).
+/// Implementors: `PlaintextTransport` (v4 path), `TlsTransport` (v5 ).
 ///
-/// NOTE (NB7-7): The h3/QUIC path does NOT implement this trait. QUIC streams
-/// use a dedicated transport model introduced in Phase 2/3. See the module-level
-/// NB7-7 design decision for rationale.
+/// NOTE: The h3/QUIC path does NOT implement this trait. QUIC streams
+/// use a dedicated transport model introduced in. See the module-level
+/// design decision for rationale.
 ///
 /// The trait uses `&mut self` because connections are not shared across threads
 /// (the Interpreter is single-threaded, `!Send`).
@@ -198,9 +196,9 @@ pub(crate) trait Transport {
     /// Used by legacy code paths that need direct stream access (WebSocket frame I/O, etc.).
     /// This will be removed or deprecated once all I/O goes through the Transport trait.
     ///
-    /// NOTE (NB7-7): This method is TCP-only by design. The h3/QUIC transport path
+    /// NOTE: This method is TCP-only by design. The h3/QUIC transport path
     /// does NOT implement `Transport` and will never provide a `TcpStream`.
-    /// See the module-level NB7-7 design decision for rationale.
+    /// See the module-level design decision for rationale.
     fn as_tcp_stream_mut(&mut self) -> &mut std::net::TcpStream;
 
     /// Whether this transport uses TLS.
@@ -264,7 +262,7 @@ impl Transport for PlaintextTransport {
 /// TLS transport. Wraps a `rustls::ServerConnection` + `TcpStream`.
 /// All read/write operations go through rustls for encryption/decryption.
 ///
-/// NET5-2a: Phase 2 implementation. cert/key are loaded at httpServe startup.
+/// implementation. cert/key are loaded at httpServe startup.
 /// TLS handshake is performed during accept (before the connection enters the pool).
 pub(crate) struct TlsTransport {
     tls_conn: rustls::ServerConnection,
@@ -286,7 +284,7 @@ impl TlsTransport {
     /// Returns `Some(b"h2")` for HTTP/2, `Some(b"http/1.1")` for HTTP/1.1,
     /// or `None` if ALPN was not negotiated.
     ///
-    /// NET6-2a: Used by httpServe to dispatch to the h2 or h1 connection loop.
+    /// Used by httpServe to dispatch to the h2 or h1 connection loop.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         self.tls_conn.alpn_protocol()
     }
@@ -299,7 +297,7 @@ impl TlsTransport {
     /// `wants_write()` returns false, matching the pattern used in
     /// `complete_tls_handshake`.
     ///
-    /// NB5-10: Without this drain loop, HTTPS responses, streaming body chunks,
+    /// Without this drain loop, HTTPS responses, streaming body chunks,
     /// and `close_notify` alerts can be partially sent and stall the client.
     fn drain_tls_write(&mut self) -> io::Result<()> {
         while self.tls_conn.wants_write() {
@@ -407,7 +405,7 @@ impl Transport for TlsTransport {
 /// Returns a `rustls::ServerConfig` ready for use in a `TlsAcceptor`.
 /// Errors are returned as descriptive strings for httpServe to wrap in Result failure.
 ///
-/// NET5-0c: cert/key are PEM file paths. CA chain should be included in cert file.
+/// cert/key are PEM file paths. CA chain should be included in cert file.
 /// Self-signed certs are accepted (validation is client's responsibility).
 pub(crate) fn load_tls_config(
     cert_path: &str,
@@ -459,7 +457,7 @@ pub(crate) fn load_tls_config(
 
 /// Load TLS server config with ALPN protocol negotiation for HTTP/2.
 ///
-/// NET6-2a: Configures ALPN to advertise ["h2", "http/1.1"] so that clients
+/// Configures ALPN to advertise ["h2", "http/1.1"] so that clients
 /// can negotiate HTTP/2 during the TLS handshake. The negotiated protocol
 /// is accessible via `TlsTransport::alpn_protocol()` after handshake.
 ///
@@ -524,9 +522,9 @@ pub(crate) struct AcceptedTransport {
 /// `PlaintextAcceptor` wraps `TcpListener` directly.
 /// `TlsAcceptor` wraps `TcpListener` + `rustls::ServerConfig` and performs TLS handshake.
 ///
-/// NOTE (NB7-7): This trait follows the TCP model of 1 accept = 1 connection.
+/// NOTE: This trait follows the TCP model of 1 accept = 1 connection.
 /// QUIC's 1 connection = N streams model is handled by a separate h3-specific
-/// acceptor in Phase 2/3. See the module-level NB7-7 design decision.
+/// acceptor in. See the module-level design decision.
 pub(crate) trait TransportAcceptor {
     /// Try to accept a new connection (non-blocking).
     /// Returns `Ok(Some(...))` if a connection is ready, `Ok(None)` if WouldBlock,
@@ -568,7 +566,7 @@ impl TransportAcceptor for PlaintextAcceptor {
 /// TLS acceptor. Wraps a non-blocking `TcpListener` + `rustls::ServerConfig`.
 /// Performs TCP accept + blocking TLS handshake with a deadline.
 ///
-/// NET5-0c: Handshake deadline uses `timeoutMs`. Handshake failure = connection close,
+/// Handshake deadline uses `timeoutMs`. Handshake failure = connection close,
 /// handler not called. Handshaking connections count toward `maxConnections`.
 pub(crate) struct TlsAcceptor {
     listener: std::net::TcpListener,
@@ -678,16 +676,16 @@ pub(crate) fn complete_tls_handshake(
 /// Replaces the previous `HttpConnection` struct to use transport abstraction.
 /// Each connection owns its transport, buffer, and lifecycle metadata.
 ///
-/// NOTE (NB7-7): This struct models a single TCP connection with one active
+/// NOTE: This struct models a single TCP connection with one active
 /// request stream. QUIC connections (h3) use a separate connection/stream model
-/// in Phase 2/3. See the module-level NB7-7 design decision.
+/// in. See the module-level design decision.
 ///
 /// # Lifecycle
 ///
 /// ```text
 /// Accept → Handshake (TLS only) → ReadHead → ReadBody → Handler → WriteResponse → [KeepAlive | Close]
-///          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-///          transport.read / transport.write
+/// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/// transport.read / transport.write
 /// ```
 pub(crate) struct TransportConnection {
     /// The transport (plaintext or TLS) for this connection.
@@ -710,14 +708,12 @@ pub(crate) struct TransportConnection {
 /// Centralizes timeout, shutdown, and backpressure parameters so that
 /// all connection lifecycle decisions reference one source of truth.
 ///
-/// # Backpressure (NET5-0b)
-///
+/// # Backpressure///
 /// v5 runtime internally manages write backpressure via EAGAIN retry.
 /// No explicit backpressure API is exposed to users. The `write_buffer_cap`
 /// field provides a future hook for limiting queued write data per connection.
 ///
-/// # Shutdown (NET5-0b)
-///
+/// # Shutdown///
 /// Graceful shutdown drains pending connections up to `drain_timeout`.
 /// Connections exceeding the drain deadline are force-closed.
 pub(crate) struct ConnectionConfig {

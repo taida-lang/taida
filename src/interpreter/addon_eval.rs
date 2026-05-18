@@ -1,21 +1,19 @@
-//! Interpreter dispatch for addon-backed function calls
-//! (RC1 Phase 4 -- `RC1-4c`).
+//! Interpreter dispatch for addon-backed function calls.
 //!
-//! `.dev/RC1_DESIGN.md` Phase 4 Lock §Dispatch and §Taida user surface
-//! pin two contracts that this module enforces:
+//! This module enforces two contracts:
 //!
 //! 1. **No raw pointer in the user surface**: the dispatcher receives
-//!    Taida `Value` arguments, calls
-//!    `LoadedAddon::call_function(&[Value]) -> Result<Value, AddonCallError>`
-//!    (Phase 3), and returns either a Taida `Value` or an error.
-//!    `*mut TaidaAddon*` types live entirely inside `src/addon`.
+//! Taida `Value` arguments, calls
+//! `LoadedAddon::call_function(&[Value]) -> Result<Value, AddonCallError>`,
+//! and returns either a Taida `Value` or an error.
+//! `*mut TaidaAddon*` types live entirely inside `src/addon`.
 //! 2. **Single dispatch entry**: every addon call goes through
-//!    `try_addon_func`, which `try_builtin_func` invokes after every
-//!    other built-in family. The sentinel format
-//!    (`__taida_addon_call::<package>::<function>`) is structurally
-//!    distinct from the underscore-flat sentinels used by
-//!    `__os_builtin_*`, `__net_builtin_*`, `__crypto_builtin_*`, etc.,
-//!    so collisions are impossible.
+//! `try_addon_func`, which `try_builtin_func` invokes after every
+//! other built-in family. The sentinel format
+//! (`__taida_addon_call::<package>::<function>`) is structurally
+//! distinct from the underscore-flat sentinels used by
+//! `__os_builtin_*`, `__net_builtin_*`, `__crypto_builtin_*`, etc.,
+//! so collisions are impossible.
 
 use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
 use crate::interpreter::value::{ErrorValue, Value};
@@ -32,11 +30,11 @@ impl Interpreter {
     /// Returns:
     /// - `Ok(Some(Signal::Value(_)))` on a successful addon call.
     /// - `Ok(Some(Signal::Throw(_)))` if the addon returned an error
-    ///   that should be propagated as a Taida throwable.
+    /// that should be propagated as a Taida throwable.
     /// - `Ok(None)` if `name` is not bound to an addon sentinel
-    ///   (caller should fall through to the next builtin family).
+    /// (caller should fall through to the next builtin family).
     /// - `Err(RuntimeError)` for unrecoverable host-side failures
-    ///   (e.g. registry lookup miss after a successful import).
+    /// (e.g. registry lookup miss after a successful import).
     pub(crate) fn try_addon_func(
         &mut self,
         name: &str,

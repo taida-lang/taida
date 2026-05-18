@@ -1,9 +1,8 @@
-# C26B-003: port-bind race recurrence fixture
+# Port-bind race recurrence fixture
 
 Exercises `httpServe` on an explicit loopback port and verifies it binds
 cleanly on all 3 backends (Interpreter / JS / Native). Serves as a sanity
-fixture for the Phase 3 root-cause fix documented in
-`.dev/C26B_003_ANALYSIS.md`.
+fixture for the test-harness allocator hardening that prevents this race.
 
 ## Files
 
@@ -37,7 +36,7 @@ curl http://127.0.0.1:18082/ ; kill %1
 
 All 3 backends must print `ok=true requests=1` to stdout.
 
-## Acceptance (C26B-003)
+## Acceptance
 
 The race being guarded lives in the test harness allocator
 (`find_free_loopback_port` in `tests/parity.rs`). The Rust-side guards

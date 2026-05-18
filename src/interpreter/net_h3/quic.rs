@@ -1,36 +1,36 @@
 /// QUIC transport substrate for the Interpreter backend.
 ///
-/// **NET7-9b: Phase 9** -- UDP + QUIC accept implementation.
-/// **NET7-9c: Phase 9** -- H3 serve loop with QUIC streams.
-/// **NET7-12b: Phase 12** -- Handler dispatch with h1/h2-compatible request pack.
+/// **: ** -- UDP + QUIC accept implementation.
+/// **: ** -- H3 serve loop with QUIC streams.
+/// **: ** -- Handler dispatch with h1/h2-compatible request pack.
 ///
 /// This module provides the QUIC transport layer using quinn (pure Rust,
-/// tokio-native) as the substrate. It replaces the Phase 3 libquiche.so
+/// tokio-native) as the substrate. It replaces the libquiche.so
 /// dlopen gate with a compile-time Rust dependency.
 ///
 /// # Architecture
 ///
 /// 1. **TLS Config**: Generate self-signed cert via rcgen, build rustls
-///    ServerConfig with ALPN h3 ("h3").
+/// ServerConfig with ALPN h3 ("h3").
 /// 2. **QUIC Endpoint**: Bind tokio::net::UdpSocket, wrap in quinn
-///    ServerConfig, create listening Endpoint.
+/// ServerConfig, create listening Endpoint.
 /// 3. **Accept Loop**: Endpoint::accept() loop for incoming connections.
-/// 4. **Stream Dispatch (NET7-9c/12b)**: accept_bi() -> H3 frame decode ->
-///    QPACK decode -> request extraction -> handler dispatch -> response write.
+/// 4. **Stream Dispatch (/12b)**: accept_bi() -> H3 frame decode ->
+/// QPACK decode -> request extraction -> handler dispatch -> response write.
 /// 5. **Idle timeout / GOAWAY / shutdown** integration via H3Connection.
 ///
 /// # Design Decisions
 ///
 /// - Bounded-copy discipline: stream bytes read into fixed-size chunks;
-///   no intermediate aggregate buffers.
+/// no intermediate aggregate buffers.
 /// - ALPN h3 exact match: only "h3" is accepted (no silent fallback to
-///   h2/h1).
+/// h2/h1).
 /// - The serve loop runs on an internal tokio runtime, bridged to the
-///   synchronous interpreter via per-step `Runtime::block_on()` calls.
-/// - NET7-12b: Handler dispatch is synchronous. The serve loop alternates
-///   between async I/O (request read, response write) and sync handler
-///   invocation, matching the h1/h2 serial model. No `tokio::spawn`
-///   is used, so the interpreter's `&mut self` is available for handler calls.
+/// synchronous interpreter via per-step `Runtime::block_on()` calls.
+/// -: Handler dispatch is synchronous. The serve loop alternates
+/// between async I/O (request read, response write) and sync handler
+/// invocation, matching the h1/h2 serial model. No `tokio::spawn`
+/// is used, so the interpreter's `&mut self` is available for handler calls.
 ///
 /// # Dependencies
 ///
@@ -47,10 +47,10 @@ pub(crate) const H3_ERR_GENERAL_PROTOCOL_ERROR: u64 = 0x0101;
 pub(crate) const H3_ERR_FRAME_UNEXPECTED: u64 = 0x0105;
 pub(crate) const H3_ERR_STREAM_CREATION_ERROR: u64 = 0x0103;
 
-/// NET7-9c: Maximum number of concurrent connections the serve loop tracks.
+/// Maximum number of concurrent connections the serve loop tracks.
 const MAX_CONCURRENT_CONNS: usize = 256;
 
-/// NET7-9c: Read buffer size for QUIC stream data (bounded-copy).
+/// Read buffer size for QUIC stream data (bounded-copy).
 const STREAM_READ_BUF: usize = 8192;
 
 /// H3 ALPN protocol identifier per IANA assignment for HTTP/3.
@@ -59,7 +59,7 @@ const STREAM_READ_BUF: usize = 8192;
 pub(crate) const H3_ALPN: &[u8] = b"h3";
 
 /// Default port for HTTP/3 (same as HTTPS: 443).
-/// NB7-97: Present as documentation of the standard HTTP/3 port.
+/// Present as documentation of the standard HTTP/3 port.
 /// serve_h3_loop requires an explicit port parameter (0 = OS picks).
 pub(crate) const DEFAULT_H3_PORT: u16 = 443;
 
@@ -71,7 +71,7 @@ pub(crate) const DEFAULT_H3_PORT: u16 = 443;
 /// callback. The caller (net_eval.rs) converts this into the same 14-field
 /// request pack used by h1/h2.
 ///
-/// Body is bounded by `max_field_section_size` (Phase 0 bounded-copy discipline).
+/// Body is bounded by `max_field_section_size` ( bounded-copy discipline).
 pub(crate) struct H3RequestData {
     pub method: String,
     pub path: String,
@@ -100,7 +100,7 @@ pub(crate) struct AcceptedConnection {
 // ── TLS Config ──────────────────────────────────────────────────────────
 
 /// Ensure the rustls default crypto provider is installed (idempotent).
-/// NB7-89: Called once per process; subsequent calls are a no-op.
+/// Called once per process; subsequent calls are a no-op.
 fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
@@ -110,7 +110,7 @@ fn ensure_crypto_provider() {
 /// If `cert_path` and `key_path` are non-empty, load PEM files from disk.
 /// Otherwise, generate a self-signed certificate for "localhost".
 ///
-/// NB7-86: Previously ignored cert_path and key_path, always self-signing.
+/// Previously ignored cert_path and key_path, always self-signing.
 fn build_tls_config(
     cert_path: &str,
     key_path: &str,
@@ -243,7 +243,7 @@ pub(crate) async fn accept_connection(
 
 /// Result of reading and decoding a single QUIC stream.
 ///
-/// NET7-12b: Separates request extraction from response sending so the
+/// Separates request extraction from response sending so the
 /// caller can invoke the user handler synchronously between the two async
 /// phases.
 enum StreamReadResult {
@@ -255,7 +255,7 @@ enum StreamReadResult {
     NoRequest,
 }
 
-/// NET7-9c/12b: Read and decode a single bidirectional QUIC stream.
+/// 12b: Read and decode a single bidirectional QUIC stream.
 ///
 /// Reads raw bytes, decodes H3 frames, extracts the request fields.
 /// On success, returns the extracted `H3RequestData` and the `SendStream`
@@ -264,12 +264,12 @@ enum StreamReadResult {
 /// # Bounded-copy discipline
 ///
 /// - Reads into a local `STREAM_READ_BUF` buffer.
-/// - All frames in the buffer are decoded in sequence (NB7-88).
-/// - SETTINGS on request streams is rejected (NB7-84, RFC 9114 §7.2.4.1).
-/// - GOAWAY on request streams is rejected (NB7-85, RFC 9114 §7.2.6).
-/// - Frame decode errors use H3_ERR_FRAME_UNEXPECTED (NB7-92).
+/// - All frames in the buffer are decoded in sequence.
+/// - SETTINGS on request streams is rejected (RFC 9114 §7.2.4.1).
+/// - GOAWAY on request streams is rejected (RFC 9114 §7.2.6).
+/// - Frame decode errors use H3_ERR_FRAME_UNEXPECTED.
 /// - Body data (DATA frames after HEADERS) is collected, bounded by
-///   `max_field_section_size`.
+/// `max_field_section_size`.
 async fn read_request_stream(
     h3_conn: &mut super::H3Connection,
     mut recv: quinn::RecvStream,
@@ -462,7 +462,7 @@ async fn read_request_stream(
     }
 }
 
-/// NET7-12b: Send an H3 response (HEADERS + DATA + FIN) on a QUIC send stream.
+/// Send an H3 response (HEADERS + DATA + FIN) on a QUIC send stream.
 ///
 /// Converts `H3ResponseData` into QPACK-encoded HEADERS and DATA frames.
 /// Returns true on success, false on write error.
@@ -508,7 +508,7 @@ async fn send_h3_response(mut send: quinn::SendStream, response: &H3ResponseData
     send.finish().is_ok()
 }
 
-/// NET7-12b: Send a 500 Internal Server Error response on a QUIC send stream.
+/// Send a 500 Internal Server Error response on a QUIC send stream.
 async fn send_h3_error_500(send: quinn::SendStream) {
     let error_response = H3ResponseData {
         status: 500,
@@ -536,7 +536,7 @@ async fn send_error_response(
 
 // ── NET7-9c/12b: Public serve loop ────────────────────────────────────
 
-/// NET7-12b: H3 serve loop — the main entry point for the Interpreter H3 server.
+/// H3 serve loop — the main entry point for the Interpreter H3 server.
 ///
 /// This runs synchronously via per-step `Runtime::block_on()` calls,
 /// alternating between async I/O and synchronous handler dispatch:
@@ -550,17 +550,14 @@ async fn send_error_response(
 /// 7. Response is sent as HEADERS + DATA frames
 /// 8. Idle timeout and GOAWAY/shutdown are integrated
 ///
-/// # Handler Dispatch (NET7-12b)
-///
+/// # Handler Dispatch///
 /// The `handler` callback converts `H3RequestData` into the same 14-field
 /// request pack used by h1/h2, calls the user's Taida function, and extracts
 /// the response. This callback is invoked synchronously between async I/O
 /// steps, matching the Interpreter's single-threaded, serial model.
 ///
 /// `request_count` is incremented only when:
-/// 1. A valid HEADERS frame is decoded (NB7-98)
-/// 2. The handler completes successfully (NET7-12b)
-///
+/// 1. A valid HEADERS frame is decoded/// 2. The handler completes successfully///
 /// Error streams (protocol errors, QPACK failures) are NOT counted.
 ///
 /// # Arguments
@@ -570,7 +567,7 @@ async fn send_error_response(
 /// * `port` - UDP port to bind (matching h1/h2 policy: 0 = OS picks)
 /// * `max_requests` - Max total requests before shutdown (0 = unlimited)
 /// * `handler` - Synchronous callback: H3RequestData -> Option<H3ResponseData>.
-///   Returns None on handler error (500 will be sent).
+/// Returns None on handler error (500 will be sent).
 ///
 /// # Returns
 ///
@@ -938,7 +935,7 @@ mod tests {
 
     // ── NET7-9c: Serve loop tests ────────────────────────────────────
 
-    /// NB7-94/NET7-12b: Verify serve_h3_loop creates an endpoint and blocks
+    /// Verify serve_h3_loop creates an endpoint and blocks
     /// waiting for connections. Since serve_h3_loop now takes a handler
     /// callback and uses per-step block_on() (synchronous), we test it in
     /// a background OS thread and verify it's waiting (not panicking).
@@ -1107,7 +1104,7 @@ mod tests {
         endpoint.close(0u32.into(), b"test");
     }
 
-    /// NET7-12d: Test graceful shutdown with NO in-flight streams.
+    /// Test graceful shutdown with NO in-flight streams.
     ///
     /// When no streams are active, shutdown should:
     /// 1. Send GOAWAY (transition Active -> Draining)
@@ -1151,7 +1148,7 @@ mod tests {
         assert!(frame.len() >= 3, "GOAWAY frame must be at least 3 bytes");
     }
 
-    /// NET7-12d: Test graceful shutdown WITH in-flight streams.
+    /// Test graceful shutdown WITH in-flight streams.
     ///
     /// When streams are still active at shutdown time, the sequence should be:
     /// 1. Send GOAWAY (transition Active -> Draining)
@@ -1214,7 +1211,7 @@ mod tests {
 
     // ── NB7-115: Control stream initialization tests ─────────────────
 
-    /// NB7-115: Verify that a control stream init payload contains:
+    /// Verify that a control stream init payload contains:
     /// 1. Stream type byte 0x00 (control stream, RFC 9114 Section 6.2)
     /// 2. A valid SETTINGS frame (type 0x04)
     ///
@@ -1268,7 +1265,7 @@ mod tests {
         );
     }
 
-    /// NB7-115: Verify H3Connection tracks control_stream_id.
+    /// Verify H3Connection tracks control_stream_id.
     #[test]
     fn test_h3_connection_control_stream_id_default_none() {
         let conn = super::super::H3Connection::new();
@@ -1278,7 +1275,7 @@ mod tests {
         );
     }
 
-    /// NB7-115: Verify H3Connection control_stream_id can be set.
+    /// Verify H3Connection control_stream_id can be set.
     #[test]
     fn test_h3_connection_control_stream_id_set() {
         let mut conn = super::super::H3Connection::new();
@@ -1290,7 +1287,7 @@ mod tests {
         );
     }
 
-    /// NB7-115: GOAWAY frame must be valid when sent on control stream.
+    /// GOAWAY frame must be valid when sent on control stream.
     /// Verifies that the shutdown pipeline produces a GOAWAY that can be
     /// written to the control stream (same bytes as before, but the
     /// transport path changed from open_uni to the existing control stream).

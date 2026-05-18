@@ -14,7 +14,7 @@ use super::value_key::ValueKey;
 use crate::parser::FuncDef;
 use std::collections::HashSet;
 
-/// C25B-022 (Phase 5-C) / C25B-023 (Phase 5-E) — fast-path helper.
+/// Fast-path helper for set-like list operations.
 ///
 /// Try to build a set of `u64` fingerprints (derived from `ValueKey`)
 /// over `items`. Returns `None` if any element is not key-eligible
@@ -49,7 +49,7 @@ fn try_build_fingerprint_set(items: &[Value]) -> Option<HashSet<u64>> {
 /// Internal representation only — the `__value` / `__default` / `__type`
 /// fields must never be observed via `.__value` etc. from user code.
 /// Direct `__` field reads are rejected with `[E1960]`, and end users must
-/// unmold via `]=>` / `getOrDefault` / `isSuccess` / `has_value` instead.
+/// unmold via `>=>` / `getOrDefault` / `isSuccess` / `has_value` instead.
 pub(crate) fn make_int_lax(idx: Option<i64>) -> Value {
     match idx {
         Some(i) => Value::pack(vec![
@@ -287,7 +287,7 @@ impl Interpreter {
                     _ => {
                         // .unmold() on custom mold: delegate to unmold_value() which
                         // handles __unmold (with Signal::Throw propagation) and
-                        // __value fallback — exactly the same path as ]=> / <=[
+                        // __value fallback — exactly the same path as >=> / <=<
                         if method == "unmold" {
                             return self.unmold_value(obj.clone());
                         }
@@ -373,18 +373,19 @@ impl Interpreter {
             }
             Value::BuchiPack(fields) => {
                 // TypeInst error: look for message field, then type field.
-                // An empty `message` is treated as "no message" so the
-                // four backends agree on the `__type` fallback (the JS
-                // Error factory always emits `message: ''` defaults
-                // which would otherwise diverge from Interpreter /
-                // Native).
+                // An explicit empty `message` is a real payload and must stay
+                // distinct from a missing field in Result.toString().
                 fields
                     .iter()
                     .find(|(n, _)| n == "message")
                     .and_then(|(_, v)| {
                         if let Value::Str(s) = v {
                             let s = s.as_string();
-                            if s.is_empty() { None } else { Some(s.clone()) }
+                            if s.is_empty() {
+                                Some("\"\"".to_string())
+                            } else {
+                                Some(s.clone())
+                            }
                         } else {
                             None
                         }
@@ -881,7 +882,7 @@ impl Interpreter {
                 ])))
             }
             "unmold" => {
-                // Same as ]=> : hasValue → __value, otherwise → __default
+                // Same as >=> : hasValue → __value, otherwise → __default
                 if has_value {
                     Ok(Signal::Value(inner_value))
                 } else {
@@ -1421,7 +1422,7 @@ impl Interpreter {
     /// Only state-check methods remain. Operations moved to molds:
     /// Upper[], Lower[], Trim[], Split[], Replace[], Slice[], CharAt[], Repeat[], Reverse[], Pad[]
     ///
-    /// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache dispatch
+    /// # Char-index cache dispatch
     ///
     /// The receiver is `&StrValue` (instead of `&str`) so that `length`,
     /// `get`, `indexOf`, and `lastIndexOf` can hit the shared char-offset
@@ -1493,7 +1494,7 @@ impl Interpreter {
             }
             // E32B-022 (Lock-N): Lax[Int]-returning replacements for the
             // legacy `-1` sentinel methods. PHILOSOPHY I forbids magic
-            // values; callers should use `]=>` / `<=[` / `getOrDefault(...)`
+            // values; callers should use `>=>` / `<=<` / `getOrDefault(...)`
             // off the returned Lax. Old methods stay around as
             // `@deprecated since="e.X"` (gen-F removal candidate).
             "indexOfLax" => {
@@ -1685,7 +1686,7 @@ impl Interpreter {
                 message: format!(
                     "Unknown string method: '{}'. Available: length, contains, startsWith, endsWith, indexOf, indexOfLax, lastIndexOf, lastIndexOfLax, get, replace, replaceAll, split, match, search, searchLax, toString. \
                      Note: `indexOf` / `lastIndexOf` / `search` return the sentinel `-1` when the substring or pattern is not found — this is retained for migration but is discouraged because Taida values total functions over magic-number returns. \
-                     Prefer the `*Lax` variants (`indexOfLax` / `lastIndexOfLax` / `searchLax`) which return `Lax[Int]` so callers can `]=>` unmold the index or fall through with an explicit default instead of guarding against `-1`.",
+                     Prefer the `*Lax` variants (`indexOfLax` / `lastIndexOfLax` / `searchLax`) which return `Lax[Int]` so callers can `>=>` unmold the index or fall through with an explicit default instead of guarding against `-1`.",
                     method
                 ),
             }),

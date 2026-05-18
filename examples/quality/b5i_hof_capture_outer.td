@@ -6,7 +6,7 @@ multiplier <= 10
 
 items <= @[1, 2, 3]
 
-Map[items, _ x = prefix + (x * multiplier).toString()]() ]=> result
+Map[items, _ x = prefix + (x * multiplier).toString()]() >=> result
 stdout(result)
 
 // Expected: @[item:10, item:20, item:30]

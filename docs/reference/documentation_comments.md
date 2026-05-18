@@ -174,7 +174,7 @@ AI がこの関数で行ってはいけないことを説明します。
 ///@   - Result を返す関数では成否述語を経由してから値を使う
 ```
 
-失敗可能性は Taida 流の表現に揃えてください。`Lax.has_value` の確認、`]=>` / `<=[` での取り出し、`Result` の述語を経由した扱いを使い、外部プロトコル仕様の引用以外で `null` / `undefined` の語を本文に書かないこと。doc-comment lint はこれを許可リスト方式で確認します。
+失敗可能性は Taida 流の表現に揃えてください。`Lax.has_value` の確認、`>=>` / `<=<` での取り出し、`Result` の述語を経由した扱いを使い、外部プロトコル仕様の引用以外で `null` / `undefined` の語を本文に書かないこと。doc-comment lint はこれを許可リスト方式で確認します。
 
 ### @AI-Related
 
@@ -265,14 +265,14 @@ Pilot = @(
 )
 ```
 
-### モールディング型のドキュメント
+### モールド型のドキュメント
 
 ```taida
 ///@ Purpose: 非同期でデータを取得した結果をラップする
 ///@ AI-Context: API呼び出しの結果を安全に扱うために使用
 ///@ AI-Examples:
 ///@   result <= fetchPilot(id)
-///@   | result.success |> result ]=> pilot; stdout(pilot.name)
+///@   | result.success |> result >=> pilot; stdout(pilot.name)
 ///@   | _ |> stdout("Error: " + result.error.message)
 Mold[T] => ApiResult[T] = @(
   success: Bool
@@ -348,14 +348,14 @@ searchPilots query: Str limit: Int includeInactive: Bool =
       "SELECT * FROM pilots WHERE name LIKE ? OR email LIKE ?",
       @["%" + query + "%", "%" + query + "%"]
     )
-    results ]=> pilots
+    results >=> pilots
 
     filtered <= (
       | includeInactive |> pilots
-      | _ |> Filter[pilots, _ u = u.active]() ]=> active; active
+      | _ |> Filter[pilots, _ u = u.active]() >=> active; active
     )
 
-    Take[filtered, limit]() ]=> limited
+    Take[filtered, limit]() >=> limited
     limited
 => :@[Pilot]
 ```
@@ -452,7 +452,7 @@ createPilot name: Str =
 // 良い例
 ///@ Example:
 ///@   config <= loadConfig("app.json")
-///@   config ]=> cfg
+///@   config >=> cfg
 ///@   stdout("Port: " + cfg.port.toString())
 
 // 悪い例（擬似コード）

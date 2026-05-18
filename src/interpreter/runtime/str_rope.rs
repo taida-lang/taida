@@ -1,25 +1,25 @@
-//! D29 Track-θ Phase 10-B: Gap-buffer rope for `Value::Str` mutation hot paths.
+//! Gap-buffer rope for `Value::Str` mutation hot paths.
 //!
-//! Lock-K verdict (V-1 Option A, V-2 case 5.2-b gap buffer, V-3 1024-byte
+//! (V-1 Option A, V-2 case 5.2-b gap buffer, V-3 1024-byte
 //! threshold) confirms a single-cursor optimised gap buffer for the LineEditor
 //! workflow. The gap buffer maintains a contiguous storage with a movable
 //! "gap" region; insertions at the gap position are amortised O(1), and edit
 //! sequences that share a cursor (the `prompt.td::LineEditor` use-case) avoid
 //! the O(N) memcpy cascade that the previous immutable `String` representation
-//! incurred (TMB-027 root cause).
+//! incurred (root cause).
 //!
 //! # Invariants
 //!
 //! * `0 <= gap_start <= gap_end <= buf.len()`
 //! * Effective bytes are `buf[0..gap_start]` followed by `buf[gap_end..]`.
 //! * The gap region (`buf[gap_start..gap_end]`) is unused / undefined memory
-//!   reserved for future insertions.
+//! reserved for future insertions.
 //! * UTF-8 boundary safety is the caller's responsibility for byte-indexed
-//!   APIs (`insert_at_byte`, `delete_byte_range`, `slice_to_string`); char-
-//!   indexed wrappers in `StrValue` perform the byte conversion.
+//! APIs (`insert_at_byte`, `delete_byte_range`, `slice_to_string`); char-
+//! indexed wrappers in `StrValue` perform the byte conversion.
 //! * After any structural mutation, `flat_cache` and `char_offsets` caches in
-//!   `RopeBuffer` must be invalidated (handled by the caller — `RopeBuffer`
-//!   is the OnceLock cache owner; this module exposes only the raw gap buffer).
+//! `RopeBuffer` must be invalidated (handled by the caller — `RopeBuffer`
+//! is the OnceLock cache owner; this module exposes only the raw gap buffer).
 
 use std::cmp;
 

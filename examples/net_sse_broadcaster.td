@@ -26,7 +26,7 @@ handler req writer =
 => :Int
 
 asyncResult <= httpServe(8081, handler, 1)
-asyncResult ]=> result
-result ]=> served
+asyncResult >=> result
+result >=> served
 stdout(served.ok.toString())
 stdout(served.requests.toString())

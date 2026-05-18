@@ -24,6 +24,7 @@
 | `E32K1_*` | 自己アップグレード供給網エラー | `taida upgrade` | SHA-256 検証 / cosign 署名検証 / artifact 取得失敗 |
 | `E32K2_*` | ロックファイル整合性エラー | `taida ingot` / `pkg::lockfile` | `taida.lock` schema バージョン / integrity 不一致 / migration 失敗 |
 | `E32K3_*` | ソースパッケージ整合性エラー | `pkg::store` / `pkg::manifest` / `pkg::provider` | ソース pin / cosign 検証 / sha256 sidecar / 公式 namespace 制約 |
+| `E32K4_*` | パッケージ facade 整合性エラー | `taida ingot publish` / module import | `packages.tdm` facade と entry module export surface の不一致 |
 
 ## コード一覧
 
@@ -32,8 +33,43 @@
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
 | `E0301` | 単一方向制約違反 — `=>` と `<=` の混在禁止 | Parser / Verify |
-| `E0302` | 単一方向制約違反 — `]=>` と `<=[` の混在禁止 | Parser / Verify |
+| `E0302` | 単一方向制約違反 — `>=>` と `<=<` の混在禁止 | Parser / Verify |
 | `E0303` | 単一方向制約違反 — `<=` の右辺に複数行の `\| cond \|> body` 多アーム条件を書けない | Parser |
+| `E0304` | `<=` チェーン (逆方向パイプライン) のステップが代入対象と同一物理行に収まっていない | Parser |
+
+#### `E0304` — `<=` チェーンのステップは単一物理行に収まる必要がある
+
+**フェーズ**: Parser
+
+**契機**: `<=` チェーン (`result <= f(_) <= g(_) <= data`) は逆方向パイプラインを成立させるための「**単一文・単一物理行**」の構文です。代入対象 (`result`) と全てのステップ・データが同じ物理行に置かれる必要があります。改行を跨いだチェーンの吸収を許すと、後続の独立した文をチェーンの一部として silently 取り込んでしまう穴が生じるため、ステップの parse 範囲が代入対象の行を逸れた場合は `[E0304]` を発射します。
+
+**典型的な reject 形**:
+
+- ステップに改行を含む呼び出し引数:
+  ```taida reject
+  result <= double(_) <= addThree(
+    1,
+    2,
+    3
+  )
+  ```
+- 括弧で包まれた multi-line 式を first rhs に置く:
+  ```taida reject
+  result <= (
+    1 + 2
+  ) <= 99
+  ```
+- backslash 継続:
+  ```taida reject
+  result <= plusOne(_) <= \
+    4
+  ```
+
+**代替手段**:
+
+- 中間変数で分割して書く。`data <= addThree(1, 2, 3)` を別文に切り出し、続けて `result <= double(_) <= data`。
+- 順方向 `=>` パイプラインを使い、`data => addThree(1, 2, 3) => double(_) => result` のように 1 行で書く。
+- 関数を抽出してパイプラインを短くする。
 
 #### `E0303` — `<=` 右辺の複数行多アーム条件は禁止
 
@@ -106,8 +142,39 @@
 | `E1517` | Cage / CageRilla: validation pass 終了時点で subject branch または runner branch が未解決 (`Cage[target, runner]()` の boundary contract を静的に証明できない) | TypeChecker |
 | `E1518` | Cage / CageRilla: Hammer 系 schema cast facade (`JSON[raw, Schema]()` 等) を `Cage` の subject または runner に渡す boundary contract 違反。Hammer family は `Lax[T]` failure channel を維持し、`Cage` / `Gorillax` 経路には流さない | TypeChecker |
 | `E1519` | (予約) Cage / CageRilla 診断範囲の拡張用 | — |
+| `E1520` | 「値の不在を表す型」の完全排除 — `@()` (空ぶちパック) を「型」として書くことを禁止: **(R1)** 戻り型注釈 `:@()` / `:Unit` / `:Void`、**(R1対称)** 引数型注釈、**(R2)** 関数本体末尾の `@()` / `Unit` / `Void` リテラル、**(R2拡張)** 注釈なしで最終推論型が `@()` 等に確定 (中間変数経由の抜け道も塞ぐ)、**(R3)** ClassLike / Mold / Inheritance 宣言の body が空 (`Pilot = @()` / `Int => PilotId = @()` / `Mold[T] => Box[T] = @()` 等) で、Parser が `[E1520]` を即時 reject、**(ジェネリック)** `Mold[T]` で `T = @()` 等に具象化、を `Parser` / `TypeChecker` で reject。Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が存在せず、縮小操作は別の具体ぶちパック型を返すため)。情報がない場合は意味を持った値 (書き込んだバイト数、状態を表すぶちパック、共通 Enum のバリアント等) を返す。空リスト `@[]` は「空のリスト」として明確な意味を持つので別物。 | Parser / TypeChecker |
+| `E1521` | ぶちパックリテラルの positional field (`@(v1, v2, ...)`) は受理されない。PHILOSOPHY II「ぶちパック `@(...)` — 名前付きフィールドの集合」と矛盾するため、すべての buchi pack field は名前付き (`@(name <= value, ...)`) でなければならない。`<<<` / `>>>` の name list (`@(name1, name2)`) や TypeDef / ClassLike の field 定義 (`@(name: Type)`) は別 context で引き続き受理される。 | Parser |
+| `E1523` | Mold header 型変数名が組み込み型名 (`Int` / `Str` / `Bool` / `Float` / `Bytes` / `Lax` / `Result` / `Async` / `Optional` / 等) と衝突。`Mold[Int]` は型変数名 `Int` として silently 解釈されるが、意図は具体型 `Int` であることが多い。`Mold[:Int]` (具体型直接指定) または `Mold[T <= :Int]` (制約付き型変数) を使う。 | TypeChecker |
+| `E1524` | 条件分岐 `\| cond \|>` から default arm が欠落。`\| _ \|>` または `\| true \|>` を追加して全入力で結果が定義されるようにする。PHILOSOPHY IV「AI が構造として読めるよう、parser が一意に解釈でき、docs と実装が同じ規約を持つ」。 | TypeChecker |
+| `E1525` | (予約) `+` (`BinOp::Add`) の両辺が `Type::Unknown` の reject 化。Lambda 構文に parameter type-annotation parser path がないため、Lambda 内の `Unknown + Unknown` を context-sensitive に reject する設計が必要。後続 cycle で land 予定。 | TypeChecker |
 
 `E1512`〜`E1519` は **Cage / CageRilla 診断範囲**。`Cage[subject, runner]()` の type rule および `CageRilla[Branch, Out]` 子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) の boundary contract を扱う。`E1513` と `E1519` は将来の runtime validation または追加診断用に予約している。
+
+`E1520` は **「値の不在を表す型」の完全排除** 診断。PHILOSOPHY.md I の系「値の不在は値の不在」と II の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を整合的に実装する。
+
+**`@()` という構文を「型」として書くこと自体を禁止する**:
+
+- 戻り型注釈 / 引数型注釈 / 型引数として `@()` / `Unit` / `Void` を書く = 「情報なしを意味する型」の意図表明 → reject
+- Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が Taida には存在せず、ぶちパックのフィールド集合を変える操作は別の具体ぶちパック型を戻り型として定義する → II の系参照)
+
+検出範囲:
+
+1. **R1** 戻り型注釈 `:@()` / `:Unit` / `:Void`
+2. **R1 対称版** 引数型注釈 `:@()` / `:Unit` / `:Void`
+3. **R2** 関数本体末尾で `@()` / `Unit` / `Void` リテラル
+4. **R2 拡張** 注釈なしで関数の最終推論型が `@()` / `Unit` / `Void` に確定 (中間変数経由の抜け道を塞ぐ)
+5. **R3** ClassLike / Mold / Inheritance 宣言の body が `@()` で空 (`Pilot = @()` / `Int => PilotId = @()` / `Mold[T] => Box[T] = @()` 等) — Parser が即時 reject し、空ぶちパック型を class-like 経由で導入する経路を閉じる
+6. **空ぶちパック型注釈** `x: @()` / `field: @()` — Parser が `[E1520]` を発火し、識別子位置でも空ぶちパック型を書けないようにする
+7. **ジェネリック制約** `Mold[T]` で `T` が `@()` / `Unit` / `Void` 等に具象化される
+8. **パターンマッチ** で `@()` パターンを書く (warning レベル、要検討)
+
+空リスト `@[]` は「空のリスト」という明確な意味を持つので別物であり、`[E1520]` の対象ではありません。空ぶちパックリテラル `@()` を **値** として書く場面そのものが Taida 言語仕様には存在しません (汎用 filter が存在せず、ぶちパックのフィールド集合を変える操作は別の具体ぶちパック型を戻り型として定義する → II の系参照)。
+
+ぶちパックのフィールド集合を変える操作は、戻り型を別の具体ぶちパック型として定義する (例: `removePrice item: @(name: Str, price: Int) = ... => :@(name: Str)`)。汎用 filter は Taida に存在せず、「フィールドを完全に削り尽くす操作」は戻り型 `:@()` が禁止されるため関数として定義不可能。これにより型と実値のズレが構造的に発生しない設計を保証する。
+
+ClassLike / Inheritance で「親型を継承するだけで自前のフィールドを追加しない」ケースは、`taida-lang/prelude` の `marker: :Type` のような **意味を持つ単一フィールド** を追加するか、共通 `Enum` のバリアントとして表現します。空のまま継承して情報のない型を作ることは認めません。
+
+実装状況: R1 / R1対称 / R2 / R2拡張 / R3 / 空ぶちパック型注釈 は実装済み。`Statement::FuncDef` 戻り型・引数型、`Statement::ErrorCeiling` の error_param / return_type、ClassLike / Mold / InheritanceDef の field 型注釈、Cage runner の Out 型引数、ClassLike / Mold / Inheritance の空 body で `[E1520]` を発火させる。`contains_unit_like_type` 再帰判定により、`:Async[Unit]` / `:Result[Unit, _]` / `:List[Unit]` / `:Function([Unit], Unit)` / `:@(payload: @())` のようなネスト形も検出する。
 
 ### 型推論・演算意味論エラー (`E16xx`)
 
@@ -123,7 +190,7 @@
 | `E1608` | 未定義の列挙型 / 列挙 variant が参照された | TypeChecker |
 | `E1609` | (予約) | — |
 | `E1610` | 継承関係 (`Inheritance`) に循環検出 | TypeChecker |
-| `E1611` | JS バックエンドが受け付けない API capability (例: `httpServe(..., tls <= @(..., protocol <= Http2()))`) | TypeChecker |
+| `E1611` | (予約) | — |
 | `E1612` | WASM プロファイルが受け付けない API capability (例: `wasm-min` / `wasm-edge` の `taida-lang/net` `httpServe`) | TypeChecker |
 | `E1613` | `TypeExtends` が enum variant リテラルを受け付けない | TypeChecker |
 | `E1614` | (tail-only mutual recursion detection guard — 発火は negative 形で検査、ハンドラ経路の保険コード) | TypeChecker |
@@ -228,6 +295,7 @@
 | コード (予約) | 内容 | 既存帯域 |
 |--------------|------|---------|
 | `E0700` | Native と native lowering 系 WASM で相互再帰を検出した場合の拒否 | `E07xx` コード生成エラー |
+| `E0701` | 直接再帰 (`A → A`) の非末尾位置呼び出しを reject。深い直接再帰はランタイムでスタックオーバーフローするため、コンパイル時に発見する。修正案: 末尾位置に書き換える (`return` 直接) か、accumulator を伴う末尾再帰版を別関数として書く。`If[cond, then, else]()` モールドの引数は末尾位置として扱われない (内部の自己再帰も対象。短絡評価ではあるが runtime の trampoline が `MoldInst` を tail target として認識しないため)。ガード式 `(\| cond \|>)` の各アーム本体や ErrorCeiling handler 末尾は引き続き末尾位置。詳細は `docs/reference/tail_recursion.md` を参照。 | `E07xx` コード生成エラー (verify check / way check) |
 | `E1506` | 通常の関数呼び出し引数型不整合。関数値引数では、期待される関数型へ省略推論できない場合も含む | `E15xx` 定義・意味論エラー |
 | `E1508` | `Lax[T].getOrDefault` / `map` / `flatMap`、`Result[T, P].getOrDefault` / `map` / `flatMap` / `mapError`、`Async[T].getOrDefault` / `map`、`List[T].fold` / `reduce`、および関数値を受け取るメソッド境界の引数型不整合 (関数引数型ピン違反を含む。`getOrThrow` は arity 0 のため対象外) | `E15xx` 定義・意味論エラー |
 
@@ -292,6 +360,17 @@ verify されることを保証する診断。現行 Taida では `taida-lang/*`
 | `E32K3_SOURCE_COSIGN_REQUIRED` | source archive の cosign 検証が `Required` policy 下で skip / warn / 失敗 | `cosign` を install し、release が公式 cosign-signed であることを確認。`TAIDA_VERIFY_SIGNATURES` を緩めない |
 | `E32K3_VERIFY_SIGNATURES_RELAXED` | source package install 時に `TAIDA_VERIFY_SIGNATURES` が `required` 以外 (もしくは未設定の cosign 不在) | install を再実行し、`required` を強制する。現行 Taida では source archive は `Required` 必須 |
 | `E32K3_PACKAGES_TDM_DUPLICATE_TABLE` | 同一 `[packages."<id>"]` ブロックが `packages.tdm` に複数存在する。後続テーブルで pin が silent に上書きされてレビューで気付けない状態 | 重複ブロックを 1 つにまとめ、source pin が一意になる形に書き直す |
+
+### パッケージ facade 整合性エラー (`E32K4_*`)
+
+`packages.tdm` の公開 facade と entry module の実 export surface が一致することを保証する診断。`taida ingot publish` は tag push の前にこの検査を行います。
+
+| コード | 発生条件 | 推奨対応 |
+|--------|----------|---------|
+| `E32K4_FACADE_SYMBOL_NOT_PUBLIC` | consumer が import した symbol が `packages.tdm` の facade に含まれていない | import symbol を facade 内の公開名に直すか、publisher 側で意図した公開 symbol を `packages.tdm` に追加する |
+| `E32K4_PUBLISH_SYMBOL_NOT_IN_ENTRY` | `packages.tdm` の facade に含まれる symbol を entry module が export していない | entry module の `<<< @(...)` に symbol を追加するか、facade から削除する |
+| `E32K4_PUBLISH_SYMBOL_MISSING` | entry module が export する symbol が `packages.tdm` の facade に含まれていない | 公開するなら facade に追加し、非公開なら entry module の `<<< @(...)` から外す |
+| `E32K4_PUBLISH_ENTRY_INVALID` | publish 前検査で entry module を読めない、または parse できない | `packages.tdm` の entry 指定と entry module の構文を修正する |
 
 ## 帯域ルール
 

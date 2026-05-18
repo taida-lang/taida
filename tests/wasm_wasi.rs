@@ -108,7 +108,7 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
-asyncResult ]=> result
+asyncResult >=> result
 "#,
         port = port,
         label = label,
@@ -408,7 +408,7 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
-asyncResult ]=> result
+asyncResult >=> result
 "#,
             port = port
         );
@@ -542,7 +542,7 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
-asyncResult ]=> result
+asyncResult >=> result
 "#
                 )
             },
@@ -565,7 +565,7 @@ handler req =
 => :Str
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
-asyncResult ]=> result
+asyncResult >=> result
 "#
                 )
             },
@@ -600,7 +600,7 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
-asyncResult ]=> result
+asyncResult >=> result
 "#
                 )
             },
@@ -636,7 +636,7 @@ handler req =
 => :@(status: Int, headers: @[@(name: Str, value: Str)], body: Str)
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 128, @())
-asyncResult ]=> result
+asyncResult >=> result
 "#
                 )
             },

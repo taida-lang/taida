@@ -29,7 +29,7 @@ printItems("--- All Items ---", items)
 
 // Perishable items display
 stdout("--- Perishable Items ---")
-Map[perishables, printPerishable]() ]=> shown
+Map[perishables, printPerishable]() >=> shown
 stdout("")
 
 // Total value
@@ -48,13 +48,13 @@ printItems("--- Expensive (price > $100) ---", expItems)
 // Expiring items
 expiring <= expiringReport(perishables)
 stdout("--- Expiring Soon ---")
-Map[expiring, printPerishable]() ]=> exShown
+Map[expiring, printPerishable]() >=> exShown
 stdout("")
 
 // Find item by name
 found <= findByName(items, "Widget B")
 | found.has_value |>
-  found ]=> item
+  found >=> item
   stdout("Found: " + item.name + " ($" + item.price.toString() + ", qty: " + item.qty.toString() + ")")
 | _ |>
   stdout("Item not found")
@@ -63,9 +63,9 @@ stdout("")
 
 // Validate stock — throw/catch handled inside validateStock
 stdout("--- Stock Validation ---")
-items.get(0) ]=> item0
-items.get(1) ]=> item1
-items.get(2) ]=> item2
+items.get(0) >=> item0
+items.get(1) >=> item1
+items.get(2) >=> item2
 stdout(validateStock(item0))
 stdout(validateStock(item1))
 stdout(validateStock(item2))

@@ -1,6 +1,6 @@
 //! HTTP/1.1 serve loop, connection dispatcher, and HTTP accessor helpers
 //! for the Taida interpreter's net package, split out from
-//! `net_eval/mod.rs` (C13-3).
+//! `net_eval/mod.rs`.
 //!
 //! Owns the `impl Interpreter` methods that implement the HTTP/1.1 accept
 //! path (`eval_http_serve`), the per-connection non-blocking request head
@@ -13,7 +13,7 @@
 //! `protocol: "h3"` is negotiated, this module calls `self.serve_h2(...)`
 //! or `self.serve_h3(...)` and returns.
 //!
-//! C13-3 note: pure mechanical move — no behavior change.
+//! note: pure mechanical move — no behavior change.
 
 use super::super::eval::{Interpreter, RuntimeError, Signal};
 use super::super::value::Value;
@@ -30,15 +30,15 @@ use super::types::{
 use crate::net_surface::http_protocol_ordinal_to_wire;
 use crate::parser::Expr;
 
-/// C26B-022 Step 2 (wE Round 3, 2026-04-24): HTTP wire byte upper
+/// Step 2 (wE Round 3, 2026-04-24): HTTP wire byte upper
 /// limits enforced at the parser boundary so that downstream Native
 /// codegen fixed-size stack buffers (`char method[16]` / `char path[2048]`
-/// / `char authority[256]`) can never silently truncate.
+/// `char authority[256]`) can never silently truncate.
 ///
 /// Option confirmation: **Step 3 Option B** (parser-level reject with
 /// `400 Bad Request`). Option A (dynamic buffers) was discarded at
-/// Phase 0 Design Lock because it conflicts with the clone-heavy
-/// abstraction direction of C26B-018/020/024.
+/// Design Lock because it conflicts with the clone-heavy
+/// abstraction direction of /020/024.
 ///
 /// These constants are the authoritative limits for 3-backend parity;
 /// the Native C codegen struct field sizes must match (see
@@ -98,7 +98,7 @@ fn span_equals_ascii_ci(raw: &[u8], start: usize, len: usize, reference: &[u8]) 
         .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-/// C26B-022 Step 2 (wJ Round 4, 2026-04-24 authority extension):
+/// Step 2 (wJ Round 4, 2026-04-24 authority extension):
 /// Check if method / path / Host-header-value exceeds its wire-limit.
 ///
 /// Returns `Some(&'static str)` with a short descriptor of the violating
@@ -295,8 +295,7 @@ impl Interpreter {
         // ── Arg 5: tls (optional, default @() = plaintext) ──
         // v5: TLS configuration. @() means plaintext (v4 compat).
         // @(cert: "path", key: "path") means HTTPS (HTTP/1.1 over TLS).
-        // @(cert: "path", key: "path", protocol: "h2") means HTTP/2 over TLS.
-        // v6 NET6-1b: protocol field support for h2 opt-in.
+        // @(cert: "path", key: "path", protocol: HttpProtocol:H2()) means HTTP/2 over TLS.
         let tls_cert_path: Option<String>;
         let tls_key_path: Option<String>;
         let mut requested_protocol: Option<String> = None;
@@ -308,15 +307,10 @@ impl Interpreter {
                         tls_cert_path = None;
                         tls_key_path = None;
                     } else {
-                        // v6 NET6-1b: Extract protocol field if present.
-                        // NB6-10: Separate "field exists" from "field is Str".
-                        // If protocol field exists but is not Str, reject immediately.
+                        // Extract protocol field if present.
                         if let Some((_, proto_val)) = fields.iter().find(|(k, _)| k == "protocol") {
                             match proto_val {
-                                Value::Str(proto) => {
-                                    requested_protocol = Some(proto.as_string().clone());
-                                }
-                                Value::Int(ordinal) => {
+                                Value::EnumVal(_, ordinal) | Value::Int(ordinal) => {
                                     if let Some(protocol) = http_protocol_ordinal_to_wire(*ordinal)
                                     {
                                         requested_protocol = Some(protocol.to_string());
@@ -337,7 +331,7 @@ impl Interpreter {
                                     let result = make_result_failure_msg(
                                         "ProtocolError",
                                         format!(
-                                            "httpServe: protocol must be HttpProtocol or Str, got {}",
+                                            "httpServe: protocol must be HttpProtocol, got {}",
                                             proto_val
                                         ),
                                     );
@@ -378,7 +372,7 @@ impl Interpreter {
                                 return Ok(Some(Signal::Value(make_fulfilled_async(result))));
                             }
                             _ => {
-                                // v6 NET6-1b: Allow @(protocol: "h2") without cert/key
+                                // v6 NET6-1b: Allow @(protocol <= HttpProtocol:H2()) without cert/key
                                 // to still trigger protocol validation below.
                                 if requested_protocol.is_some() {
                                     tls_cert_path = None;

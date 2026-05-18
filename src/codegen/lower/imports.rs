@@ -13,15 +13,15 @@ use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
-    /// C18-1: Read an exporter module's `.td` source and register any
+    /// Read an exporter module's `.td` source and register any
     /// `EnumDef` whose name is being imported into `self.enum_defs`.
     /// Mirror of the interpreter / type-checker / JS codegen behaviour so
-    /// `Color:Red()` in the importer can resolve at codegen time.
+    /// `Color::Red()` in the importer can resolve at codegen time.
     ///
     /// Silent no-op for:
     /// - core-bundled (`taida-lang/*`) and npm paths (pre-filtered by caller)
     /// - unresolved paths / unreadable files / parse errors — downstream
-    ///   lowering emits the real diagnostic
+    /// lowering emits the real diagnostic
     ///
     /// For relative / absolute paths the resolver uses `self.source_dir`;
     /// for package paths we follow `resolve_package_module` chains so
@@ -145,7 +145,7 @@ impl Lowering {
         }
     }
 
-    /// RC1 Phase 4 helper: resolve only the **package directory** for
+    /// Resolve only the **package directory** for
     /// an import path, without producing a `.td` source path. Used by
     /// the addon-policy guard in `Statement::Import` so the Cranelift
     /// native lower can detect addon-backed packages and emit a
@@ -155,7 +155,7 @@ impl Lowering {
     /// Returns `None` for relative / absolute / project-root /
     /// `std/` / `npm:` imports — those can never be addon-backed.
     /// Also returns `None` for submodule imports (`org/pkg/sub`)
-    /// because RC1 addons are package-level only.
+    /// because addons are package-level only.
     pub(super) fn try_locate_addon_pkg_dir(
         &self,
         path: &str,
@@ -183,12 +183,12 @@ impl Lowering {
         Some(resolution.pkg_dir)
     }
 
-    /// RC2.5 Phase 1: lower an addon-backed package import.
+    /// Lower an addon-backed package import.
     ///
     /// Reads `native/addon.toml`, resolves the cdylib absolute path at
-    /// build time (per `.dev/RC2_5_IMPL_SPEC.md` F-4), and registers each
-    /// imported symbol in `addon_func_refs` for later dispatch at the
-    /// call site via `taida_addon_call`.
+    /// build time, and registers each imported symbol in
+    /// `addon_func_refs` for later dispatch at the call site via
+    /// `taida_addon_call`.
     ///
     /// Failures surface as compile errors (manifest missing / symbol
     /// not declared in `[functions]` / cdylib not yet built). Runtime
@@ -576,25 +576,18 @@ impl Lowering {
         Ok(())
     }
 
-    /// RC2.5 Phase 4 (RC2.5B-008): hardcoded return-type table for the
-    /// v1-scoped addon functions whose stringification must match the
-    /// interpreter byte-for-byte. The ABI v1 manifest (`addon.toml`)
-    /// only carries `name = arity`, so return types live here as a
-    /// per-package lookup table. RC3+ will consider a manifest schema
-    /// extension or dynamic facade-based lookup; for now the table
-    /// enumerates both the production `taida-lang/terminal` surface
-    /// (external package at `../terminal`) **and** the workspace sample
-    /// crate (`crates/addon-terminal-sample`) which unfortunately
+    /// Hardcoded return-type table for addon functions whose
+    /// stringification must match the interpreter byte-for-byte. The ABI
+    /// manifest (`addon.toml`) only carries `name = arity`, so return
+    /// types live here as a per-package lookup table.
+    ///
+    /// The table enumerates both the production `taida-lang/terminal`
+    /// surface (external package at `../terminal`) and the workspace
+    /// sample crate (`crates/addon-terminal-sample`) which currently
     /// declares the same `taida-lang/terminal` package id. The two
     /// surfaces do not overlap, so a superset entry is safe.
     ///
-    /// Package id collision (`taida-lang/terminal` declared by both
-    /// the production external repo and the in-tree sample crate) is
-    /// tracked as tech debt in `.dev/RC2_6_BLOCKERS.md::RC2.6B-015`
-    /// and should be resolved in RC3+ by renaming the sample crate's
-    /// package id to something like `taida-lang/addon-rs-sample`.
-    ///
-    /// Returns the Taida type name (`"Bool"`, `"Str"`, `"Pack"`, ...)
+    /// Returns the Taida type name (`"Bool"`, `"Str"`, `"Pack"`,...)
     /// or `None` if the function's return type is unknown.
     pub(super) fn addon_known_return_tag(
         package_id: &str,
@@ -626,7 +619,7 @@ impl Lowering {
         }
     }
 
-    /// C25B-030 Phase 1E-β: register the arity, parameter defs, and
+    /// β: register the arity, parameter defs, and
     /// return-type inference hints for a facade-declared FuncDef
     /// under `local_name`.
     ///
@@ -634,7 +627,7 @@ impl Lowering {
     /// signature under: during the facade-wide registration pass
     /// this is the facade's raw FuncDef name (e.g. `ClearScreen`);
     /// during the per-symbol user-import loop this is the user's
-    /// alias (e.g. `MyClear` from `>>> ... => @(ClearScreen: MyClear)`).
+    /// alias (e.g. `MyClear` from `>>>... => @(ClearScreen: MyClear)`).
     ///
     /// Mirrors the logic in `lower_program`'s 1st pass for ordinary
     /// FuncDefs (see `stmt.rs`), but applied to facade FuncDefs
@@ -681,7 +674,7 @@ impl Lowering {
         }
     }
 
-    /// RC2.5 Phase 2: emit the IR for a single addon function call.
+    /// Emit the IR for a single addon function call.
     ///
     /// Used by both the regular `FuncCall` lowering path and the
     /// `MoldInst` lowering path (`Foo[]()` desugars to a call on an
@@ -690,12 +683,11 @@ impl Lowering {
     /// expects:
     ///
     /// ```text
-    ///   taida_addon_call(
-    ///     <const char*> package_id,    // .rodata
-    ///     <const char*> cdylib_path,   // .rodata (absolute path)
-    ///     <const char*> function_name, // .rodata
-    ///     <i64>         argc,
-    ///     <i64>         argv_pack)     // Taida Pack or 0 when argc == 0
+    /// taida_addon_call( /// <const char*> package_id, //.rodata
+    /// <const char*> cdylib_path, //.rodata (absolute path)
+    /// <const char*> function_name, //.rodata
+    /// <i64> argc,
+    /// <i64> argv_pack) // Taida Pack or 0 when argc == 0
     /// ```
     ///
     /// The argv pack is allocated fresh per call so the dispatcher can

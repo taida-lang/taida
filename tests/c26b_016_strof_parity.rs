@@ -155,7 +155,7 @@ fn parity_assert(tag: &str, source: &str, expected: &str) {
 fn c26b_016_strof_basic_parity() {
     let source = r#"
 rawLax <= Bytes["GET /api HTTP/1.1"]()
-rawLax ]=> raw
+rawLax >=> raw
 method <= @(start <= 0, len <= 3)
 m <= StrOf[method, raw]()
 stdout(m)
@@ -169,7 +169,7 @@ stdout(m.length())
 fn c26b_016_strof_path_parity() {
     let source = r#"
 rawLax <= Bytes["GET /api/users/42 HTTP/1.1"]()
-rawLax ]=> raw
+rawLax >=> raw
 path <= @(start <= 4, len <= 13)
 p <= StrOf[path, raw]()
 stdout(p)
@@ -194,7 +194,7 @@ stdout(m)
 fn c26b_016_strof_empty_span_parity() {
     let source = r#"
 rawLax <= Bytes["GET /api HTTP/1.1"]()
-rawLax ]=> raw
+rawLax >=> raw
 empty <= @(start <= 0, len <= 0)
 s <= StrOf[empty, raw]()
 stdout(s.length())
@@ -207,7 +207,7 @@ stdout(s.length())
 fn c26b_016_strof_oob_parity() {
     let source = r#"
 rawLax <= Bytes["GET /api HTTP/1.1"]()
-rawLax ]=> raw
+rawLax >=> raw
 oob <= @(start <= 100, len <= 4)
 s <= StrOf[oob, raw]()
 stdout(s.length())
@@ -221,7 +221,7 @@ stdout(s.length())
 fn c26b_016_strof_hot_cold_integration_parity() {
     let source = r#"
 rawLax <= Bytes["POST /api/users HTTP/1.1"]()
-rawLax ]=> raw
+rawLax >=> raw
 method <= @(start <= 0, len <= 4)
 path <= @(start <= 5, len <= 10)
 // hot path: byte-exact comparison (no allocation)

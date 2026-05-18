@@ -16,20 +16,28 @@ greet name greeting =
 
 stdout(greet("Taida", "Hello"))
 
-// Recursive factorial
+// Tail-recursive factorial
+factorialLoop n acc =
+  | n < 2 |> acc
+  | _ |> factorialLoop(n - 1, acc * n)
+=> :Int
+
 factorial n =
-  | n < 2 |> 1
-  | _ |> n * factorial(n - 1)
+  factorialLoop(n, 1)
 => :Int
 
 stdout(`5! = ${factorial(5)}`)
 stdout(`10! = ${factorial(10)}`)
 
-// Fibonacci
+// Tail-recursive Fibonacci
+fibLoop n a b =
+  | n == 0 |> a
+  | n == 1 |> b
+  | _ |> fibLoop(n - 1, b, a + b)
+=> :Int
+
 fib n =
-  | n == 0 |> 0
-  | n == 1 |> 1
-  | _ |> fib(n - 1) + fib(n - 2)
+  fibLoop(n, 0, 1)
 => :Int
 
 stdout(`fib(10) = ${fib(10)}`)

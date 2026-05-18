@@ -29,7 +29,12 @@ pub fn format_type_expr(te: &TypeExpr) -> String {
         }
         TypeExpr::Function(args, ret) => {
             let as_: Vec<String> = args.iter().map(format_type_expr).collect();
-            format!("({}) => :{}", as_.join(", "), format_type_expr(ret))
+            let args_str = match as_.as_slice() {
+                [] => "_".to_string(),
+                [single] => single.clone(),
+                _ => format!("({})", as_.join(", ")),
+            };
+            format!("{} => :{}", args_str, format_type_expr(ret))
         }
     }
 }

@@ -11,15 +11,15 @@ use crate::parser::{FieldDef, Param, Statement};
 
 use super::runtime::str_rope::GapBuffer;
 
-/// D29B-016 / Phase 10-B (Track-θ): threshold above which `concat_with` and
+/// threshold above which `concat_with` and
 /// the `+` operator promote a Flat string to the Rope path.
 ///
-/// Lock-K verdict V-3 confirmed 1024 bytes — small enough that LineEditor's
+/// verdict V-3 confirmed 1024 bytes — small enough that LineEditor's
 /// keystroke-by-keystroke growth crosses the threshold within a few dozen
 /// inserts and starts amortising mutation cost over the rope's gap buffer.
 pub const STR_ROPE_PROMOTION_THRESHOLD: usize = 1024;
 
-/// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache layer
+/// # (A) / Round 8 wU (2026-04-24): char-index cache layer
 ///
 /// A string value with a lazy char-boundary cache. The `data` field holds
 /// the UTF-8 payload; `char_offsets` is populated on first access to a
@@ -29,37 +29,37 @@ pub const STR_ROPE_PROMOTION_THRESHOLD: usize = 1024;
 ///
 /// This type is wrapped by `Value::Str(Arc<StrValue>)`, so:
 /// - cloning a `Value::Str` still costs one atomic increment (Round 6 wP
-///   foundation preserved);
+/// foundation preserved);
 /// - the cache is shared across all Arc clones and only ever computed once;
 /// - the public surface (ABI, error strings, test fixtures) is unchanged
-///   because `StrValue` implements `Deref<Target = String>`, so
-///   `s.chars()`, `s.len()`, `s.as_str()`, `s.as_ptr()`, `&s[..]`,
-///   `format!("{}", s)`, `a == b`, `a < b`, etc. all continue to work
-///   transparently.
+/// because `StrValue` implements `Deref<Target = String>`, so
+/// `s.chars()`, `s.len()`, `s.as_str()`, `s.as_ptr()`, `&s[..]`,
+/// `format!("{}", s)`, `a == b`, `a < b`, etc. all continue to work
+/// transparently.
 ///
 /// `OnceLock` gives us thread-safe lock-free reads of the cache after the
 /// first write (single `Acquire` load), which matches Taida's
 /// immutable-first execution model and the Cluster 4 abstraction pin
 /// (Arc + try_unwrap COW, Round 3 wG LOCKED).
-/// D29B-016 / Phase 10-B (Track-θ): internal storage variant for `StrValue`.
+/// internal storage variant for `StrValue`.
 ///
-/// Lock-K V-1 verdict (Option A) is implemented as **interior wrapping**
-/// (DEVIATION matching Track-ε commit `e179238`) rather than a new
+/// V-1 verdict (Option A) is implemented as **interior wrapping**
+/// (DEVIATION matching commit `e179238`) rather than a new
 /// `Value::StrRope` outer enum variant — the latter would have required
 /// updating ~146 `Value::Str(_)` match arms across the codebase, with the
-/// same silent-bug risk Track-ε identified for Bytes (47 sites).
+/// same silent-bug risk identified for Bytes (47 sites).
 ///
 /// * `Flat(String)` — legacy path, also the default for short strings.
 /// * `Rope(Box<RopeBuffer>)` — gap-buffer storage used after a `concat_with`
-///   crosses `STR_ROPE_PROMOTION_THRESHOLD`. Rope reads (`as_str`,
-///   `as_string`, `cached_char_*`) lazily flatten via the inner `OnceLock`.
+/// crosses `STR_ROPE_PROMOTION_THRESHOLD`. Rope reads (`as_str`,
+/// `as_string`, `cached_char_*`) lazily flatten via the inner `OnceLock`.
 #[derive(Debug)]
 pub enum StrRepr {
     Flat(String),
     Rope(Box<RopeBuffer>),
 }
 
-/// D29B-016 / Phase 10-B: rope storage backing a `StrRepr::Rope` variant.
+/// rope storage backing a `StrRepr::Rope` variant.
 ///
 /// Wraps the raw `GapBuffer` (defined in `super::runtime::str_rope`) with a
 /// `OnceLock<String>` that caches the flat representation on first read.
@@ -133,7 +133,7 @@ impl Clone for RopeBuffer {
 pub struct StrValue {
     /// The UTF-8 payload (Flat or Rope; see `StrRepr`).
     ///
-    /// Phase 10-B (D29B-016) replaced the prior `data: String` field with
+    /// replaced the prior `data: String` field with
     /// this enum. The change is internal — `as_str()` / `as_string()` /
     /// `cached_char_*` keep their previous signatures and call sites are
     /// unaffected.
@@ -162,7 +162,7 @@ impl StrValue {
         }
     }
 
-    /// D29B-016 / Phase 10-B: construct a `StrValue` whose internal
+    /// construct a `StrValue` whose internal
     /// representation is a rope. Caller is asserting the rope path is
     /// beneficial — most call sites should use `concat_with` instead and
     /// let the threshold heuristic decide.
@@ -174,16 +174,16 @@ impl StrValue {
     }
 
     /// True iff the storage is the rope path. Intended for tests and the
-    /// LineEditor promotion verification (Phase 10-G).
+    /// LineEditor promotion verification.
     #[inline]
     pub fn is_rope(&self) -> bool {
         matches!(self.data, StrRepr::Rope(_))
     }
 
-    /// D29B-016 / Phase 10-B: concatenate with `other` and decide whether
+    /// concatenate with `other` and decide whether
     /// to keep the result Flat or promote to Rope.
     ///
-    /// Promotion rules (Lock-K V-3 = 1024 bytes):
+    /// Promotion rules ( V-3 = 1024 bytes):
     /// * Either operand is already Rope → result is Rope.
     /// * Combined byte length >= `STR_ROPE_PROMOTION_THRESHOLD` → Rope.
     /// * Otherwise → Flat (legacy fast path).
@@ -334,7 +334,7 @@ impl StrValue {
 }
 
 impl Deref for StrValue {
-    /// Phase 10-B (D29B-016): Deref keeps the legacy `&String` target so
+    /// Deref keeps the legacy `&String` target so
     /// that all 146 `Value::Str(s)` sites continue to compile unchanged.
     /// For `StrRepr::Rope`, this triggers a one-time flatten + cache via
     /// `as_string()`.
@@ -438,7 +438,7 @@ impl std::borrow::Borrow<str> for StrValue {
     }
 }
 
-/// # D29B-004 / Track-ε (2026-04-27): Bytes view value
+/// # / (2026-04-27): Bytes view value
 ///
 /// `BytesValue` represents a (possibly sub-range) view over an `Arc<Vec<u8>>`
 /// byte buffer. The view is defined by `offset` and `len` into `buf`.
@@ -446,16 +446,16 @@ impl std::borrow::Borrow<str> for StrValue {
 /// # Zero-copy invariants
 ///
 /// - `Slice[bytes(b), s, e]` returns a new `BytesValue` with the *same* `buf`
-///   `Arc` (verified by `Arc::ptr_eq`) and adjusted `offset`/`len`.
+/// `Arc` (verified by `Arc::ptr_eq`) and adjusted `offset`/`len`.
 /// - The byte slice is `&buf[offset..offset+len]`, returned by `as_slice()`.
 /// - Cloning `Arc<BytesValue>` is O(1) atomic; cloning `BytesValue` itself
-///   bumps the inner `Arc<Vec<u8>>` rcount (one atomic).
+/// bumps the inner `Arc<Vec<u8>>` rcount (one atomic).
 ///
 /// # Equality / ordering / hashing
 ///
 /// All comparisons use the byte slice (`as_slice()`), so two BytesValues with
 /// different `buf` Arcs but the same byte content compare equal. This matches
-/// the pre-D29 contract of `Value::Bytes` equality on `Vec<u8>` content.
+/// the legacy contract of `Value::Bytes` equality on `Vec<u8>` content.
 #[derive(Debug, Clone)]
 pub struct BytesValue {
     /// The underlying byte buffer. Shared via `Arc::clone` across views.
@@ -502,7 +502,7 @@ impl BytesValue {
     }
 
     /// True iff this view shares its underlying `buf` Arc with `other`.
-    /// Used by D29B-004 zero-copy regression tests to confirm that
+    /// Used by zero-copy regression tests to confirm that
     /// `Slice[bytes]` returns a view rather than a deep copy.
     #[inline]
     pub fn shares_buf_with(&self, other: &BytesValue) -> bool {
@@ -557,7 +557,7 @@ pub enum Value {
     Float(f64),
     /// String value.
     ///
-    /// # C26B-018 (A) / Round 8 wU (2026-04-24): char-index cache layer
+    /// # (A) / Round 8 wU (2026-04-24): char-index cache layer
     ///
     /// The interior `StrValue` holds the UTF-8 payload plus a
     /// lazily-computed char-offset table so that `CharAt` / `Slice` /
@@ -573,22 +573,22 @@ pub enum Value {
     ///
     /// * **Construction**: prefer [`Value::str`] (wraps in `Arc::new`).
     /// * **Reading from a match binding**: `s.as_str()` / `&s[..]` /
-    ///   `s.chars()` / `s.len()` / `s.is_empty()` / `s.as_ptr()` /
-    ///   `format!("{}", s)` work via `Deref<Target = String>`.
+    /// `s.chars()` / `s.len()` / `s.is_empty()` / `s.as_ptr()` /
+    /// `format!("{}", s)` work via `Deref<Target = String>`.
     /// * **Char-indexed fast paths**: call `s.cached_char_count()`,
-    ///   `s.cached_char_at(idx)`, `s.cached_char_slice(start, end)`,
-    ///   `s.cached_byte_to_char_index(byte_pos)` — O(1) after first
-    ///   touch.
+    /// `s.cached_char_at(idx)`, `s.cached_char_slice(start, end)`,
+    /// `s.cached_byte_to_char_index(byte_pos)` — O(1) after first
+    /// touch.
     /// * **Consuming the inner `String`**: use [`Value::str_take`] —
-    ///   `Arc::try_unwrap` fast path (drops the cache), else
-    ///   `(*arc).clone_into_string()` fallback.
+    /// `Arc::try_unwrap` fast path (drops the cache), else
+    /// `(*arc).clone_into_string()` fallback.
     ///
     /// Equality, ordering, display, hashing semantics are unchanged
     /// because `StrValue` forwards all of them to its inner `String`.
     Str(Arc<StrValue>),
     /// Bytes value (immutable byte sequence).
     ///
-    /// # D29B-004 / Track-ε (2026-04-27): interior `Arc<BytesValue>`
+    /// # / (2026-04-27): interior `Arc<BytesValue>`
     ///
     /// Migrated from `Arc<Vec<u8>>` to `Arc<BytesValue { buf, offset, len }>`
     /// so that `Slice[bytes]` can return a **zero-copy view** sharing the
@@ -597,21 +597,21 @@ pub enum Value {
     /// body memcpy in the 1-arg handler hot path
     /// (`body <= Slice[req.raw, body.start, body.start + body.len]`).
     ///
-    /// # C26B-020 柱 2 / Round 5 wO (2026-04-24): interior Arc origin
+    /// # 柱 2 / Round 5 wO (2026-04-24): interior Arc origin
     ///
     /// The original migration from plain `Vec<u8>` to `Arc<Vec<u8>>` ensured
     /// that `Value::clone()` on Bytes is one atomic increment instead of a
-    /// full byte-by-byte deep-clone. This Track-ε wrapping preserves that
+    /// full byte-by-byte deep-clone. This wrapping preserves that
     /// property — cloning `Value::Bytes` now bumps the outer `Arc<BytesValue>`
     /// rcount; the inner `Arc<Vec<u8>>` is shared via the BytesValue field.
     ///
     /// * **Construction**: prefer [`Value::bytes`] (full-buffer view) or
-    ///   [`Value::bytes_view`] (sub-range view sharing an existing buf Arc).
+    /// [`Value::bytes_view`] (sub-range view sharing an existing buf Arc).
     /// * **Reading from a match binding**: `b.iter()` / `b.len()` /
-    ///   `b.is_empty()` / `b.as_slice()` work as `BytesValue` inherent
-    ///   methods; the slice is `&buf[offset..offset+len]`.
+    /// `b.is_empty()` / `b.as_slice()` work as `BytesValue` inherent
+    /// methods; the slice is `&buf[offset..offset+len]`.
     /// * **Consuming bytes**: use [`Value::bytes_take`] — Arc try_unwrap
-    ///   fast path on the outer BytesValue, else returns `as_slice().to_vec()`.
+    /// fast path on the outer BytesValue, else returns `as_slice().to_vec()`.
     ///
     /// Equality, ordering, display semantics are based on the byte slice
     /// `&buf[offset..offset+len]`, so Bytes from different buf Arcs with the
@@ -621,14 +621,14 @@ pub enum Value {
     Bool(bool),
     /// Buchi pack (named fields, ordered).
     ///
-    /// # C26B-012 / Round 6 wQ (2026-04-24): interior `Arc<Vec<(String, Value)>>`
+    /// # / Round 6 wQ (2026-04-24): interior `Arc<Vec<(String, Value)>>`
     ///
     /// Migrated from plain `Vec<(String, Value)>` to
     /// `Arc<Vec<(String, Value)>>` so that `Value::clone()` on a pack becomes
     /// an `Arc::clone()` (one atomic increment) instead of a full
     /// field-by-field deep-clone. This follows the same Cluster 4 abstraction
     /// pattern (Arc + try_unwrap COW, LOCKED in Round 3 wG) applied to
-    /// `Value::List` (Phase 5-F2-1) and `Value::Bytes` (Round 5 wO).
+    /// `Value::List` () and `Value::Bytes` (Round 5 wO).
     ///
     /// Pattern-match bindings such as `Value::BuchiPack(fields)` now yield
     /// `fields: Arc<Vec<(String, Value)>>`, which derefs transparently to
@@ -636,19 +636,19 @@ pub enum Value {
     ///
     /// * **Construction**: prefer [`Value::pack`] (wraps in `Arc::new`).
     /// * **Iteration from a match binding**: `fields.iter()` works via deref;
-    ///   `for f in &**fields` and `for f in fields.as_ref()` are both valid.
+    /// `for f in &**fields` and `for f in fields.as_ref()` are both valid.
     /// * **Mutation with COW**: `Arc::make_mut(&mut inner)` clones if shared,
-    ///   otherwise mutates in place.
+    /// otherwise mutates in place.
     /// * **Consuming the inner `Vec<(String, Value)>`**: use
-    ///   [`Value::pack_take`] — `Arc::try_unwrap` fast path, else
-    ///   `(*arc).clone()` fallback.
+    /// [`Value::pack_take`] — `Arc::try_unwrap` fast path, else
+    /// `(*arc).clone()` fallback.
     ///
     /// Equality, ordering, display, hashing semantics are unchanged because
     /// `Arc<T>` transparently forwards read access to `T`.
     BuchiPack(Arc<Vec<(String, Value)>>),
     /// List of values.
     ///
-    /// # C25B-029 / Phase 5-F2-1 (2026-04-23): interior `Arc<Vec<Value>>`
+    /// # / (2026-04-23): interior `Arc<Vec<Value>>`
     ///
     /// The interior was migrated from plain `Vec<Value>` to
     /// `Arc<Vec<Value>>` so that `Value::clone()` on a list becomes an
@@ -659,14 +659,14 @@ pub enum Value {
     ///
     /// * **Construction**: prefer [`Value::list`] (wraps in `Arc::new`).
     /// * **Iteration from a match binding**: `items.iter()` works via
-    ///   deref; `for x in &*items` and `for x in items.as_ref()` are
-    ///   both valid.
+    /// deref; `for x in &*items` and `for x in items.as_ref()` are
+    /// both valid.
     /// * **Mutation with COW**: `Arc::make_mut(&mut inner)` clones if
-    ///   shared, otherwise mutates in place.
+    /// shared, otherwise mutates in place.
     /// * **Consuming the inner `Vec<Value>`**: `Arc::try_unwrap(arc)`
-    ///   returns `Ok(Vec)` if unique, else `Err(Arc)`; fall back to
-    ///   `(*arc).clone()` or `arc.as_ref().clone()` for unconditional
-    ///   ownership.
+    /// returns `Ok(Vec)` if unique, else `Err(Arc)`; fall back to
+    /// `(*arc).clone()` or `arc.as_ref().clone()` for unconditional
+    /// ownership.
     ///
     /// Equality, ordering, display, hashing semantics are unchanged
     /// because `Arc<T>` transparently forwards read access to `T`.
@@ -687,25 +687,25 @@ pub enum Value {
     /// No methods, no field access. Only usable inside Cage.
     Molten,
     /// Stream value — time-series mold type. Values flow over time.
-    /// `]=>` collects all values into `@[T]` (blocking).
+    /// `>=>` collects all values into `@[T]` (blocking).
     Stream(StreamValue),
-    /// C18-2 / C18-3: Tagged enum value — the ordinal carries its owning
+    /// Tagged enum value — the ordinal carries its owning
     /// enum name so that `jsonEncode` can emit the variant name Str and
     /// `Ordinal[]` can assert the argument came from an Enum variant.
     ///
     /// Interop with `Value::Int(ordinal)`:
     /// - equality: `Int(n) == EnumVal(_, n)` (same ordinal matches).
     /// - ordering: same-enum `EnumVal` pairs compare by ordinal; cross-
-    ///   enum or Enum↔Int ordering still falls through to `None`.
+    /// enum or Enum↔Int ordering still falls through to `None`.
     /// - arithmetic: addition / subtraction treat EnumVal like Int(n).
     /// - `.toString()` / `to_display_string()` returns the ordinal as a
-    ///   Str, preserving the C16 contract (the variant-name representation
-    ///   is only used by jsonEncode, not by display).
+    /// Str, preserving the variant-name representation
+    /// is only used by jsonEncode, not by display).
     ///
     /// This is strictly additive: every existing code path that produces
     /// `Value::Int(ordinal)` for an Enum continues to work. Code paths
-    /// that need the enum identity (Phase 2 jsonEncode, Phase 3 Ordinal[],
-    /// Phase 4 ordering) use pattern-match on `EnumVal`.
+    /// that need the enum identity ( jsonEncode, Ordinal[],
+    /// ordering) use pattern-match on `EnumVal`.
     EnumVal(String, i64),
 }
 
@@ -721,7 +721,7 @@ pub struct FuncValue {
     /// RCB-242: Declared return type from function definition (if any).
     /// Used for introspection. Runtime type enforcement is handled by the checker.
     pub return_type: Option<crate::parser::TypeExpr>,
-    /// C20B-015 / ROOT-18: TypeDef registry from the function's defining module.
+    /// TypeDef registry from the function's defining module.
     ///
     /// When a function is imported into another module and references a schema
     /// via `JSON[raw, Schema]()`, the schema must be resolved against the
@@ -734,7 +734,7 @@ pub struct FuncValue {
     /// `Interpreter::type_defs` as before. Also `None` for lambdas / partials /
     /// internal helpers — those can only reference the currently-visible scope.
     pub module_type_defs: Option<Arc<HashMap<String, Vec<FieldDef>>>>,
-    /// C20B-015 / ROOT-18: Enum registry from the function's defining module.
+    /// Enum registry from the function's defining module.
     /// Same semantics as `module_type_defs` but for enum declarations.
     pub module_enum_defs: Option<Arc<HashMap<String, Vec<String>>>>,
 }
@@ -769,9 +769,9 @@ pub enum PendingState {
 ///
 /// Two modes:
 /// - **Resolved** (status = Fulfilled | Rejected): value/error set immediately.
-///   This is backward-compatible with the original synchronous simulation.
+/// This is backward-compatible with the original synchronous simulation.
 /// - **Pending** (status = Pending, task = Some(...)): a real tokio task is running.
-///   When `]=>` is used, the interpreter calls `block_on` to wait for the result.
+/// When `>=>` is used, the interpreter calls `block_on` to wait for the result.
 #[derive(Debug, Clone)]
 pub struct AsyncValue {
     pub status: AsyncStatus,
@@ -807,7 +807,7 @@ pub enum StreamTransform {
 /// A stream value — Mold[@[T]] for time-series data.
 ///
 /// Stream[T] holds source items and a chain of lazy transforms.
-/// When `]=>` is used, the transforms are applied and items collected into a list.
+/// When `>=>` is used, the transforms are applied and items collected into a list.
 /// PHILOSOPHY.md III: カタめたいなら、鋳型を作りましょう
 #[derive(Debug, Clone)]
 pub struct StreamValue {
@@ -837,7 +837,7 @@ impl Value {
 
     /// Construct a `Value::Str` from an owned `String`, hiding the
     /// `Arc<StrValue>` wrapping. See the doc comment on `Value::Str`
-    /// for the rationale (C26B-018 (A) char-index cache, Round 8 wU
+    /// for the rationale ( (A) char-index cache, Round 8 wU
     /// extends Round 6 wP interior-Arc migration).
     pub fn str(s: String) -> Self {
         Value::Str(Arc::new(StrValue::new(s)))
@@ -847,7 +847,7 @@ impl Value {
     /// `Arc<StrValue>`. If the `Arc` is uniquely owned, avoids allocation
     /// (the `StrValue` is destructured and its `data` field returned);
     /// otherwise clones the `String`. Used at legacy consumer sites that
-    /// previously moved `String` out of `Value::Str`. C26B-018 (A) / wU.
+    /// previously moved `String` out of `Value::Str`. (A) / wU.
     pub fn str_take(s: Arc<StrValue>) -> String {
         match Arc::try_unwrap(s) {
             Ok(sv) => sv.into_string(),
@@ -862,7 +862,7 @@ impl Value {
 
     /// Construct a `Value::Bytes` from an owned `Vec<u8>`, hiding the
     /// `Arc` wrapping. See the doc comment on `Value::Bytes` for the
-    /// rationale (C26B-020 柱 2 interior migration + D29B-004 Track-ε
+    /// rationale ( 柱 2 interior migration +
     /// view wrapping).
     pub fn bytes(data: Vec<u8>) -> Self {
         let len = data.len();
@@ -873,7 +873,7 @@ impl Value {
         }))
     }
 
-    /// D29B-004 / Track-ε: Construct a `Value::Bytes` as a zero-copy view
+    /// Construct a `Value::Bytes` as a zero-copy view
     /// over an existing buffer Arc. Used by `Slice[bytes]` and other
     /// sub-range operations to avoid the per-request body memcpy.
     /// `Arc::ptr_eq(&new.buf, &source.buf) == true` if `source.buf` is
@@ -890,7 +890,7 @@ impl Value {
     /// COW helper: take ownership of the inner `Vec<u8>` from an
     /// `Arc<BytesValue>`. If both Arcs are uniquely owned and `offset==0`
     /// and `len==buf.len()`, avoids allocation; otherwise allocates a new
-    /// `Vec<u8>` containing the slice. C26B-020 柱 2 + D29B-004 Track-ε.
+    /// `Vec<u8>` containing the slice. 柱 2 +.
     pub fn bytes_take(data: Arc<BytesValue>) -> Vec<u8> {
         match Arc::try_unwrap(data) {
             Ok(bv) => {
@@ -917,7 +917,7 @@ impl Value {
 
     /// Construct a `Value::List` from an owned `Vec<Value>`, hiding the
     /// `Arc` wrapping. See the doc comment on `Value::List` for the
-    /// rationale (Phase 5-F2-1 interior migration).
+    /// rationale ( interior migration).
     pub fn list(items: Vec<Value>) -> Self {
         Value::List(Arc::new(items))
     }
@@ -925,7 +925,7 @@ impl Value {
     /// COW helper: take ownership of the inner `Vec<Value>` from an
     /// `Arc<Vec<Value>>`. If the `Arc` is uniquely owned, avoids allocation;
     /// otherwise clones the vec. Used at all legacy consumer sites that
-    /// previously moved `Vec<Value>` out of `Value::List`. Phase 5-F2-1.
+    /// previously moved `Vec<Value>` out of `Value::List`..
     pub fn list_take(items: Arc<Vec<Value>>) -> Vec<Value> {
         Arc::try_unwrap(items).unwrap_or_else(|arc| (*arc).clone())
     }
@@ -937,7 +937,7 @@ impl Value {
 
     /// Construct a `Value::BuchiPack` from an owned `Vec<(String, Value)>`,
     /// hiding the `Arc` wrapping. See the doc comment on `Value::BuchiPack`
-    /// for the rationale (C26B-012 interior migration, Round 6 wQ).
+    /// for the rationale ( interior migration, Round 6 wQ).
     pub fn pack(fields: Vec<(String, Value)>) -> Self {
         Value::BuchiPack(Arc::new(fields))
     }
@@ -946,7 +946,7 @@ impl Value {
     /// `Arc<Vec<(String, Value)>>`. If the `Arc` is uniquely owned, avoids
     /// allocation; otherwise clones the vec. Used at legacy consumer sites
     /// that previously moved `Vec<(String, Value)>` out of `Value::BuchiPack`.
-    /// C26B-012 / Round 6 wQ.
+    /// Round 6 wQ.
     pub fn pack_take(fields: Arc<Vec<(String, Value)>>) -> Vec<(String, Value)> {
         Arc::try_unwrap(fields).unwrap_or_else(|arc| (*arc).clone())
     }

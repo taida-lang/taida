@@ -1,27 +1,26 @@
-//! Process-wide addon registry (RC1 Phase 4 -- `RC1-4b` / `RC1-4c`).
+//! Process-wide addon registry.
 //!
-//! `.dev/RC1_DESIGN.md` Phase 4 Lock §Runtime registry pins three
-//! contracts that this module enforces:
+//! This module enforces three registry contracts:
 //!
 //! 1. **Single load per (project_root, package_id)**: an addon-backed
-//!    package is `dlopen`-ed at most once per process. Subsequent
-//!    imports return the same `Arc<LoadedAddon>` so the value bridge
-//!    allocator stays unified across calls.
+//! package is `dlopen`-ed at most once per process. Subsequent
+//! imports return the same `Arc<LoadedAddon>` so the value bridge
+//! allocator stays unified across calls.
 //! 2. **No unload until process exit**: `libloading::Library` is held
-//!    for the registry's entire lifetime. The registry is `'static`
-//!    and never drops, so addon function pointers remain valid for as
-//!    long as the host process is running.
+//! for the registry's entire lifetime. The registry is `'static`
+//! and never drops, so addon function pointers remain valid for as
+//! long as the host process is running.
 //! 3. **Resolution order is single source**: the cdylib search order
-//!    documented in the design lock lives entirely inside this module.
-//!    Both the interpreter import path and the (future) Cranelift /
-//!    JS / WASM compile-time error path call into the same lookup
-//!    helper, so they can never drift.
+//! documented in the design lock lives entirely inside this module.
+//! Both the interpreter import path and the (future) Cranelift /
+//! JS / WASM compile-time error path call into the same lookup
+//! helper, so they can never drift.
 //!
 //! # Why a global registry?
 //!
 //! `LoadedAddon` cannot be cloned (it owns a `libloading::Library`
 //! handle), and copying the host capability table would mean two
-//! independent allocators -- exactly the problem the Phase 3 ownership
+//! independent allocators -- exactly the problem the ownership
 //! lock fixed. The cleanest fix is to keep `LoadedAddon` in an `Arc`
 //! and hand `Arc` clones to every consumer. The natural place for an
 //! `Arc<LoadedAddon>` to live is a `'static` registry keyed by
@@ -32,7 +31,7 @@
 //! The registry uses a single `Mutex` around a `HashMap`. Addon
 //! loading is rare (once per package per process) and the critical
 //! section is microscopic, so contention is not a concern. The
-//! `LoadedAddon` itself is `Send + Sync` (Phase 2 `unsafe impl`), so
+//! `LoadedAddon` itself is `Send + Sync` ( `unsafe impl`), so
 //! handing out `Arc` clones across threads is safe.
 
 use std::collections::HashMap;
@@ -88,7 +87,7 @@ pub enum AddonImportError {
         binary_arity: u32,
     },
     /// The `package` field inside `native/addon.toml` does not match
-    /// the package id the import resolver was looking up. RC1B-110
+    /// the package id the import resolver was looking up.
     /// contract: the two identifiers must be identical; a drift here
     /// would desynchronise the registry key, the sentinel binding,
     /// and the manifest-reported diagnostics.
@@ -424,12 +423,12 @@ pub fn cdylib_search_paths(pkg_dir: &Path, library_stem: &str) -> Vec<PathBuf> {
 
 /// Walk the cdylib search order and return the first existing path.
 ///
-/// `RC1_DESIGN.md` Phase 4 Lock §Resolution order Step 5:
+/// `RC1_DESIGN.md` Lock §Resolution order Step 5:
 /// 1. `<pkg_dir>/native/lib<stem>.{so,dylib,dll}`
 /// 2. `${CARGO_TARGET_DIR}/debug/...`
 /// 3. `${CARGO_TARGET_DIR}/release/...`
 ///
-/// RC2.5 Phase 1: visibility raised to `pub(crate)` so the Cranelift
+/// Visibility is `pub(crate)` so the Cranelift
 /// native lowering layer (`src/codegen/lower.rs`) can resolve the
 /// absolute path at build time and embed it in `.rodata`. The
 /// interpreter path is unchanged.

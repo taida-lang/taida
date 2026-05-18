@@ -4,7 +4,7 @@
 Error => MyError = @(code: Int)
 
 sumList nums =
-  Sum[nums]() ]=> total
+  Sum[nums]() >=> total
   total
 => :Int
 

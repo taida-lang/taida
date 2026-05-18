@@ -1,8 +1,8 @@
 // Quality Test: B-6g — BuchiPack 内モールド + unmold（ラムダ経由）
-// フィールド関数内で ]=> 使用
+// フィールド関数内で >=> 使用
 
 safeDivFn x y =
-  Div[x, y]() ]=> result
+  Div[x, y]() >=> result
   result
 => :Int
 

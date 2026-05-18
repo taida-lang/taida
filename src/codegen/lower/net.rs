@@ -2,8 +2,7 @@
 //
 // This module groups the `Lowering` helpers that describe the
 // `taida-lang/net` surface (HTTP v1 / v2 / v3 / v4 / v5, WebSocket,
-// SSE) and the enum rewrite that propagates `HttpProtocol` values to
-// the native runtime. All items are moved verbatim from
+// SSE) and the net enum import surface. All items are moved verbatim from
 // `src/codegen/lower/stdlib.rs` with their original signatures,
 // bodies, and privacy preserved per the C13-2 move-only policy.
 //
@@ -13,8 +12,7 @@
 // - `net.rs` (this file) holds the `taida-lang/net` package surface.
 
 use super::Lowering;
-use crate::net_surface::{NET_HTTP_PROTOCOL_VARIANTS, http_protocol_variant_to_wire};
-use crate::parser::*;
+use crate::net_surface::NET_HTTP_PROTOCOL_VARIANTS;
 
 impl Lowering {
     /// taida-lang/net package function → C runtime function mapping.
@@ -73,30 +71,5 @@ impl Lowering {
                 .map(|variant| (*variant).to_string())
                 .collect(),
         );
-    }
-
-    pub(super) fn rewrite_http_serve_tls_expr_for_runtime(&self, expr: &Expr) -> Expr {
-        let Expr::BuchiPack(fields, span) = expr else {
-            return expr.clone();
-        };
-        let rewritten_fields = fields
-            .iter()
-            .map(|field| {
-                if field.name == "protocol"
-                    && let Expr::EnumVariant(enum_name, variant_name, variant_span) = &field.value
-                    && self.enum_defs.contains_key(enum_name)
-                {
-                    let protocol = http_protocol_variant_to_wire(variant_name);
-                    if let Some(protocol) = protocol {
-                        let mut rewritten = field.clone();
-                        rewritten.value =
-                            Expr::StringLit(protocol.to_string(), variant_span.clone());
-                        return rewritten;
-                    }
-                }
-                field.clone()
-            })
-            .collect();
-        Expr::BuchiPack(rewritten_fields, span.clone())
     }
 }

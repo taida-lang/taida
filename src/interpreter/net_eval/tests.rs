@@ -1,4 +1,4 @@
-//! Test module for net_eval (C12B-025 mechanical split).
+//! Test module for net_eval (mechanical split).
 //!
 //! Extracted verbatim from net_eval.rs lines 5714..12591.
 
@@ -1315,7 +1315,7 @@ fn dummy_span() -> Span {
     Span::new(0, 0, 1, 1)
 }
 
-/// C27B-003 root-cause fix (C27 wE, 2026-04-25):
+/// Root-cause guard:
 /// Replace blind `sleep(100ms)` + bare `TcpStream::connect(...).unwrap()` with
 /// poll-until-bound loop. The pre-existing pattern assumed 100 ms was enough
 /// for a freshly spawned interpreter thread to reach `TcpListener::bind()`,
@@ -1323,14 +1323,14 @@ fn dummy_span() -> Span {
 /// (compilation cache, mold init, env setup), causing the very first
 /// `connect()` to surface ConnectionRefused (errno 111). This is the dominant
 /// remaining failure mode of `test_http_serve_max_requests_3` and siblings
-/// after C26B-003 closed the kernel-ephemeral port collision window.
+/// after closed the kernel-ephemeral port collision window.
 ///
 /// The fix is to wait for the actual bind, not for a wall-clock guess. We
 /// poll up to `max_attempts` times with `sleep_ms` between attempts (default
 /// 200 × 10 ms = 2 s ceiling, well above worst-observed CI bind latency).
 ///
 /// This is a test-helper-only change: production surface is unchanged
-/// (D27/D28 escalation 3 points all NO).
+/// All escalation points stay rejected.
 fn connect_with_retry(port: u16) -> std::net::TcpStream {
     const MAX_ATTEMPTS: usize = 200;
     const SLEEP_MS: u64 = 10;
@@ -2350,7 +2350,7 @@ fn test_nb27_empty_path_parse() {
 #[test]
 fn test_nb29_sentinel_shadow_by_unmold() {
     // Simulates: >>> taida-lang/net => @(httpServe)
-    //            someResult ]=> httpServe
+    //            someResult >=> httpServe
     // After unmold, httpServe is overwritten with a non-sentinel value.
     // try_net_func must return None (sentinel guard blocks dispatch).
     let mut interp = Interpreter::new();
@@ -2367,7 +2367,7 @@ fn test_nb29_sentinel_shadow_by_unmold() {
         "Before shadow: sentinel should be active (httpServe requires args)"
     );
 
-    // Step 2: Simulate unmold shadow (]=> httpServe overwrites with a value)
+    // Step 2: Simulate unmold shadow (>=> httpServe overwrites with a value)
     interp.env.define_force("httpServe", Value::Int(99));
 
     // Step 3: try_net_func must return None — sentinel is gone
@@ -2793,7 +2793,7 @@ fn read_responses(stream: &mut std::net::TcpStream, expected: usize) -> Vec<Stri
     results
 }
 
-/// NET2-1h: 1 connection, 2 requests → 2 responses (keep-alive works)
+/// 1 connection, 2 requests → 2 responses (keep-alive works)
 #[test]
 fn test_keep_alive_two_requests_one_connection() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -2867,7 +2867,7 @@ fn test_keep_alive_two_requests_one_connection() {
     }
 }
 
-/// NET2-1h: Connection: close → connection terminates after one request
+/// Connection: close → connection terminates after one request
 #[test]
 fn test_keep_alive_connection_close_terminates() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -2927,7 +2927,7 @@ fn test_keep_alive_connection_close_terminates() {
     }
 }
 
-/// NET2-1h: HTTP/1.0 + Connection: keep-alive → connection maintained
+/// HTTP/1.0 + Connection: keep-alive → connection maintained
 #[test]
 fn test_keep_alive_http10_explicit_keep_alive() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -3003,7 +3003,7 @@ fn test_keep_alive_http10_explicit_keep_alive() {
     }
 }
 
-/// NET2-1h: HTTP/1.0 without Connection header → connection closes after one request
+/// HTTP/1.0 without Connection header → connection closes after one request
 #[test]
 fn test_keep_alive_http10_default_close() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -3082,7 +3082,7 @@ fn test_keep_alive_http10_default_close() {
     }
 }
 
-/// NET2-1h: maxRequests across connections — verify count is global
+/// maxRequests across connections — verify count is global
 #[test]
 fn test_keep_alive_max_requests_across_connections() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -3629,9 +3629,9 @@ fn test_body_encoding_classify_empty_when_all_zero() {
     );
 }
 
-/// C12B-032: `Empty` must expose the two sub-cases as distinct
+/// `Empty` must expose the two sub-cases as distinct
 /// values so downstream consumers (v2 chunked, HTTP/2 DATA
-/// promotion) can branch on them. Before C12B-032 these were
+/// promotion) can branch on them. Before these were
 /// indistinguishable at the enum level.
 #[test]
 fn test_body_encoding_empty_distinguishes_absent_vs_zero() {
@@ -3708,7 +3708,7 @@ fn test_body_encoding_from_parsed_content_length_zero() {
     );
 }
 
-/// C12B-032: the internal `__hasContentLengthHeader` field on the
+/// the internal `__hasContentLengthHeader` field on the
 /// parsed BuchiPack must be `true` for an explicit
 /// `Content-Length: 0` and `false` when the header is absent, so
 /// the `ConnReadResult::Ready` path can preserve the distinction
@@ -3866,7 +3866,7 @@ fn test_read_body_chunked() {
 
 // ── httpServe integration test: chunked body (NET2-2i) ──
 
-/// NET2-2i: httpServe with chunked request body
+/// httpServe with chunked request body
 #[test]
 fn test_http_serve_chunked_body() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -3918,7 +3918,7 @@ fn test_http_serve_chunked_body() {
     server_handle.join().unwrap();
 }
 
-/// NET2-2i: httpServe rejects Content-Length + Transfer-Encoding: chunked
+/// httpServe rejects Content-Length + Transfer-Encoding: chunked
 #[test]
 fn test_http_serve_rejects_cl_and_chunked() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -3964,7 +3964,7 @@ fn test_http_serve_rejects_cl_and_chunked() {
     server_handle.join().unwrap();
 }
 
-/// NET2-2i: httpServe with malformed chunk size → 400
+/// httpServe with malformed chunk size → 400
 #[test]
 fn test_http_serve_malformed_chunk() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -4010,7 +4010,7 @@ fn test_http_serve_malformed_chunk() {
     server_handle.join().unwrap();
 }
 
-/// NET2-2i: chunked body + keep-alive (chunked first, then Content-Length on same connection)
+/// chunked body + keep-alive (chunked first, then Content-Length on same connection)
 #[test]
 fn test_http_serve_chunked_then_normal_keep_alive() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -4074,7 +4074,7 @@ fn test_http_serve_chunked_then_normal_keep_alive() {
     }
 }
 
-/// NET2-2i: large chunked body (multiple chunks totaling > 8KB)
+/// large chunked body (multiple chunks totaling > 8KB)
 #[test]
 fn test_http_serve_chunked_large_body() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -4136,7 +4136,7 @@ fn test_http_serve_chunked_large_body() {
 
 // ── NET2-3g: Concurrent handler dispatch tests ──
 
-/// NET2-3g: Two clients connect simultaneously, both get responses.
+/// Two clients connect simultaneously, both get responses.
 #[test]
 fn test_concurrent_two_clients_both_get_responses() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -4216,7 +4216,7 @@ fn test_concurrent_two_clients_both_get_responses() {
     }
 }
 
-/// NET2-3g: maxConnections limits simultaneous connections.
+/// maxConnections limits simultaneous connections.
 /// Excess connections must wait for a slot or be processed later.
 #[test]
 fn test_concurrent_max_connections_limit() {
@@ -4302,7 +4302,7 @@ fn test_concurrent_max_connections_limit() {
     }
 }
 
-/// NET2-3g: maxRequests counts across all connections.
+/// maxRequests counts across all connections.
 #[test]
 fn test_concurrent_max_requests_across_connections() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -4362,7 +4362,7 @@ fn test_concurrent_max_requests_across_connections() {
     }
 }
 
-/// NET2-3g: Per-connection buffer isolation.
+/// Per-connection buffer isolation.
 /// Verify that data from one connection does not leak into another.
 #[test]
 fn test_concurrent_buffer_isolation() {
@@ -4430,7 +4430,7 @@ fn test_concurrent_buffer_isolation() {
     }
 }
 
-/// NET2-3g: maxConnections defaults to 128 when not specified (v1 compat).
+/// maxConnections defaults to 128 when not specified (v1 compat).
 #[test]
 fn test_concurrent_max_connections_default() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -4478,7 +4478,7 @@ fn test_concurrent_max_connections_default() {
     }
 }
 
-/// NET2-3g: Keep-alive works correctly in concurrent mode.
+/// Keep-alive works correctly in concurrent mode.
 /// One connection does keep-alive while another connects separately.
 #[test]
 fn test_concurrent_keep_alive_with_multiple_connections() {
@@ -4550,7 +4550,7 @@ fn test_concurrent_keep_alive_with_multiple_connections() {
     }
 }
 
-/// NET2-3g: Chunked body works with concurrent connections.
+/// Chunked body works with concurrent connections.
 #[test]
 fn test_concurrent_chunked_body() {
     use std::sync::atomic::{AtomicU16, Ordering};

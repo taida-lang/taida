@@ -11,8 +11,8 @@ processOk items =
   |== err: Error =
     "caught:" + err.message
   => :Str
-  Map[items, _ x = safeDouble(x)]() ]=> result
-  Join[result, ","]() ]=> joined
+  Map[items, _ x = safeDouble(x)]() >=> result
+  Join[result, ","]() >=> joined
   joined
 => :Str
 
@@ -20,8 +20,8 @@ processFail items =
   |== err: Error =
     "caught:" + err.message
   => :Str
-  Map[items, _ x = safeDouble(x)]() ]=> result
-  Join[result, ","]() ]=> joined
+  Map[items, _ x = safeDouble(x)]() >=> result
+  Join[result, ","]() >=> joined
   joined
 => :Str
 

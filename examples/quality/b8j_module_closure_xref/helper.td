@@ -6,8 +6,8 @@ formatNum n =
 => :Str
 
 wrapAll items =
-  Map[items, _ x = formatNum(x)]() ]=> result
-  Join[result, ","]() ]=> joined
+  Map[items, _ x = formatNum(x)]() >=> result
+  Join[result, ","]() >=> joined
   joined
 => :Str
 

@@ -315,7 +315,7 @@ impl TypeRegistry {
     /// Register an inheritance relationship.
     ///
     /// Returns `false` if registering would create a cycle in the
-    /// inheritance chain (e.g. `A => B`, then `B => A`).  In that case
+    /// inheritance chain (e.g. `A => B`, then `B => A`). In that case
     /// the relationship is **not** stored.
     pub fn register_inheritance(
         &mut self,
@@ -493,9 +493,9 @@ impl TypeRegistry {
     /// TypeExpr tree. This is acceptable at current codebase scale because:
     /// 1. Type expressions are typically shallow (1-3 levels deep).
     /// 2. The checker calls resolve_type() O(n) times per program where n is
-    ///    the number of type annotations -- not per-expression.
+    /// the number of type annotations -- not per-expression.
     /// 3. Adding a cache would require either interior mutability (&self -> &mut self
-    ///    propagation) or a RefCell, adding complexity for negligible benefit.
+    /// propagation) or a RefCell, adding complexity for negligible benefit.
     ///
     /// If profiling reveals this as a bottleneck, consider a HashMap<TypeExpr, Type>
     /// cache with the TypeExpr implementing Hash + Eq.

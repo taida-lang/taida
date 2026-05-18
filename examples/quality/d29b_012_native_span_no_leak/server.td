@@ -25,6 +25,6 @@ handler req =
 // port via TAIDA_NET_ANNOUNCE_PORT=1. handler limit 4 keeps the smoke
 // duration bounded under valgrind (10× slowdown) on CI 2C runners.
 asyncResult <= httpServe(0, handler, 4, 5000, 4)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.requests.toString())

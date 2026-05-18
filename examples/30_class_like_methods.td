@@ -67,7 +67,7 @@ Shape = @(
 
 Shape => Triangle = @(
   area =
-    Div[width * height, 2]() ]=> result
+    Div[width * height, 2]() >=> result
     result
   => :Int
 )

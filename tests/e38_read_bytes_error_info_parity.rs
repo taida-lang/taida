@@ -127,7 +127,7 @@ fn read_bytes_missing_file_carries_error_info_across_backends() {
             "info <= bad.errorInfo()\n",
             "stdout(bad.hasValue().toString())\n",
             "stdout(info.hasValue().toString())\n",
-            "info ]=> err\n",
+            "info >=> err\n",
             "stdout(err.type)\n",
             "stdout(err.message)\n",
             "stdout(err.kind)\n",

@@ -9,7 +9,7 @@
 
 r <= runInteractive("/nonexistent/taida_c19_xyz_does_not_exist", @[])
 stdout("has_value=" + r.has_value.toString())
-r.errorInfo() ]=> err
+r.errorInfo() >=> err
 stdout("type=" + err.type.toString())
 stdout("kind=" + err.kind.toString())
 stdout("code=" + err.code.toString())

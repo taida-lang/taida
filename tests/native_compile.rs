@@ -324,7 +324,7 @@ stdout(Pair[40, 2]().toString())
 #[test]
 fn test_native_inherited_custom_mold_required_positional_binding_matches_interpreter() {
     let source = r#"
-Mold[T] => PairBase[T] = @()
+Mold[T] => PairBase[T] = @(marker: Int <= 0)
 PairBase[T] => Pair[T, U] = @(
   second: U
   solidify =
@@ -375,9 +375,9 @@ stdout(check(7).toString())
 #[test]
 fn test_native_custom_mold_default_unmold_matches_interpreter() {
     let source = r#"
-Mold[T] => Boxed[T] = @()
+Mold[T] => Boxed[T] = @(marker: Int <= 0)
 b <= Boxed[7]()
-b ]=> v
+b >=> v
 stdout(v.toString())
 "#;
     assert_native_matches_interpreter(source, "native_custom_mold_default_unmold");
@@ -397,7 +397,7 @@ Mold[T] => BadField[T] = @(
         (
             "native_custom_mold_def_unbound_type_param",
             r#"
-Mold[T] => BadBind[T, U] = @()
+Mold[T] => BadBind[T, U] = @(marker: Int <= 0)
 "#,
         ),
     ];
@@ -451,15 +451,15 @@ stdout((x + 1).toString())
 fn test_native_todo_stub_unmold_matches_interpreter() {
     let source = r#"
 a <= TODO[Int](id <= "TASK-1", task <= "use unm", sol <= 7, unm <= 9)
-a ]=> av
+a >=> av
 stdout(av.toString())
 
 b <= TODO[Int](sol <= 5)
-b ]=> bv
+b >=> bv
 stdout(bv.toString())
 
 c <= TODO[Stub["User data TBD"]]()
-c ]=> cv
+c >=> cv
 stdout(TypeName[cv]())
 "#;
     assert_native_matches_interpreter(source, "native_todo_stub_unmold");
@@ -478,7 +478,7 @@ stdout(flat)
 fn test_native_unmold_large_int_matches_interpreter() {
     let source = r#"
 x <= 1234567890123
-x ]=> y
+x >=> y
 stdout(y.toString())
 "#;
     assert_native_matches_interpreter(source, "unmold_large_int");
@@ -535,7 +535,7 @@ stdout(flat)
 fn test_native_unmold_negative_boundary_matches_interpreter() {
     let source = r#"
 x <= -2147483648
-x ]=> y
+x >=> y
 stdout(y.toString())
 "#;
     assert_native_matches_interpreter(source, "unmold_negative_boundary");
@@ -599,7 +599,7 @@ fn test_native_async_all_mixed_sync_async_rejected_consistently() {
     // implicitly promoting Int into Async[Int].
     let source = r#"
 a <= All[@[1, Async[2](), 3, Async[4]()]]()
-a ]=> r
+a >=> r
 stdout(r)
 "#;
     assert_native_and_interpreter_reject_source(source, "async_all_mixed_sync_async");
@@ -623,7 +623,7 @@ fn test_native_nowms_sleep_shape() {
     let source = r#"
 a <= nowMs()
 s <= sleep(20)
-s ]=> waited
+s >=> waited
 b <= nowMs()
 stdout(a.toString())
 stdout(b.toString())
@@ -667,7 +667,7 @@ limit <= 18
 
 ok <= Result[21, _ x = x >= limit]()
 stdout(ok.isSuccess().toString())
-ok ]=> v
+ok >=> v
 stdout(v.toString())
 
 ng <= Result[15, _ x = x >= limit]()
@@ -744,7 +744,7 @@ doUpdate reqId reqTitle reqDone =
   mapper <= _ item = | item.id == reqId |> @(id <= reqId, title <= reqTitle, done <= reqDone) | _ |> item
   newItems <= Map[items, mapper]()
   found <= Find[newItems, _ item = item.id == reqId]()
-  found ]=> foundValue
+  found >=> foundValue
   jsonPretty(foundValue)
 => :Str
 main dummy =
@@ -1129,7 +1129,7 @@ fn test_qf20_unmold_statement_preserves_global_capture() {
 items <= @[10, 20, 30]
 
 sumItems =
-  Fold[items, 0, _ acc x = acc + x]() ]=> total
+  Fold[items, 0, _ acc x = acc + x]() >=> total
   total
 
 stdout(sumItems().toString())
@@ -1328,9 +1328,9 @@ a <= @(v <= 1)
 b <= @(v <= 2)
 c <= @(v <= 3)
 items <= @[a, b, c]
-items.get(0) ]=> first
+items.get(0) >=> first
 stdout(first.v.toString())
-items.get(2) ]=> last
+items.get(2) >=> last
 stdout(last.v.toString())
 "#;
     assert_native_matches_interpreter(source, "a4g_list_of_packs");
@@ -1342,7 +1342,7 @@ fn test_native_a4g_pack_with_list_field() {
     let source = r#"
 data <= @(name <= "test", scores <= @[10, 20, 30])
 stdout(data.name)
-Sum[data.scores]() ]=> total
+Sum[data.scores]() >=> total
 stdout(total.toString())
 "#;
     assert_native_matches_interpreter(source, "a4g_pack_with_list");
@@ -1510,7 +1510,7 @@ fn test_a4_str_retain_on_store_in_list_pack_lax() {
 name <= "hello" + " world"
 items <= @[name, name]
 pack <= @(val <= name)
-items.first() ]=> f
+items.first() >=> f
 stdout(f)
 stdout(pack.val)
 "#;
@@ -1523,10 +1523,10 @@ fn test_a4_zip_enumerate_str_elements() {
     let source = r#"
 names <= @["alice", "bob"]
 ages <= @[30, 25]
-Zip[names, ages]() ]=> pairs
+Zip[names, ages]() >=> pairs
 stdout(pairs.length().toString())
 
-Enumerate[names]() ]=> indexed
+Enumerate[names]() >=> indexed
 stdout(indexed.length().toString())
 "#;
     assert_native_matches_interpreter(source, "a4_zip_enumerate_str");
@@ -1536,7 +1536,7 @@ stdout(indexed.length().toString())
 fn test_a4_runtime_built_pack_heap_string() {
     // A-4: Str 型変換で heap string を生成 → Lax に入る → unmold で取り出す
     let source = r#"
-Str[42]() ]=> s
+Str[42]() >=> s
 stdout(s)
 "#;
     assert_native_matches_interpreter(source, "a4_runtime_lax_heap_str");
@@ -1721,7 +1721,7 @@ fn test_no3_async_int_value_ownership() {
     // NO-3: Async with Int value — should not crash, basic ownership
     let source = r#"
 a <= Async[42]()
-a ]=> v
+a >=> v
 stdout(v.toString())
 "#;
     assert_native_matches_interpreter(source, "no3_async_int_value");
@@ -1732,7 +1732,7 @@ fn test_no3_async_string_value_ownership() {
     // NO-3: Async with String value — tagged as STR, released on drop
     let source = r#"
 a <= Async["hello world"]()
-a ]=> v
+a >=> v
 stdout(v)
 "#;
     assert_native_matches_interpreter(source, "no3_async_string_value");
@@ -1744,7 +1744,7 @@ fn test_no3_async_pack_value_ownership() {
     let source = r#"
 p <= @(name <= "taida", version <= 7)
 a <= Async[p]()
-a ]=> v
+a >=> v
 stdout(v.name)
 stdout(v.version.toString())
 "#;
@@ -1757,7 +1757,7 @@ fn test_no3_async_list_value_ownership() {
     let source = r#"
 lst <= @[1, 2, 3]
 a <= Async[lst]()
-a ]=> v
+a >=> v
 stdout(v)
 "#;
     assert_native_matches_interpreter(source, "no3_async_list_value");
@@ -1768,7 +1768,7 @@ fn test_no3_async_all_with_heap_children() {
     // NO-3: All with multiple Asyncs containing values — values collected into list
     let source = r#"
 a <= All[@[Async[10](), Async[20](), Async[30]()]]()
-a ]=> r
+a >=> r
 stdout(r)
 "#;
     assert_native_matches_interpreter(source, "no3_async_all_heap_children");
@@ -1779,7 +1779,7 @@ fn test_no3_async_race_with_heap_children() {
     // NO-3: Race — first resolved value is returned
     let source = r#"
 a <= Race[@[Async[99]()]]()
-a ]=> r
+a >=> r
 stdout(r.toString())
 "#;
     assert_native_matches_interpreter(source, "no3_async_race_heap_children");
@@ -1866,7 +1866,7 @@ fn test_qf58_async_all_retains_values() {
     // QF-58: taida_async_all must retain elements and set elem_type_tag
     let source = r#"
 a <= All[@[Async[10](), Async[20](), Async[30]()]]()
-a ]=> r
+a >=> r
 stdout(r)
 "#;
     assert_native_matches_interpreter(source, "qf58_async_all_retain");

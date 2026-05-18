@@ -6,8 +6,8 @@
 dotProductAt a: @[Float] b: @[Float] i: Int n: Int acc: Float =
   | i == n |> acc
   | _ |>
-      a.get(i) ]=> av
-      b.get(i) ]=> bv
+      a.get(i) >=> av
+      b.get(i) >=> bv
       dotProductAt(a, b, i + 1, n, acc + av * bv)
 => :Float
 

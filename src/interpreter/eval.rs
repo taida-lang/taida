@@ -50,7 +50,7 @@ pub(crate) enum Signal {
     TailCall(Vec<Value>),
 }
 
-/// Cached module: exported symbols from a loaded .td file.
+/// Cached module: exported symbols from a loaded.td file.
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedModule {
     /// Exported symbols (name -> value)
@@ -96,9 +96,9 @@ pub struct Interpreter {
     ///
     /// In **stream mode** (`stream_stdout == true`, via `Interpreter::new_streaming()`)
     /// this Vec is left empty — `stdout` / `debug` write directly to the real
-    /// `io::stdout()` / `io::stderr()` with immediate flush. (C22-2 / C22B-002)
+    /// `io::stdout()` / `io::stderr()` with immediate flush. ( / )
     pub output: Vec<String>,
-    /// Stream mode flag (C22-2 / C22B-002).
+    /// Stream mode flag ( / ).
     ///
     /// `false` (default): buffered mode — `stdout` / `debug` push to `self.output`.
     /// `true`: stream mode — `stdout` writes to real stdout with immediate flush,
@@ -111,7 +111,7 @@ pub struct Interpreter {
     /// unaffected — it emits its own I/O directly.
     pub stream_stdout: bool,
     /// Number of stdout-visible emissions (from `stdout` **or** `debug`
-    /// builtins) seen so far (C22-2).
+    /// builtins) seen so far.
     ///
     /// In stream mode, `output` Vec is always empty, so `main.rs` cannot use
     /// `output.is_empty()` to decide whether to print the final value. This
@@ -145,7 +145,7 @@ pub struct Interpreter {
     /// Empty means no `<<<` was encountered (all symbols exported for backward compat).
     pub(crate) module_exported_symbols: Vec<String>,
     /// Tokio runtime for true async operations.
-    /// Used by `]=>` to block_on pending async values and by All/Race/Timeout molds.
+    /// Used by `>=>` to block_on pending async values and by All/Race/Timeout molds.
     pub(crate) tokio_runtime: Arc<tokio::runtime::Runtime>,
     /// Socket handle table for tcpConnect/socketSend/socketRecv.
     /// Key is a stable interpreter-local handle id returned to Taida code.
@@ -177,24 +177,24 @@ pub struct Interpreter {
     /// RCB-301: Current function call depth for stack overflow prevention.
     /// Incremented on each non-TCO function call, decremented on return.
     call_depth: usize,
-    /// NET3-2: Active streaming writer for 2-arg httpServe handler.
+    /// Active streaming writer for 2-arg httpServe handler.
     /// Set before calling the handler, cleared after the handler returns.
     /// This allows startResponse/writeChunk/endResponse/sseEvent to access
     /// the connection's StreamingWriter state and TcpStream during handler execution.
     /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
     /// stack-local variables in dispatch_request that outlive the handler call.
     pub(crate) active_streaming_writer: Option<super::net_eval::ActiveStreamingWriter>,
-    /// E30B-007 / Lock-G: Context for the addon facade currently being loaded.
+    /// Context for the addon facade currently being loaded.
     ///
     /// When `load_addon_facade` is evaluating a `<pkg>/taida/<stem>.td` file,
     /// this field holds `Some((package_id, function_arities))` so that the
     /// `RustAddon["fn"](arity <= N)` expression form can:
     ///
     /// 1. Resolve to the canonical addon sentinel
-    ///    `Value::str("__taida_addon_call::<package_id>::<fn>")` (matching
-    ///    today's `define_force` pre-injection contract).
+    /// `Value::str("__taida_addon_call::<package_id>::<fn>")` (matching
+    /// today's `define_force` pre-injection contract).
     /// 2. Validate the declared `arity` field against the manifest
-    ///    `[functions]` table and reject drift with `[E1412]`.
+    /// `[functions]` table and reject drift with `[E1412]`.
     ///
     /// Outside facade execution this is `None` and a `RustAddon[...]`
     /// expression falls through to the generic `MoldInst` path (the
@@ -204,7 +204,7 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
-    /// E30 Phase 6 / E30B-004: synthetic defaultFn sentinel name.
+    /// Synthetic defaultFn sentinel name.
     ///
     /// `default_for_type_expr` returns a `Value::Function` whose `name`
     /// equals this constant when materialising the default for a
@@ -216,7 +216,7 @@ impl Interpreter {
 
     pub fn new() -> Self {
         // Create a dedicated current-thread tokio runtime for the interpreter.
-        // This runtime is used by `]=>` to block_on pending async values
+        // This runtime is used by `>=>` to block_on pending async values
         // and by All/Race/Timeout molds for parallel resolution.
         let tokio_runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -258,7 +258,7 @@ impl Interpreter {
         }
     }
 
-    /// Construct a new Interpreter in **stream mode** (C22-2 / C22B-002).
+    /// Construct a new Interpreter in **stream mode** ( / ).
     ///
     /// In stream mode, `stdout(...)` writes directly to the real `io::stdout()`
     /// with immediate flush (line-by-line), and `debug(...)` writes directly to
@@ -700,11 +700,11 @@ impl Interpreter {
                     Signal::Gorilla => return Ok(Signal::Gorilla),
                 };
                 // Unmold: extract the inner value from a Mold wrapper
-                // For Async values, ]=> acts as blocking await
+                // For Async values, >=> acts as blocking await
                 // Rejected Async throws an error (caught by error ceiling)
                 //
                 // C13-1: Return the unwrapped value as the statement's
-                // signal so tail unmold `expr ]=> name` in an expression
+                // signal so tail unmold `expr >=> name` in an expression
                 // block yields the bound value.
                 match self.unmold_value(source_val)? {
                     Signal::Value(unwrapped) => {
@@ -727,11 +727,11 @@ impl Interpreter {
                     Signal::Throw(err) => return Ok(Signal::Throw(err)),
                     Signal::Gorilla => return Ok(Signal::Gorilla),
                 };
-                // For Async values, <=[ acts as blocking await
+                // For Async values, <=< acts as blocking await
                 // Rejected Async throws an error (caught by error ceiling)
                 //
                 // C13-1: Return the unwrapped value as the statement's
-                // signal so tail unmold `name <=[ expr` in an expression
+                // signal so tail unmold `name <=< expr` in an expression
                 // block yields the bound value.
                 match self.unmold_value(source_val)? {
                     Signal::Value(unwrapped) => {
@@ -749,7 +749,7 @@ impl Interpreter {
         }
     }
 
-    /// C13-1 / C13B-007: Return true if `expr` contains an `Expr::Ident(name, _)`
+    /// Return true if `expr` contains an `Expr::Ident(name, _)`
     /// whose name appears in `bound_names`. Used to decide whether a
     /// pipeline step explicitly consumes a pipeline-scope binding, in
     /// which case auto-injection of the pipeline `current` as an extra
@@ -794,22 +794,22 @@ impl Interpreter {
         walk(expr, bound_names)
     }
 
-    /// C13-1 / C13B-007: Decide whether an intermediate pipeline step
+    /// Decide whether an intermediate pipeline step
     /// `=> name` should call `name` with the current value (classic
     /// function-step semantics) or bind the current value to `name`
     /// and forward it unchanged (bind-and-forward semantics).
     ///
     /// A name is considered callable-in-pipeline if:
-    ///   - it already resolves to a `Value::Function` in the current
-    ///     environment (user-defined function, prelude function stored
-    ///     as a Function), or
-    ///   - it resolves to a builtin sentinel `Value::Str` (used for
-    ///     addon dispatch / net builtins / crypto), or
-    ///   - it is not defined in the environment at all — in which case
-    ///     we assume it's a binding target (never an undefined function
-    ///     reference, which would have been caught by the checker).
+    /// - it already resolves to a `Value::Function` in the current
+    /// environment (user-defined function, prelude function stored
+    /// as a Function), or
+    /// - it resolves to a builtin sentinel `Value::Str` (used for
+    /// addon dispatch / net builtins / crypto), or
+    /// - it is not defined in the environment at all — in which case
+    /// we assume it's a binding target (never an undefined function
+    /// reference, which would have been caught by the checker).
     ///
-    /// For any resolved *value* (Int, Str, List, BuchiPack, ...) that
+    /// For any resolved *value* (Int, Str, List, BuchiPack,...) that
     /// is not a function-like value, the intermediate step is
     /// bind-and-forward: we take the name as a fresh binding target.
     pub(crate) fn is_pipeline_bindable_callable(&self, name: &str) -> bool {
@@ -1000,11 +1000,10 @@ impl Interpreter {
                         return Err(RuntimeError {
                             message: format!(
                                 "[E1413] addon facade for '{}': bare reference to addon \
-                                manifest function '{}' is no longer pre-injected in @e.30 \
-                                 (Lock-G Sub-G4: legacy implicit pre-inject removed). Add \
-                                 an explicit binding to the top of the facade: `{} <= \
-                                 RustAddon[\"{}\"](arity <= {})`. E31 does not provide an \
-                                 AST migration command; update the facade manually.",
+                                 manifest function '{}' is no longer pre-injected. Add an \
+                                 explicit binding to the top of the facade: `{} <= \
+                                 RustAddon[\"{}\"](arity <= {})`. AST migration tooling is \
+                                 not available; update the facade manually.",
                                 pkg_id, name, name, name, arity
                             ),
                         });
@@ -1735,7 +1734,7 @@ impl Interpreter {
         }
     }
 
-    /// Evaluate an empty-slot partial application: `func(arg1, , arg3)` returns a closure.
+    /// Evaluate an empty-slot partial application: `func(arg1,, arg3)` returns a closure.
     /// The closure, when called with the missing args, fills in the holes (Hole nodes).
     /// Note: Old `_` (Placeholder) partial application is rejected by checker (E1502)
     /// and never reaches this code path.
@@ -1840,9 +1839,9 @@ impl Interpreter {
     /// Resolve a JSON schema from an expression AST node.
     /// The schema expression is not evaluated as a value — it is interpreted
     /// as a type descriptor:
-    ///   - Ident("Int"/"Str"/"Float"/"Bool") → primitive schema
-    ///   - Ident("User") → look up TypeDef by name
-    ///   - ListLit([Ident("Pilot")]) → list schema with element type
+    /// - Ident("Int"/"Str"/"Float"/"Bool") → primitive schema
+    /// - Ident("User") → look up TypeDef by name
+    /// - ListLit([Ident("Pilot")]) → list schema with element type
     pub(crate) fn resolve_json_schema(
         &self,
         expr: &Expr,
@@ -1943,7 +1942,7 @@ impl Interpreter {
         Ok(None)
     }
 
-    /// C20B-015 / ROOT-18: Overlay a function's defining-module TypeDef / enum
+    /// Overlay a function's defining-module TypeDef / enum
     /// registries onto the interpreter's live registries before executing the
     /// function body. Returns the previous state so the caller can restore it
     /// after the body runs.
@@ -2000,7 +1999,7 @@ impl Interpreter {
         }
     }
 
-    /// E30 Phase 6 / E30B-004: Materialise the synthetic defaultFn return.
+    /// Materialise the synthetic defaultFn return.
     ///
     /// Called from `call_function` / `call_function_with_values` /
     /// `call_function_preserving_signals` whenever a `Value::Function` whose
@@ -2445,23 +2444,23 @@ impl Interpreter {
         Ok(result)
     }
 
-    /// E30B-007 / Lock-G: evaluate the explicit addon-binding form
+    /// evaluate the explicit addon-binding form
     /// `RustAddon["fn"](arity <= N)`.
     ///
     /// Contract:
     /// - `type_args` must contain exactly one entry, a `StringLit` with
-    ///   the addon function name. Anything else → `[E1412]`.
+    /// the addon function name. Anything else → `[E1412]`.
     /// - `fields` must contain exactly one entry, name `arity`, with an
-    ///   `IntLit` value. Anything else → `[E1412]`.
+    /// `IntLit` value. Anything else → `[E1412]`.
     /// - Must execute inside an addon facade load context
-    ///   (`loading_addon_facade_ctx == Some(_)`). Otherwise → `[E1412]`.
+    /// (`loading_addon_facade_ctx == Some(_)`). Otherwise → `[E1412]`.
     /// - The function name must exist in the surrounding addon's
-    ///   manifest `[functions]` table and the declared arity must match
-    ///   the manifest arity. Otherwise → `[E1412]` drift error.
+    /// manifest `[functions]` table and the declared arity must match
+    /// the manifest arity. Otherwise → `[E1412]` drift error.
     /// - On success, returns `Value::str("__taida_addon_call::<pkg>::<fn>")`
-    ///   so the binding is structurally identical to today's pre-injected
-    ///   addon sentinel (the addon dispatch path in `MoldInst` /
-    ///   `try_addon_func` uses the sentinel string verbatim).
+    /// so the binding is structurally identical to today's pre-injected
+    /// addon sentinel (the addon dispatch path in `MoldInst` /
+    /// `try_addon_func` uses the sentinel string verbatim).
     fn eval_rust_addon_binding(
         &mut self,
         type_args: &[crate::parser::Expr],

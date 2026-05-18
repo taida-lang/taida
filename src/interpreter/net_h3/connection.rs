@@ -4,12 +4,11 @@ use super::frame::{H3_DEFAULT_MAX_FIELD_SECTION_SIZE, H3_MAX_STREAMS, encode_goa
 /// This module contains:
 /// - H3StreamState, H3Stream — per-stream lifecycle
 /// - H3ConnState — connection-level QUIC transport state
-/// - H3HandlerContext — H3-specific handler context (NET7-7c)
-/// - H3Connection — protocol state with idle timeout, GOAWAY, shutdown
+/// - H3HandlerContext — H3-specific handler context/// - H3Connection — protocol state with idle timeout, GOAWAY, shutdown
 /// - QPACK dynamic table and decoder/encoder instruction processing
 use super::qpack::{H3DecodeError, H3DynamicTable, H3Header};
 
-/// NB7-96: Pre-allocated capacity for per-connection stream tracking.
+/// Pre-allocated capacity for per-connection stream tracking.
 const H3_STREAM_PREALLOC: usize = 8;
 
 // ── H3 Stream State Machine ──────────────────────────────────────────────
@@ -43,7 +42,7 @@ impl H3Stream {
 
 // ── H3 Connection State ──────────────────────────────────────────────────
 
-/// Connection-level QUIC transport state (NB7-20, NB7-26, NB7-28).
+/// Connection-level QUIC transport state .
 ///
 /// These fields track QUIC-specific state and are **separate** from the
 /// existing 14-field handler contract. They are surfaced via `H3HandlerContext`
@@ -62,8 +61,8 @@ pub(crate) enum H3ConnState {
 
 /// H3-specific handler context, decoupled from the standard 14-field request pack.
 ///
-/// NB7-20: H3 固有フィールド (quic_connection_id, quic_stream_id)
-/// NB7-26: 既存 14 field に影響を与えずに分離
+/// H3 固有フィールド (quic_connection_id, quic_stream_id)
+/// 既存 14 field に影響を与えずに分離
 ///
 /// This struct carries QUIC transport metadata that only applies to HTTP/3
 /// requests. Non-QUIC backends (h1, h2) leave these fields empty/default,
@@ -80,14 +79,14 @@ pub(crate) struct H3HandlerContext {
 
 /// HTTP/3 protocol state per connection.
 ///
-/// **NB7-22 / NB7-28: Responsibility boundary.**
+/// ** /: Responsibility boundary.**
 /// `H3Connection` manages HTTP/3 protocol state only:
-/// - QPACK encode/decode state (static table only in Phase 2/3)
+/// - QPACK encode/decode state (static table only in )
 /// - Stream lifecycle (open/close)
 /// - Settings (max_field_section_size)
 /// - GOAWAY tracking
-/// - Idle timeout (NET7-6c): H3-layer deadline tracking
-/// - QUIC transport state (NET7-7c): connection ID, stream ID, lifecycle
+/// - Idle timeout: H3-layer deadline tracking
+/// - QUIC transport state: connection ID, stream ID, lifecycle
 ///
 /// QUIC transport state (draining, loss_detection, congestion_control)
 /// is managed by `net_transport.rs` / QUIC substrate (libquiche).
@@ -176,7 +175,7 @@ impl H3Connection {
 
     /// Reset the idle timeout deadline on peer activity.
     /// Called when a new frame is received from the peer.
-    /// NET7-6c: this is the "touch" mechanism for the idle timer.
+    /// this is the "touch" mechanism for the idle timer.
     pub fn reset_idle_timer(&mut self) {
         self.idle_timeout_at = Self::default_idle_deadline();
     }
@@ -224,7 +223,7 @@ impl H3Connection {
 
     /// Set the QUIC Connection ID from the transport layer.
     /// The ID is opaque bytes whose length depends on the QUIC config.
-    /// NB7-20, NB7-26: stored on H3Connection, NOT on the 14-field handler pack.
+    ///,: stored on H3Connection, NOT on the 14-field handler pack.
     pub fn set_quic_connection_id(&mut self, id: Vec<u8>) {
         self.quic_connection_id = id;
         self.handler_ctx.quic_connection_id = self.quic_connection_id.clone();
@@ -278,7 +277,7 @@ impl H3Connection {
     /// Begin graceful shutdown: send GOAWAY with the last peer stream ID,
     /// then transition to Draining state. Returns false if already shutting down.
     ///
-    /// NB7-76: After sending GOAWAY, the caller MUST check `has_active_streams()`
+    /// After sending GOAWAY, the caller MUST check `has_active_streams()`
     /// or `active_stream_count() == 0` before transitioning to Closed.
     /// The `shutdown()` 1-step pipeline enforces this by design — the caller
     /// implements drain wait between Step 1 (Draining) and Step 2 (Closed).
@@ -291,7 +290,7 @@ impl H3Connection {
     }
 
     /// Return the count of streams that are not yet Closed.
-    /// NB7-76: Used to verify drain wait before transitioning to Closed.
+    /// Used to verify drain wait before transitioning to Closed.
     pub fn active_stream_count(&self) -> usize {
         self.streams
             .iter()
@@ -300,7 +299,7 @@ impl H3Connection {
     }
 
     /// Check whether there are streams still in flight.
-    /// NB7-76: Caller should wait until this returns false before completing shutdown.
+    /// Caller should wait until this returns false before completing shutdown.
     pub fn has_active_streams(&self) -> bool {
         self.active_stream_count() > 0
     }
@@ -322,7 +321,7 @@ impl H3Connection {
 
     /// Complete shutdown: close all remaining streams and transition to Closed.
     /// Uses `transition_state()` to validate the state transition.
-    /// NB7-52/53: Previously bypassed the state machine — now properly guarded.
+    /// 53: Previously bypassed the state machine — now properly guarded.
     pub fn complete_shutdown(&mut self) -> bool {
         // Close all remaining streams
         for stream in self.streams.iter_mut() {

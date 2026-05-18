@@ -326,7 +326,7 @@ impl Lowering {
         Ok(result)
     }
 
-    /// Polymorphic .map() -- dispatches to list_map or monadic_map at runtime
+    /// Polymorphic.map() -- dispatches to list_map or monadic_map at runtime
     fn lower_polymorphic_map(
         &mut self,
         func: &mut IrFunction,
@@ -372,7 +372,7 @@ impl Lowering {
         Ok(result)
     }
 
-    /// Polymorphic .get() -- Str.get(idx), list.get(idx), or HashMap.get(key)
+    /// Polymorphic.get() -- Str.get(idx), list.get(idx), or HashMap.get(key)
     fn lower_polymorphic_get(
         &mut self,
         func: &mut IrFunction,

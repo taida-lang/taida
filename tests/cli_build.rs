@@ -18,7 +18,7 @@ fn test_build_native_release_blocks_todo_and_stub() {
     let dir = unique_temp_dir("taida_release_build_native");
     let src = r#"
 t <= TODO[Stub["ship later"]](id <= "REL-1", task <= "replace this")
-t ]=> v
+t >=> v
 stdout(typeof(v))
 "#;
     let input = dir.join("main.td");
@@ -98,7 +98,7 @@ fn test_build_native_release_blocks_todo_in_imported_module() {
         &main_td,
         r#"
 >>> ./dep.td => @(v)
-v ]=> out
+v >=> out
 stdout(out.toString())
 "#,
     );

@@ -83,7 +83,7 @@ f2 x =
     #[test]
     fn test_eval_string_upper() {
         assert_eq!(
-            eval_ok("Upper[\"hello\"]() ]=> x\nx"),
+            eval_ok("Upper[\"hello\"]() >=> x\nx"),
             Value::str("HELLO".to_string())
         );
     }
@@ -91,7 +91,7 @@ f2 x =
     #[test]
     fn test_eval_string_lower() {
         assert_eq!(
-            eval_ok("Lower[\"HELLO\"]() ]=> x\nx"),
+            eval_ok("Lower[\"HELLO\"]() >=> x\nx"),
             Value::str("hello".to_string())
         );
     }
@@ -99,7 +99,7 @@ f2 x =
     #[test]
     fn test_eval_string_trim() {
         assert_eq!(
-            eval_ok("Trim[\"  hello  \"]() ]=> x\nx"),
+            eval_ok("Trim[\"  hello  \"]() >=> x\nx"),
             Value::str("hello".to_string())
         );
     }
@@ -114,7 +114,7 @@ f2 x =
 
     #[test]
     fn test_eval_string_split() {
-        let result = eval_ok("Split[\"a,b,c\", \",\"]() ]=> x\nx");
+        let result = eval_ok("Split[\"a,b,c\", \",\"]() >=> x\nx");
         match result {
             Value::List(items) => {
                 assert_eq!(items.len(), 3);
@@ -129,7 +129,7 @@ f2 x =
     #[test]
     fn test_eval_string_replace() {
         assert_eq!(
-            eval_ok("Replace[\"hello world\", \"world\", \"taida\"]() ]=> x\nx"),
+            eval_ok("Replace[\"hello world\", \"world\", \"taida\"]() >=> x\nx"),
             Value::str("hello taida".to_string())
         );
     }
@@ -137,7 +137,7 @@ f2 x =
     #[test]
     fn test_eval_string_to_int() {
         // Use Int[] type conversion mold instead of .toInt()
-        assert_eq!(eval_ok("Int[\"42\"]() ]=> x\nx"), Value::Int(42));
+        assert_eq!(eval_ok("Int[\"42\"]() >=> x\nx"), Value::Int(42));
     }
 
     // ── Number Methods (auto-mold) ──
@@ -152,22 +152,22 @@ f2 x =
 
     #[test]
     fn test_eval_num_abs() {
-        assert_eq!(eval_ok("Abs[-5]() ]=> x\nx"), Value::Int(5));
+        assert_eq!(eval_ok("Abs[-5]() >=> x\nx"), Value::Int(5));
     }
 
     #[test]
     fn test_eval_num_floor() {
-        assert_eq!(eval_ok("Floor[3.7]() ]=> x\nx"), Value::Int(3));
+        assert_eq!(eval_ok("Floor[3.7]() >=> x\nx"), Value::Int(3));
     }
 
     #[test]
     fn test_eval_num_ceil() {
-        assert_eq!(eval_ok("Ceil[3.2]() ]=> x\nx"), Value::Int(4));
+        assert_eq!(eval_ok("Ceil[3.2]() >=> x\nx"), Value::Int(4));
     }
 
     #[test]
     fn test_eval_num_round() {
-        assert_eq!(eval_ok("Round[3.5]() ]=> x\nx"), Value::Int(4));
+        assert_eq!(eval_ok("Round[3.5]() >=> x\nx"), Value::Int(4));
     }
 
     // ── List Methods (auto-mold) ──
@@ -206,7 +206,7 @@ f2 x =
 
     #[test]
     fn test_eval_list_reverse() {
-        let result = eval_ok("Reverse[@[1, 2, 3]]() ]=> x\nx");
+        let result = eval_ok("Reverse[@[1, 2, 3]]() >=> x\nx");
         match result {
             Value::List(items) => {
                 assert_eq!(
@@ -221,19 +221,19 @@ f2 x =
     #[test]
     fn test_eval_list_join() {
         assert_eq!(
-            eval_ok("Join[@[\"a\", \"b\", \"c\"], \",\"]() ]=> x\nx"),
+            eval_ok("Join[@[\"a\", \"b\", \"c\"], \",\"]() >=> x\nx"),
             Value::str("a,b,c".to_string())
         );
     }
 
     #[test]
     fn test_eval_list_sum() {
-        assert_eq!(eval_ok("Sum[@[1, 2, 3]]() ]=> x\nx"), Value::Int(6));
+        assert_eq!(eval_ok("Sum[@[1, 2, 3]]() >=> x\nx"), Value::Int(6));
     }
 
     #[test]
     fn test_eval_list_concat() {
-        let result = eval_ok("Concat[@[1, 2], @[3, 4]]() ]=> x\nx");
+        let result = eval_ok("Concat[@[1, 2], @[3, 4]]() >=> x\nx");
         match result {
             Value::List(items) => {
                 assert_eq!(items.len(), 4);
@@ -244,7 +244,7 @@ f2 x =
 
     #[test]
     fn test_eval_list_append() {
-        let result = eval_ok("Append[@[1, 2], 3]() ]=> x\nx");
+        let result = eval_ok("Append[@[1, 2], 3]() >=> x\nx");
         match result {
             Value::List(items) => {
                 assert_eq!(
@@ -258,7 +258,7 @@ f2 x =
 
     #[test]
     fn test_eval_list_sort() {
-        let result = eval_ok("Sort[@[3, 1, 2]]() ]=> x\nx");
+        let result = eval_ok("Sort[@[3, 1, 2]]() >=> x\nx");
         match result {
             Value::List(items) => {
                 assert_eq!(
@@ -283,8 +283,8 @@ f2 x =
     #[test]
     fn test_eval_bool_to_int() {
         // Use Int[] type conversion mold instead of .toInt()
-        assert_eq!(eval_ok("Int[true]() ]=> x\nx"), Value::Int(1));
-        assert_eq!(eval_ok("Int[false]() ]=> x\nx"), Value::Int(0));
+        assert_eq!(eval_ok("Int[true]() >=> x\nx"), Value::Int(1));
+        assert_eq!(eval_ok("Int[false]() >=> x\nx"), Value::Int(0));
     }
 
     // ── Debug (builtin prelude) ──
@@ -730,7 +730,7 @@ double x =
     fn test_eval_map() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-Map[numbers, _ x = x * 2]() ]=> doubled
+Map[numbers, _ x = x * 2]() >=> doubled
 doubled
 "#;
         let result = eval_ok(source);
@@ -755,11 +755,11 @@ doubled
     fn test_eval_filter() {
         let source = r#"
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-Filter[numbers, isEven]() ]=> evens
+Filter[numbers, isEven]() >=> evens
 evens
 "#;
         let result = eval_ok(source);
@@ -784,7 +784,7 @@ evens
     fn test_eval_fold_sum() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-Fold[numbers, 0, _ acc x = acc + x]() ]=> sum
+Fold[numbers, 0, _ acc x = acc + x]() >=> sum
 sum
 "#;
         assert_eq!(eval_ok(source), Value::Int(15));
@@ -794,7 +794,7 @@ sum
     fn test_eval_fold_product() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-Fold[numbers, 1, _ acc x = acc * x]() ]=> product
+Fold[numbers, 1, _ acc x = acc * x]() >=> product
 product
 "#;
         assert_eq!(eval_ok(source), Value::Int(120));
@@ -804,7 +804,7 @@ product
     fn test_eval_take() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-Take[numbers, 3]() ]=> first3
+Take[numbers, 3]() >=> first3
 first3
 "#;
         let result = eval_ok(source);
@@ -823,7 +823,7 @@ first3
     fn test_eval_drop() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-Drop[numbers, 2]() ]=> rest
+Drop[numbers, 2]() >=> rest
 rest
 "#;
         let result = eval_ok(source);
@@ -842,7 +842,7 @@ rest
     fn test_eval_take_while() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-TakeWhile[numbers, _ x = x < 4]() ]=> under4
+TakeWhile[numbers, _ x = x < 4]() >=> under4
 under4
 "#;
         let result = eval_ok(source);
@@ -861,7 +861,7 @@ under4
     fn test_eval_drop_while() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-DropWhile[numbers, _ x = x < 4]() ]=> from4
+DropWhile[numbers, _ x = x < 4]() >=> from4
 from4
 "#;
         let result = eval_ok(source);
@@ -877,7 +877,7 @@ from4
     fn test_eval_foldr() {
         let source = r#"
 words <= @["a", "b", "c"]
-Foldr[words, "", _ acc x = x + acc]() ]=> concat
+Foldr[words, "", _ acc x = x + acc]() >=> concat
 concat
 "#;
         assert_eq!(eval_ok(source), Value::str("abc".to_string()));
@@ -888,13 +888,13 @@ concat
         // Filter even numbers, double them, sum them
         let source = r#"
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-Filter[numbers, isEven]() ]=> evens
-Map[evens, _ x = x * 2]() ]=> doubled
-Fold[doubled, 0, _ acc x = acc + x]() ]=> sum
+Filter[numbers, isEven]() >=> evens
+Map[evens, _ x = x * 2]() >=> doubled
+Fold[doubled, 0, _ acc x = acc + x]() >=> sum
 sum
 "#;
         assert_eq!(eval_ok(source), Value::Int(60));
@@ -909,7 +909,7 @@ transform x =
   | _ |> x
 => :Int
 numbers <= @[1, 2, 3, 4, 5]
-Map[numbers, transform]() ]=> processed
+Map[numbers, transform]() >=> processed
 processed
 "#;
         let result = eval_ok(source);
@@ -956,7 +956,7 @@ numbers <= @[1, 2, 3, 4, 5]
 addToSum acc x =
   acc + x
 => :Int
-Fold[numbers, 0, addToSum]() ]=> total
+Fold[numbers, 0, addToSum]() >=> total
 total
 "#;
         assert_eq!(eval_ok(source), Value::Int(15));
@@ -1226,10 +1226,10 @@ a
 
     #[test]
     fn test_async_unmold_forward() {
-        // ]=> unwraps fulfilled async
+        // >=> unwraps fulfilled async
         let source = r#"
 a <= Async[42]()
-a ]=> val
+a >=> val
 val
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1237,10 +1237,10 @@ val
 
     #[test]
     fn test_async_unmold_string() {
-        // ]=> unwraps fulfilled async containing a string
+        // >=> unwraps fulfilled async containing a string
         let source = r#"
 a <= Async["hello"]()
-a ]=> val
+a >=> val
 val
 "#;
         assert_eq!(eval_ok(source), Value::str("hello".to_string()));
@@ -1256,7 +1256,7 @@ handleError unused =
   => :Str
 
   a <= AsyncReject["fail"]()
-  a ]=> val
+  a >=> val
   val
 => :Str
 
@@ -1295,7 +1295,7 @@ double x =
 
 a <= Async[21]()
 b <= a.map(double)
-b ]=> val
+b >=> val
 val
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1339,7 +1339,7 @@ a.getOrDefault(99)
         // All collects all fulfilled results
         let source = r#"
 asyncs <= @[Async[1](), Async[2](), Async[3]()]
-All[asyncs]() ]=> results
+All[asyncs]() >=> results
 results
 "#;
         match eval_ok(source) {
@@ -1363,7 +1363,7 @@ handleError unused =
   => :Str
 
   asyncs <= @[Async[1](), AsyncReject["fail"](), Async[3]()]
-  All[asyncs]() ]=> results
+  All[asyncs]() >=> results
   "success"
 => :Str
 
@@ -1378,7 +1378,7 @@ result
         // Race returns the first resolved
         let source = r#"
 asyncs <= @[Async[42](), Async[99]()]
-Race[asyncs]() ]=> winner
+Race[asyncs]() >=> winner
 winner
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1389,7 +1389,7 @@ winner
         // Timeout in synchronous mode just passes through
         let source = r#"
 a <= Async[42]()
-Timeout[a, 5000]() ]=> val
+Timeout[a, 5000]() >=> val
 val
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1406,7 +1406,7 @@ handleError unused =
 
   a <= sleep(1000)
   c <= Cancel[a]()
-  c ]=> ignored
+  c >=> ignored
   "unexpected"
 => :Str
 
@@ -1429,17 +1429,17 @@ a.toString()
 
     #[test]
     fn test_async_chain() {
-        // Chain async operations via ]=>
+        // Chain async operations via >=>
         let source = r#"
 addOne x =
   Async[x + 1]()
 
 a <= Async[10]()
-a ]=> v1
+a >=> v1
 b <= addOne(v1)
-b ]=> v2
+b >=> v2
 c <= addOne(v2)
-c ]=> v3
+c >=> v3
 v3
 "#;
         assert_eq!(eval_ok(source), Value::Int(12));
@@ -1455,7 +1455,7 @@ fetchData key: Str =
   => :Str
 
   a <= AsyncReject["network error"]()
-  a ]=> data
+  a >=> data
   data
 => :Str
 
@@ -1465,13 +1465,13 @@ result
         assert_eq!(eval_ok(source), Value::str("default".to_string()));
     }
 
-    // ── UnmoldBackward <=[ Tests ──────────────────────────────
+    // ── UnmoldBackward <=< Tests ──────────────────────────────
 
     #[test]
     fn test_unmold_backward_lax() {
         let source = r#"
 opt <= Lax[42]()
-value <=[ opt
+value <=< opt
 value
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1481,7 +1481,7 @@ value
     fn test_unmold_backward_string() {
         let source = r#"
 opt <= Lax["hello"]()
-s <=[ opt
+s <=< opt
 s
 "#;
         assert_eq!(eval_ok(source), Value::str("hello".to_string()));
@@ -1491,7 +1491,7 @@ s
     fn test_unmold_backward_map() {
         let source = r#"
 numbers <= @[1, 2, 3]
-doubled <=[ Map[numbers, _ x = x * 2]()
+doubled <=< Map[numbers, _ x = x * 2]()
 doubled
 "#;
         assert_eq!(
@@ -1504,11 +1504,11 @@ doubled
     fn test_unmold_backward_filter() {
         let source = r#"
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 numbers <= @[1, 2, 3, 4, 5]
-evens <=[ Filter[numbers, isEven]()
+evens <=< Filter[numbers, isEven]()
 evens
 "#;
         assert_eq!(
@@ -1521,7 +1521,7 @@ evens
     fn test_unmold_backward_reduce() {
         let source = r#"
 numbers <= @[1, 2, 3, 4, 5]
-total <=[ Reduce[numbers, 0, _ acc x = acc + x]()
+total <=< Reduce[numbers, 0, _ acc x = acc + x]()
 total
 "#;
         assert_eq!(eval_ok(source), Value::Int(15));
@@ -1531,7 +1531,7 @@ total
     fn test_unmold_backward_async() {
         let source = r#"
 a <= Async[100]()
-val <=[ a
+val <=< a
 val
 "#;
         assert_eq!(eval_ok(source), Value::Int(100));
@@ -1625,7 +1625,7 @@ id(1, 2)
     fn test_unmold_forward_lax() {
         let source = r#"
 opt <= Lax[42]()
-opt ]=> value
+opt >=> value
 value
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1656,7 +1656,7 @@ encoded
         let source = r#"
 Data = @(x: Int)
 raw <= "{\"x\": 42}"
-JSON[raw, Data]() ]=> result
+JSON[raw, Data]() >=> result
 result.x
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -1683,7 +1683,7 @@ result
         let source = r#"
 Data = @(value: Str)
 raw <= "{\"value\": null}"
-JSON[raw, Data]() ]=> result
+JSON[raw, Data]() >=> result
 result.value
 "#;
         assert_eq!(eval_ok(source), Value::str(String::new()));
@@ -2026,7 +2026,7 @@ result
     fn test_lax_unmold_forward() {
         let source = r#"
 lax <= Lax[42]()
-lax ]=> value
+lax >=> value
 value
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -2036,7 +2036,7 @@ value
     fn test_lax_unmold_backward() {
         let source = r#"
 lax <= Lax[42]()
-value <=[ lax
+value <=< lax
 value
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -2230,9 +2230,9 @@ Result[0](throw <= NotFound(message <= "not found")).toString()
     #[test]
     fn test_result_predicate_always_true() {
         // _ = true is a lambda that always returns true
-        // Result[42, _ = true]() ]=> value → 42
+        // Result[42, _ = true]() >=> value → 42
         let source = r#"
-Result[42, _ = true]() ]=> value
+Result[42, _ = true]() >=> value
 value
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -2241,12 +2241,12 @@ value
     #[test]
     fn test_result_predicate_always_false_unmold() {
         // _ = false is a lambda that always returns false
-        // Result[0, _ = false]() ]=> value → throw (predicate fails)
+        // Result[0, _ = false]() >=> value → throw (predicate fails)
         let source = r#"
 |== error: Error =
   | _ |> -1
 => :Int
-Result[0, _ = false]() ]=> value
+Result[0, _ = false]() >=> value
 value
 "#;
         assert_eq!(eval_ok(source), Value::Int(-1));
@@ -2256,7 +2256,7 @@ value
     fn test_result_predicate_validation() {
         // _ x = x >= 18 — age validation predicate
         let source = r#"
-Result[25, _ x = x >= 18]() ]=> validAge
+Result[25, _ x = x >= 18]() >=> validAge
 validAge
 "#;
         assert_eq!(eval_ok(source), Value::Int(25));
@@ -2269,7 +2269,7 @@ validAge
 |== error: Error =
   | _ |> -1
 => :Int
-Result[15, _ x = x >= 18]() ]=> validAge
+Result[15, _ x = x >= 18]() >=> validAge
 validAge
 "#;
         assert_eq!(eval_ok(source), Value::Int(-1));
@@ -2283,7 +2283,7 @@ Error => ValidationError = @(field: Str)
 |== error: Error =
   | _ |> "caught"
 => :Str
-Result[15, _ x = x >= 18](throw <= ValidationError(type <= "ValidationError", message <= "Must be 18+", field <= "age")) ]=> validAge
+Result[15, _ x = x >= 18](throw <= ValidationError(type <= "ValidationError", message <= "Must be 18+", field <= "age")) >=> validAge
 validAge.toString()
 "#;
         assert_eq!(eval_ok(source), Value::str("caught".into()));
@@ -2357,7 +2357,7 @@ Result[42, _ = false]().getOrThrow()
         // Result[42]() with no predicate — still works as before
         assert_eq!(eval_ok("Result[42]().isSuccess()"), Value::Bool(true));
         assert_eq!(eval_ok("Result[42]().getOrDefault(0)"), Value::Int(42));
-        let source = "Result[42]() ]=> value\nvalue";
+        let source = "Result[42]() >=> value\nvalue";
         assert_eq!(eval_ok(source), Value::Int(42));
     }
 
@@ -2758,29 +2758,32 @@ stderr("error msg")
         );
     }
 
+    /// sleep returns Async[Int] (elapsed ms approximation),
+    /// not Async[Unit]. PHILOSOPHY I forbids Unit on Taida surface.
     #[test]
-    fn test_prelude_sleep_zero_unmolds_to_unit() {
+    fn test_prelude_sleep_zero_resolves_to_int_zero() {
         let v = eval_ok(
             r#"
 s <= sleep(0)
-s ]=> done
+s >=> done
 done
 "#,
         );
-        assert_eq!(v, Value::Unit);
+        assert_eq!(v, Value::Int(0));
     }
 
+    /// sleep(N) resolves to Int(N) (the requested ms count).
     #[test]
     fn test_prelude_sleep_waits_short_duration() {
         let start = Instant::now();
         let v = eval_ok(
             r#"
 s <= sleep(20)
-s ]=> done
+s >=> done
 done
 "#,
         );
-        assert_eq!(v, Value::Unit);
+        assert_eq!(v, Value::Int(20));
         assert!(
             start.elapsed() >= Duration::from_millis(10),
             "sleep(20) should wait at least ~10ms"
@@ -2797,7 +2800,7 @@ handle =
   => :Str
 
   s <= sleep(-1)
-  s ]=> waited
+  s >=> waited
   "ok"
 => :Str
 
@@ -2817,7 +2820,7 @@ handle =
   => :Str
 
   s <= sleep(2147483648)
-  s ]=> waited
+  s >=> waited
   "ok"
 => :Str
 
@@ -2957,7 +2960,7 @@ result <= c.compute()
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":"Alice","age":30}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.name
 "#;
         assert_eq!(eval_ok(source), Value::str("Alice".to_string()));
@@ -2968,7 +2971,7 @@ user.name
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":"Alice","age":30}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.age
 "#;
         assert_eq!(eval_ok(source), Value::Int(30));
@@ -2979,7 +2982,7 @@ user.age
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":"Alice","age":30,"extra":"ignored"}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.name
 "#;
         assert_eq!(eval_ok(source), Value::str("Alice".to_string()));
@@ -2990,7 +2993,7 @@ user.name
         let source = r#"
 User = @(name: Str, age: Int, email: Str)
 raw <= '{"name":"Asuka"}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.age
 "#;
         assert_eq!(eval_ok(source), Value::Int(0));
@@ -3001,7 +3004,7 @@ user.age
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":"Asuka","age":"not a number"}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.age
 "#;
         assert_eq!(eval_ok(source), Value::Int(0));
@@ -3012,7 +3015,7 @@ user.age
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":null,"age":null}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.name
 "#;
         assert_eq!(eval_ok(source), Value::str(String::new()));
@@ -3024,7 +3027,7 @@ user.name
 Address = @(city: Str, zip: Str)
 User = @(name: Str, address: Address)
 raw <= '{"name":"Asuka","address":{"city":"Tokyo-3","zip":"999"}}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.address.city
 "#;
         assert_eq!(eval_ok(source), Value::str("Tokyo-3".to_string()));
@@ -3035,7 +3038,7 @@ user.address.city
         let source = r#"
 Pilot = @(name: Str, syncRate: Int)
 raw <= '[{"name":"Asuka","syncRate":78},{"name":"Rei","syncRate":65}]'
-JSON[raw, @[Pilot]]() ]=> pilots
+JSON[raw, @[Pilot]]() >=> pilots
 pilots.length()
 "#;
         assert_eq!(eval_ok(source), Value::Int(2));
@@ -3046,8 +3049,8 @@ pilots.length()
         let source = r#"
 Pilot = @(name: Str, syncRate: Int)
 raw <= '[{"name":"Asuka","syncRate":78},{"name":"Rei","syncRate":65}]'
-JSON[raw, @[Pilot]]() ]=> pilots
-pilots.get(0) ]=> first
+JSON[raw, @[Pilot]]() >=> pilots
+pilots.get(0) >=> first
 first.name
 "#;
         assert_eq!(eval_ok(source), Value::str("Asuka".to_string()));
@@ -3057,7 +3060,7 @@ first.name
     fn test_json_schema_primitive_int() {
         let source = r#"
 raw <= '42'
-JSON[raw, Int]() ]=> num
+JSON[raw, Int]() >=> num
 num
 "#;
         assert_eq!(eval_ok(source), Value::Int(42));
@@ -3067,7 +3070,7 @@ num
     fn test_json_schema_primitive_str() {
         let source = r#"
 raw <= '"hello"'
-JSON[raw, Str]() ]=> s
+JSON[raw, Str]() >=> s
 s
 "#;
         assert_eq!(eval_ok(source), Value::str("hello".to_string()));
@@ -3115,8 +3118,8 @@ result.has_value
 UserInfo = @(name: Str, age: Int)
 StatsInfo = @(score: Float, rank: Int)
 raw <= '{"name":"Asuka","age":14,"score":95.5,"rank":3}'
-JSON[raw, UserInfo]() ]=> user
-JSON[raw, StatsInfo]() ]=> stats
+JSON[raw, UserInfo]() >=> user
+JSON[raw, StatsInfo]() >=> stats
 user.name
 "#;
         assert_eq!(eval_ok(source), Value::str("Asuka".to_string()));
@@ -3126,7 +3129,7 @@ user.name
     fn test_json_schema_int_list() {
         let source = r#"
 raw <= '[1, 2, 3]'
-JSON[raw, @[Int]]() ]=> nums
+JSON[raw, @[Int]]() >=> nums
 nums.length()
 "#;
         assert_eq!(eval_ok(source), Value::Int(3));
@@ -3166,7 +3169,7 @@ result.has_value
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.name
 "#;
         // name should be "" (default for Str)
@@ -3178,7 +3181,7 @@ user.name
         // JSON['[]', @[Int]]() — empty array
         let source = r#"
 raw <= '[]'
-JSON[raw, @[Int]]() ]=> nums
+JSON[raw, @[Int]]() >=> nums
 nums.length()
 "#;
         assert_eq!(eval_ok(source), Value::Int(0));
@@ -3202,7 +3205,7 @@ result.has_value
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":null,"age":null}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.name
 "#;
         // null should become "" (Str default)
@@ -3215,7 +3218,7 @@ user.name
         let source = r#"
 User = @(name: Str, age: Int)
 raw <= '{"name":"Alice","age":null}'
-JSON[raw, User]() ]=> user
+JSON[raw, User]() >=> user
 user.age
 "#;
         assert_eq!(eval_ok(source), Value::Int(0));
@@ -3352,7 +3355,7 @@ result <= r.has_value
     fn test_div_mold_unmold() {
         let source = r#"
 r <= Div[10, 3]()
-r ]=> result
+r >=> result
 result
 "#;
         assert_eq!(eval_ok(source), Value::Int(3));
@@ -3362,7 +3365,7 @@ result
     fn test_div_mold_zero_unmold() {
         let source = r#"
 r <= Div[10, 0]()
-r ]=> result
+r >=> result
 result
 "#;
         assert_eq!(eval_ok(source), Value::Int(0));
@@ -3372,7 +3375,7 @@ result
     fn test_mod_mold_int() {
         let source = r#"
 r <= Mod[17, 5]()
-r ]=> result
+r >=> result
 result
 "#;
         assert_eq!(eval_ok(source), Value::Int(2));
@@ -3391,7 +3394,7 @@ result <= r.has_value
     fn test_div_mold_float() {
         let source = r#"
 r <= Div[10.0, 3.0]()
-r ]=> result
+r >=> result
 result
 "#;
         let val = eval_ok(source);
@@ -3405,7 +3408,7 @@ result
     fn test_div_mold_mixed_types() {
         let source = r#"
 r <= Div[10, 3.0]()
-r ]=> result
+r >=> result
 result
 "#;
         let val = eval_ok(source);
@@ -3487,7 +3490,7 @@ result
         let mut interpreter = crate::interpreter::eval::Interpreter::new();
         interpreter.env.define("pending_val", pending).unwrap();
 
-        let (program, errors) = crate::parser::parse("pending_val ]=> result\nresult");
+        let (program, errors) = crate::parser::parse("pending_val >=> result\nresult");
         assert!(errors.is_empty());
         let val = interpreter.eval_program(&program).unwrap();
         assert_eq!(val, Value::Int(42));
@@ -3608,7 +3611,7 @@ result
         let mut interpreter = crate::interpreter::eval::Interpreter::new();
         interpreter.env.define("async_list", list).unwrap();
 
-        let (program, errors) = crate::parser::parse("All[async_list]() ]=> results\nresults");
+        let (program, errors) = crate::parser::parse("All[async_list]() >=> results\nresults");
         assert!(errors.is_empty());
         let val = interpreter.eval_program(&program).unwrap();
         assert_eq!(val, Value::list(vec![Value::Int(10), Value::Int(20)]));
@@ -3618,19 +3621,19 @@ result
     fn test_async_existing_sync_tests_still_pass() {
         // Verify all original synchronous Async patterns still work.
         // Fulfilled
-        assert_eq!(eval_ok("Async[42]() ]=> x\nx"), Value::Int(42));
+        assert_eq!(eval_ok("Async[42]() >=> x\nx"), Value::Int(42));
         // All with sync
         let source =
-            "asyncs <= @[Async[1](), Async[2](), Async[3]()]\nAll[asyncs]() ]=> results\nresults";
+            "asyncs <= @[Async[1](), Async[2](), Async[3]()]\nAll[asyncs]() >=> results\nresults";
         assert_eq!(
             eval_ok(source),
             Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
         );
         // Race
-        assert_eq!(eval_ok("Race[@[Async[99]()]]() ]=> w\nw"), Value::Int(99));
+        assert_eq!(eval_ok("Race[@[Async[99]()]]() >=> w\nw"), Value::Int(99));
         // Timeout (no-op for resolved)
         assert_eq!(
-            eval_ok("Timeout[Async[42](), 1000]() ]=> x\nx"),
+            eval_ok("Timeout[Async[42](), 1000]() >=> x\nx"),
             Value::Int(42)
         );
         // AsyncReject caught by error ceiling (via function-level |==)
@@ -3640,7 +3643,7 @@ handleReject unused =
     "caught"
   => :Str
 
-  AsyncReject["fail"]() ]=> x
+  AsyncReject["fail"]() >=> x
   x
 => :Str
 
@@ -3655,7 +3658,7 @@ handleReject(0)
     fn test_stream_single_value() {
         let source = r#"
 s <= Stream[42]()
-s ]=> result
+s >=> result
 result
 "#;
         assert_eq!(eval_ok(source), Value::list(vec![Value::Int(42)]));
@@ -3665,7 +3668,7 @@ result
     fn test_stream_from_list() {
         let source = r#"
 s <= StreamFrom[@[1, 2, 3]]()
-s ]=> result
+s >=> result
 result
 "#;
         assert_eq!(
@@ -3679,7 +3682,7 @@ result
         let source = r#"
 s <= StreamFrom[@[1, 2, 3]]()
 mapped <= Map[s, _ x = x * 10]()
-mapped ]=> result
+mapped >=> result
 result
 "#;
         assert_eq!(
@@ -3692,12 +3695,12 @@ result
     fn test_stream_filter() {
         let source = r#"
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 s <= StreamFrom[@[1, 2, 3, 4, 5, 6]]()
 filtered <= Filter[s, isEven]()
-filtered ]=> result
+filtered >=> result
 result
 "#;
         assert_eq!(
@@ -3711,7 +3714,7 @@ result
         let source = r#"
 s <= StreamFrom[@[10, 20, 30, 40, 50]]()
 taken <= Take[s, 3]()
-taken ]=> result
+taken >=> result
 result
 "#;
         assert_eq!(
@@ -3725,7 +3728,7 @@ result
         let source = r#"
 s <= StreamFrom[@[1, 2, 3, 10, 20]]()
 tw <= TakeWhile[s, _ x = x < 5]()
-tw ]=> result
+tw >=> result
 result
 "#;
         assert_eq!(
@@ -3738,14 +3741,14 @@ result
     fn test_stream_chained_transforms() {
         let source = r#"
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 s <= StreamFrom[@[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]()
 step1 <= Filter[s, isEven]()
 step2 <= Map[step1, _ x = x * 10]()
 step3 <= Take[step2, 3]()
-step3 ]=> result
+step3 >=> result
 result
 "#;
         assert_eq!(
@@ -3797,7 +3800,7 @@ s.isEmpty()
     fn test_stream_empty_collect() {
         let source = r#"
 s <= StreamFrom[@[]]()
-s ]=> result
+s >=> result
 result
 "#;
         assert_eq!(eval_ok(source), Value::list(vec![]));
@@ -3811,7 +3814,7 @@ double x = x * 2 => :Int
 s <= StreamFrom[@[1, 2, 3, 4, 5]]()
 step1 <= Map[s, double]()
 step2 <= Take[step1, 3]()
-step2 ]=> result
+step2 >=> result
 result
 "#;
         assert_eq!(
@@ -3824,7 +3827,7 @@ result
     fn test_stream_with_output() {
         let source = r#"
 s <= StreamFrom[@[10, 20, 30]]()
-s ]=> result
+s >=> result
 stdout(Join[result, " "]())
 "#;
         let (_, output) = eval_with_output(source);
@@ -3836,7 +3839,7 @@ stdout(Join[result, " "]())
         // Verify List molds still work unchanged when given a list (not a stream)
         let source = r#"
 nums <= @[1, 2, 3, 4, 5]
-Map[nums, _ x = x * 2]() ]=> mapped
+Map[nums, _ x = x * 2]() >=> mapped
 mapped
 "#;
         assert_eq!(

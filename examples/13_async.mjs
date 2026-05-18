@@ -398,7 +398,7 @@ function Error(fields) {
 // ── Async[T] — Promise-based (thenable) ─────────────────
 // __TaidaAsync is a thenable: it implements .then() so that
 // `await asyncObj` resolves to the inner value or rejects with the error.
-// This enables ]=> to map to `await` in generated JS code.
+// This enables >=> to map to `await` in generated JS code.
 class __TaidaAsync {
   constructor(value, error, status) {
     this.__type = 'Async';
@@ -831,7 +831,7 @@ function None() { throw new __NativeError('None() has been removed. Optional is 
 // ── Result[T, P] (operation mold with predicate + throw field) ──
 // Result[value, pred]() → P: :T => :Bool — predicate for success/failure
 // Result[value, pred]() => r — predicate unevaluated (stored as __predicate)
-// Result[value, pred]() ]=> r — predicate evaluated: true → value T, false → throw
+// Result[value, pred]() >=> r — predicate evaluated: true → value T, false → throw
 // Result[value]() — backward compatible: no predicate (always success if no throw)
 function __taida_result_create(value, throwVal, predicate, displayOrder) {
   const _value = value;
@@ -1508,7 +1508,7 @@ function ToRadix(value, base) {
 
 // ── Stream[T] — time-series mold type ────────────────────
 // Stream holds source items + lazy transform chain.
-// ]=> (unmold) collects all items, applying transforms.
+// >=> (unmold) collects all items, applying transforms.
 function __taida_stream(items, transforms) {
   return Object.freeze({ __type: 'Stream', __items: Object.freeze([...items]), __transforms: Object.freeze([...transforms]), __status: 'completed',
     length_() { return this.__status === 'completed' ? this.__items.length : -1; },
@@ -2313,7 +2313,7 @@ function __taida_stderr(...args) {
 const __taida_fs = await import('node:fs').catch(() => null);
 
 // C20-2: readline/promises is loaded alongside node:fs so that
-// `stdinLine(prompt) ]=> line` has a UTF-8-aware editor available on the
+// `stdinLine(prompt) >=> line` has a UTF-8-aware editor available on the
 // JS backend. We deliberately choose `readline/promises` over `readline`
 // because `rl.question(prompt)` returns a Promise directly — Taida's
 // Async[Lax[Str]] surface wraps it without a sync / async bridge.
@@ -2378,7 +2378,7 @@ function __taida_stdin(prompt) {
 // type to Async and let the Interpreter / Native backends resolve
 // immediately. Taida callers write:
 //
-//     stdinLine("name: ") ]=> line
+//     stdinLine("name: ") >=> line
 //     stdout("hi, " + line.getOrDefault("stranger"))
 //
 // Any failure (missing readline module, EOF on pipe, Ctrl-C, non-TTY
@@ -2565,7 +2565,7 @@ function __taida_unmold(v) {
 async function __taida_unmold_async(v) {
   if (v && typeof v.then === 'function') {
     // Promise-based OS APIs already resolve to monadic objects (Lax/Result).
-    // Do not unmold again after awaiting, or `]=>` loses one level too many.
+    // Do not unmold again after awaiting, or `>=>` loses one level too many.
     return await v;
   }
   return __taida_unmold(v);
@@ -2644,7 +2644,7 @@ if (!Array.prototype.__taida_patched) {
   });
   // E32B-022 (Lock-N): Lax[Int]-returning siblings of indexOf /
   // lastIndexOf. PHILOSOPHY I forbids `-1` magic-value sentinels;
-  // callers should use `]=>` / `<=[` / `getOrDefault(...)` off the
+  // callers should use `>=>` / `<=<` / `getOrDefault(...)` off the
   // returned Lax. Both paths use structural equality just like the
   // `-1`-sentinel siblings above.
   Object.defineProperty(Array.prototype, 'indexOfLax', {
@@ -5561,37 +5561,36 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
   // tls is a BuchiPack (object) or undefined/null.
   // @() = empty object = plaintext (v4 compat).
   // @(cert: "path", key: "path") = HTTPS.
-  // v6 NET6-1b: @(cert: ..., key: ..., protocol: "h2") = HTTP/2 (rejected on JS).
+  // @(cert: ..., key: ..., protocol: HttpProtocol:H2()) = HTTP/2 (rejected on JS).
   let __useTls = false;
   let __tlsCert = null;
   let __tlsKey = null;
   let __requestedProtocol = null;
   if (tls !== undefined && tls !== null && typeof tls === 'object') {
     // v6 NET6-1b: Extract protocol field if present.
-    // NB6-10: Separate "field exists" from "field is Str".
-    // If protocol field exists but is not Str, reject immediately.
     if ('protocol' in tls) {
-      if (typeof tls.protocol === 'string') {
-        __requestedProtocol = tls.protocol;
-      } else if (typeof tls.protocol === 'number' && Number.isInteger(tls.protocol)) {
+      const __protocolOrdinal = __taida_isEnumVal(tls.protocol)
+        ? tls.protocol.__taida_enum_ordinal
+        : tls.protocol;
+      if (typeof __protocolOrdinal === 'number' && Number.isInteger(__protocolOrdinal)) {
         // Sync with `crate::net_surface::http_protocol_ordinal_to_wire`.
-        if (tls.protocol === 0) {
+        if (__protocolOrdinal === 0) {
           __requestedProtocol = 'h1.1';
-        } else if (tls.protocol === 1) {
+        } else if (__protocolOrdinal === 1) {
           __requestedProtocol = 'h2';
-        } else if (tls.protocol === 2) {
+        } else if (__protocolOrdinal === 2) {
           __requestedProtocol = 'h3';
         } else {
           return new __TaidaAsync(
             __taida_net_result_fail('ProtocolError',
-              'httpServe: unknown HttpProtocol ordinal ' + tls.protocol +
+              'httpServe: unknown HttpProtocol ordinal ' + __protocolOrdinal +
               '. Expected 0 (H1), 1 (H2), or 2 (H3).'),
             null, 'fulfilled');
         }
       } else {
         return new __TaidaAsync(
           __taida_net_result_fail('ProtocolError',
-            'httpServe: protocol must be HttpProtocol or Str, got ' + typeof tls.protocol),
+            'httpServe: protocol must be HttpProtocol, got ' + typeof tls.protocol),
           null, 'fulfilled');
       }
     }
@@ -5664,7 +5663,7 @@ async function __taida_net_httpServe(port, handler, maxRequests, timeoutMs, maxC
       }
       __useTls = true;
     } else if (__requestedProtocol !== null) {
-      // v6 NET6-1b: @(protocol: "h2") without cert/key — still validate protocol.
+      // v6 NET6-1b: @(protocol <= HttpProtocol:H2()) without cert/key — still validate protocol.
       // Fall through to protocol validation below.
     }
     // else: empty object @() → plaintext, fall through

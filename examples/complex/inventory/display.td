@@ -28,7 +28,7 @@ printPerishable item =
 
 printItems label items =
   stdout(label)
-  Map[items, printItem]() ]=> shown
+  Map[items, printItem]() >=> shown
   stdout("")
   0
 => :Int

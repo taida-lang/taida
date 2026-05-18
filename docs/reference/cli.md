@@ -117,6 +117,16 @@ taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--di
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。
 - `--diag-format jsonl` を指定するとコンパイル診断を `taida.diagnostic.v1` JSONL 形式で出力します。
 
+#### 診断 JSON / JSONL の `null` について
+
+`taida.diagnostic.v1` 系の JSON / JSONL 出力で省略可能フィールド (例: 解析途中で取れなかった位置情報、optional な `hint` フィールド) が **JSON null** として現れることがあります。これは **機械可読な JSON schema レベルの「フィールド未提供」マーカー** であり、**Taida 言語の値ではありません**。
+
+- Taida 言語仕様としては `null` / `undefined` / `none` / `nil` / `unit` / `void` は値にも名前にも存在しません (`docs/reference/naming_conventions.md` 参照)。
+- 診断 JSON に出る `null` は、外部ツール (エディタ、SARIF パイプライン、CI) が Taida コードを直接読まずに診断結果だけを処理するための機械可読フォーマット上の慣習です。
+- Taida コード側で `null` をハンドリングする経路は存在しません。`Lax[T]` / `Result[T, P]` / 共通 Enum で「値の不在」を意味のある値として表現してください。
+
+将来 schema が変更され null を完全に排除する場合は、`taida.diagnostic.v2` 等のメジャー番号でアナウンスします。`v1` を消費するツールは null を「fieldは未提供」として扱ってください。
+
 ### ディスクリプタビルド
 
 ```bash
@@ -310,10 +320,13 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 `ingot publish` はタグの push のみを行います。
 
 1. `packages.tdm` のアイデンティティ (`<<<@version owner/name`) を検証
-2. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定
-3. `git tag <version>` + `git push origin <tag>`
+2. `packages.tdm` の facade と entry module の export surface が一致することを検証
+3. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定
+4. `git tag <version>` + `git push origin <tag>`
 
 CLI はローカルビルド、`addon.lock.toml` の生成、`native/addon.toml` / `packages.tdm` の書き換え、GitHub リリースの作成、リリースアセットのアップロードのいずれも行いません。リリース作成はアドオン側 CI の責務です。
+
+facade 検証では、`packages.tdm` の `<<<@version owner/name @(symbols)` と entry module の `<<< @(symbols)` を双方向に比較します。entry module が export していない symbol を facade に書いた場合、または entry module が export している symbol を facade に書き忘れた場合、publish は tag を作成する前に拒否されます。
 
 自動バージョン繰り上げ:
 

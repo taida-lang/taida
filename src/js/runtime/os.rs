@@ -1,7 +1,7 @@
 //! JS runtime: `taida-lang/os` package (13 OS APIs) + crypto.
 //!
-//! Split out from monolithic `src/js/runtime.rs` as part of C12-9
-//! (FB-21 mechanical file split). Original source line range: 2005..3137.
+//! Split out from monolithic `src/js/runtime.rs` as part of
+//! ( mechanical file split). Original source line range: 2005..3137.
 //!
 //! See `src/js/runtime/mod.rs::RUNTIME_JS`.
 
@@ -333,12 +333,10 @@ function __taida_os_envvar(name) {
 
 // ── Side-effect functions (writeFile, appendFile, remove, createDir, rename) ──
 
-// C12B-021: the five write/remove/create APIs now return
-// Result[Int]. Inner value is the byte count (writeFile /
-// writeBytes / appendFile), the number of entries removed
-// (remove), or 1/0 for "newly created"/"already existed"
-// (createDir). Rationale and parity matrix: see
-// .dev/C12_DESIGN.md §C12B-021.
+// The five write/remove/create APIs return Result[Int]. The inner
+// value is the byte count (writeFile / writeBytes / appendFile),
+// the number of entries removed (remove), or 1/0 for
+// "newly created" / "already existed" (createDir).
 function __taida_os_writeFile(path, content) {
   try {
     // Compute the byte count from the same encoding Node will use

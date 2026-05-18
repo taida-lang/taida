@@ -66,7 +66,7 @@ impl GraphExtractor {
                         source: src,
                         target: target_id,
                         kind: EdgeKind::UnmoldForward,
-                        label: "]=>".to_string(),
+                        label: ">=>".to_string(),
                         metadata: HashMap::new(),
                     });
                 }
@@ -81,7 +81,7 @@ impl GraphExtractor {
                         source: src,
                         target: target_id,
                         kind: EdgeKind::UnmoldBackward,
-                        label: "<=[".to_string(),
+                        label: "<=<".to_string(),
                         metadata: HashMap::new(),
                     });
                 }
@@ -508,7 +508,7 @@ impl GraphExtractor {
                 graph.add_node(GraphNode {
                     id: id.clone(),
                     kind: NodeKind::Unmold,
-                    label: "]=>".to_string(),
+                    label: ">=>".to_string(),
                     location: Location {
                         file: self.file.clone(),
                         line: span.line,
@@ -521,7 +521,7 @@ impl GraphExtractor {
                         source: iid,
                         target: id.clone(),
                         kind: EdgeKind::UnmoldForward,
-                        label: "]=>".to_string(),
+                        label: ">=>".to_string(),
                         metadata: HashMap::new(),
                     });
                 }
@@ -1069,7 +1069,7 @@ impl GraphExtractor {
     /// Propagates edge semantics:
     /// - `ErrorCeiling -> Function`: the ceiling covers the callee's throws (cross-function coverage)
     /// - `Function(caller) -> Function(callee)`: callee's throws propagate to caller
-    ///   (allows transitive coverage: if caller is covered by a ceiling, callee is too)
+    /// (allows transitive coverage: if caller is covered by a ceiling, callee is too)
     fn extract_error_expr(
         &mut self,
         graph: &mut Graph,
@@ -1523,9 +1523,12 @@ impl GraphExtractor {
                 }
             }
 
-            Expr::MoldInst(_, type_args, _, _) => {
+            Expr::MoldInst(_, type_args, fields, _) => {
                 for arg in type_args {
                     self.extract_calls_expr(graph_snapshot, graph, caller_id, arg, false);
+                }
+                for field in fields {
+                    self.extract_calls_expr(graph_snapshot, graph, caller_id, &field.value, false);
                 }
             }
 
@@ -1644,13 +1647,22 @@ impl GraphExtractor {
                     }
                 }
             }
-            Expr::MoldInst(_, type_args, _, _) => {
+            Expr::MoldInst(_, type_args, fields, _) => {
                 for arg in type_args {
                     self.extract_func_ref_from_expr(
                         graph_snapshot,
                         graph,
                         caller_id,
                         arg,
+                        func_names,
+                    );
+                }
+                for field in fields {
+                    self.extract_func_ref_from_expr(
+                        graph_snapshot,
+                        graph,
+                        caller_id,
+                        &field.value,
                         func_names,
                     );
                 }
@@ -1698,7 +1710,7 @@ mod tests {
     #[test]
     fn test_dataflow_unmold_forward() {
         let source =
-            "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\nMap[numbers, doubleFn]() ]=> doubled";
+            "numbers <= @[1, 2, 3]\ndoubleFn x =\n  x * 2\nMap[numbers, doubleFn]() >=> doubled";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(graph.nodes.iter().any(|n| n.label == "doubled"));
         assert!(
@@ -2060,9 +2072,9 @@ outer input =
 
     #[test]
     fn test_dataflow_unmold_stmt() {
-        // Unmold is statement-level (]=> / <=[), not expression-level
+        // Unmold is statement-level (>=> / <=<), not expression-level
         // .unmold() parses as a MethodCall
-        let source = "lax <= Lax[42]()\nlax ]=> val";
+        let source = "lax <= Lax[42]()\nlax >=> val";
         let graph = parse_and_extract(source, GraphView::Dataflow);
         assert!(
             graph

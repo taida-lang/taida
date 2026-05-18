@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/lint/panic_baseline.sh
 #
-# D28B-020 (Option A) — production `panic!` baseline pin / forward-protection gate.
+# Production `panic!` baseline pin / forward-protection gate.
 #
 # Counts `panic!` occurrences in production regions of `src/**/*.rs` and rejects
 # any drift from the pinned baseline. "Production region" is defined as the
@@ -18,10 +18,9 @@
 #   E31 removed the src/codegen/driver.rs panic, leaving only:
 #     - src/parser/ast.rs     (`body_expr()` precondition on AST arm)
 #   These are intentional internal-invariant panics (precondition violations
-#   that signal a compiler bug, not user-input failures), allowed by D28B-020's
-#   "invariant 違反の internal panic は限定的に許容され得る" judgment. They
-#   are pinned by the ALLOWLIST below and counted toward the baseline. Any
-#   change to count or to the allowlisted file:line set fails this gate.
+#   that signal a compiler bug, not user-input failures). They are pinned by
+#   the ALLOWLIST below and counted toward the baseline. Any change to count or
+#   to the allowlisted file:line set fails this gate.
 #
 # Exit codes:
 #   0 — production panic! count matches baseline AND every observed site is in
@@ -36,16 +35,15 @@
 #   To remove an entry from the allowlist after refactoring a `panic!` away,
 #   delete the matching `file:line` from PANIC_BASELINE and decrement
 #   PANIC_BASELINE_COUNT in lockstep. To add a new allowed invariant panic,
-#   require D28 driver / user verdict — this gate is meant to *prevent* silent
-#   addition.
+#   require explicit review; this gate is meant to *prevent* silent addition.
 
 set -euo pipefail
 
 # --- Pinned baseline -----------------------------------------------------------
 # Each entry is `path:line` relative to the repo root, sorted ascending.
-# Update only with explicit user verdict (D28B-020 maintenance entry).
+# Update only with explicit review.
 PANIC_BASELINE=(
-  "src/parser/ast.rs:564"
+  "src/parser/ast.rs:566"
 )
 PANIC_BASELINE_COUNT=${#PANIC_BASELINE[@]}
 
@@ -112,7 +110,7 @@ for entry in "${PANIC_BASELINE[@]}"; do
 done
 
 # Report.
-echo "panic_baseline.sh — D28B-020 production panic! gate"
+echo "panic_baseline.sh — production panic! gate"
 echo "  baseline count : ${PANIC_BASELINE_COUNT}"
 echo "  observed count : ${observed_count}"
 

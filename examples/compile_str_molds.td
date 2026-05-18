@@ -24,7 +24,7 @@ stdout(replaced_all)
 
 // CharAt (returns Lax — unmold to get value)
 greeting <= "Hello"
-CharAt[greeting, 1]() ]=> ch
+CharAt[greeting, 1]() >=> ch
 stdout(ch)
 
 // Repeat

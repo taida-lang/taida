@@ -11,7 +11,7 @@ safeInvert x =
 
 items <= @[10, 20, 0, 40]
 
-Map[items, _ x = safeInvert(x)]() ]=> result
+Map[items, _ x = safeInvert(x)]() >=> result
 stdout(result)
 
 // Expected: @[10, 5, -1, 2]

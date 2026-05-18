@@ -3,8 +3,7 @@ use super::frame::is_canonical_varint;
 ///
 /// This module contains all QPACK-related types and functions:
 /// - QPACK static table (RFC 9204 Appendix A, 99 entries)
-/// - H3DecodeError enum and H3Result type alias (NET7-6b)
-/// - QPACK integer/string coding (RFC 9204 Section 4.1.1 / 4.1.2)
+/// - H3DecodeError enum and H3Result type alias/// - QPACK integer/string coding (RFC 9204 Section 4.1.1 / 4.1.2)
 /// - QPACK header block encode/decode (RFC 9204 Section 4.5)
 /// - QPACK dynamic table (RFC 9204 Section 4.3)
 /// - QPACK encoder/decoder instruction streams (RFC 9204 Sections 5.2/6.2)
@@ -433,7 +432,7 @@ pub(crate) const QPACK_STATIC_TABLE: &[QpackStaticEntry] = &[
 // | QPACK int overflow     | H3_ERR_GENERAL_PROTOCOL_ERROR        | QpackIntOverflow   |
 
 /// Decode error for QPACK / H3 frame parsing.
-/// **NET7-6b**: replaces `Option<T>` decode signatures so that each
+/// ****: replaces `Option<T>` decode signatures so that each
 /// `None` reason can be traced back to an RFC 9114 error code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum H3DecodeError {
@@ -458,10 +457,10 @@ pub(crate) enum H3DecodeError {
     /// Frame header / payload malformed (length mismatch, truncation).
     /// Maps to: RFC 9114 H3_ERR_FRAME_ERROR
     FrameMalformed,
-    /// Field section exceeds max_field_section_size (NB7-43).
+    /// Field section exceeds max_field_section_size.
     /// Maps to: RFC 9114 H3_ERR_REQUEST_REJECTED
     FieldSectionTooLarge,
-    /// Header block has too many fields (overflow guard, NB7-11).
+    /// Header block has too many fields (overflow guard).
     /// Maps to: RFC 9114 H3_ERR_REQUEST_REJECTED
     TooManyHeaders,
     /// Non-canonical encoding detected.
@@ -503,12 +502,12 @@ pub(crate) type H3Result<T> = Result<T, H3DecodeError>;
 // ── QPACK Integer Coding (RFC 9204 Section 4.1.1) — Result variants ──────
 
 /// Decode a QPACK integer with the given prefix bit width.
-/// **NET7-6b**: `Result<T, H3DecodeError>` variant — provides error traceability
+/// ****: `Result<T, H3DecodeError>` variant — provides error traceability
 /// instead of opaque `None`.
 ///
 /// **QPACK Integer encoding per RFC 9204 Section 4.1.1.** Uses prefix bits (m) and 7-bit continuation bytes.
-/// NB7-33: Distinct from QUIC varint (RFC 9000 Section 16) — QPACK uses arbitrary prefix bit widths,
-///   while QUIC varint uses fixed 2-bit length prefix.
+/// Distinct from QUIC varint (RFC 9000 Section 16) — QPACK uses arbitrary prefix bit widths,
+/// while QUIC varint uses fixed 2-bit length prefix.
 /// Returns `Ok((value, bytes_consumed))` on success, `Err(H3DecodeError)` on error.
 pub(crate) fn qpack_decode_int_r(data: &[u8], prefix_bits: u8) -> H3Result<(u64, usize)> {
     if data.is_empty() {
@@ -544,12 +543,12 @@ pub(crate) fn qpack_decode_int_r(data: &[u8], prefix_bits: u8) -> H3Result<(u64,
 
 /// Decode a QPACK integer with the given prefix bit width.
 /// **QPACK Integer decoding per RFC 9204 Section 4.1.1** — thin wrapper
-/// around `qpack_decode_int_r` to share a single implementation path (NET7-11c).
+/// around `qpack_decode_int_r` to share a single implementation path.
 pub(crate) fn qpack_decode_int(data: &[u8], prefix_bits: u8) -> Option<(u64, usize)> {
     qpack_decode_int_r(data, prefix_bits).ok()
 }
 
-/// Decode a QPACK string literal — `Result` variant (NET7-6b). Returns `Ok((string, bytes_consumed))` on success, `Err` with specific error variant.
+/// Decode a QPACK string literal — `Result` variant. Returns `Ok((string, bytes_consumed))` on success, `Err` with specific error variant.
 pub(crate) fn qpack_decode_string_r(data: &[u8]) -> H3Result<(String, usize)> {
     if data.is_empty() {
         return Err(H3DecodeError::Truncated);
@@ -577,7 +576,7 @@ pub(crate) fn qpack_decode_string_r(data: &[u8]) -> H3Result<(String, usize)> {
 
 // ── QUIC Varint: Result Variant (NET7-6b) ────────────────────────────────
 
-/// Decode a QUIC variable-length integer — `Result` variant (NET7-6b).
+/// Decode a QUIC variable-length integer — `Result` variant.
 /// Returns `Ok((value, bytes_consumed))` on success, `Err(H3DecodeError)` on error.
 pub(crate) fn varint_decode_r(data: &[u8]) -> H3Result<(u64, usize)> {
     if data.is_empty() {
@@ -600,7 +599,7 @@ pub(crate) fn varint_decode_r(data: &[u8]) -> H3Result<(u64, usize)> {
 }
 
 /// Encode a QPACK integer with the given prefix bit width.
-/// **QPACK Integer encoding per RFC 9204 Section 4.1.1.** See `qpack_decode_int` for details. NB7-33
+/// **QPACK Integer encoding per RFC 9204 Section 4.1.1.** See `qpack_decode_int` for details.
 /// Returns the number of bytes written on success, `None` on buffer overflow.
 pub(crate) fn qpack_encode_int(
     buf: &mut [u8],
@@ -670,7 +669,7 @@ pub(crate) fn qpack_decode_string(data: &[u8]) -> Option<(String, usize)> {
     }
 }
 
-/// Encode a QPACK string literal (non-Huffman for simplicity in Phase 2/3).
+/// Encode a QPACK string literal (non-Huffman for simplicity in ).
 /// Returns the number of bytes written, or `None` on buffer overflow.
 pub(crate) fn qpack_encode_string(buf: &mut [u8], s: &str) -> Option<usize> {
     let slen = s.len() as u64;
@@ -698,14 +697,14 @@ pub(crate) struct H3Header {
 
 /// Decode a QPACK header block.
 /// Returns the decoded headers on success, `None` on error.
-/// `max_headers` limits the number of decoded headers (overflow = error, NB7-11 parity).
-/// `max_field_section_size` limits the wire size of the block (NB7-43 hardening).
+/// `max_headers` limits the number of decoded headers (overflow = error, parity).
+/// `max_field_section_size` limits the wire size of the block ( hardening).
 /// When `Some(limit)` is passed, the block is rejected if it exceeds the limit.
-/// `dynamic_table` is used for dynamic table lookups (Phase 6+).
-/// Decode a QPACK header block — `Option` wrapper (NB7-47).
+/// `dynamic_table` is used for dynamic table lookups (+).
+/// Decode a QPACK header block — `Option` wrapper.
 ///
 /// Thin wrapper around `qpack_decode_block_r` to guarantee identical decoding logic.
-/// Eliminates the Option/Result duplication risk described in NB7-47.
+/// Eliminates the Option/Result duplication risk described in.
 pub(crate) fn qpack_decode_block(
     data: &[u8],
     max_headers: usize,
@@ -720,7 +719,7 @@ pub(crate) fn qpack_decode_block(
 // This allows callers to distinguish between truncation, overflow, dynamic table
 // errors, and other failure modes for RFC 9114 error code mapping.
 
-/// Decode a QPACK header block — `Result` variant (NET7-6b).
+/// Decode a QPACK header block — `Result` variant.
 ///
 /// Returns `Ok(Vec<H3Header>)` on success, or an `Err(H3DecodeError)` variant
 /// that maps to an RFC 9114 error code.
@@ -937,14 +936,14 @@ pub(crate) fn qpack_decode_block_r(
 
 // ── H3 Frame Decode: Result Variants (NET7-6b) ─────────────────────────
 
-/// Decode an H3 frame header — `Result` variant (NET7-6b).
+/// Decode an H3 frame header — `Result` variant.
 pub(crate) fn decode_frame_header_r(data: &[u8]) -> H3Result<(u64, u64, usize)> {
     let (frame_type, tc) = varint_decode_r(data)?;
     let (frame_length, lc) = varint_decode_r(&data[tc..])?;
     Ok((frame_type, frame_length, tc + lc))
 }
 
-/// Decode a complete H3 frame — `Result` variant (NET7-6b).
+/// Decode a complete H3 frame — `Result` variant.
 /// Returns `Ok((frame_type, payload_slice))` on success, `Err` on malformed input.
 pub(crate) fn decode_frame_r(data: &[u8]) -> H3Result<(u64, &[u8])> {
     let (frame_type, frame_length, header_size) = decode_frame_header_r(data)?;
@@ -1120,7 +1119,7 @@ impl H3DynamicTable {
     /// Post-base index 0 = the most recently inserted entry (largest_ref).
     /// Post-base index N = the entry with absolute_index = largest_ref - N.
     /// RFC 9204 Section 4.5.3.
-    /// NB7-61: boundary check uses both total_inserted (protocol-level bound)
+    /// boundary check uses both total_inserted (protocol-level bound)
     /// AND entries.len() (actual entry count) to avoid returning stale entries
     /// after eviction.
     pub fn lookup_post_base(&self, post_base_index: u64) -> Option<&DynamicTableEntry> {
@@ -1267,7 +1266,7 @@ pub(crate) fn encode_insert_count_increment(buf: &mut [u8], increment: u64) -> O
 
 /// Decoded encoder instruction.
 ///
-/// NB7-111 fix: dynamic table indices are stored as **relative indices**
+/// fix: dynamic table indices are stored as **relative indices**
 /// (0 = most recently inserted entry, per RFC 9204 §5) because that is
 /// how they arrive on the wire. Static table indices remain as-is.
 #[derive(Clone, Debug)]
@@ -1292,8 +1291,8 @@ pub(crate) enum H3EncoderInstruction {
 /// Decode a single encoder instruction from the encoder stream.
 ///
 /// Returns `Some((instruction, bytes_consumed))` on success, `None` on error.
-/// NB7-27 placeholder: currently returns `Option<T>`; migrates to
-/// `Result<T, H3DecodeError>` in Phase 6+ (NET7-6b).
+/// placeholder: currently returns `Option<T>`; migrates to
+/// `Result<T, H3DecodeError>` in +.
 pub(crate) fn decode_encoder_instruction(data: &[u8]) -> Option<(H3EncoderInstruction, usize)> {
     if data.is_empty() {
         return None;
@@ -1361,7 +1360,7 @@ pub(crate) fn decode_encoder_instruction(data: &[u8]) -> Option<(H3EncoderInstru
 
 /// Apply an encoder instruction to a dynamic table.
 ///
-/// NB7-111 fix: dynamic table indices (from `InsertWithNameRef` with
+/// fix: dynamic table indices (from `InsertWithNameRef` with
 /// `is_static == false` and `Duplicate`) are **relative indices**
 /// (0 = most recently inserted entry). They must be converted to absolute
 /// indices before lookup, per RFC 9204 §5.2.
@@ -1459,16 +1458,16 @@ pub(crate) fn decode_decoder_instruction(data: &[u8]) -> Option<(H3DecoderInstru
 /// Apply a decoder instruction to connection-level QPACK state.
 ///
 /// - SectionAck: acknowledges that the decoder has processed all fields
-///   from a header block. Can be used to free decoder state.
+/// from a header block. Can be used to free decoder state.
 /// - StreamCancel: informs encoder that a stream was cancelled, allowing
-///   the encoder to reclaim dynamic table references.
+/// the encoder to reclaim dynamic table references.
 /// - InsertCountIncrement: increments the known ReceivedInsertCount, allowing
-///   the encoder to use newly available dynamic table entries.
+/// the encoder to use newly available dynamic table entries.
 pub(crate) struct H3DecoderState {
     /// Known received insert count (from Insert Count Increment instructions).
     received_insert_count: u64,
     /// Maximum insert count that has been acknowledged by the decoder.
-    /// Replaces a bounded HashMap (NB7-49): monotonic counter, O(1) memory.
+    /// Replaces a bounded HashMap: monotonic counter, O(1) memory.
     acknowledged_insert_count: u64,
 }
 
@@ -1525,7 +1524,7 @@ impl H3DecoderState {
 
 /// Encode a QPACK header block with dynamic table support.
 ///
-/// Phase 6/7: patches the Required Insert Count byte in the static-table
+/// patches the Required Insert Count byte in the static-table
 /// encoded block to reflect the dynamic table's insert count. Actual
 /// dynamic table entry encoding is a future-phase enhancement.
 /// The mutable ref is kept for API compatibility.

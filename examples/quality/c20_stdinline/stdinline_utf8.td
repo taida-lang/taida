@@ -6,6 +6,6 @@
 //
 // Driver: pipe `こんにちは\n` (15 UTF-8 bytes) into stdin.
 
-stdinLine("") ]=> line
+stdinLine("") >=> line
 stdout("has_value=" + line.hasValue().toString())
 stdout("val=" + line.getOrDefault("<empty>"))

@@ -10,27 +10,27 @@ data <= buildList(10000, @[])
 stdout(data.length().toString())
 
 // Map
-Map[data, _ x = x * 2]() ]=> mapped
+Map[data, _ x = x * 2]() >=> mapped
 stdout(mapped.length().toString())
-mapped.first() ]=> mf
+mapped.first() >=> mf
 stdout(mf.toString())
-mapped.last() ]=> ml
+mapped.last() >=> ml
 stdout(ml.toString())
 
 // Filter (even numbers)
 isEven x =
-  Mod[x, 2]() ]=> r
+  Mod[x, 2]() >=> r
   r == 0
 => :Bool
 
-Filter[data, isEven]() ]=> filtered
+Filter[data, isEven]() >=> filtered
 stdout(filtered.length().toString())
 
 // Sort
 sorted <= Sort[data]()
-sorted.first() ]=> sf
+sorted.first() >=> sf
 stdout(sf.toString())
-sorted.last() ]=> sl
+sorted.last() >=> sl
 stdout(sl.toString())
 
 // Sum

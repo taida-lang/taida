@@ -180,8 +180,8 @@ pub fn parse_doc_tags(comments: &[String]) -> DocTags {
 
 /// Try to match a tag at the start of a line. Returns (tag_name, rest_of_line).
 ///
-/// Accepts both `@Purpose: ...` (raw doc comment content where `///@` prefix
-/// left the `@`) and `Purpose: ...` (where the lexer already consumed the `@`
+/// Accepts both `@Purpose:...` (raw doc comment content where `///@` prefix
+/// left the `@`) and `Purpose:...` (where the lexer already consumed the `@`
 /// as part of the `///@` prefix).
 fn try_match_tag(line: &str) -> Option<(String, String)> {
     // Strip optional leading `@`
@@ -290,10 +290,10 @@ pub fn format_type_expr(te: &TypeExpr) -> String {
         }
         TypeExpr::Function(args, ret) => {
             let as_: Vec<String> = args.iter().map(format_type_expr).collect();
-            let args_str = if as_.len() == 1 {
-                as_[0].clone()
-            } else {
-                format!("({})", as_.join(", "))
+            let args_str = match as_.as_slice() {
+                [] => "_".to_string(),
+                [single] => single.clone(),
+                _ => format!("({})", as_.join(", ")),
             };
             format!("{} => :{}", args_str, format_type_expr(ret))
         }
@@ -370,13 +370,13 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
             {
                 doc.functions.push(extract_func_doc(fd));
             }
-            // (E30B-007 sub-step B-5 / Lock-G Sub-G5、2026-04-28) explicit
+            // Explicit addon bindings are surfaced as function docs.
             // `Name <= RustAddon["fn"](arity <= N)` binding を **public
             // function** として doc-gen 出力する。AST 上は Assignment だが、
             // public binding contract であり、call site から見ると関数。
             // doc comment の有無に関わらず必ず FuncDoc に出すことで、
-            // `taida doc generate` の addon facade 出力に 23 sentinel が
-            // 全件表示される (TMB-029 解消)。Match の order が重要 — RustAddon
+            // `taida doc generate` の addon facade 出力に explicit bindings が
+            // 全件表示される。Match の order が重要 — RustAddon
             // 判定を doc-comments-only の AssignmentDoc 分岐より前に置くこと。
             Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
                 doc.functions.push(extract_rust_addon_func_doc(a));
@@ -401,7 +401,7 @@ fn extract_assignment_doc(a: &Assignment) -> AssignmentDoc {
     }
 }
 
-/// E30B-007 sub-step B-5 / Lock-G Sub-G5: render an explicit
+/// Render an explicit
 /// `Name <= RustAddon["fn"](arity <= N)` binding as a `FuncDoc` so
 /// downstream doc-gen / LSP / introspection consumers surface it as a
 /// public function. Params / return type are not declared in the

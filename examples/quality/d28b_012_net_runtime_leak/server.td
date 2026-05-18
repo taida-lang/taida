@@ -19,11 +19,10 @@
 // `c26_soak_fixture` used by `scripts/soak/fast-soak-proxy.sh`.
 //
 // Acceptance: with the `taida_arena_request_reset` per-request
-// boundary applied (D28B-012 fix), the worker thread's bump arena
-// must rewind on every request so RSS plateaus near the cold-start
-// value. Pre-fix the same workload drove RSS to ~340 MiB in 5 minutes
-// (matching the 4 GB / 4.7 GiB/h drift recorded in
-// `.dev/D28_BLOCKERS.md::D28B-012`).
+// boundary applied, the worker thread's bump arena must rewind on
+// every request so RSS plateaus near the cold-start value. Without
+// the rewind the same workload drove RSS to ~340 MiB in 5 minutes
+// (~4 GB / 4.7 GiB per hour drift).
 
 >>> taida-lang/net => @(httpServe)
 
@@ -38,7 +37,7 @@ handler req =
 // itself stops sending after its sample window so we never reach the
 // cap in the regression test.
 asyncResult <= httpServe(0, handler, 50000)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.ok)
 stdout(r.requests)

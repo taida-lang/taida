@@ -1,12 +1,12 @@
 //! Backend support policy for addon-backed packages.
 //!
-//! **C25 redefinition (C25B-030 Phase 1A)**: the RC1 "addon is Native only"
-//! freeze is lifted. Addon-backed packages are now formally supported on
+//! The original "addon is Native only" freeze is lifted. Addon-backed
+//! packages are now formally supported on
 //! both the `Native` and `Interpreter` backends (the interpreter is the
 //! reference implementation and always ships the dispatch path).
 //!
-//! **D28B-010 widening (@d.X stable initial release)**: `WasmFull` joins
-//! `Native` and `Interpreter` as a first-class addon backend. wasm-full
+//! `WasmFull` joins `Native` and `Interpreter` as a first-class addon
+//! backend. wasm-full
 //! is the only wasm profile in the stable contract that exposes the
 //! addon dispatcher; wasm-min / wasm-wasi / wasm-edge remain unsupported
 //! at @d.X. The widening is an additive change under
@@ -15,18 +15,17 @@
 //! a generation bump. Manifest authors who want
 //! to declare wasm-full compatibility add `"wasm-full"` to the top-level
 //! `targets` array; addons that omit `targets` continue to default to
-//! `["native"]` (D28B-021 contract preserved). The `Js` backend remains
+//! `["native"]`. The `Js` backend remains
 //! unsupported until a JS-side dispatcher is designed.
 //!
-//! Historical note: the original RC1 freeze (see `.dev/RC1_DESIGN.md`
-//! Section E and `.dev/RC1_IMPL_SPEC.md` Phase 0 Frozen Contracts) forced
-//! the interpreter to masquerade as `AddonBackend::Native` to pass the
-//! policy guard. That dishonest state is removed in C25; the interpreter
-//! binary now calls `ensure_addon_supported(AddonBackend::Interpreter, ...)`
+//! Historical note: the original Native-only freeze forced the interpreter
+//! to masquerade as `AddonBackend::Native` to pass the policy guard. That
+//! dishonest state is removed; the interpreter
+//! binary now calls `ensure_addon_supported(AddonBackend::Interpreter,...)`
 //! truthfully.
 //!
-//! This module is the single decision point. The Native dispatcher (RC1
-//! Phase 4), the interpreter's addon import handler, and the import-
+//! This module is the single decision point. The Native dispatcher
+//! ), the interpreter's addon import handler, and the import-
 //! resolver guard for every other backend all call into
 //! `ensure_addon_supported` so the policy lives in one place across all
 //! backends.
@@ -39,8 +38,8 @@ use std::fmt;
 
 /// All backends that may attempt to consume an addon-backed package.
 ///
-/// **C25 policy (C25B-030)**: `Native` and `Interpreter` are first-class
-/// addon backends. **D28B-010 (@d.X)**: `WasmFull` joins them as a
+/// `Native` and `Interpreter` are first-class
+/// addon backends. ** (@d.X)**: `WasmFull` joins them as a
 /// first-class addon backend (§6.2 widening). `Js`, `WasmMin`,
 /// `WasmWasi`, and `WasmEdge` remain unsupported. Adding a new backend
 /// to the supported set is a deliberate, RC-level decision -- the
@@ -56,7 +55,7 @@ use std::fmt;
 pub enum AddonBackend {
     /// Cranelift + native runtime. Dlopens cdylib addons directly.
     Native,
-    /// Tree-walking interpreter. C25 first-class addon backend
+    /// Tree-walking interpreter addon backend
     /// (reference implementation).
     Interpreter,
     /// JavaScript codegen. No addon dispatcher yet (post-stable).
@@ -67,7 +66,7 @@ pub enum AddonBackend {
     WasmWasi,
     /// `wasm-edge` target. No addon dispatcher (out of @d.X stable).
     WasmEdge,
-    /// `wasm-full` target. **D28B-010 (@d.X)**: addon dispatcher
+    /// `wasm-full` target. ** (@d.X)**: addon dispatcher
     /// supported via the same registry / facade path used by Native and
     /// Interpreter. Manifest authors opt in by adding `"wasm-full"` to
     /// `targets`. cdylib loading on wasm-full reuses the host's native
@@ -95,8 +94,8 @@ impl AddonBackend {
 
     /// `true` iff this backend may load addon-backed packages.
     ///
-    /// **C25 policy (C25B-030)**: `Native` and `Interpreter` are supported.
-    /// **D28B-010 (@d.X)**: `WasmFull` is enrolled as a first-class
+    /// `Native` and `Interpreter` are supported.
+    /// ** (@d.X)**: `WasmFull` is enrolled as a first-class
     /// addon backend (§6.2 widening). `Js`, `WasmMin`, `WasmWasi`, and
     /// `WasmEdge` remain unsupported. Do not add `_ => true` arms here
     /// -- new backends must be explicitly enrolled.
@@ -116,7 +115,7 @@ impl fmt::Display for AddonBackend {
 ///
 /// Carries the package name (so the user can find the offending import)
 /// and the backend label. The `Display` impl produces the deterministic
-/// message that `.dev/RC1_DESIGN.md` Section E.4 mandates.
+/// unsupported-backend message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddonBackendError {
     pub backend: AddonBackend,
@@ -158,7 +157,7 @@ impl std::error::Error for AddonBackendError {}
 /// Returns `Ok(())` if `backend` is allowed to consume addon-backed
 /// packages, otherwise an [`AddonBackendError`] tagged with `package`.
 ///
-/// Phase 4 (`RC1-4*`) wires this into the import resolver so that
+/// (`*`) wires this into the import resolver so that
 /// `import "taida-lang/terminal"` (an addon-backed package) on, say,
 /// the JS backend produces a compile-time error rather than crashing
 /// the runtime.
@@ -246,8 +245,8 @@ mod tests {
         // Smoke check that the policy is uniform: every rejected backend
         // must produce the same shape of message so the LSP / CLI can
         // pattern-match a single substring ("is not supported on
-        // backend"). C25B-030: Interpreter and Native no longer appear
-        // here because they are supported. D28B-010: WasmFull also
+        // backend"). Interpreter and Native no longer appear
+        // here because they are supported. WasmFull also
         // moves to the supported set; only Js / WasmMin / WasmWasi /
         // WasmEdge remain rejected.
         for b in [

@@ -2,8 +2,8 @@
 // フィールド関数内でパイプライン
 
 processFn nums =
-  Filter[nums, _ x = Mod[x, 2]().unmold() == 0]() ]=> evens
-  Sum[evens]() ]=> total
+  Filter[nums, _ x = Mod[x, 2]().unmold() == 0]() >=> evens
+  Sum[evens]() >=> total
   total
 => :Int
 

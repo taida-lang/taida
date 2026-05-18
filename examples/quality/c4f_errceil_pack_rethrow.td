@@ -3,7 +3,7 @@ Error => E1 = @(code: Int)
 Error => E2 = @(code: Int)
 
 buildMsg err =
-  @(tag <= "mid", detail <= err) ]=> info
+  @(tag <= "mid", detail <= err) >=> info
   info.tag + ":" + info.detail
 => :Str
 

@@ -401,13 +401,16 @@ function Error(fields) {
     type: __taida_ensureNotNull(fields && fields.type, ''),
     message: __taida_ensureNotNull(fields && fields.message, ''),
   };
+  if (fields && Object.prototype.hasOwnProperty.call(fields, 'message')) {
+    Object.defineProperty(obj, '__taidaExplicitMessageField', { value: true, enumerable: false });
+  }
   return Object.freeze(obj);
 }
 
 // ── Async[T] — Promise-based (thenable) ─────────────────
 // __TaidaAsync is a thenable: it implements .then() so that
 // `await asyncObj` resolves to the inner value or rejects with the error.
-// This enables ]=> to map to `await` in generated JS code.
+// This enables >=> to map to `await` in generated JS code.
 class __TaidaAsync {
   constructor(value, error, status) {
     this.__type = 'Async';
@@ -840,7 +843,7 @@ function None() { throw new __NativeError('None() has been removed. Optional is 
 // ── Result[T, P] (operation mold with predicate + throw field) ──
 // Result[value, pred]() → P: :T => :Bool — predicate for success/failure
 // Result[value, pred]() => r — predicate unevaluated (stored as __predicate)
-// Result[value, pred]() ]=> r — predicate evaluated: true → value T, false → throw
+// Result[value, pred]() >=> r — predicate evaluated: true → value T, false → throw
 // Result[value]() — backward compatible: no predicate (always success if no throw)
 function __taida_result_create(value, throwVal, predicate, displayOrder) {
   const _value = value;
@@ -902,6 +905,7 @@ function __taida_result_create(value, throwVal, predicate, displayOrder) {
           ? __taida_format(mapped)
           : String(mapped);
         newThrow = { __type: 'ResultError', message: msg, type: 'ResultError' };
+        Object.defineProperty(newThrow, '__taidaExplicitMessageField', { value: true, enumerable: false });
       }
       return __taida_result_create(null, newThrow, null);
     },
@@ -923,14 +927,16 @@ function __taida_result_create(value, throwVal, predicate, displayOrder) {
       if (!_checkError()) return 'Result(' + String(_value) + ')';
       let errDisplay;
       if (_throw && typeof _throw === 'object') {
-        // The JS Error factory always materialises `message: ''` for
-        // Error-derived packs, so an empty string is indistinguishable
-        // from a missing message. Treat `message === ''` as "no
-        // message" and fall back to the declared `__type` name; the
-        // four backends agree on this even though Interpreter / Native
-        // can technically tell the two states apart.
-        if (typeof _throw.message === 'string' && _throw.message.length > 0) {
-          errDisplay = _throw.message;
+        if (typeof _throw.message === 'string') {
+          if (_throw.message.length > 0) {
+            errDisplay = _throw.message;
+          } else if (_throw.__taidaExplicitMessageField === true) {
+            errDisplay = '""';
+          } else if (_throw.__type) {
+            errDisplay = _throw.__type;
+          } else {
+            errDisplay = '""';
+          }
         } else if (_throw.__type) {
           errDisplay = _throw.__type;
         } else {
@@ -1517,7 +1523,7 @@ function ToRadix(value, base) {
 
 // ── Stream[T] — time-series mold type ────────────────────
 // Stream holds source items + lazy transform chain.
-// ]=> (unmold) collects all items, applying transforms.
+// >=> (unmold) collects all items, applying transforms.
 function __taida_stream(items, transforms) {
   return Object.freeze({ __type: 'Stream', __items: Object.freeze([...items]), __transforms: Object.freeze([...transforms]), __status: 'completed',
     length_() { return this.__status === 'completed' ? this.__items.length : -1; },
@@ -2322,7 +2328,7 @@ function __taida_stderr(...args) {
 const __taida_fs = await import('node:fs').catch(() => null);
 
 // C20-2: readline/promises is loaded alongside node:fs so that
-// `stdinLine(prompt) ]=> line` has a UTF-8-aware editor available on the
+// `stdinLine(prompt) >=> line` has a UTF-8-aware editor available on the
 // JS backend. We deliberately choose `readline/promises` over `readline`
 // because `rl.question(prompt)` returns a Promise directly — Taida's
 // Async[Lax[Str]] surface wraps it without a sync / async bridge.
@@ -2387,7 +2393,7 @@ function __taida_stdin(prompt) {
 // type to Async and let the Interpreter / Native backends resolve
 // immediately. Taida callers write:
 //
-//     stdinLine("name: ") ]=> line
+//     stdinLine("name: ") >=> line
 //     stdout("hi, " + line.getOrDefault("stranger"))
 //
 // Any failure (missing readline module, EOF on pipe, Ctrl-C, non-TTY
@@ -2489,8 +2495,11 @@ function __taida_sleep(ms) {
       'rejected'
     );
   }
+  // F42 sweep: resolve with the requested ms count (Int) instead of
+  // an empty object (which would be Unit on Taida surface).
+  // PHILOSOPHY I forbids `Async[Unit]` — `sleep` now returns `Async[Int]`.
   const promise = new Promise((resolve) => {
-    setTimeout(() => resolve(Object.freeze({})), ms);
+    setTimeout(() => resolve(ms), ms);
   });
   return __taida_async_pending_from_promise(promise);
 }
@@ -2574,7 +2583,7 @@ function __taida_unmold(v) {
 async function __taida_unmold_async(v) {
   if (v && typeof v.then === 'function') {
     // Promise-based OS APIs already resolve to monadic objects (Lax/Result).
-    // Do not unmold again after awaiting, or `]=>` loses one level too many.
+    // Do not unmold again after awaiting, or `>=>` loses one level too many.
     return await v;
   }
   return __taida_unmold(v);
@@ -2653,7 +2662,7 @@ if (!Array.prototype.__taida_patched) {
   });
   // E32B-022 (Lock-N): Lax[Int]-returning siblings of indexOf /
   // lastIndexOf. PHILOSOPHY I forbids `-1` magic-value sentinels;
-  // callers should use `]=>` / `<=[` / `getOrDefault(...)` off the
+  // callers should use `>=>` / `<=<` / `getOrDefault(...)` off the
   // returned Lax. Both paths use structural equality just like the
   // `-1`-sentinel siblings above.
   Object.defineProperty(Array.prototype, 'indexOfLax', {
@@ -3096,7 +3105,12 @@ function zip(a, b) {
 }
 
 function __taida_assert(cond, msg) {
+  // F42 sweep: assert returns true on success (Bool) instead of undefined (Unit).
+  // PHILOSOPHY I forbids Unit on Taida surface; the interpreter
+  // (src/interpreter/prelude.rs:801) returns Value::Bool(true) for the
+  // success path and throws on failure. Keep parity across backends.
   if (!cond) throw new __TaidaError('AssertionError', msg || 'Assertion failed', {});
+  return true;
 }
 
 function __taida_list_method_removed(method) {
@@ -3264,7 +3278,11 @@ function __taida_js_set_runner(path, value) {
   return __taida_cagerilla_runner(function(subject) {
     const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSSet');
     receiver[key] = runnerValue;
-    return subject;
+    // F42 sweep: JSSet returns :JSRilla[Bool] — Cage unwraps the runner
+    // and surfaces this boolean as the assignment-success signal.
+    // PHILOSOPHY I forbids `Unit` / `Molten` placeholders as the surface
+    // return type for assignment-style descriptors.
+    return true;
   });
 }
 

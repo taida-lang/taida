@@ -1,10 +1,10 @@
 // Quality Test: B-4h — エラー天井内モールド + unmold
-// |== 内で Div ]=> して結果を使う
+// |== 内で Div >=> して結果を使う
 
 Error => MyError = @(code: Int)
 
 doDiv x y =
-  Div[x, y]() ]=> q
+  Div[x, y]() >=> q
   q
 => :Int
 

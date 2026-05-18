@@ -128,7 +128,10 @@ fn test_check_json_e1502_old_placeholder_partial_application() {
 fn test_check_json_e1503_typedef_partial_application() {
     let dir = unique_temp_dir("taida_check_e1503");
     let src = dir.join("main.td");
-    write_file(&src, "Point => @(x, y)\np <= Point(1, )\n");
+    // F42 sweep [E1521]: positional `@(x, y)` is no longer accepted as a
+    // buchi pack literal; use the canonical named-field TypeDef form so
+    // the partial application (`Point(1, )`) is what surfaces `[E1503]`.
+    write_file(&src, "Point = @(x: Int, y: Int)\np <= Point(1, )\n");
 
     let output = Command::new(taida_bin())
         .arg("way")

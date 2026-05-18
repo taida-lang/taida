@@ -3,9 +3,9 @@
 /// Provides:
 /// - Parse errors (severity: Error)
 /// - Type errors from TypeChecker (severity: Warning)
-///   - Type mismatches in assignments
-///   - Undefined variable warnings (when TypeChecker reports unknown types)
-///   - Empty list literal without type annotation
+/// - Type mismatches in assignments
+/// - Undefined variable warnings (when TypeChecker reports unknown types)
+/// - Empty list literal without type annotation
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use crate::parser::{ParseError, parse};
@@ -255,7 +255,7 @@ mod tests {
             "pi <= 3.14",
             "items: @[Int] <= @[]",
             "Person = @(name: Str, age: Int)\np <= Person(name <= \"Alice\", age <= 30)",
-            "add a b = a + b => :Int",
+            "add a: Int b: Int = a + b => :Int",
             "x <= 42\nstdout(x)",
         ];
         for (i, src) in valid_programs.iter().enumerate() {
@@ -402,7 +402,9 @@ mod tests {
 
     #[test]
     fn test_rc4b_multiline_function_no_false_positive() {
-        let source = "add a b =\n  a + b\n=> :Int";
+        // F42 sweep [E1525]: params need annotations so `a + b` resolves
+        // to a concrete operator dispatch (not `Unknown + Unknown`).
+        let source = "add a: Int b: Int =\n  a + b\n=> :Int";
         let result = analyze(source);
         assert!(
             result.diagnostics.is_empty(),

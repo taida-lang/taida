@@ -154,7 +154,7 @@ fn slice_bytes_via_interpreter_is_zero_copy_view() {
     // sub-range view via Slice[bytes, 10, 100].
     let src = "\
 sourceLax <= Bytes[\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>/?`~\"]()
-sourceLax ]=> source
+sourceLax >=> source
 view <= Slice[source, 10, 100]
 ";
     let (prog, errs) = parse(src);

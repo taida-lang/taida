@@ -229,15 +229,15 @@ impl Lowering {
 
     /// NB-31: Determine compile-time callable type tag for httpServe handler.
     /// Returns:
-    ///   6  (TAIDA_TAG_CLOSURE) — lambda or closure variable
-    ///  10  (TAIDA_TAG_FUNC)    — named function reference (user_funcs / lambda_vars)
-    ///  -1  (TAIDA_TAG_UNKNOWN) — dynamic / cannot determine at compile time
-    ///   other (0..5, etc.)     — statically known non-callable type
+    /// 6 (TAIDA_TAG_CLOSURE) — lambda or closure variable
+    /// 10 (TAIDA_TAG_FUNC) — named function reference (user_funcs / lambda_vars)
+    /// -1 (TAIDA_TAG_UNKNOWN) — dynamic / cannot determine at compile time
+    /// other (0..5, etc.) — statically known non-callable type
     ///
     /// Strategy: check callable first, then delegate to noncallable_type_tag()
     /// which uses the existing expr_returns_float / expr_is_string_full / expr_is_bool /
     /// expr_is_pack / expr_is_list helpers + arithmetic Int detection.
-    /// NET3-5a: Determine compile-time handler parameter count for httpServe.
+    /// Determine compile-time handler parameter count for httpServe.
     /// Returns the number of parameters if statically known, -1 if dynamic.
     pub(super) fn handler_arity(&self, expr: &Expr) -> i64 {
         match expr {
@@ -247,7 +247,7 @@ impl Lowering {
         }
     }
 
-    /// NB3-4: Resolve handler arity for a named identifier by following
+    /// Resolve handler arity for a named identifier by following
     /// func_param_defs, lambda_vars, lambda_param_counts, and var_aliases chains.
     /// Max chain depth of 16 to prevent infinite loops from cyclic aliases.
     pub(super) fn resolve_ident_arity(&self, name: &str) -> i64 {
@@ -308,7 +308,7 @@ impl Lowering {
         -1 // TAIDA_TAG_UNKNOWN
     }
 
-    /// NB3-4: Resolve callable type tag for a named identifier, following var_aliases.
+    /// Resolve callable type tag for a named identifier, following var_aliases.
     pub(super) fn resolve_ident_callable_tag(&self, name: &str) -> Option<i64> {
         let mut current = name;
         let mut depth = 0;
@@ -332,7 +332,7 @@ impl Lowering {
         }
     }
 
-    /// NB3-4: Check if an identifier, or any ancestor in its var_aliases chain,
+    /// Check if an identifier, or any ancestor in its var_aliases chain,
     /// belongs to return_type_inferred_params. This ensures that `x <= h` where
     /// `h` is a return-type-inferred parameter is also treated as unknown callable.
     pub(super) fn ident_or_alias_is_return_type_inferred(&self, name: &str) -> bool {
@@ -477,7 +477,7 @@ impl Lowering {
     /// NB-31: 式が Int を返すかどうかを判定（noncallable_type_tag 用）
     /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
     ///
-    /// C23B-003 reopen 4 (2026-04-22): visibility widened from
+    /// reopen 4 (2026-04-22): visibility widened from
     /// `pub(super)` to `pub(crate)` so the sibling `lower_molds.rs`
     /// module (`src/codegen/lower_molds.rs`, not under `lower/`) can
     /// use the richer Int check in the `Str[x]()` fast-path dispatch.
@@ -513,12 +513,12 @@ impl Lowering {
     }
 
     /// Unmold 先の変数に型情報を伝播する
-    /// MoldInst("Str", ...) ]=> x の場合、x を string_vars に追加
+    /// MoldInst("Str",...) >=> x の場合、x を string_vars に追加
     pub(super) fn track_unmold_type(&mut self, target: &str, source: &Expr) {
         match source {
             // C26B-011 (Phase 11): Div/Mod return Float when at least one
             // type-arg is Float (matches `taida_div_mold_f` lowering in
-            // `lower_molds.rs`). Without this, `Div[1.0, 2.0]() ]=> r`
+            // `lower_molds.rs`). Without this, `Div[1.0, 2.0]() >=> r`
             // leaves `r` untagged, `debug(r)` falls through to
             // `taida_debug_int`, and prints the f64 bit-pattern as an
             // int. `track_unmold_type_by_mold_name` only sees the mold
@@ -532,7 +532,7 @@ impl Lowering {
             }
             Expr::MoldInst(name, _, _, _) => self.track_unmold_type_by_mold_name(target, name),
             // QF-34: Ident source — look up lax_inner_types to propagate type through unmold
-            // e.g., `x <= Bool["maybe"]()` then `x ]=> val` → val is Bool
+            // e.g., `x <= Bool["maybe"]()` then `x >=> val` → val is Bool
             Expr::Ident(name, _) => {
                 if let Some(inner_type) = self.lax_inner_types.get(name).cloned() {
                     self.track_unmold_type_by_mold_name(target, &inner_type);
@@ -565,7 +565,7 @@ impl Lowering {
                 ) {
                     self.bool_vars.insert(target.to_string());
                 }
-                // C21-4: `a.get(i) ]=> av` — if `a` is a typed `@[Float]` list,
+                // C21-4: `a.get(i) >=> av` — if `a` is a typed `@[Float]` list,
                 // tag `av` as a Float so the subsequent `av * bv` arithmetic
                 // lowers to `taida_float_mul` (not `taida_int_mul`).
                 if method.as_str() == "get"
@@ -596,7 +596,7 @@ impl Lowering {
                 self.float_vars.insert(target.to_string());
             }
             // C26B-011 (Phase 11): math molds return Float per
-            // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() ]=> nan`
+            // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() >=> nan`
             // left `nan` untagged and `debug(nan)` fell through to
             // `taida_debug_int`, printing the f64 bit-pattern as Int
             // (e.g. `-2251799813685248` for NaN). Must match
@@ -611,7 +611,7 @@ impl Lowering {
 
     /// 式の結果を文字列に変換する。既に文字列なら何もしない。
     ///
-    /// C12B-016 (2026-04-15): This helper is **no longer called from the
+    /// (2026-04-15): This helper is **no longer called from the
     /// `stdout` / `stderr` lowering path**. Those now dispatch directly via
     /// `taida_io_stdout_with_tag` / `taida_io_stderr_with_tag` with the
     /// compile-time tag (or `-1` for UNKNOWN); the runtime polymorphic
@@ -621,7 +621,7 @@ impl Lowering {
     ///
     /// - `stdin(prompt)` — the C runtime expects a prompt string.
     /// - `TemplateLit` (`"prefix ${expr} suffix"`) — interpolated exprs
-    ///   are stringified so they can be concatenated with `taida_str_concat`.
+    /// are stringified so they can be concatenated with `taida_str_concat`.
     pub(super) fn convert_to_string(
         &self,
         func: &mut IrFunction,

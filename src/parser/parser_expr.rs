@@ -416,7 +416,10 @@ impl Parser {
                 self.advance(); // consume `@`
                 if self.check(&TokenKind::LParen) {
                     self.advance(); // consume `(`
-                    let fields = self.parse_buchi_field_list()?;
+                    // F42 sweep [E1521]: literal `@(...)` enforces named-only
+                    // fields. MoldInst / TypeInst call-site arguments still
+                    // accept positional shape via the default `false` mode.
+                    let fields = self.parse_buchi_field_list_with(true)?;
                     self.expect(&TokenKind::RParen)?;
                     Ok(Expr::BuchiPack(fields, span))
                 } else if self.check(&TokenKind::LBracket) {
@@ -578,14 +581,14 @@ impl Parser {
     /// If the body is on the same line, parse a single expression.
     /// If the body continues on the next line (indented), parse as a block.
     ///
-    /// C12-4 (FB-17): Pure expression discipline.
+    /// Pure expression discipline.
     /// An arm body must be a sequence of **let-bindings** followed by
     /// **exactly one final result expression**. Allowed non-final
-    /// statement kinds: `<=` assignment, `]=>` unmold-forward,
-    /// `<=[` unmold-backward. Any other statement kind in a non-final
+    /// statement kinds: `<=` assignment, `>=>` unmold-forward,
+    /// `<=<` unmold-backward. Any other statement kind in a non-final
     /// position — including a bare function-call / pipeline statement
-    /// (used for side effects) and any definition (`Name = ...`,
-    /// `Mold[] => ...`, `|== ... =`, `>>> ...`, `<<< ...`) — is
+    /// (used for side effects) and any definition (`Name =...`,
+    /// `Mold[] =>...`, `|==... =`, `>>>...`, `<<<...`) — is
     /// rejected with `[E1616]`. The final statement must be an
     /// expression statement that produces the arm's value.
     pub(super) fn parse_cond_arm_body(&mut self) -> Result<Vec<Statement>, ParseError> {
@@ -613,30 +616,30 @@ impl Parser {
         }
     }
 
-    /// C12-4 (FB-17) + C13-1: pure-expression discipline on a parsed
-    /// condition-arm body, relaxed for C13.
+    /// +: pure-expression discipline on a parsed
+    /// condition-arm body.
     ///
     /// Rules:
-    ///   1. The **final** statement may be:
-    ///      - `Statement::Expr(_)` — arm's result expression (classic form), or
-    ///      - `Statement::Assignment(_)` / `Statement::UnmoldForward(_)` /
-    ///        `Statement::UnmoldBackward(_)` — C13-1 tail-binding form
-    ///        that yields the bound value as the arm's result.
-    ///   2. **Non-final** statements must be `Assignment`,
-    ///      `UnmoldForward`, or `UnmoldBackward` — i.e. let-bindings
-    ///      that name a value for subsequent statements.
-    ///   3. Any other statement kind anywhere in the arm body is
-    ///      rejected with `[E1616]`.
+    /// 1. The **final** statement may be:
+    /// - `Statement::Expr(_)` — arm's result expression (classic form), or
+    /// - `Statement::Assignment(_)` / `Statement::UnmoldForward(_)` /
+    /// `Statement::UnmoldBackward(_)` — tail-binding form
+    /// that yields the bound value as the arm's result.
+    /// 2. **Non-final** statements must be `Assignment`,
+    /// `UnmoldForward`, or `UnmoldBackward` — i.e. let-bindings
+    /// that name a value for subsequent statements.
+    /// 3. Any other statement kind anywhere in the arm body is
+    /// rejected with `[E1616]`.
     ///
-    /// The rule stops the FB-17 "context leak" pattern where a
+    /// The rule stops the "context leak" pattern where a
     /// discarded side-effect call (`writeFile(...) => _wr`, a bare
     /// function-call statement, or a top-level definition) can hide
     /// inside what reads like a conditional branch.
     ///
-    /// C13-1 loosens rule 1 so the tail bind (`name <= expr`,
-    /// `expr => name`, `expr ]=> name`, `name <=[ expr`) is accepted
+    /// loosens rule 1 so the tail bind (`name <= expr`,
+    /// `expr => name`, `expr >=> name`, `name <=< expr`) is accepted
     /// as an expression-block result without requiring a redundant
-    /// trailing `name` line. FB-17's safety boundary is preserved:
+    /// trailing `name` line. 's safety boundary is preserved:
     /// bare call statements, discard pipelines, and nested definitions
     /// in non-final positions remain rejected.
     fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
@@ -657,7 +660,7 @@ impl Parser {
                             message: format!(
                                 "[E1616] `| |>` arm body must end with a result expression or a binding, not a {} statement. \
                                  A condition arm is a pure expression: optional let-bindings \
-                                 (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may appear, \
+                                 (`name <= expr`, `expr >=> name`, `name <=< expr`) may appear, \
                                  and the last line may be either a result expression or a tail binding. \
                                  See docs/guide/07_control_flow.md for the pure-expression rule.",
                                 Self::statement_kind_label(stmt),
@@ -676,7 +679,7 @@ impl Parser {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: "[E1616] side-effect statement is not allowed inside a `| |>` arm body. \
-                                      Only let-bindings (`name <= expr`, `expr ]=> name`, `name <=[ expr`) may \
+                                      Only let-bindings (`name <= expr`, `expr >=> name`, `name <=< expr`) may \
                                       appear before the final result expression — a bare function call or \
                                       pipeline used for side effects breaks the pure-expression rule. \
                                       See docs/guide/07_control_flow.md.".to_string(),
@@ -702,11 +705,11 @@ impl Parser {
         Ok(())
     }
 
-    /// C13B-010: Reject discard bindings (`expr => _name`, `_name <= expr`,
-    /// `expr ]=> _name`, `_name <=[ expr`) at any position inside an
+    /// Reject discard bindings (`expr => _name`, `_name <= expr`,
+    /// `expr >=> _name`, `_name <=< expr`) at any position inside an
     /// expression-block body — arm body, function body, `|==` handler body,
-    /// or method body. The FB-17 "throw the value away for its side effects"
-    /// pattern breaks the pure-expression rule at every C13-1 tail-binding
+    /// or method body. The "throw the value away for its side effects"
+    /// pattern breaks the pure-expression rule at every tail-binding
     /// position, so the rejection is context-independent.
     pub(crate) fn reject_discard_bindings_in_expression_block(
         block: &[Statement],
@@ -717,7 +720,7 @@ impl Parser {
                 let span = Self::statement_span(stmt);
                 return Err(ParseError {
                     message: format!(
-                        "[E1616] `{} <= ...` / `... => {}` / `... ]=> {}` is a discard binding \
+                        "[E1616] `{} <= ...` / `... => {}` / `... >=> {}` is a discard binding \
                          and is not allowed inside a {}. The underscore-prefixed \
                          target indicates a value being thrown away for side effects, which \
                          breaks the pure-expression rule. Remove the binding or use a meaningful \
@@ -731,8 +734,8 @@ impl Parser {
         Ok(())
     }
 
-    /// C13-1: Return `Some(target)` if `stmt` is a discard-style binding
-    /// (`expr => _name`, `_name <= expr`, `expr ]=> _name`, `_name <=[ expr`)
+    /// Return `Some(target)` if `stmt` is a discard-style binding
+    /// (`expr => _name`, `_name <= expr`, `expr >=> _name`, `_name <=< expr`)
     /// — i.e. the binding target starts with `_`. Used by
     /// `reject_discard_bindings_in_expression_block`.
     fn discard_binding_target(stmt: &Statement) -> Option<&str> {
@@ -754,8 +757,8 @@ impl Parser {
         match stmt {
             Statement::Expr(_) => "expression",
             Statement::Assignment(_) => "assignment",
-            Statement::UnmoldForward(_) => "]=> binding",
-            Statement::UnmoldBackward(_) => "<=[ binding",
+            Statement::UnmoldForward(_) => ">=> binding",
+            Statement::UnmoldBackward(_) => "<=< binding",
             Statement::EnumDef(_) => "enum definition",
             // (E30 Sub-step 2.1) ClassLikeDef + kind discriminator
             Statement::ClassLikeDef(cl) => match cl.kind {
@@ -832,6 +835,21 @@ impl Parser {
     }
 
     pub(super) fn parse_buchi_field_list(&mut self) -> Result<Vec<BuchiField>, ParseError> {
+        self.parse_buchi_field_list_with(false)
+    }
+
+    /// [E1521]: When `strict_named` is true, positional fields
+    /// (`@(v1, v2)`) are rejected so buchi pack literals (`@(name <= value, ...)`)
+    /// can be statically guaranteed to have only named fields, satisfying
+    /// PHILOSOPHY II.
+    ///
+    /// MoldInst / TypeInst call-site argument lists (e.g.
+    /// `JSNew[Server](8080)` — positional arguments to the mold) still
+    /// accept positional shape via `strict_named = false`.
+    pub(super) fn parse_buchi_field_list_with(
+        &mut self,
+        strict_named: bool,
+    ) -> Result<Vec<BuchiField>, ParseError> {
         let mut fields = Vec::new();
         self.skip_newlines();
         while !self.check(&TokenKind::RParen) && !self.is_at_end() {
@@ -850,8 +868,24 @@ impl Parser {
                     value,
                     span: field_span,
                 });
+            } else if strict_named {
+                // F42 sweep [E1521]: positional buchi pack field literals
+                // (`@(v1, v2, ...)`) are no longer accepted in literal
+                // context. PHILOSOPHY II 「ぶちパック `@(...)` — 名前付き
+                // フィールドの集合」と矛盾するため reject。書き換え方:
+                // `@(name <= value, ...)` の named-only form を使う。
+                return Err(ParseError {
+                    message:
+                        "[E1521] positional buchi pack field is no longer accepted in `@(...)` literal. \
+                         Every buchi pack field must be named (PHILOSOPHY II — \
+                         buchi pack is a set of named fields). \
+                         Hint: rewrite as `@(name <= value, ...)`."
+                            .into(),
+                    span: field_span,
+                });
             } else {
-                // Positional argument — use index as name
+                // MoldInst / TypeInst argument list — positional shape is
+                // still allowed at call sites (e.g. `JSNew[Server](8080)`).
                 let value = self.parse_expression()?;
                 fields.push(BuchiField {
                     name: format!("_{}", fields.len()),

@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 // N-55: Error handling conventions in this CLI binary
 //
 // This file uses three error handling patterns, chosen by context:
@@ -300,8 +302,7 @@ Behavior:
   `.taida/deps/<pkg>/native/lib<name>.<ext>`. Downloads are cached under
   `~/.taida/addon-cache/`; use `taida ingot cache clean --addons` to prune.
 
-  Large addon downloads (>= 256 KiB) show a progress indicator on stderr
-  (RC15B-002).
+  Large addon downloads (>= 256 KiB) show a progress indicator on stderr.
 
   C17: before reusing a cached `~/.taida/store/<pkg>/<version>/` entry,
   `taida ingot install` compares the resolved commit SHA of `<version>` on the
@@ -554,7 +555,7 @@ fn reject_removed_command(command: &str) -> ! {
 
 fn reject_removed_migration_command(invocation: &str) -> ! {
     eprintln!(
-        "[E1700] Migration command '{}' is not available in @e.X. E31 does not provide AST migration tooling.",
+        "[E1700] Migration command '{}' is not available. Current CLI does not provide AST migration tooling.",
         invocation
     );
     eprintln!(
@@ -973,6 +974,27 @@ fn run_check_cmd(args: &[String]) {
                 suggestion,
             });
         }
+
+        // F42 sweep [E0701]: surface direct non-tail recursion at
+        // `way check` time. The verify check is registered in
+        // `verify::ALL_CHECKS` for `way verify`, but `way check` does
+        // not run the full verify pipeline; pulling this single check
+        // in keeps PHILOSOPHY I — strict, no unbounded stacks — visible
+        // during the default lint flow as well.
+        let f42_findings = verify::run_check("direct-non-tail-recursion", &program, &file_str);
+        for f in f42_findings {
+            let (code, suggestion) = split_diag_code_and_hint(&f.message);
+            diagnostics.push(CheckDiagnostic {
+                stage: "verify",
+                severity: "ERROR",
+                code,
+                message: f.message.clone(),
+                file: f.file.clone(),
+                line: f.line,
+                column: None,
+                suggestion,
+            });
+        }
     }
 
     let errors = diagnostics.iter().filter(|d| d.severity == "ERROR").count();
@@ -1165,7 +1187,7 @@ fn check_diagnostics_json(
     })
 }
 
-// ── Lint subcommand (D28B-008) ──────────────────────────
+// ── Lint subcommand ──────────────────────────
 
 fn print_lint_help() {
     println!(
@@ -1174,10 +1196,10 @@ Usage:
   taida way lint [--format text|json|jsonl|sarif] [--strict] [--quiet] <PATH>
 
 Description:
-  Run the D28B-008 naming-convention lint pass over <PATH>. <PATH> may be
+  Run the naming-convention lint pass over <PATH>. <PATH> may be
   a single .td file or a directory (.td files are collected recursively).
-  The lint pins the D28B-001 (Phase 0 2026-04-26) category-based naming
-  rules and emits diagnostics in the E1801..E1809 band.
+  The lint enforces category-based naming rules and emits diagnostics in the
+  E1801..E1809 band.
 
 Exit codes:
   0   No lint diagnostics surfaced.
@@ -1887,7 +1909,7 @@ struct BuildDescriptorModel {
     hooks_by_symbol: HashMap<String, BuildHookDescriptor>,
     /// Tracks BuildHook `name` -> `symbol` so duplicate hook names are
     /// caught alongside BuildUnit / BuildPlan / AssetBundle. Without this
-    /// map two `BuildHook(name <= "deploy", ...)` definitions silently
+    /// map two `BuildHook(name <= "deploy",...)` definitions silently
     /// coexist in `hooks_by_symbol`, leaving any future name-based CLI or
     /// docs lookup ambiguous.
     hook_symbol_by_name: HashMap<String, String>,
@@ -5319,7 +5341,7 @@ fn run_build_js_file(
     }
 }
 
-/// Stage all missing dependency .mjs files under .taida/deps/ so they can be
+/// Stage all missing dependency.mjs files under.taida/deps/ so they can be
 /// committed atomically with the main JS outputs.
 fn stage_dep_js_outputs(
     project_root: &Path,
@@ -8145,21 +8167,21 @@ fn run_update(args: &[String]) {
 // ── Publish subcommand ─────────────────────────────────
 
 #[cfg(feature = "community")]
-/// C14-1: `taida ingot publish` is now a tag-push-only command.
+/// `taida ingot publish` is now a tag-push-only command.
 ///
 /// Flow:
 ///
-///   1. Find the `packages.tdm` in the current tree and parse it.
-///   2. Validate the manifest identity (`<<<@version owner/name`
-///      required; bare names are rejected).
-///   3. Cross-check identity against `origin` (GitHub URL, exact
-///      `owner/repo` match).
-///   4. Check the working tree is clean.
-///   5. Compute the next version from the public API diff (or honour
-///      `--force-version`).
-///   6. Detect tag collision (reject unless `--retag`).
-///   7. `--dry-run` prints the plan and exits.
-///   8. Otherwise, `git tag <next> && git push origin <tag>`. Done.
+/// 1. Find the `packages.tdm` in the current tree and parse it.
+/// 2. Validate the manifest identity (`<<<@version owner/name`
+/// required; bare names are rejected).
+/// 3. Cross-check identity against `origin` (GitHub URL, exact
+/// `owner/repo` match).
+/// 4. Check the working tree is clean.
+/// 5. Compute the next version from the public API diff (or honour
+/// `--force-version`).
+/// 6. Detect tag collision (reject unless `--retag`).
+/// 7. `--dry-run` prints the plan and exits.
+/// 8. Otherwise, `git tag <next> && git push origin <tag>`. Done.
 ///
 /// `taida ingot publish` does not build cdylibs, compute SHA-256, mutate
 /// `packages.tdm`, push to `main`, or call `gh release create`. All
@@ -8301,13 +8323,13 @@ fn run_cache(args: &[String]) {
         println!("Commands:");
         println!("  clean                       Remove cached WASM runtime .o files (default)");
         println!("  clean --addons              Remove cached addon prebuild binaries");
-        println!("                              (RC15B-001: prunes ~/.taida/addon-cache/)");
-        println!("  clean --store [--yes]       C17: prune ~/.taida/store/ (shows a summary");
+        println!("                              (prunes ~/.taida/addon-cache/)");
+        println!("  clean --store [--yes]       Prune ~/.taida/store/ (shows a summary");
         println!("                              first; then asks to confirm interactively on a");
         println!("                              TTY, or requires --yes in non-TTY contexts)");
-        println!("  clean --store-pkg <org>/<name>   C17: prune a single store package");
+        println!("  clean --store-pkg <org>/<name>   Prune a single store package");
         println!("                              (no confirmation prompt; scope is narrow)");
-        println!("  clean --all [--yes]         Remove WASM + addon cache + store (C17)");
+        println!("  clean --all [--yes]         Remove WASM + addon cache + store");
         return;
     }
 

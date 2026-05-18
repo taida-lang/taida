@@ -9,20 +9,20 @@ findByName items name =
 => :Lax
 
 calcTotalValue items =
-  Map[items, totalValue]() ]=> values
+  Map[items, totalValue]() >=> values
   Sum[values]()
 => :Int
 
 lowStockReport items =
-  Filter[items, isLowStock]() ]=> result
+  Filter[items, isLowStock]() >=> result
   result
 
 expensiveReport items =
-  Filter[items, isExpensive]() ]=> result
+  Filter[items, isExpensive]() >=> result
   result
 
 expiringReport items =
-  Filter[items, isExpiring]() ]=> result
+  Filter[items, isExpiring]() >=> result
   result
 
 // Validate stock level — throws StockError if qty is 0, catches internally

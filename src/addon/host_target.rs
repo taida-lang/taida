@@ -3,7 +3,7 @@
 //! Uses `target_lexicon::HOST` to detect the current platform and maps
 //! it to a canonical `HostTarget` enum.
 //!
-//! ## RC1.5 v1 (5 targets)
+//! ## Baseline targets
 //!
 //! - `x86_64-unknown-linux-gnu`
 //! - `aarch64-unknown-linux-gnu`
@@ -11,8 +11,7 @@
 //! - `aarch64-apple-darwin`
 //! - `x86_64-pc-windows-msvc`
 //!
-//! ## RC1.5 Nice-to-Have extensions (RC15B-003)
-//!
+//! ## Extended targets//!
 //! - `x86_64-unknown-linux-musl` (Alpine Linux)
 //! - `aarch64-unknown-linux-musl`
 //! - `i686-unknown-linux-gnu` (32-bit Linux)
@@ -146,8 +145,8 @@ impl fmt::Display for UnsupportedHost {
 
 /// Returns all supported target triples in canonical order.
 ///
-/// The first 5 entries are the RC1.5 v1 baseline targets; the remaining
-/// entries are RC1.5 Nice-to-Have extensions (RC15B-003). The order is
+/// The first 5 entries are the baseline targets; the remaining
+/// entries are extended targets. The order is
 /// preserved so help messages and error diagnostics are deterministic.
 pub fn supported_targets() -> &'static [&'static str] {
     &[

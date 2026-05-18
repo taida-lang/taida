@@ -86,7 +86,7 @@ pilot_data <= @(
   name <= "Asuka",
   sync_rate <= Div[780, 10]()
 )
-pilot_data.sync_rate ]=> rateValue
+pilot_data.sync_rate >=> rateValue
 stdout(rateValue.toString())
 
 // List literal
@@ -98,6 +98,6 @@ stdout(names)
 // JSON conversion
 Pilot6 = @(name: Str, age: Int)
 raw <= '{"name": "Ritsuko", "age": 30}'
-JSON[raw, Pilot6]() ]=> pilot6
+JSON[raw, Pilot6]() >=> pilot6
 stdout(pilot6.name)
 stdout(pilot6.age.toString())

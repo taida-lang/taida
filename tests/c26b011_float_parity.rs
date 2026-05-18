@@ -20,7 +20,7 @@
 //!    matches. Lax slots are tagged `TAIDA_TAG_FLOAT` so
 //!    `taida_lax_to_string` routes through `taida_float_to_str`.
 //! 3. **Native unmold target missed Float origin** — `Div[1.0, 2.0]()
-//!    ]=> r` left `r` untagged; `debug(r)` fell through to
+//!    >=> r` left `r` untagged; `debug(r)` fell through to
 //!    `taida_debug_int`. Extended `track_unmold_type` / `_by_mold_name`
 //!    to cover `Div` / `Mod` (Float-arg case) and math molds.
 //! 4. **JS `__taida_float_render` missed NaN / Inf** — `String(Infinity)`
@@ -137,7 +137,7 @@ fn which_node() -> Option<std::path::PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// div_mod_float.td — integer + float-origin Div / Mod through `]=>` unmold
+// div_mod_float.td — integer + float-origin Div / Mod through `>=>` unmold
 // ---------------------------------------------------------------------------
 
 #[test]

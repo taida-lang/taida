@@ -45,7 +45,7 @@ use taida::parser::parse;
 #[test]
 fn c20b_017_handler_body_error_pops_handler_scope() {
     let prog1_src = "\
-Error => MyError = @()
+Error => MyError = @(detail: Str <= \"\")
 
 boom y =
   |== error: Error =
@@ -122,7 +122,7 @@ stdout(secret)
 #[test]
 fn c20b_017_top_level_handler_body_error_pops_scope() {
     let prog_src = "\
-Error => MyError = @()
+Error => MyError = @(detail: Str <= \"\")
 
 trigger y =
   |== error: Error =
@@ -162,7 +162,7 @@ stdout(trigger(0 - 1))
 #[test]
 fn c20b_017_handler_success_path_unchanged() {
     let prog_src = "\
-Error => MyError = @()
+Error => MyError = @(detail: Str <= \"\")
 
 recover y =
   |== error: Error =

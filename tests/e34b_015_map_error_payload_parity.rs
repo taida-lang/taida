@@ -352,11 +352,6 @@ fn map_error_q_shape_float_round_trips_four_backends() {
 
 #[test]
 fn map_error_empty_message_error_pack_round_trips_four_backends() {
-    // `Fail(message <= "")` cannot be distinguished from "no message
-    // supplied" on JS — the Error factory always materialises a
-    // `message: ''` default. Treat empty strings as "missing" on every
-    // backend and fall back to the declared `__type` name so the four
-    // backends produce the same output.
     let dir = fixture_dir("empty_message");
     let main = dir.join("main.td");
     fs::write(
@@ -375,8 +370,8 @@ fn map_error_empty_message_error_pack_round_trips_four_backends() {
         .map(|(_, o)| o.clone())
         .unwrap_or_default();
     assert_eq!(
-        interp, "Result(throw <= Fail)",
-        "interp must fall back to __type when message is empty, got {:?}",
+        interp, "Result(throw <= \"\")",
+        "interp must keep an empty message distinct from a missing message, got {:?}",
         interp
     );
     assert_four_backends_agree(&results);

@@ -8,7 +8,7 @@
 ///   - `<=` for variable assignment
 ///   - `=` for function definition and BuchiPack field initialization inside @()
 ///   - `=>` for pipeline / return type
-///   - `]=>` for unmold
+///   - `>=>` for unmold
 ///   - `| cond |> value` for conditions (NOT `| cond = value`)
 mod common;
 
@@ -321,7 +321,7 @@ fn test_js_exec_inherited_custom_mold_required_positional_binding() {
     assert_parity(
         "inherited_custom_mold_required_positional",
         r#"
-Mold[T] => PairBase[T] = @()
+Mold[T] => PairBase[T] = @(marker: Int <= 0)
 PairBase[T] => Pair[T, U] = @(
   second: U
   solidify =
@@ -458,11 +458,11 @@ fn test_js_exec_lax() {
         "lax",
         r#"
 d <= Div[10, 3]()
-d ]=> val
+d >=> val
 stdout(val.toString())
 d2 <= Div[10, 0]()
 stdout(d2.has_value.toString())
-d2 ]=> val2
+d2 >=> val2
 stdout(val2.toString())
 "#,
     );
@@ -476,15 +476,15 @@ fn test_js_exec_type_conversion() {
     assert_parity(
         "type_conversion",
         r#"
-Int["123"]() ]=> n
+Int["123"]() >=> n
 stdout(n.toString())
-Int["abc"]() ]=> n2
+Int["abc"]() >=> n2
 stdout(n2.toString())
-Float["3.14"]() ]=> f
+Float["3.14"]() >=> f
 stdout(f.toString())
-Bool["true"]() ]=> b
+Bool["true"]() >=> b
 stdout(b.toString())
-Str[42]() ]=> s
+Str[42]() >=> s
 stdout(s)
 "#,
     );
@@ -593,13 +593,13 @@ stdout(items.length().toString())
 stdout(items.isEmpty().toString())
 stdout(items.contains(4).toString())
 stdout(items.indexOf(1).toString())
-items.first() ]=> f
+items.first() >=> f
 stdout(f.toString())
-items.last() ]=> l
+items.last() >=> l
 stdout(l.toString())
-items.max() ]=> mx
+items.max() >=> mx
 stdout(mx.toString())
-items.min() ]=> mn
+items.min() >=> mn
 stdout(mn.toString())
 "#,
     );
@@ -916,7 +916,7 @@ fn test_js_exec_div_integer() {
         "div_integer",
         r#"
 d <= Div[7, 2]()
-d ]=> v
+d >=> v
 stdout(v.toString())
 "#,
     );
@@ -932,7 +932,7 @@ fn test_js_exec_div_by_zero() {
         "div_by_zero",
         r#"
 d <= Div[10, 0]()
-d ]=> v
+d >=> v
 stdout(v.toString())
 "#,
     );
@@ -948,7 +948,7 @@ fn test_js_exec_div_float() {
         "div_float",
         r#"
 d <= Div[7.5, 2.0]()
-d ]=> v
+d >=> v
 stdout(v.toString())
 "#,
     );
@@ -964,7 +964,7 @@ fn test_js_exec_div_mixed_int_float() {
         "div_mixed_int_float",
         r#"
 d <= Div[7, 2.0]()
-d ]=> v
+d >=> v
 stdout(v.toString())
 "#,
     );
@@ -980,7 +980,7 @@ fn test_js_exec_mod_integer() {
         "mod_integer",
         r#"
 m <= Mod[7, 3]()
-m ]=> v
+m >=> v
 stdout(v.toString())
 "#,
     );

@@ -8,8 +8,8 @@
 // on wasm-full because `taida_polymorphic_length` mis-dispatched Bytes.
 
 chunk <= readBytesAt("_c27b_020_chain_tmp.bin", 0, 4)
-chunk ]=> bytes
+chunk >=> bytes
 cursor <= BytesCursor[bytes](offset <= 0)
-BytesCursorTake[cursor, 4]() ]=> step
+BytesCursorTake[cursor, 4]() >=> step
 v <= U32LEDecode[step.value]().getOrDefault(0)
 stdout(v.toString())

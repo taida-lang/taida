@@ -1,8 +1,7 @@
-//! Host-side value bridge for the RC1 Phase 3 addon ABI.
+//! Host-side value bridge for the addon ABI.
 //!
-//! This module is the concrete implementation of the "allocator
-//! unification" contract from `.dev/RC1_DESIGN.md` Phase 3 Lock and
-//! the RC1B-103 resolution: **the host owns every `TaidaAddonValueV1`
+//! This module is the concrete implementation of the allocator
+//! unification contract: **the host owns every `TaidaAddonValueV1`
 //! and `TaidaAddonErrorV1` that crosses the bridge**. Addons build
 //! return values exclusively through the `TaidaHostV1` callback table
 //! provided by this module, which keeps allocation and deallocation on
@@ -18,33 +17,33 @@
 //! `Box::from_raw` in [`release_value`] / [`release_error`]), we
 //! guarantee correctness regardless of how the addon was compiled.
 //!
-//! # Ownership summary (RC1B-103 resolution)
+//! # Ownership summary
 //!
 //! - Inputs (`args_ptr`, `args_len`): borrowed read-only views built
-//!   by the host on its stack. The addon reads them during the call
-//!   and must not retain references past return. The host drops the
-//!   entire input vector via [`drop_host_built_value`] when the call
-//!   returns.
+//! by the host on its stack. The addon reads them during the call
+//! and must not retain references past return. The host drops the
+//! entire input vector via [`drop_host_built_value`] when the call
+//! returns.
 //! - Outputs (`*out_value`): the addon builds the return value using
-//!   the callback table. Ownership transfers to the host immediately
-//!   on construction; the addon writes the pointer into `*out_value`
-//!   and the host releases it after materialising it back into a
-//!   `taida::Value`.
+//! the callback table. Ownership transfers to the host immediately
+//! on construction; the addon writes the pointer into `*out_value`
+//! and the host releases it after materialising it back into a
+//! `taida::Value`.
 //! - Errors (`*out_error`): same as outputs but with `error_new` /
-//!   `error_release`.
+//! `error_release`.
 //!
 //! # Invariants this module upholds
 //!
 //! 1. Every `*mut TaidaAddonValueV1` returned by a callback is the
-//!    unique owner of its payload subtree.
+//! unique owner of its payload subtree.
 //! 2. `release_value` recursively frees list / pack payloads, so the
-//!    host can drop a whole subtree with one call.
+//! host can drop a whole subtree with one call.
 //! 3. The callback functions are `extern "C"` and never panic across
-//!    the FFI boundary — they use catch-unwind style defensive code
-//!    to convert errors into null returns.
+//! the FFI boundary — they use catch-unwind style defensive code
+//! to convert errors into null returns.
 //! 4. `build_host_input_value` / `drop_host_built_value` are the
-//!    *internal* helpers the host uses to construct borrowed input
-//!    vectors. They are symmetric and must always be used in pairs.
+//! *internal* helpers the host uses to construct borrowed input
+//! vectors. They are symmetric and must always be used in pairs.
 
 use core::ffi::{CStr, c_char, c_void};
 
@@ -60,17 +59,17 @@ use crate::interpreter::value::Value;
 /// the addon boundary.
 ///
 /// Split into distinct variants so callers (and, transitively, Taida
-/// user-level diagnostics) can classify the failure. RC1 scope:
-/// `Async`, `Gorilla`, `Function`, `Stream`, `Json`, `Molten`,
-/// `Error` are out of scope and map to `UnsupportedInput`.
+/// user-level diagnostics) can classify the failure. The current addon
+/// ABI does not bridge `Async`, `Gorilla`, `Function`, `Stream`, `Json`,
+/// `Molten`, or `Error`; those values map to `UnsupportedInput`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BridgeError {
-    /// A value of a kind outside the RC1 Phase 3 whitelist was passed
+    /// A value of a kind outside the addon ABI whitelist was passed
     /// as an input argument.
     UnsupportedInput { kind: &'static str },
     /// The addon returned a `TaidaAddonValueV1` with an out-of-range
-    /// `tag`. Only `Unit..=Pack` are valid in Phase 3.
+    /// `tag`. Only the defined addon value tags are valid.
     UnknownOutputTag { raw_tag: u32 },
     /// An output `Str` payload was not valid UTF-8.
     InvalidStrEncoding,
@@ -84,7 +83,7 @@ impl std::fmt::Display for BridgeError {
         match self {
             Self::UnsupportedInput { kind } => write!(
                 f,
-                "addon bridge: value kind '{kind}' is not supported in RC1 Phase 3"
+                "addon bridge: value kind '{kind}' is not supported by the addon ABI"
             ),
             Self::UnknownOutputTag { raw_tag } => write!(
                 f,
@@ -495,7 +494,7 @@ pub fn make_host_table() -> TaidaHostV1 {
 /// [`release_value_ptr`] when the call completes (or on error).
 ///
 /// Returns `Err(BridgeError::UnsupportedInput)` for values outside
-/// the RC1 Phase 3 whitelist.
+/// the addon ABI whitelist.
 pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, BridgeError> {
     match value {
         Value::Unit => Ok(alloc_value(TaidaAddonValueTag::Unit, core::ptr::null_mut())),
@@ -986,7 +985,31 @@ mod tests {
         assert!(matches!(err, BridgeError::MalformedOutput { .. }));
     }
 
-    // ── RC1B-108 regression: null array + non-zero len must not
+    #[test]
+    fn take_addon_output_rejects_null_scalar_payloads() {
+        for tag in [
+            TaidaAddonValueTag::Int,
+            TaidaAddonValueTag::Float,
+            TaidaAddonValueTag::Bool,
+            TaidaAddonValueTag::Str,
+            TaidaAddonValueTag::Bytes,
+            TaidaAddonValueTag::List,
+            TaidaAddonValueTag::Pack,
+        ] {
+            let ptr = alloc_value(tag, core::ptr::null_mut());
+            // SAFETY: host-built value with deliberately malformed payload.
+            let err = unsafe { take_addon_output(ptr) }
+                .expect_err("null payload for non-Unit tag must fail");
+            assert!(
+                matches!(err, BridgeError::MalformedOutput { .. }),
+                "expected malformed output for tag {:?}, got {:?}",
+                tag,
+                err
+            );
+        }
+    }
+
+    // Regression: null array + non-zero len must not
     // silently normalise to an empty container. ───────────────────
 
     #[test]

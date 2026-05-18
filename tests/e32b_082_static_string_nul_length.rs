@@ -175,16 +175,16 @@ fn e32b_084_byte_at_past_nul_three_backend() {
     // "no value" surfaces here.
     let source = r#"s <= "X\x00Y"
 b0Lax <= ByteAt[s, 0]()
-b0Lax ]=> b0
+b0Lax >=> b0
 stdout(b0.toString())
 b1Lax <= ByteAt[s, 1]()
-b1Lax ]=> b1
+b1Lax >=> b1
 stdout(b1.toString())
 b2Lax <= ByteAt[s, 2]()
-b2Lax ]=> b2
+b2Lax >=> b2
 stdout(b2.toString())
 oobLax <= ByteAt[s, 3]()
-oobLax ]=> oob
+oobLax >=> oob
 stdout(oob.toString())
 "#;
 
@@ -218,7 +218,7 @@ fn e32b_084_byte_at_lax_tag_three_backend() {
     // report `has_value=false`. The previous strlen()-truncated path
     // confused the two on Native because every index >= 1 fell into the
     // empty-Lax branch. This test reads the tag directly via
-    // `.hasValue()` instead of `]=>` so a tag mistake cannot hide
+    // `.hasValue()` instead of `>=>` so a tag mistake cannot hide
     // behind a default value that happens to coincide with the byte.
     let source = r#"s <= "X\x00Y"
 b1Lax <= ByteAt[s, 1]()

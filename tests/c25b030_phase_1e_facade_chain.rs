@@ -721,8 +721,7 @@ stdout(`${helper_public(100)}`)
 
 /// Phase 1E-β: TypeDef / EnumDef / MoldDef statements inside a
 /// facade remain rejected with a stable Phase-1E-γ-referencing
-/// message. Mirrors the original Phase 1E-α test shape but with
-/// the follow-up phase pointer rotated forward.
+/// message. Mirrors the original unsupported-facade test shape.
 #[test]
 fn phase_1e_beta_typedef_in_facade_is_still_rejected() {
     let project = unique_temp_dir("beta_typedef_reject");
@@ -742,8 +741,8 @@ stdout(`${MyRecord}`)
     let (ok, _stdout, stderr) = build_native(&project, main_td);
     assert!(!ok, "TypeDef inside a facade must still fail the build");
     assert!(
-        stderr.contains("C25B-030 Phase 1E-γ"),
-        "error must point to Phase 1E-γ as the follow-up, got: {}",
+        stderr.contains("class-like definitions inside addon facades are not yet supported"),
+        "error must explain that class-like facade definitions are unsupported, got: {}",
         stderr
     );
 
@@ -990,7 +989,7 @@ MakeState initial =
     write_terminal_fixture(&project, terminal_td, &[]);
 
     let main_td = r#">>> taida-lang/terminal => @(MakeState)
-st <=[ MakeState("hello")
+st <=< MakeState("hello")
 stdout(`text=${st.text}`)
 stdout(`cursor=${st.cursor}`)
 stdout(`action=${st.action}`)
@@ -1059,7 +1058,7 @@ MakeState initial =
     // read must both resolve against the same binding without
     // duplicate replay.
     let main_td = r#">>> taida-lang/terminal => @(MakeState, State)
-st <=[ MakeState("hi")
+st <=< MakeState("hi")
 stdout(`via_func=${st.text}`)
 stdout(`default=${State.text}`)
 "#;

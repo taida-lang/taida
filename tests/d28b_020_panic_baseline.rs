@@ -1,15 +1,15 @@
-//! D28B-020 (Option A) — production `panic!` baseline meta regression test.
+//! Production `panic!` baseline meta regression test.
 //!
 //! ## 背景 (Round 1 wB session、2026-04-26)
 //!
-//! D28B-020 contract 起案時、`src/graph/query.rs` 11 箇所 + `src/addon/value_bridge.rs`
+//! この baseline の起案時、`src/graph/query.rs` 11 箇所 + `src/addon/value_bridge.rs`
 //! 11 箇所 の panic! を「production audit 対象 22 箇所」として `Result<T, Err>` 化する
 //! 前提だった。Round 1 wB の探索で、これら 22 箇所は**全て `#[cfg(test)] mod tests`
 //! 内 (test idiom `match { Ok(...) => ..., other => panic!("expected X") }`)** であり、
 //! `src/graph/` + `src/addon/` の production region に panic! が残っていない事実が判明。
 //!
-//! User verdict: **Option A** — production panic! baseline を pin して forward
-//! protection に転換 (`scripts/lint/panic_baseline.sh`)、D28B-020 を CLOSED に flip。
+//! User verdict: production panic! baseline を pin して forward
+//! protection に転換 (`scripts/lint/panic_baseline.sh`)。
 //!
 //! ## 全 src/ tree audit による補足
 //!
@@ -23,7 +23,7 @@
 //!   (`debug_assert_eq!` で contract を明示後の defensive panic)
 //!
 //! これは user-input 由来ではなく、compiler 内部の invariant 違反を signal する
-//! defensive panic で、D28B-020 の「invariant 違反の internal panic は限定的に許容
+//! defensive panic で、「invariant 違反の internal panic は限定的に許容
 //! され得る」判断に整合する。この 1 箇所を baseline として pin し、新規 panic!
 //! 追加 / 既存 panic! の silent な行ずれ・除去を CI で検出する。
 //!

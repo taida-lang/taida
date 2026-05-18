@@ -1,25 +1,25 @@
-//! Native addon loader (RC1 Phase 2 -- `RC1-2a` / `RC1-2b`).
+//! Native addon loader.
 //!
 //! Resolves the frozen `taida_addon_get_v1` symbol from a Rust addon
 //! `cdylib`, validates the ABI handshake, and exposes the addon's
 //! function table behind a safe Rust facade.
 //!
-//! # Frozen contract (`.dev/RC1_DESIGN.md`)
+//! # Frozen contract
 //!
 //! 1. ABI version is `1`. The loader validates `descriptor.abi_version
-//!    == TAIDA_ADDON_ABI_VERSION` **before** dereferencing any other
-//!    descriptor field. Mismatch -> [`AddonLoadError::AbiMismatch`].
-//!    No silent fallback. (RC1B-101)
+//! == TAIDA_ADDON_ABI_VERSION` **before** dereferencing any other
+//! descriptor field. Mismatch -> [`AddonLoadError::AbiMismatch`].
+//! No silent fallback.
 //! 2. Load failures are split into distinct, classifiable variants:
-//!    library not found, entry symbol missing, null descriptor,
-//!    invalid descriptor, init failure. (RC1B-102)
+//! library not found, entry symbol missing, null descriptor,
+//! invalid descriptor, init failure.
 //! 3. The loader takes ownership of the `libloading::Library` handle and
-//!    keeps it alive for the entire lifetime of the [`LoadedAddon`].
-//!    Function pointers harvested from the descriptor are valid only
-//!    while the library is loaded -- this is enforced by lifetime-tying
-//!    [`AddonFunctionRef`] to a borrow of `LoadedAddon`.
+//! keeps it alive for the entire lifetime of the [`LoadedAddon`].
+//! Function pointers harvested from the descriptor are valid only
+//! while the library is loaded -- this is enforced by lifetime-tying
+//! [`AddonFunctionRef`] to a borrow of `LoadedAddon`.
 //! 4. Taida user code never sees raw pointers. The public API only
-//!    hands out `&str` / `u32` / `extern "C" fn` references.
+//! hands out `&str` / `u32` / `extern "C" fn` references.
 //!
 //! # Why `libloading`
 //!
@@ -28,12 +28,12 @@
 //! backend (it is gated by `feature = "native"`), so this loader is
 //! invisible to the JS, WASM, and Interpreter pipelines.
 //!
-//! # Phase split
+//! #
 //!
-//! Phase 2 stops at "ABI handshake + function table introspection".
+//! stops at "ABI handshake + function table introspection".
 //! Calling functions through the bridge (with real Taida values) is
-//! Phase 3 (`RC1-3*`). The function pointers exposed here can already
-//! be invoked with null arg vectors -- the Phase 1 sample addon proves
+//! (`*`). The function pointers exposed here can already
+//! be invoked with null arg vectors -- the sample addon proves
 //! that path -- but routing actual Taida values is deliberately deferred.
 
 use std::ffi::CStr;
@@ -51,9 +51,9 @@ use taida_addon::{
 /// routed back to the offending package import. The split between
 /// `LibraryNotFound`, `EntrySymbolMissing`, `NullDescriptor`,
 /// `AbiMismatch`, `InvalidDescriptor`, and `InitFailed` is the direct
-/// fix for **RC1B-102** (load failures were previously not classifiable).
+/// fix for **** (load failures were previously not classifiable).
 ///
-/// `AbiMismatch` is the direct fix for **RC1B-101** (ABI mismatch was
+/// `AbiMismatch` is the direct fix for **** (ABI mismatch was
 /// previously a silent success because nothing checked the version
 /// before reading other descriptor fields).
 #[derive(Debug)]
@@ -77,7 +77,7 @@ pub enum AddonLoadError {
     /// return a `'static` descriptor; null is treated as a hard error
     /// rather than a recoverable state.
     NullDescriptor { path: PathBuf },
-    /// **RC1B-101 fix.** `descriptor.abi_version` did not match
+    /// ** fix.** `descriptor.abi_version` did not match
     /// [`TAIDA_ADDON_ABI_VERSION`]. The loader stops *before* reading
     /// any other descriptor field; the addon may have a completely
     /// different layout under a future ABI.
@@ -186,7 +186,7 @@ pub struct LoadedAddon {
     /// `'static` table, valid as long as `library` is loaded.
     functions: Vec<RawFunctionEntry>,
     /// Host capability table passed to the addon's `init` callback.
-    /// RC1 Phase 3 populates it with real callbacks
+    /// Native addon loading populates it with real callbacks
     /// (`src/addon/value_bridge.rs::make_host_table`). Stored in a
     /// `Box` so the pointer we handed the addon remains stable for
     /// the addon's entire lifetime -- addons typically capture it in
@@ -285,7 +285,7 @@ impl<'a> AddonFunctionRef<'a> {
     /// `extern "C" fn` entry point.
     ///
     /// **Do not call this directly from Taida user code.** It is
-    /// exposed so the Phase 3 host-side call facade
+    /// exposed so the host-side call facade
     /// ([`LoadedAddon::call_function`](crate::addon::loader::LoadedAddon::call_function))
     /// can invoke the raw pointer while it holds the host-built
     /// borrowed input vector. Any other caller is responsible for
@@ -353,22 +353,22 @@ impl LoadedAddon {
 /// Load a Rust addon from `path`.
 ///
 /// This is the single entry point for the Native backend's addon
-/// dispatcher (RC1 Phase 4 will plumb it through the package import
+/// dispatcher (package import will plumb it through
 /// path). It performs:
 ///
 /// 1. `dlopen(path)` -> `LibraryNotFound` on failure.
 /// 2. `dlsym("taida_addon_get_v1")` -> `EntrySymbolMissing`.
 /// 3. Call the entry symbol -> `NullDescriptor` if it returns null.
 /// 4. **ABI handshake**: read `descriptor.abi_version` *only* and
-///    compare to [`TAIDA_ADDON_ABI_VERSION`]. Mismatch ->
-///    `AbiMismatch`. **No other field is touched until this passes.**
+/// compare to [`TAIDA_ADDON_ABI_VERSION`]. Mismatch ->
+/// `AbiMismatch`. **No other field is touched until this passes.**
 /// 5. Validate `function_count` / `functions` consistency
-///    -> `InvalidDescriptor`.
+/// -> `InvalidDescriptor`.
 /// 6. Cache the addon name (UTF-8 validated) -> `InvalidDescriptor`
-///    on non-UTF-8.
+/// on non-UTF-8.
 /// 7. Cache function entries (UTF-8 validate each name).
 /// 8. If `init` is present, build a [`TaidaHostV1`] with the host's
-///    ABI version filled in and call it -> `InitFailed` on non-Ok.
+/// ABI version filled in and call it -> `InitFailed` on non-Ok.
 ///
 /// On success the returned [`LoadedAddon`] owns the library handle.
 pub fn load_addon<P: AsRef<Path>>(path: P) -> Result<LoadedAddon, AddonLoadError> {
@@ -378,7 +378,7 @@ pub fn load_addon<P: AsRef<Path>>(path: P) -> Result<LoadedAddon, AddonLoadError
     // 1. dlopen
     //
     // SAFETY: libloading wraps `dlopen`/`LoadLibrary`. The unsafety
-    // boundary is "the library may run static initializers". RC1 only
+    // boundary is "the library may run static initializers". The host only
     // loads addons that the host explicitly chose to load via the
     // package layer, so this is the same trust level as a Cargo
     // dependency.

@@ -6,8 +6,8 @@
 resolved <= Async[42]()
 stdout("Resolved async: " + resolved.toString())
 
-// Unwrap with ]=> (blocking await)
-resolved ]=> value
+// Unwrap with >=> (blocking await)
+resolved >=> value
 stdout("Unwrapped value: " + value.toString())
 
 // Status check methods
@@ -29,7 +29,7 @@ double x =
 => :Int
 
 doubled <= resolved.map(double)
-doubled ]=> doubledVal
+doubled >=> doubledVal
 stdout("Mapped (42 * 2): " + doubledVal.toString())
 
 // map on rejected propagates rejection
@@ -38,17 +38,17 @@ stdout("Map on rejected still rejected: " + rejectedMapped.isRejected().toString
 
 // All — collect all results
 asyncs <= @[Async[1](), Async[2](), Async[3]()]
-All[asyncs]() ]=> allResults
+All[asyncs]() >=> allResults
 stdout("All results:")
 stdout(allResults)
 
 // Race — first resolved value
 asyncs2 <= @[Async[10](), Async[20]()]
-Race[asyncs2]() ]=> winner
+Race[asyncs2]() >=> winner
 stdout("Race winner: " + winner.toString())
 
 // Timeout — passthrough in synchronous mode
-Timeout[Async[42](), 5000]() ]=> timeoutVal
+Timeout[Async[42](), 5000]() >=> timeoutVal
 stdout("Timeout value: " + timeoutVal.toString())
 
 // Error ceiling catches rejected async on unmold
@@ -58,7 +58,7 @@ fetchData key: Str =
   => :Str
 
   a <= AsyncReject["network error"]()
-  a ]=> data
+  a >=> data
   data
 => :Str
 
@@ -70,9 +70,9 @@ addTen x =
   Async[x + 10]()
 
 a <= Async[0]()
-a ]=> v1
+a >=> v1
 b <= addTen(v1)
-b ]=> v2
+b >=> v2
 c <= addTen(v2)
-c ]=> v3
+c >=> v3
 stdout("Chained result (0 + 10 + 10): " + v3.toString())

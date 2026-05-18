@@ -21,20 +21,20 @@ pub struct JsCodegen {
     enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// Set of function names that need trampoline wrapping (self or mutual recursion)
     trampoline_funcs: std::collections::HashSet<String>,
-    /// Set of function names that contain ]=> (unmold) and need `async function` generation
+    /// Set of function names that contain >=> (unmold) and need `async function` generation
     async_funcs: std::collections::HashSet<String>,
     /// Whether we are currently generating code inside an async context.
     /// true at top-level (ESM top-level await) and inside async functions.
-    /// When true, ]=> generates `await __taida_unmold_async(...)`.
-    /// When false, ]=> generates `__taida_unmold(...)`.
+    /// When true, >=> generates `await __taida_unmold_async(...)`.
+    /// When false, >=> generates `__taida_unmold(...)`.
     in_async_context: bool,
-    /// Source .td file path (for resolving package import paths)
+    /// Source `.td` file path (for resolving package import paths)
     source_file: Option<std::path::PathBuf>,
-    /// Project root directory (for finding .taida/deps/)
+    /// Project root directory (for finding `.taida/deps/`)
     project_root: Option<std::path::PathBuf>,
-    /// Output .mjs file path (for resolving package import paths relative to the final output)
+    /// Output `.mjs` file path (for resolving package import paths relative to the final output)
     output_file: Option<std::path::PathBuf>,
-    /// Entry source root directory (entry .td file's parent) — for output placement logic
+    /// Entry source root directory (entry `.td` file's parent) — for output placement logic
     entry_root: Option<std::path::PathBuf>,
     /// Output root directory — for output placement logic
     out_root: Option<std::path::PathBuf>,
@@ -45,39 +45,39 @@ pub struct JsCodegen {
     shadowed_net_builtins: std::collections::HashSet<String>,
     /// B11-6c: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
     type_parents: std::collections::HashMap<String, String>,
-    /// C13-1 / C13B-007: All top-level user-defined function names. Used
+    /// All top-level user-defined function names. Used
     /// by `is_js_pipeline_callable_ident` to distinguish a callable
     /// intermediate pipeline step from a bind-and-forward target.
     user_funcs: std::collections::HashSet<String>,
-    /// C21-5: User-defined functions declared with `=> :Float` return type.
+    /// User-defined functions declared with `=> :Float` return type.
     /// Used for compile-time Float-origin propagation so that
     /// `stdout(triple(4.0))` renders `12.0` instead of `12` (JS `Number`
     /// cannot distinguish `12` from `12.0` at runtime — the design
     /// forbids wrapping every FloatLit, so we instead specialise call
     /// sites whose argument is statically known to be Float-origin).
     float_return_funcs: std::collections::HashSet<String>,
-    /// C21B-seed-04 (2026-04-22 reopen) re-fix: scope stack of local bindings
+    /// Scope stack of local bindings
     /// statically known to hold a Taida `Float`. Pushed on function entry,
     /// popped on exit. Populated by:
-    ///   * `x <= 3.0` / `x <= floatExpr` (Float-origin RHS)
-    ///   * `x: Float <= ...` (explicit `: Float` annotation)
-    ///   * `triple x: Float = ...` parameters
-    ///   * `a.get(i) ]=> av` when `a` is typed `@[Float]`
+    /// * `x <= 3.0` / `x <= floatExpr` (Float-origin RHS)
+    /// * `x: Float <= ...` (explicit `: Float` annotation)
+    /// * `triple x: Float = ...` parameters
+    /// * `a.get(i) >=> av` when `a` is typed `@[Float]`
     ///
     /// Queried by `is_float_origin_expr` on `Expr::Ident`. Lookup walks the
     /// stack from innermost to outermost — shadowing by inner scopes is
     /// honoured so a `Float` outer binding shadowed by a non-Float inner
     /// binding is correctly demoted.
     float_origin_vars: Vec<std::collections::HashSet<String>>,
-    /// C21B-seed-04 re-fix: symmetric scope stack for `Int`-origin locals.
+    /// Symmetric scope stack for `Int`-origin locals.
     int_origin_vars: Vec<std::collections::HashSet<String>>,
-    /// C21B-seed-04 re-fix: scope stack of local bindings known to hold
+    /// Scope stack of local bindings known to hold
     /// `@[Float]` (homogeneous list of Float). Used to propagate
-    /// `a.get(i) ]=> av` / `av <=[ a.get(i)` into `float_origin_vars`.
+    /// `a.get(i) >=> av` / `av <=< a.get(i)` into `float_origin_vars`.
     float_list_vars: Vec<std::collections::HashSet<String>>,
 }
 
-/// C25B-033: PascalCase identifiers declared as top-level `function X(...)`
+/// PascalCase identifiers declared as top-level `function X(...)`
 /// in the JS runtime prelude (`src/js/runtime/{core,os,net}.rs`). When a
 /// user-defined FuncDef collides with any name in this set, the JS backend
 /// must mangle the emission to avoid a `SyntaxError: Identifier 'X' has
@@ -216,14 +216,14 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Zip",
 ];
 
-/// C25B-033: Returns true when `name` is reserved by the JS runtime prelude
+/// Returns true when `name` is reserved by the JS runtime prelude
 /// (see `PRELUDE_RESERVED_IDENTS`). Call sites emitting a user FuncDef
 /// reference must consult this to decide whether to mangle.
 fn is_prelude_reserved_ident(name: &str) -> bool {
     PRELUDE_RESERVED_IDENTS.binary_search(&name).is_ok()
 }
 
-/// C25B-033: Mangled JS emission form for a user FuncDef whose Taida-level
+/// Mangled JS emission form for a user FuncDef whose Taida-level
 /// name collides with a prelude reserved identifier. The `_td_user_` prefix
 /// is chosen so it cannot collide with the `__taida_*` runtime namespace
 /// (double-underscore) nor with user surface names (user PascalCase is
@@ -232,7 +232,7 @@ fn mangled_user_func_name(name: &str) -> String {
     format!("_td_user_{}", name)
 }
 
-/// C21B-seed-04 re-fix: classification of an `Assignment`'s RHS for
+/// Classification of an `Assignment`'s RHS for
 /// Float/Int-origin tracking. Returned by `classify_assignment_rhs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssignOrigin {
@@ -432,7 +432,7 @@ impl JsCodegen {
         }
     }
 
-    /// C21B-seed-04 re-fix: if `src` is a `list.get(i)` call whose list is
+    /// If `src` is a `list.get(i)` call whose list is
     /// known Float-list, return true (so the unmold target should be
     /// registered as Float-origin). Kept conservative: only the direct
     /// `Ident.get(i)` shape is recognised.
@@ -444,7 +444,7 @@ impl JsCodegen {
         {
             return true;
         }
-        // An unmold of a Float-origin scalar (e.g. `someFloat ]=> y`) also
+        // An unmold of a Float-origin scalar (e.g. `someFloat >=> y`) also
         // preserves the Float origin.
         self.is_float_origin_expr(src)
     }
@@ -477,7 +477,7 @@ impl JsCodegen {
         self.output_file = Some(output_file.to_path_buf());
     }
 
-    /// Set the entry root (entry .td file's parent) and output root for
+    /// Set the entry root (entry `.td` file's parent) and output root for
     /// computing correct ESM import specifiers when modules are placed
     /// in a flattened output layout.
     pub fn set_build_context(&mut self, entry_root: &std::path::Path, out_root: &std::path::Path) {
@@ -485,7 +485,7 @@ impl JsCodegen {
         self.out_root = Some(out_root.to_path_buf());
     }
 
-    /// C21-5: Compile-time Float-origin analysis for JS codegen.
+    /// Compile-time Float-origin analysis for JS codegen.
     ///
     /// Returns `true` when we can statically prove that `expr` evaluates to
     /// a Taida `Float`. Used to specialise `stdout` / `debug` / `.toString()`
@@ -493,11 +493,11 @@ impl JsCodegen {
     ///
     /// The analysis is deliberately conservative (closure-crossing is out of
     /// scope, per the design): we recognise only
-    ///   - `FloatLit`
-    ///   - arithmetic (`+` / `-` / `*`) where at least one side is Float-origin
-    ///   - unary negation of a Float-origin operand
-    ///   - calls to user functions declared `=> :Float`
-    ///   - parenthesised / pipelined Float-origin sub-expressions
+    /// - `FloatLit`
+    /// - arithmetic (`+` / `-` / `*`) where at least one side is Float-origin
+    /// - unary negation of a Float-origin operand
+    /// - calls to user functions declared `=> :Float`
+    /// - parenthesised / pipelined Float-origin sub-expressions
     ///
     /// All other expressions (`Ident`, opaque calls, `Int[]` results, method
     /// calls, etc.) return `false`. This keeps the specialisation strictly
@@ -527,7 +527,7 @@ impl JsCodegen {
             // scalar carries Float origin so `debug(r) / stdout(r)` can
             // dispatch to `__taida_debug_f` / `__taida_stdout_f` and
             // render `0.0` / `inf` / `-inf` / `NaN` via
-            // `__taida_float_render`. Without this, `Div[1.0, 0.0]() ]=>
+            // `__taida_float_render`. Without this, `Div[1.0, 0.0]() >=>
             // r` drifts to `debug(r)` → `String(0)` → `"0"`.
             Expr::MoldInst(name, type_args, _, _) if name == "Div" || name == "Mod" => {
                 type_args.iter().any(|a| self.is_float_origin_expr(a))
@@ -536,12 +536,12 @@ impl JsCodegen {
         }
     }
 
-    /// C21-5: Compile-time Int-origin analysis (symmetric with
+    /// Compile-time Int-origin analysis (symmetric with
     /// `is_float_origin_expr`). Currently recognises only `IntLit` — used
     /// by `TypeIs[x, :Float]()` static fold so `TypeIs[3, :Float]()` emits
     /// literal `false` in JS to match the interpreter.
     ///
-    /// C21B-seed-04 re-fix: extend to consult the `int_origin_vars` scope
+    /// Consult the `int_origin_vars` scope
     /// stack so that `x <= 3; Float[x]()` also statically folds (same
     /// treatment as the symmetric Float case).
     fn is_int_origin_expr(&self, expr: &Expr) -> bool {
@@ -561,16 +561,16 @@ impl JsCodegen {
             && !self.shadowed_net_builtins.contains(name)
     }
 
-    /// C13-1 / C13B-007: True if `name` in an intermediate pipeline step
+    /// True if `name` in an intermediate pipeline step
     /// should be treated as a callable (classic pipeline semantics: call
     /// it with the current value) rather than a bind-and-forward target.
     ///
     /// For JS codegen we recognise:
-    ///   - any built-in prelude name that has an explicit `Expr::Ident`
-    ///     branch in `gen_pipeline` (debug, stdout, typeof, ...);
-    ///   - any net builtin when `taida-lang/net` was imported;
-    ///   - any name that matches a user-defined function collected
-    ///     during pre-pass (`trampoline_funcs` / `async_funcs`).
+    /// - any built-in prelude name that has an explicit `Expr::Ident`
+    /// branch in `gen_pipeline` (debug, stdout, typeof, ...);
+    /// - any net builtin when `taida-lang/net` was imported;
+    /// - any name that matches a user-defined function collected
+    /// during pre-pass (`trampoline_funcs` / `async_funcs`).
     fn is_js_pipeline_callable_ident(&self, name: &str) -> bool {
         if self.user_funcs.contains(name)
             || self.trampoline_funcs.contains(name)
@@ -632,7 +632,7 @@ impl JsCodegen {
         )
     }
 
-    /// C25B-033: Returns the JS emission form for a reference to a user
+    /// Returns the JS emission form for a reference to a user
     /// FuncDef `name`. If `name` is a user-defined function AND collides with
     /// a prelude reserved identifier (e.g. `Join`, `Concat`, `Sum`), this
     /// returns the mangled form `_td_user_<name>`. Otherwise returns the name
@@ -780,7 +780,7 @@ impl JsCodegen {
         // Pre-pass: detect mutual recursion groups and mark functions for trampolining
         self.detect_trampoline_funcs(&program.statements);
 
-        // Pre-pass: detect functions containing ]=> (unmold) that need async generation
+        // Pre-pass: detect functions containing >=> (unmold) that need async generation
         self.detect_async_funcs(&program.statements);
 
         // C13-1 / C13B-007: collect all top-level user-defined function names
@@ -914,14 +914,14 @@ impl JsCodegen {
         on_stack.remove(node);
     }
 
-    /// Detect functions that contain ]=> on async-related mold values.
+    /// Detect functions that contain >=> on async-related mold values.
     /// Only functions that unmold async molds (Async, AsyncReject, All, Race, Timeout)
     /// need `async function` generation. Functions that only unmold sync molds
     /// (Div, Mod, Lax, Result) remain synchronous.
     /// After initial detection, propagate async transitively: if function A calls
     /// async function B, A is also async (needed for proper await in trampolined TCO).
     fn detect_async_funcs(&mut self, stmts: &[Statement]) {
-        // Phase 1: direct async detection (functions with ]=> on async molds)
+        // Phase 1: direct async detection (functions with >=> on async molds)
         for stmt in stmts {
             if let Statement::FuncDef(fd) = stmt
                 && stmts_contain_async_unmold(&fd.body)
@@ -1070,7 +1070,7 @@ impl JsCodegen {
     /// Convert a TypeExpr to a JSON schema string for __taida_registerTypeDef.
     /// Handles Named types, List types, and inline BuchiPack types recursively.
     ///
-    /// E30 Phase 6 / E30B-004 (Lock-D verdict): `TypeExpr::Function(_, ret)`
+    /// Function-type schemas: `TypeExpr::Function(_, ret)`
     /// emits a `{ __fn: retSchema }` schema so that `__taida_defaultForSchema`
     /// can synthesise an arrow-function default whose return value is the
     /// return-type's default. This mirrors the interpreter's synthetic
@@ -1298,8 +1298,8 @@ impl JsCodegen {
                 if self.has_net_import && is_net_runtime_builtin(&unmold.target) {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
-                // C21B-seed-04 re-fix: `a.get(i) ]=> av` on a Float-list
-                // (or `floatVal ]=> y` on a Float scalar) preserves the
+                // C21B-seed-04 re-fix: `a.get(i) >=> av` on a Float-list
+                // (or `floatVal >=> y` on a Float scalar) preserves the
                 // Float origin of the unmolded result.
                 if self.unmold_source_is_float(&unmold.source) {
                     self.register_float_origin(&unmold.target);
@@ -1326,7 +1326,7 @@ impl JsCodegen {
                     self.shadowed_net_builtins.insert(unmold.target.clone());
                 }
                 // C21B-seed-04 re-fix: symmetric Float-origin propagation
-                // for `y <=[ a.get(i)` / `y <=[ floatVal`.
+                // for `y <=< a.get(i)` / `y <=< floatVal`.
                 if self.unmold_source_is_float(&unmold.source) {
                     self.register_float_origin(&unmold.target);
                 } else {
@@ -1344,7 +1344,7 @@ impl JsCodegen {
         let needs_async = is_async_fn;
         let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
 
-        // Save async context — set to true for async functions so ]=> generates `await`
+        // Save async context — set to true for async functions so >=> generates `await`
         let prev_async_context = self.in_async_context;
         self.in_async_context = needs_async;
 
@@ -1813,6 +1813,11 @@ impl JsCodegen {
         }
         self.indent -= 1;
         self.writeln("};");
+        self.writeln("if (parent && parent.__taidaExplicitMessageField === true) {");
+        self.indent += 1;
+        self.writeln("Object.defineProperty(obj, '__taidaExplicitMessageField', { value: true, enumerable: false });");
+        self.indent -= 1;
+        self.writeln("}");
         self.writeln("return Object.freeze(obj);");
         self.indent -= 1;
         self.writeln("}");
@@ -1999,7 +2004,7 @@ impl JsCodegen {
         Ok(())
     }
 
-    /// RCB-201: Resolve the .td source path for a local import, for export validation.
+    /// Resolve the `.td` source path for a local import, for export validation.
     /// Returns None if the path cannot be determined (e.g., no source_file context).
     fn resolve_import_td_path(&self, import_path: &str) -> Option<std::path::PathBuf> {
         let source_file = self.source_file.as_ref()?;
@@ -2012,7 +2017,7 @@ impl JsCodegen {
         }
     }
 
-    /// C18-1: For a user-module import (`>>> ./m.td => @(Color)`), read the
+    /// For a user-module import (`>>> ./m.td => @(Color)`), read the
     /// exporting module and register any `EnumDef` whose name is being
     /// imported into `self.enum_defs`. The enum is registered under the
     /// local alias if one is provided (`@(Color: Paint)`), matching the
@@ -2138,7 +2143,7 @@ impl JsCodegen {
     }
 
     /// RCB-201: Validate that all imported symbols are exported by the target module.
-    /// Reads and parses the target .td file, checks for explicit `<<<` declarations,
+    /// Reads and parses the target `.td` file, checks for explicit `<<<` declarations,
     /// and returns an error if any imported symbol is not in the export list.
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
         if import.path == "taida-lang/net" {
@@ -2210,24 +2215,8 @@ impl JsCodegen {
                                     );
                                     if let Some(v) = violations.first() {
                                         return Err(JsError {
-                                        message: match v {
-                                            crate::pkg::facade::FacadeViolation::HiddenSymbol { name, available } => {
-                                                format!(
-                                                    "Symbol '{}' is not part of the public API declared in packages.tdm. \
-                                                     Available exports: {}",
-                                                    name,
-                                                    available.join(", ")
-                                                )
-                                            }
-                                            crate::pkg::facade::FacadeViolation::GhostSymbol { name } => {
-                                                format!(
-                                                    "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                                                     The entry module must export all symbols listed in the package facade.",
-                                                    name
-                                                )
-                                            }
-                                        },
-                                    });
+                                            message: crate::pkg::facade::format_facade_violation(v),
+                                        });
                                     }
                                     (Some(ctx.entry_path), Some(ctx.facade_exports))
                                 } else {
@@ -2442,7 +2431,7 @@ impl JsCodegen {
         Ok(())
     }
 
-    /// Resolve a local (relative) import path to the correct .mjs ESM specifier.
+    /// Resolve a local (relative) import path to the correct `.mjs` ESM specifier.
     ///
     /// When build context (entry_root, out_root) is available, computes the actual
     /// output location of the dependency using the same strip_prefix logic as main.rs,
@@ -2450,7 +2439,7 @@ impl JsCodegen {
     /// This handles the case where `../shared` from `src/main.td` is flattened to
     /// `out_root/shared.mjs` alongside `out_root/main.mjs` (correct: `./shared.mjs`).
     ///
-    /// Also performs RCB-303 / C27B-022 path traversal rejection for
+    /// Also performs RCB-303 / path traversal rejection for
     /// `..` AND absolute `/` imports (3-backend parity with Interpreter
     /// SEC-003 land and Native `driver.rs::resolve_module_path`).
     fn resolve_local_import_js_path(&self, import_path: &str) -> Result<String, JsError> {
@@ -2559,11 +2548,11 @@ impl JsCodegen {
         Ok(js_path)
     }
 
-    /// Resolve a package import path to a relative .mjs path for ESM import.
+    /// Resolve a package import path to a relative `.mjs` path for ESM import.
     ///
     /// Given "shijimic/taida-package-test", finds `.taida/deps/shijimic/taida-package-test/`,
     /// reads packages.tdm for entry point, and returns a relative path from the JS output
-    /// to the package's .mjs file (transpiled in-place in .taida/deps/).
+    /// to the package's `.mjs` file (transpiled in-place in `.taida/deps/`).
     ///
     /// RC-1q: When `version` is provided, tries version-qualified directories first
     /// (e.g., `.taida/deps/alice/http@b.12/`) before falling back to unversioned.
@@ -2694,7 +2683,7 @@ impl JsCodegen {
         Ok(())
     }
 
-    /// RC1 Phase 4 helper: resolve only the **package directory** for
+    /// Resolve only the **package directory** for
     /// an import statement, without producing a `.mjs` path. Used by
     /// the addon-policy guard in `gen_import` so JS codegen can detect
     /// addon-backed packages and emit a deterministic compile-time
@@ -2704,7 +2693,7 @@ impl JsCodegen {
     /// Returns `None` for relative / absolute / project-root /
     /// `std/` / `npm:` imports — those can never be addon-backed.
     /// Also returns `None` for submodule imports (`org/pkg/sub`)
-    /// because RC1 addons are package-level only.
+    /// because addons are package-level only.
     fn try_locate_addon_pkg_dir(&self, import: &ImportStmt) -> Option<std::path::PathBuf> {
         let path = &import.path;
         if path.starts_with("./")
@@ -4115,7 +4104,7 @@ impl JsCodegen {
     /// Generate the body of a condition arm.
     /// For multi-statement bodies, generates all statements with `return` on the last expression.
     ///
-    /// C13-1: If the last statement is a tail binding (`Assignment` /
+    /// If the last statement is a tail binding (`Assignment` /
     /// `UnmoldForward` / `UnmoldBackward`), emit the binding as usual and
     /// then `return <target>;` so the bound value becomes the arm result.
     fn gen_cond_arm_body(&mut self, body: &[crate::parser::Statement]) -> Result<(), JsError> {
@@ -4165,9 +4154,9 @@ impl JsCodegen {
     ///
     /// Handles two categories of conversion:
     /// 1. **Text segments** (outside `${...}`): escape `\`, `` ` ``, and convert
-    ///    `@[` to `[` and `.length()` to `.length_()`.
+    /// `@[` to `[` and `.length()` to `.length_()`.
     /// 2. **Interpolation segments** (`${...}`): convert `@[` and `.length()` only,
-    ///    without adding escape sequences.
+    /// without adding escape sequences.
     ///
     /// Limitation: nested `${...}` and complex expressions inside interpolation
     /// blocks are handled by simple brace matching (first `}` closes the block).
@@ -4588,7 +4577,7 @@ impl JsCodegen {
     }
 }
 
-/// C13-1 / C13B-007: True if `expr` references any name in `bound_names`
+/// True if `expr` references any name in `bound_names`
 /// anywhere in its subtree. Used by `gen_pipeline` to decide whether a
 /// pipeline step should skip the classic `__p` auto-injection because the
 /// user explicitly consumed a pipeline-scope binding.
@@ -4683,7 +4672,7 @@ fn collect_tail_targets_from_expr(expr: &Expr, targets: &mut std::collections::H
 }
 
 /// OS API mold names that are always async sources when unmolded.
-/// These require `async function` generation when `]=>` appears inside a function.
+/// These require `async function` generation when `>=>` appears inside a function.
 const OS_ASYNC_MOLDS: &[&str] = &[
     "Read",
     "ListDir",
@@ -4854,7 +4843,7 @@ fn expr_contains_os_async_unmold(
     }
 }
 
-/// Check if statements contain ]=> that unmolds an OS async (true Promise) value.
+/// Check if statements contain >=> that unmolds an OS async (true Promise) value.
 /// Only OS API molds that return real Promises trigger async function generation.
 /// Standard Taida molds (Async, Div, Mod, etc.) use sync __TaidaAsync thenables
 /// and do NOT require async functions.
@@ -5005,7 +4994,7 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 }
 
 /// Compute relative path from `base` directory to `target` file.
-/// C27B-022: Walk up from `start_dir` looking for project-root markers
+/// Walk up from `start_dir` looking for project-root markers
 /// (`packages.tdm`, `taida.toml`, `.git`). Mirrors the marker
 /// set used by `interpreter::module_eval::find_project_root` and
 /// `codegen::driver::find_project_root` so the JS path-traversal guard
@@ -5056,7 +5045,7 @@ fn pathdiff(base: &std::path::Path, target: &std::path::Path) -> Option<std::pat
     }
 }
 
-/// .td ファイルを JS にトランスパイル (with file context for package import resolution)
+/// `.td` ファイルを JS にトランスパイル (with file context for package import resolution)
 pub fn transpile_with_context(
     program: &Program,
     source_file: &std::path::Path,
@@ -5068,7 +5057,7 @@ pub fn transpile_with_context(
     codegen.generate(program)
 }
 
-/// .td ファイルを JS にトランスパイル (with build context for output-layout-aware imports)
+/// `.td` ファイルを JS にトランスパイル (with build context for output-layout-aware imports)
 pub fn transpile_with_build_context(
     program: &Program,
     source_file: &std::path::Path,
@@ -5087,7 +5076,7 @@ pub fn transpile_with_build_context(
     codegen.generate(program)
 }
 
-/// .td ファイルを JS にトランスパイル
+/// `.td` ファイルを JS にトランスパイル
 pub fn transpile(source: &str) -> Result<String, JsError> {
     let (program, parse_errors) = crate::parser::parse(source);
     if !parse_errors.is_empty() {
@@ -5406,34 +5395,34 @@ mod tests {
 
     #[test]
     fn test_js_codegen_jsnew_no_args() {
-        // JSNew[Hono]() ]=> app  →  const app = new Hono();
+        // JSNew[Hono]() >=> app  →  const app = new Hono();
         assert!(
-            js_contains("JSNew[Hono]() ]=> app", "new Hono()"),
+            js_contains("JSNew[Hono]() >=> app", "new Hono()"),
             "JSNew[Hono]() should generate new Hono()"
         );
     }
 
     #[test]
     fn test_js_codegen_jsnew_with_args() {
-        // JSNew[Server](8080) ]=> server  →  const server = new Server(8080);
+        // JSNew[Server](8080) >=> server  →  const server = new Server(8080);
         assert!(
-            js_contains("JSNew[Server](8080) ]=> server", "new Server(8080)"),
+            js_contains("JSNew[Server](8080) >=> server", "new Server(8080)"),
             "JSNew[Server](8080) should generate new Server(8080)"
         );
     }
 
     #[test]
     fn test_js_codegen_jsnew_with_multiple_args() {
-        // JSNew[Uint8Array](16) ]=> buf  →  const buf = new Uint8Array(16);
+        // JSNew[Uint8Array](16) >=> buf  →  const buf = new Uint8Array(16);
         assert!(
-            js_contains("JSNew[Uint8Array](16) ]=> buf", "new Uint8Array(16)"),
+            js_contains("JSNew[Uint8Array](16) >=> buf", "new Uint8Array(16)"),
             "JSNew[Uint8Array](16) should generate new Uint8Array(16)"
         );
     }
 
     #[test]
     fn test_js_codegen_jsnew_unmold_forward() {
-        let js = transpile("JSNew[Hono]() ]=> app\napp").unwrap();
+        let js = transpile("JSNew[Hono]() >=> app\napp").unwrap();
         assert!(
             js.contains("const app = await __taida_unmold_async(new Hono())"),
             "JSNew unmold forward should wrap with await __taida_unmold_async: got {}",
@@ -5443,7 +5432,7 @@ mod tests {
 
     #[test]
     fn test_js_codegen_jsnew_unmold_backward() {
-        let js = transpile("app <=[ JSNew[Hono]()\napp").unwrap();
+        let js = transpile("app <=< JSNew[Hono]()\napp").unwrap();
         assert!(
             js.contains("const app = await __taida_unmold_async(new Hono())"),
             "JSNew unmold backward should wrap with await __taida_unmold_async: got {}",
@@ -5456,7 +5445,7 @@ mod tests {
         let src = r#"
 fetchUdp p =
   s <= udpBind("127.0.0.1", 0)
-  s ]=> v
+  s >=> v
   v
 "#;
         let js = transpile(src).expect("transpile should succeed");
@@ -5477,7 +5466,7 @@ fetchUdp p =
         let src = r#"
 waitBoth p =
   all <= All[@[sleep(0), sleep(0)]]()
-  all ]=> vals
+  all >=> vals
   vals.length()
 => :Int
 "#;
@@ -5498,7 +5487,7 @@ waitBoth p =
     fn test_sleep_timeout_direct_unmold_marks_function_async() {
         let src = r#"
 waitWithTimeout p =
-  Timeout[sleep(0), 100]() ]=> done
+  Timeout[sleep(0), 100]() >=> done
   done
 => :Int
 "#;
@@ -5521,7 +5510,7 @@ waitWithTimeout p =
 waitWithTimeout p =
   s <= sleep(0)
   t <= Timeout[s, 100]()
-  t ]=> done
+  t >=> done
   done
 => :Int
 "#;
@@ -5541,7 +5530,7 @@ waitWithTimeout p =
     #[test]
     fn test_js_codegen_jsnew_import_skipped() {
         // taida-lang/js import should not generate any ESM import statement
-        let js = transpile(">>> taida-lang/js => @(JSNew)\nJSNew[Hono]() ]=> app\napp").unwrap();
+        let js = transpile(">>> taida-lang/js => @(JSNew)\nJSNew[Hono]() >=> app\napp").unwrap();
         assert!(
             !js.contains("import {"),
             "taida-lang/js import should be skipped in JS output (no ESM import): got {}",
@@ -5643,7 +5632,7 @@ Cage[target, JSSpread[@[1]]()]()
 
     #[test]
     fn test_js_codegen_jsset_unmold() {
-        let js = transpile("obj = 1\nJSSet[obj, \"x\", 42]() ]=> result\nresult").unwrap();
+        let js = transpile("obj = 1\nJSSet[obj, \"x\", 42]() >=> result\nresult").unwrap();
         assert!(
             js.contains("__taida_unmold"),
             "JSSet unmold should wrap with __taida_unmold: got {}",
@@ -5676,7 +5665,7 @@ Cage[target, JSSpread[@[1]]()]()
 
     #[test]
     fn test_js_codegen_jsbind_unmold() {
-        let js = transpile("obj = 1\nJSBind[obj, \"fetch\"]() ]=> bound\nbound").unwrap();
+        let js = transpile("obj = 1\nJSBind[obj, \"fetch\"]() >=> bound\nbound").unwrap();
         assert!(
             js.contains("__taida_unmold"),
             "JSBind unmold should wrap with __taida_unmold: got {}",
@@ -5704,7 +5693,7 @@ Cage[target, JSSpread[@[1]]()]()
 
     #[test]
     fn test_js_codegen_jsspread_unmold() {
-        let js = transpile("a = 1\nb = 2\nJSSpread[a, b]() ]=> merged\nmerged").unwrap();
+        let js = transpile("a = 1\nb = 2\nJSSpread[a, b]() >=> merged\nmerged").unwrap();
         assert!(
             js.contains("__taida_unmold"),
             "JSSpread unmold should wrap with __taida_unmold: got {}",

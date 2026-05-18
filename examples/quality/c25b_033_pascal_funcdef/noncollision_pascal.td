@@ -3,7 +3,7 @@
 // mangling) so Taida's "user may name functions freely" surface invariant
 // (PHILOSOPHY.md I. / docs/reference/naming_conventions.md) is preserved
 // for the common case. Also exercises the 4-backend parity.
-MyCustomFunc a b =
+MyCustomFunc a: Int b: Int =
   a + b
 => :Int
 

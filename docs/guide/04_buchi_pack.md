@@ -1,6 +1,6 @@
 # ぶちパック構文
 
-> **PHILOSOPHY.md -- II.** だいじなものはふくろにしまっておきましょう
+> **PHILOSOPHY.md — II.** だいじなものはふくろにしまっておきましょう
 
 > 型定義 (`Pilot = @(...)`) と継承 (`Pilot => NervStaff = @(...)`) は **クラスライク型の単一概念** に統合されており、[クラスライク型定義](04_class_like.md) で説明します。本章では値リテラル `@(...)` / `@[...]` を中心に扱います。
 
@@ -162,8 +162,8 @@ pilot_data <= @(
   sync_rate <= Div[780, 10]()
 )
 
-// ]=> でアンモールド
-pilot_data.sync_rate ]=> rate_value  // 78
+// >=> でアンモールド
+pilot_data.sync_rate >=> rate_value  // 78
 ```
 
 モールド型の詳細は [モールド](05_mold.md) を参照してください。
@@ -186,6 +186,28 @@ pilots: @[Pilot] <= @[
 ]
 ```
 
+### `@[]` (空リスト) と `@()` (空ぶちパック) は別カテゴリ
+
+| 形 | 意味 | 扱い |
+|----|------|------|
+| `@[]` | 空のリスト (要素 0) | OK。明確な意味を持つ値 |
+| `@()` 値リテラル | フィールドなしのぶちパック値 | 言語仕様としては書く場面が存在しない (ぶちパックは必ず名前付きフィールド集合) |
+| `@()` 型注釈 / 戻り型 / 引数型 / class-like body | 「情報なしを意味する型」 | `[E1520]` で reject。null と同レベルの抜け道として禁止 |
+
+「ぶちパックのフィールドが全部なくなるまで削る」操作は Taida 言語には存在しません。フィールド集合を変える関数は、戻り型を別の具体ぶちパック型として定義するのが正解です。
+
+> **PHILOSOPHY.md — II.** だいじなものはふくろにしまっておきましょう
+
+の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を参照してください。
+
+```taida
+// OK: 縮小型を明示
+removePrice item: @(name: Str, price: Int) = ... => :@(name: Str)
+
+// NG: 戻り型として `:@()` は書けない (`[E1520]`)
+// removeName item: @(name: Str) = ... => :@()
+```
+
 ---
 
 ## JSON からの変換
@@ -196,7 +218,7 @@ pilots: @[Pilot] <= @[
 Pilot = @(name: Str, age: Int)
 
 raw <= '{"name": "Ritsuko", "age": 30}'
-JSON[raw, Pilot]() ]=> pilot
+JSON[raw, Pilot]() >=> pilot
 // pilot: @(name <= "Ritsuko", age <= 30)
 ```
 
@@ -210,7 +232,7 @@ JSON[raw, Pilot]() ]=> pilot
 | フィールドアクセス | `pack.fieldName` | 本章 |
 | ネスト | `@(inner <= @(field <= value))` | 本章 |
 | リストリテラル | `@[elem1, elem2, ...]` | 本章 |
-| JSON 変換 | `JSON[raw, TypeName]() ]=> val` | [03_json.md](03_json.md) |
+| JSON 変換 | `JSON[raw, TypeName]() >=> val` | [03_json.md](03_json.md) |
 | クラスライク型定義 | `Name[?type-args] [=> Parent] = @(...)` | [04_class_like.md](04_class_like.md) |
 | モールド | `Upper[str]()` 等 | [05_mold.md](05_mold.md) |
 

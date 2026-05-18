@@ -8,7 +8,7 @@
 // the crash driver catches it even when the parity suite is skipped
 // (e.g. node not available, release build not configured).
 
-Error => MyError = @()
+Error => MyError = @(detail: Str <= "")
 
 throwBoom msg =
   MyError(type <= "MyError", message <= msg).throw()

@@ -31,7 +31,7 @@ pub struct Parser {
     errors: Vec<ParseError>,
     /// Current recursion depth for expression parsing (RCB-301).
     depth: usize,
-    /// C20-1 (ROOT-5): Context while reading a `| cond |> body` branch.
+    /// Context while reading a `| cond |> body` branch.
     /// Switched to `LetRhs` while parsing the right-hand side of a `<=`
     /// assignment so that a multi-line multi-arm guard is rejected with
     /// `[E0303]` instead of greedily swallowing later top-level statements.
@@ -133,9 +133,9 @@ impl Parser {
         &self.peek().kind
     }
 
-    /// Look ahead by `offset` tokens.  There is no hard cap on `offset` because
+    /// Look ahead by `offset` tokens. There is no hard cap on `offset` because
     /// the token stream is finite (bounded by source length) and all callers use
-    /// small constant offsets (0, 1, or 2).  `saturating_add` prevents overflow.
+    /// small constant offsets (0, 1, or 2). `saturating_add` prevents overflow.
     fn peek_at(&self, offset: usize) -> &Token {
         let idx = self.pos.saturating_add(offset);
         if idx < self.tokens.len() {
@@ -260,7 +260,7 @@ impl Parser {
     /// Error recovery: skip tokens until the next newline (statement boundary).
     ///
     /// Taida is indentation-based, so a newline always terminates the current
-    /// (logical) line.  This is intentionally simpler than brace-delimited
+    /// (logical) line. This is intentionally simpler than brace-delimited
     /// languages that must skip to `;` or `}` — here, newline sync is sufficient
     /// because each logical line is a complete statement.
     fn synchronize(&mut self) {
@@ -363,7 +363,7 @@ impl Parser {
                     }
                     let body = self.parse_block()?;
                     // C13B-010: reject discard bindings (`=> _x` / `_x <=` /
-                    // `]=> _x` / `_x <=[`) anywhere in an expression-block
+                    // `>=> _x` / `_x <=<`) anywhere in an expression-block
                     // body — same rule as `| |>` arm body.
                     Self::reject_discard_bindings_in_expression_block(&body, "function body")?;
                     self.skip_newlines();
@@ -400,6 +400,7 @@ impl Parser {
             }
 
             // `name <= expr` -> assignment
+            // `name <= step <= step <= ... <= data` -> backward pipeline assignment
             TokenKind::LtEq => {
                 self.advance(); // consume `<=`
                 self.skip_newlines(); // allow multiline (e.g., condition branch on next line)
@@ -409,9 +410,17 @@ impl Parser {
                 // statements. Restored after the expression parses.
                 let saved_ctx =
                     std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
-                let value = self.parse_expression();
+                // Remember the span of the first rhs token (= the data
+                // end of a `<=` chain) so the resulting Pipeline span
+                // can anchor on it, matching the forward `=>` lowering.
+                let first_rhs_start_span = self.current_span();
+                let first_rhs_result = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
-                let value = value?;
+                let first_rhs = first_rhs_result?;
+
+                let value =
+                    self.parse_lt_eq_chain_tail(first_rhs, &first_rhs_start_span, &start_span)?;
+
                 // Single-direction constraint: <= used, => must not follow on same line
                 if self.check(&TokenKind::FatArrow) {
                     return Err(ParseError {
@@ -429,6 +438,7 @@ impl Parser {
             }
 
             // `name: Type <= expr` -> typed assignment
+            // `name: Type <= step <= ... <= data` -> typed backward pipeline assignment
             TokenKind::Colon => {
                 self.advance(); // consume `:`
                 let type_ann = self.parse_type_expr()?;
@@ -438,9 +448,20 @@ impl Parser {
                 // C20-1 (ROOT-5): same LetRhs guard as the untyped form.
                 let saved_ctx =
                     std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
-                let value = self.parse_expression();
+                let first_rhs_start_span = self.current_span();
+                let first_rhs_result = self.parse_expression();
                 self.cond_branch_context = saved_ctx;
-                let value = value?;
+                let first_rhs = first_rhs_result?;
+                let value =
+                    self.parse_lt_eq_chain_tail(first_rhs, &first_rhs_start_span, &start_span)?;
+                // Single-direction constraint: <= used, => must not follow on
+                // the same line (mirrors the untyped <= entry).
+                if self.check(&TokenKind::FatArrow) {
+                    return Err(ParseError {
+                        message: "E0301: 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
+                        span: self.current_span(),
+                    });
+                }
                 Ok(Statement::Assignment(Assignment {
                     target: name,
                     type_annotation: Some(type_ann),
@@ -539,14 +560,14 @@ impl Parser {
                 self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
 
-            // `expr ]=> name` -> unmold forward
+            // `expr >=> name` -> unmold forward
             TokenKind::UnmoldForward => {
-                self.advance(); // consume `]=>`
+                self.advance(); // consume `>=>`
                 let target = self.expect_ident()?;
-                // Single-direction constraint: ]=> used, <=[ must not follow
+                // Single-direction constraint: >=> used, <=< must not follow
                 if self.check(&TokenKind::UnmoldBackward) {
                     return Err(ParseError {
-                        message: "E0302: 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
+                        message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
                         span: self.current_span(),
                     });
                 }
@@ -557,14 +578,14 @@ impl Parser {
                 }))
             }
 
-            // `name <=[ expr` -> unmold backward
+            // `name <=< expr` -> unmold backward
             TokenKind::UnmoldBackward => {
-                self.advance(); // consume `<=[`
+                self.advance(); // consume `<=<`
                 let source = self.parse_expression()?;
-                // Single-direction constraint: <=[ used, ]=> must not follow
+                // Single-direction constraint: <=< used, >=> must not follow
                 if self.check(&TokenKind::UnmoldForward) {
                     return Err(ParseError {
-                        message: "E0302: 単一方向制約違反 — 一つの文内で ]=> と <=[ を混在させることはできません".to_string(),
+                        message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
                         span: self.current_span(),
                     });
                 }
@@ -823,7 +844,7 @@ impl Parser {
         }))
     }
 
-    /// E30 Phase 2 Sub-step 2.2 (Lock-B Sub-B1): zero-or-more arity の class-like 定義。
+    /// Zero-or-more arity の class-like 定義。
     ///
     /// 形式: `Name[args?] = @(...)`
     ///
@@ -1140,15 +1161,15 @@ impl Parser {
     ///
     /// Grammar (state machine):
     /// ```text
-    ///   start ──Ident(gen)──> gen_only ──Dot──Int(num)──> exact
-    ///                                                       │
-    ///                                            Dot──label──> labeled
-    ///   start ──Float/Int──> legacy_semver ──Dot──Int(patch)──> semver_full
+    /// start ──Ident(gen)──> gen_only ──Dot──Int(num)──> exact
+    /// │
+    /// Dot──label──> labeled
+    /// start ──Float/Int──> legacy_semver ──Dot──Int(patch)──> semver_full
     /// ```
     ///
     /// Examples:
     /// - `@a.3` -> "a.3" (exact: generation a, publish #3)
-    /// - `@b`   -> "b"   (generation-only: latest in generation b)
+    /// - `@b` -> "b" (generation-only: latest in generation b)
     /// - `@aa.12` -> "aa.12" (multi-letter generation)
     /// - `@a.1.beta` -> "a.1.beta" (labeled release)
     /// - `@a.3.gen-2-stable` -> "a.3.gen-2-stable" (hyphenated label)
@@ -1768,12 +1789,112 @@ impl Parser {
 
     // ── Pipeline / Assignment helpers ────────────────────────
 
-    /// After parsing an initial expression, check for `=> ...` pipeline chains.
+    /// Fold a backward pipeline (`<=` chain) into a single `Expr::Pipeline`.
+    ///
+    /// After the first `<= rhs` is parsed, any further `<= step` tokens on
+    /// the same physical line as the assignment target are absorbed. The
+    /// chain `name <= f(_) <= g(_) <= data` lowers to the same AST that
+    /// `data => g(_) => f(_) => name` produces:
+    /// `Expr::Pipeline([data, g(_), f(_)])` with `target = name`.
+    ///
+    /// When no further `<=` follows, the original `first_rhs` is returned
+    /// unchanged so the legacy single-binding path is preserved bit-for-bit.
+    ///
+    /// Chain continuation is intentionally restricted to a single physical
+    /// line: both the chain separators and every step's parse range must
+    /// stay on the assignment target's line. A multi-line rhs (`x <=\n
+    /// expr`), a multi-line call argument list inside a step, a
+    /// parenthesised multi-line expression, and backslash continuations
+    /// are all rejected via [`E0304`] so chain absorption never crosses a
+    /// newline silently.
+    ///
+    /// `first_rhs_start` is the span of the leading token of the first
+    /// rhs (captured by the caller before `parse_expression` is invoked).
+    /// Together with the leading-token span of every subsequent step it
+    /// lets the helper anchor `Expr::Pipeline` on the *data* end — the
+    /// same anchor the forward `=>` pipeline uses — so downstream span
+    /// consumers (LSP hover, diagnostics, source maps) observe the same
+    /// location regardless of pipeline direction.
+    fn parse_lt_eq_chain_tail(
+        &mut self,
+        first_rhs: Expr,
+        first_rhs_start: &Span,
+        start_span: &Span,
+    ) -> Result<Expr, ParseError> {
+        if !self.check(&TokenKind::LtEq) {
+            return Ok(first_rhs);
+        }
+        let target_line = start_span.line;
+        // Bail out (without consuming anything) when the first rhs already
+        // spilled onto another physical line. The legacy single-binding
+        // path then keeps that rhs and any trailing `<=` becomes the
+        // start of a fresh statement (parse error surfaces there).
+        if first_rhs_start.line != target_line || self.last_consumed_line() != target_line {
+            return Ok(first_rhs);
+        }
+        if self.current_span().line != target_line {
+            return Ok(first_rhs);
+        }
+        let mut steps_reversed: Vec<Expr> = vec![first_rhs];
+        let mut data_anchor_span: Span = first_rhs_start.clone();
+        while self.check(&TokenKind::LtEq) {
+            if self.current_span().line != target_line {
+                break;
+            }
+            self.advance(); // consume `<=`
+            // The chain step must be a normal expression. A leading `=>`
+            // here would otherwise be silently re-interpreted as a return
+            // type annotation placeholder by the expression parser, which
+            // would let `name <= a <= => 99` slip past the single-direction
+            // guard. Reject it explicitly.
+            if self.check(&TokenKind::FatArrow) {
+                return Err(ParseError {
+                    message: "E0301: 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
+                    span: self.current_span(),
+                });
+            }
+            let step_start_span = self.current_span();
+            let saved_ctx =
+                std::mem::replace(&mut self.cond_branch_context, CondBranchContext::LetRhs);
+            let step_result = self.parse_expression();
+            self.cond_branch_context = saved_ctx;
+            let step = step_result?;
+            // Same-physical-line guarantee: every token the step parser
+            // consumed must stay on the target line. A step whose start
+            // *or* end span left the line is a chain step that crossed a
+            // newline (multi-line call args, parenthesised multi-line
+            // expression, backslash continuation) and is rejected.
+            let step_end_line = self.last_consumed_line();
+            if step_start_span.line != target_line || step_end_line != target_line {
+                return Err(ParseError {
+                    message: "[E0304] `<=` chain step must stay on a single physical line as the assignment target".to_string(),
+                    span: step.span().clone(),
+                });
+            }
+            data_anchor_span = step_start_span;
+            steps_reversed.push(step);
+        }
+        let steps: Vec<Expr> = steps_reversed.into_iter().rev().collect();
+        Ok(Expr::Pipeline(steps, data_anchor_span))
+    }
+
+    /// Line of the most recently consumed token. Used by the `<=` chain
+    /// helper to detect chain steps whose parse range spilled beyond a
+    /// newline (the AST anchor `step.span()` alone is insufficient — for
+    /// `FuncCall` it is the `(` position, not the end of the call).
+    fn last_consumed_line(&self) -> usize {
+        if self.pos == 0 {
+            return self.current_span().line;
+        }
+        self.tokens[self.pos - 1].span.line
+    }
+
+    /// After parsing an initial expression, check for `=>...` pipeline chains.
     /// Returns a Statement:
     /// - If the chain ends with `=> ident` (no call/access), it becomes an Assignment.
     /// - Otherwise the entire chain is wrapped as `Expr::Pipeline`.
-    /// - If `]=>` follows instead, wraps as UnmoldForward.
-    /// - If no `=>` or `]=>` follows, returns `Statement::Expr(expr)`.
+    /// - If `>=>` follows instead, wraps as UnmoldForward.
+    /// - If no `=>` or `>=>` follows, returns `Statement::Expr(expr)`.
     fn finish_expr_as_statement(
         &mut self,
         expr: Expr,
@@ -1816,7 +1937,7 @@ impl Parser {
 
             if steps.len() == 1 {
                 // No actual pipeline steps parsed (e.g., we hit `=> :Type`)
-                // Re-check for ]=>
+                // Re-check for >=>
                 if self.check(&TokenKind::UnmoldForward) {
                     let span = self.current_span();
                     self.advance();
@@ -1852,7 +1973,7 @@ impl Parser {
             Ok(Statement::Expr(Expr::Pipeline(steps, start_span)))
         } else if self.check(&TokenKind::UnmoldForward) {
             let span = self.current_span();
-            self.advance(); // consume `]=>`
+            self.advance(); // consume `>=>`
             let target = self.expect_ident()?;
             Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                 source: expr,

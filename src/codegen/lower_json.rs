@@ -12,18 +12,18 @@ impl Lowering {
 
     /// Resolve a JSON schema from an AST expression into a descriptor string
     /// for the C runtime. The schema expression is interpreted as a type descriptor:
-    ///   - Ident("Int"/"Str"/"Float"/"Bool") -> primitive
-    ///   - Ident("User") -> lookup TypeDef by name
-    ///   - ListLit([Ident("Pilot")]) -> list schema
+    /// - Ident("Int"/"Str"/"Float"/"Bool") -> primitive
+    /// - Ident("User") -> lookup TypeDef by name
+    /// - ListLit([Ident("Pilot")]) -> list schema
     ///
     /// Descriptor format:
-    ///   "i" = Int, "f" = Float, "s" = Str, "b" = Bool
-    ///   "T{TypeName|field1:desc,field2:desc,...}" = TypeDef
-    ///   "L{desc}" = List of elements
-    ///   "E{EnumName|Variant1,Variant2,...}" = Enum (C16)
+    /// "i" = Int, "f" = Float, "s" = Str, "b" = Bool
+    /// "T{TypeName|field1:desc,field2:desc,...}" = TypeDef
+    /// "L{desc}" = List of elements
+    /// "E{EnumName|Variant1,Variant2,...}" = Enum.
     ///
     /// Taida の命名規則（英数字 + `_`、`docs/reference/naming_conventions.md`）により
-    /// Variant 名に `,` `|` `{` `}` は出現しないため、C16 ではエスケープ不要。
+    /// Variant 名に `,` `|` `{` `}` は出現しないため、エスケープ不要。
     /// D1 懸念の最終決定: escape なし。parser 側で名前が汚染された場合は別 ticket。
     pub(crate) fn resolve_json_schema_descriptor(&self, expr: &Expr) -> Result<String, LowerError> {
         match expr {
@@ -88,7 +88,7 @@ impl Lowering {
         Ok(format!("T{{{}|{}}}", type_name, parts.join(",")))
     }
 
-    /// C16: Format an Enum schema descriptor.
+    /// Format an Enum schema descriptor.
     ///
     /// Shape: `E{<EnumName>|<Variant1>,<Variant2>,...}`
     /// Empty variant list becomes `E{<EnumName>|}` and is treated as

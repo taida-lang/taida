@@ -76,7 +76,7 @@ pub enum NodeKind {
 
     // Type hierarchy graph
     PrimitiveType,
-    /// (E30 Phase 7.5 / E30B-006, Lock-F 軸 2) Class-like 単一 NodeKind。
+    /// Class-like 単一 NodeKind。
     /// 旧 `BuchiPackType` / `MoldType` / `ErrorType` を統合した。surface 上の
     /// 旧 3 系統 (TypeDef / Mold 継承 / Error 継承) は kind discriminator を
     /// `metadata["class_like_kind"]` (`"BuchiPack" | "Mold" | "Inheritance"`)
@@ -143,7 +143,7 @@ pub enum EdgeKind {
     SymbolRef,
 
     // Type hierarchy
-    /// (E30 Phase 7.5 / E30B-006, Lock-F 軸 2) Class-like 単一 inheritance edge。
+    /// Class-like 単一 inheritance edge。
     /// 旧 `MoldInheritance` / `ErrorInheritance` を統合した。Mold base / Error
     /// base / 任意親型からの継承をすべてこの edge kind で表現する。`metadata`
     /// で旧分類が必要な consumer 向けに kind hint を付与する余地を残す。

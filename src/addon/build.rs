@@ -1,4 +1,4 @@
-//! Shared addon build helper (RC2.7 Phase 1).
+//! Shared addon build helper.
 //!
 //! Extracts `AddonBuildOutput` and `build_addon_artifacts` from
 //! `src/pkg/publish.rs` so that both the publish flow and the
@@ -8,9 +8,9 @@
 //!
 //! * **Not pure.** Invokes `cargo build --release --lib` as a subprocess.
 //! * When `external_target_dir` is `Some(path)`, the build output
-//!   is redirected via `CARGO_TARGET_DIR` so the project's own
-//!   `target/` directory is never touched (critical for the install
-//!   fallback where the source tree lives in the package store).
+//! is redirected via `CARGO_TARGET_DIR` so the project's own
+//! `target/` directory is never touched (critical for the install
+//! fallback where the source tree lives in the package store).
 //! * Does **not** modify `packages.tdm`, `addon.toml` or `addon.lock.toml`.
 
 use std::path::{Path, PathBuf};
@@ -42,12 +42,12 @@ pub struct AddonBuildOutput {
 ///
 /// The function:
 ///
-///   1. Parses `native/addon.toml` to discover the declared library
-///      stem (`[addon].library`).
-///   2. Detects the current host triple via
-///      [`crate::addon::host_target::detect_host_target`].
-///   3. Invokes `cargo build --release --lib` in `project_dir`.
-///   4. Probes the release directory for the built cdylib.
+/// 1. Parses `native/addon.toml` to discover the declared library
+/// stem (`[addon].library`).
+/// 2. Detects the current host triple via
+/// [`crate::addon::host_target::detect_host_target`].
+/// 3. Invokes `cargo build --release --lib` in `project_dir`.
+/// 4. Probes the release directory for the built cdylib.
 ///
 /// When `external_target_dir` is `Some(dir)`, the environment
 /// variable `CARGO_TARGET_DIR` is set so all build artifacts land
@@ -178,7 +178,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// RC2.7-4c: verify that store source tree is never polluted.
+    /// verify that store source tree is never polluted.
     ///
     /// The contract is: when `external_target_dir` is provided, the
     /// project's own `target/` directory must not be created or modified.

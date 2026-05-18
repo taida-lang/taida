@@ -6,13 +6,13 @@
 /// ## 最適化パターン
 ///
 /// 1. **Return 直前の Release 除去**: 関数が値を返す直前に同じ変数を
-///    Release するのは無意味（callee → caller の所有権移転）
+/// Release するのは無意味（callee → caller の所有権移転）
 ///
 /// 2. **未使用 Release 除去**: Release 対象の変数がヒープでない場合
-///    （スカラー値 0 など）、Release は不要
+/// （スカラー値 0 など）、Release は不要
 ///
 /// 3. **連続 Retain-Release 除去**: 同一変数に対する Retain 直後の Release
-///    は相殺されるため除去可能
+/// は相殺されるため除去可能
 use super::ir::*;
 
 /// IrModule 全体に RC 最適化を適用

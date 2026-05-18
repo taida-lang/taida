@@ -1,11 +1,10 @@
-//! `native/addon.toml` parser and validator (RC1 Phase 4 -- `RC1-4a`).
+//! `native/addon.toml` parser and validator.
 //!
-//! `.dev/RC1_DESIGN.md` Phase 4 Lock pins the boundary between the
-//! Taida-language facade (`packages.tdm`) and the Native-only addon
-//! manifest (`native/addon.toml`). This module owns the second half:
+//! This module owns the boundary between the Taida-language facade
+//! (`packages.tdm`) and the Native-only addon manifest (`native/addon.toml`):
 //! parsing and validating `addon.toml` files. It is intentionally a
 //! **minimal hand-written TOML subset parser** so we don't pull a TOML
-//! crate into the dependency tree (RC1 dep minimisation policy).
+//! crate into the dependency tree.
 //!
 //! # Accepted syntax
 //!
@@ -34,21 +33,21 @@
 //! Anything outside this subset is rejected with a structured error so
 //! authors get a clear failure mode rather than silent acceptance.
 //!
-//! # Validation contract (`RC1_DESIGN.md` Phase 4 Lock §Manifest boundary)
+//! # Validation contract (`RC1_DESIGN.md` Lock §Manifest boundary)
 //!
 //! 1. `abi` MUST equal [`taida_addon::TAIDA_ADDON_ABI_VERSION`] (currently `1`).
 //! 2. `entry` MUST equal [`taida_addon::TAIDA_ADDON_ENTRY_SYMBOL`]
-//!    (`"taida_addon_get_v1"`).
+//! (`"taida_addon_get_v1"`).
 //! 3. `package` MUST be a non-empty string.
 //! 4. `library` MUST be a non-empty string (the cdylib stem, no
-//!    platform suffix).
+//! platform suffix).
 //! 5. `[functions]` table MUST exist and contain at least one entry.
 //! 6. Each function arity MUST be a non-negative integer.
 //! 7. `targets`, when present, MUST be a non-empty array of strings
-//!    drawn from the supported allowlist (currently `{"native"}`).
-//!    When absent, the parser explicitly injects `vec!["native"]` so
-//!    the omitted form and `targets = ["native"]` produce a
-//!    bit-identical [`AddonManifest`].
+//! drawn from the supported allowlist (currently `{"native"}`).
+//! When absent, the parser explicitly injects `vec!["native"]` so
+//! the omitted form and `targets = ["native"]` produce a
+//! bit-identical [`AddonManifest`].
 //!
 //! Any violation -> `AddonManifestError::*` with a deterministic
 //! single-line `Display` for diagnostic routing.
@@ -60,7 +59,7 @@
 //! its `serde` derive surface) for a five-line schema would invert the
 //! cost/benefit ratio. The hand parser is ~150 lines, has no
 //! dependencies, and rejects every shape outside the v1 schema with a
-//! pinned error variant — exactly the property RC1 needs.
+//! pinned error variant — exactly the property addon loading needs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -68,12 +67,12 @@ use std::path::{Path, PathBuf};
 
 use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 
-/// D28B-021 + D28B-010: closed allowlist for the top-level `targets`
+/// +: closed allowlist for the top-level `targets`
 /// array.
 ///
 /// The list is intentionally tiny so additions are visible review
 /// events. `"native"` is the cdylib dispatch target; `"wasm-full"` was
-/// added at @d.X (D28B-010) as a §6.2 widening — wasm-full is the
+/// added at @d.X () as a §6.2 widening — wasm-full is the
 /// only wasm profile that exposes the addon dispatcher contract at
 /// stable. wasm-min / wasm-wasi / wasm-edge remain unsupported and
 /// the `AddonBackend::supports_addons` policy rejects them at the
@@ -84,7 +83,7 @@ use taida_addon::{TAIDA_ADDON_ABI_VERSION, TAIDA_ADDON_ENTRY_SYMBOL};
 /// the receivable values listed in `docs/reference/addon_manifest.md`.
 pub const SUPPORTED_ADDON_TARGETS: &[&str] = &["native", "wasm-full"];
 
-/// D28B-021: default value injected when `targets` is omitted.
+/// default value injected when `targets` is omitted.
 ///
 /// Returning the same `Vec<String>` for both the absent and the
 /// `targets = ["native"]` cases is the structural half of the
@@ -100,7 +99,7 @@ pub fn default_addon_targets() -> Vec<String> {
 /// Parsed `[library.prebuild]` section from `native/addon.toml`.
 ///
 /// This is **optional** — addons without a prebuild section simply fall
-/// back to the RC1 "developer-side `.so` manual placement" mode.
+/// back to the "developer-side `.so` manual placement" mode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PrebuildConfig {
     /// URL template with `{version}`, `{target}`, `{ext}`, `{name}` variables.
@@ -109,9 +108,9 @@ pub struct PrebuildConfig {
     pub allowed_prebuild_hosts: Vec<String>,
     /// Target triple -> `sha256:<64-hex-string>` mapping.
     pub targets: HashMap<String, String>,
-    /// RC15B-005: Optional GPG / detached signatures keyed by target triple.
+    /// Optional GPG / detached signatures keyed by target triple.
     ///
-    /// Reserved for future supply-chain hardening. In RC1.5 the signatures
+    /// Reserved for future supply-chain hardening. The signatures
     /// are **parsed and stored** but **not verified**: the field is
     /// preserved so that manifest authors can start including signatures
     /// today without tripping `unknown key` errors, and so that the
@@ -119,7 +118,7 @@ pub struct PrebuildConfig {
     ///
     /// Accepted value format is `"gpg:<opaque-identifier>"` — the opaque
     /// identifier is treated as an opaque token (URL, fingerprint, base64
-    /// signature, ...). Non-`gpg:` prefixes are rejected at parse time
+    /// signature,...). Non-`gpg:` prefixes are rejected at parse time
     /// so that the reserved namespace stays disjoint from future schemes
     /// such as `sigstore:`.
     pub signatures: HashMap<String, String>,
@@ -131,9 +130,9 @@ impl PrebuildConfig {
         self.url_template.is_some()
     }
 
-    /// RC15B-005: Returns true if any target has a signature recorded.
+    /// Returns true if any target has a signature recorded.
     ///
-    /// The signature field is reserved in RC1.5 and the verifier is not
+    /// The signature field is reserved and the verifier is not
     /// wired yet; callers can use this to gate future verification code
     /// paths without having to plumb through a separate flag.
     pub fn has_signatures(&self) -> bool {
@@ -161,7 +160,7 @@ pub struct AddonManifest {
     pub library: String,
     /// `[functions]` table: function name -> declared arity.
     pub functions: BTreeMap<String, u32>,
-    /// D28B-021: top-level `targets` array. Always populated after
+    /// top-level `targets` array. Always populated after
     /// parsing — when the source omits `targets`, the parser injects
     /// [`default_addon_targets`] so the omitted form and an explicit
     /// `targets = ["native"]` produce a bit-identical struct.
@@ -170,7 +169,7 @@ pub struct AddonManifest {
     /// parse time; unknown entries are rejected with
     /// [`AddonManifestError::UnknownAddonTarget`] (`[E2001]`).
     pub targets: Vec<String>,
-    /// RC1.5: `[library.prebuild]` section. `None` if absent (RC1 addon).
+    /// `[library.prebuild]` section. `None` if absent.
     pub prebuild: PrebuildConfig,
 }
 
@@ -178,7 +177,7 @@ pub struct AddonManifest {
 ///
 /// Every variant carries the manifest path so diagnostics can route
 /// back to the offending file. The `Display` impl uses a deterministic
-/// `addon manifest error: ...` prefix that the import resolver pins on.
+/// `addon manifest error:...` prefix that the import resolver pins on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AddonManifestError {
@@ -224,27 +223,27 @@ pub enum AddonManifestError {
         key: String,
         expected: &'static str,
     },
-    /// RC1.5: `[library.prebuild]` url field is missing or empty.
+    /// `[library.prebuild]` url field is missing or empty.
     PrebuildMissingUrl { path: PathBuf },
-    /// RC1.5: `sha256:` prefix validation failed (must be `sha256:` + 64 hex chars).
+    /// `sha256:` prefix validation failed (must be `sha256:` + 64 hex chars).
     PrebuildInvalidSha256 {
         path: PathBuf,
         target: String,
         value: String,
     },
-    /// RC1.5: unknown URL template variable in `[library.prebuild].url`.
+    /// Unknown URL template variable in `[library.prebuild].url`.
     PrebuildUnknownUrlVariable { path: PathBuf, variable: String },
-    /// RC1.5: unbalanced brace in `[library.prebuild].url` template.
+    /// Unbalanced brace in `[library.prebuild].url` template.
     PrebuildUnbalancedBrace { path: PathBuf, detail: String },
     /// Unknown key inside `[library.prebuild]`.
     PrebuildUnknownKey { path: PathBuf, key: String },
     /// Invalid host in `[library.prebuild].allowed_prebuild_hosts`.
     PrebuildInvalidAllowedHost { path: PathBuf, host: String },
-    /// RC1.5: duplicate `[library.prebuild.targets.<target>]` for the same target.
+    /// Duplicate `[library.prebuild.targets.<target>]` for the same target.
     PrebuildDuplicateTarget { path: PathBuf, target: String },
-    /// RC15B-103: target triple in `[library.prebuild.targets]` is not a known valid triple.
+    /// target triple in `[library.prebuild.targets]` is not a known valid triple.
     PrebuildUnknownTarget { path: PathBuf, target: String },
-    /// RC15B-005: `[library.prebuild.signatures]` entry is not in the
+    /// `[library.prebuild.signatures]` entry is not in the
     /// reserved `gpg:<opaque>` format. Future schemes (e.g. `sigstore:`)
     /// should be added as a new variant rather than loosened here.
     PrebuildInvalidSignatureFormat {
@@ -252,11 +251,11 @@ pub enum AddonManifestError {
         target: String,
         value: String,
     },
-    /// RC15B-005: signature target triple is not a known valid triple.
+    /// signature target triple is not a known valid triple.
     PrebuildSignatureUnknownTarget { path: PathBuf, target: String },
-    /// RC15B-005: duplicate `[library.prebuild.signatures.<target>]` for the same target.
+    /// duplicate `[library.prebuild.signatures.<target>]` for the same target.
     PrebuildDuplicateSignatureTarget { path: PathBuf, target: String },
-    /// D28B-021 (`[E2001]`): top-level `targets` contains an entry
+    /// (`[E2001]`): top-level `targets` contains an entry
     /// that is not in [`SUPPORTED_ADDON_TARGETS`].
     ///
     /// The error is raised early — before any dispatcher is consulted —
@@ -264,12 +263,12 @@ pub enum AddonManifestError {
     /// `target` field carries the offending string verbatim (case
     /// preserved) for the diagnostic.
     UnknownAddonTarget { path: PathBuf, target: String },
-    /// D28B-021 (`[E2002]`): top-level `targets` was present but the
+    /// (`[E2002]`): top-level `targets` was present but the
     /// array was empty (`targets = []`). An empty array is rejected
     /// rather than silently treated as the default — silent treatment
     /// would let an author opt out of the contract by writing `[]`.
     EmptyAddonTargets { path: PathBuf },
-    /// D28B-021: top-level `targets` was the wrong type (e.g. a string
+    /// top-level `targets` was the wrong type (e.g. a string
     /// or integer rather than an array of strings).
     AddonTargetsTypeMismatch { path: PathBuf, detail: String },
 }
@@ -812,10 +811,10 @@ pub fn parse_addon_manifest_str(
 
 /// Internal representation of a parsed `addon.toml`. Holds top-level
 /// keys, the `[functions]` table, and optional `[library.prebuild]`
-/// with its child `[library.prebuild.targets]` table (RC1.5).
+/// with its child `[library.prebuild.targets]` table.
 /// Anything else triggers a syntax error so the schema stays pinned.
 ///
-/// ## RC15B-107: Unknown-key forward-compatibility policy
+/// ##: Unknown-key forward-compatibility policy
 ///
 /// The parser is **strict**: any section or top-level key not listed in
 /// [`parse_minimal_toml`]'s section table is rejected with a
@@ -824,15 +823,15 @@ pub fn parse_addon_manifest_str(
 /// tolerating stray keys that would become load-bearing in a future RC.
 ///
 /// Forward-compat for addon authors:
-///   1. Adding a new section is an **ABI bump** and should coincide with
-///      a new manifest schema version (future work).
-///   2. Adding a new optional key inside an existing reserved section
-///      (e.g. `[library.prebuild.signatures]` added in RC15B-005) must
-///      only be done after updating this parser and bumping the host's
-///      minimum supported tool version.
-///   3. Manifests written by a *newer* taida will fail to load on older
-///      taidas that do not know the new key — this is by design. Authors
-///      should document the minimum `taida` version in their README.
+/// 1. Adding a new section is an **ABI bump** and should coincide with
+/// a new manifest schema version (future work).
+/// 2. Adding a new optional key inside an existing reserved section
+/// (e.g. `[library.prebuild.signatures]` added in ) must
+/// only be done after updating this parser and bumping the host's
+/// minimum supported tool version.
+/// 3. Manifests written by a *newer* taida will fail to load on older
+/// taidas that do not know the new key — this is by design. Authors
+/// should document the minimum `taida` version in their README.
 #[derive(Debug, Default)]
 struct ParsedToml {
     top_level: BTreeMap<String, RawValue>,
@@ -849,8 +848,8 @@ struct ParsedToml {
 enum RawValue {
     Int(i64),
     Str(String),
-    /// D28B-021: inline array of strings, used only for the top-level
-    /// `targets = ["native", ...]` key. Other keys still reject arrays
+    /// inline array of strings, used only for the top-level
+    /// `targets = ["native",...]` key. Other keys still reject arrays
     /// via [`require_str`] / [`require_int`] type checks.
     StrArray(Vec<String>),
 }
@@ -1122,7 +1121,7 @@ fn parse_value(path: &Path, line_no: usize, raw: &str) -> Result<RawValue, Addon
     })
 }
 
-/// D28B-021: parse the inside of a single-line `["a", "b"]` array.
+/// parse the inside of a single-line `["a", "b"]` array.
 /// Returns the extracted strings in order; rejects empty entries,
 /// embedded escapes, and stray characters between elements.
 fn parse_str_array_items(
@@ -1209,7 +1208,7 @@ fn is_valid_sha256(value: &str) -> bool {
     hex_part.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
-/// RC15B-005: validates the reserved `gpg:<opaque>` signature format.
+/// validates the reserved `gpg:<opaque>` signature format.
 ///
 /// The opaque identifier must be non-empty and contain only printable
 /// ASCII (no whitespace, no control characters) so it can be embedded

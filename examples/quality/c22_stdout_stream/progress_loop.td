@@ -26,6 +26,6 @@ emit label: Str =
 // the example compatible across backends (Fold side-effect bodies
 // with block syntax currently trip the parser; see c22_fold probe).
 labels <= @["1", "2", "3", "4"]
-Map[labels, emit]() ]=> _emitted
+Map[labels, emit]() >=> _emitted
 
 stdout("done")

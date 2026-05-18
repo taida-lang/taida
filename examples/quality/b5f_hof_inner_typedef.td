@@ -7,7 +7,7 @@ makeItem name = Item(id <= name.length(), label <= name) => :Item
 
 names <= @["alpha", "beta", "gamma"]
 
-Map[names, _ name = makeItem(name)]() ]=> items
+Map[names, _ name = makeItem(name)]() >=> items
 stdout(items.first().unmold().label)
 stdout(items.first().unmold().id.toString())
 stdout(items.last().unmold().label)

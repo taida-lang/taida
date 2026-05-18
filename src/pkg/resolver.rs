@@ -3,7 +3,7 @@
 /// Resolves all dependencies using the Provider pattern:
 /// 1. WorkspaceProvider — local path dependencies
 /// 2. CoreBundledProvider — core packages bundled with Taida (`taida-lang/*`)
-/// 3. StoreProvider — external registry (stub, Phase 3+)
+/// 3. StoreProvider — external registry (stub, +)
 ///
 /// `taida ingot deps` and `taida ingot install` read `packages.tdm`, resolve all dependencies
 /// through the provider chain, and create `.taida/deps/` symlinks.
@@ -33,7 +33,7 @@ pub struct ResolveResult {
     pub errors: Vec<String>,
 }
 
-/// C17-2: refresh-related flags forwarded from the CLI to the StoreProvider.
+/// refresh-related flags forwarded from the CLI to the StoreProvider.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StoreRefreshFlags {
     /// `--force-refresh`: invalidate the store entry and re-extract.
@@ -179,7 +179,7 @@ pub fn resolve_deps_locked(manifest: &Manifest, lockfile: &Lockfile) -> ResolveR
     )
 }
 
-/// C17-2: variant of `resolve_deps_locked` that forwards the C17 refresh
+/// variant of `resolve_deps_locked` that forwards the refresh
 /// flags to the `StoreProvider` (force-refresh / no-remote-check).
 pub fn resolve_deps_locked_with_flags(
     manifest: &Manifest,
@@ -189,7 +189,7 @@ pub fn resolve_deps_locked_with_flags(
     resolve_deps_inner(manifest, false, Some(lockfile), flags)
 }
 
-/// C17-2: variant of `resolve_deps` that forwards the C17 refresh flags
+/// variant of `resolve_deps` that forwards the refresh flags
 /// to the `StoreProvider` when there is no prior lockfile.
 pub fn resolve_deps_with_flags(manifest: &Manifest, flags: StoreRefreshFlags) -> ResolveResult {
     resolve_deps_inner(manifest, false, None, flags)
@@ -595,7 +595,7 @@ fn install_deps_into(result: &ResolveResult, deps_dir: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// RC1.5: Install addon prebuilds for all resolved packages that have `native/addon.toml`.
+/// Install addon prebuilds for all resolved packages that have `native/addon.toml`.
 ///
 /// For each package, checks if `native/addon.toml` exists in the package dir.
 /// If present, parses the manifest, detects the host target, and fetches the prebuild
@@ -779,7 +779,7 @@ fn record_allow_fresh_audit(
 ///
 /// Creates the `native/` directory if needed and copies the binary from
 /// `source_path`. Extracted from the prebuild success and local build
-/// fallback arms to eliminate code duplication (RC2.7B-010).
+/// fallback arms to eliminate code duplication.
 fn place_addon_binary(
     deps_dir: &Path,
     pkg_name: &str,
@@ -806,7 +806,7 @@ enum PrebuildFailure {
     IntegrityMismatch(String),
     /// Missing / unavailable / transport failure — eligible for local build fallback.
     Unavailable(String),
-    /// RC2.7B-009: host target is not registered in addon.toml / addon.lock.toml.
+    /// host target is not registered in addon.toml / addon.lock.toml.
     /// Never eligible for fallback, regardless of `--allow-local-addon-build`.
     /// Design: Section C "unsupported target では fallback しない".
     UnsupportedTarget(String),
@@ -830,7 +830,7 @@ pub(crate) enum ShaSource {
     AddonToml,
     /// Consult `addon.lock.toml` from the release asset. Either:
     /// - `addon.toml` has no row for our host triple, or
-    /// - `addon.toml`'s row is a `sha256:0{64}` placeholder (C14B-012).
+    /// - `addon.toml`'s row is a `sha256:0{64}` placeholder.
     LockfileFallback,
     /// Addon declares no prebuild at all — hard `UnsupportedTarget`
     /// error, no fallback eligible.
@@ -915,7 +915,7 @@ fn prebuild_https_host(url: &str) -> Option<String> {
 /// Returns the cached binary path, expected SHA-256, and release metadata
 /// on success, or a classified error for the fallback policy to decide on.
 ///
-/// RC2.7B-004: the SHA is returned so the caller can record it in the lockfile.
+/// the SHA is returned so the caller can record it in the lockfile.
 fn try_fetch_prebuild(
     pkg: &ResolvedPackage,
     addon_manifest: &crate::addon::manifest::AddonManifest,
@@ -1232,7 +1232,7 @@ fn try_fetch_prebuild(
     }
 }
 
-/// RC2.7-4b: attempt local cargo build when prebuild is unavailable.
+/// attempt local cargo build when prebuild is unavailable.
 ///
 /// Uses the shared build helper from `crate::addon::build` with
 /// `CARGO_TARGET_DIR` pointing at an external cache directory
@@ -1281,7 +1281,7 @@ fn try_local_addon_build(
     ))
 }
 
-/// RC15B-002: builds a progress reporter closure that prints a one-line
+/// builds a progress reporter closure that prints a one-line
 /// carriage-return indicator to stderr while an addon binary downloads.
 ///
 /// The reporter deliberately stays silent for the first ~256 KiB so
@@ -1609,7 +1609,7 @@ pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(),
     lockfile.write(&lock_path)
 }
 
-/// RC1.5-3b: Generate/update lockfile with addon info.
+/// Generate/update lockfile with addon info.
 pub fn write_lockfile_with_addons(
     manifest: &Manifest,
     result: &ResolveResult,

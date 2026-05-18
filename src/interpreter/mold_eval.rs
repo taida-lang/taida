@@ -12,8 +12,8 @@ use super::value::{
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use crate::parser::Expr;
 
-/// C25B-025 (Phase 5-A): helper for single-argument numeric molds that
-/// return Float (Sqrt / Exp / Ln / Sin / Cos / ...). Accepts Int (widens
+/// helper for single-argument numeric molds that
+/// return Float (Sqrt / Exp / Ln / Sin / Cos /...). Accepts Int (widens
 /// to f64) or Float. Any other value produces a descriptive runtime
 /// error including the mold name. Non-value signals (Throw / TailCall)
 /// are propagated.
@@ -50,12 +50,12 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     ])
 }
 
-/// C26B-020 柱 2: zero-copy BytesCursor constructor.
+/// 柱 2: zero-copy BytesCursor constructor.
 ///
 /// Accepts an already-shared `Arc<BytesValue>`; cloning the Arc is O(1)
 /// atomic refcount bump rather than a full byte-by-byte memcpy.
 ///
-/// D29B-004 / Track-ε: `bytes` is now `Arc<BytesValue>` (was `Arc<Vec<u8>>`)
+/// `bytes` is now `Arc<BytesValue>` (was `Arc<Vec<u8>>`)
 /// to match the new `Value::Bytes` interior. `BytesValue::len()` returns the
 /// view length (not the underlying buf length), so cursors over a sub-range
 /// view see the view's range only.
@@ -114,11 +114,11 @@ fn parse_bytes_cursor(
     Ok((bytes, offset))
 }
 
-/// C26B-016 (Option B+): extract `(start, len)` from a span pack
+/// (Option B+): extract `(start, len)` from a span pack
 /// `@(start: Int, len: Int)`. Returns None if the value is not a
 /// BuchiPack with both fields present as Int.
 ///
-/// D28B-015: exposed as `pub(crate)` so the `strOf(span, raw)` function-form
+/// exposed as `pub(crate)` so the `strOf(span, raw)` function-form
 /// builtin (in `prelude.rs`) can reuse the same span-extraction logic as the
 /// `StrOf[span, raw]()` mold form. Keeping a single extractor preserves
 /// 4-backend parity (interpreter / JS / native / wasm-full all use identical
@@ -141,10 +141,10 @@ pub(crate) fn extract_span_pack(value: &Value) -> Option<(usize, usize)> {
     Some((start as usize, len as usize))
 }
 
-/// C26B-016: resolve the raw byte buffer backing a span. Accepts `Bytes`
+/// resolve the raw byte buffer backing a span. Accepts `Bytes`
 /// directly or `Str` (UTF-8 re-encoded). Returns None for other types.
 ///
-/// D28B-015: exposed as `pub(crate)` so the `strOf(span, raw)` function-form
+/// exposed as `pub(crate)` so the `strOf(span, raw)` function-form
 /// builtin (in `prelude.rs`) can reuse the same byte-extraction logic as the
 /// `StrOf[span, raw]()` mold form (cf. `extract_span_pack`).
 pub(crate) fn raw_as_bytes(value: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
@@ -2386,10 +2386,10 @@ impl Interpreter {
             //   id   — task identifier (optional)
             //   task — description of the pending work
             //   sol  — solidify channel (`__value`): the current placeholder value
-            //   unm  — unmold channel (`__default`): the value returned by `]=>`
+            //   unm  — unmold channel (`__default`): the value returned by `>=>`
             //
             // When T is provided, both `sol` and `unm` default to `default_for_type(T)`.
-            // See unmold.rs for the unmold (`]=>`) behavior.
+            // See unmold.rs for the unmold (`>=>`) behavior.
             "TODO" => {
                 let type_default = if let Some(arg) = type_args.first() {
                     self.todo_default_from_type_arg(arg)?

@@ -1,4 +1,4 @@
-//! Tail-position analyzer for the `mutual-recursion` verify check (C12-3 / FB-8).
+//! Tail-position analyzer for the `mutual-recursion` verify check ( / ).
 //!
 //! This module walks the AST of a single [`FuncDef`] and emits a [`CallSite`]
 //! entry for every direct function call (`Expr::FuncCall` where the callee is
@@ -7,25 +7,25 @@
 //! function's body.
 //!
 //! Conservative rules (intentionally narrower than the runtime TCO so that
-//! the C12-3 compile-time reject does not over-reject programs that happen
+//! the compile-time reject does not over-reject programs that happen
 //! to work at runtime):
 //!
 //! - The final statement of a function body is in tail position. Earlier
-//!   statements (including assignments and unmold binds) are not.
+//! statements (including assignments and unmold binds) are not.
 //! - Inside a [`Expr::CondBranch`], the final statement of each arm
-//!   inherits the enclosing tail flag.
+//! inherits the enclosing tail flag.
 //! - Inside an [`Expr::Pipeline`], **only** the last stage inherits tail,
-//!   and even then only if the last stage is itself a direct `FuncCall`
-//!   (e.g., `x => foo(_)`). A bare `Ident` pipeline stage is conservatively
-//!   treated as non-tail (it is morally a reference, not a tail call site).
+//! and even then only if the last stage is itself a direct `FuncCall`
+//! (e.g., `x => foo(_)`). A bare `Ident` pipeline stage is conservatively
+//! treated as non-tail (it is morally a reference, not a tail call site).
 //! - Function arguments, `MoldInst` header / body args, `BuchiPack` field
-//!   values, list elements, binary-op operands, lambda bodies, and
-//!   `ErrorCeiling` handler bodies are all **non-tail** — they feed a
-//!   surrounding construct and therefore cannot be the last operation.
+//! values, list elements, binary-op operands, lambda bodies, and
+//! `ErrorCeiling` handler bodies are all **non-tail** — they feed a
+//! surrounding construct and therefore cannot be the last operation.
 //! - Lambdas introduce their own tail frame; calls inside a lambda body
-//!   are scoped to the lambda, not the outer function. For the purpose of
-//!   the mutual-recursion check they are treated as non-tail of the outer
-//!   function.
+//! are scoped to the lambda, not the outer function. For the purpose of
+//! the mutual-recursion check they are treated as non-tail of the outer
+//! function.
 //!
 //! The analyzer intentionally does **not** try to reason about
 //! `|== Error =` ceilings' return values. A call inside an error handler
@@ -68,16 +68,24 @@ fn visit_stmt(stmt: &Statement, is_tail: bool, out: &mut Vec<CallSite>) {
         Statement::UnmoldForward(uf) => visit_expr(&uf.source, false, out),
         Statement::UnmoldBackward(ub) => visit_expr(&ub.source, false, out),
         Statement::ErrorCeiling(ec) => {
-            // Handler body runs in its own trampoline scope. Calls inside
-            // it are not tail-of-outer.
+            // F42 sweep follow-up: ErrorCeiling handler bodies are
+            // executed in a trampoline scope by the interpreter / JS
+            // (`mutual_tail_call_target`). The handler is its own tail
+            // frame regardless of whether the surrounding `ErrorCeiling`
+            // statement is the outer function's last statement — every
+            // handler exit can dispatch a tail call into the trampoline
+            // and re-enter the caller without growing the stack.
+            //
+            // We therefore visit the handler with its own tail context:
+            // the *last* handler statement is tail of the handler, and
+            // earlier statements are non-tail. This keeps retry patterns
+            // (`| _ |> retryLoop(...)` at the end of the handler) clean
+            // while still surfacing `E0701` for self-recursion in
+            // non-tail positions inside the handler.
             let h_len = ec.handler_body.len();
             for (i, hstmt) in ec.handler_body.iter().enumerate() {
-                let _last = i == h_len - 1;
-                // Even the last handler stmt is not tail of the *outer*
-                // function in the sense that matters for this check
-                // (mutual recursion across the ceiling is unusual and a
-                // conservative reject is safer than a conservative pass).
-                visit_stmt(hstmt, false, out);
+                let last = i + 1 == h_len;
+                visit_stmt(hstmt, last, out);
             }
         }
         _ => {}
@@ -157,6 +165,16 @@ fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Vec<CallSite>) {
             }
         }
         Expr::MoldInst(_, type_args, fields, _) => {
+            // F42 sweep follow-up: an earlier draft tried to allow-list
+            // `If[cond, then, else]()` then/else positions as tail. That
+            // draft turned out to be unsound — `interpreter::eval_expr_tail`
+            // and `js::codegen::collect_tail_call_targets` only see
+            // `FuncCall` / `CondBranch` as tail targets, so the runtime
+            // still consumes the stack. Until both runtimes track
+            // `MoldInst("If")` as a tail position, this analyzer keeps
+            // every mold type-arg classified as non-tail (conservative,
+            // matching the runtime). Use `| cond |> body` instead of
+            // `If[..., recur, ...]()` for tail-recursive control flow.
             for a in type_args {
                 visit_expr(a, false, out);
             }

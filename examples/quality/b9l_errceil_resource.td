@@ -9,8 +9,8 @@ process items =
   => :Str
   | items.length() == 0 |> DataError(type <= "DataError", message <= "empty", code <= 1).throw()
   | _ |>
-    Map[items, _ x = x * 2]() ]=> doubled
-    Fold[doubled, 0, _ acc x = acc + x]() ]=> total
+    Map[items, _ x = x * 2]() >=> doubled
+    Fold[doubled, 0, _ acc x = acc + x]() >=> total
     "total:" + total.toString()
 => :Str
 

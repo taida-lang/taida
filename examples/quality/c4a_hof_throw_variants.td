@@ -20,8 +20,8 @@ safeMap items =
   |== err: Error =
     "map:" + err.message
   => :Str
-  Map[items, _ x = guardMap(x)]() ]=> r
-  Join[r, ","]() ]=> v
+  Map[items, _ x = guardMap(x)]() >=> r
+  Join[r, ","]() >=> v
   v
 => :Str
 
@@ -29,8 +29,8 @@ safeFilter items =
   |== err: Error =
     "filter:" + err.message
   => :Str
-  Filter[items, _ x = guardFilter(x)]() ]=> r
-  Join[r, ","]() ]=> v
+  Filter[items, _ x = guardFilter(x)]() >=> r
+  Join[r, ","]() >=> v
   v
 => :Str
 
@@ -38,7 +38,7 @@ safeFold items =
   |== err: Error =
     "fold:" + err.message
   => :Str
-  Fold[items, 0, _ acc x = guardFold(acc, x)]() ]=> v
+  Fold[items, 0, _ acc x = guardFold(acc, x)]() >=> v
   v.toString()
 => :Str
 

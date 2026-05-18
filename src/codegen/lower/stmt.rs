@@ -410,26 +410,7 @@ impl Lowering {
                         );
                         if let Some(v) = violations.first() {
                             return Err(LowerError {
-                                message: match v {
-                                    crate::pkg::facade::FacadeViolation::HiddenSymbol {
-                                        name,
-                                        available,
-                                    } => {
-                                        format!(
-                                            "Symbol '{}' is not part of the public API declared in packages.tdm. \
-                                             Available exports: {}",
-                                            name,
-                                            available.join(", ")
-                                        )
-                                    }
-                                    crate::pkg::facade::FacadeViolation::GhostSymbol { name } => {
-                                        format!(
-                                            "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                                             The entry module must export all symbols listed in the package facade.",
-                                            name
-                                        )
-                                    }
-                                },
+                                message: crate::pkg::facade::format_facade_violation(v),
                             });
                         }
                     }
@@ -569,7 +550,7 @@ impl Lowering {
                     // C21-4: Infer homogeneous element type from ListLit.
                     // If every element of `@[...]` has the same primitive
                     // type (FloatLit / IntLit / StringLit / BoolLit), record
-                    // it so later unmold via `a.get(i) ]=> av` can tag `av`.
+                    // it so later unmold via `a.get(i) >=> av` can tag `av`.
                     if let Expr::ListLit(elems, _) = &assign.value
                         && !elems.is_empty()
                     {
@@ -1747,7 +1728,7 @@ impl Lowering {
                 Ok(())
             }
             Statement::UnmoldForward(uf) => {
-                // expr ]=> name : Async のアンモールド
+                // expr >=> name : Async のアンモールド
                 let source_var = self.lower_expr(func, &uf.source)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
@@ -1765,7 +1746,7 @@ impl Lowering {
                 Ok(())
             }
             Statement::UnmoldBackward(ub) => {
-                // name <=[ expr : Async のアンモールド（逆方向）
+                // name <=< expr : Async のアンモールド（逆方向）
                 let source_var = self.lower_expr(func, &ub.source)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
@@ -2060,7 +2041,7 @@ impl Lowering {
         }
     }
 
-    /// C25B-030 Phase 1F helper: walk a `TemplateLit` body for
+    /// helper: walk a `TemplateLit` body for
     /// free-variable references. Mirrors
     /// `lower_template_lit`'s `${...}` parser so the free-var
     /// collection sees exactly the same identifiers the native
@@ -2421,7 +2402,7 @@ impl Lowering {
     /// Lower a condition arm body (Vec<Statement>) to IR.
     /// Returns the IR variable holding the result of the last expression.
     ///
-    /// C13-1: A tail binding statement (`Assignment` / `UnmoldForward` /
+    /// A tail binding statement (`Assignment` / `UnmoldForward` /
     /// `UnmoldBackward`) yields the bound value as the arm result, so the
     /// IR variable produced by that statement becomes `last_var`.
     pub(super) fn lower_cond_arm_body(
@@ -2455,7 +2436,7 @@ impl Lowering {
     /// Lower a condition arm body in tail position.
     /// The last expression is lowered with tail-call optimization.
     ///
-    /// C13-1: Tail-binding statements cannot be TCO'd (the value is bound
+    /// Tail-binding statements cannot be TCO'd (the value is bound
     /// first and then yielded), so they are lowered via the normal path
     /// and the IR variable for the binding becomes the tail value.
     pub(super) fn lower_cond_arm_body_tail(
@@ -2490,7 +2471,7 @@ impl Lowering {
         Ok(last_var)
     }
 
-    /// C13-1: If `stmt` is a tail-binding statement that was just lowered
+    /// If `stmt` is a tail-binding statement that was just lowered
     /// via `lower_statement`, return the IR variable bound by the trailing
     /// `DefVar(target, value)` instruction so the caller can treat it as
     /// the block's yield value.

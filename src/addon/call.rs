@@ -1,37 +1,36 @@
-//! Host-side call facade for the RC1 Phase 3 addon value bridge.
+//! Host-side call facade for the addon value bridge.
 //!
 //! `LoadedAddon::call_function` ties the [`value_bridge`] module and
 //! the loader's raw function table into a single safe entry point:
 //!
 //! 1. Validate arity against the addon's declared function entry.
 //! 2. Reject inputs containing unsupported value kinds up-front
-//!    (deterministic `AddonCallError::UnsupportedInput`).
+//! (deterministic `AddonCallError::UnsupportedInput`).
 //! 3. Allocate a borrowed input vector on the host (every element is
-//!    host-owned via `build_host_input_value`).
+//! host-owned via `build_host_input_value`).
 //! 4. Invoke the addon's raw `extern "C"` call pointer with the
-//!    borrowed vector and nullable `*out_value` / `*out_error` slots.
+//! borrowed vector and nullable `*out_value` / `*out_error` slots.
 //! 5. Materialise the addon's reply into a `taida::Value` (or an
-//!    error), and release every host-owned pointer regardless of
-//!    outcome.
+//! error), and release every host-owned pointer regardless of
+//! outcome.
 //!
 //! Taida user code never sees a raw pointer; the public surface here
 //! is `&[Value] -> Result<Value, AddonCallError>`.
 //!
-//! # RC1B-103 resolution
+//! # Ownership resolution
 //!
-//! The ownership contract promised by `.dev/RC1_DESIGN.md` Phase 3
-//! Lock is enforced structurally here:
+//! The ownership contract is enforced structurally here:
 //!
 //! - **Single allocator**: every `*mut TaidaAddonValueV1` that crosses
-//!   the bridge is produced by the host-side `value_bridge` module.
-//!   The addon can only obtain new pointers through the host callback
-//!   table, so the host is the only free-er.
+//! the bridge is produced by the host-side `value_bridge` module.
+//! The addon can only obtain new pointers through the host callback
+//! table, so the host is the only free-er.
 //! - **Borrowed inputs**: the input vector is built immediately before
-//!   the call and released immediately after. The addon has no way to
-//!   stash a pointer past return (the storage literally goes away).
+//! the call and released immediately after. The addon has no way to
+//! stash a pointer past return (the storage literally goes away).
 //! - **Owned outputs**: addon-returned pointers are consumed exactly
-//!   once by `take_addon_output`, which both reads the data and
-//!   releases the host-owned allocation.
+//! once by `take_addon_output`, which both reads the data and
+//! releases the host-owned allocation.
 
 use taida_addon::{TaidaAddonErrorV1, TaidaAddonStatus, TaidaAddonValueV1};
 
@@ -41,8 +40,8 @@ use crate::interpreter::value::Value;
 
 /// Error surfaced by [`LoadedAddon::call_function`].
 ///
-/// Split into distinct variants so the Native backend dispatcher (RC1
-/// Phase 4) can route on them. Every variant carries enough context
+/// Split into distinct variants so the Native backend dispatcher
+/// ) can route on them. Every variant carries enough context
 /// to diagnose the failure from the addon import site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,7 +55,7 @@ pub enum AddonCallError {
         expected: u32,
         actual: u32,
     },
-    /// One of the input values used a kind outside the RC1 Phase 3
+    /// One of the input values used a kind outside the
     /// whitelist (e.g. `Async`, `Gorilla`, `Function`).
     UnsupportedInput {
         addon: String,
@@ -147,8 +146,8 @@ impl LoadedAddon {
     /// Call an addon function by name with the given `taida::Value`
     /// arguments.
     ///
-    /// This is the only safe way to invoke an addon entry in RC1
-    /// Phase 3. It enforces arity, rejects unsupported input kinds,
+    /// This is the only safe way to invoke an addon entry
+    ///. It enforces arity, rejects unsupported input kinds,
     /// builds the borrowed input vector, invokes the raw call pointer,
     /// and releases every host-owned allocation before returning.
     pub fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, AddonCallError> {

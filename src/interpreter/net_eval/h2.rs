@@ -1,5 +1,5 @@
 //! HTTP/2 serve loop for the Taida interpreter's net package, split out
-//! from `net_eval/mod.rs` (C13-3).
+//! from `net_eval/mod.rs`.
 //!
 //! Owns the `impl Interpreter` methods that run the HTTP/2 accept loop
 //! (`serve_h2`), drive a single connection's frame state machine
@@ -7,7 +7,7 @@
 //! (`send_h2_response`). The underlying HPACK / frame codec lives in
 //! `super::super::net_h2`; this module is the interpreter-side glue.
 //!
-//! C13-3 note: pure mechanical move — no behavior change. The HTTP/1.1
+//! note: pure mechanical move — no behavior change. The HTTP/1.1
 //! `eval_http_serve` implementation in `h1.rs` delegates into
 //! `self.serve_h2(...)` when `protocol: "h2"` is negotiated.
 
@@ -20,7 +20,7 @@ use super::helpers::{
 use super::types::ConnStream;
 
 impl Interpreter {
-    /// NET6-2a/2b/2c: HTTP/2 serve loop (Interpreter reference implementation).
+    /// 2b/2c: HTTP/2 serve loop (Interpreter reference implementation).
     ///
     /// Accepts TLS connections with ALPN h2 negotiation, validates the HTTP/2
     /// connection preface, then enters a frame-level protocol loop that:

@@ -19,7 +19,7 @@
 //!   正規化、`taida_io_stdout_with_tag` で FLOAT tag を `taida_float_to_str`
 //!   経由にルートする
 //! * WASM-wasi: `12.0` / `11.0` — Phase 2/4 で seed-01/03/C21B-009
-//!   解消済: (a) `@[Float]` 要素の unmold 経路 (`a.get(i) ]=> av`) で
+//!   解消済: (a) `@[Float]` 要素の unmold 経路 (`a.get(i) >=> av`) で
 //!   element type を `list_element_types` に伝播して `av*bv` を
 //!   `taida_float_mul` に降ろす、(b) `taida_io_stdout_with_tag` が
 //!   FLOAT tag で `taida_float_to_str` (bit-pattern decode) を呼ぶ。

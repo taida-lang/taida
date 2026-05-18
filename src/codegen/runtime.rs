@@ -1,6 +1,6 @@
 /// Taida ランタイム関数 — ネイティブコードから呼ばれる extern "C" 関数群。
 ///
-/// Phase N1: debug() のみ。
+/// debug() のみ。
 use std::ffi::CStr;
 use std::os::raw::c_char;
 

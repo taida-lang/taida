@@ -16,7 +16,7 @@ GraphNode = @(
     line: Int
     column: Int
   )
-  metadata: @()
+  metadata: Str
 )
 ```
 
@@ -26,7 +26,7 @@ GraphNode = @(
 | `kind` | `Str` | ノード種別（ビューごとに定義） |
 | `label` | `Str` | 表示用ラベル |
 | `location` | `@(file, line, column)` | ソースコード上の位置 |
-| `metadata` | `@()` | ビュー固有の追加情報 |
+| `metadata` | `Str` | ビュー固有の追加情報を JSON 文字列としてシリアライズしたもの。空のときは `"{}"` を入れる。`@()` (空ぶちパック型) は「値の不在を表す型」として禁止されているため、自由形メタデータは構造を持つ別フィールドに分解するか、シリアライズした `Str` として運ぶ。 |
 
 ### GraphEdge
 
@@ -38,7 +38,7 @@ GraphEdge = @(
   target: Str
   kind: Str
   label: Str
-  metadata: @()
+  metadata: Str
 )
 ```
 
@@ -48,7 +48,7 @@ GraphEdge = @(
 | `target` | `Str` | 終点ノードのID |
 | `kind` | `Str` | エッジ種別（ビューごとに定義） |
 | `label` | `Str` | 表示用ラベル |
-| `metadata` | `@()` | ビュー固有の追加情報 |
+| `metadata` | `Str` | ビュー固有の追加情報を JSON 文字列としてシリアライズしたもの。空のときは `"{}"` を入れる。`@()` (空ぶちパック型) は「値の不在を表す型」として禁止されているため、自由形メタデータは構造を持つ別フィールドに分解するか、シリアライズした `Str` として運ぶ。 |
 
 ### Graph
 
@@ -79,7 +79,7 @@ Graph = @(
 | `FunctionCall` | 関数呼び出し | `func(...)` |
 | `Literal` | リテラル値 | `42`, `"hello"`, `@[...]` |
 | `BuchiPack` | ぶちパック | `@(...)` |
-| `Unmold` | アンモールディング操作 | `]=>` / `<=[` / `.unmold()` |
+| `Unmold` | アンモールド操作 | `>=>` / `<=<` / `.unmold()` |
 | `Placeholder` | プレースホルダ | `_` |
 | `Condition` | 条件分岐 | `\| cond \|>` |
 
@@ -89,8 +89,8 @@ Graph = @(
 |--------|------|------------|
 | `PipeForward` | 順方向パイプ | `=>` |
 | `PipeBackward` | 逆方向パイプ | `<=` |
-| `UnmoldForward` | 順方向アンモールド | `]=>` |
-| `UnmoldBackward` | 逆方向アンモールド | `<=[` |
+| `UnmoldForward` | 順方向アンモールド | `>=>` |
+| `UnmoldBackward` | 逆方向アンモールド | `<=<` |
 | `Argument` | 関数引数 | `func(arg)` |
 | `Return` | 戻り値 | `=> :Type` |
 | `ConditionTrue` | 条件真 | `\| cond \|> value` |
@@ -103,8 +103,8 @@ Graph = @(
 | `a => b` | `a`: Variable, `b`: Variable | `a -> b`: PipeForward |
 | `a => func(_) => b` | `a`: Variable, `func(_)`: FunctionCall, `b`: Variable | `a -> func(_)`: PipeForward, `func(_) -> b`: PipeForward |
 | `b <= a` | `a`: Variable, `b`: Variable | `a -> b`: PipeBackward |
-| `mold ]=> x` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldForward |
-| `x <=[ mold` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldBackward |
+| `mold >=> x` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldForward |
+| `x <=< mold` | `mold`: Variable, `x`: Variable | `mold -> x`: UnmoldBackward |
 | `func(a, b)` | `func(a, b)`: FunctionCall, `a`: *, `b`: * | `a -> func`: Argument, `b -> func`: Argument |
 
 > **注意**: 単一方向制約により、一つの文内で `PipeForward` と `PipeBackward` が同時に出現することはありません。同様に `UnmoldForward` と `UnmoldBackward` も同時に出現しません。
@@ -211,7 +211,7 @@ Graph = @(
 |--------|------|--------|
 | `Function` | 名前付き関数 | `funcName args = ...` |
 | `AnonymousFn` | 無名関数 | `_ x = x * 2` |
-| `Method` | メソッド | ぶちパック/モールディング型内の関数 |
+| `Method` | メソッド | ぶちパック/モールド型内の関数 |
 | `Entrypoint` | エントリーポイント | `taida` コマンドで実行されるファイル |
 
 ### エッジ種別
@@ -260,7 +260,7 @@ node_id    := IDENTIFIER
 
 ### クエリの扱い
 
-上記の query vocabulary は内部モデルと検証器が使う概念です。E31 の公開 CLI
+上記の query vocabulary は内部モデルと検証器が使う概念です。現在の公開 CLI
 には graph query subcommand はありません。安全性検査は `taida way verify`、
 機械処理用の構造抽出は `taida graph` の JSON を使います。
 
@@ -310,7 +310,7 @@ taida graph ./src/main.td
 }
 ```
 
-Mermaid / DOT は E31 CLI の公開出力形式ではありません。必要な場合は
+Mermaid / DOT は公開 CLI の出力形式ではありません。必要な場合は
 `taida graph` の JSON を外部ツールで変換してください。
 
 ---

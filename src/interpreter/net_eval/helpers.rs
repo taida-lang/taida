@@ -1,14 +1,14 @@
-/// Free helper functions for net_eval (C12B-025 mechanical split).
+/// Free helper functions for net_eval (mechanical split).
 ///
 /// This file contains all free functions extracted from net_eval.rs:
-///   - HTTP response head builder / reason phrase map
-///   - Scatter-gather write helpers (write_all_retry, write_vectored_all)
-///   - Result BuchiPack helpers (make_result_*, extract_result_value*, get_field_*)
-///   - HTTP request head parser + build_parse_result
-///   - Chunked transfer-encoding helpers (chunked_in_place_compact, chunked_body_complete)
-///   - Keep-alive determination
-///   - HTTP response encoder
-///   - Request body helpers (is_body_stream_request, extract_body_token, eval_read_body)
+/// - HTTP response head builder / reason phrase map
+/// - Scatter-gather write helpers (write_all_retry, write_vectored_all)
+/// - Result BuchiPack helpers (make_result_*, extract_result_value*, get_field_*)
+/// - HTTP request head parser + build_parse_result
+/// - Chunked transfer-encoding helpers (chunked_in_place_compact, chunked_body_complete)
+/// - Keep-alive determination
+/// - HTTP response encoder
+/// - Request body helpers (is_body_stream_request, extract_body_token, eval_read_body)
 use super::super::eval::RuntimeError;
 use super::super::value::{AsyncStatus, AsyncValue, ErrorValue, Value};
 use super::types::{ConnStream, ResponseFields, StreamingWriter};
@@ -82,7 +82,7 @@ pub(crate) fn write_all_retry(stream: &mut ConnStream, data: &[u8]) -> Result<()
 
 /// Write multiple IoSlice buffers to a stream.
 ///
-/// NB5-18: Plaintext path uses `write_vectored()` (writev syscall) to send
+/// Plaintext path uses `write_vectored()` (writev syscall) to send
 /// multiple buffers in a single syscall, avoiding Nagle-induced small packet
 /// splitting. TLS path concatenates all IoSlices into one buffer before passing
 /// to rustls writer — rustls `Writer` only implements `std::io::Write` (not
@@ -284,7 +284,7 @@ pub(crate) fn get_field_value<'a>(fields: &'a [(String, Value)], key: &str) -> O
 /// Compute the offset of `needle` within `haystack`, when `needle` is a
 /// subslice of `haystack` (i.e. shares the same allocation).
 ///
-/// D29B-008 Lock-E (E2): Safe replacement for raw pointer arithmetic
+/// Safety note: safe replacement for raw pointer arithmetic
 /// `needle.as_ptr() as usize - haystack.as_ptr() as usize`. The pointer
 /// comparison is wrapped in a range check so that, if `needle` is **not**
 /// actually a subslice of `haystack` (e.g. a future refactor returns owned
@@ -308,16 +308,15 @@ fn bytes_subslice_offset(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Parse HTTP/1.1 request head from raw bytes.
 ///
-/// **SIGNATURE PIN (D29B-008)**: This function MUST keep the signature
+/// **SIGNATURE PIN**: This function MUST keep the signature
 /// `pub(crate) fn parse_request_head(bytes: &[u8]) -> Value`. Do NOT change
 /// it to take `Arc<Vec<u8>>` or other owning types. The downstream
 /// `build_parse_result` relies on `bytes_subslice_offset` to recover spans
 /// from httparse's `&str` / `&[u8]` outputs; that helper REQUIRES `bytes`
 /// and the parser-returned subslices to share the same allocation. An
 /// `Arc` wrapper that gets cloned between this function and the parser
-/// would silently produce wrong offsets. The dedicated CI test
-/// `tests/d29b_008_parse_request_head_signature_pin.rs` enforces this
-/// invariant by string-matching the signature line at build time.
+/// would silently produce wrong offsets. A dedicated CI test enforces
+/// this invariant by string-matching the signature line at build time.
 ///
 /// Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength), _]
 pub(crate) fn parse_request_head(bytes: &[u8]) -> Value {
@@ -601,7 +600,7 @@ pub(crate) struct ChunkedCompactResult {
 /// Perform in-place compaction of chunked transfer-encoded body data.
 ///
 /// The buffer `buf[body_offset..]` contains raw chunked data:
-///   chunk-size (hex) CRLF chunk-data CRLF ... 0 CRLF CRLF
+/// chunk-size (hex) CRLF chunk-data CRLF... 0 CRLF CRLF
 ///
 /// After compaction, `buf[body_offset..body_offset + body_len]` contains
 /// the reassembled body with all framing removed.
@@ -734,7 +733,7 @@ pub(crate) fn chunked_in_place_compact(
     }
 }
 
-/// Like `find_crlf` (legacy helper removed in E32B-051), but only scans the
+/// Like `find_crlf` (legacy helper removed in), but only scans the
 /// first `cap` bytes of `data`.
 /// Returns `None` if no CRLF is found within `cap` bytes (regardless of
 /// whether more data exists past the cap). Used to bound chunk-size and
@@ -749,7 +748,7 @@ pub(crate) fn find_crlf_capped(data: &[u8], cap: usize) -> Option<usize> {
 }
 
 /// Check if the buffer contains a complete chunked body (read-only scan).
-/// NB2-15: Typed error for chunked body parsing — avoids string prefix matching.
+/// Typed error for chunked body parsing — avoids string prefix matching.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum ChunkedBodyError {
@@ -1024,7 +1023,7 @@ pub(crate) fn encode_response(response: &Value) -> Value {
     make_result_success(result)
 }
 
-/// NB6-1: Scatter-gather send for internal one-shot response path.
+/// Scatter-gather send for internal one-shot response path.
 /// Builds head and body as separate buffers and sends them via vectored I/O,
 /// avoiding the aggregate buffer concatenation of encode_response().
 pub(crate) fn send_response_scatter(
@@ -1275,7 +1274,7 @@ pub(crate) fn is_body_stream_request(req: &Value) -> bool {
     }
 }
 
-/// Extract the request body token from a body-stream request pack (NB4-7).
+/// Extract the request body token from a body-stream request pack.
 /// Returns None if the request is not a body-stream request or has no token.
 pub(crate) fn extract_body_token(req: &Value) -> Option<u64> {
     if let Value::BuchiPack(fields) = req {
@@ -1294,7 +1293,7 @@ pub(crate) fn extract_body_token(req: &Value) -> Option<u64> {
 
 /// `readBody(req)` — extract body bytes from a request pack.
 ///
-/// Returns `Bytes` (owned copy of `req.raw[body.start .. body.start + body.len]`).
+/// Returns `Bytes` (owned copy of `req.raw[body.start.. body.start + body.len]`).
 /// If body.len == 0 or body span is absent, returns empty Bytes.
 pub(crate) fn eval_read_body(req: &Value) -> Result<Value, RuntimeError> {
     let fields = match req {

@@ -87,6 +87,14 @@ fn bump_manifest_to(project: &Path, pkg: &str, version: &str) {
     run_git(&["push", "-f", "origin", "main"], project);
 }
 
+fn replace_manifest_and_main(project: &Path, manifest: &str, main: &str) {
+    fs::write(project.join("packages.tdm"), manifest).unwrap();
+    fs::write(project.join("main.td"), main).unwrap();
+    run_git(&["add", "packages.tdm", "main.td"], project);
+    run_git(&["commit", "--amend", "--no-edit"], project);
+    run_git(&["push", "-f", "origin", "main"], project);
+}
+
 #[test]
 fn force_version_overrides_auto_bump() {
     let root = unique_temp_dir("force_version_simple");
@@ -117,6 +125,34 @@ fn force_version_overrides_auto_bump() {
         stdout
     );
     assert!(stdout.contains("Tag to push: a.5"));
+}
+
+#[test]
+fn publish_dry_run_rejects_broken_package_facade() {
+    let root = unique_temp_dir("publish_facade_validation");
+    let project = setup_repo(&root, "demo-pkg");
+    replace_manifest_and_main(
+        &project,
+        ">>> ./main.td\n<<<@a.1 alice/demo-pkg @(public, ghost)\n",
+        "public <= 1\n<<< @(public)\n",
+    );
+
+    let out = Command::new(taida_bin())
+        .env("TAIDA_PUBLISH_SKIP_GH_AUTH", "1")
+        .args(["ingot", "publish", "--dry-run", "--force-version", "a.1"])
+        .current_dir(&project)
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "dry-run must reject broken facade before tag planning"
+    );
+    assert!(
+        stderr.contains("E32K4_PUBLISH_SYMBOL_NOT_IN_ENTRY") && stderr.contains("ghost"),
+        "stderr should pinpoint the missing entry export: {}",
+        stderr
+    );
 }
 
 #[test]

@@ -211,7 +211,7 @@ fn c26b_020_wasm_edge_rejects_read_bytes_at() {
 // C27B-020 (2026-04-25) follow-up: bytes mold lowering parity.
 //
 // Two new fixtures verify the wasm-side fixes:
-//   1. `bytes_length_parity.td`: `chunk ]=> bytes; bytes.length()` returns
+//   1. `bytes_length_parity.td`: `chunk >=> bytes; bytes.length()` returns
 //      the actual byte count on every backend (regression guard for the
 //      silent-0 bug where `taida_polymorphic_length` mis-dispatched Bytes).
 //   2. `bytes_cursor_chain.td`: full `BytesCursor` -> `BytesCursorTake` ->

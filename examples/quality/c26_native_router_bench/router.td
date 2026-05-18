@@ -29,8 +29,8 @@ splitPath p: Str =
 matchSegs pat: @[Str] pth: @[Str] i: Int n: Int =
   | i >= n |> true
   | _ |>
-    pat.get(i) ]=> pseg
-    pth.get(i) ]=> sseg
+    pat.get(i) >=> pseg
+    pth.get(i) >=> sseg
     | pseg.startsWith(":") |> matchSegs(pat, pth, i + 1, n)
     | pseg == sseg |> matchSegs(pat, pth, i + 1, n)
     | _ |> false
@@ -46,7 +46,7 @@ matchPattern pattern: Str path: Str =
 matchRoutes routes: @[@(method: Str, pattern: Str)] method: Str path: Str i: Int n: Int =
   | i >= n |> -1
   | _ |>
-    routes.get(i) ]=> r
+    routes.get(i) >=> r
     | r.method != method |> matchRoutes(routes, method, path, i + 1, n)
     | _ |>
       | matchPattern(r.pattern, path) |> i

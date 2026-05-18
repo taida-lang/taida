@@ -9,15 +9,15 @@ age <= 14
 pilot <= Pilot(name <= "Asuka", age <= 14)
 
 // => pipe forward
-Str[42]() ]=> str_val
+Str[42]() >=> str_val
 stdout(str_val)
 
-// ]=> unmold
-Div[10, 3]() ]=> div_val
+// >=> unmold
+Div[10, 3]() >=> div_val
 stdout(div_val.toString())
 
-// <=[ backward unmold
-back_val <=[ Div[20, 4]()
+// <=< backward unmold
+back_val <=< Div[20, 4]()
 stdout(back_val.toString())
 
 // | |> condition

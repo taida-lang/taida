@@ -166,7 +166,7 @@ fn c26b_023_readbody_buffered_body_parity() {
     let source = r#">>> taida-lang/net => @(readBody)
 
 rawLax <= Bytes["POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"]()
-rawLax ]=> raw
+rawLax >=> raw
 req <= @(raw <= raw, body <= @(start <= 42, len <= 5))
 body <= readBody(req)
 stdout(body.length())
@@ -183,7 +183,7 @@ fn c26b_023_readbody_empty_body_parity() {
     let source = r#">>> taida-lang/net => @(readBody)
 
 rawLax <= Bytes["GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"]()
-rawLax ]=> raw
+rawLax >=> raw
 req <= @(raw <= raw, body <= @(start <= 35, len <= 0))
 body <= readBody(req)
 stdout(body.length())
@@ -203,7 +203,7 @@ fn c26b_023_anti_pattern_direct_slice_empty_parity() {
     let source = r#">>> taida-lang/net => @(readBody)
 
 rawLax <= Bytes["POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"]()
-rawLax ]=> raw
+rawLax >=> raw
 // 2-arg-shape simulation: body span has len=0 even though Content-Length > 0.
 // The direct-slice path below incorrectly returns empty bytes (silent
 // breakage). This fixture pins that behavior so a future C26B-023 runtime

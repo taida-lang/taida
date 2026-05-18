@@ -259,7 +259,7 @@ fn js_writechunk_passes_uint8array_without_copy() {
     // literal directly in the Taida source — there's no Str.repeat in the
     // current standard library and using BytesCursor / mold chains would
     // obscure the writeChunk argument shape. The Bytes[..]() constructor
-    // returns a Lax which we unwrap via ]=> so writeChunk sees a concrete
+    // returns a Lax which we unwrap via >=> so writeChunk sees a concrete
     // Uint8Array (the JS runtime path under inspection).
     let big_str: String = "A".repeat(1024);
     let src = format!(
@@ -268,14 +268,14 @@ fn js_writechunk_passes_uint8array_without_copy() {
 handler req writer =
   startResponse(writer, 200, @[])
   payloadLax <= Bytes["{big_str}"]()
-  payloadLax ]=> payload
+  payloadLax >=> payload
   writeChunk(writer, payload)
   endResponse(writer)
 => :Int
 
 asyncResult <= httpServe({port}, handler, 1, 5000, 4)
-asyncResult ]=> result
-result ]=> r
+asyncResult >=> result
+result >=> r
 stdout(r.requests)
 "#
     );

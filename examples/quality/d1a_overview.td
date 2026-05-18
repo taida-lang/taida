@@ -43,8 +43,8 @@ stdout(grade)
 
 // Pipeline (using step-by-step, not pipeline syntax)
 data <= @[1, 2, 3, 4, 5]
-Filter[data, _ x2 = x2 > 0]() ]=> filtered
-Map[filtered, _ x2 = x2 * 2]() ]=> pipeResult
+Filter[data, _ x2 = x2 > 0]() >=> filtered
+Map[filtered, _ x2 = x2 * 2]() >=> pipeResult
 stdout(jsonEncode(pipeResult))
 
 // Default values

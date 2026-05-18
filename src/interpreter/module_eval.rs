@@ -617,20 +617,20 @@ impl Interpreter {
                 let name = &sym.name;
                 if !facade_exports.contains(name) {
                     return Err(RuntimeError {
-                        message: format!(
-                            "Symbol '{}' is not part of the public API declared in packages.tdm. \
-                             Available exports: {}",
-                            name,
-                            facade_exports.join(", ")
+                        message: crate::pkg::facade::format_facade_violation(
+                            &crate::pkg::facade::FacadeViolation::HiddenSymbol {
+                                name: name.clone(),
+                                available: facade_exports.clone(),
+                            },
                         ),
                     });
                 }
                 if !exports.contains_key(name) {
                     return Err(RuntimeError {
-                        message: format!(
-                            "Symbol '{}' is declared in packages.tdm but not found in the entry module. \
-                             The entry module must export all symbols listed in the package facade.",
-                            name
+                        message: crate::pkg::facade::format_facade_violation(
+                            &crate::pkg::facade::FacadeViolation::GhostSymbol {
+                                name: name.clone(),
+                            },
                         ),
                     });
                 }
@@ -790,24 +790,24 @@ impl Interpreter {
     /// Detects whether `import` resolves to an addon-backed package,
     /// and if so:
     /// 1. Calls `ensure_addon_supported` (defensive: should always
-    ///    pass on the native interpreter binary).
+    /// pass on the native interpreter binary).
     /// 2. Loads / caches the addon via `AddonRegistry::ensure_loaded`.
     /// 3. If the package ships a Taida-side facade at
-    ///    `<pkg_dir>/taida/<stem>.td`, executes it as a module. Inside
-    ///    the facade, each addon-backed function appears as an explicit
-    ///    `Name <= RustAddon["fn"](arity <= N)` binding (E30 Lock-G,
-    ///    sub-step B-5 — legacy implicit pre-inject is removed). The
-    ///    facade can also define pure-Taida companion values (like the
-    ///    `KeyKind` pack).
+    /// `<pkg_dir>/taida/<stem>.td`, executes it as a module. Inside
+    /// the facade, each addon-backed function appears as an explicit
+    /// `Name <= RustAddon["fn"](arity <= N)` binding,
+    /// sub-step B-5 — legacy implicit pre-inject is removed). The
+    /// facade can also define pure-Taida companion values (like the
+    /// `KeyKind` pack).
     /// 4. Validates that every symbol the import statement asked for
-    ///    resolves to either
-    ///      - a facade export (if a facade was loaded), or
-    ///      - an `addon.toml` `[functions]` entry.
+    /// resolves to either
+    /// - a facade export (if a facade was loaded), or
+    /// - an `addon.toml` `[functions]` entry.
     /// 5. Binds each requested symbol into the current env. Facade
-    ///    exports are bound by value; addon functions are bound as
-    ///    sentinels `Value::str("__taida_addon_call::<pkg>::<fn>")` that
-    ///    `try_addon_func` (in `addon_eval.rs`) routes through
-    ///    `LoadedAddon::call_function`.
+    /// exports are bound by value; addon functions are bound as
+    /// sentinels `Value::str("__taida_addon_call::<pkg>::<fn>")` that
+    /// `try_addon_func` (in `addon_eval.rs`) routes through
+    /// `LoadedAddon::call_function`.
     ///
     /// Returns `Ok(Some(Signal::Value(Unit)))` if the import was
     /// handled by the addon path, `Ok(None)` if it was not addon-backed
@@ -915,7 +915,7 @@ impl Interpreter {
     /// The facade file lives at `<pkg_dir>/taida/<stem>.td` where
     /// `<stem>` is the final `/`-segment of the package id. Inside the
     /// facade, each addon-backed function appears as an explicit
-    /// `Name <= RustAddon["fn"](arity <= N)` binding (E30 Lock-G
+    /// `Name <= RustAddon["fn"](arity <= N)` binding
     /// sub-step B-5 verdict — legacy implicit pre-inject is removed).
     /// `eval_rust_addon_binding` resolves these to addon sentinels
     /// (`Value::str("__taida_addon_call::<pkg>::<fn>")`) — the same

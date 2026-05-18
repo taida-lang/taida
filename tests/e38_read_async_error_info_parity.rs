@@ -123,11 +123,11 @@ fn read_async_missing_file_carries_error_info_across_backends() {
         &main,
         concat!(
             ">>> taida-lang/os => @(ReadAsync)\n",
-            "ReadAsync[\"__taida_e38_missing_read_async_errorinfo__\"]() ]=> bad\n",
+            "ReadAsync[\"__taida_e38_missing_read_async_errorinfo__\"]() >=> bad\n",
             "info <= bad.errorInfo()\n",
             "stdout(bad.hasValue().toString())\n",
             "stdout(info.hasValue().toString())\n",
-            "info ]=> err\n",
+            "info >=> err\n",
             "stdout(err.type)\n",
             "stdout(err.message)\n",
             "stdout(err.kind)\n",

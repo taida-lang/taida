@@ -262,10 +262,10 @@ fn dfs_find_cycles(
 /// A throw site is considered "covered" if:
 /// 1. It has a direct `ThrowsTo` edge to an error ceiling (same-function coverage), OR
 /// 2. It is inside a function that is transitively covered via `Propagates` edges:
-///    - A `Propagates` edge from an `ErrorCeiling` to the function means the ceiling
-///      covers the function's throws (cross-function coverage).
-///    - A `Propagates` edge from another `Function` to the function means the throws
-///      propagate to the caller; if the caller is itself covered, the callee is too.
+/// - A `Propagates` edge from an `ErrorCeiling` to the function means the ceiling
+/// covers the function's throws (cross-function coverage).
+/// - A `Propagates` edge from another `Function` to the function means the throws
+/// propagate to the caller; if the caller is itself covered, the callee is too.
 pub fn uncovered_throws(graph: &Graph) -> QueryResult {
     let throw_sites: Vec<&GraphNode> = graph
         .nodes

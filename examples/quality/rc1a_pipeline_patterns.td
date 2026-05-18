@@ -33,9 +33,9 @@ stdout(result6.toString())
 
 // 3a: Step by step
 numbers <= @[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-Filter[numbers, _ x = x > 5]() ]=> step1
-Map[step1, _ x = x * 2]() ]=> step2
-Fold[step2, 0, _ acc x = acc + x]() ]=> step3
+Filter[numbers, _ x = x > 5]() >=> step1
+Map[step1, _ x = x * 2]() >=> step2
+Fold[step2, 0, _ acc x = acc + x]() >=> step3
 stdout(step3.toString())
 
 // === 4. Condition as pipeline step result ===
@@ -78,8 +78,8 @@ stdout(activeNames)
 
 // Age statistics
 staff => Map[_, _ s = s.age]() => ages
-Sum[ages]() ]=> totalAge
-Div[totalAge, ages.length()]() ]=> avgAge
+Sum[ages]() >=> totalAge
+Div[totalAge, ages.length()]() >=> avgAge
 stdout(avgAge.toString())
 
 // === 7. Nested condition in pipeline context ===
@@ -89,13 +89,13 @@ classify7 x: Int =
   | x > 3 |> x * 10
   | _ |> x
 => :Int
-Map[data, classify7]() ]=> processed
+Map[data, classify7]() >=> processed
 stdout(processed)
 
 // === 8. Pipeline with Lax handling ===
 
 @[10, 20, 30] => items8
-items8.get(1) ]=> val8
+items8.get(1) >=> val8
 stdout(val8.toString())
 
 items8.get(100).getOrDefault(99) => fallback8

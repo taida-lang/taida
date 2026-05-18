@@ -1,6 +1,6 @@
 # 制御フロー
 
-> **PHILOSOPHY.md -- I.** 深く考えずに適当にぶちこんでけ
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
 Taida には if/else も switch も三項演算子もありません。あるのは `|` と `|>` だけです。
 
@@ -35,7 +35,7 @@ grade <= (
 // grade: "B"
 ```
 
-> **Note (C20):** `<=` の右辺に **複数行** の `| cond |> body` 多アーム条件を
+> **Note:** `<=` の右辺に **複数行** の `| cond |> body` 多アーム条件を
 > 直接書くと [`E0303`](../reference/diagnostic_codes.md#e0303) で拒否されます。
 > 上記のように丸括弧で包む（escape hatch）、`If[cond, then, else]()` を使う、
 > またはヘルパ関数に抽出してください。単一行の多アームはそのまま書けます
@@ -49,7 +49,7 @@ sign <= | x >= 0 |> "positive" | _ |> "negative"
 
 ### `| _ |>` を最後に置く
 
-default arm (`| _ |>`) を欠いた条件分岐はパース・型チェックを通りますが、いずれの条件にも合致しなかった場合の挙動は未定義です。可能な限り `| _ |>` を最後に置いてください。default arm 必須化 (exhaustiveness 検査) は将来の言語仕様で検討中です。
+default arm (`| _ |>` または `| true |>`) は条件分岐に必須です。欠落した条件分岐は型チェッカーで `[E1524]` として reject されます。default arm を最後に置くと、上から順に評価する読み方がそのまま「いずれにも合致しなかったときの fallback」になり、読み手が混乱しません。実行は上から順なので、default arm を途中に置くと後続の arm が決して評価されない (dead code) ことに注意してください。
 
 ### 複合条件
 
@@ -115,7 +115,7 @@ accessLevel <= (
 
 ## ゴリラリテラル `><` との組み合わせ
 
-> **PHILOSOPHY.md -- I.** 深く考えずに適当にぶちこんでけ
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
 条件分岐の先に `><` を置くと、プログラムは即座に終了します。「**この分岐に到達したらもう終わり**」というプログラマの意思表明です。パターンマッチで到達不能を示すための主道リテラルとして使ってください。
 
@@ -219,12 +219,12 @@ fibTail n: Int a: Int b: Int =
 findAndProcess items: @[Item] =
   | items.isEmpty() |> @(found <= false, result <= "")
   | _ |>
-    items.first() ]=> current
+    items.first() >=> current
     | current.priority > 5 |>
       processed <= transform(current)
       @(found <= true, result <= processed.name)
     | _ |>
-      Drop[items, 1]() ]=> rest
+      Drop[items, 1]() >=> rest
       findAndProcess(rest)  // 末尾再帰
 => :@(found: Bool, result: Str)
 ```
@@ -235,7 +235,7 @@ findAndProcess items: @[Item] =
 
 ## `| |>` アーム本体の構文境界
 
-> **PHILOSOPHY.md -- I.** 深く考えずに適当にぶちこんでけ
+> **PHILOSOPHY.md — I.** 深く考えずに適当にぶちこんでけ
 
 `| cond |> ...` のアーム本体は **純粋な式** です。副作用文 (結果を捨てる関数呼び出しや `=> _var` パイプライン) をアームの途中に埋め込むことはできません。この制約はアーム本体に限定されます — 関数本体と `|==` エラー天井本体には適用されません。
 
@@ -247,8 +247,8 @@ findAndProcess items: @[Item] =
 
 - `name <= expr` — 値バインディング
 - `expr => name` — 単一方向パイプラインの末尾に書かれた値バインディング
-- `expr ]=> name` — 前方アンモールド (Lax / Option 解凍)
-- `name <=[ expr` — 後方アンモールド
+- `expr >=> name` — 前方アンモールド (Lax / Option 解凍)
+- `name <=< expr` — 後方アンモールド
 
 **最終行** は次のいずれでも構いません。
 
@@ -432,7 +432,7 @@ grade <= (
 5 => If[_ > 3, "big", "small"]() => label  // "big"
 ```
 
-非選択 branch は評価されません (short-circuit)。`_` プレースホルダの全体仕様は [`docs/guide/00_overview.md`](00_overview.md) のプレースホルダ節を参照してください。`If` を含む条件・型変換などのモールド全般のシグネチャは [`docs/api/prelude.md §7.8`](../api/prelude.md#78-条件モールド) を参照してください。
+非選択 branch は評価されません (short-circuit)。`_` プレースホルダの全体仕様は [演算子リファレンスの `_` プレースホルダ節](../reference/operators.md#_-プレースホルダ) を参照してください。`If` を含む条件・型変換などのモールド全般のシグネチャは [`docs/api/prelude.md §7.8`](../api/prelude.md#78-条件モールド) を参照してください。
 
 ---
 

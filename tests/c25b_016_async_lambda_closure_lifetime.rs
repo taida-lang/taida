@@ -5,7 +5,7 @@
 //! > `src/interpreter/eval.rs:1291+` の `Expr::Lambda` は
 //! > `closure: current_env.bindings.clone()` で static snapshot。
 //! > 同期実行では問題ないが、C22B-002 実装以降に async stdout streaming
-//! > や将来の coroutine-like async 導入時に「lambda body が `]=>` await
+//! > や将来の coroutine-like async 導入時に「lambda body が `>=>` await
 //! > で suspend → resume 時に親 scope がすでに pop されている」シナリオ
 //! > で closure の一貫性が崩れる可能性。
 //!
@@ -84,6 +84,14 @@ stdout(h(100).toString())
 /// Scenario 2: lambda captured into a BuchiPack returned from a
 /// function; the defining frame has already returned when we invoke
 /// the captured lambda through a field access.
+///
+/// The original fixture annotated the return type as
+/// `:@()` ("value-absence" type) to suppress checker noise — that is now
+/// rejected by `[E1520]`. Replaced with a meaningful structured BuchiPack
+/// annotation (`:@(add: Int => :Int, mul: Int => :Int)`) that documents
+/// the captured-lambda shape. The closure-lifetime scenario the test
+/// covers (lambda survives after the defining frame returned) is
+/// unchanged.
 #[test]
 fn c25b016_lambda_captured_into_returned_pack() {
     let src = r#"
@@ -92,7 +100,7 @@ makeOps base =
     add <= _ x = x + base,
     mul <= _ x = x * base
   )
-=> :@()
+=> :@(add: Int => :Int, mul: Int => :Int)
 
 ops <= makeOps(10)
 stdout(ops.add(5).toString())

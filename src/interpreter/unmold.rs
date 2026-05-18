@@ -259,7 +259,7 @@ impl Interpreter {
                         }
                     });
 
-                // TODO[T] unmold: `]=>` returns the `unm` channel when present,
+                // TODO[T] unmold: `>=>` returns the `unm` channel when present,
                 // otherwise falls back to the default for the `sol` type.
                 if type_name == Some("TODO") {
                     if let Some((_, unm_val)) =
@@ -344,7 +344,7 @@ impl Interpreter {
                     }
                 }
 
-                // Result: predicate evaluation on unmold (]=>)
+                // Result: predicate evaluation on unmold (>=>)
                 // 1. If throw field is already set (not Unit), throw immediately
                 // 2. If __predicate is present, evaluate P(value):
                 //    - true  → return value T

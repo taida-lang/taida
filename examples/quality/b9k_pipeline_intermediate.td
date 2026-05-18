@@ -8,9 +8,9 @@ isEven x =
 => :Bool
 
 // パイプラインチェーン
-Filter[nums, isEven]() ]=> evens
-Map[evens, _ x = x * 10]() ]=> tens
-Fold[tens, 0, _ acc x = acc + x]() ]=> total
+Filter[nums, isEven]() >=> evens
+Map[evens, _ x = x * 10]() >=> tens
+Fold[tens, 0, _ acc x = acc + x]() >=> total
 stdout(total.toString())
 
 // 元のリストは無傷
