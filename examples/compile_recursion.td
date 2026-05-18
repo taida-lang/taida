@@ -1,9 +1,9 @@
-// Non-tail recursive factorial (not optimized)
-factorial n =
-  | n == 1 |> 1
-  | _ |> n * factorial(n - 1)
+// Tail-recursive factorial (optimized)
+factorial n acc =
+  | n == 1 |> acc
+  | _ |> factorial(n - 1, acc * n)
 => :Int
-debug(factorial(10))
+debug(factorial(10, 1))
 
 // Tail-recursive sum (TCO optimized — runs with 100000 depth)
 sumTo n acc =
