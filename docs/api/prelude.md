@@ -415,7 +415,7 @@ exit code: Int => :Int
 | モールド | 戻り値 | 説明 |
 |---------|--------|------|
 | `Lax[value]()` | `Lax[T]` | 失敗可能値を必ず値へ落とす安全モールド。値省略 / 失敗の表現はこの一手に集約する。 |
-| `Optional[value]()` | `Lax[T]` | 廃止済み。v0.8.0 で abolished、呼び出すと「`Optional has been removed. Use Lax[value]() instead.`」という RuntimeError を返す。新規コードは `Lax[value]()` を使用する。registry に entry が残っているのは、診断メッセージを発火させるための marker としての役割であり、機能としては使用不可。 |
+| `Optional[value]()` | `Lax[T]` | 廃止された旧記法。呼び出すと `Optional has been removed. Use Lax[value]() instead.` という実行時エラーが返るため、新規コードは `Lax[value]()` を使う。 |
 | `Result[value, pred](throw <= error)` | `Result[T, _]` | 述語付き Result。`>=>` で述語評価、真なら値、偽なら throw。 |
 | `Async[value]()` | `Async[T]` | 即時 fulfilled の非同期値。 |
 | `AsyncReject[error]()` | `Async[T]` | 即時 rejected の非同期値。 |
