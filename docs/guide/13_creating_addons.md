@@ -129,6 +129,20 @@ library = "my_addon"
 greet = 1
 ```
 
+CPU worker (`AsyncTask` / `ParMap`) 内から直接呼べる純粋関数を公開する
+場合は、関数単位で purity claim を追加します。省略した関数は
+`unspecified` として扱われ、worker 内では拒否されます。
+
+```toml
+[function_purity]
+greet = "declared"
+```
+
+`"declared"` は作者による claim であり、利用側 project が
+`packages.tdm` の `[parallelism] addon_purity = "allow declared"` などで
+許可した場合だけ worker 内で直接呼べます。I/O や OS 状態に触れる関数は
+`unspecified` のままにしてください。
+
 `taida ingot install` でフェッチ可能なプレビルドを配布するには
 `[library.prebuild]` セクションを追加します。
 

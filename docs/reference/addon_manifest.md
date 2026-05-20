@@ -41,6 +41,7 @@ greet = 1
 | `package` | `"<org>/<name>"` 形式のパッケージ識別子。`packages.tdm` と照合されます |
 | `library` | cdylib のファイル名ステム (`lib` 接頭辞と拡張子なし) |
 | `[functions]` | 公開する関数名とアリティを `name = arity` の形で列挙 |
+| `[function_purity]` | 任意。CPU worker から直接呼べる addon 関数の純粋性 claim |
 
 これだけ書けば、`cargo build --release` で出力した cdylib を
 `.taida/deps/<pkg>/native/lib<name>.<ext>` に手で配置するだけで
@@ -73,7 +74,7 @@ url = "https://github.com/my-org/my-addon/releases/download/{version}/lib{name}-
 `url` 内のテンプレート変数 (`{version}` / `{target}` / `{ext}` /
 `{name}`) は `taida ingot install` が実行時に展開します。配布対象の
 ターゲットだけ `[library.prebuild.targets]` に列挙します。詳細は
-[§3.3](#33-libraryprebuild) を参照してください。
+[§3.4](#34-libraryprebuild) を参照してください。
 
 ---
 
@@ -103,7 +104,62 @@ noop  = 0
 呼ばれる関数名、値はアリティ (引数の数) を表す非負整数です。
 非整数のアリティと重複キーはパースエラーになります。
 
-### 3.3 `[library.prebuild]`
+### 3.3 `[function_purity]` と `[function_purity_audit.<function>]`
+
+`AsyncTask` / `ParMap` の CPU worker 本体から addon 関数を直接呼ばせたい
+場合は、関数ごとに純粋性 claim を書けます。省略した関数は
+`unspecified` として扱われ、worker 内では拒否されます。
+
+```toml
+[functions]
+fast_sum = 1
+read_file = 1
+
+[function_purity]
+fast_sum = "declared"
+read_file = "unspecified"
+```
+
+- `[function_purity]` は任意です。
+- キーは `[functions]` に存在する関数名でなければなりません。
+- 値は `"unspecified"` または `"declared"` のどちらかです。
+- `"declared"` は addon 作者による claim です。実際に worker で許可するかは
+  利用側 project / host policy が決めます。
+- addon 関数を関数値として worker に捕捉することは、claim に関係なく
+  拒否されます。許可対象は直接呼び出しだけです。
+
+Audit metadata は次の形で添付できます。
+
+```toml
+[function_purity_audit.fast_sum]
+authority = "taida-lang/core-audit"
+signature = "ed25519:<署名ペイロード>"
+audited_version = "@a.8"
+date = "2026-05-21"
+expires = "2027-05-21"
+audit_doc = "https://example.invalid/audit/fast_sum"
+```
+
+`authority` / `signature` / `audited_version` / `date` は必須です。
+`expires` / `audit_doc` は任意です。現行実装は audit metadata の形を
+検証して格納しますが、署名・authority・失効リストの実運用検証はまだ
+保守的に扱います。検証できない audit は worker 許可には使われません。
+
+利用側は `packages.tdm` の `[parallelism]` で policy を明示できます。
+
+```toml
+[parallelism]
+addon_purity = "allow declared"
+
+[parallelism.addon_purity_overrides]
+"example/math::fast_sum" = "trusted"
+```
+
+`addon_purity` は `"deny"` / `"allow audited"` / `"allow declared"` の
+いずれかです。project policy がない場合の既定値は `"allow audited"` で、
+unaudited な `"declared"` claim は自動では通りません。
+
+### 3.4 `[library.prebuild]`
 
 `taida ingot install` がプレビルド cdylib を取得する場所を宣言する
 セクションです。本セクションを省略した場合、アドオンは「開発者が
@@ -188,7 +244,7 @@ allowed_prebuild_hosts = ["example.com"]
   今書いておけば、ベリファイアが land したときに同じフィールドから
   読み取られます。
 
-### 3.4 `targets` (任意、トップレベル)
+### 3.5 `targets` (任意、トップレベル)
 
 ```toml
 targets = ["native"]
@@ -448,6 +504,7 @@ version = "<要求されたバージョン文字列>"
 | ターゲット未知 | ターゲットキーが Taida の正準トリプル集合に含まれない |
 | 署名形式 | 署名値が `gpg:<opaque>` 形式でない |
 | 署名キー | 署名セクションのキーが正準トリプルでない、もしくは重複 |
+| 純粋性 metadata | `[function_purity]` / `[function_purity_audit.<function>]` が未知関数、未知 claim、必須 field 欠落、不正な署名形式などを含む |
 | アドオンターゲット (`E2001`) | トップレベル `targets` のエントリが許可リスト外 |
 | アドオンターゲット (`E2002`) | トップレベル `targets = []` (空配列) |
 | アドオンターゲット型 | トップレベル `targets` の値が文字列配列でない |
