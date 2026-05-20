@@ -280,6 +280,20 @@ fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
         Statement::ClassLikeDef(cl) => lint_class_like_def(cl, diags),
         Statement::FuncDef(f) => lint_func_def(f, diags, /* is_method */ false),
         Statement::Assignment(a) => {
+            if a.as_rust_addon_binding().is_some() {
+                if !is_function_binding_name(&a.target) {
+                    diags.push(LintDiagnostic {
+                        code: "[E1803]",
+                        message: format!(
+                            "関数値を束縛する変数は camelCase で命名してください: '{}'",
+                            a.target
+                        ),
+                        span: a.span.clone(),
+                    });
+                }
+                lint_expr(&a.value, diags);
+                return;
+            }
             // PascalCase assignment targets are almost certainly a
             // misinterpreted return-type (`body => Int` instead of
             // `body => :Int`). E1809 is reported by the source-aware
@@ -1116,6 +1130,16 @@ mod tests {
         assert!(
             !codes(&diags).contains(&"[E1804]"),
             "SCREAMING_SNAKE_CASE constants should not trigger E1804: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn rust_addon_binding_is_linted_as_function_binding() {
+        let diags = lint_str("terminalSize <= RustAddon[\"terminalSize\"](arity <= 0)\n");
+        assert!(
+            !codes(&diags).contains(&"[E1804]"),
+            "RustAddon bindings are public functions, not value bindings: {:?}",
             diags
         );
     }

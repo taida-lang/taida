@@ -413,15 +413,30 @@ fn extract_rust_addon_func_doc(a: &Assignment) -> FuncDoc {
     let (_fn_name, arity) = a
         .as_rust_addon_binding()
         .expect("caller already verified RustAddon binding");
-    let placeholder_params: Vec<(String, Option<String>)> =
-        (0..arity).map(|i| (format!("_arg{}", i), None)).collect();
+    let tags = parse_doc_tags(&a.doc_comments);
+    let params = rust_addon_doc_params(&tags, arity as usize);
     FuncDoc {
         name: a.target.clone(),
         type_params: Vec::new(),
-        tags: parse_doc_tags(&a.doc_comments),
-        params: placeholder_params,
+        tags,
+        params,
         return_type: None,
     }
+}
+
+fn rust_addon_doc_params(tags: &DocTags, arity: usize) -> Vec<(String, Option<String>)> {
+    (0..arity)
+        .map(|i| {
+            let name = tags
+                .params
+                .get(i)
+                .map(|(name, _)| name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("_arg{}", i));
+            (name, None)
+        })
+        .collect()
 }
 
 fn extract_type_doc(td: &ClassLikeDef) -> TypeDoc {
@@ -1106,6 +1121,28 @@ mod tests {
         assert_eq!(doc.functions[0].return_type, Some("Str".to_string()));
 
         assert_eq!(doc.exports, vec!["User".to_string(), "greet".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_rust_addon_docs_use_param_tags() {
+        let source = r#"
+///@ Purpose: Checks a terminal stream.
+///@ Params:
+///@   - stream: stream selector
+///@ Returns: Bool
+isTerminal <= RustAddon["isTerminal"](arity <= 1)
+"#;
+        let (program, errors) = crate::parser::parse(source);
+        assert!(errors.is_empty(), "parse errors: {:?}", errors);
+
+        let doc = extract_docs(&program, "terminal.td");
+        assert_eq!(doc.functions.len(), 1);
+        assert_eq!(doc.functions[0].name, "isTerminal");
+        assert_eq!(doc.functions[0].params, vec![("stream".to_string(), None)]);
+
+        let md = render_markdown(&doc);
+        assert!(md.contains("| `stream` | `-` | stream selector |"));
+        assert!(!md.contains("_arg0"));
     }
 
     #[test]
