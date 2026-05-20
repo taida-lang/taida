@@ -451,7 +451,7 @@ failed.getOrThrow()      // throw が発動します
 
 ## Gorillax -- 覚悟のエラーモデル
 
-外部パッケージ（npm 等）の Molten branch operation は安全が保証されません。`Cage[subject, runner]()` で Molten branch capability を実行し、結果を Gorillax で受け取ります。`Cage` の対応 branch は現状 `JS` / `Build` / `File` です。
+外部パッケージ（npm 等）の Molten branch operation は安全が保証されません。`Cage[subject, runner]()` で Molten branch capability を実行します。同期 JS runner は結果を `Gorillax` で受け取り、Promise を返す JS runner は `Async` として待ちます。公開されている concrete runner は JS 系 (`JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) です。File / Build branch は、対応する具体 runner を公開している API のリファレンスで説明されている場合にだけ使います。
 
 ### 基本: Cage → Gorillax → アンモールド
 
@@ -464,6 +464,26 @@ rilax >=> total  // 成功 → total = 6, 失敗 → ゴリラ（プログラム
 ```
 
 Gorillax のアンモールド失敗はゴリラと同じ -- `|==` ではキャッチできません。
+
+### Promise-returning JS call: Async rejection として扱う
+
+JS の Promise-returning 関数は `JSCallAsync` で呼びます。
+`Cage[subject, JSCallAsync[...]]()` は `Async[Out]` を返し、Promise rejection
+は `>=>` で待った位置の `|==` エラー天井で捕捉できます。
+
+```taida fragment
+>>> npm:node:fs/promises => @(readFile)
+
+readConfig =
+  |== error: Error =
+    "fallback"
+  => :Str
+
+  task <= Cage[readFile, JSCallAsync[@[], @["config.json"], Str]()]()
+  task >=> text
+  text
+=> :Str
+```
 
 ### relax: キャッチ可能にする
 
@@ -605,7 +625,7 @@ validateAndProcess input =
 | **Result** | `Result[T, P]` | 述語 P で成功/失敗を判定する操作モールド型です |
 | **ゴリラ** | `><` | 即時終了リテラルです。条件分岐と組み合わせて使います |
 | **Gorillax** | `Gorillax[T]` | 覚悟のモールド型。アンモールド失敗でゴリラ（プログラム終了） |
-| **Cage** | `Cage[subject, runner]` | `Molten` を扱う実行を `Gorillax` で囲む境界です。`runner` (`CageRilla[Branch, Out]`) を実行して `Gorillax[Out]` を返します |
+| **Cage** | `Cage[subject, runner]` | `Molten` を扱う境界です。同期 runner は `Gorillax[Out]`、`JSCallAsync` は `Async[Out]` を返します |
 | **errorInfo()** | `g.errorInfo()` | Lax / Gorillax / RelaxedGorillax / Error 系（RelaxedGorillaEscaped を含む）から失敗詳細を `Lax[ErrorInfo]` として取り出します |
 | **RelaxedGorillax** | `.relax()` | Gorillax を throw 可能に変換。`\|==` でキャッチ可能になります |
 

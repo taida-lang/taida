@@ -464,6 +464,195 @@ stdout(Status:Retry())
     assert_backend_parity_for_source(source, "rc3_enum_variant_parity");
 }
 
+#[test]
+fn test_cpu_parallel_par_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping CPU parallel native parity");
+        return;
+    }
+    let source = r#"
+triple x: Int =
+  x * 3
+=> :Int
+jobs <= @[AsyncTask[_ = triple(3)](), AsyncTask[_ = 1](), AsyncTask[_ = 2]()]
+Par[jobs]() >=> out
+stdout(out.toString())
+"#;
+    assert_backend_parity_for_source(source, "cpu_parallel_par_order");
+
+    let interp = run_interpreter_src(source, "cpu_parallel_par_order_wasm")
+        .expect("interpreter should run CPU parallel Par source");
+    match run_wasm_min_src(source, "cpu_parallel_par_order_wasm") {
+        Ok(Some(wasm)) => assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mismatch for CPU parallel Par source"
+        ),
+        Err(err) if err.contains("wasmtime not available") => {
+            eprintln!("SKIP: wasmtime not available, skipping CPU parallel wasm-min parity");
+        }
+        Err(err) => panic!("wasm-min CPU parallel Par failed: {}", err),
+        Ok(None) => panic!("wasm-min CPU parallel Par returned no output"),
+    }
+}
+
+#[test]
+fn test_cpu_parallel_par_map_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping CPU parallel native parity");
+        return;
+    }
+    let source = r#"
+items <= @[1, 2, 3]
+ParMap[items, _ x: Int = x * 2]() >=> out
+stdout(out.toString())
+"#;
+    assert_backend_parity_for_source(source, "cpu_parallel_par_map_order");
+
+    let interp = run_interpreter_src(source, "cpu_parallel_par_map_order_wasm")
+        .expect("interpreter should run CPU parallel ParMap source");
+    match run_wasm_min_src(source, "cpu_parallel_par_map_order_wasm") {
+        Ok(Some(wasm)) => assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mismatch for CPU parallel ParMap source"
+        ),
+        Err(err) if err.contains("wasmtime not available") => {
+            eprintln!("SKIP: wasmtime not available, skipping CPU parallel ParMap wasm-min parity");
+        }
+        Err(err) => panic!("wasm-min CPU parallel ParMap failed: {}", err),
+        Ok(None) => panic!("wasm-min CPU parallel ParMap returned no output"),
+    }
+}
+
+#[test]
+fn test_cpu_parallel_async_task_type_name_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping CPU parallel native parity");
+        return;
+    }
+    let source = r#"
+job <= AsyncTask[_ = 1]()
+stdout(TypeName[job]())
+"#;
+    assert_backend_parity_for_source(source, "cpu_parallel_async_task_type_name");
+
+    let interp = run_interpreter_src(source, "cpu_parallel_async_task_type_name_wasm")
+        .expect("interpreter should run AsyncTask TypeName source");
+    match run_wasm_min_src(source, "cpu_parallel_async_task_type_name_wasm") {
+        Ok(Some(wasm)) => assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mismatch for AsyncTask TypeName source"
+        ),
+        Err(err) if err.contains("wasmtime not available") => {
+            eprintln!("SKIP: wasmtime not available, skipping CPU parallel wasm-min parity");
+        }
+        Err(err) => panic!("wasm-min AsyncTask TypeName failed: {}", err),
+        Ok(None) => panic!("wasm-min AsyncTask TypeName returned no output"),
+    }
+}
+
+#[test]
+fn test_cpu_parallel_rejected_task_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping CPU parallel native parity");
+        return;
+    }
+    let source = r#"
+TaskErr = @(type: Str, message: Str)
+failTask =
+  TaskErr(type <= "TaskErr", message <= "boom").throw()
+=> :Int
+handle =
+  |== error: Error =
+    error.type + ":" + error.message
+  => :Str
+  jobs <= @[AsyncTask[_ = failTask()]()]
+  Par[jobs]() >=> out
+  "miss"
+=> :Str
+stdout(handle())
+"#;
+    assert_backend_parity_for_source(source, "cpu_parallel_rejected_task");
+
+    let interp = run_interpreter_src(source, "cpu_parallel_rejected_task_wasm")
+        .expect("interpreter should run rejected CPU task source");
+    match run_wasm_min_src(source, "cpu_parallel_rejected_task_wasm") {
+        Ok(Some(wasm)) => assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mismatch for rejected CPU task source"
+        ),
+        Err(err) if err.contains("wasmtime not available") => {
+            eprintln!("SKIP: wasmtime not available, skipping rejected CPU task wasm-min parity");
+        }
+        Err(err) => panic!("wasm-min rejected CPU task failed: {}", err),
+        Ok(None) => panic!("wasm-min rejected CPU task returned no output"),
+    }
+}
+
+#[test]
+fn test_cpu_parallel_async_task_to_string_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping CPU parallel native parity");
+        return;
+    }
+    let source = r#"
+job <= AsyncTask[_ = 1]()
+stdout(job.toString())
+"#;
+    assert_backend_parity_for_source(source, "cpu_parallel_async_task_to_string");
+
+    let interp = run_interpreter_src(source, "cpu_parallel_async_task_to_string_wasm")
+        .expect("interpreter should run AsyncTask toString source");
+    match run_wasm_min_src(source, "cpu_parallel_async_task_to_string_wasm") {
+        Ok(Some(wasm)) => assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mismatch for AsyncTask toString source"
+        ),
+        Err(err) if err.contains("wasmtime not available") => {
+            eprintln!("SKIP: wasmtime not available, skipping CPU parallel wasm-min parity");
+        }
+        Err(err) => panic!("wasm-min AsyncTask toString failed: {}", err),
+        Ok(None) => panic!("wasm-min AsyncTask toString returned no output"),
+    }
+}
+
+#[test]
+fn test_cpu_parallel_par_map_rejected_task_message_backend_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping CPU parallel native parity");
+        return;
+    }
+    let source = r#"
+TaskErr = @(type: Str, message: Str)
+failMap x: Int =
+  TaskErr(type <= "TaskErr", message <= "map-boom").throw()
+=> :Int
+handle =
+  |== error: Error =
+    error.type + ":" + error.message
+  => :Str
+  items <= @[1]
+  ParMap[items, _ x: Int = failMap(x)]() >=> out
+  "miss"
+=> :Str
+stdout(handle())
+"#;
+    assert_backend_parity_for_source(source, "cpu_parallel_par_map_rejected_task_message");
+
+    let interp = run_interpreter_src(source, "cpu_parallel_par_map_rejected_task_message_wasm")
+        .expect("interpreter should run rejected ParMap source");
+    match run_wasm_min_src(source, "cpu_parallel_par_map_rejected_task_message_wasm") {
+        Ok(Some(wasm)) => assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mismatch for rejected ParMap source"
+        ),
+        Err(err) if err.contains("wasmtime not available") => {
+            eprintln!("SKIP: wasmtime not available, skipping rejected ParMap wasm-min parity");
+        }
+        Err(err) => panic!("wasm-min rejected ParMap failed: {}", err),
+        Ok(None) => panic!("wasm-min rejected ParMap returned no output"),
+    }
+}
+
 fn assert_backends_reject_source(source: &str, label: &str) {
     assert!(
         run_interpreter_src(source, label).is_none(),
@@ -2853,8 +3042,18 @@ fn test_race_empty_three_way_parity() {
     let source = r#"
 r: Async[Int] <= Race[@[]]()
 stdout(r.toString())
+stdout(r.isRejected().toString())
 "#;
     assert_backend_parity_for_source(source, "race_empty");
+}
+
+#[test]
+fn test_type_message_buchi_pack_display_is_not_error_parity() {
+    let source = r#"
+fake <= @(type <= "Plain", message <= "not error")
+stdout(fake.toString())
+"#;
+    assert_full_backend_parity_for_source(source, "type_message_pack_display_not_error", &[]);
 }
 
 #[test]

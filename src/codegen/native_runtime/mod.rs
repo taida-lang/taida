@@ -635,7 +635,7 @@ mod tests {
         //   user-facing hint. Net +31 bytes. Recomputed total = 1,132,061.
         // 2026-05-18 source doc-comment cleanup trims 18 bytes from core.c.
         //   Recomputed total = 1,132,043.
-        const EXPECTED_TOTAL_LEN: usize = 1_132_043;
+        const EXPECTED_TOTAL_LEN: usize = 1_139_723;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1213,10 +1213,10 @@ mod tests {
         //   F2 167,302 → 167,306.
         // 2026-05-18 source doc-comment cleanup trims 18 bytes from F1.
         //   F1 moves 314,343 → 314,325; F2 remains 167,299.
-        const F1_LEN: usize = 314_325;
+        const F1_LEN: usize = 314_749;
         assert_eq!(
             CORE_SECTION.len(),
-            314_325 + 167_299,
+            314_749 + 174_555,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

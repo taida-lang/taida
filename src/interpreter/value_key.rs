@@ -137,6 +137,7 @@ fn is_hashable(v: &Value) -> bool {
         Value::Float(_)
         | Value::Function(_)
         | Value::Async(_)
+        | Value::AsyncTask(_)
         | Value::Stream(_)
         | Value::Error(_)
         | Value::Molten
@@ -247,6 +248,7 @@ fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
         Value::Float(_)
         | Value::Function(_)
         | Value::Async(_)
+        | Value::AsyncTask(_)
         | Value::Stream(_)
         | Value::Error(_)
         | Value::Molten

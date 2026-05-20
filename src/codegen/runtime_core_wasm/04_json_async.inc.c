@@ -1391,7 +1391,11 @@ int64_t taida_async_race(int64_t list_ptr) {
     if (!_looks_like_list(list_ptr)) return taida_async_ok_tagged(list_ptr, WASM_ASYNC_TAG_UNKNOWN);
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];  /* list[1] = length */
-    if (len == 0) return taida_async_ok_tagged(taida_pack_new(0), WASM_TAG_PACK);
+    if (len == 0) {
+        return taida_async_err(taida_make_error(
+            (int64_t)(intptr_t)"AsyncRaceError",
+            (int64_t)(intptr_t)"Race requires at least one value"));
+    }
     int64_t first = list[WASM_LIST_ELEMS];
     if (_wasm_is_async_obj(first)) {
         int64_t *aobj = (int64_t *)(intptr_t)first;
@@ -1407,6 +1411,61 @@ int64_t taida_async_race(int64_t list_ptr) {
         return taida_async_ok_tagged(aobj[2], aobj[5]);
     }
     return taida_async_ok_tagged(first, WASM_ASYNC_TAG_UNKNOWN);
+}
+
+static int64_t _wasm_async_task_error_from_caught(int64_t fallback_msg) {
+    int64_t message = fallback_msg;
+    if (__wasm_error_depth > 0) {
+        int64_t error = __wasm_error_val[__wasm_error_depth - 1];
+        if (_looks_like_pack(error) && taida_pack_has_hash(error, WASM_HASH_MESSAGE)) {
+            int64_t caught_message = taida_pack_get(error, WASM_HASH_MESSAGE);
+            if (caught_message) message = caught_message;
+        }
+    }
+    return taida_make_error((int64_t)(intptr_t)"AsyncTaskError", message);
+}
+
+int64_t taida_async_task_par(int64_t list_ptr) {
+    if (!_looks_like_list(list_ptr)) {
+        return taida_async_err(taida_make_error(
+            (int64_t)(intptr_t)"AsyncTaskError",
+            (int64_t)(intptr_t)"Par expected a list of AsyncTask values"));
+    }
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t result = taida_list_new();
+    for (int64_t i = 0; i < len; i++) {
+        int64_t task = _wasm_async_task_callable(list[WASM_LIST_ELEMS + i]);
+        int64_t value = _wasm_invoke_callback0(task);
+        if (__wasm_error_thrown) {
+            int64_t error = _wasm_async_task_error_from_caught((int64_t)(intptr_t)"AsyncTask failed");
+            __wasm_error_thrown = 0;
+            return taida_async_err(error);
+        }
+        result = taida_list_push(result, value);
+    }
+    return taida_async_ok_tagged(result, WASM_ASYNC_TAG_UNKNOWN);
+}
+
+int64_t taida_async_task_par_map(int64_t list_ptr, int64_t fn_ptr) {
+    if (!_looks_like_list(list_ptr)) {
+        return taida_async_err(taida_make_error(
+            (int64_t)(intptr_t)"AsyncTaskError",
+            (int64_t)(intptr_t)"ParMap expected a list and a function"));
+    }
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = list[1];
+    int64_t result = taida_list_new();
+    for (int64_t i = 0; i < len; i++) {
+        int64_t value = _wasm_invoke_callback1(fn_ptr, list[WASM_LIST_ELEMS + i]);
+        if (__wasm_error_thrown) {
+            int64_t error = _wasm_async_task_error_from_caught((int64_t)(intptr_t)"ParMap task failed");
+            __wasm_error_thrown = 0;
+            return taida_async_err(error);
+        }
+        result = taida_list_push(result, value);
+    }
+    return taida_async_ok_tagged(result, WASM_ASYNC_TAG_UNKNOWN);
 }
 
 int64_t taida_async_cancel(int64_t async_ptr) {

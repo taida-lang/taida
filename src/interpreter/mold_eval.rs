@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{
-    AsyncStatus, AsyncValue, BytesValue, StreamStatus, StreamTransform, StreamValue, Value,
+    AsyncStatus, AsyncTaskValue, AsyncValue, BytesValue, ErrorValue, StreamStatus, StreamTransform,
+    StreamValue, Value,
 };
 /// Operation mold evaluation for the Taida interpreter.
 ///
@@ -48,6 +49,28 @@ fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
         ("__default".into(), default),
         ("__type".into(), Value::str("Lax".into())),
     ])
+}
+
+fn async_fulfilled(value: Value) -> Value {
+    Value::Async(AsyncValue {
+        status: AsyncStatus::Fulfilled,
+        value: Box::new(value),
+        error: Box::new(Value::Unit),
+        task: None,
+    })
+}
+
+fn async_rejected(error_type: &str, message: String) -> Value {
+    Value::Async(AsyncValue {
+        status: AsyncStatus::Rejected,
+        value: Box::new(Value::Unit),
+        error: Box::new(Value::Error(ErrorValue {
+            error_type: error_type.to_string(),
+            message,
+            fields: Vec::new(),
+        })),
+        task: None,
+    })
 }
 
 /// 柱 2: zero-copy BytesCursor constructor.
@@ -3751,6 +3774,134 @@ impl Interpreter {
                 }))))
             }
 
+            "AsyncTask" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: "AsyncTask requires exactly 1 argument: AsyncTask[_ = expr]()"
+                            .to_string(),
+                    });
+                }
+                let thunk = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Function(func)) => func,
+                    Signal::Value(other) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "AsyncTask requires a zero-argument function, got {}",
+                                other
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                if !thunk.params.is_empty() {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "AsyncTask requires a zero-argument function, got {} parameter(s)",
+                            thunk.params.len()
+                        ),
+                    });
+                }
+                Ok(Some(Signal::Value(Value::AsyncTask(AsyncTaskValue {
+                    func: thunk,
+                }))))
+            }
+
+            "Par" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: "Par requires exactly 1 argument: Par[jobs]()".to_string(),
+                    });
+                }
+                let jobs = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::List(items)) => items,
+                    Signal::Value(other) => {
+                        return Err(RuntimeError {
+                            message: format!("Par: argument must be a list, got {}", other),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let mut results = Vec::with_capacity(jobs.len());
+                for job in jobs.iter() {
+                    let task = match job {
+                        Value::AsyncTask(task) => task,
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "Par: list elements must be AsyncTask values, got {}",
+                                    other
+                                ),
+                            });
+                        }
+                    };
+                    match self.call_function_with_values(&task.func, &[]) {
+                        Ok(value) => results.push(value),
+                        Err(err) => {
+                            let message = self
+                                .pending_throw
+                                .take()
+                                .map(|throw_val| Self::throw_val_to_display_str(&throw_val))
+                                .unwrap_or(err.message);
+                            return Ok(Some(Signal::Value(async_rejected(
+                                "AsyncTaskError",
+                                message,
+                            ))));
+                        }
+                    }
+                }
+                Ok(Some(Signal::Value(async_fulfilled(Value::list(results)))))
+            }
+
+            "ParMap" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "ParMap requires 2 arguments: ParMap[list, fn]()".to_string(),
+                    });
+                }
+                let list_val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::List(items)) => items,
+                    Signal::Value(other) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ParMap: first argument must be a list, got {}",
+                                other
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let func = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Function(func)) => func,
+                    Signal::Value(other) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "ParMap: second argument must be a function, got {}",
+                                other
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let mut results = Vec::with_capacity(list_val.len());
+                for item in list_val.iter() {
+                    match self.call_function_with_values(&func, std::slice::from_ref(item)) {
+                        Ok(value) => results.push(value),
+                        Err(err) => {
+                            let message = self
+                                .pending_throw
+                                .take()
+                                .map(|throw_val| Self::throw_val_to_display_str(&throw_val))
+                                .unwrap_or(err.message);
+                            return Ok(Some(Signal::Value(async_rejected(
+                                "AsyncTaskError",
+                                message,
+                            ))));
+                        }
+                    }
+                }
+                Ok(Some(Signal::Value(async_fulfilled(Value::list(results)))))
+            }
+
             "All" => {
                 // All[asyncList]() -> await all async values, collecting results.
                 // If any pending tasks exist, resolve them via tokio runtime.
@@ -3870,10 +4021,15 @@ impl Interpreter {
                         })))),
                     }
                 } else {
+                    let error = Value::Error(ErrorValue {
+                        error_type: "AsyncRaceError".into(),
+                        message: "Race requires at least one value".into(),
+                        fields: Vec::new(),
+                    });
                     Ok(Some(Signal::Value(Value::Async(AsyncValue {
-                        status: AsyncStatus::Fulfilled,
-                        value: Box::new(Value::Unit),
-                        error: Box::new(Value::Unit),
+                        status: AsyncStatus::Rejected,
+                        value: Box::new(error.clone()),
+                        error: Box::new(error),
                         task: None,
                     }))))
                 }
@@ -4220,6 +4376,9 @@ impl Interpreter {
             }),
             "JSCall" => Err(RuntimeError {
                 message: "JSCall is only available in the JS transpiler backend".to_string(),
+            }),
+            "JSCallAsync" => Err(RuntimeError {
+                message: "JSCallAsync is only available in the JS transpiler backend".to_string(),
             }),
             "JSNew" => Err(RuntimeError {
                 message: "JSNew is only available in the JS transpiler backend".to_string(),

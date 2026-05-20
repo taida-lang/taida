@@ -21,12 +21,12 @@ docs/guide/07_control_flow.md:201
 docs/guide/07_control_flow.md:286
 docs/guide/07_control_flow.md:303
 docs/guide/08_error_handling.md:110
-docs/guide/08_error_handling.md:498
-docs/guide/08_error_handling.md:541
+docs/guide/08_error_handling.md:518
+docs/guide/08_error_handling.md:561
 docs/guide/09_functions.md:197
 docs/guide/09_functions.md:305
-docs/guide/10_modules.md:145
-docs/guide/10_modules.md:151
+docs/guide/10_modules.md:150
+docs/guide/10_modules.md:156
 docs/guide/11_async.md:81
 docs/guide/12_introspection.md:202
 docs/guide/12_introspection.md:213

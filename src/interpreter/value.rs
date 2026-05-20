@@ -681,6 +681,8 @@ pub enum Value {
     Error(ErrorValue),
     /// Async value — Mold[T] for asynchronous operations
     Async(AsyncValue),
+    /// CPU task value — explicit delayed zero-argument computation.
+    AsyncTask(AsyncTaskValue),
     /// JSON value — 外部データの型安全なエアロック
     Json(serde_json::Value),
     /// Molten value — opaque primitive for external (JS) interop data.
@@ -782,6 +784,12 @@ pub struct AsyncValue {
     /// Handle to a pending tokio task. None for immediately resolved values.
     /// Wrapped in Arc<Mutex<>> so AsyncValue can be Clone.
     pub task: Option<Arc<Mutex<PendingState>>>,
+}
+
+/// CPU task value used by `AsyncTask`.
+#[derive(Debug, Clone)]
+pub struct AsyncTaskValue {
+    pub func: FuncValue,
 }
 
 /// Stream status.
@@ -1008,6 +1016,7 @@ impl Value {
             Value::Molten => false,
             Value::Stream(s) => !s.items.is_empty() || s.status == StreamStatus::Active,
             Value::Async(a) => a.status == AsyncStatus::Fulfilled,
+            Value::AsyncTask(_) => true,
             Value::Json(j) => match j {
                 serde_json::Value::Null => false,
                 serde_json::Value::Bool(b) => *b,
@@ -1108,6 +1117,7 @@ impl Value {
                 s
             }
             Value::Function(f) => format!("<function {}>", f.name),
+            Value::AsyncTask(_) => "AsyncTask[<task>]".to_string(),
             Value::Gorilla => "><".to_string(),
             Value::Unit => "@()".to_string(),
             Value::Error(err) => format!("Error({}: {})", err.error_type, err.message),
@@ -1201,6 +1211,7 @@ impl PartialEq for Value {
             (Value::Unit, Value::Unit) => true,
             (Value::Gorilla, Value::Gorilla) => true,
             (Value::Async(a), Value::Async(b)) => a.status == b.status && *a.value == *b.value,
+            (Value::AsyncTask(a), Value::AsyncTask(b)) => a.func.name == b.func.name,
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Molten, Value::Molten) => true,
             (Value::Stream(a), Value::Stream(b)) => a.status == b.status && a.items == b.items,

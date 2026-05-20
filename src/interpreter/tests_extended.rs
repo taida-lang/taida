@@ -1241,6 +1241,49 @@ a
     }
 
     #[test]
+    fn test_cpu_parallel_par_collects_results_in_input_order() {
+        let source = "jobs <= @[AsyncTask[_ = 3](), AsyncTask[_ = 1](), AsyncTask[_ = 2]()]\n\
+                      Par[jobs]() >=> out\n\
+                      out";
+        assert_eq!(
+            eval_ok(source),
+            Value::list(vec![Value::Int(3), Value::Int(1), Value::Int(2)])
+        );
+    }
+
+    #[test]
+    fn test_cpu_parallel_par_map_sequential_reference() {
+        let source = "items <= @[1, 2, 3]\n\
+                      ParMap[items, _ x: Int = x * 2]() >=> out\n\
+                      out";
+        assert_eq!(
+            eval_ok(source),
+            Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
+        );
+    }
+
+    #[test]
+    fn test_cpu_parallel_par_rejects_failed_task() {
+        let source = r#"
+TaskErr = @(type: Str, message: Str)
+failTask =
+  TaskErr(type <= "TaskErr", message <= "boom").throw()
+=> :Int
+handle =
+  |== error: Error =
+    "caught"
+  => :Str
+  jobs <= @[AsyncTask[_ = failTask()]()]
+  Par[jobs]() >=> out
+  "miss"
+=> :Str
+result <= handle()
+result
+"#;
+        assert_eq!(eval_ok(source), Value::str("caught".to_string()));
+    }
+
+    #[test]
     fn test_async_unmold_forward() {
         // >=> unwraps fulfilled async
         let source = r#"

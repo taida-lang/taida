@@ -51,6 +51,7 @@ impl Interpreter {
             Value::Unit => "Unit",
             Value::Error(_) => "Error",
             Value::Async(_) => "Async",
+            Value::AsyncTask(_) => "AsyncTask",
             Value::Json(_) => "JSON",
             Value::Molten => "Molten",
             Value::Stream(_) => "Stream",

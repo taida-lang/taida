@@ -1720,6 +1720,18 @@ check(1)"#;
     }
 
     #[test]
+    fn test_jscall_async_js_backend_only_error() {
+        let result = eval("x <= JSCallAsync[@[], @[], Int]()");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("JSCallAsync is only available in the JS transpiler backend"),
+            "Got: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_jsnew_js_backend_only_error() {
         let result = eval("x <= JSNew[\"Date\"]()");
         assert!(result.is_err());

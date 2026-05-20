@@ -303,6 +303,10 @@ class __TaidaError extends globalThis.Error {
   errorInfo() {
     return __taida_error_info_lax(this);
   }
+
+  toString() {
+    return `Error(${this.type}: ${this.message})`;
+  }
 }
 
 // Standalone throw function (no Object.prototype pollution)
@@ -463,8 +467,74 @@ function AsyncReject(error) {
   return new __TaidaAsync(null, error, 'rejected');
 }
 
+class __TaidaAsyncTask {
+  constructor(fn) {
+    this.__type = 'AsyncTask';
+    this.__fn = fn;
+  }
+  run() {
+    return this.__fn();
+  }
+  toString() {
+    return 'AsyncTask[<task>]';
+  }
+}
+
+function AsyncTask(fn) {
+  if (typeof fn !== 'function') {
+    throw new __TaidaError('TypeError', 'AsyncTask expects a zero-argument function', {});
+  }
+  return new __TaidaAsyncTask(fn);
+}
+
+function __taida_async_task_error(error) {
+  const info = __taida_error_info(error);
+  const message = info.message || String(error || 'AsyncTask failed');
+  return new __TaidaError('AsyncTaskError', message, {
+    kind: 'AsyncTaskError',
+    code: info.code || 0,
+  });
+}
+
+function __taida_run_async_task(task) {
+  if (task instanceof __TaidaAsyncTask) return task.run();
+  if (typeof task === 'function') return task();
+  throw new __TaidaError('TypeError', 'Par expected AsyncTask values', {});
+}
+
+function Par(tasks) {
+  try {
+    const values = [];
+    for (const task of tasks) {
+      values.push(__taida_run_async_task(task));
+    }
+    return new __TaidaAsync(Object.freeze(values), null, 'fulfilled');
+  } catch (error) {
+    return new __TaidaAsync(null, __taida_async_task_error(error), 'rejected');
+  }
+}
+
+function ParMap(items, fn) {
+  if (typeof fn !== 'function') {
+    return new __TaidaAsync(
+      null,
+      new __TaidaError('AsyncTaskError', 'ParMap expects a unary function', { kind: 'AsyncTaskError', code: 0 }),
+      'rejected'
+    );
+  }
+  try {
+    const values = [];
+    for (const item of items) {
+      values.push(fn(item));
+    }
+    return new __TaidaAsync(Object.freeze(values), null, 'fulfilled');
+  } catch (error) {
+    return new __TaidaAsync(null, __taida_async_task_error(error), 'rejected');
+  }
+}
+
 // Build a pending Async from a Promise while preserving Async shape/toString.
-function __taida_async_pending_from_promise(promise) {
+function __taida_async_pending_from_promise(promise, mapError) {
   const asyncObj = new __TaidaAsync(undefined, null, 'pending');
   asyncObj.then = function(resolve, reject) {
     return promise.then(
@@ -476,10 +546,13 @@ function __taida_async_pending_from_promise(promise) {
         return value;
       },
       (error) => {
+        const mapped = asyncObj.status === 'rejected' && asyncObj.__error !== null
+          ? asyncObj.__error
+          : (mapError ? mapError(error) : error);
         asyncObj.status = 'rejected';
-        asyncObj.__error = error;
-        if (reject) return reject(error);
-        throw error;
+        asyncObj.__error = mapped;
+        if (reject) return reject(mapped);
+        throw mapped;
       }
     );
   };
@@ -512,7 +585,13 @@ function All(asyncList) {
 }
 
 function Race(asyncList) {
-  if (asyncList.length === 0) return new __TaidaAsync(Object.freeze({}));
+  if (asyncList.length === 0) {
+    return new __TaidaAsync(
+      null,
+      new __TaidaError('AsyncRaceError', 'Race requires at least one value', {}),
+      'rejected'
+    );
+  }
   // Fast path: no true Promise in inputs.
   const hasPromise = asyncList.some(item =>
     (item && typeof item.then === 'function' && !(item instanceof __TaidaAsync))
@@ -537,7 +616,7 @@ function Timeout(asyncVal, ms) {
     if (asyncVal.status === 'pending') {
       return Promise.race([
         Promise.resolve(asyncVal),
-        new Promise((_, reject) => setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
+        new Promise((_, reject) => globalThis.setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
       ]);
     }
     return asyncVal;
@@ -549,7 +628,7 @@ function Timeout(asyncVal, ms) {
   // Async path: race against timeout
   return Promise.race([
     asyncVal,
-    new Promise((_, reject) => setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
+    new Promise((_, reject) => globalThis.setTimeout(() => reject(new __TaidaError('TimeoutError', 'timeout', {})), ms))
   ]);
 }
 
@@ -1133,9 +1212,15 @@ function Gorillax(value, error) {
   });
 }
 
-function __taida_cagerilla_runner(fn) {
+function __taida_cagerilla_runner(fn, options) {
   Object.defineProperty(fn, '__taida_cagerilla_runner', {
     value: true,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
+  Object.defineProperty(fn, '__taida_cagerilla_async', {
+    value: !!(options && options.async),
     writable: false,
     configurable: false,
     enumerable: false,
@@ -1151,6 +1236,21 @@ function Cage_mold(cageValue, cageRunner) {
       'Cage runner must be a CageRilla descriptor; direct functions and lambdas are not supported',
       {}
     );
+  }
+  if (cageRunner.__taida_cagerilla_async === true) {
+    try {
+      const result = cageRunner(cageValue);
+      if (!result || typeof result.then !== 'function') {
+        return AsyncReject(new __TaidaError(
+          'JSError',
+          'JSCallAsync target did not return a Promise',
+          { kind: 'JSError', code: 0 }
+        ));
+      }
+      return __taida_async_pending_from_promise(result, __taida_js_boundary_error);
+    } catch (e) {
+      return AsyncReject(__taida_js_boundary_error(e));
+    }
   }
   try {
     const result = cageRunner(cageValue);
@@ -2499,7 +2599,7 @@ function __taida_sleep(ms) {
   // an empty object (which would be Unit on Taida surface).
   // PHILOSOPHY I forbids `Async[Unit]` — `sleep` now returns `Async[Int]`.
   const promise = new Promise((resolve) => {
-    setTimeout(() => resolve(ms), ms);
+    globalThis.setTimeout(() => resolve(ms), ms);
   });
   return __taida_async_pending_from_promise(promise);
 }
@@ -3131,6 +3231,7 @@ function __taida_typeof(x) {
   if (Array.isArray(x)) return 'List';
   if (x instanceof __TaidaJSON) return 'JSON';
   if (x instanceof __TaidaAsync) return 'Async';
+  if (x instanceof __TaidaAsyncTask) return 'AsyncTask';
   if (x && x.__type) return x.__type;
   if (typeof x === 'object') return 'BuchiPack';
   return 'Unknown';
@@ -3145,7 +3246,7 @@ function __taida_typename(x) {
   }
   if (x && typeof x === 'object' && typeof x.__type === 'string') return x.__type;
   if (x instanceof __TaidaError || x instanceof globalThis.Error) return x.type || x.name || 'Error';
-  if (Array.isArray(x) || __taida_isBytes(x) || x instanceof __TaidaJSON || x instanceof __TaidaAsync) return __taida_typeof(x);
+  if (Array.isArray(x) || __taida_isBytes(x) || x instanceof __TaidaJSON || x instanceof __TaidaAsync || x instanceof __TaidaAsyncTask) return __taida_typeof(x);
   if (x && typeof x === 'object') return '';
   return __taida_typeof(x);
 }
@@ -3200,6 +3301,22 @@ function __taida_to_js_value(value) {
 
 function __taida_from_js_value(value) {
   return value;
+}
+
+function __taida_js_boundary_error(error) {
+  if (error instanceof __TaidaError) return error;
+  const info = __taida_error_info(error);
+  const nativeKind = error && typeof error === 'object' && typeof error.code === 'string'
+    ? error.code
+    : '';
+  return new __TaidaError(
+    'JSError',
+    info.message || String(error || 'JS boundary operation failed'),
+    {
+      kind: nativeKind || info.kind || 'JSError',
+      code: info.code || 0,
+    }
+  );
 }
 
 function __taida_js_key(part) {
@@ -3258,6 +3375,25 @@ function __taida_js_call_runner(path, args) {
     }
     return __taida_from_js_value(fn.apply(receiver, runnerArgs));
   });
+}
+
+function __taida_js_call_async_runner(path, args) {
+  const runnerPath = __taida_js_path_array(path);
+  const runnerArgs = __taida_js_args_array(args).map(__taida_to_js_value);
+  return __taida_cagerilla_runner(function(subject) {
+    if (runnerPath.length === 0) {
+      if (typeof subject !== 'function') {
+        throw new __TaidaError('JSError', 'JSCallAsync target is not callable', {});
+      }
+      return __taida_from_js_value(subject(...runnerArgs));
+    }
+    const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSCallAsync');
+    const fn = receiver[key];
+    if (typeof fn !== 'function') {
+      throw new __TaidaError('JSError', 'JSCallAsync target is not callable', {});
+    }
+    return __taida_from_js_value(fn.apply(receiver, runnerArgs));
+  }, { async: true });
 }
 
 function __taida_js_new_runner(path, args) {

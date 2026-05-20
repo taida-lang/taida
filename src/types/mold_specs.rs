@@ -57,12 +57,33 @@ pub enum MoldArgKind {
     Function,
     Int,
     Str,
+    NullaryFunction,
     UnaryFunction,
     UnaryPredicate,
     BinaryFunction,
     List,
     ListOrStream,
     Numeric,
+}
+
+/// Whether a builtin mold can cross a CPU worker boundary.
+///
+/// The default is intentionally `Unsafe`; only molds with explicit evidence
+/// may be promoted to `Pure` or `Transparent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerSafety {
+    Pure,
+    Transparent,
+    Unsafe,
+}
+
+/// Why a builtin mold is disallowed inside a CPU worker body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerMoldBoundary {
+    Structural,
+    Effectful,
+    HostBoundary,
+    NestedAsync,
 }
 
 /// Named `()` option accepted by a builtin mold.
@@ -82,6 +103,8 @@ pub struct MoldSpec {
     pub arg_kinds: &'static [MoldArgKind],
     pub return_kind: MoldReturnKind,
     pub options: &'static [MoldOptionSpec],
+    pub worker_safety: WorkerSafety,
+    pub worker_boundary: WorkerMoldBoundary,
     /// Some legacy molds still need permissive arity until their runtime
     /// contracts are audited. `true` means the checker should enforce the
     /// registry arity now.
@@ -102,6 +125,8 @@ impl MoldSpec {
             arg_kinds,
             return_kind,
             options: &[],
+            worker_safety: WorkerSafety::Unsafe,
+            worker_boundary: WorkerMoldBoundary::Structural,
             checker_enforced: false,
         }
     }
@@ -120,6 +145,8 @@ impl MoldSpec {
             arg_kinds,
             return_kind,
             options: &[],
+            worker_safety: WorkerSafety::Unsafe,
+            worker_boundary: WorkerMoldBoundary::Structural,
             checker_enforced: false,
         }
     }
@@ -131,6 +158,16 @@ impl MoldSpec {
 
     pub const fn with_options(mut self, options: &'static [MoldOptionSpec]) -> Self {
         self.options = options;
+        self
+    }
+
+    pub const fn with_worker_safety(mut self, worker_safety: WorkerSafety) -> Self {
+        self.worker_safety = worker_safety;
+        self
+    }
+
+    pub const fn with_worker_boundary(mut self, worker_boundary: WorkerMoldBoundary) -> Self {
+        self.worker_boundary = worker_boundary;
         self
     }
 
@@ -172,6 +209,7 @@ const ANY4: &[MoldArgKind] = &[
     MoldArgKind::Any,
     MoldArgKind::Any,
 ];
+const NULLARY_FUNCTION1: &[MoldArgKind] = &[MoldArgKind::NullaryFunction];
 const LIST1: &[MoldArgKind] = &[MoldArgKind::List];
 const LIST_UNARY_FUNCTION: &[MoldArgKind] =
     &[MoldArgKind::ListOrStream, MoldArgKind::UnaryFunction];
@@ -310,30 +348,56 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("BytesCursorRemaining", 1, ANY1, MoldReturnKind::Int),
     MoldSpec::exact("BytesCursorTake", 2, ANY2, MoldReturnKind::Pack),
     MoldSpec::exact("BytesCursorU8", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::range("Lax", 0, Some(1), ANY1, MoldReturnKind::Pack),
-    MoldSpec::range("Result", 1, Some(2), ANY2, MoldReturnKind::Pack).with_options(RESULT_OPTIONS),
-    MoldSpec::exact("Async", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("AsyncReject", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("Gorillax", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("RelaxedGorillax", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("Stream", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("StreamFrom", 1, LIST1, MoldReturnKind::Pack),
+    MoldSpec::range("Lax", 0, Some(1), ANY1, MoldReturnKind::Pack)
+        .with_worker_safety(WorkerSafety::Transparent),
+    MoldSpec::range("Result", 1, Some(2), ANY2, MoldReturnKind::Pack)
+        .with_options(RESULT_OPTIONS)
+        .with_worker_safety(WorkerSafety::Transparent),
+    MoldSpec::exact("Async", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
+    MoldSpec::exact("AsyncReject", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
+    MoldSpec::exact("AsyncTask", 1, NULLARY_FUNCTION1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync)
+        .enforce_checker(),
+    MoldSpec::exact("Gorillax", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_safety(WorkerSafety::Transparent),
+    MoldSpec::exact("RelaxedGorillax", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_safety(WorkerSafety::Transparent),
+    MoldSpec::exact("Stream", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
+    MoldSpec::exact("StreamFrom", 1, LIST1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
     MoldSpec::range("Optional", 0, Some(1), ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("Molten", 0, &[], MoldReturnKind::Pack),
+    MoldSpec::exact("Molten", 0, &[], MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
-    MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack),
-    MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack),
-    MoldSpec::exact("JSRilla", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("FileRilla", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("BuildRilla", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSRilla", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("FileRilla", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("BuildRilla", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("JSON", 2, ANY2, MoldReturnKind::Pack),
-    MoldSpec::exact("JSGet", 2, ANY2, MoldReturnKind::Pack),
-    MoldSpec::exact("JSCall", 3, ANY3, MoldReturnKind::Pack),
-    MoldSpec::exact("JSNew", 3, ANY3, MoldReturnKind::Pack),
-    MoldSpec::exact("JSSet", 2, ANY2, MoldReturnKind::Pack),
-    MoldSpec::exact("JSBind", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("JSSpread", 1, ANY1, MoldReturnKind::Pack),
+    MoldSpec::exact("JSGet", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSCall", 3, ANY3, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSCallAsync", 3, ANY3, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSNew", 3, ANY3, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSSet", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSBind", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSSpread", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     // Numeric / math.
     MoldSpec::exact("Sqrt", 1, ANY1, MoldReturnKind::Float),
     MoldSpec::exact("Pow", 2, ANY2, MoldReturnKind::Float),
@@ -467,20 +531,38 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("Max", 1, LIST1, MoldReturnKind::Dynamic),
     MoldSpec::exact("If", 3, ANY3, MoldReturnKind::Dynamic).enforce_checker(),
     // Async combinators.
-    MoldSpec::exact("Cancel", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("All", 1, LIST1, MoldReturnKind::Pack),
-    MoldSpec::exact("Race", 1, LIST1, MoldReturnKind::Pack),
-    MoldSpec::exact("Timeout", 2, ASYNC_NUM, MoldReturnKind::Pack),
+    MoldSpec::exact("Cancel", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
+    MoldSpec::exact("All", 1, LIST1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
+    MoldSpec::exact("Par", 1, LIST1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync)
+        .enforce_checker(),
+    MoldSpec::exact("ParMap", 2, LIST_UNARY_FUNCTION, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync)
+        .enforce_checker(),
+    MoldSpec::exact("Race", 1, LIST1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
+    MoldSpec::exact("Timeout", 2, ASYNC_NUM, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::NestedAsync),
     // OS package mold constructors.
-    MoldSpec::exact("Read", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("ListDir", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("Stat", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("EnvVar", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("ReadAsync", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("HttpGet", 1, ANY1, MoldReturnKind::Pack),
-    MoldSpec::exact("HttpPost", 2, ANY2, MoldReturnKind::Pack),
+    MoldSpec::exact("Read", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
+    MoldSpec::exact("ListDir", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
+    MoldSpec::exact("Stat", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
+    MoldSpec::exact("EnvVar", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
+    MoldSpec::exact("ReadAsync", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
+    MoldSpec::exact("HttpGet", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
+    MoldSpec::exact("HttpPost", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
     MoldSpec::exact("HttpRequest", 2, ANY2, MoldReturnKind::Pack)
-        .with_options(HTTP_REQUEST_OPTIONS),
+        .with_options(HTTP_REQUEST_OPTIONS)
+        .with_worker_boundary(WorkerMoldBoundary::Effectful),
 ];
 
 /// Look up a builtin mold specification by name.
@@ -505,6 +587,18 @@ pub fn lookup_mold_return_kind(name: &str) -> Option<MoldReturnKind> {
 /// directly (no `convert_to_string` fallback needed).
 pub fn mold_return_tag(name: &str) -> Option<i64> {
     lookup_mold_return_kind(name).and_then(|k| k.tag())
+}
+
+pub fn lookup_worker_safety(name: &str) -> WorkerSafety {
+    lookup_mold_spec(name)
+        .map(|spec| spec.worker_safety)
+        .unwrap_or(WorkerSafety::Unsafe)
+}
+
+pub fn lookup_worker_mold_boundary(name: &str) -> WorkerMoldBoundary {
+    lookup_mold_spec(name)
+        .map(|spec| spec.worker_boundary)
+        .unwrap_or(WorkerMoldBoundary::Structural)
 }
 
 #[cfg(test)]
@@ -690,6 +784,9 @@ mod tests {
             "Lax",
             "Result",
             "Async",
+            "AsyncTask",
+            "Par",
+            "ParMap",
             "Gorillax",
             "Stream",
             "StreamFrom",
@@ -705,6 +802,90 @@ mod tests {
             "ByteAt",
         ] {
             assert_eq!(mold_return_tag(name), Some(4), "{name} should be Pack (4)");
+        }
+    }
+
+    #[test]
+    fn worker_safety_defaults_to_unsafe() {
+        assert_eq!(lookup_worker_safety("HttpGet"), WorkerSafety::Unsafe);
+        assert_eq!(
+            lookup_worker_safety("DefinitelyUserDefined"),
+            WorkerSafety::Unsafe
+        );
+    }
+
+    #[test]
+    fn worker_safety_marks_transparent_wrappers() {
+        for name in ["Lax", "Result", "Gorillax", "RelaxedGorillax"] {
+            assert_eq!(
+                lookup_worker_safety(name),
+                WorkerSafety::Transparent,
+                "{name} should be transparent"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_safety_keeps_async_family_unsafe() {
+        for name in [
+            "Async",
+            "AsyncReject",
+            "AsyncTask",
+            "Par",
+            "ParMap",
+            "All",
+            "Race",
+            "Timeout",
+            "Cancel",
+        ] {
+            assert_eq!(
+                lookup_worker_safety(name),
+                WorkerSafety::Unsafe,
+                "{name} should be unsafe"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_boundaries_classify_disallowed_worker_molds() {
+        for name in ["Read", "ListDir", "Stat", "EnvVar", "ReadAsync", "HttpGet"] {
+            assert_eq!(
+                lookup_worker_mold_boundary(name),
+                WorkerMoldBoundary::Effectful,
+                "{name} should be effectful"
+            );
+        }
+
+        for name in [
+            "Molten",
+            "Cage",
+            "JSGet",
+            "JSCall",
+            "JSCallAsync",
+            "JSNew",
+            "JSSet",
+        ] {
+            assert_eq!(
+                lookup_worker_mold_boundary(name),
+                WorkerMoldBoundary::HostBoundary,
+                "{name} should be a host boundary"
+            );
+        }
+
+        for name in [
+            "Async",
+            "AsyncTask",
+            "Par",
+            "ParMap",
+            "All",
+            "Race",
+            "Stream",
+        ] {
+            assert_eq!(
+                lookup_worker_mold_boundary(name),
+                WorkerMoldBoundary::NestedAsync,
+                "{name} should be nested async"
+            );
         }
     }
 }

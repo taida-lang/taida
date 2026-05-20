@@ -1106,8 +1106,14 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_async_get_or_default" => {
             "int64_t taida_async_get_or_default(int64_t async_ptr, int64_t fallback);".to_string()
         }
-        "taida_async_all" | "taida_async_race" | "taida_async_cancel" => {
+        "taida_async_all" | "taida_async_race" | "taida_async_cancel" | "taida_async_task_par" => {
             format!("int64_t {}(int64_t arg);", name)
+        }
+        "taida_async_task_par_map" => {
+            "int64_t taida_async_task_par_map(int64_t list_ptr, int64_t fn_ptr);".to_string()
+        }
+        "taida_async_task_new" => {
+            "int64_t taida_async_task_new(int64_t fn_ptr);".to_string()
         }
         "taida_async_spawn" => {
             "int64_t taida_async_spawn(int64_t fn_ptr, int64_t arg);".to_string()

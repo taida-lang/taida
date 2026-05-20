@@ -99,6 +99,7 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Asin",
     "Async",
     "AsyncReject",
+    "AsyncTask",
     "Atan",
     "Atan2",
     "BitAnd",
@@ -161,6 +162,8 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Ok",
     "Optional",
     "Pad",
+    "Par",
+    "ParMap",
     "Pow",
     "Prepend",
     "Race",
@@ -648,6 +651,10 @@ impl JsCodegen {
         } else {
             name.to_string()
         }
+    }
+
+    fn callee_is_async_user_func(&self, callee: &Expr) -> bool {
+        matches!(callee, Expr::Ident(name, _) if self.async_funcs.contains(name))
     }
 
     /// Try to write a net builtin rewrite. Returns true if the name was a net
@@ -1193,15 +1200,6 @@ impl JsCodegen {
         match stmt {
             Statement::Expr(expr) => {
                 self.write_indent();
-                // In async context, await standalone calls to async functions
-                // so their side effects complete before the next statement.
-                if self.in_async_context
-                    && let Expr::FuncCall(callee, _, _) = expr
-                    && let Expr::Ident(name, _) = callee.as_ref()
-                    && self.async_funcs.contains(name)
-                {
-                    self.write("await ");
-                }
                 self.gen_expr(expr)?;
                 self.write(";\n");
                 Ok(())
@@ -1209,14 +1207,6 @@ impl JsCodegen {
             Statement::Assignment(assign) => {
                 self.write_indent();
                 self.write(&format!("const {} = ", assign.target));
-                // In async context, await RHS calls to async functions
-                if self.in_async_context
-                    && let Expr::FuncCall(callee, _, _) = &assign.value
-                    && let Expr::Ident(name, _) = callee.as_ref()
-                    && self.async_funcs.contains(name)
-                {
-                    self.write("await ");
-                }
                 self.gen_expr(&assign.value)?;
                 self.write(";\n");
                 // Track local assignment shadow: if the target name matches a net
@@ -2768,6 +2758,21 @@ impl JsCodegen {
                 self.write(")");
                 Ok(true)
             }
+            "JSCallAsync" => {
+                if type_args.len() != 3 {
+                    return Err(JsError {
+                        message:
+                            "JSCallAsync requires 3 type arguments: JSCallAsync[path, args, Out]()"
+                                .to_string(),
+                    });
+                }
+                self.write("__taida_js_call_async_runner(");
+                self.gen_expr(&type_args[0])?;
+                self.write(", ");
+                self.gen_expr(&type_args[1])?;
+                self.write(")");
+                Ok(true)
+            }
             "JSNew" if type_args.len() == 3 => {
                 self.write("__taida_js_new_runner(");
                 self.gen_expr(&type_args[0])?;
@@ -2802,7 +2807,7 @@ impl JsCodegen {
             "JSSpread" => Ok(false),
             "JSRilla" | "FileRilla" | "BuildRilla" | "CageRilla" => Err(JsError {
                 message: format!(
-                    "{} is an abstract CageRilla descriptor. Use JSGet/JSCall/JSNew/JSSet/JSBind/JSSpread.",
+                    "{} is an abstract CageRilla descriptor. Use JSGet/JSCall/JSCallAsync/JSNew/JSSet/JSBind/JSSpread.",
                     name
                 ),
             }),
@@ -3106,6 +3111,12 @@ impl JsCodegen {
                     return Ok(());
                 }
 
+                let await_async_call =
+                    self.in_async_context && self.callee_is_async_user_func(callee.as_ref());
+                if await_async_call {
+                    self.write("(await ");
+                }
+
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     // C21-5: specialise single-arg stdout / debug / stderr
                     // when the argument is statically Float-origin, so that
@@ -3201,6 +3212,9 @@ impl JsCodegen {
                     self.gen_expr(arg)?;
                 }
                 self.write(")");
+                if await_async_call {
+                    self.write(")");
+                }
                 Ok(())
             }
             Expr::MethodCall(obj, method, args, _) => {
@@ -4725,14 +4739,23 @@ fn mold_propagates_async_from_args(name: &str) -> bool {
     matches!(name, "All" | "Race" | "Timeout")
 }
 
-/// Check if an unmold source expression involves an OS async mold/function (true Promise).
+fn expr_is_js_call_async_runner(expr: &Expr) -> bool {
+    matches!(expr, Expr::MoldInst(name, _, _, _) if name == "JSCallAsync")
+}
+
+fn mold_is_js_async_cage(name: &str, type_args: &[Expr]) -> bool {
+    name == "Cage" && type_args.get(1).is_some_and(expr_is_js_call_async_runner)
+}
+
+/// Check if an unmold source expression involves a backend Promise source.
 fn is_os_async_unmold_source(
     source: &Expr,
     os_async_vars: &std::collections::HashSet<String>,
 ) -> bool {
     match source {
         Expr::MoldInst(name, type_args, fields, _) => {
-            OS_ASYNC_MOLDS.contains(&name.as_str())
+            mold_is_js_async_cage(name, type_args)
+                || OS_ASYNC_MOLDS.contains(&name.as_str())
                 || (mold_propagates_async_from_args(name)
                     && (type_args
                         .iter()
@@ -4781,7 +4804,7 @@ fn is_os_async_unmold_source(
 }
 
 /// Check if an expression tree contains Expr::Unmold whose inner expression
-/// involves an OS async mold. Recurses into sub-expressions but NOT lambdas.
+/// involves a backend Promise source. Recurses into sub-expressions but NOT lambdas.
 fn expr_contains_os_async_unmold(
     expr: &Expr,
     os_async_vars: &std::collections::HashSet<String>,
@@ -4843,8 +4866,8 @@ fn expr_contains_os_async_unmold(
     }
 }
 
-/// Check if statements contain >=> that unmolds an OS async (true Promise) value.
-/// Only OS API molds that return real Promises trigger async function generation.
+/// Check if statements contain >=> that unmolds a backend Promise value.
+/// Promise-backed APIs and JSCallAsync Cage boundaries trigger async function generation.
 /// Standard Taida molds (Async, Div, Mod, etc.) use sync __TaidaAsync thenables
 /// and do NOT require async functions.
 /// Also checks for Expr::Unmold within expressions (e.g. inside CondBranch).
@@ -5529,6 +5552,45 @@ waitWithTimeout p =
     }
 
     #[test]
+    fn test_async_user_function_call_is_awaited_inside_expressions() {
+        let src = r#"
+readOne =
+  s <= sleep(0)
+  s >=> waited
+  waited + 1
+=> :Int
+
+stdout(readOne() + 2)
+stdout("value=" + readOne().toString())
+"#;
+        let js = transpile(src).expect("transpile should succeed");
+        assert!(
+            js.contains("__taida_add((await readOne()), 2)"),
+            "async user function inside binary expression should be awaited: got {}",
+            js
+        );
+        assert!(
+            js.contains("__taida_to_string((await readOne()))"),
+            "async user function as method receiver should be awaited: got {}",
+            js
+        );
+    }
+
+    #[test]
+    fn test_timer_helpers_use_global_this() {
+        let js = transpile("s <= sleep(0)\ns").expect("transpile should succeed");
+        assert!(
+            js.contains("globalThis.setTimeout(() => resolve(ms), ms)"),
+            "sleep helper should use host timer explicitly: got {}",
+            js
+        );
+        assert!(
+            !js.contains("new Promise((resolve) => {\n    setTimeout"),
+            "runtime helper should not use an unqualified timer"
+        );
+    }
+
+    #[test]
     fn test_js_codegen_jsnew_import_skipped() {
         // taida-lang/js import should not generate any ESM import statement
         let js = transpile(">>> taida-lang/js => @(JSNew)\nJSNew[Hono]() >=> app\napp").unwrap();
@@ -5551,6 +5613,7 @@ waitWithTimeout p =
 target = 1
 Cage[target, JSGet[@["value"], Int]()]()
 Cage[target, JSCall[@[], @["e33.txt"], Str]()]()
+Cage[target, JSCallAsync[@[], @["e33.txt"], Str]()]()
 Cage[target, JSNew[@["Router"], @[], Molten]()]()
 Cage[target, JSSet[@["port"], 3000]()]()
 Cage[target, JSBind[@["handle"]]()]()
@@ -5566,6 +5629,13 @@ Cage[target, JSSpread[@[1]]()]()
         assert!(
             js.contains("__taida_js_call_runner(Object.freeze([]), Object.freeze([\"e33.txt\"]))"),
             "JSCall descriptor should lower to runner: got {}",
+            js
+        );
+        assert!(
+            js.contains(
+                "__taida_js_call_async_runner(Object.freeze([]), Object.freeze([\"e33.txt\"]))"
+            ),
+            "JSCallAsync descriptor should lower to async runner: got {}",
             js
         );
         assert!(

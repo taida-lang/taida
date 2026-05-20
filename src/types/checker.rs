@@ -83,6 +83,7 @@ impl CageBranch {
 struct CageRunnerType {
     branch: CageBranch,
     output: Type,
+    async_boundary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +219,10 @@ pub struct TypeChecker {
     net_http_serve_symbols: HashSet<String>,
     /// Local enum names that resolve to taida-lang/net's `HttpProtocol`.
     net_http_protocol_type_names: HashSet<String>,
+    /// Local names that resolve to APIs with externally visible effects.
+    worker_effect_symbols: HashSet<String>,
+    /// Local names that resolve to external addon / host boundaries.
+    worker_addon_symbols: HashSet<String>,
     /// Scope-aligned metadata for branch-carrying values. `Type::Molten`
     /// remains the public type; this side table records the branch only
     /// when the checker can prove it.
@@ -301,6 +306,8 @@ impl TypeChecker {
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
             net_http_protocol_type_names: HashSet::new(),
+            worker_effect_symbols: HashSet::new(),
+            worker_addon_symbols: HashSet::new(),
             branch_scope_stack: vec![HashMap::new()],
             current_func_type_params: Vec::new(),
             hinted_func_stack: Vec::new(),
@@ -1263,6 +1270,10 @@ impl TypeChecker {
         }
     }
 
+    fn is_async_type(ty: &Type) -> bool {
+        matches!(ty, Type::Generic(name, _) if name == "Async")
+    }
+
     /// RCB-50: Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
@@ -1447,7 +1458,7 @@ impl TypeChecker {
     fn is_js_rilla_constructor(name: &str) -> bool {
         matches!(
             name,
-            "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread"
+            "JSGet" | "JSCall" | "JSCallAsync" | "JSNew" | "JSSet" | "JSBind" | "JSSpread"
         )
     }
 
@@ -1455,6 +1466,7 @@ impl TypeChecker {
         match name {
             "JSGet" => Some((2, "JSGet[path, Out]()")),
             "JSCall" => Some((3, "JSCall[path, args, Out]()")),
+            "JSCallAsync" => Some((3, "JSCallAsync[path, args, Out]()")),
             "JSNew" => Some((3, "JSNew[path, args, Out]()")),
             "JSSet" => Some((2, "JSSet[path, value]()")),
             "JSBind" => Some((1, "JSBind[path]()")),
@@ -1479,32 +1491,44 @@ impl TypeChecker {
             "JSGet" if type_args.len() == 2 => type_args.get(1).map(|out| CageRunnerType {
                 branch: CageBranch::Js,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "JSCall" | "JSNew" if type_args.len() == 3 => {
                 type_args.get(2).map(|out| CageRunnerType {
                     branch: CageBranch::Js,
                     output: self.type_arg_expr_to_type(out),
+                    async_boundary: false,
                 })
             }
+            "JSCallAsync" if type_args.len() == 3 => type_args.get(2).map(|out| CageRunnerType {
+                branch: CageBranch::Js,
+                output: self.type_arg_expr_to_type(out),
+                async_boundary: true,
+            }),
             "JSSet" if type_args.len() == 2 => Some(CageRunnerType {
                 branch: CageBranch::Js,
                 output: Type::Bool,
+                async_boundary: false,
             }),
             "JSBind" | "JSSpread" if type_args.len() == 1 => Some(CageRunnerType {
                 branch: CageBranch::Js,
                 output: Type::Molten,
+                async_boundary: false,
             }),
             "JSRilla" => type_args.first().map(|out| CageRunnerType {
                 branch: CageBranch::Js,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "FileRilla" => type_args.first().map(|out| CageRunnerType {
                 branch: CageBranch::File,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "BuildRilla" => type_args.first().map(|out| CageRunnerType {
                 branch: CageBranch::Build,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "CageRilla" => {
                 let branch = type_args
@@ -1514,7 +1538,11 @@ impl TypeChecker {
                     .get(1)
                     .map(|out| self.type_arg_expr_to_type(out))
                     .unwrap_or(Type::Unknown);
-                Some(CageRunnerType { branch, output })
+                Some(CageRunnerType {
+                    branch,
+                    output,
+                    async_boundary: false,
+                })
             }
             _ => None,
         }
@@ -1566,7 +1594,7 @@ impl TypeChecker {
         if self
             .errors
             .iter()
-            .any(|err| err.span == *span && err.message.contains(code))
+            .any(|err| err.span == *span && err.message.starts_with(code))
         {
             return;
         }
@@ -1643,6 +1671,22 @@ impl TypeChecker {
                 // 書くことを禁止する。docs/api/js.md は「Out に Unit/@()/Void
                 // 不可」を明文化しているが、これまで type checker は enforce
                 // していなかった。
+                if let Some(ref runner_info) = info
+                    && matches!(name.as_str(), "JSCall" | "JSNew" | "JSCallAsync")
+                    && Self::is_async_type(&runner_info.output)
+                {
+                    self.push_cage_error(
+                        "[E1519]",
+                        runner_span,
+                        format!(
+                            "[E1519] Cage runner `{}` declares Async output. \
+                             JS Promise boundaries must declare the resolved non-Async Out type, \
+                             not `{}[..., Async[Out]]()`.",
+                            name, name
+                        ),
+                    );
+                }
+
                 if let Some(ref runner_info) = info
                     && Self::contains_unit_like_type(&runner_info.output)
                 {
@@ -2586,6 +2630,8 @@ impl TypeChecker {
         self.seen_func_defs.clear();
         self.func_def_scope_depths.clear();
         self.declared_concrete_type_names.clear();
+        self.worker_effect_symbols.clear();
+        self.worker_addon_symbols.clear();
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
@@ -3642,6 +3688,9 @@ defaulted fields must be provided via `()`",
             MoldArgKind::Function => matches!(actual, Type::Function(_, _)),
             MoldArgKind::Int => actual == &Type::Int,
             MoldArgKind::Str => actual == &Type::Str,
+            MoldArgKind::NullaryFunction => {
+                matches!(actual, Type::Function(params, _) if params.is_empty())
+            }
             MoldArgKind::UnaryFunction => {
                 matches!(actual, Type::Function(params, _) if params.len() == 1)
             }
@@ -3672,6 +3721,7 @@ defaulted fields must be provided via `()`",
             MoldArgKind::Function => "function",
             MoldArgKind::Int => "Int",
             MoldArgKind::Str => "Str",
+            MoldArgKind::NullaryFunction => "zero-argument function",
             MoldArgKind::UnaryFunction => "1-argument function",
             MoldArgKind::UnaryPredicate => "1-argument Bool predicate",
             MoldArgKind::BinaryFunction => "2-argument function",
@@ -4940,6 +4990,7 @@ defaulted fields must be provided via `()`",
         match stmt {
             Statement::EnumDef(_) => {}
             Statement::Assignment(assign) => {
+                let is_addon_binding = assign.as_rust_addon_binding().is_some();
                 let expected_annotation = assign
                     .type_annotation
                     .as_ref()
@@ -4987,6 +5038,9 @@ defaulted fields must be provided via `()`",
                         self.branch_info_for_assignment_expr(&assign.value, &inferred);
                     self.define_var_with_span(&assign.target, inferred, Some(&assign.span));
                     self.define_branch_info(&assign.target, branch_info);
+                }
+                if is_addon_binding {
+                    self.worker_addon_symbols.insert(assign.target.clone());
                 }
             }
             Statement::FuncDef(fd) => {
@@ -5382,6 +5436,12 @@ defaulted fields must be provided via `()`",
                 let os_import = imp.path == "taida-lang/os";
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
+                    if imp.path == "taida-lang/net" || os_import {
+                        self.worker_effect_symbols.insert(name.to_string());
+                    }
+                    if imp.path.starts_with("npm:") {
+                        self.worker_addon_symbols.insert(name.to_string());
+                    }
                     if imp.path == "taida-lang/net" {
                         self.register_net_import_symbol(&sym.name, name);
                     }
@@ -5833,6 +5893,784 @@ defaulted fields must be provided via `()`",
             method,
             "toString" | "length" | "isEmpty" | "hasValue" | "typename"
         )
+    }
+
+    fn push_worker_error(&mut self, code: &str, span: &Span, message: String) {
+        if self
+            .errors
+            .iter()
+            .any(|err| err.span == *span && err.message.contains(code))
+        {
+            return;
+        }
+        self.errors.push(TypeError {
+            message,
+            span: span.clone(),
+        });
+    }
+
+    fn validate_async_task_worker_body(&mut self, task_arg: &Expr) {
+        match task_arg {
+            Expr::Lambda(params, body, _) => {
+                let mut local_names = HashSet::new();
+                let mut function_stack = HashSet::new();
+                self.push_scope();
+                for param in params {
+                    if let Some(default_value) = &param.default_value {
+                        self.validate_worker_expr(
+                            default_value,
+                            &mut local_names,
+                            &mut function_stack,
+                        );
+                    }
+                    let ty = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|ann| self.registry.resolve_type(ann))
+                        .unwrap_or(Type::Unknown);
+                    self.define_var_silent(&param.name, ty);
+                    local_names.insert(param.name.clone());
+                }
+                self.validate_worker_expr(body, &mut local_names, &mut function_stack);
+                self.pop_scope();
+            }
+            Expr::Ident(name, span) => {
+                let mut function_stack = HashSet::new();
+                let local_names = HashSet::new();
+                self.validate_worker_call_name(name, span, &local_names, &mut function_stack);
+            }
+            other => {
+                let mut local_names = HashSet::new();
+                let mut function_stack = HashSet::new();
+                self.validate_worker_expr(other, &mut local_names, &mut function_stack);
+                self.push_worker_error(
+                    "[E1624]",
+                    other.span(),
+                    "[E1624] CPU worker body must be a lambda literal or a visible Taida function. \
+                     Hint: write `AsyncTask[_ = expr]()` or pass a direct mapper lambda to `ParMap` so the worker body is explicit."
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    fn validate_worker_user_function(
+        &mut self,
+        name: &str,
+        span: &Span,
+        function_stack: &mut HashSet<String>,
+    ) {
+        if !function_stack.insert(name.to_string()) {
+            return;
+        }
+
+        let Some(fd) = self
+            .func_defs
+            .get(name)
+            .or_else(|| self.generic_func_defs.get(name))
+            .cloned()
+        else {
+            self.push_worker_error(
+                "[E1624]",
+                span,
+                format!(
+                    "[E1624] CPU worker body cannot call opaque function value '{}'. \
+                     Hint: call a Taida function whose body is visible to the checker, or inline a local lambda inside the task.",
+                    name
+                ),
+            );
+            function_stack.remove(name);
+            return;
+        };
+
+        let param_types = self.func_param_types.get(name).cloned().unwrap_or_else(|| {
+            fd.params
+                .iter()
+                .map(|param| {
+                    param
+                        .type_annotation
+                        .as_ref()
+                        .map(|ann| self.registry.resolve_type(ann))
+                        .unwrap_or(Type::Unknown)
+                })
+                .collect()
+        });
+
+        let mut local_names = HashSet::new();
+        self.push_scope();
+        for (idx, param) in fd.params.iter().enumerate() {
+            if let Some(default_value) = &param.default_value {
+                self.validate_worker_expr(default_value, &mut local_names, function_stack);
+            }
+            self.define_var_silent(
+                &param.name,
+                param_types.get(idx).cloned().unwrap_or(Type::Unknown),
+            );
+            local_names.insert(param.name.clone());
+        }
+
+        for stmt in &fd.body {
+            self.validate_worker_stmt(stmt, &mut local_names, function_stack);
+        }
+        self.pop_scope();
+        function_stack.remove(name);
+    }
+
+    fn validate_worker_stmt(
+        &mut self,
+        stmt: &Statement,
+        local_names: &mut HashSet<String>,
+        function_stack: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::Assignment(assign) => {
+                self.validate_worker_expr(&assign.value, local_names, function_stack);
+                let ty = self
+                    .typed_expr_table
+                    .lookup(&assign.value)
+                    .cloned()
+                    .unwrap_or(Type::Unknown);
+                self.define_var_silent(&assign.target, ty);
+                local_names.insert(assign.target.clone());
+            }
+            Statement::Expr(expr) => self.validate_worker_expr(expr, local_names, function_stack),
+            Statement::ErrorCeiling(ec) => {
+                let mut handler_locals = local_names.clone();
+                self.push_scope();
+                let err_ty = self.registry.resolve_type(&ec.error_type);
+                self.define_var_silent(&ec.error_param, err_ty);
+                handler_locals.insert(ec.error_param.clone());
+                for stmt in &ec.handler_body {
+                    self.validate_worker_stmt(stmt, &mut handler_locals, function_stack);
+                }
+                self.pop_scope();
+            }
+            Statement::UnmoldForward(stmt) => {
+                self.validate_worker_expr(&stmt.source, local_names, function_stack);
+                let source_ty = self
+                    .typed_expr_table
+                    .lookup(&stmt.source)
+                    .cloned()
+                    .unwrap_or(Type::Unknown);
+                self.define_var_silent(&stmt.target, self.unmold_type(&source_ty));
+                local_names.insert(stmt.target.clone());
+            }
+            Statement::UnmoldBackward(stmt) => {
+                self.validate_worker_expr(&stmt.source, local_names, function_stack);
+                let source_ty = self
+                    .typed_expr_table
+                    .lookup(&stmt.source)
+                    .cloned()
+                    .unwrap_or(Type::Unknown);
+                self.define_var_silent(&stmt.target, self.unmold_type(&source_ty));
+                local_names.insert(stmt.target.clone());
+            }
+            Statement::FuncDef(fd) => {
+                self.validate_worker_inline_function_def(fd, local_names, function_stack);
+            }
+            Statement::ClassLikeDef(_)
+            | Statement::EnumDef(_)
+            | Statement::Import(_)
+            | Statement::Export(_) => {}
+        }
+    }
+
+    fn validate_worker_expr(
+        &mut self,
+        expr: &Expr,
+        local_names: &mut HashSet<String>,
+        function_stack: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::Ident(name, span) => self.validate_worker_ident(name, span, local_names),
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for field in fields {
+                    self.validate_worker_expr(&field.value, local_names, function_stack);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    self.validate_worker_expr(item, local_names, function_stack);
+                }
+            }
+            Expr::Pipeline(items, _) => {
+                let last_idx = items.len().saturating_sub(1);
+                let mut pipeline_locals = local_names.clone();
+                self.push_scope();
+                for (idx, item) in items.iter().enumerate() {
+                    if idx > 0
+                        && idx < last_idx
+                        && let Expr::Ident(name, _) = item
+                        && !self.is_pipeline_callable_ident(name)
+                    {
+                        pipeline_locals.insert(name.clone());
+                        continue;
+                    }
+                    self.validate_worker_expr(item, &mut pipeline_locals, function_stack);
+                }
+                self.pop_scope();
+            }
+            Expr::BinaryOp(left, _, right, _) => {
+                self.validate_worker_expr(left, local_names, function_stack);
+                self.validate_worker_expr(right, local_names, function_stack);
+            }
+            Expr::UnaryOp(_, inner, _)
+            | Expr::FieldAccess(inner, _, _)
+            | Expr::Unmold(inner, _)
+            | Expr::Throw(inner, _) => {
+                self.validate_worker_expr(inner, local_names, function_stack);
+            }
+            Expr::FuncCall(callee, args, span) => {
+                for arg in args {
+                    self.validate_worker_expr(arg, local_names, function_stack);
+                }
+                match callee.as_ref() {
+                    Expr::Ident(name, callee_span) => self.validate_worker_call_name(
+                        name,
+                        callee_span,
+                        local_names,
+                        function_stack,
+                    ),
+                    Expr::Lambda(params, body, _) => {
+                        self.validate_worker_lambda(params, body, local_names, function_stack);
+                    }
+                    other => {
+                        self.validate_worker_expr(other, local_names, function_stack);
+                        self.push_worker_error(
+                            "[E1624]",
+                            span,
+                            "[E1624] CPU worker body cannot call a computed function value. \
+                             Hint: use a direct Taida function call or a lambda literal inside the task."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            Expr::MethodCall(receiver, _, args, _) => {
+                self.validate_worker_expr(receiver, local_names, function_stack);
+                for arg in args {
+                    self.validate_worker_expr(arg, local_names, function_stack);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(condition) = &arm.condition {
+                        self.validate_worker_expr(condition, local_names, function_stack);
+                    }
+                    let mut arm_locals = local_names.clone();
+                    self.push_scope();
+                    for stmt in &arm.body {
+                        self.validate_worker_stmt(stmt, &mut arm_locals, function_stack);
+                    }
+                    self.pop_scope();
+                }
+            }
+            Expr::MoldInst(name, type_args, fields, span) => {
+                let value_arg_count = Self::worker_mold_value_arg_count(name, type_args.len());
+                for arg in type_args.iter().take(value_arg_count) {
+                    self.validate_worker_expr(arg, local_names, function_stack);
+                }
+                for field in fields {
+                    self.validate_worker_expr(&field.value, local_names, function_stack);
+                }
+                self.validate_worker_mold_name(name, span);
+            }
+            Expr::Lambda(params, body, _) => {
+                self.validate_worker_lambda(params, body, local_names, function_stack);
+            }
+            Expr::IntLit(_, _)
+            | Expr::FloatLit(_, _)
+            | Expr::StringLit(_, _)
+            | Expr::TemplateLit(_, _)
+            | Expr::BoolLit(_, _)
+            | Expr::Gorilla(_)
+            | Expr::Placeholder(_)
+            | Expr::Hole(_)
+            | Expr::EnumVariant(_, _, _)
+            | Expr::TypeLiteral(_, _, _) => {}
+        }
+    }
+
+    fn worker_mold_value_arg_count(name: &str, arg_count: usize) -> usize {
+        match name {
+            "JSGet" if arg_count == 2 => 1,
+            "JSCall" | "JSCallAsync" if arg_count == 3 => 2,
+            "JSNew" if arg_count == 3 => 2,
+            _ => arg_count,
+        }
+    }
+
+    fn validate_worker_lambda(
+        &mut self,
+        params: &[Param],
+        body: &Expr,
+        local_names: &mut HashSet<String>,
+        function_stack: &mut HashSet<String>,
+    ) {
+        let mut nested_locals = local_names.clone();
+        self.push_scope();
+        for param in params {
+            if let Some(default_value) = &param.default_value {
+                self.validate_worker_expr(default_value, &mut nested_locals, function_stack);
+            }
+            let ty = param
+                .type_annotation
+                .as_ref()
+                .map(|ann| self.registry.resolve_type(ann))
+                .unwrap_or(Type::Unknown);
+            self.define_var_silent(&param.name, ty);
+            nested_locals.insert(param.name.clone());
+        }
+        self.validate_worker_expr(body, &mut nested_locals, function_stack);
+        self.pop_scope();
+    }
+
+    fn validate_worker_inline_function_def(
+        &mut self,
+        fd: &FuncDef,
+        local_names: &mut HashSet<String>,
+        function_stack: &mut HashSet<String>,
+    ) {
+        let param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .map(|param| {
+                param
+                    .type_annotation
+                    .as_ref()
+                    .map(|ann| self.registry.resolve_type(ann))
+                    .unwrap_or(Type::Unknown)
+            })
+            .collect();
+        let ret_ty = fd
+            .return_type
+            .as_ref()
+            .map(|ann| self.registry.resolve_type(ann))
+            .unwrap_or(Type::Unknown);
+
+        let mut nested_locals = local_names.clone();
+        self.push_scope();
+        for (idx, param) in fd.params.iter().enumerate() {
+            if let Some(default_value) = &param.default_value {
+                self.validate_worker_expr(default_value, &mut nested_locals, function_stack);
+            }
+            self.define_var_silent(
+                &param.name,
+                param_types.get(idx).cloned().unwrap_or(Type::Unknown),
+            );
+            nested_locals.insert(param.name.clone());
+        }
+        for stmt in &fd.body {
+            self.validate_worker_stmt(stmt, &mut nested_locals, function_stack);
+        }
+        self.pop_scope();
+
+        self.define_var_silent(&fd.name, Type::Function(param_types, Box::new(ret_ty)));
+        local_names.insert(fd.name.clone());
+    }
+
+    fn validate_worker_call_name(
+        &mut self,
+        name: &str,
+        span: &Span,
+        local_names: &HashSet<String>,
+        function_stack: &mut HashSet<String>,
+    ) {
+        if local_names.contains(name) {
+            return;
+        }
+        if self.is_worker_effect_symbol(name) {
+            self.push_worker_error(
+                "[E1620]",
+                span,
+                format!(
+                    "[E1620] CPU worker body cannot call effectful API '{}'. \
+                     Hint: perform I/O before creating the task or after `Par[jobs]()` completes.",
+                    name
+                ),
+            );
+            return;
+        }
+        if self.worker_addon_symbols.contains(name) {
+            self.push_worker_error(
+                "[E1621]",
+                span,
+                format!(
+                    "[E1621] CPU worker body cannot cross addon or host boundary '{}'. \
+                     Hint: move addon and host interop calls outside the worker task.",
+                    name
+                ),
+            );
+            return;
+        }
+        if self.func_defs.contains_key(name) || self.generic_func_defs.contains_key(name) {
+            self.validate_worker_user_function(name, span, function_stack);
+            return;
+        }
+        if Self::is_core_builtin_name(name) {
+            return;
+        }
+        if matches!(self.lookup_var(name), Some(Type::Function(_, _)))
+            || self.func_types.contains_key(name)
+        {
+            self.push_worker_error(
+                "[E1624]",
+                span,
+                format!(
+                    "[E1624] CPU worker body cannot call captured function value '{}'. \
+                     Hint: call a visible Taida function directly or inline a local lambda inside the task.",
+                    name
+                ),
+            );
+            return;
+        }
+        if matches!(self.lookup_var(name), Some(Type::Unknown | Type::Any)) {
+            self.push_worker_error(
+                "[E1626]",
+                span,
+                format!(
+                    "[E1626] CPU worker body calls '{}' before its type is fully known. \
+                     Hint: add a concrete annotation or use a visible Taida function.",
+                    name
+                ),
+            );
+            return;
+        }
+        if let Some(ty) = self.lookup_var(name)
+            && !self.is_worker_safe_type(&ty)
+        {
+            self.push_worker_error(
+                "[E1623]",
+                span,
+                format!(
+                    "[E1623] CPU worker body cannot call '{}' with non-transferable type {}. \
+                     Hint: call visible Taida functions directly and keep host values outside the worker task.",
+                    name, ty
+                ),
+            );
+        }
+    }
+
+    fn validate_worker_ident(&mut self, name: &str, span: &Span, local_names: &HashSet<String>) {
+        if local_names.contains(name) {
+            return;
+        }
+        if self.is_worker_effect_symbol(name) {
+            self.push_worker_error(
+                "[E1620]",
+                span,
+                format!(
+                    "[E1620] CPU worker body cannot capture effectful API '{}'. \
+                     Hint: perform I/O before creating the task or after `Par[jobs]()` completes.",
+                    name
+                ),
+            );
+            return;
+        }
+        if self.worker_addon_symbols.contains(name) {
+            self.push_worker_error(
+                "[E1621]",
+                span,
+                format!(
+                    "[E1621] CPU worker body cannot capture addon or host boundary '{}'. \
+                     Hint: move addon and host interop values outside the worker task.",
+                    name
+                ),
+            );
+            return;
+        }
+        if self.func_defs.contains_key(name)
+            || self.generic_func_defs.contains_key(name)
+            || self.func_types.contains_key(name)
+        {
+            self.push_worker_error(
+                "[E1624]",
+                span,
+                format!(
+                    "[E1624] CPU worker body cannot capture function value '{}'. \
+                     Hint: call a visible Taida function directly or inline a local lambda inside the task.",
+                    name
+                ),
+            );
+            return;
+        }
+        let Some(ty) = self.lookup_var(name) else {
+            self.push_worker_error(
+                "[E1626]",
+                span,
+                format!(
+                    "[E1626] CPU worker body captures '{}' before its type is known. \
+                     Hint: define the value before creating the task and give it a concrete type.",
+                    name
+                ),
+            );
+            return;
+        };
+        if matches!(ty, Type::Unknown | Type::Any) {
+            self.push_worker_error(
+                "[E1626]",
+                span,
+                format!(
+                    "[E1626] CPU worker body captures '{}' with unresolved type {}. \
+                     Hint: add a concrete annotation before creating the task.",
+                    name, ty
+                ),
+            );
+            return;
+        }
+        if matches!(ty, Type::Function(_, _)) {
+            self.push_worker_error(
+                "[E1624]",
+                span,
+                format!(
+                    "[E1624] CPU worker body cannot capture function value '{}'. \
+                     Hint: call a visible Taida function directly or inline a local lambda inside the task.",
+                    name
+                ),
+            );
+            return;
+        }
+        if !self.is_worker_safe_type(&ty) {
+            self.push_worker_error(
+                "[E1623]",
+                span,
+                format!(
+                    "[E1623] CPU worker body captures '{}' with non-transferable type {}. \
+                     Hint: capture primitives, lists, and structurally safe buchi packs only.",
+                    name, ty
+                ),
+            );
+        }
+    }
+
+    fn validate_worker_mold_name(&mut self, name: &str, span: &Span) {
+        if Self::is_worker_effect_mold(name) {
+            self.push_worker_error(
+                "[E1620]",
+                span,
+                format!(
+                    "[E1620] CPU worker body cannot call effectful mold '{}'. \
+                     Hint: perform file, environment, or network access outside the worker task.",
+                    name
+                ),
+            );
+        } else if Self::is_worker_host_boundary_mold(name) {
+            self.push_worker_error(
+                "[E1621]",
+                span,
+                format!(
+                    "[E1621] CPU worker body cannot cross addon or host boundary '{}'. \
+                     Hint: move addon and host interop calls outside the worker task.",
+                    name
+                ),
+            );
+        } else if Self::is_worker_nested_async_mold(name) {
+            self.push_worker_error(
+                "[E1622]",
+                span,
+                format!(
+                    "[E1622] CPU worker body cannot create nested async or parallel value '{}'. \
+                     Hint: build parallel tasks at the outer level and keep each task body synchronous.",
+                    name
+                ),
+            );
+        }
+    }
+
+    fn is_worker_effect_symbol(&self, name: &str) -> bool {
+        self.worker_effect_symbols.contains(name) || Self::is_worker_effect_builtin(name)
+    }
+
+    fn is_worker_effect_builtin(name: &str) -> bool {
+        matches!(
+            name,
+            "debug"
+                | "nowMs"
+                | "stdout"
+                | "stderr"
+                | "exit"
+                | "stdin"
+                | "stdinLine"
+                | "argv"
+                | "sleep"
+                | "readBytes"
+                | "readBytesAt"
+                | "writeFile"
+                | "writeBytes"
+                | "appendFile"
+                | "remove"
+                | "createDir"
+                | "rename"
+                | "allEnv"
+                | "dnsResolve"
+                | "tcpConnect"
+                | "tcpListen"
+                | "tcpAccept"
+                | "socketSend"
+                | "socketSendAll"
+                | "socketSendBytes"
+                | "socketRecv"
+                | "socketRecvBytes"
+                | "socketRecvExact"
+                | "udpBind"
+                | "udpSendTo"
+                | "udpRecvFrom"
+                | "socketClose"
+                | "listenerClose"
+                | "udpClose"
+                | "poolCreate"
+                | "poolAcquire"
+                | "poolRelease"
+                | "poolClose"
+                | "poolHealth"
+                | "run"
+                | "execShell"
+                | "runInteractive"
+                | "execShellInteractive"
+        )
+    }
+
+    fn is_worker_effect_mold(name: &str) -> bool {
+        use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
+
+        lookup_worker_mold_boundary(name) == WorkerMoldBoundary::Effectful
+    }
+
+    fn is_worker_host_boundary_mold(name: &str) -> bool {
+        use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
+
+        name == "RustAddon" || lookup_worker_mold_boundary(name) == WorkerMoldBoundary::HostBoundary
+    }
+
+    fn is_worker_nested_async_mold(name: &str) -> bool {
+        use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
+
+        lookup_worker_mold_boundary(name) == WorkerMoldBoundary::NestedAsync
+    }
+
+    fn is_worker_safe_type(&self, ty: &Type) -> bool {
+        let mut seen = HashSet::new();
+        self.is_worker_safe_type_inner(ty, &mut seen)
+    }
+
+    fn is_worker_safe_type_inner(&self, ty: &Type, seen_named: &mut HashSet<String>) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::Num | Type::Str | Type::Bytes | Type::Bool => true,
+            Type::BuchiPack(fields) => fields
+                .iter()
+                .all(|(_, field_ty)| self.is_worker_safe_type_inner(field_ty, seen_named)),
+            Type::List(inner) => self.is_worker_safe_type_inner(inner, seen_named),
+            Type::Named(name) => {
+                if self.registry.is_enum_type(name) {
+                    return true;
+                }
+                if !seen_named.insert(name.clone()) {
+                    return true;
+                }
+                let safe = self.registry.get_type_fields(name).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .all(|(_, field_ty)| self.is_worker_safe_type_inner(field_ty, seen_named))
+                });
+                seen_named.remove(name);
+                safe
+            }
+            Type::Generic(name, args) => {
+                use crate::types::mold_specs::{WorkerSafety, lookup_worker_safety};
+                match lookup_worker_safety(name) {
+                    WorkerSafety::Pure => true,
+                    WorkerSafety::Transparent => args
+                        .iter()
+                        .all(|arg| self.is_worker_safe_type_inner(arg, seen_named)),
+                    WorkerSafety::Unsafe => self.is_worker_safe_user_mold(name, args, seen_named),
+                }
+            }
+            Type::Error(name) => {
+                if !seen_named.insert(name.clone()) {
+                    return true;
+                }
+                let safe = self.registry.get_type_fields(name).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .all(|(_, field_ty)| self.is_worker_safe_type_inner(field_ty, seen_named))
+                });
+                seen_named.remove(name);
+                safe
+            }
+            Type::Function(_, _)
+            | Type::Unit
+            | Type::Unknown
+            | Type::Any
+            | Type::Json
+            | Type::Molten => false,
+        }
+    }
+
+    fn is_worker_safe_user_mold(
+        &self,
+        name: &str,
+        args: &[Type],
+        seen_named: &mut HashSet<String>,
+    ) -> bool {
+        let Some((type_params, fields)) = self.registry.mold_defs.get(name) else {
+            return false;
+        };
+        let key = format!(
+            "{}[{}]",
+            name,
+            args.iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !seen_named.insert(key.clone()) {
+            return true;
+        }
+        let bindings: HashMap<String, Type> = type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        let safe = fields.iter().all(|(_, field_ty)| {
+            let resolved = Self::substitute_worker_type_params(field_ty, &bindings);
+            self.is_worker_safe_type_inner(&resolved, seen_named)
+        });
+        seen_named.remove(&key);
+        safe
+    }
+
+    fn substitute_worker_type_params(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Named(name) => bindings.get(name).cloned().unwrap_or_else(|| ty.clone()),
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, field_ty)| {
+                        (
+                            name.clone(),
+                            Self::substitute_worker_type_params(field_ty, bindings),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::List(inner) => Type::List(Box::new(Self::substitute_worker_type_params(
+                inner, bindings,
+            ))),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| Self::substitute_worker_type_params(param, bindings))
+                    .collect(),
+                Box::new(Self::substitute_worker_type_params(ret, bindings)),
+            ),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| Self::substitute_worker_type_params(arg, bindings))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 
     /// Inner implementation of `infer_expr_type`. Does NOT record into
@@ -6945,6 +7783,40 @@ defaulted fields must be provided via `()`",
                                 .unwrap_or(Type::Unknown),
                         ],
                     ),
+                    "AsyncTask" => {
+                        let task_ty = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        if let Some(task_arg) = type_args.first() {
+                            self.validate_async_task_worker_body(task_arg);
+                        }
+                        let inner = match task_ty {
+                            Type::Function(params, ret) if params.is_empty() => *ret,
+                            Type::Function(params, ret) => {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] `AsyncTask[_ = expr]()` requires a zero-argument thunk, got a function with {} parameter(s).",
+                                        params.len()
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                                *ret
+                            }
+                            Type::Unknown => Type::Unknown,
+                            other => {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] `AsyncTask[_ = expr]()` requires a zero-argument thunk, got {}.",
+                                        other
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                                Type::Unknown
+                            }
+                        };
+                        Type::Generic("AsyncTask".to_string(), vec![inner])
+                    }
                     // Cancel[async]() returns Async[T] (or Async[Unknown] fallback)
                     "Cancel" => {
                         if type_args.len() != 1 {
@@ -7008,6 +7880,111 @@ defaulted fields must be provided via `()`",
                             })
                             .unwrap_or(Type::List(Box::new(Type::Unknown)));
                         Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    "Par" => {
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|t| match t {
+                                Type::List(elem) => match *elem {
+                                    Type::Generic(ref name, ref args) if name == "AsyncTask" => {
+                                        Type::List(Box::new(
+                                            args.first().cloned().unwrap_or(Type::Unknown),
+                                        ))
+                                    }
+                                    Type::Unknown => Type::List(Box::new(Type::Unknown)),
+                                    other => {
+                                        self.errors.push(TypeError {
+                                            message: format!(
+                                                "[E1506] `Par[jobs]()` expects a list of AsyncTask values, got list element type {}.",
+                                                other
+                                            ),
+                                            span: mold_span.clone(),
+                                        });
+                                        Type::List(Box::new(Type::Unknown))
+                                    }
+                                },
+                                Type::Unknown => Type::List(Box::new(Type::Unknown)),
+                                other => {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1506] `Par[jobs]()` expects a list of AsyncTask values, got {}.",
+                                            other
+                                        ),
+                                        span: mold_span.clone(),
+                                    });
+                                    Type::List(Box::new(Type::Unknown))
+                                }
+                            })
+                            .unwrap_or(Type::List(Box::new(Type::Unknown)));
+                        Type::Generic("Async".to_string(), vec![inner])
+                    }
+                    "ParMap" => {
+                        if let Some(mapper_arg) = type_args.get(1) {
+                            self.validate_async_task_worker_body(mapper_arg);
+                        }
+                        let list_ty = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        let elem_ty = match list_ty {
+                            Type::List(elem) => *elem,
+                            Type::Unknown => Type::Unknown,
+                            other => {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] `ParMap[list, fn]()` expects a list as its first argument, got {}.",
+                                        other
+                                    ),
+                                    span: mold_span.clone(),
+                                });
+                                Type::Unknown
+                            }
+                        };
+                        let ret_ty = type_args
+                            .get(1)
+                            .map(|a| self.infer_expr_type(a))
+                            .map(|fn_ty| match fn_ty {
+                                Type::Function(params, ret) if params.len() == 1 => {
+                                    if let Some(param_ty) = params.first()
+                                        && !matches!(&elem_ty, Type::Unknown | Type::Any)
+                                        && !matches!(param_ty, Type::Unknown | Type::Any)
+                                        && !self.registry.is_subtype_of(&elem_ty, param_ty)
+                                    {
+                                        self.errors.push(TypeError {
+                                            message: format!(
+                                                "[E1506] `ParMap[list, fn]()` function parameter has type {}, but list elements are {}.",
+                                                param_ty, elem_ty
+                                            ),
+                                            span: mold_span.clone(),
+                                        });
+                                    }
+                                    *ret
+                                }
+                                Type::Function(params, ret) => {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1506] `ParMap[list, fn]()` requires a one-argument function, got {} parameter(s).",
+                                            params.len()
+                                        ),
+                                        span: mold_span.clone(),
+                                    });
+                                    *ret
+                                }
+                                Type::Unknown => Type::Unknown,
+                                other => {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[E1506] `ParMap[list, fn]()` expects a function as its second argument, got {}.",
+                                            other
+                                        ),
+                                        span: mold_span.clone(),
+                                    });
+                                    Type::Unknown
+                                }
+                            })
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Async".to_string(), vec![Type::List(Box::new(ret_ty))])
                     }
                     "Race" => {
                         if type_args.len() != 1 {
@@ -7294,8 +8271,8 @@ defaulted fields must be provided via `()`",
                         }
                         Type::Str
                     }
-                    "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" | "JSRilla"
-                    | "FileRilla" | "BuildRilla" | "CageRilla" => self
+                    "JSGet" | "JSCall" | "JSCallAsync" | "JSNew" | "JSSet" | "JSBind"
+                    | "JSSpread" | "JSRilla" | "FileRilla" | "BuildRilla" | "CageRilla" => self
                         .cage_runner_type(expr)
                         .map(|runner| {
                             Type::Generic(
@@ -7436,10 +8413,18 @@ defaulted fields must be provided via `()`",
                                         ),
                                     );
                                 }
-                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                if runner.async_boundary {
+                                    Type::Generic("Async".to_string(), vec![runner.output])
+                                } else {
+                                    Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                }
                             }
                             (_, Some(runner)) => {
-                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                if runner.async_boundary {
+                                    Type::Generic("Async".to_string(), vec![runner.output])
+                                } else {
+                                    Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                }
                             }
                             _ => Type::Generic("Gorillax".to_string(), vec![Type::Unknown]),
                         }
@@ -7820,39 +8805,9 @@ defaulted fields must be provided via `()`",
                 span: span.clone(),
             });
         }
-        // Infer type from the first arm
-        let first_ty = if let Some(first_arm) = arms.first() {
-            // Check condition type
-            if let Some(cond) = &first_arm.condition {
-                let cond_ty = self.infer_expr_type(cond);
-                if cond_ty != Type::Bool
-                    && cond_ty != Type::Unknown
-                    && !Self::contains_unknown(&cond_ty)
-                {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "[E1604] Condition in branch must be Bool, got {}. \
-                             Hint: Use a boolean expression as the condition.",
-                            cond_ty
-                        ),
-                        span: first_arm.span.clone(),
-                    });
-                }
-            }
-            // Each arm gets its own scope for local bindings (e.g. >=>)
-            self.push_scope();
-            for body_stmt in &first_arm.body {
-                self.check_statement(body_stmt);
-            }
-            let ty = self.arm_result_type(first_arm);
-            self.pop_scope();
-            ty
-        } else {
-            Type::Unknown
-        };
+        let mut result_ty = Type::Unknown;
 
-        // Check subsequent arms for type consistency
-        for arm in arms.iter().skip(1) {
+        for arm in arms {
             // Check condition type
             if let Some(cond) = &arm.condition {
                 let cond_ty = self.infer_expr_type(cond);
@@ -7876,27 +8831,26 @@ defaulted fields must be provided via `()`",
                 self.check_statement(body_stmt);
             }
             let arm_ty = self.arm_result_type(arm);
-            if arm_ty != Type::Unknown
-                && !(first_ty == Type::Unknown
-                    || Self::contains_unknown(&first_ty)
-                    || Self::contains_unknown(&arm_ty)
-                    || self.registry.is_subtype_of(&arm_ty, &first_ty)
-                    // Allow Int/Float mixing (both are Num)
-                    || first_ty.is_numeric() && arm_ty.is_numeric())
-            {
-                self.errors.push(TypeError {
-                    message: format!(
-                        "[E1603] Condition branch type mismatch: first arm returns {}, but this arm returns {}. \
-                         Hint: All arms of a condition branch should return the same type.",
-                        first_ty, arm_ty
-                    ),
-                    span: span.clone(),
-                });
+            if arm_ty != Type::Unknown && !Self::contains_unknown(&arm_ty) {
+                if result_ty == Type::Unknown || Self::contains_unknown(&result_ty) {
+                    result_ty = arm_ty;
+                } else if !(self.registry.is_subtype_of(&arm_ty, &result_ty)
+                    || result_ty.is_numeric() && arm_ty.is_numeric())
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1603] Condition branch type mismatch: first resolved arm returns {}, but this arm returns {}. \
+                             Hint: All value-returning arms of a condition branch should return the same type.",
+                            result_ty, arm_ty
+                        ),
+                        span: span.clone(),
+                    });
+                }
             }
             self.pop_scope();
         }
 
-        first_ty
+        result_ty
     }
 
     /// Infer the type of an arm's result. The result is:

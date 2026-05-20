@@ -595,6 +595,7 @@ pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, B
         Value::Gorilla => Err(BridgeError::UnsupportedInput { kind: "Gorilla" }),
         Value::Error(_) => Err(BridgeError::UnsupportedInput { kind: "Error" }),
         Value::Async(_) => Err(BridgeError::UnsupportedInput { kind: "Async" }),
+        Value::AsyncTask(_) => Err(BridgeError::UnsupportedInput { kind: "AsyncTask" }),
         Value::Json(_) => Err(BridgeError::UnsupportedInput { kind: "Json" }),
         Value::Molten => Err(BridgeError::UnsupportedInput { kind: "Molten" }),
         Value::Stream(_) => Err(BridgeError::UnsupportedInput { kind: "Stream" }),

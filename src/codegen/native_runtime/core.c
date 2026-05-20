@@ -1296,6 +1296,7 @@ static const char __relaxed_gorillax_type_str[] = "RelaxedGorillax";
 static const char __error_info_type_str[] = "ErrorInfo";
 static const char __molten_type_str[] = "Molten";
 static const char __todo_type_str[] = "TODO";
+static const char __async_task_type_str[] = "AsyncTask";
 static const char __bytes_cursor_type_str[] = "BytesCursor";
 
 // FNV-1a hashes for Lax field names (computed with FNV-1a algorithm)
@@ -3364,9 +3365,22 @@ taida_val taida_is_closure_value(taida_val ptr) {
 }
 
 typedef taida_val (*taida_cb1_fn)(taida_val);
+typedef taida_val (*taida_cb0_fn)(void);
+typedef taida_val (*taida_closure_cb0_fn)(taida_val);
 typedef taida_val (*taida_closure_cb1_fn)(taida_val, taida_val);
 typedef taida_val (*taida_cb2_fn)(taida_val, taida_val);
 typedef taida_val (*taida_closure_cb2_fn)(taida_val, taida_val, taida_val);
+
+static taida_val taida_invoke_callback0(taida_val fn_ptr) {
+    if (TAIDA_IS_CLOSURE(fn_ptr)) {
+        taida_val *closure = (taida_val*)fn_ptr;
+        taida_closure_cb0_fn closure_fn = (taida_closure_cb0_fn)closure[1];
+        taida_val env_ptr = closure[2];
+        return closure_fn(env_ptr);
+    }
+    taida_cb0_fn fn = (taida_cb0_fn)fn_ptr;
+    return fn();
+}
 
 static taida_val taida_invoke_callback1(taida_val fn_ptr, taida_val arg0) {
     if (TAIDA_IS_CLOSURE(fn_ptr)) {
@@ -3394,8 +3408,6 @@ static taida_val taida_invoke_callback2(taida_val fn_ptr, taida_val arg0, taida_
 // obj.field(args) — get field from pack, then invoke as function.
 // Handles both plain function pointers and closures.
 
-typedef taida_val (*taida_cb0_fn)(void);
-typedef taida_val (*taida_closure_cb0_fn)(taida_val);
 typedef taida_val (*taida_cb3_fn)(taida_val, taida_val, taida_val);
 typedef taida_val (*taida_closure_cb3_fn)(taida_val, taida_val, taida_val, taida_val);
 
@@ -7803,6 +7815,14 @@ static int taida_is_buchi_pack(taida_val ptr) {
     return TAIDA_IS_PACK(ptr);
 }
 
+static int taida_is_async_task_pack(taida_val ptr) {
+    if (!taida_is_buchi_pack(ptr)) return 0;
+    if (!taida_pack_has_hash(ptr, (taida_val)HASH_TODO_TASK)) return 0;
+    if (!taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) return 0;
+    taida_val type_val = taida_pack_get(ptr, (taida_val)HASH___TYPE);
+    return taida_str_eq(type_val, (taida_val)__async_task_type_str) != 0;
+}
+
 // Forward declare recursive value-to-display-string
 // NO-4 RULE 2: These functions return heap-allocated strings via taida_str_new_copy
 // or taida_str_alloc. The CALLER is responsible for calling taida_str_release on
@@ -7968,6 +7988,43 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     return result;
 }
 
+static int taida_is_error_pack(taida_val val) {
+    if (!taida_is_buchi_pack(val)) return 0;
+    taida_val *pack = (taida_val*)val;
+    taida_val fc = pack[1];
+    return fc >= 2 && fc <= 10
+        && pack[2] == (taida_val)HASH_TYPE
+        && pack[5] == (taida_val)HASH_MESSAGE
+        && taida_pack_has_hash(val, (taida_val)HASH___TYPE);
+}
+
+static taida_val taida_error_to_display_string(taida_val val) {
+    taida_val type = taida_pack_get(val, (taida_val)HASH_TYPE);
+    taida_val message = taida_pack_get(val, (taida_val)HASH_MESSAGE);
+    const char *type_s = (const char*)type;
+    const char *message_s = (const char*)message;
+    size_t type_len = 0;
+    size_t message_len = 0;
+    if (!type_s || !taida_read_cstr_len_safe(type_s, 65536, &type_len)) {
+        type_s = "Error";
+        type_len = 5;
+    }
+    if (!message_s || !taida_read_cstr_len_safe(message_s, 65536, &message_len)) {
+        message_s = "";
+        message_len = 0;
+    }
+    size_t out_len = 6 + type_len + 2 + message_len + 1;
+    char *out = taida_str_alloc(out_len);
+    size_t pos = 0;
+    memcpy(out + pos, "Error(", 6); pos += 6;
+    memcpy(out + pos, type_s, type_len); pos += type_len;
+    memcpy(out + pos, ": ", 2); pos += 2;
+    memcpy(out + pos, message_s, message_len); pos += message_len;
+    out[pos++] = ')';
+    out[pos] = '\0';
+    return (taida_val)out;
+}
+
 // TF-15: Pack to display string with ALL fields (including __ internal fields).
 // Matches interpreter's to_display_string() for BuchiPack which shows all fields.
 //
@@ -8113,6 +8170,9 @@ static taida_val taida_value_to_display_string(taida_val val) {
 
     // Check for BuchiPack (including monadic types)
     if (taida_is_buchi_pack(val)) {
+        if (taida_is_async_task_pack(val)) {
+            return (taida_val)taida_str_new_copy("AsyncTask[<task>]");
+        }
         int fc = taida_monadic_field_count(val);
         if (fc == 3) return taida_result_to_string(val);
         if (fc == 4 || fc == 5) {
@@ -8121,6 +8181,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
             if (gtype == 2) return taida_relaxed_gorillax_to_string(val);
             return taida_lax_to_string(val);
         }
+        if (taida_is_error_pack(val)) return taida_error_to_display_string(val);
         return taida_pack_to_display_string(val);
     }
 
@@ -8148,6 +8209,9 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     if (taida_is_list(val)) return taida_list_to_display_string(val);
     if (taida_is_bytes(val)) return taida_bytes_to_display_string(val);
     if (taida_is_buchi_pack(val)) {
+        if (taida_is_async_task_pack(val)) {
+            return (taida_val)taida_str_new_copy("AsyncTask[<task>]");
+        }
         int fc = taida_monadic_field_count(val);
         if (fc == 3) return taida_result_to_string(val);
         if (fc == 4 || fc == 5) return taida_lax_to_string(val);
@@ -8217,6 +8281,9 @@ static taida_val taida_value_to_debug_string_full(taida_val val) {
     }
     if (taida_is_bytes(val)) return taida_bytes_to_display_string(val);
     if (taida_is_buchi_pack(val)) {
+        if (taida_is_async_task_pack(val)) {
+            return (taida_val)taida_str_new_copy("AsyncTask[<task>]");
+        }
         // Route every pack shape through the full-form renderer so
         // nested Lax / Result / user-packs all render with their
         // `__`-prefixed internals exposed (matches interpreter's
@@ -8430,6 +8497,9 @@ taida_val taida_stdout_display_string(taida_val obj) {
     if (taida_is_hashmap(obj)) return taida_hashmap_to_display_string_full(obj);
     if (taida_is_set(obj)) return taida_set_to_display_string_full(obj);
     if (taida_is_buchi_pack(obj)) {
+        if (taida_is_async_task_pack(obj)) {
+            return (taida_val)taida_str_new_copy("AsyncTask[<task>]");
+        }
         return taida_pack_to_display_string_full(obj);
     }
     // C23B-003 reopen 2: Lists must recurse through the full-form
@@ -8648,6 +8718,134 @@ taida_val taida_async_err(taida_val error) {
     return (taida_val)obj;
 }
 
+taida_val taida_async_task_new(taida_val fn_ptr) {
+    taida_register_field_name((taida_val)HASH_TODO_TASK, (taida_val)"task");
+    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH_TODO_TASK);
+    taida_pack_set(pack, 0, fn_ptr);
+    taida_retain_and_tag_field(pack, 0, fn_ptr);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 1, (taida_val)__async_task_type_str);
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    return pack;
+}
+
+static taida_val taida_async_task_callable(taida_val task) {
+    if (taida_is_async_task_pack(task)) {
+        return taida_pack_get(task, (taida_val)HASH_TODO_TASK);
+    }
+    return task;
+}
+
+static taida_val taida_async_task_error(const char *message) {
+    return taida_make_error("AsyncTaskError", message ? message : "AsyncTask failed");
+}
+
+static taida_val taida_async_task_error_from_caught(taida_val error, const char *fallback) {
+    const char *message = fallback ? fallback : "AsyncTask failed";
+    if (taida_is_buchi_pack(error) && taida_pack_has_hash(error, (taida_val)HASH_MESSAGE)) {
+        taida_val msg = taida_pack_get(error, (taida_val)HASH_MESSAGE);
+        if (taida_safe_cstr(msg, 65536)) {
+            message = (const char*)msg;
+        }
+    }
+    return taida_async_task_error(message);
+}
+
+static int taida_try_invoke_callback0(taida_val fn_ptr, taida_val *out, taida_val *error) {
+    taida_val depth = taida_error_ceiling_push();
+    if (setjmp(__taida_error_jmp[(int)depth]) == 0) {
+        *out = taida_invoke_callback0(fn_ptr);
+        taida_error_ceiling_pop();
+        return 0;
+    }
+    *error = __taida_error_val[(int)depth];
+    taida_error_ceiling_pop();
+    return 1;
+}
+
+static int taida_try_invoke_callback1(taida_val fn_ptr, taida_val arg, taida_val *out, taida_val *error) {
+    taida_val depth = taida_error_ceiling_push();
+    if (setjmp(__taida_error_jmp[(int)depth]) == 0) {
+        *out = taida_invoke_callback1(fn_ptr, arg);
+        taida_error_ceiling_pop();
+        return 0;
+    }
+    *error = __taida_error_val[(int)depth];
+    taida_error_ceiling_pop();
+    return 1;
+}
+
+taida_val taida_async_task_par(taida_val list_ptr) {
+    if (!taida_is_list(list_ptr)) {
+        return taida_async_err(taida_async_task_error("Par expected a list of AsyncTask values"));
+    }
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val result_list = taida_list_new();
+    taida_val unified_tag = TAIDA_TAG_UNKNOWN;
+    int tag_set = 0;
+
+    for (taida_val i = 0; i < len; i++) {
+        taida_val task = taida_async_task_callable(list[4 + i]);
+        if (!_taida_is_callable_impl(task)) {
+            taida_release(result_list);
+            return taida_async_err(taida_async_task_error("Par expected AsyncTask values"));
+        }
+        taida_val value = 0;
+        taida_val error = 0;
+        if (taida_try_invoke_callback0(task, &value, &error)) {
+            taida_release(result_list);
+            return taida_async_err(taida_async_task_error_from_caught(error, "AsyncTask failed"));
+        }
+        taida_val vtag = taida_get_return_tag();
+        if (vtag < 0) vtag = taida_detect_value_tag(value);
+        taida_list_elem_retain(value, vtag);
+        result_list = taida_list_push(result_list, value);
+        if (!tag_set) {
+            unified_tag = vtag;
+            tag_set = 1;
+        } else if (unified_tag != vtag) {
+            unified_tag = TAIDA_TAG_UNKNOWN;
+        }
+    }
+    taida_list_set_elem_tag(result_list, unified_tag);
+    return taida_async_ok_tagged(result_list, TAIDA_TAG_LIST);
+}
+
+taida_val taida_async_task_par_map(taida_val list_ptr, taida_val fn_ptr) {
+    if (!taida_is_list(list_ptr) || !_taida_is_callable_impl(fn_ptr)) {
+        return taida_async_err(taida_async_task_error("ParMap expected a list and a function"));
+    }
+    taida_val *list = (taida_val*)list_ptr;
+    taida_val len = list[2];
+    taida_val result_list = taida_list_new();
+    taida_val unified_tag = TAIDA_TAG_UNKNOWN;
+    int tag_set = 0;
+
+    for (taida_val i = 0; i < len; i++) {
+        taida_val value = 0;
+        taida_val error = 0;
+        if (taida_try_invoke_callback1(fn_ptr, list[4 + i], &value, &error)) {
+            taida_release(result_list);
+            return taida_async_err(taida_async_task_error_from_caught(error, "ParMap task failed"));
+        }
+        taida_val vtag = taida_get_return_tag();
+        if (vtag < 0) vtag = taida_detect_value_tag(value);
+        taida_list_elem_retain(value, vtag);
+        result_list = taida_list_push(result_list, value);
+        if (!tag_set) {
+            unified_tag = vtag;
+            tag_set = 1;
+        } else if (unified_tag != vtag) {
+            unified_tag = TAIDA_TAG_UNKNOWN;
+        }
+    }
+    taida_list_set_elem_tag(result_list, unified_tag);
+    return taida_async_ok_tagged(result_list, TAIDA_TAG_LIST);
+}
+
 // NO-3: Set value_tag on an existing Async object (for lowering to call after taida_async_ok)
 void taida_async_set_value_tag(taida_val async_ptr, taida_val tag) {
     ((taida_val*)async_ptr)[5] = tag;
@@ -8800,8 +8998,7 @@ taida_val taida_async_race(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) {
-        // Matches Interpreter behavior: Race[@[]] -> Async(@())
-        return taida_async_ok_tagged(taida_pack_new(0), TAIDA_TAG_PACK);
+        return taida_async_err(taida_make_error("AsyncRaceError", "Race requires at least one value"));
     }
     // Join all pending threads (simple approach: join all, pick first)
     for (taida_val i = 0; i < len; i++) {
