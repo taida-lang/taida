@@ -370,11 +370,11 @@ fn d28b_008_diagnostic_codes_doc_registers_cage_rilla_subrange() {
         );
     }
     assert!(
-        doc.contains("Cage / CageRilla 診断範囲"),
+        doc.contains("`Cage` / `CageRilla` 診断範囲"),
         "diagnostic_codes.md must describe the Cage / CageRilla diagnostic subrange"
     );
     assert!(
-        doc.contains("`E1513` | (予約)") && doc.contains("`E1519` | (予約)"),
+        doc.contains("`E1513` | (予約)"),
         "Cage / CageRilla reserved slots must stay explicitly marked"
     );
 }

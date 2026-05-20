@@ -120,6 +120,26 @@ fetchData id: Int =
 
 エラー天井 `|==` がない場合は、ゴリラ天井がキャッチしてプログラムを停止させます。
 
+### JS Promise 境界
+
+JS バックエンドで Promise-returning 関数を呼ぶ場合は、
+`Cage[subject, JSCallAsync[path, args, Out]()]()` を使います。この形は
+`Async[Out]` を返します。Promise rejection は `Async` の rejection に
+変換され、`>=>` で待った位置の `|==` エラー天井で捕捉できます。
+
+```taida
+>>> npm:node:timers/promises => @(setTimeout)
+
+waitAnswer =
+  task <= Cage[setTimeout, JSCallAsync[@[], @[20, 42], Int]()]()
+  task >=> value
+  value
+=> :Int
+```
+
+同期 JS 呼び出しの `JSCall` は `Gorillax[Out]` 境界です。Promise を返す
+関数に対して `JSCall[..., Async[Out]]` とは書きません。
+
 ### リトライパターン
 
 末尾再帰と組み合わせたリトライパターンです。

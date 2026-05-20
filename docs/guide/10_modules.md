@@ -79,19 +79,24 @@ Cage[express, JSNew[@["Router"], @[], Molten]()]() >=> router  // router: Molten
 // app.listen(3000) を Int として受け取る
 Cage[app, JSCall[@["listen"], @[3000], Int]()]() => result    // result: Gorillax[Int]
 result >=> server                                              // server: Int（またはゴリラ）
+
+>>> npm:node:timers/promises => @(setTimeout)
+
+// Promise を返す関数は Async として待つ
+Cage[setTimeout, JSCallAsync[@[], @[20, true], Bool]()]() >=> ready  // ready: Bool
 ```
 
 **型の流れ:**
 
 ```
 npm import (Molten / branch=JS)
-  -> JSRilla 実行記述 (JSGet / JSCall / JSNew / JSSet / JSBind / JSSpread)
+  -> JSRilla 実行記述 (JSGet / JSCall / JSCallAsync / JSNew / JSSet / JSBind / JSSpread)
   -> Cage (subject branch ↔ runner branch を照合)
-  -> Gorillax[Out]
+  -> Gorillax[Out] または Async[Out]
   -> >=> 値
 ```
 
-インタプリタおよび Native バックエンドで `npm:` インポートを使用するとコンパイルエラーになります。`JSRilla` 子系統 (`JSGet` / `JSCall` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) も同様です。
+インタプリタおよび Native バックエンドで `npm:` インポートを使用するとコンパイルエラーになります。`JSRilla` 子系統 (`JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) も同様です。
 
 ### 外部パッケージ
 

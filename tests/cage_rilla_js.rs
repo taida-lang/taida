@@ -91,3 +91,61 @@ stdout(info.type)
 
     assert_eq!(stdout, "Thing\nFail\nJSError");
 }
+
+#[test]
+fn cage_rilla_js_call_async_rejection_is_catchable() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let stdout = build_and_run_js(
+        r#"
+>>> npm:node:fs/promises => @(readFile)
+
+readMissing =
+  |== error: Error =
+    error.type + ":" + error.kind
+  => :Str
+
+  task <= Cage[readFile, JSCallAsync[@[], @["/tmp/taida-f47-missing-file-never-exists"], Str]()]()
+  task >=> value
+  value
+=> :Str
+
+out <= readMissing()
+stdout(out)
+"#,
+    );
+
+    assert_eq!(stdout, "JSError:ENOENT");
+}
+
+#[test]
+fn cage_rilla_js_call_async_requires_promise_result() {
+    if !node_available() {
+        eprintln!("SKIP: node not available");
+        return;
+    }
+
+    let stdout = build_and_run_js(
+        r#"
+>>> npm:node:path => @(basename)
+
+callSyncAsAsync =
+  |== error: Error =
+    error.type + ":" + error.kind
+  => :Str
+
+  task <= Cage[basename, JSCallAsync[@[], @["/tmp/e33-cage-rilla.txt"], Str]()]()
+  task >=> value
+  value
+=> :Str
+
+out <= callSyncAsAsync()
+stdout(out)
+"#,
+    );
+
+    assert_eq!(stdout, "JSError:JSError");
+}

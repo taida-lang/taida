@@ -530,7 +530,7 @@ function ParMap(items, fn) {
 }
 
 // Build a pending Async from a Promise while preserving Async shape/toString.
-function __taida_async_pending_from_promise(promise) {
+function __taida_async_pending_from_promise(promise, mapError) {
   const asyncObj = new __TaidaAsync(undefined, null, 'pending');
   asyncObj.then = function(resolve, reject) {
     return promise.then(
@@ -542,10 +542,13 @@ function __taida_async_pending_from_promise(promise) {
         return value;
       },
       (error) => {
+        const mapped = asyncObj.status === 'rejected' && asyncObj.__error !== null
+          ? asyncObj.__error
+          : (mapError ? mapError(error) : error);
         asyncObj.status = 'rejected';
-        asyncObj.__error = error;
-        if (reject) return reject(error);
-        throw error;
+        asyncObj.__error = mapped;
+        if (reject) return reject(mapped);
+        throw mapped;
       }
     );
   };
@@ -1199,9 +1202,15 @@ function Gorillax(value, error) {
   });
 }
 
-function __taida_cagerilla_runner(fn) {
+function __taida_cagerilla_runner(fn, options) {
   Object.defineProperty(fn, '__taida_cagerilla_runner', {
     value: true,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
+  Object.defineProperty(fn, '__taida_cagerilla_async', {
+    value: !!(options && options.async),
     writable: false,
     configurable: false,
     enumerable: false,
@@ -1217,6 +1226,21 @@ function Cage_mold(cageValue, cageRunner) {
       'Cage runner must be a CageRilla descriptor; direct functions and lambdas are not supported',
       {}
     );
+  }
+  if (cageRunner.__taida_cagerilla_async === true) {
+    try {
+      const result = cageRunner(cageValue);
+      if (!result || typeof result.then !== 'function') {
+        return AsyncReject(new __TaidaError(
+          'JSError',
+          'JSCallAsync target did not return a Promise',
+          { kind: 'JSError', code: 0 }
+        ));
+      }
+      return __taida_async_pending_from_promise(result, __taida_js_boundary_error);
+    } catch (e) {
+      return AsyncReject(__taida_js_boundary_error(e));
+    }
   }
   try {
     const result = cageRunner(cageValue);
@@ -3269,6 +3293,22 @@ function __taida_from_js_value(value) {
   return value;
 }
 
+function __taida_js_boundary_error(error) {
+  if (error instanceof __TaidaError) return error;
+  const info = __taida_error_info(error);
+  const nativeKind = error && typeof error === 'object' && typeof error.code === 'string'
+    ? error.code
+    : '';
+  return new __TaidaError(
+    'JSError',
+    info.message || String(error || 'JS boundary operation failed'),
+    {
+      kind: nativeKind || info.kind || 'JSError',
+      code: info.code || 0,
+    }
+  );
+}
+
 function __taida_js_key(part) {
   if (typeof part === 'string' || typeof part === 'number' || typeof part === 'symbol') {
     return part;
@@ -3325,6 +3365,25 @@ function __taida_js_call_runner(path, args) {
     }
     return __taida_from_js_value(fn.apply(receiver, runnerArgs));
   });
+}
+
+function __taida_js_call_async_runner(path, args) {
+  const runnerPath = __taida_js_path_array(path);
+  const runnerArgs = __taida_js_args_array(args).map(__taida_to_js_value);
+  return __taida_cagerilla_runner(function(subject) {
+    if (runnerPath.length === 0) {
+      if (typeof subject !== 'function') {
+        throw new __TaidaError('JSError', 'JSCallAsync target is not callable', {});
+      }
+      return __taida_from_js_value(subject(...runnerArgs));
+    }
+    const [receiver, key] = __taida_js_parent_and_key(subject, runnerPath, 'JSCallAsync');
+    const fn = receiver[key];
+    if (typeof fn !== 'function') {
+      throw new __TaidaError('JSError', 'JSCallAsync target is not callable', {});
+    }
+    return __taida_from_js_value(fn.apply(receiver, runnerArgs));
+  }, { async: true });
 }
 
 function __taida_js_new_runner(path, args) {

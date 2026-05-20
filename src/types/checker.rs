@@ -83,6 +83,7 @@ impl CageBranch {
 struct CageRunnerType {
     branch: CageBranch,
     output: Type,
+    async_boundary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1269,6 +1270,10 @@ impl TypeChecker {
         }
     }
 
+    fn is_async_type(ty: &Type) -> bool {
+        matches!(ty, Type::Generic(name, _) if name == "Async")
+    }
+
     /// RCB-50: Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
@@ -1453,7 +1458,7 @@ impl TypeChecker {
     fn is_js_rilla_constructor(name: &str) -> bool {
         matches!(
             name,
-            "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread"
+            "JSGet" | "JSCall" | "JSCallAsync" | "JSNew" | "JSSet" | "JSBind" | "JSSpread"
         )
     }
 
@@ -1461,6 +1466,7 @@ impl TypeChecker {
         match name {
             "JSGet" => Some((2, "JSGet[path, Out]()")),
             "JSCall" => Some((3, "JSCall[path, args, Out]()")),
+            "JSCallAsync" => Some((3, "JSCallAsync[path, args, Out]()")),
             "JSNew" => Some((3, "JSNew[path, args, Out]()")),
             "JSSet" => Some((2, "JSSet[path, value]()")),
             "JSBind" => Some((1, "JSBind[path]()")),
@@ -1485,32 +1491,44 @@ impl TypeChecker {
             "JSGet" if type_args.len() == 2 => type_args.get(1).map(|out| CageRunnerType {
                 branch: CageBranch::Js,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "JSCall" | "JSNew" if type_args.len() == 3 => {
                 type_args.get(2).map(|out| CageRunnerType {
                     branch: CageBranch::Js,
                     output: self.type_arg_expr_to_type(out),
+                    async_boundary: false,
                 })
             }
+            "JSCallAsync" if type_args.len() == 3 => type_args.get(2).map(|out| CageRunnerType {
+                branch: CageBranch::Js,
+                output: self.type_arg_expr_to_type(out),
+                async_boundary: true,
+            }),
             "JSSet" if type_args.len() == 2 => Some(CageRunnerType {
                 branch: CageBranch::Js,
                 output: Type::Bool,
+                async_boundary: false,
             }),
             "JSBind" | "JSSpread" if type_args.len() == 1 => Some(CageRunnerType {
                 branch: CageBranch::Js,
                 output: Type::Molten,
+                async_boundary: false,
             }),
             "JSRilla" => type_args.first().map(|out| CageRunnerType {
                 branch: CageBranch::Js,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "FileRilla" => type_args.first().map(|out| CageRunnerType {
                 branch: CageBranch::File,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "BuildRilla" => type_args.first().map(|out| CageRunnerType {
                 branch: CageBranch::Build,
                 output: self.type_arg_expr_to_type(out),
+                async_boundary: false,
             }),
             "CageRilla" => {
                 let branch = type_args
@@ -1520,7 +1538,11 @@ impl TypeChecker {
                     .get(1)
                     .map(|out| self.type_arg_expr_to_type(out))
                     .unwrap_or(Type::Unknown);
-                Some(CageRunnerType { branch, output })
+                Some(CageRunnerType {
+                    branch,
+                    output,
+                    async_boundary: false,
+                })
             }
             _ => None,
         }
@@ -1649,6 +1671,22 @@ impl TypeChecker {
                 // 書くことを禁止する。docs/api/js.md は「Out に Unit/@()/Void
                 // 不可」を明文化しているが、これまで type checker は enforce
                 // していなかった。
+                if let Some(ref runner_info) = info
+                    && matches!(name.as_str(), "JSCall" | "JSNew" | "JSCallAsync")
+                    && Self::is_async_type(&runner_info.output)
+                {
+                    self.push_cage_error(
+                        "[E1519]",
+                        runner_span,
+                        format!(
+                            "[E1519] Cage runner `{}` declares Async output. \
+                             JS Promise boundaries must declare the resolved non-Async Out type, \
+                             not `{}[..., Async[Out]]()`.",
+                            name, name
+                        ),
+                    );
+                }
+
                 if let Some(ref runner_info) = info
                     && Self::contains_unit_like_type(&runner_info.output)
                 {
@@ -8223,8 +8261,8 @@ defaulted fields must be provided via `()`",
                         }
                         Type::Str
                     }
-                    "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" | "JSRilla"
-                    | "FileRilla" | "BuildRilla" | "CageRilla" => self
+                    "JSGet" | "JSCall" | "JSCallAsync" | "JSNew" | "JSSet" | "JSBind"
+                    | "JSSpread" | "JSRilla" | "FileRilla" | "BuildRilla" | "CageRilla" => self
                         .cage_runner_type(expr)
                         .map(|runner| {
                             Type::Generic(
@@ -8365,10 +8403,18 @@ defaulted fields must be provided via `()`",
                                         ),
                                     );
                                 }
-                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                if runner.async_boundary {
+                                    Type::Generic("Async".to_string(), vec![runner.output])
+                                } else {
+                                    Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                }
                             }
                             (_, Some(runner)) => {
-                                Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                if runner.async_boundary {
+                                    Type::Generic("Async".to_string(), vec![runner.output])
+                                } else {
+                                    Type::Generic("Gorillax".to_string(), vec![runner.output])
+                                }
                             }
                             _ => Type::Generic("Gorillax".to_string(), vec![Type::Unknown]),
                         }

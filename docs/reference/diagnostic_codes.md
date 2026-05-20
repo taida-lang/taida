@@ -137,11 +137,11 @@
 | `E1512` | `Cage` / `CageRilla`: コンパイル時のブランチ不一致 — `Cage[subject, runner]()` で `subject` 側の `Molten` ブランチと、`runner` (`CageRilla[Branch, Out]`) の `Branch` 型引数が一致しない | TypeChecker |
 | `E1513` | (予約) `Cage` / `CageRilla`: 実行時のブランチ不一致 — 実行時のメタデータで `subject` 側と `runner` 側のブランチが一致しないことを検出 | Runtime |
 | `E1514` | `Cage` / `CageRilla`: 古い記法 `Cage[molten, lambda]()` のような lambda 直接渡し形は受理しない。正規形である `Cage[subject, JSRilla[...]()]()` のように、`CageRilla` 系の実行記述経由で書き換える | TypeChecker |
-| `E1515` | `Cage` / `CageRilla`: `JSGet` / `JSCall` / `JSNew` / `JSSet` / `JSBind` / `JSSpread` を `Cage` の外で JS 操作として直接書く記法は受理しない。`Cage[subject, JSCall[path, args, Out]()]()` のように `Cage` の実行記述として中に置く | TypeChecker |
+| `E1515` | `Cage` / `CageRilla`: `JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread` を `Cage` の外で JS 操作として直接書く記法は受理しない。`Cage[subject, JSCall[path, args, Out]()]()` のように `Cage` の実行記述として中に置く | TypeChecker |
 | `E1516` | `Cage` / `CageRilla`: 子系統のアリティ違反 — `JSRilla[JS, Out]` / `BuildRilla[Build, Out]` / `FileRilla[File, Out]` のようにブランチ名を第 2 引数に書く形は採用しない。子系統は `JSRilla[Out]` / `BuildRilla[Out]` / `FileRilla[Out]` の `[Out]` 1 引数のみで書く | TypeChecker |
 | `E1517` | `Cage` / `CageRilla`: 型検査終了時点で subject 側または runner 側のブランチが未解決のため、`Cage[target, runner]()` の境界規約を静的に証明できない | TypeChecker |
 | `E1518` | `Cage` / `CageRilla`: `JSON[raw, Schema]()` のようなスキーマ変換ファサードを `Cage` の subject または runner に渡す境界規約違反。これらのファサードは失敗を `Lax[T]` で表現する経路を維持しており、`Cage` / `Gorillax` の経路には流さない | TypeChecker |
-| `E1519` | (予約) Cage / CageRilla 診断範囲の拡張用 | — |
+| `E1519` | `Cage` / `CageRilla`: JS runner (`JSCall` / `JSNew` / `JSCallAsync`) の `Out` に `Async[T]` を書く Promise 境界の混在は受理しない。Promise-returning JS call は `JSCallAsync[path, args, T]()` を使い、`Cage[subject, JSCallAsync[...]]()` の戻り値 `Async[T]` を `>=>` で待つ | TypeChecker |
 | `E1520` | 「値の不在を表す型」の完全排除 — `@()` (空ぶちパック) を「型」として書くことを禁止: **(R1)** 戻り型注釈 `:@()` / `:Unit` / `:Void`、**(R1対称)** 引数型注釈、**(R2)** 関数本体末尾の `@()` / `Unit` / `Void` リテラル、**(R2拡張)** 注釈なしで最終推論型が `@()` 等に確定 (中間変数経由の抜け道も塞ぐ)、**(R3)** ClassLike / Mold / Inheritance 宣言の body が空 (`Pilot = @()` / `Int => PilotId = @()` / `Mold[T] => Box[T] = @()` 等) で、Parser が `[E1520]` を即時 reject、**(ジェネリック)** `Mold[T]` で `T = @()` 等に具象化、を `Parser` / `TypeChecker` で reject。Taida ではぶちパック値が動的に `@()` になるケースは構造的に発生しない (汎用 filter が存在せず、縮小操作は別の具体ぶちパック型を返すため)。情報がない場合は意味を持った値 (書き込んだバイト数、状態を表すぶちパック、共通 Enum のバリアント等) を返す。空リスト `@[]` は「空のリスト」として明確な意味を持つので別物。 | Parser / TypeChecker |
 | `E1521` | ぶちパックリテラルの位置指定フィールド (`@(v1, v2, ...)`) は受理しない。PHILOSOPHY II「ぶちパック `@(...)` — 名前付きフィールドの集合」と矛盾するため、すべてのぶちパックフィールドは名前付き (`@(name <= value, ...)`) で書く必要がある。`<<<` / `>>>` の名前リスト (`@(name1, name2)`) や、型定義 / クラスライク型のフィールド定義 (`@(name: Type)`) は、別の文脈として引き続き受理する。 | Parser |
 | `E1523` | モールド宣言ヘッダーの型変数名が、組み込み型名 (`Int` / `Str` / `Bool` / `Float` / `Bytes` / `Lax` / `Result` / `Async` / `Optional` / 等) と衝突。`Mold[Int]` は型変数名 `Int` として警告なく解釈されるが、書き手の意図は具体型 `Int` のほうが多い。曖昧さを避けるため `Mold[:Int]` (具体型直接指定) または `Mold[T <= :Int]` (制約付き型変数) を使う。 | TypeChecker |
@@ -152,7 +152,7 @@
 | `E1528` | lambda パラメータの明示型注釈が、呼び出し元から要求される関数型のパラメータ型と一致しない。 | TypeChecker |
 | `E1529` | 型検査完了後の内部表現に未解決型が残っている。未解決型を含むプログラムはバックエンドのコード生成段階に渡されない | TypeChecker |
 
-`E1512`〜`E1519` は **`Cage` / `CageRilla` 診断範囲**。`Cage[subject, runner]()` の型規則、および `CageRilla[Branch, Out]` の子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) が守る境界規約を扱う。`E1513` と `E1519` は将来の実行時検証または追加診断用に予約している。
+`E1512`〜`E1519` は **`Cage` / `CageRilla` 診断範囲**。`Cage[subject, runner]()` の型規則、および `CageRilla[Branch, Out]` の子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) が守る境界規約を扱う。`E1513` は将来の実行時検証用に予約している。
 
 `E1525`〜`E1529` は **完全固定境界の診断**。Taida コードからバックエンドのコード生成段階へ渡る式は、公開関数境界・lambda 境界・型情報の保存先のすべてで具体型に固定されている必要がある。
 

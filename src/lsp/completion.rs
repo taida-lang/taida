@@ -878,7 +878,7 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
         (
             "Cage",
             "Cage[subject, runner]() -- run a branch-specific CageRilla capability on a Molten subject",
-            "Cage[subject, runner]: subject branch must match runner CageRilla[Branch, Out]. JS runners are built with JSGet/JSCall/JSNew/JSSet/JSBind/JSSpread. Returns Gorillax[Out].",
+            "Cage[subject, runner]: subject branch must match runner CageRilla[Branch, Out]. Sync JS runners return Gorillax[Out]; JSCallAsync returns Async[Out].",
         ),
         (
             "CageRilla",
@@ -901,6 +901,11 @@ fn builtin_mold_completions() -> Vec<CompletionItem> {
             "JSCall",
             "JSCall[path, args, Out]() -- JSRilla[Out] for function/method call",
             "JS backend only. Build a JSRilla[Out] descriptor that calls subject.path(args...). Used as runner of Cage[subject, JSCall[...]()]() -> Gorillax[Out].",
+        ),
+        (
+            "JSCallAsync",
+            "JSCallAsync[path, args, Out]() -- async JSRilla[Out] for Promise-returning calls",
+            "JS backend only. Used as runner of Cage[subject, JSCallAsync[...]()]() -> Async[Out]. Out is the resolved non-Async type; Promise rejection becomes an Async rejection.",
         ),
         (
             "JSNew",

@@ -424,20 +424,20 @@ exit code: Int => :Int
 | `Molten[]()` | `Molten` | 外部由来の不透明値。通常は境界 API が生成する。 |
 | `Stub[value]()` | `T` | 「ここはまだ仮の値」と印を付けた値を返す。 |
 | `TODO[]()` | `T` | 未実装の印として置く値。リリース版のビルドでは残存を拒否できる。 |
-| `Cage[subject, runner]()` | `Gorillax[T]` | `Molten` を扱う実行を `Gorillax` で囲む境界。`runner` を実行し結果を `Gorillax` で受ける。 |
+| `Cage[subject, runner]()` | `Gorillax[T]` / `Async[T]` | `Molten` を扱う境界。同期 runner は `Gorillax[T]`、Promise-returning JS runner (`JSCallAsync`) は `Async[T]` で受ける。 |
 | `CageRilla[Branch, Out]()` | `Pack` | `Cage` で `runner` 位置に置く実行記述の親型。直接呼び出さない。 |
-| `JSRilla[Out]()` | `Pack` | JS 連携の実行記述。`JSGet` / `JSCall` 等が返す。直接呼び出さない。 |
-| `FileRilla[Out]()` | `Pack` | ファイル操作の実行記述。直接呼び出さない。 |
-| `BuildRilla[Out]()` | `Pack` | ビルド処理の実行記述。直接呼び出さない。 |
+| `JSRilla[Out]()` | `Pack` | JS 連携の実行記述。`JSGet` / `JSCall` / `JSCallAsync` 等が返す。直接呼び出さない。 |
+| `FileRilla[Out]()` | `Pack` | ファイル branch の実行記述の抽象型。具体 runner が公開されている API からのみ使う。 |
+| `BuildRilla[Out]()` | `Pack` | Build branch の実行記述の抽象型。具体 runner が公開されている API からのみ使う。 |
 | `JSON[raw, Schema]()` | `Lax[T]` | JSON を schema 指定で Taida 値へ変換。 |
 
 > `CageRilla[Branch, Out]` および `JSRilla[Out]` / `FileRilla[Out]` /
 > `BuildRilla[Out]` は **直接呼び出さない型** です。`Cage[subject,
 > runner]()` の型規則と、`runner` 位置に置く実行記述 (`JSGet` /
-> `JSCall` / `FileWrite` / `BuildPlan` 等) の戻り型としてのみ公開面に
-> 現れます。各実行記述の詳細は [`docs/api/js.md`](js.md) /
-> [`docs/api/build_descriptors.md`](build_descriptors.md) / 関連 API
-> ドキュメントを参照してください。
+> `JSCall` / `JSCallAsync` 等) の戻り型としてのみ公開面に現れます。
+> File / Build branch は、対応する具体 runner を公開している API の
+> リファレンスで説明されている場合にだけ使います。JS 実行記述の詳細は
+> [`docs/api/js.md`](js.md) を参照してください。
 
 ### 7.4 文字列モールド
 
@@ -899,7 +899,8 @@ lodash.sum()       // エラー: Molten has no methods
 lodash.toString()  // エラー: Molten has no methods
 ```
 
-JS / npm 連携は `Cage[subject, JSCall[...]()]()` 経由で行います。詳細は
+JS / npm 連携は `Cage[subject, JSCall[...]()]()` または
+`Cage[subject, JSCallAsync[...]()]()` 経由で行います。詳細は
 [`docs/api/js.md`](js.md) を参照してください。
 
 JSON のパースは `JSON[raw, Schema]()` モールドで行います。詳細は

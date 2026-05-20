@@ -334,7 +334,7 @@ impl CoreBundledProvider {
 // canonical: Cage[subject, JSNew[@["Hono"], @[], Molten]()]() >=> app
 // All descriptors are JS-backend only. Interpreter/Native will error.
 
-<<< @(JSGet, JSCall, JSNew, JSSet, JSBind, JSSpread)
+<<< @(JSGet, JSCall, JSCallAsync, JSNew, JSSet, JSBind, JSSpread)
 "#
     }
 
@@ -1690,7 +1690,15 @@ mod tests {
                 assert!(pkg.path.join("main.td").exists());
                 // Verify the source contains JS descriptor exports.
                 let source = std::fs::read_to_string(pkg.path.join("main.td")).unwrap();
-                for symbol in ["JSGet", "JSCall", "JSNew", "JSSet", "JSBind", "JSSpread"] {
+                for symbol in [
+                    "JSGet",
+                    "JSCall",
+                    "JSCallAsync",
+                    "JSNew",
+                    "JSSet",
+                    "JSBind",
+                    "JSSpread",
+                ] {
                     assert!(
                         source.contains(symbol),
                         "js package should export {}",

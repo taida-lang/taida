@@ -5637,6 +5637,75 @@ stdout(total.toString())
 }
 
 #[test]
+fn test_cage_sync_js_call_still_returns_gorillax() {
+    let source = r#"
+>>> npm:lodash => @(lodash)
+result <= Cage[lodash, JSCall[@["sum"], @[@[1, 2]], Int]()]()
+"#;
+    let (ty, errors) = infer_assignment_type(source, "result");
+    assert!(
+        errors.is_empty(),
+        "sync JSCall should type-check: {:?}",
+        errors
+    );
+    assert_eq!(ty, Type::Generic("Gorillax".to_string(), vec![Type::Int]));
+}
+
+#[test]
+fn test_cage_js_call_async_returns_async_output() {
+    let source = r#"
+>>> npm:node:timers/promises => @(setTimeout)
+result <= Cage[setTimeout, JSCallAsync[@[], @[1, 42], Int]()]()
+"#;
+    let (ty, errors) = infer_assignment_type(source, "result");
+    assert!(
+        errors.is_empty(),
+        "JSCallAsync should type-check: {:?}",
+        errors
+    );
+    assert_eq!(ty, Type::Generic("Async".to_string(), vec![Type::Int]));
+}
+
+#[test]
+fn test_js_call_async_descriptor_rejects_direct_execution() {
+    let source = r#"result <= JSCallAsync[@[], @[], Int]()"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1515]")),
+        "direct JSCallAsync descriptor execution must emit [E1515], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_sync_js_call_rejects_async_output() {
+    let source = r#"
+>>> npm:node:timers/promises => @(setTimeout)
+result <= Cage[setTimeout, JSCall[@[], @[1, 42], Async[Int]]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1519]")),
+        "sync JSCall with Async output must emit [E1519], got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_js_call_async_rejects_async_output() {
+    let source = r#"
+>>> npm:node:timers/promises => @(setTimeout)
+result <= Cage[setTimeout, JSCallAsync[@[], @[1, 42], Async[Int]]()]()
+"#;
+    let (_checker, errors) = check(source);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1519]")),
+        "JSCallAsync with Async output must emit [E1519], got: {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_typename_and_error_info_type_check() {
     let source = r#"
 Thing = @(name: Str)

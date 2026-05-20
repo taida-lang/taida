@@ -388,6 +388,8 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("JSCall", 3, ANY3, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("JSCallAsync", 3, ANY3, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("JSNew", 3, ANY3, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("JSSet", 2, ANY2, MoldReturnKind::Pack)
@@ -854,7 +856,15 @@ mod tests {
             );
         }
 
-        for name in ["Molten", "Cage", "JSGet", "JSCall", "JSNew", "JSSet"] {
+        for name in [
+            "Molten",
+            "Cage",
+            "JSGet",
+            "JSCall",
+            "JSCallAsync",
+            "JSNew",
+            "JSSet",
+        ] {
             assert_eq!(
                 lookup_worker_mold_boundary(name),
                 WorkerMoldBoundary::HostBoundary,

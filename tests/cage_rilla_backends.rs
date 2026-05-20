@@ -37,6 +37,19 @@ stdout(value)
         reject_descriptor: r#"JSCall[@[], @[], Str]"#,
     },
     RunnerCase {
+        name: "jscall_async",
+        source: r#"
+>>> npm:node:timers/promises => @(setTimeout)
+task <= Cage[setTimeout, JSCallAsync[@[], @[1, 42], Int]()]()
+stdout(TypeName[task]())
+task >=> value
+stdout(value.toString())
+"#,
+        expected: "Async\n42",
+        runner: "JSCallAsync",
+        reject_descriptor: r#"JSCallAsync[@[], @[], Str]"#,
+    },
+    RunnerCase {
         name: "jsnew",
         source: r#"
 >>> npm:node:url => @(URL)

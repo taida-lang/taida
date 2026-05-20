@@ -3033,7 +3033,8 @@ impl Lowering {
             }
 
             // JS-only molds -- error in native backend
-            "JSGet" | "JSCall" | "JSNew" | "JSSet" | "JSBind" | "JSSpread" => Err(LowerError {
+            "JSGet" | "JSCall" | "JSCallAsync" | "JSNew" | "JSSet" | "JSBind"
+            | "JSSpread" => Err(LowerError {
                 message: format!(
                     "{} is only available in the JS transpiler backend.",
                     type_name
@@ -3041,7 +3042,7 @@ impl Lowering {
             }),
             "JSRilla" | "FileRilla" | "BuildRilla" | "CageRilla" => Err(LowerError {
                 message: format!(
-                    "{} is an abstract CageRilla descriptor. Use JSGet/JSCall/JSNew/JSSet/JSBind/JSSpread.",
+                    "{} is an abstract CageRilla descriptor. Use JSGet/JSCall/JSCallAsync/JSNew/JSSet/JSBind/JSSpread.",
                     type_name
                 ),
             }),

@@ -4372,6 +4372,9 @@ impl Interpreter {
             "JSCall" => Err(RuntimeError {
                 message: "JSCall is only available in the JS transpiler backend".to_string(),
             }),
+            "JSCallAsync" => Err(RuntimeError {
+                message: "JSCallAsync is only available in the JS transpiler backend".to_string(),
+            }),
             "JSNew" => Err(RuntimeError {
                 message: "JSNew is only available in the JS transpiler backend".to_string(),
             }),
