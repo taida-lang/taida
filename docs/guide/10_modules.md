@@ -306,7 +306,7 @@ version = "a.1"
 integrity = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 ```
 
-source tarball は `https://github.com/taida-lang/...` からのみ取得され、`TAIDA_GITHUB_BASE_URL` による本番 override は受理されません。署名検証は required 固定で、`TAIDA_VERIFY_SIGNATURES=best-effort` や `off` による緩和は source package では `[E32K3_VERIFY_SIGNATURES_RELAXED]` になります。
+source tarball は `https://github.com/taida-lang/...` からのみ取得され、`TAIDA_GITHUB_BASE_URL` による本番 override は受理されません。通常の source package install は manifest の SHA-256 pin を trust root にします。`TAIDA_VERIFY_SIGNATURES=required` を明示した場合は source archive の cosign bundle も必須になりますが、GitHub の自動 tag archive には release asset と違って同居する bundle がないため、その場合は `[E32K3_SOURCE_COSIGN_REQUIRED]` で停止します。
 
 ### packages.tdm と通常の .td の違い
 

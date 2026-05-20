@@ -73,18 +73,25 @@ fn source_signature_verification_skipped_for_mock_base(base_url: &str) -> bool {
     local_mock_github_base_url_allowed() && is_loopback_http_url(base_url.trim())
 }
 
-fn enforce_source_signature_required_env() -> Result<(), String> {
+fn source_tarball_verify_policy() -> Result<crate::addon::signature_verify::VerifyPolicy, String> {
+    use crate::addon::signature_verify::VerifyPolicy;
+
     let Ok(raw) = std::env::var("TAIDA_VERIFY_SIGNATURES") else {
-        return Ok(());
+        return Ok(VerifyPolicy::Disabled);
     };
     let value = raw.trim();
-    if value.is_empty() || matches!(value, "required" | "REQUIRED" | "enforce" | "ENFORCE") {
-        return Ok(());
+    match value {
+        "" => Ok(VerifyPolicy::Disabled),
+        "required" | "REQUIRED" | "enforce" | "ENFORCE" => Ok(VerifyPolicy::Required),
+        "1" | "on" | "ON" | "true" | "TRUE" | "best-effort" | "BEST-EFFORT" => {
+            Ok(VerifyPolicy::BestEffort)
+        }
+        "0" | "off" | "OFF" | "false" | "FALSE" => Ok(VerifyPolicy::Disabled),
+        _ => Err(format!(
+            "[E32K3_VERIFY_SIGNATURES_INVALID] source package installs received unsupported TAIDA_VERIFY_SIGNATURES='{}'; expected required, best-effort, or off",
+            raw
+        )),
     }
-    Err(format!(
-        "[E32K3_VERIFY_SIGNATURES_RELAXED] source package installs require TAIDA_VERIFY_SIGNATURES=required or unset; got '{}'",
-        raw
-    ))
 }
 
 fn verify_source_tarball_signature(
@@ -93,23 +100,43 @@ fn verify_source_tarball_signature(
     org: &str,
     name: &str,
     version: &str,
+    policy: crate::addon::signature_verify::VerifyPolicy,
 ) -> Result<(), String> {
     if org != "taida-lang" {
         return Ok(());
     }
     use crate::addon::signature_verify::{VerifyOutcome, VerifyPolicy, verify_artifact};
-    match verify_artifact(archive_path, artifact_url, VerifyPolicy::Required) {
+    if matches!(policy, VerifyPolicy::Disabled) {
+        return Ok(());
+    }
+    match verify_artifact(archive_path, artifact_url, policy) {
         Ok(VerifyOutcome::Verified) => Ok(()),
-        Ok(VerifyOutcome::Warned(reason)) => Err(format!(
-            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires cosign verification; warning is not accepted: {}",
-            org, name, version, reason
-        )),
-        Ok(VerifyOutcome::Skipped) => Err(format!(
-            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires cosign verification; verification was skipped",
-            org, name, version
-        )),
+        Ok(VerifyOutcome::Warned(reason)) => {
+            if matches!(policy, VerifyPolicy::Required) {
+                Err(format!(
+                    "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires source archive signature verification; warning is not accepted: {}",
+                    org, name, version, reason
+                ))
+            } else {
+                eprintln!(
+                    "  source signature verify: WARN ({}/{}@{}): {reason}",
+                    org, name, version
+                );
+                Ok(())
+            }
+        }
+        Ok(VerifyOutcome::Skipped) => {
+            if matches!(policy, VerifyPolicy::Required) {
+                Err(format!(
+                    "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires source archive signature verification; verification was skipped",
+                    org, name, version
+                ))
+            } else {
+                Ok(())
+            }
+        }
         Err(e) => Err(format!(
-            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires cosign verification: {}",
+            "[E32K3_SOURCE_COSIGN_REQUIRED] source package {}/{}@{} requires source archive signature verification: {}",
             org, name, version, e
         )),
     }
@@ -444,7 +471,7 @@ impl GlobalStore {
                 org, name, version
             )
         })?;
-        enforce_source_signature_required_env()?;
+        let source_signature_policy = source_tarball_verify_policy()?;
 
         let pkg_dir = self.package_path(org, name, version);
 
@@ -524,7 +551,14 @@ impl GlobalStore {
         }
 
         if !source_signature_verification_skipped_for_mock_base(&base_url)
-            && let Err(e) = verify_source_tarball_signature(&archive_path, &url, org, name, version)
+            && let Err(e) = verify_source_tarball_signature(
+                &archive_path,
+                &url,
+                org,
+                name,
+                version,
+                source_signature_policy,
+            )
         {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             let _ = std::fs::remove_dir_all(&pkg_dir);
@@ -2463,15 +2497,17 @@ mod tests {
     }
 
     #[test]
-    fn test_e32_verify_signatures_relaxed_rejected_for_source() {
+    fn test_e32_source_verify_policy_accepts_best_effort() {
         let _guard = crate::util::env_test_lock().lock().unwrap();
         let prev = std::env::var("TAIDA_VERIFY_SIGNATURES").ok();
         unsafe {
             std::env::set_var("TAIDA_VERIFY_SIGNATURES", "best-effort");
         }
-        let err = enforce_source_signature_required_env()
-            .expect_err("source installs must reject relaxed signature policy");
-        assert!(err.contains("E32K3_VERIFY_SIGNATURES_RELAXED"), "{err}");
+        let policy = source_tarball_verify_policy().expect("best-effort is supported");
+        assert!(matches!(
+            policy,
+            crate::addon::signature_verify::VerifyPolicy::BestEffort
+        ));
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("TAIDA_VERIFY_SIGNATURES", v),
@@ -2518,8 +2554,15 @@ mod tests {
         let archive = dir.join("archive.tar.gz");
         std::fs::write(&archive, b"archive").unwrap();
         let url = format!("file://{}", archive.display());
-        let err = verify_source_tarball_signature(&archive, &url, "taida-lang", "demo", "a.1")
-            .expect_err("source tarballs require a cosign bundle under required policy");
+        let err = verify_source_tarball_signature(
+            &archive,
+            &url,
+            "taida-lang",
+            "demo",
+            "a.1",
+            crate::addon::signature_verify::VerifyPolicy::Required,
+        )
+        .expect_err("source tarballs require a cosign bundle under required policy");
         assert!(err.contains("E32K3_SOURCE_COSIGN_REQUIRED"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }

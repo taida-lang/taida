@@ -206,13 +206,14 @@ the same helpers, so the eager and streaming paths cannot diverge.
 Source-package downloads consumed via `packages.tdm` are pinned by
 SHA-256 in the manifest. The package store recomputes the SHA-256
 from the downloaded bytes and rejects any mismatch before the cache
-is written. Cosign verification is required for any source package
-whose origin matches the official release URL pattern; non-official
-source URLs are rejected during the supported window.
+is written. Source archives are fetched from GitHub tag archive URLs;
+they are not GitHub release assets, so the SHA-256 manifest pin is the
+default trust root. Operators who set `TAIDA_VERIFY_SIGNATURES=required`
+also require a source archive cosign bundle and fail closed when that
+bundle is unavailable. Non-official source URLs are rejected during the
+supported window.
 
 Production builds ignore `TAIDA_GITHUB_BASE_URL`; the host is fixed
-to `https://github.com`. `TAIDA_VERIFY_SIGNATURES` defaults to
-`required`, and any value other than `required` causes a production
-binary to refuse to start. Test builds may relax these constraints
+to `https://github.com`. Test builds may relax this host constraint
 through a build feature, but the released binary distributed via
 `install.sh` does not enable that feature.

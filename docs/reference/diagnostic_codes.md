@@ -370,19 +370,20 @@ verify する経路で発射する診断。`--required` 既定です。
 
 ### ソースパッケージ整合性エラー (`E32K3_*`)
 
-ソースパッケージ (`taida-lang/*` の `[packages."x"]`) が cosign + SHA-256 で
-verify されることを保証する診断。現行 Taida では `taida-lang/*` 以外の
-ソース pin は受理しません。
+ソースパッケージ (`taida-lang/*` の `[packages."x"]`) が SHA-256 pin で
+verify されることを保証する診断。`TAIDA_VERIFY_SIGNATURES=required` を
+明示した場合は source archive の cosign 検証も hard-fail policy になります。
+現行 Taida では `taida-lang/*` 以外のソース pin は受理しません。
 
 | コード | 発生条件 | 推奨対応 |
 |--------|----------|---------|
 | `E32K3_GITHUB_BASE_URL_CONFINED` | source package install 時に `TAIDA_GITHUB_BASE_URL` が `https://github.com` 以外を指している | 現行 Taida では source archive は `https://github.com` 固定。テスト環境で override する場合は `cargo test` 内の専用 helper を使う |
 | `E32K3_NON_OFFICIAL_SOURCE_REJECTED` | `[packages."x"]` table に `taida-lang/*` 以外の owner の source pin を書いた | 現行 Taida では公式 namespace のみ受理する。3rd party は addon (cdylib) として配布する設計 |
-| `E32K3_SOURCE_INTEGRITY_MISSING` | `[packages."x"]` table に `integrity` が無い、または `sha256:<64 lowercase hex>` 以外の prefix | `packages.tdm` に `integrity = "sha256:<64 hex>"` を追加。値は upstream release の sidecar から取得 |
+| `E32K3_SOURCE_INTEGRITY_MISSING` | `[packages."x"]` table に `integrity` が無い、または `sha256:<64 lowercase hex>` 以外の prefix | `packages.tdm` に `integrity = "sha256:<64 hex>"` を追加。値は対象 tag の source archive SHA-256 を使う |
 | `E32K3_SOURCE_INTEGRITY_MISMATCH` | キャッシュ済み source archive / cached store の SHA-256 が `packages.tdm` の expected と一致しない | `taida ingot install --force-refresh` で再取得。再現する場合は供給網侵害を疑う |
 | `E32K3_SOURCE_INTEGRITY_UNVERIFIED` | キャッシュ済み source archive に SHA-256 sidecar が無い、または読めない | `taida ingot install --force-refresh` で sidecar を再生成 |
-| `E32K3_SOURCE_COSIGN_REQUIRED` | source archive の cosign 検証が `Required` policy 下で skip / warn / 失敗 | `cosign` を install し、release が公式 cosign-signed であることを確認。`TAIDA_VERIFY_SIGNATURES` を緩めない |
-| `E32K3_VERIFY_SIGNATURES_RELAXED` | source package install 時に `TAIDA_VERIFY_SIGNATURES` が `required` 以外 (もしくは未設定の cosign 不在) | install を再実行し、`required` を強制する。現行 Taida では source archive は `Required` 必須 |
+| `E32K3_SOURCE_COSIGN_REQUIRED` | `TAIDA_VERIFY_SIGNATURES=required` 下で source archive の cosign 検証が skip / warn / 失敗 | source archive に対応する cosign bundle が公開されているか確認し、bundle がない配布形態では `TAIDA_VERIFY_SIGNATURES` を未設定または `best-effort` にして SHA-256 pin 検証を trust root にする |
+| `E32K3_VERIFY_SIGNATURES_INVALID` | source package install 時の `TAIDA_VERIFY_SIGNATURES` が `required` / `best-effort` / `off` 系の既知値ではない | 値を既知の policy 名に直すか、未設定に戻す |
 | `E32K3_PACKAGES_TDM_DUPLICATE_TABLE` | 同一 `[packages."<id>"]` ブロックが `packages.tdm` に複数存在する。後続テーブルで pin が silent に上書きされてレビューで気付けない状態 | 重複ブロックを 1 つにまとめ、source pin が一意になる形に書き直す |
 
 ### パッケージ facade 整合性エラー (`E32K4_*`)
