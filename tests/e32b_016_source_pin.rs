@@ -1,4 +1,4 @@
-//! E32B-016: source package SHA-256 pins from `packages.tdm`.
+//! Source package SHA-256 pins from `packages.tdm`.
 
 #![cfg(unix)]
 
@@ -390,7 +390,7 @@ integrity = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 }
 
 #[test]
-fn e32b_016_relaxed_signature_policy_rejected() {
+fn e32b_016_invalid_signature_policy_rejected_before_network() {
     let work = unique_temp_dir("e32b_016_relaxed_sig");
     let home = work.join("home");
     let project = work.join("project");
@@ -407,19 +407,19 @@ fn e32b_016_relaxed_signature_policy_rejected() {
         .args(["ingot", "install", "--no-remote-check"])
         .current_dir(&project)
         .env("HOME", &home)
-        .env("TAIDA_VERIFY_SIGNATURES", "best-effort")
+        .env("TAIDA_VERIFY_SIGNATURES", "surprise")
         .env("GH_TOKEN", "unused")
         .output()
         .expect("run install");
 
     assert!(
         !output.status.success(),
-        "relaxed source signature policy must fail"
+        "invalid source signature policy must fail"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("E32K3_VERIFY_SIGNATURES_RELAXED"),
-        "expected relaxed signature policy error, got: {}",
+        stderr.contains("E32K3_VERIFY_SIGNATURES_INVALID"),
+        "expected invalid signature policy error, got: {}",
         stderr
     );
 

@@ -639,7 +639,7 @@ fn download_from_https(
     )))
 }
 
-// ── RC2.6B-019: addon.lock.toml release asset fetcher ─────────
+// ── addon.lock.toml release asset fetcher ──────────────────────
 
 /// Download `addon.lock.toml` from a GitHub Release asset.
 ///
@@ -792,6 +792,8 @@ pub fn fetch_release_metadata(
 }
 
 fn is_valid_github_login(value: &str) -> bool {
+    let value = value.strip_suffix("[bot]").unwrap_or(value);
+
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 39 || bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
         return false;
@@ -1070,9 +1072,15 @@ mod tests {
     fn publisher_login_validation_rejects_homographs() {
         assert!(is_valid_github_login("taida-lang"));
         assert!(is_valid_github_login("Alice-123"));
+        assert!(is_valid_github_login("github-actions[bot]"));
+        assert!(is_valid_github_login("dependabot[bot]"));
         assert!(!is_valid_github_login("оrg"));
         assert!(!is_valid_github_login("-org"));
         assert!(!is_valid_github_login("org-"));
+        assert!(!is_valid_github_login("[bot]"));
+        assert!(!is_valid_github_login("-org[bot]"));
+        assert!(!is_valid_github_login("org-[bot]"));
+        assert!(!is_valid_github_login("org[bot][bot]"));
         assert!(!is_valid_github_login(""));
         assert_eq!(
             crate::pkg::publisher_identity::confusable_known_publisher("taida-1ang"),

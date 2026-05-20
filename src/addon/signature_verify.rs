@@ -19,8 +19,8 @@
 //! # Trust boundary
 //!
 //! The heavy-lifting cryptography is performed by `cosign verify-blob`
-//! via the already-audited `scripts/release/verify-signatures.sh`
-//! ( Sub-phase 7.4). This module only handles:
+//! via the already-audited `scripts/release/verify-signatures.sh`.
+//! This module only handles:
 //!
 //! 1. deciding whether verification should run at all for a given URL,
 //! 2. fetching the `.cosign.bundle` file next to the artefact,
@@ -128,9 +128,9 @@ pub enum VerifyOutcome {
     Skipped,
     /// Policy was [`VerifyPolicy::BestEffort`] and no bundle was
     /// found (or `cosign` was missing). A warning was emitted to
-    /// the caller; the install should proceed. First-party source
-    /// tarball verification uses [`VerifyPolicy::Required`], so that
-    /// path fails closed instead of returning this outcome.
+    /// the caller; the install should proceed. Callers that demand
+    /// fail-closed behaviour use [`VerifyPolicy::Required`], which
+    /// returns an error instead of this outcome.
     Warned(String),
     /// `cosign verify-blob` (or the test stub) returned success.
     Verified,
