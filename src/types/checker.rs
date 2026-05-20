@@ -223,6 +223,8 @@ pub struct TypeChecker {
     worker_effect_symbols: HashSet<String>,
     /// Local names that resolve to external addon / host boundaries.
     worker_addon_symbols: HashSet<String>,
+    /// Local addon function imports whose package/function identity is known.
+    worker_addon_bindings: HashMap<String, WorkerAddonBinding>,
     /// Scope-aligned metadata for branch-carrying values. `Type::Molten`
     /// remains the public type; this side table records the branch only
     /// when the checker can prove it.
@@ -282,6 +284,24 @@ impl CompileTarget {
     }
 }
 
+#[derive(Debug, Clone)]
+struct WorkerAddonBinding {
+    package_id: String,
+    function_name: String,
+    decision: WorkerAddonDecision,
+}
+
+#[derive(Debug, Clone)]
+enum WorkerAddonDecision {
+    Allow,
+    Deny {
+        code: &'static str,
+        reason: String,
+        active_policy: String,
+        effective_claim: String,
+    },
+}
+
 impl TypeChecker {
     pub fn new() -> Self {
         let mut checker = Self {
@@ -308,6 +328,7 @@ impl TypeChecker {
             net_http_protocol_type_names: HashSet::new(),
             worker_effect_symbols: HashSet::new(),
             worker_addon_symbols: HashSet::new(),
+            worker_addon_bindings: HashMap::new(),
             branch_scope_stack: vec![HashMap::new()],
             current_func_type_params: Vec::new(),
             hinted_func_stack: Vec::new(),
@@ -2136,6 +2157,142 @@ impl TypeChecker {
         }
     }
 
+    fn register_worker_addon_imports(&mut self, imp: &crate::parser::ImportStmt) {
+        if imp.path.starts_with("npm:")
+            || imp.path.starts_with("taida-lang/")
+            || imp.path.starts_with("./")
+            || imp.path.starts_with("../")
+            || imp.path.starts_with('/')
+        {
+            return;
+        }
+
+        let Some(source_file) = self.source_file.clone() else {
+            return;
+        };
+        let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
+        let project_root = Self::find_project_root(source_dir);
+        let resolution = if let Some(ref version) = imp.version {
+            crate::pkg::resolver::resolve_package_module_versioned(
+                &project_root,
+                &imp.path,
+                version,
+            )
+        } else {
+            crate::pkg::resolver::resolve_package_module(&project_root, &imp.path)
+        };
+        let Some(resolution) = resolution else {
+            return;
+        };
+        if resolution.submodule.is_some() {
+            return;
+        }
+        let manifest_path = resolution.pkg_dir.join("native").join("addon.toml");
+        if !manifest_path.exists() {
+            return;
+        }
+
+        let manifest = match crate::addon::manifest::parse_addon_manifest(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                for sym in &imp.symbols {
+                    let local = sym.alias.as_ref().unwrap_or(&sym.name);
+                    self.worker_addon_bindings.insert(
+                        local.to_string(),
+                        WorkerAddonBinding {
+                            package_id: imp.path.clone(),
+                            function_name: sym.name.clone(),
+                            decision: WorkerAddonDecision::Deny {
+                                code: "[E1631]",
+                                reason: err.to_string(),
+                                active_policy: "unresolved".to_string(),
+                                effective_claim: "invalid".to_string(),
+                            },
+                        },
+                    );
+                }
+                return;
+            }
+        };
+
+        let policy = crate::pkg::addon_purity_policy::load_addon_purity_policy(&project_root);
+
+        for sym in &imp.symbols {
+            let local = sym.alias.as_ref().unwrap_or(&sym.name);
+            let decision = match &policy {
+                Ok(policy) => self.decide_worker_addon_import(policy, &manifest, &sym.name),
+                Err(err) => WorkerAddonDecision::Deny {
+                    code: "[E1630]",
+                    reason: err.clone(),
+                    active_policy: "invalid".to_string(),
+                    effective_claim: "unresolved".to_string(),
+                },
+            };
+            self.worker_addon_bindings.insert(
+                local.to_string(),
+                WorkerAddonBinding {
+                    package_id: manifest.package.clone(),
+                    function_name: sym.name.clone(),
+                    decision,
+                },
+            );
+        }
+    }
+
+    fn decide_worker_addon_import(
+        &self,
+        policy: &crate::pkg::addon_purity_policy::AddonPurityPolicy,
+        manifest: &crate::addon::manifest::AddonManifest,
+        function_name: &str,
+    ) -> WorkerAddonDecision {
+        let active_policy = policy.mode.as_str().to_string();
+        if !manifest.functions.contains_key(function_name) {
+            return WorkerAddonDecision::Deny {
+                code: "[E1631]",
+                reason: format!(
+                    "addon manifest for '{}' does not declare function '{}'",
+                    manifest.package, function_name
+                ),
+                active_policy,
+                effective_claim: "invalid".to_string(),
+            };
+        }
+        if policy.is_override_trusted(&manifest.package, function_name) {
+            return WorkerAddonDecision::Allow;
+        }
+
+        let purity = manifest.function_purity_for(function_name);
+        match purity.claim {
+            crate::addon::manifest::AddonPurityClaim::Unspecified => WorkerAddonDecision::Deny {
+                code: "[E1627]",
+                reason: "function has no `declared` purity claim".to_string(),
+                active_policy,
+                effective_claim: "unspecified".to_string(),
+            },
+            crate::addon::manifest::AddonPurityClaim::Declared => {
+                if purity.audit.is_some() {
+                    return WorkerAddonDecision::Deny {
+                        code: "[E1629]",
+                        reason: "audit metadata is present but no F48 audit verifier is available"
+                            .to_string(),
+                        active_policy,
+                        effective_claim: "invalid".to_string(),
+                    };
+                }
+                if policy.allows_declared() {
+                    WorkerAddonDecision::Allow
+                } else {
+                    WorkerAddonDecision::Deny {
+                        code: "[E1628]",
+                        reason: "`declared` purity is below the active policy".to_string(),
+                        active_policy,
+                        effective_claim: "declared".to_string(),
+                    }
+                }
+            }
+        }
+    }
+
     /// Register exported types and function signatures that cross a module
     /// boundary so the importer can type-check calls without falling back to
     /// `Type::Unknown`.
@@ -2632,6 +2789,7 @@ impl TypeChecker {
         self.declared_concrete_type_names.clear();
         self.worker_effect_symbols.clear();
         self.worker_addon_symbols.clear();
+        self.worker_addon_bindings.clear();
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
@@ -5428,6 +5586,7 @@ defaulted fields must be provided via `()`",
                 // between a local redefinition and the imported module and emits
                 // [E1618] when they disagree.
                 self.register_imported_types(imp);
+                self.register_worker_addon_imports(imp);
                 // C19B-002: pin typed signatures for select `taida-lang/os`
                 // symbols (runInteractive / execShellInteractive) so that
                 // field access through their Gorillax result resolves at
@@ -6291,6 +6450,34 @@ defaulted fields must be provided via `()`",
             );
             return;
         }
+        if let Some(binding) = self.worker_addon_bindings.get(name).cloned() {
+            match binding.decision {
+                WorkerAddonDecision::Allow => {}
+                WorkerAddonDecision::Deny {
+                    code,
+                    reason,
+                    active_policy,
+                    effective_claim,
+                } => {
+                    self.push_worker_error(
+                        code,
+                        span,
+                        format!(
+                            "{} CPU worker body cannot call addon function '{}::{}'. \
+                             Effective claim: {}; active policy: {}. {}. \
+                             Hint: add function purity metadata and project policy, or move the addon call outside the worker task.",
+                            code,
+                            binding.package_id,
+                            binding.function_name,
+                            effective_claim,
+                            active_policy,
+                            reason
+                        ),
+                    );
+                }
+            }
+            return;
+        }
         if self.worker_addon_symbols.contains(name) {
             self.push_worker_error(
                 "[E1621]",
@@ -6362,6 +6549,18 @@ defaulted fields must be provided via `()`",
                 format!(
                     "[E1620] CPU worker body cannot capture effectful API '{}'. \
                      Hint: perform I/O before creating the task or after `Par[jobs]()` completes.",
+                    name
+                ),
+            );
+            return;
+        }
+        if self.worker_addon_bindings.contains_key(name) {
+            self.push_worker_error(
+                "[E1621]",
+                span,
+                format!(
+                    "[E1621] CPU worker body cannot capture addon or host boundary '{}'. \
+                     Hint: call allowed pure addon functions directly inside the worker task; do not capture them as values.",
                     name
                 ),
             );

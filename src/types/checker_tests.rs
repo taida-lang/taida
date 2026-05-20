@@ -6736,6 +6736,203 @@ fn cpu_parallel_async_task_rejects_addon_boundary() {
     );
 }
 
+fn write_f48_addon_fixture(
+    dir: &C18TempDir,
+    packages_tdm: &str,
+    addon_toml: &str,
+    source: &str,
+) -> std::path::PathBuf {
+    std::fs::write(dir.path.join("packages.tdm"), packages_tdm).expect("write packages.tdm");
+    let native_dir = dir.path.join(".taida/deps/example/math/native");
+    std::fs::create_dir_all(&native_dir).expect("create addon native dir");
+    std::fs::write(native_dir.join("addon.toml"), addon_toml).expect("write addon.toml");
+    std::fs::write(
+        native_dir.parent().unwrap().join("main.td"),
+        "fast_sum x: Int =\n  x\n=> :Int\n<<< @(fast_sum)\n",
+    )
+    .expect("write addon checker facade");
+    dir.write("main.td", source)
+}
+
+fn f48_addon_manifest(purity_section: &str) -> String {
+    format!(
+        r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "example/math"
+library = "example_math"
+
+[functions]
+fast_sum = 1
+{}
+"#,
+        purity_section
+    )
+}
+
+#[test]
+fn cpu_parallel_async_task_allows_declared_package_addon_direct_call_with_policy() {
+    let dir = C18TempDir::new("f48-allow-declared");
+    let consumer = write_f48_addon_fixture(
+        &dir,
+        r#"
+name <= "demo"
+
+[parallelism]
+addon_purity = "allow declared"
+"#,
+        &f48_addon_manifest(
+            r#"
+[function_purity]
+fast_sum = "declared"
+"#,
+        ),
+        ">>> example/math => @(fast_sum)\n\
+         job: AsyncTask[Int] <= AsyncTask[_ = fast_sum(1)]()\n",
+    );
+    let (_, errors) = check_file(&consumer);
+    assert!(
+        errors.is_empty(),
+        "declared addon should pass under allow declared policy: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_default_policy_rejects_declared_addon() {
+    let dir = C18TempDir::new("f48-default-declared");
+    let consumer = write_f48_addon_fixture(
+        &dir,
+        r#"name <= "demo""#,
+        &f48_addon_manifest(
+            r#"
+[function_purity]
+fast_sum = "declared"
+"#,
+        ),
+        ">>> example/math => @(fast_sum)\n\
+         job: AsyncTask[Int] <= AsyncTask[_ = fast_sum(1)]()\n",
+    );
+    let (_, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1628]")),
+        "default allow-audited policy should reject declared-only addon: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_unspecified_package_addon() {
+    let dir = C18TempDir::new("f48-unspecified");
+    let consumer = write_f48_addon_fixture(
+        &dir,
+        r#"
+name <= "demo"
+
+[parallelism]
+addon_purity = "allow declared"
+"#,
+        &f48_addon_manifest(""),
+        ">>> example/math => @(fast_sum)\n\
+         job: AsyncTask[Int] <= AsyncTask[_ = fast_sum(1)]()\n",
+    );
+    let (_, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1627]")),
+        "unspecified addon should be rejected: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_package_addon_function_capture() {
+    let dir = C18TempDir::new("f48-capture");
+    let consumer = write_f48_addon_fixture(
+        &dir,
+        r#"
+name <= "demo"
+
+[parallelism]
+addon_purity = "allow declared"
+"#,
+        &f48_addon_manifest(
+            r#"
+[function_purity]
+fast_sum = "declared"
+"#,
+        ),
+        ">>> example/math => @(fast_sum)\n\
+         f <= fast_sum\n\
+         job: AsyncTask[Int] <= AsyncTask[_ = f(1)]()\n",
+    );
+    let (_, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1624]")),
+        "addon function capture must remain rejected: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_override_allows_unspecified_package_addon() {
+    let dir = C18TempDir::new("f48-override");
+    let consumer = write_f48_addon_fixture(
+        &dir,
+        r#"
+name <= "demo"
+
+[parallelism]
+addon_purity = "deny"
+
+[parallelism.addon_purity_overrides]
+"example/math::fast_sum" = "trusted"
+"#,
+        &f48_addon_manifest(""),
+        ">>> example/math => @(fast_sum)\n\
+         job: AsyncTask[Int] <= AsyncTask[_ = fast_sum(1)]()\n",
+    );
+    let (_, errors) = check_file(&consumer);
+    assert!(
+        errors.is_empty(),
+        "function override should allow the direct addon call: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_unverified_audit_metadata() {
+    let dir = C18TempDir::new("f48-audit-invalid");
+    let consumer = write_f48_addon_fixture(
+        &dir,
+        r#"
+name <= "demo"
+
+[parallelism]
+addon_purity = "allow declared"
+"#,
+        &f48_addon_manifest(
+            r#"
+[function_purity]
+fast_sum = "declared"
+
+[function_purity_audit.fast_sum]
+authority = "taida-lang/core-audit"
+signature = "ed25519:abc123"
+audited_version = "@a.8"
+date = "2026-05-21"
+"#,
+        ),
+        ">>> example/math => @(fast_sum)\n\
+         job: AsyncTask[Int] <= AsyncTask[_ = fast_sum(1)]()\n",
+    );
+    let (_, errors) = check_file(&consumer);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1629]")),
+        "unverified audit metadata should be denied: {:?}",
+        errors
+    );
+}
+
 #[test]
 fn cpu_parallel_async_task_rejects_nested_parallel_construct() {
     let src = "job <= AsyncTask[_ = AsyncTask[_ = 1]()]()\n";

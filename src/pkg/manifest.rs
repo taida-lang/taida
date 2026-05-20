@@ -578,6 +578,8 @@ fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>,
     let mut active_version: Option<String> = None;
     let mut active_integrity: Option<String> = None;
     let mut active_security = false;
+    let mut active_parallelism = false;
+    let mut active_parallelism_overrides = false;
 
     for line in source.lines() {
         let trimmed = line.trim();
@@ -589,6 +591,34 @@ fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>,
                 active_integrity.take(),
             )?;
             active_security = true;
+            active_parallelism = false;
+            active_parallelism_overrides = false;
+            stripped.push('\n');
+            continue;
+        }
+        if trimmed == "[parallelism]" {
+            flush_package_table(
+                &mut deps,
+                active_package.take(),
+                active_version.take(),
+                active_integrity.take(),
+            )?;
+            active_security = false;
+            active_parallelism = true;
+            active_parallelism_overrides = false;
+            stripped.push('\n');
+            continue;
+        }
+        if trimmed == "[parallelism.addon_purity_overrides]" {
+            flush_package_table(
+                &mut deps,
+                active_package.take(),
+                active_version.take(),
+                active_integrity.take(),
+            )?;
+            active_security = false;
+            active_parallelism = false;
+            active_parallelism_overrides = true;
             stripped.push('\n');
             continue;
         }
@@ -600,6 +630,8 @@ fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>,
                 active_integrity.take(),
             )?;
             active_security = false;
+            active_parallelism = false;
+            active_parallelism_overrides = false;
             active_package = Some(package_id);
             stripped.push('\n');
             continue;
@@ -645,6 +677,74 @@ fn extract_package_tables(source: &str) -> Result<(BTreeMap<String, Dependency>,
                         key
                     ));
                 }
+            }
+            stripped.push('\n');
+            continue;
+        }
+
+        if active_parallelism || active_parallelism_overrides {
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+                stripped.push('\n');
+                continue;
+            }
+            if trimmed.starts_with(">>>") || trimmed.starts_with("<<<") {
+                active_parallelism = false;
+                active_parallelism_overrides = false;
+                stripped.push_str(line);
+                stripped.push('\n');
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                return Err(format!(
+                    "packages.tdm: unsupported table header '{}'. Only [packages.\"org/name\"], [security], [parallelism], and [parallelism.addon_purity_overrides] are supported.",
+                    trimmed
+                ));
+            }
+            let Some((key_raw, value_raw)) = trimmed.split_once('=') else {
+                return Err(format!(
+                    "packages.tdm: invalid parallelism table line '{}'. Expected key = \"value\".",
+                    trimmed
+                ));
+            };
+            let key = if active_parallelism_overrides {
+                parse_quoted_string(key_raw).ok_or_else(|| {
+                    format!(
+                        "packages.tdm: addon purity override key '{}' must be a plain quoted string.",
+                        key_raw.trim()
+                    )
+                })?
+            } else {
+                key_raw.trim().to_string()
+            };
+            let value = parse_quoted_string(value_raw).ok_or_else(|| {
+                format!(
+                    "packages.tdm: parallelism table key '{}' must be a plain quoted string.",
+                    key
+                )
+            })?;
+            if active_parallelism {
+                match key.as_str() {
+                    "addon_purity" => match value.as_str() {
+                        "deny" | "allow audited" | "allow declared" => {}
+                        _ => {
+                            return Err(format!(
+                                "packages.tdm: invalid addon_purity '{}'. Expected deny, allow audited, or allow declared.",
+                                value
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(format!(
+                            "packages.tdm: unknown parallelism table key '{}'. Expected addon_purity.",
+                            key
+                        ));
+                    }
+                }
+            } else if value != "trusted" {
+                return Err(format!(
+                    "packages.tdm: addon purity override '{}' must be \"trusted\".",
+                    key
+                ));
             }
             stripped.push('\n');
             continue;
@@ -783,6 +883,22 @@ name <= "minimal"
         assert_eq!(manifest.name, "minimal");
         assert_eq!(manifest.version, "0.1.0");
         assert_eq!(manifest.entry, "main.td");
+    }
+
+    #[test]
+    fn test_parse_manifest_strips_parallelism_policy_tables() {
+        let source = r#"
+name <= "minimal"
+
+[parallelism]
+addon_purity = "allow declared"
+
+[parallelism.addon_purity_overrides]
+"example/math::fast_sum" = "trusted"
+"#;
+        let manifest = Manifest::parse(source, Path::new("/tmp")).unwrap();
+        assert_eq!(manifest.name, "minimal");
+        assert!(manifest.deps.is_empty());
     }
 
     #[test]

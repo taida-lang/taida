@@ -236,7 +236,14 @@ ParMap[items, _ x: Int = x * 2]() >=> doubled
 stdout(doubled.toString())  // @[2, 4, 6]
 ```
 
-`AsyncTask` の本体と `ParMap` の mapper は、worker 境界を越えられる純粋な計算に限定されます。I/O、ネットワーク、プロセス操作、addon / host interop、ネストした `AsyncTask` / `Par` / `ParMap`、関数値や `Async` / `Stream` / `Molten` などの捕捉は、実行時失敗ではなく checker 診断で reject されます。
+`AsyncTask` の本体と `ParMap` の mapper は、worker 境界を越えられる純粋な計算に限定されます。I/O、ネットワーク、プロセス操作、host interop、ネストした `AsyncTask` / `Par` / `ParMap`、関数値や `Async` / `Stream` / `Molten` などの捕捉は、実行時失敗ではなく checker 診断で reject されます。
+
+addon 関数は既定では worker 内で拒否されます。例外は、`native/addon.toml` で関数単位に `"declared"` purity claim があり、利用側 `packages.tdm` の `[parallelism] addon_purity` がその claim を許可している場合の直接呼び出しだけです。addon 関数を変数へ入れて worker に捕捉する形は、purity claim に関係なく拒否されます。
+
+```toml
+[parallelism]
+addon_purity = "allow declared"
+```
 
 バックエンドは worker dispatch または deterministic sequential fallback のどちらで実行してもよく、公開される契約は同じです。結果順、失敗伝播、`>=>` の待機挙動はバックエンド間で一致します。
 

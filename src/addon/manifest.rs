@@ -28,6 +28,10 @@
 //! [functions]
 //! noop = 0
 //! echo = 1
+//!
+//! # Optional F48 worker-safety metadata. Omitted functions are `unspecified`.
+//! [function_purity]
+//! echo = "declared"
 //! ```
 //!
 //! Anything outside this subset is rejected with a structured error so
@@ -140,6 +144,49 @@ impl PrebuildConfig {
     }
 }
 
+/// Author-declared worker-safety claim for one addon function.
+///
+/// `Audited` is intentionally not an authored value. Audit metadata can
+/// upgrade a `Declared` claim to an effective audited decision after policy
+/// validation, but the manifest claim remains one of these two states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddonPurityClaim {
+    #[default]
+    Unspecified,
+    Declared,
+}
+
+impl AddonPurityClaim {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Declared => "declared",
+        }
+    }
+}
+
+/// Parsed `[function_purity_audit.<function>]` metadata.
+///
+/// F48 only shape-validates and stores this metadata. Authority trust,
+/// signature verification, expiry, revocation, and package-version matching
+/// are policy decisions outside the manifest parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddonPurityAudit {
+    pub authority: String,
+    pub signature: String,
+    pub audited_version: String,
+    pub date: String,
+    pub expires: Option<String>,
+    pub audit_doc: Option<String>,
+}
+
+/// Parsed purity metadata for one function.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AddonFunctionPurity {
+    pub claim: AddonPurityClaim,
+    pub audit: Option<AddonPurityAudit>,
+}
+
 /// A parsed and validated `native/addon.toml` manifest.
 ///
 /// Constructed via [`parse_addon_manifest`]. The struct is immutable
@@ -160,6 +207,11 @@ pub struct AddonManifest {
     pub library: String,
     /// `[functions]` table: function name -> declared arity.
     pub functions: BTreeMap<String, u32>,
+    /// Optional F48 worker-safety metadata: function name -> claim/audit.
+    ///
+    /// Missing functions are treated as [`AddonPurityClaim::Unspecified`]
+    /// through [`AddonManifest::function_purity_for`].
+    pub function_purity: BTreeMap<String, AddonFunctionPurity>,
     /// top-level `targets` array. Always populated after
     /// parsing — when the source omits `targets`, the parser injects
     /// [`default_addon_targets`] so the omitted form and an explicit
@@ -171,6 +223,15 @@ pub struct AddonManifest {
     pub targets: Vec<String>,
     /// `[library.prebuild]` section. `None` if absent.
     pub prebuild: PrebuildConfig,
+}
+
+impl AddonManifest {
+    pub fn function_purity_for(&self, function: &str) -> AddonFunctionPurity {
+        self.function_purity
+            .get(function)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 /// Errors produced when parsing or validating `native/addon.toml`.
@@ -271,6 +332,39 @@ pub enum AddonManifestError {
     /// top-level `targets` was the wrong type (e.g. a string
     /// or integer rather than an array of strings).
     AddonTargetsTypeMismatch { path: PathBuf, detail: String },
+    /// `[function_purity]` references a function not declared in `[functions]`.
+    PurityUnknownFunction { path: PathBuf, function: String },
+    /// `[function_purity]` value is neither `unspecified` nor `declared`.
+    PurityInvalidClaim {
+        path: PathBuf,
+        function: String,
+        value: String,
+    },
+    /// `[function_purity_audit.<function>]` is missing a required field.
+    PurityAuditMissingField {
+        path: PathBuf,
+        function: String,
+        field: &'static str,
+    },
+    /// Unknown key inside `[function_purity_audit.<function>]`.
+    PurityAuditUnknownKey {
+        path: PathBuf,
+        function: String,
+        key: String,
+    },
+    /// Audit metadata carried the wrong value type.
+    PurityAuditTypeMismatch {
+        path: PathBuf,
+        function: String,
+        key: String,
+        expected: &'static str,
+    },
+    /// Audit signature is not in a scheme-prefixed format.
+    PurityAuditInvalidSignature {
+        path: PathBuf,
+        function: String,
+        value: String,
+    },
 }
 
 impl fmt::Display for AddonManifestError {
@@ -457,6 +551,69 @@ impl fmt::Display for AddonManifestError {
                 "addon manifest error: 'targets' in '{}' must be an array of strings ({})",
                 path.display(),
                 detail
+            ),
+            Self::PurityUnknownFunction { path, function } => write!(
+                f,
+                "addon manifest error: [E1631] function purity metadata in '{}' references unknown function '{}' (declare it in [functions] first)",
+                path.display(),
+                function
+            ),
+            Self::PurityInvalidClaim {
+                path,
+                function,
+                value,
+            } => write!(
+                f,
+                "addon manifest error: [E1631] invalid purity claim '{}' for function '{}' in '{}' (allowed: unspecified, declared)",
+                value,
+                function,
+                path.display()
+            ),
+            Self::PurityAuditMissingField {
+                path,
+                function,
+                field,
+            } => write!(
+                f,
+                "addon manifest error: [E1631] [function_purity_audit.{}] in '{}' is missing required field '{}'",
+                function,
+                path.display(),
+                field
+            ),
+            Self::PurityAuditUnknownKey {
+                path,
+                function,
+                key,
+            } => write!(
+                f,
+                "addon manifest error: [E1631] unknown key '{}' in [function_purity_audit.{}] of '{}' (allowed: authority, signature, audited_version, date, expires, audit_doc)",
+                key,
+                function,
+                path.display()
+            ),
+            Self::PurityAuditTypeMismatch {
+                path,
+                function,
+                key,
+                expected,
+            } => write!(
+                f,
+                "addon manifest error: [E1631] key '{}' in [function_purity_audit.{}] of '{}' must be {}",
+                key,
+                function,
+                path.display(),
+                expected
+            ),
+            Self::PurityAuditInvalidSignature {
+                path,
+                function,
+                value,
+            } => write!(
+                f,
+                "addon manifest error: [E1631] invalid audit signature '{}' for function '{}' in '{}' (expected '<scheme>:<payload>')",
+                value,
+                function,
+                path.display()
             ),
         }
     }
@@ -795,6 +952,13 @@ pub fn parse_addon_manifest_str(
         }
     };
 
+    let function_purity = build_function_purity(
+        path,
+        &functions,
+        raw.function_purity,
+        raw.function_purity_audits,
+    )?;
+
     Ok(AddonManifest {
         manifest_path: path.to_path_buf(),
         abi: abi as u32,
@@ -802,9 +966,156 @@ pub fn parse_addon_manifest_str(
         package,
         library,
         functions,
+        function_purity,
         targets,
         prebuild,
     })
+}
+
+fn build_function_purity(
+    path: &Path,
+    functions: &BTreeMap<String, u32>,
+    raw_claims: Option<BTreeMap<String, RawValue>>,
+    raw_audits: BTreeMap<String, BTreeMap<String, RawValue>>,
+) -> Result<BTreeMap<String, AddonFunctionPurity>, AddonManifestError> {
+    let mut function_purity = BTreeMap::new();
+
+    if let Some(raw_claims) = raw_claims {
+        for (function, raw_claim) in raw_claims {
+            if !functions.contains_key(&function) {
+                return Err(AddonManifestError::PurityUnknownFunction {
+                    path: path.to_path_buf(),
+                    function,
+                });
+            }
+            let RawValue::Str(claim_raw) = raw_claim else {
+                return Err(AddonManifestError::TypeMismatch {
+                    path: path.to_path_buf(),
+                    key: format!("function_purity.{}", function),
+                    expected: "string",
+                });
+            };
+            let claim = match claim_raw.as_str() {
+                "unspecified" => AddonPurityClaim::Unspecified,
+                "declared" => AddonPurityClaim::Declared,
+                _ => {
+                    return Err(AddonManifestError::PurityInvalidClaim {
+                        path: path.to_path_buf(),
+                        function,
+                        value: claim_raw,
+                    });
+                }
+            };
+            function_purity.insert(function, AddonFunctionPurity { claim, audit: None });
+        }
+    }
+
+    for (function, audit_table) in raw_audits {
+        if !functions.contains_key(&function) {
+            return Err(AddonManifestError::PurityUnknownFunction {
+                path: path.to_path_buf(),
+                function,
+            });
+        }
+        let audit = parse_purity_audit(path, &function, audit_table)?;
+        function_purity.entry(function).or_default().audit = Some(audit);
+    }
+
+    Ok(function_purity)
+}
+
+fn parse_purity_audit(
+    path: &Path,
+    function: &str,
+    audit_table: BTreeMap<String, RawValue>,
+) -> Result<AddonPurityAudit, AddonManifestError> {
+    for key in audit_table.keys() {
+        if !matches!(
+            key.as_str(),
+            "authority" | "signature" | "audited_version" | "date" | "expires" | "audit_doc"
+        ) {
+            return Err(AddonManifestError::PurityAuditUnknownKey {
+                path: path.to_path_buf(),
+                function: function.to_string(),
+                key: key.clone(),
+            });
+        }
+    }
+
+    let authority = require_audit_str(path, function, &audit_table, "authority")?;
+    let signature = require_audit_str(path, function, &audit_table, "signature")?;
+    if !is_valid_audit_signature(&signature) {
+        return Err(AddonManifestError::PurityAuditInvalidSignature {
+            path: path.to_path_buf(),
+            function: function.to_string(),
+            value: signature,
+        });
+    }
+    let audited_version = require_audit_str(path, function, &audit_table, "audited_version")?;
+    let date = require_audit_str(path, function, &audit_table, "date")?;
+    let expires = optional_audit_str(path, function, &audit_table, "expires")?;
+    let audit_doc = optional_audit_str(path, function, &audit_table, "audit_doc")?;
+
+    Ok(AddonPurityAudit {
+        authority,
+        signature,
+        audited_version,
+        date,
+        expires,
+        audit_doc,
+    })
+}
+
+fn require_audit_str(
+    path: &Path,
+    function: &str,
+    table: &BTreeMap<String, RawValue>,
+    key: &'static str,
+) -> Result<String, AddonManifestError> {
+    match table.get(key) {
+        Some(RawValue::Str(value)) if !value.trim().is_empty() => Ok(value.clone()),
+        Some(RawValue::Str(_)) | None => Err(AddonManifestError::PurityAuditMissingField {
+            path: path.to_path_buf(),
+            function: function.to_string(),
+            field: key,
+        }),
+        Some(_) => Err(AddonManifestError::PurityAuditTypeMismatch {
+            path: path.to_path_buf(),
+            function: function.to_string(),
+            key: key.to_string(),
+            expected: "string",
+        }),
+    }
+}
+
+fn optional_audit_str(
+    path: &Path,
+    function: &str,
+    table: &BTreeMap<String, RawValue>,
+    key: &'static str,
+) -> Result<Option<String>, AddonManifestError> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(RawValue::Str(value)) if !value.trim().is_empty() => Ok(Some(value.clone())),
+        Some(RawValue::Str(_)) => Err(AddonManifestError::PurityAuditMissingField {
+            path: path.to_path_buf(),
+            function: function.to_string(),
+            field: key,
+        }),
+        Some(_) => Err(AddonManifestError::PurityAuditTypeMismatch {
+            path: path.to_path_buf(),
+            function: function.to_string(),
+            key: key.to_string(),
+            expected: "string",
+        }),
+    }
+}
+
+fn is_valid_audit_signature(value: &str) -> bool {
+    let Some((scheme, payload)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty() && !payload.is_empty()
 }
 
 // ── Minimal TOML subset parser ────────────────────────────────
@@ -842,6 +1153,10 @@ struct ParsedToml {
     prebuild_targets: BTreeMap<String, RawValue>,
     // RC15B-005: [library.prebuild.signatures] key-value pairs (reserved)
     prebuild_signatures: BTreeMap<String, RawValue>,
+    // F48: [function_purity] function -> claim
+    function_purity: Option<BTreeMap<String, RawValue>>,
+    // F48: [function_purity_audit.<function>] metadata
+    function_purity_audits: BTreeMap<String, BTreeMap<String, RawValue>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -937,6 +1252,18 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                     parsed.functions = Some(BTreeMap::new());
                     current_section = Some("functions".to_string());
                 }
+                "function_purity" => {
+                    if parsed.function_purity.is_some() {
+                        return Err(AddonManifestError::Syntax {
+                            path: path.to_path_buf(),
+                            line: line_no,
+                            message: "[function_purity] section declared more than once"
+                                .to_string(),
+                        });
+                    }
+                    parsed.function_purity = Some(BTreeMap::new());
+                    current_section = Some("function_purity".to_string());
+                }
                 "library.prebuild" => {
                     // RC1.5: optional prebuild section
                     current_section = Some("library.prebuild".to_string());
@@ -949,12 +1276,41 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                     // RC15B-005: target -> gpg:<opaque> reserved section
                     current_section = Some("library.prebuild.signatures".to_string());
                 }
+                other if other.starts_with("function_purity_audit.") => {
+                    let function = other
+                        .strip_prefix("function_purity_audit.")
+                        .unwrap_or_default();
+                    if !is_valid_key(function) {
+                        return Err(AddonManifestError::Syntax {
+                            path: path.to_path_buf(),
+                            line: line_no,
+                            message: format!(
+                                "invalid function name '{}' in [function_purity_audit.<function>]",
+                                function
+                            ),
+                        });
+                    }
+                    if parsed.function_purity_audits.contains_key(function) {
+                        return Err(AddonManifestError::Syntax {
+                            path: path.to_path_buf(),
+                            line: line_no,
+                            message: format!(
+                                "[function_purity_audit.{}] section declared more than once",
+                                function
+                            ),
+                        });
+                    }
+                    parsed
+                        .function_purity_audits
+                        .insert(function.to_string(), BTreeMap::new());
+                    current_section = Some(format!("function_purity_audit.{}", function));
+                }
                 other => {
                     return Err(AddonManifestError::Syntax {
                         path: path.to_path_buf(),
                         line: line_no,
                         message: format!(
-                            "unknown section '[{}]' (only [functions], [library.prebuild], [library.prebuild.targets], [library.prebuild.signatures] are allowed)",
+                            "unknown section '[{}]' (only [functions], [function_purity], [function_purity_audit.<function>], [library.prebuild], [library.prebuild.targets], [library.prebuild.signatures] are allowed)",
                             other
                         ),
                     });
@@ -1023,9 +1379,22 @@ fn parse_minimal_toml(path: &Path, source: &str) -> Result<ParsedToml, AddonMani
                 .functions
                 .as_mut()
                 .expect("functions section must be initialised"),
+            Some(name) if name == "function_purity" => parsed
+                .function_purity
+                .as_mut()
+                .expect("function_purity section must be initialised"),
             Some(name) if name == "library.prebuild" => &mut parsed.prebuild,
             Some(name) if name == "library.prebuild.targets" => &mut parsed.prebuild_targets,
             Some(name) if name == "library.prebuild.signatures" => &mut parsed.prebuild_signatures,
+            Some(name) if name.starts_with("function_purity_audit.") => {
+                let function = name
+                    .strip_prefix("function_purity_audit.")
+                    .expect("prefix checked above");
+                parsed
+                    .function_purity_audits
+                    .get_mut(function)
+                    .expect("function_purity_audit section must be initialised")
+            }
             Some(other) => unreachable!("unexpected section state: {}", other),
         };
         if target.contains_key(key) {
@@ -1282,6 +1651,117 @@ echo = 1
         assert_eq!(manifest.functions.len(), 2);
         assert_eq!(manifest.functions.get("noop"), Some(&0));
         assert_eq!(manifest.functions.get("echo"), Some(&1));
+    }
+
+    #[test]
+    fn purity_metadata_parses_function_claims_and_audit_shape() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "taida-lang/addon-rs-sample"
+library = "taida_addon_sample"
+
+[functions]
+noop = 0
+echo = 1
+
+[function_purity]
+echo = "declared"
+
+[function_purity_audit.echo]
+authority = "taida-lang/core-audit"
+signature = "ed25519:abc123"
+audited_version = "@a.8"
+date = "2026-05-21"
+expires = "2027-05-21"
+audit_doc = "https://example.invalid/audit/echo"
+"#;
+        let manifest = parse(src).expect("purity metadata must parse");
+        assert_eq!(
+            manifest.function_purity_for("noop").claim,
+            AddonPurityClaim::Unspecified
+        );
+        let echo = manifest.function_purity_for("echo");
+        assert_eq!(echo.claim, AddonPurityClaim::Declared);
+        let audit = echo.audit.expect("audit metadata");
+        assert_eq!(audit.authority, "taida-lang/core-audit");
+        assert_eq!(audit.signature, "ed25519:abc123");
+        assert_eq!(audit.audited_version, "@a.8");
+        assert_eq!(audit.expires.as_deref(), Some("2027-05-21"));
+        assert_eq!(
+            audit.audit_doc.as_deref(),
+            Some("https://example.invalid/audit/echo")
+        );
+    }
+
+    #[test]
+    fn purity_metadata_rejects_unknown_function() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[function_purity]
+missing = "declared"
+"#;
+        let err = parse(src).expect_err("unknown purity function must fail");
+        assert!(matches!(
+            err,
+            AddonManifestError::PurityUnknownFunction { function, .. } if function == "missing"
+        ));
+    }
+
+    #[test]
+    fn purity_metadata_rejects_invalid_claim() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[function_purity]
+f = "audited"
+"#;
+        let err = parse(src).expect_err("authored audited claim must fail");
+        assert!(matches!(
+            err,
+            AddonManifestError::PurityInvalidClaim { function, value, .. }
+                if function == "f" && value == "audited"
+        ));
+    }
+
+    #[test]
+    fn purity_audit_rejects_missing_required_field() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+
+[functions]
+f = 0
+
+[function_purity]
+f = "declared"
+
+[function_purity_audit.f]
+authority = "taida-lang/core-audit"
+signature = "ed25519:abc123"
+audited_version = "@a.8"
+"#;
+        let err = parse(src).expect_err("missing date must fail");
+        assert!(matches!(
+            err,
+            AddonManifestError::PurityAuditMissingField { function, field: "date", .. }
+                if function == "f"
+        ));
     }
 
     #[test]
