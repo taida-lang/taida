@@ -2308,6 +2308,14 @@ static int64_t _wasm_error_to_string(int64_t val) {
     return (int64_t)(intptr_t)"Error";
 }
 
+static int _wasm_is_async_task_pack(int64_t val) {
+    if (!_looks_like_pack(val)) return 0;
+    if (!taida_pack_has_hash(val, WASM_HASH_TODO_TASK)) return 0;
+    if (!taida_pack_has_hash(val, WASM_HASH___TYPE)) return 0;
+    int64_t type_name = taida_pack_get(val, WASM_HASH___TYPE);
+    return taida_str_eq(type_name, (int64_t)(intptr_t)"AsyncTask") ? 1 : 0;
+}
+
 /* W-4f2: Convert value to display string (like native's taida_value_to_display_string) */
 static int64_t _wasm_value_to_display_string(int64_t val) {
     if (val == 0) return (int64_t)(intptr_t)"0";
@@ -2325,6 +2333,7 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
     if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
     /* Check Error before generic pack (Error is a pack with "type" field) */
     if (_wasm_is_error(val)) return _wasm_error_to_string(val);
+    if (_wasm_is_async_task_pack(val)) return (int64_t)(intptr_t)"AsyncTask[<task>]";
     /* Check Pack (field_count + hash pattern) */
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* C23B-003 reopen 3: empty packs (`@()`) have `fc == 0` and slip past

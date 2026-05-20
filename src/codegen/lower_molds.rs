@@ -1803,6 +1803,53 @@ impl Lowering {
                     Ok(result)
                 }
             }
+            "AsyncTask" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message:
+                            "AsyncTask requires 1 argument: AsyncTask[_ = expr]()".into(),
+                    });
+                }
+                let thunk = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_async_task_new".to_string(),
+                    vec![thunk],
+                ));
+                Ok(result)
+            }
+            "Par" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: "Par requires 1 argument: Par[jobs]()".into(),
+                    });
+                }
+                let list = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_async_task_par".to_string(),
+                    vec![list],
+                ));
+                Ok(result)
+            }
+            "ParMap" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "ParMap requires 2 arguments: ParMap[items, fn]()".into(),
+                    });
+                }
+                let list = self.lower_expr(func, &type_args[0])?;
+                let fn_var = self.lower_expr(func, &type_args[1])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_async_task_par_map".to_string(),
+                    vec![list, fn_var],
+                ));
+                Ok(result)
+            }
             "All" => {
                 // All[asyncList]() -> taida_async_all(list)
                 if type_args.is_empty() {

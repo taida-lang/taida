@@ -3167,3 +3167,40 @@ fn test_e30b_007_rust_addon_binding_rejects_missing_quotes() {
         type_args[0]
     );
 }
+
+#[test]
+fn test_cpu_parallel_async_task_thunk_parses_as_mold_inst_with_zero_param_lambda() {
+    use crate::parser::ast::{Expr, Statement};
+
+    let source = "job <= AsyncTask[_ = heavy(1, 2)]()\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    let type_args = match &assign.value {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            assert_eq!(name, "AsyncTask");
+            assert!(fields.is_empty(), "AsyncTask call should have no fields");
+            type_args
+        }
+        other => panic!("expected AsyncTask MoldInst, got {:?}", other),
+    };
+    assert_eq!(type_args.len(), 1);
+    let body = match &type_args[0] {
+        Expr::Lambda(params, body, _) => {
+            assert!(params.is_empty(), "thunk lambda must have zero params");
+            body
+        }
+        other => panic!("expected zero-param Lambda, got {:?}", other),
+    };
+    match body.as_ref() {
+        Expr::FuncCall(callee, args, _) => {
+            assert!(matches!(callee.as_ref(), Expr::Ident(name, _) if name == "heavy"));
+            assert_eq!(args.len(), 2, "lambda body call arguments must stay intact");
+        }
+        other => panic!("expected FuncCall in thunk body, got {:?}", other),
+    }
+}

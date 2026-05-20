@@ -20,6 +20,24 @@ fn check_with_target(source: &str, target: CompileTarget) -> (TypeChecker, Vec<T
     (checker, errors)
 }
 
+fn infer_assignment_type(source: &str, target: &str) -> (Type, Vec<TypeError>) {
+    let (program, parse_errors) = parse(source);
+    assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
+    let mut checker = TypeChecker::new();
+    checker.check_program(&program);
+    let assign = program
+        .statements
+        .iter()
+        .find_map(|stmt| match stmt {
+            Statement::Assignment(assign) if assign.target == target => Some(assign),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing assignment for {target}"));
+    let ty = checker.infer_expr_type(&assign.value);
+    let errors = checker.errors.clone();
+    (ty, errors)
+}
+
 #[test]
 fn test_literal_type_inference() {
     let mut checker = TypeChecker::new();
@@ -6408,6 +6426,272 @@ fn e34b_018_async_family_correct_signatures_accepted() {
     assert!(
         errors.is_empty(),
         "Correctly-shaped Async-family calls must be accepted; errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_infers_body_type() {
+    let src = "heavy x: Int = x + 1 => :Int\n\
+               job <= AsyncTask[_ = heavy(40)]()\n";
+    let (ty, errors) = infer_assignment_type(src, "job");
+    assert!(
+        errors.is_empty(),
+        "AsyncTask thunk should type-check: {:?}",
+        errors
+    );
+    assert_eq!(ty, Type::Generic("AsyncTask".to_string(), vec![Type::Int]));
+}
+
+#[test]
+fn cpu_parallel_par_infers_async_list_from_async_tasks() {
+    let src = "heavy x: Int = x + 1 => :Int\n\
+               job1 <= AsyncTask[_ = heavy(1)]()\n\
+               job2 <= AsyncTask[_ = heavy(2)]()\n\
+               jobs <= @[job1, job2]\n\
+               out <= Par[jobs]()\n";
+    let (ty, errors) = infer_assignment_type(src, "out");
+    assert!(errors.is_empty(), "Par should type-check: {:?}", errors);
+    assert_eq!(
+        ty,
+        Type::Generic("Async".to_string(), vec![Type::List(Box::new(Type::Int))])
+    );
+}
+
+#[test]
+fn cpu_parallel_par_keeps_empty_task_list_as_unknown_element_type() {
+    let src = "jobs <= @[]\n\
+               out <= Par[jobs]()\n";
+    let (ty, errors) = infer_assignment_type(src, "out");
+    assert!(
+        errors
+            .iter()
+            .all(|e| !(e.message.contains("[E1506]") && e.message.contains("Par[jobs]()"))),
+        "Empty task list should not be rejected as a non-task list: {:?}",
+        errors
+    );
+    assert_eq!(
+        ty,
+        Type::Generic(
+            "Async".to_string(),
+            vec![Type::List(Box::new(Type::Unknown))]
+        )
+    );
+}
+
+#[test]
+fn cpu_parallel_par_map_infers_async_list_from_unary_function() {
+    let src = "items <= @[1, 2, 3]\n\
+               out <= ParMap[items, _ x: Int = x + 1]()\n";
+    let (ty, errors) = infer_assignment_type(src, "out");
+    assert!(errors.is_empty(), "ParMap should type-check: {:?}", errors);
+    assert_eq!(
+        ty,
+        Type::Generic("Async".to_string(), vec![Type::List(Box::new(Type::Int))])
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_non_thunk_argument() {
+    let src = "bad <= AsyncTask[1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]") && e.message.contains("AsyncTask")),
+        "Expected [E1506] for non-thunk AsyncTask arg, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_unary_function_argument() {
+    let src = "bad <= AsyncTask[_ x: Int = x]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| {
+            e.message.contains("[E1506]")
+                && e.message.contains("AsyncTask")
+                && e.message.contains("zero-argument function")
+        }),
+        "Expected [E1506] for unary AsyncTask arg, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_par_rejects_non_task_list() {
+    let src = "items <= @[1, 2]\n\
+               bad <= Par[items]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]") && e.message.contains("Par[jobs]()")),
+        "Expected [E1506] for Par over non-task list, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_par_map_rejects_function_parameter_mismatch() {
+    let src = "items <= @[1, 2]\n\
+               bad <= ParMap[items, _ x: Str = x]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("[E1506]") && e.message.contains("ParMap")),
+        "Expected [E1506] for ParMap parameter mismatch, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_par_map_rejects_effectful_mapper_body() {
+    let src = "items <= @[1, 2]\n\
+               bad <= ParMap[items, _ x: Int = stdout(x)]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1620]")),
+        "Expected [E1620] for effectful ParMap mapper, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_par_map_rejects_effectful_mapper_reference() {
+    let src = "log x: Int = stdout(x) => :Int\n\
+               items <= @[1, 2]\n\
+               bad <= ParMap[items, log]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1620]")),
+        "Expected [E1620] for effectful ParMap helper, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_allows_structural_safe_capture() {
+    let src = "Point = @(x: Int, label: Str)\n\
+               point <= Point(x <= 41, label <= \"p\")\n\
+               job <= AsyncTask[_ = point.x + 1]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "AsyncTask should allow structurally safe captures: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_worker_safety_resolves_user_mold_fields() {
+    let mut checker = TypeChecker::new();
+    checker.registry.register_mold(
+        "Box",
+        vec!["T".to_string()],
+        vec![("value".to_string(), Type::Named("T".to_string()))],
+    );
+
+    assert!(checker.is_worker_safe_type(&Type::Generic("Box".to_string(), vec![Type::Int],)));
+    assert!(!checker.is_worker_safe_type(&Type::Generic(
+        "Box".to_string(),
+        vec![Type::Generic("Async".to_string(), vec![Type::Int])],
+    )));
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_effect_call_in_helper() {
+    let src = "log x: Int = stdout(x) => :Int\n\
+               job <= AsyncTask[_ = log(1)]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1620]")),
+        "Expected [E1620] for effectful helper call, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_effect_call_in_function_reference() {
+    let src = "boot =\n  stdout(\"io\")\n=> :Int\njob <= AsyncTask[boot]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1620]")),
+        "Expected [E1620] for effectful zero-arg function reference, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_addon_boundary() {
+    let src = "native <= RustAddon[\"native\"](arity <= 0)\n\
+               job <= AsyncTask[_ = native()]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1621]")),
+        "Expected [E1621] for addon boundary call, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_nested_parallel_construct() {
+    let src = "job <= AsyncTask[_ = AsyncTask[_ = 1]()]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1622]")),
+        "Expected [E1622] for nested AsyncTask, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_non_transferable_capture() {
+    let src = "pending <= Async[1]()\n\
+               job <= AsyncTask[_ = pending]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1623]")),
+        "Expected [E1623] for Async capture, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_call_through_non_transferable_value() {
+    let src = "bridge <= Molten[]()\n\
+               job <= AsyncTask[_ = bridge(1)]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1623]")),
+        "Expected [E1623] for call through Molten value, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_function_value_capture() {
+    let src = "heavy x: Int = x + 1 => :Int\n\
+               fnv <= heavy\n\
+               job <= AsyncTask[_ = fnv(1)]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1624]")),
+        "Expected [E1624] for captured function value, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn cpu_parallel_async_task_rejects_unresolved_capture() {
+    let src = "mystery <= make()\n\
+               job <= AsyncTask[_ = mystery]()\n";
+    let (_, errors) = check(src);
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1626]")),
+        "Expected [E1626] for unresolved capture, got: {:?}",
         errors
     );
 }

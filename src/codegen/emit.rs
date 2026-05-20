@@ -1154,6 +1154,18 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        "taida_async_task_par" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_async_task_par_map" => RuntimeAbi {
+            params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_async_task_new" => RuntimeAbi {
+            params: &[FnPtr],
+            returns: &[Ptr],
+        },
         "taida_async_spawn" => RuntimeAbi {
             params: &[FnPtr, Val],
             returns: &[Ptr],

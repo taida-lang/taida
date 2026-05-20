@@ -1017,6 +1017,42 @@ static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
     return func(arg0);
 }
 
+static int64_t _wasm_invoke_callback0(int64_t fn_ptr) {
+    if (taida_is_closure_value(fn_ptr)) {
+        int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
+        typedef int64_t (*closure_fn0_t)(int64_t);
+        closure_fn0_t func = (closure_fn0_t)(intptr_t)closure[1];
+        return func(closure[2]);
+    }
+    typedef int64_t (*fn_t)(void);
+    fn_t func = (fn_t)(intptr_t)fn_ptr;
+    return func();
+}
+
+int64_t taida_async_task_new(int64_t fn_ptr) {
+    taida_register_field_name(WASM_HASH_TODO_TASK, (int64_t)(intptr_t)"task");
+    taida_register_field_name(WASM_HASH___TYPE, (int64_t)(intptr_t)"__type");
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, WASM_HASH_TODO_TASK);
+    taida_pack_set(pack, 0, fn_ptr);
+    taida_pack_set_hash(pack, 1, WASM_HASH___TYPE);
+    taida_pack_set(pack, 1, (int64_t)(intptr_t)"AsyncTask");
+    taida_pack_set_tag(pack, 1, WASM_TAG_STR);
+    return pack;
+}
+
+static int64_t _wasm_async_task_callable(int64_t task) {
+    if (_looks_like_pack(task)
+        && taida_pack_has_hash(task, WASM_HASH_TODO_TASK)
+        && taida_pack_has_hash(task, WASM_HASH___TYPE)) {
+        int64_t type_name = taida_pack_get(task, WASM_HASH___TYPE);
+        if (taida_str_eq(type_name, (int64_t)(intptr_t)"AsyncTask")) {
+            return taida_pack_get(task, WASM_HASH_TODO_TASK);
+        }
+    }
+    return task;
+}
+
 /* RCB-101: Check error type and re-throw if it does not match.
    If the type matches, returns the error_val unchanged.
    If it does not match, calls taida_throw(error_val) which sets the error flag (never returns normally). */

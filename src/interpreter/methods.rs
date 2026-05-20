@@ -360,7 +360,7 @@ impl Interpreter {
     }
 
     // ── Helper: extract display string from a throw value ─────
-    fn throw_val_to_display_str(throw_val: &Value) -> String {
+    pub(crate) fn throw_val_to_display_str(throw_val: &Value) -> String {
         match throw_val {
             Value::Error(err) => {
                 if !err.message.is_empty() {

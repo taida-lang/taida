@@ -463,6 +463,72 @@ function AsyncReject(error) {
   return new __TaidaAsync(null, error, 'rejected');
 }
 
+class __TaidaAsyncTask {
+  constructor(fn) {
+    this.__type = 'AsyncTask';
+    this.__fn = fn;
+  }
+  run() {
+    return this.__fn();
+  }
+  toString() {
+    return 'AsyncTask[<task>]';
+  }
+}
+
+function AsyncTask(fn) {
+  if (typeof fn !== 'function') {
+    throw new __TaidaError('TypeError', 'AsyncTask expects a zero-argument function', {});
+  }
+  return new __TaidaAsyncTask(fn);
+}
+
+function __taida_async_task_error(error) {
+  const info = __taida_error_info(error);
+  const message = info.message || String(error || 'AsyncTask failed');
+  return new __TaidaError('AsyncTaskError', message, {
+    kind: 'AsyncTaskError',
+    code: info.code || 0,
+  });
+}
+
+function __taida_run_async_task(task) {
+  if (task instanceof __TaidaAsyncTask) return task.run();
+  if (typeof task === 'function') return task();
+  throw new __TaidaError('TypeError', 'Par expected AsyncTask values', {});
+}
+
+function Par(tasks) {
+  try {
+    const values = [];
+    for (const task of tasks) {
+      values.push(__taida_run_async_task(task));
+    }
+    return new __TaidaAsync(Object.freeze(values), null, 'fulfilled');
+  } catch (error) {
+    return new __TaidaAsync(null, __taida_async_task_error(error), 'rejected');
+  }
+}
+
+function ParMap(items, fn) {
+  if (typeof fn !== 'function') {
+    return new __TaidaAsync(
+      null,
+      new __TaidaError('AsyncTaskError', 'ParMap expects a unary function', { kind: 'AsyncTaskError', code: 0 }),
+      'rejected'
+    );
+  }
+  try {
+    const values = [];
+    for (const item of items) {
+      values.push(fn(item));
+    }
+    return new __TaidaAsync(Object.freeze(values), null, 'fulfilled');
+  } catch (error) {
+    return new __TaidaAsync(null, __taida_async_task_error(error), 'rejected');
+  }
+}
+
 // Build a pending Async from a Promise while preserving Async shape/toString.
 function __taida_async_pending_from_promise(promise) {
   const asyncObj = new __TaidaAsync(undefined, null, 'pending');
@@ -3131,6 +3197,7 @@ function __taida_typeof(x) {
   if (Array.isArray(x)) return 'List';
   if (x instanceof __TaidaJSON) return 'JSON';
   if (x instanceof __TaidaAsync) return 'Async';
+  if (x instanceof __TaidaAsyncTask) return 'AsyncTask';
   if (x && x.__type) return x.__type;
   if (typeof x === 'object') return 'BuchiPack';
   return 'Unknown';
@@ -3145,7 +3212,7 @@ function __taida_typename(x) {
   }
   if (x && typeof x === 'object' && typeof x.__type === 'string') return x.__type;
   if (x instanceof __TaidaError || x instanceof globalThis.Error) return x.type || x.name || 'Error';
-  if (Array.isArray(x) || __taida_isBytes(x) || x instanceof __TaidaJSON || x instanceof __TaidaAsync) return __taida_typeof(x);
+  if (Array.isArray(x) || __taida_isBytes(x) || x instanceof __TaidaJSON || x instanceof __TaidaAsync || x instanceof __TaidaAsyncTask) return __taida_typeof(x);
   if (x && typeof x === 'object') return '';
   return __taida_typeof(x);
 }
