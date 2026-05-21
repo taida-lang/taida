@@ -331,6 +331,10 @@ fn wasm_edge_generates_js_glue() {
         "glue should have Workers fetch handler"
     );
     assert!(
+        glue_content.contains("export async function handleTaidaRequest(request, env, ctx)"),
+        "glue should expose an importable Taida request adapter"
+    );
+    assert!(
         glue_content.contains("wasi_snapshot_preview1"),
         "glue should provide wasi_snapshot_preview1"
     );
@@ -418,6 +422,40 @@ fn wasm_edge_glue_syntax_valid() {
             String::from_utf8_lossy(&check.stderr)
         );
     }
+}
+
+/// Test: current Workers glue mode is explicitly the stdout `_start` adapter.
+#[test]
+fn wasm_edge_glue_current_mode_is_stdout_start_adapter() {
+    let glue = taida::codegen::edge_glue::generate_edge_js_source(
+        taida::codegen::edge_glue::EdgeGlueConfig::stdout("test", "test.wasm"),
+    );
+
+    assert!(
+        glue.contains("instance.exports._start()"),
+        "stdout adapter should invoke the wasm _start export"
+    );
+    assert!(
+        !glue.contains("taida_abi_web_handle"),
+        "stdout adapter should not pretend to expose the request handler ABI"
+    );
+}
+
+/// Test: generated glue can be imported from user-authored Workers JS.
+#[test]
+fn wasm_edge_glue_exposes_importable_request_adapter() {
+    let glue = taida::codegen::edge_glue::generate_edge_js_source(
+        taida::codegen::edge_glue::EdgeGlueConfig::stdout("test", "test.wasm"),
+    );
+
+    assert!(
+        glue.contains("export async function handleTaidaRequest(request, env, ctx)"),
+        "glue should expose a named adapter for custom JS routing"
+    );
+    assert!(
+        glue.contains("return handleTaidaRequest(request, env, ctx);"),
+        "default Workers fetch should delegate to the named adapter"
+    );
 }
 
 /// Test: wasm-edge env example also produces JS glue.
