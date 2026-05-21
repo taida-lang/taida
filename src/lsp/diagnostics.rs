@@ -57,11 +57,7 @@ fn parse_error_to_diagnostic(err: &ParseError, source: &str) -> Diagnostic {
     let end_col_char = if err.span.end > err.span.start {
         // Span.start/end are char offsets (from Vec<char> indexing in the lexer).
         // Compute how many chars precede this line to get a line-relative offset.
-        let line_start_char: usize = source
-            .lines()
-            .take(line)
-            .map(|l| l.chars().count() + 1) // +1 for newline
-            .sum();
+        let line_start_char = line_start_char_offset(source, line);
 
         err.span.end.saturating_sub(line_start_char)
     } else {
@@ -109,11 +105,7 @@ fn type_error_to_diagnostic(err: &crate::types::TypeError, source: &str) -> Diag
 
     // Calculate end column (0-based char index) from the span's char range.
     let end_col_char = if err.span.end > err.span.start {
-        let line_start_char: usize = source
-            .lines()
-            .take(line)
-            .map(|l| l.chars().count() + 1) // +1 for newline
-            .sum();
+        let line_start_char = line_start_char_offset(source, line);
 
         err.span.end.saturating_sub(line_start_char)
     } else {
@@ -150,6 +142,14 @@ fn type_error_to_diagnostic(err: &crate::types::TypeError, source: &str) -> Diag
         message: err.message.clone(),
         ..Default::default()
     }
+}
+
+fn line_start_char_offset(source: &str, line: usize) -> usize {
+    source
+        .split_inclusive('\n')
+        .take(line)
+        .map(|segment| segment.chars().count())
+        .sum()
 }
 
 #[cfg(test)]

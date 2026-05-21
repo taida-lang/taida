@@ -1118,9 +1118,10 @@ impl GraphExtractor {
                     });
                 }
                 // If no ceiling, it propagates to gorilla ceiling (uncovered)
+                self.extract_error_expr(graph, inner, current_ceiling, current_func, func_names);
             }
 
-            Expr::MethodCall(obj, method, _, span) if method == "throw" => {
+            Expr::MethodCall(obj, method, args, span) if method == "throw" => {
                 let throw_id =
                     Graph::make_id(&self.file, span.line, span.column, &NodeKind::ThrowSite);
                 let mut metadata = HashMap::new();
@@ -1147,6 +1148,10 @@ impl GraphExtractor {
                         label: "throws to".to_string(),
                         metadata: HashMap::new(),
                     });
+                }
+                self.extract_error_expr(graph, obj, current_ceiling, current_func, func_names);
+                for arg in args {
+                    self.extract_error_expr(graph, arg, current_ceiling, current_func, func_names);
                 }
             }
 
@@ -1232,7 +1237,7 @@ impl GraphExtractor {
             Expr::MoldInst(name, type_args, fields, _) => {
                 for (idx, arg) in type_args.iter().enumerate() {
                     if let Expr::Lambda(_, body, _) = arg
-                        && (name == "AsyncTask" || name == "ParMap" && idx == 1)
+                        && (name == "AsyncTask" || (name == "ParMap" && idx == 1))
                     {
                         self.extract_error_expr(
                             graph,

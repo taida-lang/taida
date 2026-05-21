@@ -750,14 +750,14 @@ pub fn parse_addon_manifest_str(
     for (fn_name, fn_value) in functions_raw {
         match fn_value {
             RawValue::Int(n) => {
-                if n < 0 {
+                let Ok(arity) = u32::try_from(n) else {
                     return Err(AddonManifestError::InvalidArity {
                         path: path.to_path_buf(),
                         function: fn_name,
                         raw: n.to_string(),
                     });
-                }
-                functions.insert(fn_name, n as u32);
+                };
+                functions.insert(fn_name, arity);
             }
             other => {
                 return Err(AddonManifestError::InvalidArity {
@@ -1927,6 +1927,20 @@ library = "z"
 f = -1
 "#;
         let err = parse(src).expect_err("negative arity must error");
+        assert!(matches!(err, AddonManifestError::InvalidArity { .. }));
+    }
+
+    #[test]
+    fn oversized_arity_is_rejected() {
+        let src = r#"
+abi = 1
+entry = "taida_addon_get_v1"
+package = "x/y"
+library = "z"
+[functions]
+f = 4294967296
+"#;
+        let err = parse(src).expect_err("oversized arity must error");
         assert!(matches!(err, AddonManifestError::InvalidArity { .. }));
     }
 

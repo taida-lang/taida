@@ -1678,12 +1678,14 @@ int64_t taida_str_char_at(int64_t s_raw, int64_t idx_raw) {
 /// Repeat[str, n]() -- repeat string n times
 int64_t taida_str_repeat(int64_t s_raw, int64_t n_raw) {
     const char *s = (const char *)s_raw;
+    if (!s || n_raw <= 0 || n_raw > TAIDA_WASM_I32_MAX) { return taida_str_alloc(0); }
     int n = (int)n_raw;
-    if (!s || n <= 0) { return taida_str_alloc(0); }
     int slen = _wf_strlen(s);
     if (slen == 0) { return taida_str_alloc(0); }
+    if (n > (TAIDA_WASM_I32_MAX - 1) / slen) { return taida_str_alloc(0); }
     int total = slen * n;
     char *r = (char *)wasm_alloc((unsigned int)(total + 1));
+    if (!r) { return taida_str_alloc(0); }
     for (int i = 0; i < n; i++) {
         _wf_memcpy(r + i * slen, s, slen);
     }
@@ -1707,11 +1709,14 @@ int64_t taida_str_reverse(int64_t s_raw) {
 /// Pad[str, target_len](padChar, padEnd) -- pad string to target length
 int64_t taida_str_pad(int64_t s_raw, int64_t target_len_raw, int64_t pad_char_raw, int64_t pad_end_raw) {
     const char *s = (const char *)s_raw;
-    int target_len = (int)target_len_raw;
     const char *pad_char = (const char *)pad_char_raw;
     int pad_end = (int)pad_end_raw;
     if (!s) { return taida_str_alloc(0); }
     int slen = _wf_strlen(s);
+    if (target_len_raw <= slen || target_len_raw > TAIDA_WASM_I32_MAX - 1) {
+        return taida_str_new_copy(s_raw);
+    }
+    int target_len = (int)target_len_raw;
     if (slen >= target_len) {
         return taida_str_new_copy(s_raw);
     }
@@ -1719,6 +1724,7 @@ int64_t taida_str_pad(int64_t s_raw, int64_t target_len_raw, int64_t pad_char_ra
     char pc = ' ';
     if (pad_char && _wf_strlen(pad_char) > 0) pc = pad_char[0];
     char *r = (char *)wasm_alloc((unsigned int)(target_len + 1));
+    if (!r) { return taida_str_new_copy(s_raw); }
     if (pad_end) {
         _wf_memcpy(r, s, slen);
         for (int i = 0; i < pad_len; i++) r[slen + i] = pc;

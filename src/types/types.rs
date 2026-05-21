@@ -465,32 +465,15 @@ impl TypeRegistry {
                         },
                     )
             }
+            (Type::Error(a), Type::Error(b)) => {
+                self.named_inherits_from(a, b) || self.named_fields_subtype(a, b, strict_int_float)
+            }
+            (Type::Error(a), Type::Named(b)) | (Type::Named(a), Type::Error(b)) => {
+                self.named_inherits_from(a, b) || self.named_fields_subtype(a, b, strict_int_float)
+            }
             // Named vs Named: check inheritance chain, then structural fields
             (Type::Named(a), Type::Named(b)) => {
-                let mut current = a.clone();
-                let mut visited = HashSet::new();
-                visited.insert(a.clone());
-                while let Some(parent) = self.inheritance.get(&current) {
-                    if parent == b {
-                        return true;
-                    }
-                    if !visited.insert(parent.clone()) {
-                        break;
-                    }
-                    current = parent.clone();
-                }
-                if let (Some(a_fields), Some(b_fields)) =
-                    (self.get_type_fields(a), self.get_type_fields(b))
-                {
-                    b_fields.iter().all(|(exp_name, exp_type)| {
-                        a_fields.iter().any(|(self_name, self_type)| {
-                            self_name == exp_name
-                                && self.is_subtype_of_inner(self_type, exp_type, strict_int_float)
-                        })
-                    })
-                } else {
-                    false
-                }
+                self.named_inherits_from(a, b) || self.named_fields_subtype(a, b, strict_int_float)
             }
             (Type::Named(name), Type::BuchiPack(expected_fields)) => {
                 if let Some(actual_fields) = self.get_type_fields(name) {
@@ -517,6 +500,40 @@ impl TypeRegistry {
                 }
             }
             _ => actual.is_subtype_of_inner(expected, strict_int_float),
+        }
+    }
+
+    fn named_inherits_from(&self, actual: &str, expected: &str) -> bool {
+        if actual == expected {
+            return true;
+        }
+        let mut current = actual;
+        let mut visited = HashSet::new();
+        visited.insert(current.to_string());
+        while let Some(parent) = self.inheritance.get(current) {
+            if parent == expected {
+                return true;
+            }
+            if !visited.insert(parent.clone()) {
+                break;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    fn named_fields_subtype(&self, actual: &str, expected: &str, strict_int_float: bool) -> bool {
+        if let (Some(actual_fields), Some(expected_fields)) =
+            (self.get_type_fields(actual), self.get_type_fields(expected))
+        {
+            expected_fields.iter().all(|(exp_name, exp_type)| {
+                actual_fields.iter().any(|(self_name, self_type)| {
+                    self_name == exp_name
+                        && self.is_subtype_of_inner(self_type, exp_type, strict_int_float)
+                })
+            })
+        } else {
+            false
         }
     }
 

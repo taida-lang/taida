@@ -258,7 +258,13 @@ impl Graph {
 
     /// Add an edge.
     pub fn add_edge(&mut self, edge: GraphEdge) {
-        self.edges.push(edge);
+        if !self.edges.iter().any(|existing| {
+            existing.source == edge.source
+                && existing.target == edge.target
+                && existing.kind == edge.kind
+        }) {
+            self.edges.push(edge);
+        }
     }
 
     /// Make a node ID from location and kind.

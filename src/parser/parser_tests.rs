@@ -3164,6 +3164,20 @@ fn test_e30b_007_rust_addon_binding_with_nonzero_arity() {
 }
 
 #[test]
+fn rust_addon_binding_oversized_arity_is_not_a_valid_binding() {
+    use crate::parser::ast::Statement;
+
+    let source = "bad <= RustAddon[\"bad\"](arity <= 4294967296)\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    assert_eq!(assign.as_rust_addon_binding(), None);
+}
+
+#[test]
 fn test_e30b_007_rust_addon_binding_rejects_missing_quotes() {
     // Lock-G fixes the syntax: the function name MUST be a string
     // literal so doc-gen / drift check can extract it without

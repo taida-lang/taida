@@ -2467,24 +2467,24 @@ fn test_builtin_hashmap_empty_is_ok() {
 
 #[test]
 fn test_method_call_take_wrong_type() {
-    // E1508: xs.take("oops") — take expects Int
+    // take moved to molds; list method syntax is rejected before arg typing.
     let source = "xs <= @[1, 2, 3]\nresult <= xs.take(\"oops\")";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1508]")),
-        "Expected E1508 for take(\"oops\") type mismatch, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1509]")),
+        "Expected E1509 for removed take() method, got: {:?}",
         errors
     );
 }
 
 #[test]
 fn test_method_call_take_too_many_args() {
-    // E1508: xs.take(1, 2) — take expects 1 arg
+    // take moved to molds; list method syntax is rejected before arity typing.
     let source = "xs <= @[1, 2, 3]\nresult <= xs.take(1, 2)";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1508]")),
-        "Expected E1508 for take(1, 2) too many args, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1509]")),
+        "Expected E1509 for removed take() method, got: {:?}",
         errors
     );
 }
@@ -6650,7 +6650,7 @@ fn cpu_parallel_par_map_rejects_effectful_mapper_reference() {
 
 #[test]
 fn cpu_parallel_par_map_direct_throw_arm_infers_from_value_arm() {
-    let src = "TaskErr = @(type: Str, message: Str)\n\
+    let src = "Error => TaskErr = @(type: Str, message: Str)\n\
                out <= ParMap[@[3], _ x: Int = | x > 2 |> TaskErr(type <= \"TaskErr\", message <= \"boom\").throw() | _ |> x * 2]()\n";
     let (_, errors) = check(src);
     assert!(

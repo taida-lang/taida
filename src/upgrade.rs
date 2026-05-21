@@ -481,6 +481,7 @@ pub fn extract_binary_from_tar_gz(
 ) -> Result<Vec<u8>, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
+    const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 
     let decoder = GzDecoder::new(archive_bytes);
     let mut archive = tar::Archive::new(decoder);
@@ -491,7 +492,7 @@ pub fn extract_binary_from_tar_gz(
         .entries()
         .map_err(|e| format!("failed to read tar entries: {}", e))?
     {
-        let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
+        let entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
         let path = entry
             .path()
             .map_err(|e| format!("failed to read entry path: {}", e))?
@@ -499,10 +500,25 @@ pub fn extract_binary_from_tar_gz(
             .to_string();
 
         if path == binary_path {
+            let size = entry.header().size().unwrap_or(0);
+            if size > MAX_BINARY_BYTES {
+                return Err(format!(
+                    "binary in archive is too large: {} bytes (max {})",
+                    size, MAX_BINARY_BYTES
+                ));
+            }
             let mut buf = Vec::new();
             entry
+                .take(MAX_BINARY_BYTES + 1)
                 .read_to_end(&mut buf)
                 .map_err(|e| format!("failed to read binary from archive: {}", e))?;
+            if buf.len() as u64 > MAX_BINARY_BYTES {
+                return Err(format!(
+                    "binary in archive is too large: {} bytes (max {})",
+                    buf.len(),
+                    MAX_BINARY_BYTES
+                ));
+            }
             return Ok(buf);
         }
     }
@@ -925,40 +941,51 @@ pub fn download_verified_sha256sums(sha256sums_url: &str) -> Result<String, Stri
 
 /// Replace the current executable with the new binary.
 ///
-/// Strategy: rename current -> current.old, write new -> current, remove old.
+/// Strategy: copy current -> current.old, write new -> current.new, then
+/// atomically rename current.new over current. If writing the new file fails,
+/// the current executable remains in place.
 pub fn self_replace(new_binary: &[u8]) -> Result<(), String> {
     let current = std::env::current_exe()
         .map_err(|e| format!("cannot determine current executable path: {}", e))?;
 
     let backup = current.with_extension("old");
+    let staged = current.with_extension("new");
 
-    // Rename current -> backup
-    std::fs::rename(&current, &backup).map_err(|e| {
+    std::fs::copy(&current, &backup).map_err(|e| {
         format!(
-            "failed to rename {} -> {}: {}",
+            "failed to copy {} -> {}: {}",
             current.display(),
             backup.display(),
             e
         )
     })?;
 
-    // Write new binary
-    if let Err(e) = std::fs::write(&current, new_binary) {
-        // Attempt to restore backup
-        let _ = std::fs::rename(&backup, &current);
-        return Err(format!(
-            "failed to write new binary to {}: {}",
-            current.display(),
-            e
-        ));
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&staged)
+            .map_err(|e| format!("failed to create staged binary {}: {}", staged.display(), e))?;
+        file.write_all(new_binary)
+            .map_err(|e| format!("failed to write staged binary {}: {}", staged.display(), e))?;
+        file.sync_all()
+            .map_err(|e| format!("failed to sync staged binary {}: {}", staged.display(), e))?;
     }
 
     // Make executable on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
     }
+
+    std::fs::rename(&staged, &current).map_err(|e| {
+        let _ = std::fs::remove_file(&staged);
+        format!(
+            "failed to install staged binary {} -> {}: {}",
+            staged.display(),
+            current.display(),
+            e
+        )
+    })?;
 
     // Remove backup
     let _ = std::fs::remove_file(&backup);

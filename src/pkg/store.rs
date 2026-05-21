@@ -53,6 +53,89 @@ fn github_api_url() -> String {
     std::env::var("TAIDA_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
 }
 
+fn extract_source_tarball_safely(archive_path: &Path, pkg_dir: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| format!("cannot open archive '{}': {}", archive_path.display(), e))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry_result in archive
+        .entries()
+        .map_err(|e| format!("failed to read tar entries: {}", e))?
+    {
+        let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink()
+            || entry_type.is_hard_link()
+            || entry_type.is_character_special()
+            || entry_type.is_block_special()
+            || entry_type.is_fifo()
+        {
+            let path = entry
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<invalid path>".to_string());
+            return Err(format!("refusing unsafe tar entry '{}'", path));
+        }
+
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            let path = entry
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<invalid path>".to_string());
+            return Err(format!("refusing unsupported tar entry '{}'", path));
+        }
+
+        let raw_path = entry
+            .path()
+            .map_err(|e| format!("failed to read tar entry path: {}", e))?
+            .into_owned();
+        let mut stripped = PathBuf::new();
+        let mut skipped_top = false;
+        for component in raw_path.components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    if !skipped_top {
+                        skipped_top = true;
+                    } else {
+                        stripped.push(part);
+                    }
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    return Err(format!(
+                        "refusing path traversal entry '{}'",
+                        raw_path.display()
+                    ));
+                }
+            }
+        }
+
+        if !skipped_top || stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        let target = pkg_dir.join(&stripped);
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("failed to create directory '{}': {}", target.display(), e))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("failed to create directory '{}': {}", parent.display(), e)
+                })?;
+            }
+            entry
+                .unpack(&target)
+                .map_err(|e| format!("failed to unpack '{}': {}", target.display(), e))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn local_mock_github_base_url_allowed() -> bool {
     (cfg!(debug_assertions) || cfg!(taida_allow_mock_github_base_url))
         && std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL")
@@ -565,21 +648,12 @@ impl GlobalStore {
             return Err(e);
         }
 
-        // Extract tarball (--strip-components=1 removes the top-level directory)
-        let tar_status = std::process::Command::new("tar")
-            .args(["xzf"])
-            .arg(&archive_path)
-            .args(["--strip-components=1", "-C"])
-            .arg(&pkg_dir)
-            .status()
-            .map_err(|e| format!("Failed to run tar: {}", e))?;
-
-        if !tar_status.success() {
+        if let Err(e) = extract_source_tarball_safely(&archive_path, &pkg_dir) {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             let _ = std::fs::remove_dir_all(&pkg_dir);
             return Err(format!(
-                "Failed to extract package {}/{}@{}",
-                org, name, version
+                "Failed to extract package {}/{}@{}: {}",
+                org, name, version, e
             ));
         }
 

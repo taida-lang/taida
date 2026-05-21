@@ -435,7 +435,14 @@ impl Interpreter {
             let val = if i < arg_values.len() {
                 arg_values[i].clone()
             } else {
-                Value::Unit
+                self.env.pop_scope();
+                self.env.pop_scope();
+                return Err(RuntimeError {
+                    message: format!(
+                        "Method '{}' missing argument '{}'",
+                        func_def.name, param.name
+                    ),
+                });
             };
             self.env.define_force(&param.name, val);
         }
@@ -950,11 +957,24 @@ impl Interpreter {
                         }
                     }
                 }
-                // Key not found — return empty Lax
+                let default_value = entries
+                    .iter()
+                    .find_map(|entry| {
+                        if let Value::BuchiPack(ef) = entry {
+                            ef.iter()
+                                .find(|(n, _)| n == "value")
+                                .map(|(_, v)| Interpreter::default_for_value(v))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| Value::str(String::new()));
+
+                // Key not found — return empty Lax with the map's value default.
                 Ok(Signal::Value(Value::pack(vec![
                     ("has_value".into(), Value::Bool(false)),
-                    ("__value".into(), Value::Unit),
-                    ("__default".into(), Value::Unit),
+                    ("__value".into(), default_value.clone()),
+                    ("__default".into(), default_value),
                     ("__type".into(), Value::str("Lax".into())),
                 ])))
             }
@@ -2050,10 +2070,9 @@ impl Interpreter {
                         // Rejected async throws the error
                         Ok(Signal::Throw((*async_val.error).clone()))
                     }
-                    AsyncStatus::Pending => {
-                        // In synchronous mode, pending returns Unit
-                        Ok(Signal::Value(Value::Unit))
-                    }
+                    AsyncStatus::Pending => Err(RuntimeError {
+                        message: "Pending Async has no task to await".to_string(),
+                    }),
                 }
             }
             "map" => {

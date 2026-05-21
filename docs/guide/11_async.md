@@ -256,7 +256,6 @@ addon_purity = "allow declared"
 ```taida
 counter <= 0
 build value: Int =
-  => :Async[Int]
   Async[value + 1]()
 => :Async[Int]
 

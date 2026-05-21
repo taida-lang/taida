@@ -92,9 +92,9 @@ impl Interpreter {
         current: Value,
     ) -> Result<Signal, RuntimeError> {
         match step {
+            Expr::Placeholder(_) => Ok(Signal::Value(current)),
             Expr::FuncCall(callee, args, span) => {
-                // Check if any arg is a Placeholder
-                let has_placeholder = args.iter().any(|a| matches!(a, Expr::Placeholder(_)));
+                let has_placeholder = args.iter().any(expr_contains_placeholder);
 
                 if has_placeholder {
                     // Replace placeholders with current value in the args,
@@ -104,16 +104,11 @@ impl Interpreter {
                     let pipe_val_name = "__pipe_current__";
                     self.env.define_force(pipe_val_name, current);
 
-                    let mut new_args: Vec<Expr> = Vec::new();
                     let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    for arg in args {
-                        if matches!(arg, Expr::Placeholder(_)) {
-                            new_args
-                                .push(Expr::Ident(pipe_val_name.to_string(), dummy_span.clone()));
-                        } else {
-                            new_args.push(arg.clone());
-                        }
-                    }
+                    let new_args: Vec<Expr> = args
+                        .iter()
+                        .map(|arg| rewrite_nested_placeholder(arg, pipe_val_name, &dummy_span))
+                        .collect();
 
                     let new_call = Expr::FuncCall(callee.clone(), new_args, span.clone());
                     let result = self.eval_expr(&new_call);
@@ -204,7 +199,7 @@ impl Interpreter {
                     result
                 }
             }
-            Expr::Ident(_, _) => {
+            Expr::Ident(name, _) => {
                 // Identifier in pipeline: evaluate it, and if it's a function, call it with current
                 let step_val = match self.eval_expr(step)? {
                     Signal::Value(v) => v,
@@ -217,10 +212,12 @@ impl Interpreter {
                         self.call_function_with_values(func, &args)
                             .map(Signal::Value)
                     }
-                    _ => {
-                        // Not a function — just return the evaluated value
-                        Ok(Signal::Value(step_val))
-                    }
+                    _ => Err(RuntimeError {
+                        message: format!(
+                            "Pipeline step '{}' resolved to a non-function value",
+                            name
+                        ),
+                    }),
                 }
             }
             _ => {

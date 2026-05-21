@@ -114,8 +114,10 @@ pub fn is_official_release_url(url: &str) -> bool {
         Some((h, p)) => (h, p),
         None => return false,
     };
-    matches!(host, "github.com" | "www.github.com")
-        && path.starts_with("taida-lang/")
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "github.com" | "www.github.com"
+    ) && path.starts_with("taida-lang/")
         && path.contains("/releases/")
 }
 

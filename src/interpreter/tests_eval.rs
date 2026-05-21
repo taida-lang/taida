@@ -809,12 +809,35 @@ result <= numbers.get(10).unmold()
     }
 
     #[test]
+    fn test_list_take_negative_count() {
+        let source = "Take[@[1, 2, 3], -1]()";
+        if let Value::List(items) = eval_ok(source) {
+            assert!(items.is_empty());
+        } else {
+            panic!("Expected list");
+        }
+    }
+
+    #[test]
     fn test_list_drop() {
         let source = "Drop[@[1, 2, 3, 4, 5], 2]()";
         if let Value::List(items) = eval_ok(source) {
             assert_eq!(
                 items.as_slice(),
                 &[Value::Int(3), Value::Int(4), Value::Int(5)]
+            );
+        } else {
+            panic!("Expected list");
+        }
+    }
+
+    #[test]
+    fn test_list_drop_negative_count() {
+        let source = "Drop[@[1, 2, 3], -1]()";
+        if let Value::List(items) = eval_ok(source) {
+            assert_eq!(
+                items.as_slice(),
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
             );
         } else {
             panic!("Expected list");
@@ -922,6 +945,23 @@ result <= numbers.get(10).unmold()
     }
 
     #[test]
+    fn test_mold_repeat_negative_count() {
+        assert_eq!(eval_ok("Repeat[\"ha\", -1]()"), Value::str(String::new()));
+    }
+
+    #[test]
+    fn test_mold_repeat_huge_count() {
+        let source = "Repeat[\"x\", 9223372036854775807]()";
+        assert_eq!(eval_ok(source), Value::str(String::new()));
+    }
+
+    #[test]
+    fn test_mold_string_repeat_join_huge_count() {
+        let source = "StringRepeatJoin[\"x\", 9223372036854775807, \",\"]()";
+        assert_eq!(eval_ok(source), Value::str(String::new()));
+    }
+
+    #[test]
     fn test_mold_reverse_str() {
         assert_eq!(eval_ok("Reverse[\"hello\"]()"), Value::str("olleh".into()));
     }
@@ -962,6 +1002,17 @@ result <= numbers.get(10).unmold()
         );
     }
 
+    #[test]
+    fn test_mold_pad_negative_target_len() {
+        assert_eq!(eval_ok("Pad[\"42\", -1]()"), Value::str("42".into()));
+    }
+
+    #[test]
+    fn test_mold_pad_huge_target_len() {
+        let source = "Pad[\"42\", 9223372036854775807]()";
+        assert_eq!(eval_ok(source), Value::str("42".into()));
+    }
+
     // Num molds
     #[test]
     fn test_mold_tofixed() {
@@ -972,6 +1023,12 @@ result <= numbers.get(10).unmold()
     fn test_mold_abs() {
         assert_eq!(eval_ok("Abs[-5]()"), Value::Int(5));
         assert_eq!(eval_ok("Abs[-3.7]()"), Value::Float(3.7));
+    }
+
+    #[test]
+    fn test_mold_abs_i64_min_saturates() {
+        let source = "x <= 0 - 9223372036854775807 - 1\nAbs[x]()";
+        assert_eq!(eval_ok(source), Value::Int(i64::MAX));
     }
 
     #[test]
@@ -2703,6 +2760,28 @@ v"#,
         assert!(
             msg.contains("drift") || msg.contains("arity"),
             "diagnostic must mention arity drift, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn rust_addon_oversized_arity_rejects_before_wraparound() {
+        let mut interp = Interpreter::new();
+        let mut arities = std::collections::BTreeMap::<String, u32>::new();
+        arities.insert("terminalSize".to_string(), 0);
+        interp.loading_addon_facade_ctx = Some(("taida-lang/terminal".to_string(), arities));
+
+        let (program, errors) = crate::parser::parse(
+            r#"terminalSize <= RustAddon["terminalSize"](arity <= 4294967296)"#,
+        );
+        assert!(errors.is_empty(), "parse: {:?}", errors);
+        let err = interp
+            .eval_program(&program)
+            .expect_err("oversized arity must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[E1412]") && msg.contains("4294967296"),
+            "expected oversized arity diagnostic, got: {}",
             msg
         );
     }

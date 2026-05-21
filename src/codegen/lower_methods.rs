@@ -170,7 +170,15 @@ impl Lowering {
             "search" => "taida_str_search_regex",
             // E32B-022 (Lock-N): Lax[Int]-returning sibling of `search`.
             "searchLax" => "taida_str_search_regex_lax",
-            "slice" => "taida_str_slice",
+            "slice" => {
+                if self.expr_is_string_full(obj) {
+                    "taida_str_slice"
+                } else {
+                    return Err(LowerError {
+                        message: "list method .slice() has moved to Slice[] mold.".to_string(),
+                    });
+                }
+            }
             "charAt" => "taida_str_char_at",
             "repeat" => "taida_str_repeat",
             "startsWith" => "taida_str_starts_with",
@@ -209,7 +217,8 @@ impl Lowering {
                 }
                 return self.lower_polymorphic_get(func, obj_var, args);
             }
-            "push" | "sum" | "reverse" | "concat" | "join" | "sort" | "unique" | "flatten" => {
+            "take" | "drop" | "push" | "append" | "sum" | "reverse" | "concat" | "join"
+            | "sort" | "unique" | "flatten" | "zip" => {
                 return Err(LowerError {
                     message: format!(
                         "list method .{}() has moved to molds. Use the corresponding mold (e.g. Join[], Sum[], Reverse[], Sort[]).",
@@ -242,6 +251,11 @@ impl Lowering {
             "isFulfilled" => "taida_async_is_fulfilled",
             "isRejected" => "taida_async_is_rejected",
             "unmold" => "taida_generic_unmold",
+            "remove" if self.expr_is_list(obj) => {
+                return Err(LowerError {
+                    message: "list method .remove() is not supported.".to_string(),
+                });
+            }
             // HashMap methods (immutable semantics)
             "set" => {
                 return self.lower_hashmap_set(func, obj_var, args);

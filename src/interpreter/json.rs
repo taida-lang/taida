@@ -396,51 +396,31 @@ fn make_lax_enum_inline() -> Value {
 /// Convert a JSON value to a primitive Taida value.
 ///
 /// Philosophy I: "null/undefined の完全排除 — 全ての型にデフォルト値を保証"
-/// Parse failures and type mismatches silently fall back to the type's default
-/// value (0, 0.0, "", false). This is intentional per Taida's null-exclusion
-/// philosophy, though it means parse errors are indistinguishable from legitimate
-/// zero/empty values.
+/// Parse failures and type mismatches fall back to the type's default value.
+/// This keeps the no-null guarantee without introducing implicit conversions
+/// between unrelated JSON primitive kinds.
 fn json_to_primitive(json: &serde_json::Value, prim: &PrimitiveType) -> Value {
     match prim {
         PrimitiveType::Int => match json {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     Value::Int(i)
-                } else if let Some(f) = n.as_f64() {
-                    Value::Int(f as i64)
                 } else {
                     Value::Int(0)
                 }
             }
-            serde_json::Value::String(s) => {
-                s.parse::<i64>().map(Value::Int).unwrap_or(Value::Int(0))
-            }
-            serde_json::Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
             _ => Value::Int(0),
         },
         PrimitiveType::Float => match json {
             serde_json::Value::Number(n) => Value::Float(n.as_f64().unwrap_or(0.0)),
-            serde_json::Value::String(s) => s
-                .parse::<f64>()
-                .map(Value::Float)
-                .unwrap_or(Value::Float(0.0)),
-            serde_json::Value::Bool(b) => Value::Float(if *b { 1.0 } else { 0.0 }),
             _ => Value::Float(0.0),
         },
         PrimitiveType::Str => match json {
             serde_json::Value::String(s) => Value::str(s.clone()),
-            serde_json::Value::Number(n) => Value::str(format!("{}", n)),
-            serde_json::Value::Bool(b) => Value::str(format!("{}", b)),
-            serde_json::Value::Null => Value::str(String::new()),
-            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                Value::str(serde_json::to_string(json).unwrap_or_default())
-            }
+            _ => Value::str(String::new()),
         },
         PrimitiveType::Bool => match json {
             serde_json::Value::Bool(b) => Value::Bool(*b),
-            serde_json::Value::Number(n) => Value::Bool(n.as_f64().is_some_and(|f| f != 0.0)),
-            serde_json::Value::String(s) => Value::Bool(!s.is_empty()),
-            serde_json::Value::Null => Value::Bool(false),
             _ => Value::Bool(false),
         },
     }

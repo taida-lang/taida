@@ -881,6 +881,7 @@ taida_val taida_os_run_interactive(taida_val program_ptr, taida_val args_list_pt
     char msg[256];
     snprintf(msg, sizeof(msg), "Process '%s' exited with code %" PRId64, program, exit_code);
     taida_val error = taida_make_error("ProcessError", msg);
+    taida_release(inner);
     return taida_gorillax_err(error);
 }
 
@@ -948,6 +949,7 @@ taida_val taida_os_exec_shell_interactive(taida_val command_ptr) {
     char msg[256];
     snprintf(msg, sizeof(msg), "Shell command exited with code %" PRId64 ": %s", exit_code, command);
     taida_val error = taida_make_error("ProcessError", msg);
+    taida_release(inner);
     return taida_gorillax_err(error);
 }
 

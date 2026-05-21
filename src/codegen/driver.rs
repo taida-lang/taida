@@ -36,8 +36,13 @@ type ModuleImports = Vec<(String, Vec<String>, Option<String>)>;
 ///
 /// Cache keys are profile-scoped via `cache_key()` so wasm-min never picks up
 /// a cached `rt_core.o` that was built with `-msimd128` and vice versa.
-const WASM_CLANG_FLAGS_COMMON: &[&str] =
-    &["--target=wasm32-unknown-wasi", "-nostdlib", "-O2", "-c"];
+const WASM_CLANG_FLAGS_COMMON: &[&str] = &[
+    "--target=wasm32-unknown-wasi",
+    "-nostdlib",
+    "-O2",
+    "-fwrapv",
+    "-c",
+];
 const WASM_CLANG_FLAGS_MIN: &[&str] = &[];
 const WASM_CLANG_FLAGS_WASI: &[&str] = &["-msimd128"];
 const WASM_CLANG_FLAGS_EDGE: &[&str] = &["-msimd128"];
@@ -926,7 +931,7 @@ fn link_objects_inner(
     let mut cmd = {
         // Unix: cc でコンパイル + リンク（-no-pie で PIE 警告を回避）
         let mut c = Command::new("cc");
-        c.arg("-no-pie").arg(&c_path);
+        c.arg("-no-pie").arg("-fwrapv").arg(&c_path);
         for obj in obj_paths {
             c.arg(obj);
         }

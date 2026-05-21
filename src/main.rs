@@ -696,7 +696,9 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
 
     // Check for --no-check flag
     let no_check = args.iter().any(|a| a == "--no-check");

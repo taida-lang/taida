@@ -557,9 +557,9 @@ fn test_cpu_parallel_rejected_task_backend_parity() {
         return;
     }
     let source = r#"
-TaskErr = @(type: Str, message: Str)
+Error => TaskErr = @(reason: Str)
 failTask =
-  TaskErr(type <= "TaskErr", message <= "boom").throw()
+  TaskErr(type <= "TaskErr", message <= "boom", reason <= "worker").throw()
 => :Int
 handle =
   |== error: Error =
@@ -622,9 +622,9 @@ fn test_cpu_parallel_par_map_rejected_task_message_backend_parity() {
         return;
     }
     let source = r#"
-TaskErr = @(type: Str, message: Str)
+Error => TaskErr = @(reason: Str)
 failMap x: Int =
-  TaskErr(type <= "TaskErr", message <= "map-boom").throw()
+  TaskErr(type <= "TaskErr", message <= "map-boom", reason <= "worker").throw()
 => :Int
 handle =
   |== error: Error =
@@ -3226,6 +3226,25 @@ stdout(i2.getOrDefault(-1).toString())
         out,
         "16\n15\n10\n1000\n1000\n2\n1099511627776\n999\nff\nbad\n255\n-1"
     );
+}
+
+#[test]
+fn test_abs_i64_min_interpreter_native_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping Abs i64 min native parity");
+        return;
+    }
+
+    let source = r#"
+x <= 0 - 9223372036854775807 - 1
+stdout(Abs[x]().toString())
+"#;
+    let interp = run_interpreter_src(source, "abs_i64_min_interp")
+        .expect("interpreter should handle Abs at i64 min");
+    let native =
+        run_native_src(source, "abs_i64_min_native").expect("native should handle Abs at i64 min");
+    assert_eq!(interp, native);
+    assert_eq!(interp, "9223372036854775807");
 }
 
 #[test]
@@ -35291,6 +35310,26 @@ stdout(Repeat["ab", 3]())
     let out = run_interpreter_src(source, "b11_stdout_str_mold_chain_expected")
         .expect("interpreter output should exist");
     assert_eq!(out, "HI\nhello\npad\nababab");
+}
+
+#[test]
+fn test_negative_mold_counts_three_backend_parity() {
+    let source = r#"r <= Repeat["x", -1]()
+stdout(r.length().toString())
+stdout(Pad["x", -1]())
+stdout(Take[@[1, 2, 3], -1]())
+stdout(Drop[@[1, 2, 3], -1]())
+hugeRepeat <= Repeat["x", 9223372036854775807]()
+stdout(hugeRepeat.length().toString())
+hugePad <= Pad["x", 9223372036854775807]()
+stdout(hugePad.length().toString())
+joined <= StringRepeatJoin["x", 9223372036854775807, ","]()
+stdout(joined.length().toString())
+"#;
+    assert_backend_parity_for_source(source, "negative_mold_counts");
+    let out = run_interpreter_src(source, "negative_mold_counts_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "0\nx\n@[]\n@[1, 2, 3]\n0\n1\n0");
 }
 
 // ────────────────────────────────────────────────────────────────

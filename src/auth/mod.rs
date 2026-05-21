@@ -113,17 +113,18 @@ fn run_login(args: &[String]) {
     println!("Waiting for authorization...");
 
     // ステップ3: トークンをポーリングで取得
-    let access_token = match device_flow::poll_for_token(&flow.device_code, flow.interval) {
-        Ok(t) => {
-            println!(); // ドットの後の改行
-            t
-        }
-        Err(e) => {
-            println!();
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let access_token =
+        match device_flow::poll_for_token(&flow.device_code, flow.interval, flow.expires_in) {
+            Ok(t) => {
+                println!(); // ドットの後の改行
+                t
+            }
+            Err(e) => {
+                println!();
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     // ステップ4: ユーザー名を取得
     let username = match device_flow::get_github_username(&access_token) {

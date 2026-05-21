@@ -87,6 +87,8 @@ typedef int64_t   taida_val;     // 整数値 (Int, Bool, Hash, tag, count, inde
 typedef intptr_t  taida_ptr;     // ヒープポインタ (Str, Pack, List, HashMap, Set, ...)
 typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 
+#define TAIDA_STRING_MOLD_MAX_LEN ((taida_val)INT32_MAX)
+
 // Taida Magic Numbers for pointer tagging and type safety
 #define TAIDA_MAGIC_MASK  0xFFFFFFFFFFFFFF00LL
 #define TAIDA_RC_MASK     0x00000000000000FFLL
@@ -1012,9 +1014,9 @@ taida_val taida_debug_polymorphic(taida_val val) {
 }
 
 // Arithmetic runtime
-taida_val taida_int_add(taida_val a, taida_val b) { return a + b; }
-taida_val taida_int_sub(taida_val a, taida_val b) { return a - b; }
-taida_val taida_int_mul(taida_val a, taida_val b) { return a * b; }
+taida_val taida_int_add(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) + ((uint64_t)b)); }
+taida_val taida_int_sub(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) - ((uint64_t)b)); }
+taida_val taida_int_mul(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) * ((uint64_t)b)); }
 
 // Bitwise molds (Int64 semantics)
 taida_val taida_bit_and(taida_val a, taida_val b) { return (taida_val)(((uint64_t)a) & ((uint64_t)b)); }
@@ -2473,7 +2475,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     return taida_lax_new((taida_val)out, (taida_val)"");
 }
 
-taida_val taida_int_neg(taida_val a) { return -a; }
+taida_val taida_int_neg(taida_val a) { return (taida_val)(0ULL - ((uint64_t)a)); }
 double taida_float_neg(double a) { return -a; }
 
 // Comparison runtime
@@ -4171,13 +4173,15 @@ taida_val taida_str_to_int(const char* s) {
 
 taida_val taida_str_repeat(const char* s, taida_val n) {
     if (!s || n <= 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val slen = (taida_val)strlen(s);
-    // Overflow check: slen * n must not overflow
-    if (slen > 0 && n > (taida_val)(((size_t)-1) / 2) / slen) {
-        // Overflow: return empty string
+    size_t slen = strlen(s);
+    if (slen == 0 || n > TAIDA_STRING_MOLD_MAX_LEN) {
         char *r = taida_str_alloc(0); return (taida_val)r;
     }
-    taida_val total = slen * n;
+    size_t count = (size_t)n;
+    if (slen > 0 && count > (size_t)TAIDA_STRING_MOLD_MAX_LEN / slen) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    size_t total = slen * count;
     char *r = taida_str_alloc(total);
     for (taida_val i = 0; i < n; i++) {
         memcpy(r + i * slen, s, slen);
@@ -4247,21 +4251,30 @@ taida_val taida_str_repeat_join(const char* s, taida_val n, const char* sep) {
     if (n <= 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
     if (!s) s = "";
     if (!sep) sep = "";
-    taida_val slen = (taida_val)strlen(s);
-    taida_val seplen = (taida_val)strlen(sep);
+    size_t slen = strlen(s);
+    size_t seplen = strlen(sep);
     if (n == 1) {
         char *r = taida_str_alloc(slen);
         memcpy(r, s, slen);
         return (taida_val)r;
     }
-    // Overflow check: total = slen*n + seplen*(n-1)
-    if (slen > 0 && n > (taida_val)(((size_t)-1) / 4) / slen) {
+    if (n > TAIDA_STRING_MOLD_MAX_LEN) {
         char *r = taida_str_alloc(0); return (taida_val)r;
     }
-    if (seplen > 0 && (n - 1) > (taida_val)(((size_t)-1) / 4) / seplen) {
+    size_t count = (size_t)n;
+    if (slen > 0 && count > (size_t)TAIDA_STRING_MOLD_MAX_LEN / slen) {
         char *r = taida_str_alloc(0); return (taida_val)r;
     }
-    taida_val total = slen * n + seplen * (n - 1);
+    size_t body_len = slen * count;
+    size_t sep_count = count - 1;
+    if (seplen > 0 && sep_count > (size_t)TAIDA_STRING_MOLD_MAX_LEN / seplen) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    size_t sep_len = seplen * sep_count;
+    if (body_len > (size_t)TAIDA_STRING_MOLD_MAX_LEN - sep_len) {
+        char *r = taida_str_alloc(0); return (taida_val)r;
+    }
+    size_t total = body_len + sep_len;
     char *r = taida_str_alloc(total);
     char *dst = r;
     memcpy(dst, s, slen); dst += slen;
@@ -4331,7 +4344,7 @@ taida_val taida_str_replace_first(const char* s, const char* from, const char* t
 taida_val taida_str_pad(const char* s, taida_val target_len, const char* pad_char, taida_val pad_end) {
     if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
     taida_val slen = (taida_val)strlen(s);
-    if (slen >= target_len) {
+    if (slen >= target_len || target_len > TAIDA_STRING_MOLD_MAX_LEN) {
         return (taida_val)taida_str_new_copy(s);
     }
     taida_val pad_len = target_len - slen;
@@ -5065,7 +5078,10 @@ taida_val taida_str_from_bool(taida_val v) {
 }
 
 // ── Int methods ───────────────────────────────────────────
-taida_val taida_int_abs(taida_val a) { return a < 0 ? -a : a; }
+taida_val taida_int_abs(taida_val a) {
+    if (a == INT64_MIN) return INT64_MAX;
+    return a < 0 ? -a : a;
+}
 
 taida_val taida_int_to_str(taida_val a) {
     char tmp[32];

@@ -174,6 +174,10 @@ function __taida_isIntNumber(v) {
   return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v);
 }
 
+const __TAIDA_I64_MIN = -(1n << 63n);
+const __TAIDA_I64_MAX = (1n << 63n) - 1n;
+const __TAIDA_STRING_MOLD_MAX_LEN = 0x7fffffff;
+
 function __taida_toI64BigInt(v) {
   if (typeof v === 'bigint') return BigInt.asIntN(64, v);
   if (__taida_isIntNumber(v)) return BigInt.asIntN(64, BigInt(v));
@@ -1656,7 +1660,12 @@ function Foldr(list, init, fn) {
   const items = (list && list.__type === 'Stream') ? __taida_stream_collect(list) : list;
   return (items || []).reduceRight((acc, item) => fn(acc, item), init);
 }
+function __taida_nonnegative_count(n) {
+  n = Number.isFinite(n) ? Math.trunc(n) : 0;
+  return n < 0 ? 0 : n;
+}
 function Take(list, n) {
+  n = __taida_nonnegative_count(n);
   if (list && list.__type === 'Stream') return __taida_stream(list.__items, [...list.__transforms, { op: 'take', n }]);
   return Object.freeze(list.slice(0, n));
 }
@@ -1667,6 +1676,7 @@ function TakeWhile(list, fn) {
   return Object.freeze(result);
 }
 function Drop(list, n) {
+  n = __taida_nonnegative_count(n);
   const items = (list && list.__type === 'Stream') ? __taida_stream_collect(list) : list;
   return Object.freeze(items.slice(n));
 }
@@ -1938,7 +1948,7 @@ function __taida_str_match(s, rx) {
   });
   if (typeof s !== 'string') return empty;
   if (!__taida_is_regex(rx)) {
-    const err = new Error(
+    const err = new __NativeError(
       'str.match(...) requires a Regex argument. Use Regex("pattern") to construct one.'
     );
     err.__taida_error_type = 'TypeError';
@@ -1970,7 +1980,7 @@ function __taida_str_match(s, rx) {
 function __taida_str_search(s, rx) {
   if (typeof s !== 'string') return -1;
   if (!__taida_is_regex(rx)) {
-    const err = new Error(
+    const err = new __NativeError(
       'str.search(...) requires a Regex argument. Use Regex("pattern") to construct one.'
     );
     err.__taida_error_type = 'TypeError';
@@ -1988,7 +1998,7 @@ function __taida_str_search(s, rx) {
 function __taida_str_search_lax(s, rx) {
   if (typeof s !== 'string') return Lax(null, 0);
   if (!__taida_is_regex(rx)) {
-    const err = new Error(
+    const err = new __NativeError(
       'str.searchLax(...) requires a Regex argument. Use Regex("pattern") to construct one.'
     );
     err.__taida_error_type = 'TypeError';
@@ -2036,7 +2046,13 @@ function Slice(val, optsOrStart, maybeEnd) {
   return '';
 }
 function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
-function Repeat(str, n) { return typeof str === 'string' ? str.repeat(Math.max(0, n)) : ''; }
+function Repeat(str, n) {
+  if (typeof str !== 'string') return '';
+  n = __taida_nonnegative_count(n);
+  if (n <= 0 || str.length === 0) return '';
+  if (str.length * n > __TAIDA_STRING_MOLD_MAX_LEN) return '';
+  try { return str.repeat(n); } catch (_) { return ''; }
+}
 // ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
 // These operate on the raw UTF-8 byte stream, not on JS UTF-16 code
 // units. The TextEncoder round-trip gives O(n) the first time but
@@ -2079,12 +2095,18 @@ function ByteLength(str) {
 function StringRepeatJoin(str, n, sep) {
   if (typeof str !== 'string') str = '';
   if (typeof sep !== 'string') sep = '';
-  n = n | 0;
+  n = __taida_nonnegative_count(n);
   if (n <= 0) return '';
   if (n === 1) return str;
+  const total = str.length * n + sep.length * (n - 1);
+  if (total > __TAIDA_STRING_MOLD_MAX_LEN) return '';
   // String#repeat + join: V8 optimizes this into a single buffer.
-  if (sep === '') return str.repeat(n);
-  return new Array(n).fill(str).join(sep);
+  try {
+    if (sep === '') return str.repeat(n);
+    return new Array(n).fill(str).join(sep);
+  } catch (_) {
+    return '';
+  }
 }
 function Reverse(val) {
   if (typeof val === 'string') return val.split('').reverse().join('');
@@ -2093,10 +2115,16 @@ function Reverse(val) {
 }
 function Pad(str, len, opts) {
   if (typeof str !== 'string') return '';
+  len = __taida_nonnegative_count(len);
+  if (len <= str.length || len > __TAIDA_STRING_MOLD_MAX_LEN) return str;
   const side = (opts && opts.side) || 'start';
   const ch = (opts && opts.char) || ' ';
-  if (side === 'start') return str.padStart(len, ch);
-  if (side === 'end') return str.padEnd(len, ch);
+  try {
+    if (side === 'start') return str.padStart(len, ch);
+    if (side === 'end') return str.padEnd(len, ch);
+  } catch (_) {
+    return str;
+  }
   return str;
 }
 
@@ -2106,7 +2134,14 @@ function ToFixed(num, digits) {
   const precision = Math.max(0, Math.min(20, Math.trunc(Number(digits) || 0)));
   return num.toFixed(precision);
 }
-function Abs(num) { return typeof num === 'number' ? Math.abs(num) : 0; }
+function Abs(num) {
+  if (typeof num === 'bigint' || __taida_isIntNumber(num)) {
+    const value = __taida_toI64BigInt(num);
+    if (value === __TAIDA_I64_MIN) return __taida_fromI64BigInt(__TAIDA_I64_MAX);
+    return __taida_fromI64BigInt(value < 0n ? -value : value);
+  }
+  return typeof num === 'number' ? Math.abs(num) : 0;
+}
 function Floor(num) { return typeof num === 'number' ? Math.floor(num) : 0; }
 function Ceil(num) { return typeof num === 'number' ? Math.ceil(num) : 0; }
 function Round(num) { return typeof num === 'number' ? Math.round(num) : 0; }

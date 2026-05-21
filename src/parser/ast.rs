@@ -341,7 +341,7 @@ impl Assignment {
                 _ => return None,
             };
             let arity = match &fields[0].value {
-                Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+                Expr::IntLit(n, _) => u32::try_from(*n).ok()?,
                 _ => return None,
             };
             return Some((fn_name, arity));

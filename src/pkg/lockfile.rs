@@ -27,13 +27,34 @@
 /// integrity = "sha256:789abc..."
 /// ```
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use super::provider::{PackageSource, ResolvedPackage, compute_dir_hash};
 
 /// The current lockfile format version.
 pub const LOCKFILE_VERSION: u32 = 3;
 const LEGACY_LOCKFILE_VERSION: u32 = 1;
+
+fn write_string_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp_path: PathBuf = parent.join(format!(".{}.tmp-{}", file_name, std::process::id()));
+
+    {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    if let Ok(parent_file) = std::fs::File::open(parent) {
+        let _ = parent_file.sync_all();
+    }
+    Ok(())
+}
 
 /// A parsed lockfile.
 #[derive(Debug, Clone)]
@@ -122,7 +143,7 @@ impl Lockfile {
     /// Write the lockfile to disk.
     pub fn write(&self, path: &Path) -> Result<(), String> {
         let content = self.to_string();
-        std::fs::write(path, content)
+        write_string_atomic(path, &content)
             .map_err(|e| format!("Cannot write lockfile '{}': {}", path.display(), e))
     }
 
@@ -174,7 +195,10 @@ impl Lockfile {
             if line.starts_with('#') {
                 // Check for version comment
                 if let Some(rest) = line.strip_prefix("# lockfile-version: ") {
-                    version = rest.trim().parse().unwrap_or(LOCKFILE_VERSION);
+                    version = rest.trim().parse().map_err(|_| {
+                        "[E32K2_LOCKFILE_VERSION_MALFORMED] lockfile-version comment is not a u32"
+                            .to_string()
+                    })?;
                 }
                 continue;
             }

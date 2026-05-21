@@ -971,8 +971,14 @@ impl Interpreter {
             }
             Expr::BoolLit(b, _) => Ok(Signal::Value(Value::Bool(*b))),
             Expr::Gorilla(_) => Ok(Signal::Gorilla),
-            Expr::Placeholder(_) => Ok(Signal::Value(Value::Unit)),
-            Expr::Hole(_) => Ok(Signal::Value(Value::Unit)),
+            Expr::Placeholder(_) => Err(RuntimeError {
+                message: "[E1502] `_` is only valid inside a pipeline placeholder position."
+                    .to_string(),
+            }),
+            Expr::Hole(_) => Err(RuntimeError {
+                message: "[E1502] Empty argument slots are only valid inside function calls."
+                    .to_string(),
+            }),
             // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold_eval
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
@@ -1934,7 +1940,9 @@ impl Interpreter {
                 let mut visiting = std::collections::HashSet::new();
                 self.default_for_type_expr(type_ann, &mut visiting)?
             } else {
-                Value::Unit
+                return Err(RuntimeError {
+                    message: format!("Function '{}' missing argument '{}'", func.name, param.name),
+                });
             };
             self.env.define_force(&param.name, val);
         }
@@ -2512,13 +2520,28 @@ impl Interpreter {
             });
         }
         let arity_decl: u32 = match &fields[0].value {
-            Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+            Expr::IntLit(n, _) => match u32::try_from(*n) {
+                Ok(arity) => arity,
+                Err(_) => {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "[E1412] RustAddon[\"{}\"](arity <= N) requires an \
+                             integer between 0 and {}; got {:?}",
+                            fn_name,
+                            u32::MAX,
+                            fields[0].value
+                        ),
+                    });
+                }
+            },
             other => {
                 return Err(RuntimeError {
                     message: format!(
-                        "[E1412] RustAddon[\"{}\"](arity <= N) requires a \
-                         non-negative integer literal; got {:?}",
-                        fn_name, other
+                        "[E1412] RustAddon[\"{}\"](arity <= N) requires an \
+                         integer between 0 and {}; got {:?}",
+                        fn_name,
+                        u32::MAX,
+                        other
                     ),
                 });
             }
