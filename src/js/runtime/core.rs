@@ -1661,6 +1661,11 @@ function Foldr(list, init, fn) {
   return (items || []).reduceRight((acc, item) => fn(acc, item), init);
 }
 function __taida_nonnegative_count(n) {
+  if (typeof n === 'bigint') {
+    if (n <= 0n) return 0;
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    return n > max ? Number.MAX_SAFE_INTEGER : Number(n);
+  }
   n = Number.isFinite(n) ? Math.trunc(n) : 0;
   return n < 0 ? 0 : n;
 }

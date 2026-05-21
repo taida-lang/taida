@@ -8718,10 +8718,15 @@ defaulted fields must be provided via `()`",
                             }
                         } else if matches!(self.lookup_var(name), Some(Type::Unknown)) {
                             Type::Unknown
+                        } else if self.mold_field_defs.contains_key(name)
+                            || self.registry.type_defs.contains_key(name)
+                            || self.registry.enum_defs.contains_key(name)
+                        {
+                            Type::Named(name.clone())
                         } else {
                             self.errors.push(TypeError {
                                 message: format!(
-                                    "[E1511] Unknown mold '{}'. Hint: Define the mold/type before use or call a function with `{}(...)` syntax.",
+                                    "[E1530] Unknown mold '{}'. Hint: Define the mold/type before use or call a function with `{}(...)` syntax.",
                                     name, name
                                 ),
                                 span: mold_span.clone(),
@@ -8848,7 +8853,7 @@ defaulted fields must be provided via `()`",
                 if !is_error {
                     self.errors.push(TypeError {
                         message: format!(
-                            "[E1409] `.throw()` requires an Error value, got {}. \
+                            "[E1531] `.throw()` requires an Error value, got {}. \
                              Hint: construct an Error-derived value before throwing.",
                             inner_ty
                         ),

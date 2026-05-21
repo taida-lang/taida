@@ -919,7 +919,7 @@ fn link_objects_inner(
         if compiler.contains("clang") {
             // -lm is not needed on Windows (included in MSVC CRT).
             // -lpthread is required: native_runtime.c uses pthread for Async support.
-            c.arg("-o").arg(bin_path).arg("-lpthread");
+            c.arg("-fwrapv").arg("-o").arg(bin_path).arg("-lpthread");
         } else {
             // cl.exe: pthread is not natively available; native_runtime.c's pthread
             // usage will need a pthreads-win32 library or Windows threads adaptation.

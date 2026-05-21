@@ -974,7 +974,14 @@ pub fn self_replace(new_binary: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            format!(
+                "failed to mark staged binary executable {}: {}",
+                staged.display(),
+                e
+            )
+        })?;
     }
 
     std::fs::rename(&staged, &current).map_err(|e| {
@@ -986,6 +993,19 @@ pub fn self_replace(new_binary: &[u8]) -> Result<(), String> {
             e
         )
     })?;
+
+    #[cfg(unix)]
+    if let Some(parent) = current.parent() {
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| {
+                format!(
+                    "failed to sync install directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+    }
 
     // Remove backup
     let _ = std::fs::remove_file(&backup);

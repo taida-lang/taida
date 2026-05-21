@@ -719,12 +719,14 @@ impl Interpreter {
                 };
                 let len = end.saturating_sub(start);
                 if len > MAX_RANGE_ITEMS {
-                    return Err(RuntimeError {
+                    return Ok(Some(Signal::Throw(Value::Error(super::value::ErrorValue {
+                        error_type: "RangeError".into(),
                         message: format!(
                             "range(start, end) would create {} items; maximum is {}",
                             len, MAX_RANGE_ITEMS
                         ),
-                    });
+                        fields: Vec::new(),
+                    }))));
                 }
                 let list: Vec<Value> = (start..end).map(Value::Int).collect();
                 Ok(Some(Signal::Value(Value::list(list))))

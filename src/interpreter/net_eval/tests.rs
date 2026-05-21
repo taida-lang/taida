@@ -1361,6 +1361,36 @@ fn plain_stream_pair() -> (ConnStream, std::net::TcpStream) {
     (ConnStream::Plain(server_tcp), client)
 }
 
+#[test]
+fn test_chunked_read_body_chunk_rejects_eof_before_size_line() {
+    let (mut server, client) = plain_stream_pair();
+    drop(client);
+    let mut body = RequestBodyState::new_legacy(true, 0, Vec::new());
+
+    let err = Interpreter::read_body_chunk_chunked(&mut body, &mut server)
+        .expect_err("peer EOF before chunk-size line must be a protocol error");
+    assert!(
+        err.message.contains("missing chunk-size line"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn test_chunked_read_body_all_rejects_eof_before_size_line() {
+    let (mut server, client) = plain_stream_pair();
+    drop(client);
+    let mut body = RequestBodyState::new_legacy(true, 0, Vec::new());
+
+    let err = Interpreter::read_body_all_chunked(&mut body, &mut server, "readBodyAll")
+        .expect_err("peer EOF before chunk-size line must be a protocol error");
+    assert!(
+        err.message.contains("missing chunk-size line"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
 /// Build a simple handler lambda expression that returns 200 OK with a given body.
 fn make_handler_expr(body_text: &str) -> Expr {
     Expr::Lambda(

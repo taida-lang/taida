@@ -3755,15 +3755,22 @@ impl Interpreter {
                 let schema = self.resolve_json_schema(&type_args[1])?;
 
                 // Cast JSON data through schema
-                let typed_value =
-                    crate::interpreter::json::json_to_typed_value(&json_data, &schema);
                 let default_val = crate::interpreter::json::default_for_schema(&schema);
+                let (typed_value, matches_schema) =
+                    crate::interpreter::json::json_to_typed_value_checked(&json_data, &schema);
+                let value_field = typed_value.clone();
+                let default_field = if matches_schema {
+                    default_val
+                } else {
+                    typed_value
+                };
 
-                // Return as Lax (JSON parsing can fail)
+                // Return as Lax. A schema mismatch marks the boundary as empty,
+                // while retaining the typed fallback for >=> / .unmold().
                 Ok(Some(Signal::Value(Value::pack(vec![
-                    ("has_value".into(), Value::Bool(true)),
-                    ("__value".into(), typed_value),
-                    ("__default".into(), default_val),
+                    ("has_value".into(), Value::Bool(matches_schema)),
+                    ("__value".into(), value_field),
+                    ("__default".into(), default_field),
                     ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }

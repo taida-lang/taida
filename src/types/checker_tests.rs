@@ -7210,5 +7210,19 @@ out <= a.run(2)
 fn unknown_mold_inst_reports_diagnostic() {
     let src = "x <= MissingMold[1]";
     let (_, errors) = check(src);
-    assert_has_error(&errors, "[E1511] Unknown mold 'MissingMold'");
+    assert_has_error(&errors, "[E1530] Unknown mold 'MissingMold'");
+}
+
+#[test]
+fn class_like_mold_inst_form_does_not_report_unknown_mold() {
+    let src = r#"Pilot = @(id: Int)
+x <= Pilot[1]"#;
+    let (_, errors) = check(src);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1530] Unknown mold 'Pilot'")),
+        "known class-like type must not fall through to unknown mold, got: {:?}",
+        errors
+    );
 }

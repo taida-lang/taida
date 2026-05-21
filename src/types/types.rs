@@ -469,7 +469,7 @@ impl TypeRegistry {
                 self.named_inherits_from(a, b) || self.named_fields_subtype(a, b, strict_int_float)
             }
             (Type::Error(a), Type::Named(b)) | (Type::Named(a), Type::Error(b)) => {
-                self.named_inherits_from(a, b) || self.named_fields_subtype(a, b, strict_int_float)
+                self.named_inherits_from(a, b)
             }
             // Named vs Named: check inheritance chain, then structural fields
             (Type::Named(a), Type::Named(b)) => {
@@ -960,6 +960,26 @@ mod tests {
         );
         // Error is NOT AppError
         assert!(!reg.is_subtype_of(&error_ty, &app_error_ty));
+    }
+
+    #[test]
+    fn test_error_named_subtyping_does_not_use_structural_fields() {
+        let mut reg = TypeRegistry::new();
+        reg.register_type(
+            "Pilot",
+            vec![
+                ("type".to_string(), Type::Str),
+                ("message".to_string(), Type::Str),
+            ],
+        );
+        assert!(reg.register_error_type("Error", "MyErr", vec![("code".to_string(), Type::Int)]));
+
+        let my_err = Type::Error("MyErr".to_string());
+        let pilot = Type::Named("Pilot".to_string());
+        assert!(
+            !reg.is_subtype_of(&my_err, &pilot),
+            "Error-derived names must not structurally satisfy unrelated named types"
+        );
     }
 
     #[test]

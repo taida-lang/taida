@@ -11,7 +11,7 @@ fn e31_removed_top_level_commands_emit_e1700() {
         ("lint", "taida way lint"),
         ("todo", "taida way todo"),
         ("inspect", "taida graph summary"),
-        ("transpile", "taida build js"),
+        ("transpile", "taida build native"),
         ("compile", "taida build native"),
         ("deps", "taida ingot deps"),
         ("install", "taida ingot install"),

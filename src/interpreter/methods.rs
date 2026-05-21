@@ -2062,19 +2062,7 @@ impl Interpreter {
             "isRejected" => Ok(Signal::Value(Value::Bool(
                 async_val.status == AsyncStatus::Rejected,
             ))),
-            "unmold" => {
-                // Blocking await — extract the inner value
-                match async_val.status {
-                    AsyncStatus::Fulfilled => Ok(Signal::Value((*async_val.value).clone())),
-                    AsyncStatus::Rejected => {
-                        // Rejected async throws the error
-                        Ok(Signal::Throw((*async_val.error).clone()))
-                    }
-                    AsyncStatus::Pending => Err(RuntimeError {
-                        message: "Pending Async has no task to await".to_string(),
-                    }),
-                }
-            }
+            "unmold" => self.unmold_value(Value::Async(async_val.clone())),
             "map" => {
                 // map(fn) -> apply fn to the inner value if fulfilled
                 if args.is_empty() {

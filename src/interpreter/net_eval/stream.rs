@@ -687,6 +687,12 @@ impl Interpreter {
                 ChunkedDecoderState::WaitingChunkSize => {
                     // NB6-7: Read chunk-size line as bytes; parse hex directly.
                     let line = Self::read_line_from_body(body, stream)?;
+                    if line.is_empty() {
+                        return Err(RuntimeError {
+                            message: "readBodyChunk: missing chunk-size line (unexpected EOF)"
+                                .into(),
+                        });
+                    }
                     let trimmed = Self::trim_bytes(&line);
                     if trimmed.is_empty() {
                         // Could be trailing CRLF; try again.
@@ -1126,6 +1132,14 @@ impl Interpreter {
                 }
                 ChunkedDecoderState::WaitingChunkSize => {
                     let line = Self::read_line_from_body(body, stream)?;
+                    if line.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: missing chunk-size line (unexpected EOF)",
+                                api_name
+                            ),
+                        });
+                    }
                     let trimmed = Self::trim_bytes(&line);
                     if trimmed.is_empty() {
                         continue;
