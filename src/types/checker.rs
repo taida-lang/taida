@@ -8683,7 +8683,31 @@ defaulted fields must be provided via `()`",
                                 mold_span.clone(),
                             );
                             self.infer_expr_type(&synth_call)
+                        } else if let Some(spec) = crate::types::mold_specs::lookup_mold_spec(name)
+                        {
+                            match spec.return_kind {
+                                crate::types::mold_specs::MoldReturnKind::Int => Type::Int,
+                                crate::types::mold_specs::MoldReturnKind::Float => Type::Float,
+                                crate::types::mold_specs::MoldReturnKind::Bool => Type::Bool,
+                                crate::types::mold_specs::MoldReturnKind::Str => Type::Str,
+                                crate::types::mold_specs::MoldReturnKind::List => {
+                                    Type::List(Box::new(Type::Unknown))
+                                }
+                                crate::types::mold_specs::MoldReturnKind::Pack
+                                | crate::types::mold_specs::MoldReturnKind::Dynamic => {
+                                    Type::Unknown
+                                }
+                            }
+                        } else if matches!(self.lookup_var(name), Some(Type::Unknown)) {
+                            Type::Unknown
                         } else {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1511] Unknown mold '{}'. Hint: Define the mold/type before use or call a function with `{}(...)` syntax.",
+                                    name, name
+                                ),
+                                span: mold_span.clone(),
+                            });
                             Type::Unknown
                         }
                     }

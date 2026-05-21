@@ -427,11 +427,44 @@ impl TypeRegistry {
         if actual == expected {
             return true;
         }
-        // Delegate to the basic check first
-        if actual.is_subtype_of_inner(expected, strict_int_float) {
-            return true;
-        }
         match (actual, expected) {
+            // Compound types must recurse through the registry-aware path so
+            // inherited/named relationships are preserved inside containers.
+            (Type::BuchiPack(actual_fields), Type::BuchiPack(expected_fields)) => {
+                expected_fields.iter().all(|(exp_name, exp_type)| {
+                    actual_fields.iter().any(|(actual_name, actual_type)| {
+                        actual_name == exp_name
+                            && self.is_subtype_of_inner(actual_type, exp_type, strict_int_float)
+                    })
+                })
+            }
+            (Type::List(actual_inner), Type::List(expected_inner)) => {
+                self.is_subtype_of_inner(actual_inner, expected_inner, strict_int_float)
+            }
+            (
+                Type::Function(actual_params, actual_ret),
+                Type::Function(expected_params, expected_ret),
+            ) => {
+                actual_params.len() == expected_params.len()
+                    && actual_params.iter().zip(expected_params.iter()).all(
+                        |(actual_param, expected_param)| {
+                            self.is_subtype_of_inner(expected_param, actual_param, strict_int_float)
+                        },
+                    )
+                    && self.is_subtype_of_inner(actual_ret, expected_ret, strict_int_float)
+            }
+            (
+                Type::Generic(actual_name, actual_args),
+                Type::Generic(expected_name, expected_args),
+            ) => {
+                actual_name == expected_name
+                    && actual_args.len() == expected_args.len()
+                    && actual_args.iter().zip(expected_args.iter()).all(
+                        |(actual_arg, expected_arg)| {
+                            self.is_subtype_of_inner(actual_arg, expected_arg, strict_int_float)
+                        },
+                    )
+            }
             // Named vs Named: check inheritance chain, then structural fields
             (Type::Named(a), Type::Named(b)) => {
                 let mut current = a.clone();
@@ -452,7 +485,7 @@ impl TypeRegistry {
                     b_fields.iter().all(|(exp_name, exp_type)| {
                         a_fields.iter().any(|(self_name, self_type)| {
                             self_name == exp_name
-                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
+                                && self.is_subtype_of_inner(self_type, exp_type, strict_int_float)
                         })
                     })
                 } else {
@@ -464,7 +497,7 @@ impl TypeRegistry {
                     expected_fields.iter().all(|(exp_name, exp_type)| {
                         actual_fields.iter().any(|(self_name, self_type)| {
                             self_name == exp_name
-                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
+                                && self.is_subtype_of_inner(self_type, exp_type, strict_int_float)
                         })
                     })
                 } else {
@@ -476,14 +509,14 @@ impl TypeRegistry {
                     expected_fields.iter().all(|(exp_name, exp_type)| {
                         actual_fields.iter().any(|(self_name, self_type)| {
                             self_name == exp_name
-                                && self_type.is_subtype_of_inner(exp_type, strict_int_float)
+                                && self.is_subtype_of_inner(self_type, exp_type, strict_int_float)
                         })
                     })
                 } else {
                     false
                 }
             }
-            _ => false,
+            _ => actual.is_subtype_of_inner(expected, strict_int_float),
         }
     }
 
@@ -777,6 +810,33 @@ mod tests {
         assert!(reg.is_subtype_of(&employee, &person));
         // Person is NOT subtype of Employee (missing department field)
         assert!(!reg.is_subtype_of(&person, &employee));
+    }
+
+    #[test]
+    fn test_registry_aware_compound_subtyping_recurses() {
+        let mut reg = TypeRegistry::new();
+        reg.register_type("Base", vec![("x".to_string(), Type::Int)]);
+        reg.register_inheritance("Base", "Child", vec![("y".to_string(), Type::Int)]);
+
+        let base = Type::Named("Base".to_string());
+        let child = Type::Named("Child".to_string());
+
+        assert!(reg.is_subtype_of(
+            &Type::BuchiPack(vec![("item".to_string(), child.clone())]),
+            &Type::BuchiPack(vec![("item".to_string(), base.clone())]),
+        ));
+        assert!(reg.is_subtype_of(
+            &Type::List(Box::new(child.clone())),
+            &Type::List(Box::new(base.clone())),
+        ));
+        assert!(reg.is_subtype_of(
+            &Type::Function(vec![], Box::new(child.clone())),
+            &Type::Function(vec![], Box::new(base.clone())),
+        ));
+        assert!(reg.is_subtype_of(
+            &Type::Generic("Box".to_string(), vec![child]),
+            &Type::Generic("Box".to_string(), vec![base]),
+        ));
     }
 
     #[test]

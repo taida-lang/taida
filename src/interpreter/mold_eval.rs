@@ -909,7 +909,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let digits = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Int(n)) => n as usize,
+                    Signal::Value(Value::Int(n)) => n.clamp(0, 20) as usize,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(

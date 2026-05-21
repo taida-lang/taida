@@ -20,6 +20,13 @@ fn check_with_target(source: &str, target: CompileTarget) -> (TypeChecker, Vec<T
     (checker, errors)
 }
 
+fn assert_has_error(errors: &[TypeError], needle: &str) {
+    assert!(
+        errors.iter().any(|err| err.message.contains(needle)),
+        "expected error containing {needle:?}, got {errors:?}"
+    );
+}
+
 fn infer_assignment_type(source: &str, target: &str) -> (Type, Vec<TypeError>) {
     let (program, parse_errors) = parse(source);
     assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
@@ -7132,4 +7139,76 @@ r_bad <= r.hasValue
         "Lax-like legacy hasValue field access should be rejected with migration guidance, got: {:?}",
         errors
     );
+}
+
+#[test]
+fn nested_named_subtyping_uses_registry_inside_compounds() {
+    let src = r#"Base = @(x: Int)
+Base => Child = @(y: Int)
+c <= Child(x <= 1, y <= 2)
+p: @(item: Base) <= @(item <= c)
+ys: @[Base] <= @[c]
+make =
+  c
+=> :Child
+fn: _ => :Base <= make
+"#;
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "nested named subtyping should typecheck, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn named_type_unknown_method_is_rejected() {
+    let src = r#"Pilot = @(name: Str)
+p <= Pilot(name <= "rei")
+x <= p.nope()
+"#;
+    let (_, errors) = check(src);
+    assert_has_error(&errors, "[E1509] Unknown method 'nope'");
+}
+
+#[test]
+fn named_type_data_field_call_is_rejected() {
+    let src = r#"Pilot = @(name: Str)
+p <= Pilot(name <= "rei")
+x <= p.name()
+"#;
+    let (_, errors) = check(src);
+    assert_has_error(&errors, "[E1509] Unknown method 'name'");
+}
+
+#[test]
+fn named_type_declared_method_and_function_field_calls_are_valid() {
+    let src = r#"Greeter = @(name: Str, greet =
+  "hi " + name
+=> :Str)
+g <= Greeter(name <= "rei")
+msg <= g.greet()
+
+Apply = @(run: Int => :Int)
+inc x: Int =
+  x + 1
+=> :Int
+a <= Apply(run <= inc)
+out <= a.run(2)
+"#;
+    let (checker, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "declared method and function field calls should typecheck, got: {:?}",
+        errors
+    );
+    assert_eq!(checker.lookup_var("msg"), Some(Type::Str));
+    assert_eq!(checker.lookup_var("out"), Some(Type::Int));
+}
+
+#[test]
+fn unknown_mold_inst_reports_diagnostic() {
+    let src = "x <= MissingMold[1]";
+    let (_, errors) = check(src);
+    assert_has_error(&errors, "[E1511] Unknown mold 'MissingMold'");
 }

@@ -2633,6 +2633,29 @@ fn test_bt1_modulo_operator_rejected() {
     );
 }
 
+#[test]
+fn test_removed_lowercase_index_syntax_rejects_multiple_args() {
+    let (_, errors) = parse("y <= xs[0, 1]");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].message.contains("Index access"));
+    assert!(errors[0].message.contains(".get"));
+}
+
+#[test]
+fn test_uppercase_mold_shorthand_without_fields_still_parses() {
+    match first_stmt("value <= Result[1]") {
+        Statement::Assignment(assign) => match assign.value {
+            Expr::MoldInst(name, args, fields, _) => {
+                assert_eq!(name, "Result");
+                assert_eq!(args.len(), 1);
+                assert!(fields.is_empty());
+            }
+            other => panic!("expected MoldInst, got {:?}", other),
+        },
+        other => panic!("expected assignment, got {:?}", other),
+    }
+}
+
 // ── BT-9: Deep nesting resilience tests ──
 
 #[test]

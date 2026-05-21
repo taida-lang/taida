@@ -349,19 +349,13 @@ impl Parser {
                         self.expect(&TokenKind::RParen)?;
                         return Ok(Expr::MoldInst(name, type_args, fields, span));
                     } else if arg_tokens_valid {
-                        // Index access `name[expr]` has been removed in v0.5.0.
+                        // Index access `name[...]` has been removed in v0.5.0.
                         // Use `.get(index)` instead.
                         // `Name[args]` without `()` is treated as MoldInst with no fields.
-                        if type_args.len() == 1 {
-                            // Could be `list[0]` (removed) or `Optional[T]` (MoldInst)
-                            // If the name starts with uppercase, treat as MoldInst
-                            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                                return Ok(Expr::MoldInst(name, type_args, Vec::new(), span));
-                            }
-                            // Otherwise it's an index access attempt — error
+                        if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
                             return Err(ParseError {
                                 message:
-                                    "Index access `name[i]` has been removed. Use `.get(i)` instead"
+                                    "Index access `name[...]` has been removed. Use `.get(index)` instead"
                                         .to_string(),
                                 span,
                             });

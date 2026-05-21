@@ -171,13 +171,34 @@ impl Lowering {
 
         let mut method_closures: Vec<(String, IrVar)> = Vec::new();
         for (method_name, method_func_def) in &method_defs {
+            let extra_capture_names =
+                self.type_method_extra_captures(method_func_def, &data_field_names);
+            let mut env_capture_names = capture_names.clone();
+            let mut env_restore_names = data_field_names.clone();
+            for extra_name in extra_capture_names {
+                let cap_name = format!("{}__free_{}", capture_prefix, extra_name);
+                let cap_val = if self.current_func_name.is_none() && !self.is_library_module {
+                    let var = func.alloc_var();
+                    func.push(IrInst::UseVar(var, extra_name.clone()));
+                    var
+                } else {
+                    self.globals_referenced.insert(extra_name.clone());
+                    let hash = self.global_var_hash(&extra_name);
+                    let var = func.alloc_var();
+                    func.push(IrInst::GlobalGet(var, hash));
+                    var
+                };
+                func.push(IrInst::DefVar(cap_name.clone(), cap_val));
+                env_capture_names.push(cap_name);
+                env_restore_names.push(extra_name);
+            }
             let closure_var = self.lower_type_method_closure(
                 func,
                 type_name,
                 method_name,
                 method_func_def,
-                &capture_names,
-                &data_field_names,
+                &env_capture_names,
+                &env_restore_names,
             )?;
             method_closures.push((method_name.clone(), closure_var));
         }
@@ -245,10 +266,34 @@ impl Lowering {
         Ok(pack_var)
     }
 
+    fn type_method_extra_captures(
+        &self,
+        method_func_def: &FuncDef,
+        data_field_names: &[String],
+    ) -> Vec<String> {
+        let mut bound: std::collections::HashSet<&str> = method_func_def
+            .params
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        for field_name in data_field_names {
+            bound.insert(field_name.as_str());
+        }
+        self.collect_free_vars_in_func_body_unfiltered(&method_func_def.body, &bound)
+            .into_iter()
+            .filter(|name| {
+                !data_field_names.iter().any(|field| field == name)
+                    && (self.top_level_vars.contains(name)
+                        || self.imported_value_names.contains(name))
+            })
+            .collect()
+    }
+
     /// Generate a closure for a TypeDef method.
-    /// The closure captures all data fields of the instance as its environment.
+    /// The closure captures all instance data fields plus any referenced
+    /// module/top-level values as its environment.
     /// `capture_names` are the unique temporary variable names used for MakeClosure.
-    /// `data_field_names` are the original field names restored inside the method body.
+    /// `data_field_names` are the original names restored inside the method body.
     pub(super) fn lower_type_method_closure(
         &mut self,
         func: &mut IrFunction,

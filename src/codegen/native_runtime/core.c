@@ -5152,7 +5152,10 @@ taida_val taida_float_to_str(double a) {
 
 taida_val taida_float_to_fixed(double a, taida_val digits) {
     char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%.*f", (int)digits, a);
+    int precision = (int)digits;
+    if (precision < 0) precision = 0;
+    if (precision > 20) precision = 20;
+    snprintf(tmp, sizeof(tmp), "%.*f", precision, a);
     return (taida_val)taida_str_new_copy(tmp);
 }
 

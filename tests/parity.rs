@@ -4694,6 +4694,30 @@ stdout(42 == 0)
     );
 }
 
+#[test]
+fn test_tofixed_precision_bounds_three_backend_parity() {
+    let src = r#"
+stdout(ToFixed[13.14159, -19]())
+stdout(ToFixed[13.14159, 0]())
+stdout(ToFixed[13.14159, 2]())
+stdout(ToFixed[13.14159, 25]())
+"#;
+    let interp =
+        run_interpreter_src(src, "tofixed_precision_bounds").expect("interpreter should succeed");
+    let native = run_native_src(src, "tofixed_precision_bounds").expect("native should succeed");
+    assert_eq!(
+        interp, native,
+        "ToFixed precision bounds mismatch between interpreter and native"
+    );
+    if node_available() {
+        let js = run_js_src(src, "tofixed_precision_bounds").expect("js should succeed");
+        assert_eq!(
+            interp, js,
+            "ToFixed precision bounds mismatch between interpreter and js"
+        );
+    }
+}
+
 /// F-56 regression: Module export function closures should include all module-level symbols.
 /// When a module exports `createDefaultKv`, its internal calls to `makeKv` should work
 /// even if the importer does not explicitly import `makeKv`.
@@ -4751,6 +4775,72 @@ stdout(val)
         "F-56: expected 'hello' from kv store/fetch, got '{}'",
         interp.trim()
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_native_type_method_closure_captures_module_value() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "taida_type_method_module_capture_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    fs::write(
+        dir.join("helper.td"),
+        r#"base <= 6
+factor <= 4
+
+scale x: Int =
+  x * factor + base
+=> :Int
+
+Item = @(value: Int, bump =
+  value + base
+=> :Int)
+
+makeItem x: Int =
+  Item(value <= scale(x))
+=> :Item
+
+<<< @(base, factor, scale, Item, makeItem)
+"#,
+    )
+    .expect("write helper.td");
+
+    fs::write(
+        dir.join("main.td"),
+        r#">>> ./helper.td => @(base, factor, scale, Item, makeItem)
+
+item <= makeItem(8)
+stdout(item.value.toString())
+stdout(item.bump().toString())
+"#,
+    )
+    .expect("write main.td");
+
+    let main_path = dir.join("main.td");
+    let interp = run_interpreter(&main_path).expect("interpreter should succeed");
+    let native = run_native(&main_path).expect("native should succeed");
+    assert_eq!(
+        interp, native,
+        "type method module capture mismatch between interpreter and native"
+    );
+
+    if node_available() {
+        let js =
+            run_js_project(&main_path, "type_method_module_capture").expect("js should succeed");
+        assert_eq!(
+            interp, js,
+            "type method module capture mismatch between interpreter and js"
+        );
+    }
 
     let _ = fs::remove_dir_all(&dir);
 }

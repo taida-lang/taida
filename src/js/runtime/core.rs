@@ -2101,7 +2101,11 @@ function Pad(str, len, opts) {
 }
 
 // ── Number Mold types ───────────────────────────────────
-function ToFixed(num, digits) { return typeof num === 'number' ? num.toFixed(digits) : '0'; }
+function ToFixed(num, digits) {
+  if (typeof num !== 'number') return '0';
+  const precision = Math.max(0, Math.min(20, Math.trunc(Number(digits) || 0)));
+  return num.toFixed(precision);
+}
 function Abs(num) { return typeof num === 'number' ? Math.abs(num) : 0; }
 function Floor(num) { return typeof num === 'number' ? Math.floor(num) : 0; }
 function Ceil(num) { return typeof num === 'number' ? Math.ceil(num) : 0; }
