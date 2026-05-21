@@ -21,7 +21,6 @@ WASM プロファイル境界は [WASM プロファイル](wasm_profiles.md) を
 |--------------|----------|----------|
 | インタプリタ | アトミック参照カウントで共有する不変構造 | 参照カウント、`clone` 操作は O(1) |
 | ネイティブ (cdylib via AOT) | スレッドローカルの bump アリーナ + 小オブジェクト freelist + 参照カウント | リクエスト境界でアリーナを巻き戻す。1 スレッド当たりのアリーナ上限は 256 MiB |
-| JS トランスパイラ | 生成 JavaScript オブジェクトをフリーズしてホスト JS の GC に委譲 | V8 / SpiderMonkey の世代別・インクリメンタル GC |
 | WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | リニアメモリ上の bump allocator と watermark 形式のアリーナ API | bump カーソルの巻き戻し。WebAssembly の `memory.grow` は行うが `memory.shrink` は行わない |
 
 これらは「完全自動」という抽象表現の下に隠れている技術選択です。
@@ -122,8 +121,10 @@ WASM プロファイル境界は [WASM プロファイル](wasm_profiles.md) を
 
 ---
 
-## JS — オブジェクトフリーズとホスト GC への委譲
+## 旧 JS ターゲット — オブジェクトフリーズとホスト GC への委譲
 
+旧 JS ターゲットは移行期間の互換機能です。リリースのパリティ契約には
+含まれませんが、既存コードの理解と移行のために実装モデルを記録します。
 JS トランスパイラはユーザーコードを生成 JavaScript に変換します。
 Taida の不変性は、生成された ぶちパック / リスト / `Lax` / `Async` /
 JSON 由来オブジェクトすべてに対して `Object.freeze()` を適用すること

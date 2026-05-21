@@ -186,7 +186,7 @@ SilentError(type <= "SilentError", detail <= "ignored").throw()
 //   → toString / display では型名 ("SilentError" 等) が表示される
 ```
 
-この区別は Interpreter / JS / Native / WASM の 4 バックエンドすべてで同じ挙動になります。
+この区別は Interpreter / Native / WASM の正式バックエンドすべてで同じ挙動になります。
 
 ---
 
@@ -455,7 +455,7 @@ failed.getOrThrow()      // throw が発動します
 
 ## Gorillax -- 覚悟のエラーモデル
 
-外部パッケージ（npm 等）の Molten branch operation は安全が保証されません。`Cage[subject, runner]()` で Molten branch capability を実行します。同期 JS runner は結果を `Gorillax` で受け取り、Promise を返す JS runner は `Async` として待ちます。公開されている concrete runner は JS 系 (`JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) です。File / Build branch は、対応する具体 runner を公開している API のリファレンスで説明されている場合にだけ使います。
+外部パッケージ（npm 等）の Molten branch operation は安全が保証されません。`Cage[subject, runner]()` で Molten branch capability を実行します。旧 JS ターゲットの同期 JS runner は結果を `Gorillax` で受け取り、Promise を返す JS runner は `Async` として待ちます。公開されている concrete runner は JS 系 (`JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) です。File / Build branch は、対応する具体 runner を公開している API のリファレンスで説明されている場合にだけ使います。
 
 ### 基本: Cage → Gorillax → アンモールド
 

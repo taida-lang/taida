@@ -1,13 +1,13 @@
-/// Parity tests: verify that all three backends (Interpreter, JS transpiler, Native compiler)
+/// Parity tests: verify that official backends (Interpreter, Native compiler, and selected WASM profiles)
 /// produce identical output for the same .td files.
 ///
 /// This is the authoritative test for backend parity. The interpreter is the reference
 /// implementation; all other backends must match its output exactly.
 ///
 /// Test categories:
-///   1. Interpreter vs JS -- all non-module, non-stdin examples
-///   2. Interpreter vs Native -- all compile_*.td examples
-///   3. Three-way parity -- compile_*.td files tested across all three backends
+///   1. Interpreter vs Native -- shared language and runtime examples
+///   2. Interpreter vs WASM -- selected profile coverage where host tooling is available
+///   3. Legacy JS-specific tests live outside this authoritative parity gate
 mod common;
 
 use common::{normalize, run_interpreter_normalized, taida_bin, wasmtime_bin};
@@ -419,16 +419,6 @@ fn assert_backend_parity_for_source(source: &str, label: &str) {
         "interpreter/native mismatch for source case {}",
         label
     );
-
-    if node_available() {
-        let js =
-            run_js_src(source, label).unwrap_or_else(|| panic!("js backend failed for {}", label));
-        assert_eq!(
-            interp, js,
-            "interpreter/js mismatch for source case {}",
-            label
-        );
-    }
 }
 
 fn assert_full_backend_parity_for_source(source: &str, label: &str, wasmtime_args: &[&str]) {

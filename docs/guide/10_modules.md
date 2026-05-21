@@ -61,9 +61,9 @@ TypeName[42]()  // "Int"
 result <= sub(10, 3)  // 7
 ```
 
-### npm パッケージ（JS バックエンドのみ）
+### npm パッケージ（旧 JS ターゲットのみ）
 
-`>>> npm:package => @(symbols)` で npm パッケージをインポートします。JS バックエンドでのみ動作します。
+`>>> npm:package => @(symbols)` で npm パッケージをインポートします。旧 JS ターゲットでのみ動作します。
 
 npm からインポートされた値は **Molten** 型（branch=JS）です。Molten は外部由来の不透明値であり、直接操作はできません。型安全な値を取り出すには `Cage[subject, JSRilla[...]()]()` 経由で操作します。
 

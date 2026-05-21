@@ -287,7 +287,7 @@ debug(user, "load_user")      // "[load_user] BuchiPack: @(name: ..., age: ...)"
 | Interactive (`taida` 引数なし) | eval 完了後に一括出力 | eval 完了後に一括出力 | return-value 字下げ表示との視覚分離のためバッファモードを維持 |
 | Rust 側 in-process test | eval 完了後に `interpreter.output` から取得 | 同左 | `Interpreter::new()` 経由のテスト互換性を維持 |
 
-`debug` の stream mode 出力先は **stdout** です（stderr ではありません）。これは JS バックエンド（`console.log`）・Native バックエンド（`printf`）との 3 バックエンドパリティを保証するための設計判断で、`test_native_compile_parity` 系の captured-stdout diff を破らない形に揃えています。
+`debug` の stream mode 出力先は **stdout** です（stderr ではありません）。これは Native バックエンド（`printf`）や WASM 実行時とのパリティを保証するための設計判断で、`test_native_compile_parity` 系の captured-stdout diff を破らない形に揃えています。
 
 長時間ループの中で `debug(x)` を差し込めば、プログラムが止まらずとも途中経過がそのまま端末に流れてくるため、printf-デバッグが機能します。
 

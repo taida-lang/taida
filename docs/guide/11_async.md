@@ -120,9 +120,9 @@ fetchData id: Int =
 
 エラー天井 `|==` がない場合は、ゴリラ天井がキャッチしてプログラムを停止させます。
 
-### JS Promise 境界
+### 旧 JS ターゲットの Promise 境界
 
-JS バックエンドで Promise-returning 関数を呼ぶ場合は、
+旧 JS ターゲットで Promise-returning 関数を呼ぶ場合は、
 `Cage[subject, JSCallAsync[path, args, Out]()]()` を使います。この形は
 `Async[Out]` を返します。Promise rejection は `Async` の rejection に
 変換され、`>=>` で待った位置の `|==` エラー天井で捕捉できます。

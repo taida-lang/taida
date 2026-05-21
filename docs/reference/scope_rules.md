@@ -23,7 +23,7 @@ Taida Langには2種類のスコープがあります。
 
 マーカーが見つからない単独ソースでは、そのソースのあるディレクトリ
 だけを fallback の境界として扱います。絶対パスの import や `..`
-を含む import がその境界の外へ出る場合、Interpreter / JS / Native /
+を含む import がその境界の外へ出る場合、Interpreter / Native /
 WASM ビルドのいずれも、共通のパストラバーサル拒否診断で reject
 します。
 

@@ -401,7 +401,7 @@ Cage[setTimeout, JSCallAsync[@[], @[20, 42], Int]()]() >=> value
 // value: Int = 42
 ```
 
-CageRilla 子系統と JSRilla 系 constructor (`JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) の詳細は [`docs/api/js.md`](../api/js.md) を参照してください。`JSRilla` 子系統は **JS バックエンド専用** で、インタプリタ・Native・WASM では利用できません。
+CageRilla 子系統と JSRilla 系 constructor (`JSGet` / `JSCall` / `JSCallAsync` / `JSNew` / `JSSet` / `JSBind` / `JSSpread`) の詳細は [`docs/api/js.md`](../api/js.md) を参照してください。`JSRilla` 子系統は **旧 JS ターゲット専用** で、インタプリタ・Native・WASM では利用できません。
 
 JSON のような structured data の schema cast は **`Cage` 経路を通りません**。JSON 専用 facade `JSON[raw, Schema]()` が `Lax[T]` failure channel を維持します。
 

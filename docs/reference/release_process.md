@@ -93,7 +93,8 @@ Taida は Semantic Versioning を採用しません。公開バージョンは
 - `docs/reference/wasm_profiles.md`
 - `docs/reference/perf_gates.md`
 - `docs/api/prelude.md` (プレリュード関数 / ビルトイン型メソッド / コレクション)
-- `docs/api/os.md`, `docs/api/net.md`, `docs/api/crypto.md`, `docs/api/pool.md`, `docs/api/js.md`, `docs/api/build_descriptors.md` (コア同梱パッケージ API)
+- `docs/api/os.md`, `docs/api/net.md`, `docs/api/crypto.md`, `docs/api/pool.md`, `docs/api/build_descriptors.md` (コア同梱パッケージ API)
+- `docs/api/js.md` (旧 JS ターゲット互換 API。正式パリティ契約には含めない)
 - `docs/guide/05_mold.md` (モールド型の解剖とユーザー定義)
 
 ---

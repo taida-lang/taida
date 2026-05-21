@@ -1,6 +1,6 @@
 # taida-lang/build API リファレンス
 
-`taida-lang/build` は Native / JS / WASM 成果物の混合ビルドを記述するための
+`taida-lang/build` は Native / WASM 成果物の混合ビルドを記述するための
 ディスクリプタ群を提供するコア同梱パッケージです。サーバー成果物が wasm
 成果物や静的アセットバンドルを「ビルド成果物」として参照する構成を、
 通常のランタイム import と分離したグラフで表現できます。
@@ -27,7 +27,7 @@
 
 ## 1. BuildUnit
 
-> コンパイル成果物 (Native binary / `.mjs` / `.wasm`) のディスクリプタ。
+> コンパイル成果物 (Native binary / `.wasm`) のディスクリプタ。
 
 ```taida
 BuildUnit name: Str  target: Str  entry: Symbol  assets: @[RouteAsset]  before: @[BuildHook]
@@ -38,7 +38,7 @@ BuildUnit name: Str  target: Str  entry: Symbol  assets: @[RouteAsset]  before: 
 | Name | Type | 必須 | Description |
 |------|------|------|-------------|
 | `name` | `Str` | はい | 成果物名。staging 階層、artifact-map のキー、ホックログディレクトリで単一パスセグメントとして使われる。 |
-| `target` | `Str` | はい | `"native"` / `"js"` / `"wasm-min"` / `"wasm-wasi"` / `"wasm-edge"` / `"wasm-full"` のいずれか。 |
+| `target` | `Str` | はい | `"native"` / `"wasm-min"` / `"wasm-wasi"` / `"wasm-edge"` / `"wasm-full"` のいずれか。旧 `"js"` target は移行期間の互換機能で、正式パリティ対象ではありません。 |
 | `entry` | `Symbol` | はい | ローカル import で取り込んだ関数シンボル。 |
 | `assets` | `@[RouteAsset]` | いいえ | 成果物・アセットバンドルへの経路メタデータ。 |
 | `before` | `@[BuildHook]` | いいえ | ビルド時前段ステップ。`--run-hooks` 明示時のみ実行。 |
@@ -230,7 +230,6 @@ buildFrontend <= BuildHook(
 
 | target | `taida-lang/os` | `taida-lang/net` | `taida-lang/terminal` |
 |--------|-----------------|------------------|-----------------------|
-| `js` | 受理 | 受理 | 受理 |
 | `native` | 受理 | 受理 | 受理 |
 | `wasm-min` | reject | reject | reject |
 | `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | reject |
@@ -295,9 +294,9 @@ plan <= BuildPlan(
 
 `taida-lang/build` のディスクリプタ自体は **ビルドドライバ専用** であり、
 ランタイムバックエンドの分類とは独立しています。`BuildUnit.target` で指定する
-ターゲット (`native` / `js` / `wasm-*`) が、生成成果物のバックエンドを決めます。
+ターゲット (`native` / `wasm-*`) が、生成成果物のバックエンドを決めます。
 
-| 関数 / 型 | Interpreter | Native | JS | WASM |
-|-----------|-------------|--------|----|------|
-| ディスクリプタ式の評価 | 受理 | 受理 | 受理 | 受理 |
-| ランタイム値としての使用 | reject (ディスクリプタのみ) | 同左 | 同左 | 同左 |
+| 関数 / 型 | Interpreter | Native | WASM |
+|-----------|-------------|--------|------|
+| ディスクリプタ式の評価 | 受理 | 受理 | 受理 |
+| ランタイム値としての使用 | reject (ディスクリプタのみ) | 同左 | 同左 |
