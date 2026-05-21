@@ -860,6 +860,23 @@ impl Lowering {
                 return Ok(result);
             }
 
+            if name == "range" {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(LowerError {
+                        message: format!("range requires 2 or 3 arguments, got {}", args.len()),
+                    });
+                }
+                let start = self.lower_expr(func, &args[0])?;
+                let end = self.lower_expr(func, &args[1])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_range".to_string(),
+                    vec![start, end],
+                ));
+                return Ok(result);
+            }
+
             if name == "allEnv" || name == "argv" {
                 if !args.is_empty() {
                     return Err(LowerError {
@@ -1547,24 +1564,34 @@ impl Lowering {
         match expr {
             // f(_) → f(prev_result)
             Expr::FuncCall(callee, args, span) => {
+                let has_placeholder = args.iter().any(|arg| self.expr_has_placeholder(arg));
                 let new_args: Vec<Expr> = args
                     .iter()
                     .map(|arg| {
-                        if matches!(arg, Expr::Placeholder(_)) {
+                        if self.expr_has_placeholder(arg) {
                             // _ を prev_result を指す特殊マーカーに置換
                             // ここでは直接 IrVar を渡せないので、
                             // Ident 参照に変換して DefVar で仮名をつける
-                            Expr::Ident("__pipe_prev".to_string(), span.clone())
+                            self.rewrite_placeholder(arg, "__pipe_prev", span)
                         } else {
                             arg.clone()
                         }
                     })
                     .collect();
 
-                // prev_result を __pipe_prev として定義
-                func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
+                if has_placeholder {
+                    // prev_result を __pipe_prev として定義
+                    func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
+                }
 
-                self.lower_func_call(func, callee, &new_args)
+                if has_placeholder {
+                    self.lower_func_call(func, callee, &new_args)
+                } else {
+                    let mut injected = vec![Expr::Ident("__pipe_prev".to_string(), span.clone())];
+                    injected.extend(new_args);
+                    func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
+                    self.lower_func_call(func, callee, &injected)
+                }
             }
             // 変数名のみ（関数として呼び出し）: `expr => func_name`
             Expr::Ident(name, _) => {
@@ -1647,6 +1674,26 @@ impl Lowering {
             Expr::MoldInst(_, type_args, _, _) => {
                 type_args.iter().any(|a| self.expr_has_placeholder(a))
             }
+            Expr::FieldAccess(obj, _, _) => self.expr_has_placeholder(obj),
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                items.iter().any(|a| self.expr_has_placeholder(a))
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                fields.iter().any(|f| self.expr_has_placeholder(&f.value))
+            }
+            Expr::Unmold(inner, _) | Expr::Lambda(_, inner, _) | Expr::Throw(inner, _) => {
+                self.expr_has_placeholder(inner)
+            }
+            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+                arm.condition
+                    .as_ref()
+                    .is_some_and(|condition| self.expr_has_placeholder(condition))
+                    || arm
+                        .body
+                        .iter()
+                        .filter_map(|stmt| stmt.yielded_expr())
+                        .any(|expr| self.expr_has_placeholder(expr))
+            }),
             _ => false,
         }
     }
@@ -1692,7 +1739,69 @@ impl Lowering {
                     .iter()
                     .map(|a| self.rewrite_placeholder(a, replacement, span))
                     .collect(),
-                fields.clone(),
+                fields
+                    .iter()
+                    .map(|field| BuchiField {
+                        name: field.name.clone(),
+                        value: self.rewrite_placeholder(&field.value, replacement, span),
+                        span: field.span.clone(),
+                    })
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::FieldAccess(obj, field, s) => Expr::FieldAccess(
+                Box::new(self.rewrite_placeholder(obj, replacement, span)),
+                field.clone(),
+                s.clone(),
+            ),
+            Expr::ListLit(items, s) => Expr::ListLit(
+                items
+                    .iter()
+                    .map(|item| self.rewrite_placeholder(item, replacement, span))
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::Pipeline(items, s) => Expr::Pipeline(
+                items
+                    .iter()
+                    .map(|item| self.rewrite_placeholder(item, replacement, span))
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::BuchiPack(fields, s) => Expr::BuchiPack(
+                fields
+                    .iter()
+                    .map(|field| BuchiField {
+                        name: field.name.clone(),
+                        value: self.rewrite_placeholder(&field.value, replacement, span),
+                        span: field.span.clone(),
+                    })
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::TypeInst(name, fields, s) => Expr::TypeInst(
+                name.clone(),
+                fields
+                    .iter()
+                    .map(|field| BuchiField {
+                        name: field.name.clone(),
+                        value: self.rewrite_placeholder(&field.value, replacement, span),
+                        span: field.span.clone(),
+                    })
+                    .collect(),
+                s.clone(),
+            ),
+            Expr::Unmold(inner, s) => Expr::Unmold(
+                Box::new(self.rewrite_placeholder(inner, replacement, span)),
+                s.clone(),
+            ),
+            Expr::Lambda(params, body, s) => Expr::Lambda(
+                params.clone(),
+                Box::new(self.rewrite_placeholder(body, replacement, span)),
+                s.clone(),
+            ),
+            Expr::Throw(inner, s) => Expr::Throw(
+                Box::new(self.rewrite_placeholder(inner, replacement, span)),
                 s.clone(),
             ),
             other => other.clone(),

@@ -659,6 +659,7 @@ static void  taida_str_release(taida_ptr ptr);
 static void taida_list_elem_retain(taida_val elem, taida_val elem_tag);
 static void taida_list_elem_release(taida_val elem, taida_val elem_tag);
 taida_ptr taida_list_get(taida_ptr list_ptr, taida_val index);
+taida_val taida_set_new(void);
 taida_val taida_set_has(taida_ptr set_ptr, taida_val item);
 taida_ptr taida_set_remove(taida_ptr set_ptr, taida_val item);
 taida_ptr taida_set_add(taida_ptr set_ptr, taida_val item);
@@ -683,6 +684,7 @@ taida_ptr taida_io_stdin_line(taida_ptr prompt_ptr);
 taida_ptr taida_sha256(taida_val value);
 taida_val taida_time_now_ms(void);
 taida_val taida_time_sleep(taida_val ms);
+taida_val taida_range(taida_val start, taida_val end);
 // F42 sweep: assert(cond, msg?) -> Bool. Native parity with
 // the interpreter and JS backends; throws AssertionError on cond=false.
 taida_val taida_assert(taida_val cond, taida_val msg);
@@ -6427,9 +6429,84 @@ taida_val taida_hashmap_remove_immut(taida_val hm_ptr, taida_val key_hash, taida
     return taida_hashmap_remove(new_hm, key_hash, key_ptr);
 }
 
+static taida_val taida_hashmap_default_for_value(taida_val value, taida_val tag, taida_val *out_tag) {
+    taida_val resolved_tag = tag;
+    if (resolved_tag == TAIDA_TAG_UNKNOWN || resolved_tag == TAIDA_TAG_HETEROGENEOUS) {
+        resolved_tag = taida_runtime_detect_tag(value);
+    }
+    if (out_tag) *out_tag = resolved_tag;
+    switch (resolved_tag) {
+        case TAIDA_TAG_FLOAT:
+            return _d2l(0.0);
+        case TAIDA_TAG_BOOL:
+            return 0;
+        case TAIDA_TAG_STR:
+            return (taida_val)taida_str_new_copy("");
+        case TAIDA_TAG_LIST:
+            return taida_list_new();
+        case TAIDA_TAG_HMAP:
+            return taida_hashmap_new();
+        case TAIDA_TAG_SET:
+            return taida_set_new();
+        case TAIDA_TAG_PACK:
+            return taida_pack_new(0);
+        case TAIDA_TAG_INT:
+        default:
+            if (out_tag) *out_tag = TAIDA_TAG_INT;
+            return 0;
+    }
+}
+
+static taida_val taida_hashmap_missing_lax(taida_val hm_ptr) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val cap = hm[1];
+    taida_val len = hm[2];
+    taida_val default_tag = TAIDA_TAG_STR;
+    taida_val default_value = 0;
+
+    if (len > 0) {
+        taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
+        for (taida_val oi = 0; oi < next_ord; oi++) {
+            taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
+            if (slot < 0 || slot >= cap) continue;
+            taida_val sh = hm[HM_HEADER + slot * 3];
+            taida_val sk = hm[HM_HEADER + slot * 3 + 1];
+            if (HM_SLOT_OCCUPIED(sh, sk)) {
+                default_value = taida_hashmap_default_for_value(
+                    hm[HM_HEADER + slot * 3 + 2],
+                    hm[3],
+                    &default_tag
+                );
+                break;
+            }
+        }
+    }
+    if (default_value == 0 && default_tag == TAIDA_TAG_STR) {
+        default_value = (taida_val)taida_str_new_copy("");
+    }
+
+    taida_val lax = taida_lax_empty(default_value);
+    if (default_tag == TAIDA_TAG_INT || default_tag == TAIDA_TAG_FLOAT || default_tag == TAIDA_TAG_BOOL) {
+        return taida_lax_tag_value_default(lax, default_tag);
+    }
+    return lax;
+}
+
+static taida_val taida_hashmap_found_lax(taida_val hm_ptr, taida_val value) {
+    taida_val *hm = (taida_val*)hm_ptr;
+    taida_val value_tag = hm[3];
+    taida_val default_tag = TAIDA_TAG_UNKNOWN;
+    taida_val default_value = taida_hashmap_default_for_value(value, value_tag, &default_tag);
+    taida_val lax = taida_lax_new(value, default_value);
+    if (default_tag == TAIDA_TAG_INT || default_tag == TAIDA_TAG_FLOAT || default_tag == TAIDA_TAG_BOOL) {
+        return taida_lax_tag_value_default(lax, default_tag);
+    }
+    return lax;
+}
+
 // Get returning Lax (Lax[value]() or empty Lax)
 taida_val taida_hashmap_get_lax(taida_val hm_ptr, taida_val key_hash, taida_val key_ptr) {
-    if (!taida_hashmap_key_valid(key_ptr)) return taida_lax_empty(0);
+    if (!taida_hashmap_key_valid(key_ptr)) return taida_hashmap_missing_lax(hm_ptr);
 
     taida_val *hm = (taida_val*)hm_ptr;
     taida_val cap = hm[1];
@@ -6439,11 +6516,13 @@ taida_val taida_hashmap_get_lax(taida_val hm_ptr, taida_val key_hash, taida_val 
         taida_val slot = (idx + i) % cap;
         taida_val sh = hm[HM_HEADER + slot * 3];
         taida_val sk = hm[HM_HEADER + slot * 3 + 1];
-        if (HM_SLOT_EMPTY(sh, sk)) return taida_lax_empty(0);
+        if (HM_SLOT_EMPTY(sh, sk)) return taida_hashmap_missing_lax(hm_ptr);
         if (HM_SLOT_TOMBSTONE(sh, sk)) continue;
-        if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) return taida_lax_new(hm[HM_HEADER + slot * 3 + 2], 0);
+        if (sh == key_hash && taida_hashmap_key_eq(sk, key_ptr)) {
+            return taida_hashmap_found_lax(hm_ptr, hm[HM_HEADER + slot * 3 + 2]);
+        }
     }
-    return taida_lax_empty(0);
+    return taida_hashmap_missing_lax(hm_ptr);
 }
 
 // Entries: returns list of BuchiPack @(key, value).
@@ -7714,6 +7793,9 @@ taida_val taida_lax_to_string(taida_val lax_ptr) {
         taida_val bits = hasv ? val : def;
         memcpy(&d, &bits, sizeof(double));
         rendered = taida_float_to_str(d);
+    } else if (slot_tag == TAIDA_TAG_BOOL) {
+        taida_val bits = hasv ? val : def;
+        rendered = (taida_val)taida_str_new_copy(bits ? "true" : "false");
     } else {
         rendered = hasv
             ? taida_value_to_display_string(val)
@@ -9680,6 +9762,28 @@ static taida_val json_default_value_for_desc(const char *desc) {
     return json_pure_default_apply(&cur);
 }
 
+static taida_val json_root_tag_for_desc(const char *desc) {
+    if (!desc || !*desc) return TAIDA_TAG_UNKNOWN;
+    switch (desc[0]) {
+        case 'i': return TAIDA_TAG_INT;
+        case 'f': return TAIDA_TAG_FLOAT;
+        case 'b': return TAIDA_TAG_BOOL;
+        case 's': return TAIDA_TAG_STR;
+        case 'L': return TAIDA_TAG_LIST;
+        case 'T': return TAIDA_TAG_PACK;
+        case 'E': return TAIDA_TAG_INT;
+        default: return TAIDA_TAG_UNKNOWN;
+    }
+}
+
+static taida_val json_tag_lax_for_schema(taida_val lax, const char *schema) {
+    taida_val root_tag = json_root_tag_for_desc(schema);
+    if (root_tag == TAIDA_TAG_INT || root_tag == TAIDA_TAG_FLOAT || root_tag == TAIDA_TAG_BOOL) {
+        return taida_lax_tag_value_default(lax, root_tag);
+    }
+    return lax;
+}
+
 // --- Convert JSON value to typed value using schema ---
 // Returns a taida_val (int, float-as-bitcast, string pointer, or BuchiPack pointer)
 
@@ -9687,15 +9791,6 @@ static taida_val json_to_int(json_val *jv) {
     if (!jv) return 0;
     switch (jv->type) {
         case JSON_INT: return jv->int_val;
-        case JSON_FLOAT: return (taida_val)jv->float_val;
-        case JSON_BOOL: return jv->int_val;
-        case JSON_STRING: {
-            if (!jv->str_val) return 0;
-            char *end;
-            taida_val r = strtol(jv->str_val, &end, 10);
-            if (*end != '\0') return 0;
-            return r;
-        }
         default: return 0;
     }
 }
@@ -9705,14 +9800,6 @@ static taida_val json_to_float(json_val *jv) {
     switch (jv->type) {
         case JSON_FLOAT: return _d2l(jv->float_val);
         case JSON_INT: return _d2l((double)jv->int_val);
-        case JSON_BOOL: return _d2l(jv->int_val ? 1.0 : 0.0);
-        case JSON_STRING: {
-            if (!jv->str_val) return _d2l(0.0);
-            char *end;
-            double r = strtod(jv->str_val, &end);
-            if (*end != '\0') return _d2l(0.0);
-            return _d2l(r);
-        }
         default: return _d2l(0.0);
     }
 }
@@ -9723,17 +9810,6 @@ static taida_val json_to_str(json_val *jv) {
         case JSON_STRING: {
             if (!jv->str_val) { return (taida_val)taida_str_alloc(0); }
             return (taida_val)taida_str_new_copy(jv->str_val);
-        }
-        case JSON_INT: {
-            char buf[32]; snprintf(buf, sizeof(buf), "%" PRId64 "", jv->int_val);
-            return (taida_val)taida_str_new_copy(buf);
-        }
-        case JSON_FLOAT: {
-            char buf[64]; snprintf(buf, sizeof(buf), "%g", jv->float_val);
-            return (taida_val)taida_str_new_copy(buf);
-        }
-        case JSON_BOOL: {
-            return (taida_val)taida_str_new_copy(jv->int_val ? "true" : "false");
         }
         case JSON_NULL: {
             return (taida_val)taida_str_alloc(0);
@@ -9748,11 +9824,145 @@ static taida_val json_to_bool(json_val *jv) {
     if (!jv) return 0;
     switch (jv->type) {
         case JSON_BOOL: return jv->int_val;
-        case JSON_INT: return jv->int_val != 0 ? 1 : 0;
-        case JSON_FLOAT: return jv->float_val != 0.0 ? 1 : 0;
-        case JSON_STRING: return (jv->str_val && jv->str_val[0]) ? 1 : 0;
-        case JSON_NULL: return 0;
         default: return 0;
+    }
+}
+
+static void json_skip_schema_desc(const char **desc) {
+    if (!desc || !*desc || !**desc) return;
+    const char *d = *desc;
+    switch (d[0]) {
+        case 'i':
+        case 'f':
+        case 's':
+        case 'b':
+            *desc = d + 1;
+            return;
+        case 'T':
+        case 'L':
+        case 'E':
+            if (d[1] == '{') {
+                d += 2;
+                int inner_len = schema_find_closing_brace(d);
+                d += inner_len;
+                if (*d == '}') d++;
+                *desc = d;
+            } else {
+                *desc = d + 1;
+            }
+            return;
+        default:
+            *desc = d + 1;
+            return;
+    }
+}
+
+static int json_matches_schema_desc(json_val *jval, const char **desc) {
+    if (!desc || !*desc || !**desc) return 0;
+    const char *d = *desc;
+    switch (d[0]) {
+        case 'i':
+            *desc = d + 1;
+            return jval && jval->type == JSON_INT;
+        case 'f':
+            *desc = d + 1;
+            return jval && (jval->type == JSON_INT || jval->type == JSON_FLOAT);
+        case 's':
+            *desc = d + 1;
+            return jval && jval->type == JSON_STRING;
+        case 'b':
+            *desc = d + 1;
+            return jval && jval->type == JSON_BOOL;
+        case 'T': {
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;
+            while (*d && *d != '|' && *d != '}') d++;
+            if (*d == '|') d++;
+
+            int object_ok = (jval && jval->type == JSON_OBJECT);
+            int matches = object_ok;
+            while (*d && *d != '}') {
+                char fname[256];
+                int fn_len = 0;
+                while (*d && *d != ':' && *d != '}' && fn_len < 255) {
+                    fname[fn_len++] = *d;
+                    d++;
+                }
+                fname[fn_len] = '\0';
+                if (*d == ':') d++;
+
+                json_val *field_jval = object_ok ? json_obj_get(jval->obj, fname) : NULL;
+                if (field_jval && field_jval->type != JSON_NULL) {
+                    const char *field_desc = d;
+                    int field_matches = json_matches_schema_desc(field_jval, &field_desc);
+                    d = field_desc;
+                    if (!field_matches) matches = 0;
+                } else {
+                    json_skip_schema_desc(&d);
+                }
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+            *desc = d;
+            return matches;
+        }
+        case 'L': {
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;
+            int inner_len = schema_find_closing_brace(d);
+            int matches = (jval && jval->type == JSON_ARRAY && jval->arr);
+            if (matches) {
+                char *inner_desc = (char*)TAIDA_MALLOC((size_t)inner_len + 1, "json_match_inner_desc");
+                memcpy(inner_desc, d, (size_t)inner_len);
+                inner_desc[inner_len] = '\0';
+                for (int i = 0; i < jval->arr->count; i++) {
+                    const char *elem_desc = inner_desc;
+                    if (!json_matches_schema_desc(&jval->arr->items[i], &elem_desc)) {
+                        matches = 0;
+                        break;
+                    }
+                }
+                free(inner_desc);
+            }
+            d += inner_len;
+            if (*d == '}') d++;
+            *desc = d;
+            return matches;
+        }
+        case 'E': {
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;
+            while (*d && *d != '|' && *d != '}') d++;
+            if (*d == '|') d++;
+            int matches = 0;
+            int is_string = (jval && jval->type == JSON_STRING && jval->str_val);
+            const char *js = is_string ? jval->str_val : NULL;
+            int js_len = is_string ? jval->str_len : 0;
+            while (*d && *d != '}') {
+                const char *vstart = d;
+                while (*d && *d != ',' && *d != '}') d++;
+                int vlen = (int)(d - vstart);
+                if (!matches && js && js_len == vlen && memcmp(js, vstart, (size_t)vlen) == 0) {
+                    matches = 1;
+                }
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+            *desc = d;
+            return matches;
+        }
+        default:
+            *desc = d + 1;
+            return 0;
     }
 }
 
@@ -9955,7 +10165,8 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
 
     if (!raw || !schema) {
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: missing raw value or schema", "parse"));
+        taida_val lax = taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: missing raw value or schema", "parse"));
+        return json_tag_lax_for_schema(lax, schema);
     }
 
     // Parse JSON
@@ -9964,7 +10175,8 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (!*p) {
         // Empty string -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: empty input", "parse"));
+        taida_val lax = taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: empty input", "parse"));
+        return json_tag_lax_for_schema(lax, schema);
     }
 
     const char *before_parse = p;
@@ -9975,7 +10187,8 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (p == before_parse) {
         // Parser didn't consume anything -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: invalid input", "parse"));
+        taida_val lax = taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: invalid input", "parse"));
+        return json_tag_lax_for_schema(lax, schema);
     }
 
     // Check if there's trailing non-whitespace (malformed JSON)
@@ -9983,17 +10196,21 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     if (*p != '\0') {
         // Trailing garbage -> parse error
         taida_val def = json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: trailing input", "parse"));
+        taida_val lax = taida_lax_empty_error(def, taida_make_error_with_kind("JsonError", "JSON parse error: trailing input", "parse"));
+        return json_tag_lax_for_schema(lax, schema);
     }
 
     // Apply schema
     const char *desc = schema;
     taida_val result = json_apply_schema(&jval, &desc);
+    const char *match_desc = schema;
+    int matches_schema = json_matches_schema_desc(&jval, &match_desc);
 
     // Compute default for same schema
     taida_val def = json_default_value_for_desc(schema);
 
-    return taida_lax_new(result, def);
+    taida_val lax = matches_schema ? taida_lax_new(result, def) : taida_lax_empty(result);
+    return json_tag_lax_for_schema(lax, schema);
 }
 
 // Legacy JSON functions (kept for backward compat with older tests)
@@ -10712,6 +10929,33 @@ taida_val taida_time_sleep(taida_val ms) {
         return taida_async_err(taida_make_error("RangeError", msg));
     }
     return taida_async_spawn((taida_val)taida_time_sleep_task, ms);
+}
+
+taida_val taida_range(taida_val start, taida_val end) {
+    const uint64_t max_range_items = 1000000ULL;
+    taida_val list = taida_list_new();
+    taida_list_set_elem_tag(list, TAIDA_TAG_INT);
+    if (end <= start) {
+        return list;
+    }
+
+    uint64_t len = (uint64_t)end - (uint64_t)start;
+    if (len > max_range_items) {
+        char msg[160];
+        snprintf(
+            msg,
+            sizeof(msg),
+            "range(start, end) would create %" PRIu64 " items; maximum is %" PRIu64 "",
+            len,
+            max_range_items
+        );
+        return taida_throw(taida_make_error("RangeError", msg));
+    }
+
+    for (taida_val value = start; value < end; value++) {
+        list = taida_list_push(list, value);
+    }
+    return list;
 }
 
 // F42 sweep / Phase 1 Round 4: `assert(cond, msg)` prelude function.

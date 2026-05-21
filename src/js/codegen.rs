@@ -4266,6 +4266,7 @@ impl JsCodegen {
             self.write("__p = ");
             match expr {
                 Expr::FuncCall(callee, args, _) => {
+                    let has_placeholder = args.iter().any(js_expr_has_placeholder);
                     if let Expr::Ident(name, _) = callee.as_ref() {
                         match name.as_str() {
                             "debug" => self.write("__taida_debug"),
@@ -4330,12 +4331,19 @@ impl JsCodegen {
                         self.gen_expr(callee)?;
                     }
                     self.write("(");
+                    if !has_placeholder {
+                        self.write("__p");
+                        if !args.is_empty() {
+                            self.write(", ");
+                        }
+                    }
                     for (i, arg) in args.iter().enumerate() {
                         if i > 0 {
                             self.write(", ");
                         }
-                        if matches!(arg, Expr::Placeholder(_)) {
-                            self.write("__p");
+                        if js_expr_has_placeholder(arg) {
+                            let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
+                            self.gen_expr(&rewritten)?;
                         } else {
                             self.gen_expr(arg)?;
                         }
@@ -4373,8 +4381,10 @@ impl JsCodegen {
                             "length" => "length_",
                             other => other,
                         };
-                        if matches!(obj.as_ref(), Expr::Placeholder(_)) {
-                            self.write(&format!("__p.{}(", js_method));
+                        if js_expr_has_placeholder(obj) {
+                            let rewritten = js_rewrite_placeholder(obj, "__p", obj.span());
+                            self.gen_expr(&rewritten)?;
+                            self.write(&format!(".{}(", js_method));
                         } else {
                             self.gen_expr(obj)?;
                             self.write(&format!(".{}(", js_method));
@@ -4383,8 +4393,9 @@ impl JsCodegen {
                             if i > 0 {
                                 self.write(", ");
                             }
-                            if matches!(arg, Expr::Placeholder(_)) {
-                                self.write("__p");
+                            if js_expr_has_placeholder(arg) {
+                                let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
+                                self.gen_expr(&rewritten)?;
                             } else {
                                 self.gen_expr(arg)?;
                             }
@@ -4434,16 +4445,20 @@ impl JsCodegen {
                         if let Some(Expr::Ident(class_name, _)) = type_args.first() {
                             self.write(&format!("new {}(", class_name));
                             // Pipeline value __p as first arg, followed by fields
-                            let has_placeholder = fields
-                                .iter()
-                                .any(|f| matches!(f.value, Expr::Placeholder(_)));
+                            let has_placeholder =
+                                fields.iter().any(|f| js_expr_has_placeholder(&f.value));
                             if has_placeholder {
                                 for (i, field) in fields.iter().enumerate() {
                                     if i > 0 {
                                         self.write(", ");
                                     }
-                                    if matches!(field.value, Expr::Placeholder(_)) {
-                                        self.write("__p");
+                                    if js_expr_has_placeholder(&field.value) {
+                                        let rewritten = js_rewrite_placeholder(
+                                            &field.value,
+                                            "__p",
+                                            field.value.span(),
+                                        );
+                                        self.gen_expr(&rewritten)?;
                                     } else {
                                         self.gen_expr(&field.value)?;
                                     }
@@ -4472,15 +4487,15 @@ impl JsCodegen {
                         };
                         self.write("__taida_solidify(");
                         self.write(&format!("{}(", js_name));
-                        let has_placeholder =
-                            type_args.iter().any(|a| matches!(a, Expr::Placeholder(_)));
+                        let has_placeholder = type_args.iter().any(js_expr_has_placeholder);
                         if has_placeholder {
                             for (i, arg) in type_args.iter().enumerate() {
                                 if i > 0 {
                                     self.write(", ");
                                 }
-                                if matches!(arg, Expr::Placeholder(_)) {
-                                    self.write("__p");
+                                if js_expr_has_placeholder(arg) {
+                                    let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
+                                    self.gen_expr(&rewritten)?;
                                 } else {
                                     self.gen_expr(arg)?;
                                 }
@@ -4500,7 +4515,16 @@ impl JsCodegen {
                                     self.write(", ");
                                 }
                                 self.write(&format!("{}: ", field.name));
-                                self.gen_expr(&field.value)?;
+                                if js_expr_has_placeholder(&field.value) {
+                                    let rewritten = js_rewrite_placeholder(
+                                        &field.value,
+                                        "__p",
+                                        field.value.span(),
+                                    );
+                                    self.gen_expr(&rewritten)?;
+                                } else {
+                                    self.gen_expr(&field.value)?;
+                                }
                             }
                             self.write(" }");
                         }
@@ -4633,6 +4657,151 @@ fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
         }
     }
     walk(expr, bound_names)
+}
+
+fn js_expr_has_placeholder(expr: &Expr) -> bool {
+    match expr {
+        Expr::Placeholder(_) => true,
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            js_expr_has_placeholder(lhs) || js_expr_has_placeholder(rhs)
+        }
+        Expr::UnaryOp(_, inner, _) => js_expr_has_placeholder(inner),
+        Expr::FuncCall(callee, args, _) => {
+            js_expr_has_placeholder(callee) || args.iter().any(js_expr_has_placeholder)
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            js_expr_has_placeholder(obj) || args.iter().any(js_expr_has_placeholder)
+        }
+        Expr::FieldAccess(obj, _, _) => js_expr_has_placeholder(obj),
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            items.iter().any(js_expr_has_placeholder)
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => fields
+            .iter()
+            .any(|field| js_expr_has_placeholder(&field.value)),
+        Expr::MoldInst(_, type_args, fields, _) => {
+            type_args.iter().any(js_expr_has_placeholder)
+                || fields
+                    .iter()
+                    .any(|field| js_expr_has_placeholder(&field.value))
+        }
+        Expr::Unmold(inner, _) | Expr::Lambda(_, inner, _) | Expr::Throw(inner, _) => {
+            js_expr_has_placeholder(inner)
+        }
+        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+            arm.condition.as_ref().is_some_and(js_expr_has_placeholder)
+                || arm
+                    .body
+                    .iter()
+                    .filter_map(|stmt| stmt.yielded_expr())
+                    .any(js_expr_has_placeholder)
+        }),
+        _ => false,
+    }
+}
+
+fn js_rewrite_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {
+    match expr {
+        Expr::Placeholder(_) => Expr::Ident(replacement.to_string(), span.clone()),
+        Expr::BinaryOp(lhs, op, rhs, s) => Expr::BinaryOp(
+            Box::new(js_rewrite_placeholder(lhs, replacement, span)),
+            op.clone(),
+            Box::new(js_rewrite_placeholder(rhs, replacement, span)),
+            s.clone(),
+        ),
+        Expr::UnaryOp(op, inner, s) => Expr::UnaryOp(
+            op.clone(),
+            Box::new(js_rewrite_placeholder(inner, replacement, span)),
+            s.clone(),
+        ),
+        Expr::FuncCall(callee, args, s) => Expr::FuncCall(
+            Box::new(js_rewrite_placeholder(callee, replacement, span)),
+            args.iter()
+                .map(|arg| js_rewrite_placeholder(arg, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
+        Expr::MethodCall(obj, method, args, s) => Expr::MethodCall(
+            Box::new(js_rewrite_placeholder(obj, replacement, span)),
+            method.clone(),
+            args.iter()
+                .map(|arg| js_rewrite_placeholder(arg, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
+        Expr::FieldAccess(obj, field, s) => Expr::FieldAccess(
+            Box::new(js_rewrite_placeholder(obj, replacement, span)),
+            field.clone(),
+            s.clone(),
+        ),
+        Expr::ListLit(items, s) => Expr::ListLit(
+            items
+                .iter()
+                .map(|item| js_rewrite_placeholder(item, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
+        Expr::Pipeline(items, s) => Expr::Pipeline(
+            items
+                .iter()
+                .map(|item| js_rewrite_placeholder(item, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
+        Expr::BuchiPack(fields, s) => Expr::BuchiPack(
+            fields
+                .iter()
+                .map(|field| BuchiField {
+                    name: field.name.clone(),
+                    value: js_rewrite_placeholder(&field.value, replacement, span),
+                    span: field.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::MoldInst(name, type_args, fields, s) => Expr::MoldInst(
+            name.clone(),
+            type_args
+                .iter()
+                .map(|arg| js_rewrite_placeholder(arg, replacement, span))
+                .collect(),
+            fields
+                .iter()
+                .map(|field| BuchiField {
+                    name: field.name.clone(),
+                    value: js_rewrite_placeholder(&field.value, replacement, span),
+                    span: field.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::TypeInst(name, fields, s) => Expr::TypeInst(
+            name.clone(),
+            fields
+                .iter()
+                .map(|field| BuchiField {
+                    name: field.name.clone(),
+                    value: js_rewrite_placeholder(&field.value, replacement, span),
+                    span: field.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::Unmold(inner, s) => Expr::Unmold(
+            Box::new(js_rewrite_placeholder(inner, replacement, span)),
+            s.clone(),
+        ),
+        Expr::Lambda(params, body, s) => Expr::Lambda(
+            params.clone(),
+            Box::new(js_rewrite_placeholder(body, replacement, span)),
+            s.clone(),
+        ),
+        Expr::Throw(inner, s) => Expr::Throw(
+            Box::new(js_rewrite_placeholder(inner, replacement, span)),
+            s.clone(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn merge_field_defs(parent: &[FieldDef], child: &[FieldDef]) -> Vec<FieldDef> {

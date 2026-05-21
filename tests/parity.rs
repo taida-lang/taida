@@ -41903,3 +41903,64 @@ stdout(result.toString())
 "#;
     assert_backends_reject_source(source, "lt_chain_paren_multiline_first_rhs");
 }
+
+fn assert_native_and_js_when_available(source: &str, label: &str) {
+    let interp = run_interpreter_src(source, label)
+        .unwrap_or_else(|| panic!("interpreter failed for {}", label));
+    let native = run_native_src(source, label)
+        .unwrap_or_else(|| panic!("native backend failed for {}", label));
+    assert_eq!(
+        interp, native,
+        "interpreter/native mismatch for source case {}",
+        label
+    );
+    if node_available() {
+        let js =
+            run_js_src(source, label).unwrap_or_else(|| panic!("js backend failed for {}", label));
+        assert_eq!(
+            interp, js,
+            "interpreter/js mismatch for source case {}",
+            label
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_nested_placeholder_backend_parity() {
+    let source = r#"
+2 => stdout(_.toString())
+@[1, 2, 3] => stdout(_.length().toString())
+"#;
+    assert_native_and_js_when_available(source, "pipeline_nested_placeholder_backend_parity");
+}
+
+#[test]
+fn test_range_large_boundary_backend_parity() {
+    let source = r#"
+stdout(range(0, 1000000).length().toString())
+"#;
+    assert_native_and_js_when_available(source, "range_large_boundary_backend_parity");
+}
+
+#[test]
+fn test_hashmap_empty_missing_to_string_backend_parity() {
+    let source = r#"
+m <= hashMap()
+stdout(m.get("missing").toString())
+m2 <= hashMap().set("ok", true)
+stdout(m2.get("ok").toString())
+stdout(m2.get("missing").toString())
+"#;
+    assert_native_and_js_when_available(source, "hashmap_empty_missing_to_string_backend_parity");
+}
+
+#[test]
+fn test_json_strict_mismatch_lax_empty_backend_parity() {
+    let source = r#"
+stdout(JSON["5", Bool]().toString())
+stdout(JSON["5", Bool]().hasValue().toString())
+stdout(JSON["true", Int]().toString())
+stdout(JSON["true", Int]().hasValue().toString())
+"#;
+    assert_native_and_js_when_available(source, "json_strict_mismatch_lax_empty_backend_parity");
+}

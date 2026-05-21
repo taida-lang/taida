@@ -780,6 +780,9 @@ function JSON_mold(rawValue, schema) {
   // Cast through schema
   const typedValue = __taida_castJson(jsonData, schema);
   const defaultVal = __taida_defaultForSchema(schema);
+  if (!__taida_jsonMatchesSchema(jsonData, schema)) {
+    return Lax(null, typedValue);
+  }
   return Lax(typedValue, defaultVal);
 }
 
@@ -812,9 +815,9 @@ function __taida_fieldMissingDefault(fschema) {
 function __taida_castJson(json, schema) {
   if (typeof schema === 'string') {
     switch (schema) {
-      case 'Int': return typeof json === 'number' ? Math.trunc(json) : (typeof json === 'string' ? (parseInt(json, 10) || 0) : 0);
-      case 'Float': return typeof json === 'number' ? json : (typeof json === 'string' ? (parseFloat(json) || 0.0) : 0.0);
-      case 'Str': return typeof json === 'string' ? json : (json === null || json === undefined ? '' : (typeof json === 'object' ? JSON.stringify(json) : String(json)));
+      case 'Int': return (typeof json === 'number' && Number.isInteger(json)) ? Math.trunc(json) : 0;
+      case 'Float': return typeof json === 'number' ? json : 0.0;
+      case 'Str': return typeof json === 'string' ? json : '';
       case 'Bool': return typeof json === 'boolean' ? json : false;
       default: {
         // C16: TypeDef wins over Enum when both exist (mirrors Interpreter).
@@ -866,6 +869,45 @@ function __taida_castJson(json, schema) {
     return Object.freeze(result);
   }
   return '';
+}
+
+function __taida_jsonMatchesSchema(json, schema) {
+  if (typeof schema === 'string') {
+    switch (schema) {
+      case 'Int': return typeof json === 'number' && Number.isInteger(json);
+      case 'Float': return typeof json === 'number';
+      case 'Str': return typeof json === 'string';
+      case 'Bool': return typeof json === 'boolean';
+      default: {
+        const td = __taida_typeDefs[schema];
+        if (td) {
+          if (typeof json !== 'object' || json === null || Array.isArray(json)) return false;
+          for (const [fname, fschema] of Object.entries(td)) {
+            if (fname in json && json[fname] !== null && json[fname] !== undefined) {
+              if (!__taida_jsonMatchesSchema(json[fname], fschema)) return false;
+            }
+          }
+          return true;
+        }
+        const variants = __taida_enumDefs[schema];
+        if (variants) return typeof json === 'string' && variants.includes(json);
+        return typeof json === 'string';
+      }
+    }
+  }
+  if (schema && schema.__list) {
+    return Array.isArray(json) && json.every(item => __taida_jsonMatchesSchema(item, schema.__list));
+  }
+  if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
+    if (typeof json !== 'object' || json === null || Array.isArray(json)) return false;
+    for (const [fname, fschema] of Object.entries(schema)) {
+      if (fname in json && json[fname] !== null && json[fname] !== undefined) {
+        if (!__taida_jsonMatchesSchema(json[fname], fschema)) return false;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function __taida_defaultForSchema(schema) {
@@ -3056,7 +3098,8 @@ function __taida_createHashMap(entries) {
       for (const e of _entries) {
         if (__taida_equals(e.key, key)) return Lax(e.value);
       }
-      return Lax(undefined);
+      const defaultValue = _entries.length > 0 ? __taida_lax_default(_entries[0].value) : '';
+      return Lax(null, defaultValue);
     },
     set(key, value) {
       const newEntries = [];

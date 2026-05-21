@@ -552,7 +552,7 @@ stdout(idx.toString())
   # 9-7: unique parity
   sem_src_unique='
 items <= @[1, 2, 2, 3, 1, 3]
-result <= items.unique()
+result <= Unique[items]()
 stdout(result.length().toString())
 '
   interp_out=$(sem_run_interp "$sem_src_unique")

@@ -34,6 +34,7 @@ impl Lowering {
         // Prelude collection constructors
         stdlib_runtime_funcs.insert("hashMap".to_string(), "taida_hashmap_new".to_string());
         stdlib_runtime_funcs.insert("setOf".to_string(), "taida_set_from_list".to_string());
+        stdlib_runtime_funcs.insert("range".to_string(), "taida_range".to_string());
         // Prelude collection functions — function form parity with mold form
         // (`Zip[a, b]()` / `Enumerate[xs]()`). C25B-027 (2026-04-23 Codex
         // reopen of C24-B HOLD): the mold form was wired up by
