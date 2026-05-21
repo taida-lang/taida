@@ -698,6 +698,7 @@ impl Interpreter {
 
             // ── range(start, end): generate integer list ──
             "range" => {
+                const MAX_RANGE_ITEMS: i64 = 1_000_000;
                 let start = if let Some(arg) = args.first() {
                     match self.eval_expr(arg)? {
                         Signal::Value(Value::Int(n)) => n,
@@ -716,6 +717,17 @@ impl Interpreter {
                 } else {
                     0
                 };
+                let len = end.saturating_sub(start);
+                if len > MAX_RANGE_ITEMS {
+                    return Ok(Some(Signal::Throw(Value::Error(super::value::ErrorValue {
+                        error_type: "RangeError".into(),
+                        message: format!(
+                            "range(start, end) would create {} items; maximum is {}",
+                            len, MAX_RANGE_ITEMS
+                        ),
+                        fields: Vec::new(),
+                    }))));
+                }
                 let list: Vec<Value> = (start..end).map(Value::Int).collect();
                 Ok(Some(Signal::Value(Value::list(list))))
             }

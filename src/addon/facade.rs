@@ -148,9 +148,20 @@ pub fn load_facade_summary(
     let mut universe_funcs: HashMap<String, FuncDef> = HashMap::new();
     let mut universe_packs: HashMap<String, Expr> = HashMap::new();
     let mut universe_aliases: HashMap<String, String> = HashMap::new();
+    let facade_root = pkg_dir
+        .join("taida")
+        .canonicalize()
+        .map_err(|e| FacadeLoadError {
+            message: format!(
+                "addon facade root '{}' cannot be canonicalized: {}",
+                pkg_dir.join("taida").display(),
+                e
+            ),
+        })?;
 
     load_facade_file(
         &facade_path,
+        &facade_root,
         manifest,
         import_path,
         None,
@@ -207,6 +218,7 @@ pub fn load_facade_summary(
 #[allow(clippy::too_many_arguments)]
 fn load_facade_file(
     facade_path: &Path,
+    facade_root: &Path,
     manifest: &AddonManifest,
     import_path: &str,
     restrict_to: Option<&HashSet<String>>,
@@ -319,16 +331,34 @@ fn load_facade_file(
                         });
                     }
                     let arity_decl: u32 = match &fields[0].value {
-                        Expr::IntLit(n, _) if *n >= 0 => *n as u32,
+                        Expr::IntLit(n, _) => match u32::try_from(*n) {
+                            Ok(arity) => arity,
+                            Err(_) => {
+                                visiting.remove(&canonical);
+                                return Err(FacadeLoadError {
+                                    message: format!(
+                                        "[E1412] addon facade '{}': RustAddon[\"{}\"](arity <= N) \
+                                         requires an integer between 0 and {}; got {:?} \
+                                         (target='{}')",
+                                        facade_path.display(),
+                                        fn_name,
+                                        u32::MAX,
+                                        fields[0].value,
+                                        assign.target
+                                    ),
+                                });
+                            }
+                        },
                         other => {
                             visiting.remove(&canonical);
                             return Err(FacadeLoadError {
                                 message: format!(
                                     "[E1412] addon facade '{}': RustAddon[\"{}\"](arity <= N) \
-                                     requires a non-negative integer literal; got {:?} \
+                                     requires an integer between 0 and {}; got {:?} \
                                      (target='{}')",
                                     facade_path.display(),
                                     fn_name,
+                                    u32::MAX,
                                     other,
                                     assign.target
                                 ),
@@ -455,6 +485,25 @@ fn load_facade_file(
                         ),
                     });
                 }
+                let child_canonical = child_path.canonicalize().map_err(|e| FacadeLoadError {
+                    message: format!(
+                        "addon facade '{}' imports '{}' which resolves to '{}' but cannot be canonicalized: {}",
+                        facade_path.display(),
+                        p,
+                        child_path.display(),
+                        e
+                    ),
+                })?;
+                if !child_canonical.starts_with(facade_root) {
+                    visiting.remove(&canonical);
+                    return Err(FacadeLoadError {
+                        message: format!(
+                            "addon facade '{}' imports '{}' outside the addon's taida/ facade root",
+                            facade_path.display(),
+                            p
+                        ),
+                    });
+                }
                 let requested: HashMap<String, String> = import_stmt
                     .symbols
                     .iter()
@@ -465,7 +514,7 @@ fn load_facade_file(
                         )
                     })
                     .collect();
-                child_imports.push((child_path, requested));
+                child_imports.push((child_canonical, requested));
             }
             Statement::Export(export_stmt) => {
                 if export_stmt.path.is_some() {
@@ -542,6 +591,7 @@ fn load_facade_file(
         if requested.is_empty() {
             load_facade_file(
                 &child_path,
+                facade_root,
                 manifest,
                 import_path,
                 None,
@@ -558,6 +608,7 @@ fn load_facade_file(
         let mut child_summary = AddonFacadeSummary::default();
         load_facade_file(
             &child_path,
+            facade_root,
             manifest,
             import_path,
             Some(&requested_names),
@@ -1161,6 +1212,34 @@ TerminalSize <= RustAddon["terminalSize"](arity <= 5)
         assert!(
             err.message.contains("drift"),
             "expected drift mention in: {}",
+            err.message
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_facade_summary_rejects_rust_addon_oversized_arity() {
+        let tmp = std::env::temp_dir().join(format!(
+            "rust_addon_oversized_arity_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let facade = r#"
+TerminalSize <= RustAddon["terminalSize"](arity <= 4294967296)
+
+<<< @(TerminalSize)
+"#;
+        mk_pkg(&tmp, "tst/oversized", facade, &[]);
+        let manifest = test_manifest("tst/oversized", &[("terminalSize", 0)]);
+        let pkg_dir = facade_pkg_dir(&tmp, "tst/oversized");
+        let err = load_facade_summary(&pkg_dir, &manifest, "tst/oversized")
+            .expect_err("oversized arity must reject");
+        assert!(
+            err.message.contains("[E1412]") && err.message.contains("4294967296"),
+            "expected oversized arity diagnostic, got: {}",
             err.message
         );
         let _ = std::fs::remove_dir_all(&tmp);

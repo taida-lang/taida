@@ -3,7 +3,7 @@
 > 関連 API: [`docs/api/build_descriptors.md`](../api/build_descriptors.md)
 > 関連 CLI: [`docs/reference/cli.md::taida build`](cli.md)
 
-Native / JS / WASM の混合ビルドを記述するための仕組みです。Native サーバー
+Native / WASM の混合ビルドを記述するための仕組みです。Native サーバー
 成果物が wasm 成果物や静的アセットバンドルを「ビルド成果物」として参照する
 構成で、通常のランタイム import とビルド成果物依存を混同しないグラフを提供
 します。

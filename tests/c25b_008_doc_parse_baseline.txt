@@ -21,8 +21,7 @@ docs/guide/07_control_flow.md:201
 docs/guide/07_control_flow.md:286
 docs/guide/07_control_flow.md:303
 docs/guide/08_error_handling.md:110
-docs/guide/08_error_handling.md:518
-docs/guide/08_error_handling.md:561
+docs/guide/08_error_handling.md:522
 docs/guide/09_functions.md:197
 docs/guide/09_functions.md:305
 docs/guide/10_modules.md:150
@@ -64,4 +63,4 @@ docs/reference/tail_recursion.md:207
 docs/reference/tail_recursion.md:225
 docs/reference/tail_recursion.md:242
 docs/reference/tail_recursion.md:262
-docs/reference/tail_recursion.md:439
+docs/reference/tail_recursion.md:438

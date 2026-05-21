@@ -68,6 +68,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Parsed contents of `native/addon.lock.toml`.
@@ -471,10 +472,30 @@ pub fn write_lockfile(path: &Path, lock: &AddonLockfile) -> Result<(), LockfileE
     }
 
     let rendered = render_lockfile(&merged);
-    std::fs::write(path, rendered).map_err(|e| LockfileError::Io {
+    write_string_atomic(path, &rendered).map_err(|e| LockfileError::Io {
         path: path.to_path_buf(),
         message: e.to_string(),
     })
+}
+
+fn write_string_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp_path: PathBuf = parent.join(format!(".{}.tmp-{}", file_name, std::process::id()));
+
+    {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    if let Ok(parent_file) = std::fs::File::open(parent) {
+        let _ = parent_file.sync_all();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

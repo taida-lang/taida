@@ -448,35 +448,42 @@ function __taida_os_run(program, args) {
   if (!__os_cp) {
     return __taida_os_gorillax_fail(__taida_os_io_error(new __NativeError('child_process not available')));
   }
-  try {
-    const result = __os_cp.execFileSync(program, args || [], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    const inner = __taida_os_process_inner(result, '', 0);
-    return __taida_os_gorillax_ok(inner);
-  } catch (e) {
-    if (e.status !== undefined) {
-      // Process exited with non-zero code
-      const code = e.status !== null ? e.status : -1;
-      return __taida_os_gorillax_fail(__taida_os_process_error(program, code, false));
-    }
-    return __taida_os_gorillax_fail(__taida_os_io_error(e));
+  const result = __os_cp.spawnSync(program, args || [], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+  if (result.error) {
+    return __taida_os_gorillax_fail(__taida_os_io_error(result.error));
   }
+  const stdout = result.stdout || '';
+  const stderr = result.stderr || '';
+  const code = result.status !== null && result.status !== undefined ? result.status : -1;
+  const inner = __taida_os_process_inner(stdout, stderr, code);
+  if (code === 0) return __taida_os_gorillax_ok(inner);
+  const err = __taida_os_process_error(program, code, false);
+  err.stdout = stdout;
+  err.stderr = stderr;
+  err.fields.stdout = stdout;
+  err.fields.stderr = stderr;
+  return __taida_os_gorillax_fail(err);
 }
 
 function __taida_os_execShell(command) {
   if (!__os_cp) {
     return __taida_os_gorillax_fail(__taida_os_io_error(new __NativeError('child_process not available')));
   }
-  try {
-    const result = __os_cp.execSync(command, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    const inner = __taida_os_process_inner(result, '', 0);
-    return __taida_os_gorillax_ok(inner);
-  } catch (e) {
-    if (e.status !== undefined) {
-      const code = e.status !== null ? e.status : -1;
-      return __taida_os_gorillax_fail(__taida_os_process_error(command, code, true));
-    }
-    return __taida_os_gorillax_fail(__taida_os_io_error(e));
+  const result = __os_cp.spawnSync(command, { encoding: 'utf-8', shell: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  if (result.error) {
+    return __taida_os_gorillax_fail(__taida_os_io_error(result.error));
   }
+  const stdout = result.stdout || '';
+  const stderr = result.stderr || '';
+  const code = result.status !== null && result.status !== undefined ? result.status : -1;
+  const inner = __taida_os_process_inner(stdout, stderr, code);
+  if (code === 0) return __taida_os_gorillax_ok(inner);
+  const err = __taida_os_process_error(command, code, true);
+  err.stdout = stdout;
+  err.stderr = stderr;
+  err.fields.stdout = stdout;
+  err.fields.stderr = stderr;
+  return __taida_os_gorillax_fail(err);
 }
 
 // ── C19: Interactive process functions (TTY passthrough) ──

@@ -593,7 +593,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let n = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Int(n)) => n as usize,
+                    Signal::Value(Value::Int(n)) => n,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(
@@ -604,7 +604,21 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::str(s.repeat(n)))))
+                if n <= 0 || s.is_empty() {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                }
+                let n = n as usize;
+                let Some(total_len) = s.len().checked_mul(n) else {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                };
+                let mut out = String::new();
+                if out.try_reserve_exact(total_len).is_err() {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                }
+                for _ in 0..n {
+                    out.push_str(s.as_str());
+                }
+                Ok(Some(Signal::Value(Value::str(out))))
             }
             // ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
             // These operate on the raw UTF-8 byte stream (not Unicode
@@ -796,12 +810,19 @@ impl Interpreter {
                 if n == 1 {
                     return Ok(Some(Signal::Value(Value::Str(s))));
                 }
-                // Pre-compute the total length to allocate once.
-                let total = s
-                    .len()
-                    .saturating_mul(n)
-                    .saturating_add(sep.len().saturating_mul(n - 1));
-                let mut out = String::with_capacity(total);
+                let Some(body_len) = s.len().checked_mul(n) else {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                };
+                let Some(sep_len) = sep.len().checked_mul(n - 1) else {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                };
+                let Some(total) = body_len.checked_add(sep_len) else {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                };
+                let mut out = String::new();
+                if out.try_reserve_exact(total).is_err() {
+                    return Ok(Some(Signal::Value(Value::str(String::new()))));
+                }
                 out.push_str(&s);
                 for _ in 1..n {
                     out.push_str(&sep);
@@ -850,7 +871,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let target_len = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Int(n)) => n as usize,
+                    Signal::Value(Value::Int(n)) => n,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("Pad: second argument must be an integer, got {}", v),
@@ -878,10 +899,24 @@ impl Interpreter {
                         }
                     })
                     .unwrap_or_else(|| " ".to_string());
+                if target_len <= 0 {
+                    return Ok(Some(Signal::Value(Value::Str(s))));
+                }
+                let target_len = target_len as usize;
                 if s.len() >= target_len {
                     Ok(Some(Signal::Value(Value::Str(s))))
                 } else {
-                    let padding = pad_char.repeat(target_len - s.len());
+                    let repeat_count = target_len - s.len();
+                    let Some(padding_len) = pad_char.len().checked_mul(repeat_count) else {
+                        return Ok(Some(Signal::Value(Value::Str(s))));
+                    };
+                    let mut padding = String::new();
+                    if padding.try_reserve_exact(padding_len).is_err() {
+                        return Ok(Some(Signal::Value(Value::Str(s))));
+                    }
+                    for _ in 0..repeat_count {
+                        padding.push_str(&pad_char);
+                    }
                     let result = if side == "end" {
                         format!("{}{}", s, padding)
                     } else {
@@ -909,7 +944,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let digits = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Int(n)) => n as usize,
+                    Signal::Value(Value::Int(n)) => n.clamp(0, 20) as usize,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(
@@ -937,7 +972,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 match val {
-                    Value::Int(n) => Ok(Some(Signal::Value(Value::Int(n.abs())))),
+                    Value::Int(n) => Ok(Some(Signal::Value(Value::Int(n.saturating_abs())))),
                     Value::Float(n) => Ok(Some(Signal::Value(Value::Float(n.abs())))),
                     _ => Err(RuntimeError {
                         message: format!("Abs: argument must be numeric, got {}", val),
@@ -3467,7 +3502,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let n = match &n_val {
-                    Value::Int(n) => *n as usize,
+                    Value::Int(n) => (*n).max(0) as usize,
                     _ => {
                         return Err(RuntimeError {
                             message: format!(
@@ -3592,7 +3627,7 @@ impl Interpreter {
                     }
                 };
                 let n = match &n_val {
-                    Value::Int(n) => *n as usize,
+                    Value::Int(n) => (*n).max(0) as usize,
                     _ => {
                         return Err(RuntimeError {
                             message: format!(
@@ -3720,15 +3755,22 @@ impl Interpreter {
                 let schema = self.resolve_json_schema(&type_args[1])?;
 
                 // Cast JSON data through schema
-                let typed_value =
-                    crate::interpreter::json::json_to_typed_value(&json_data, &schema);
                 let default_val = crate::interpreter::json::default_for_schema(&schema);
+                let (typed_value, matches_schema) =
+                    crate::interpreter::json::json_to_typed_value_checked(&json_data, &schema);
+                let value_field = typed_value.clone();
+                let default_field = if matches_schema {
+                    default_val
+                } else {
+                    typed_value
+                };
 
-                // Return as Lax (JSON parsing can fail)
+                // Return as Lax. A schema mismatch marks the boundary as empty,
+                // while retaining the typed fallback for >=> / .unmold().
                 Ok(Some(Signal::Value(Value::pack(vec![
-                    ("has_value".into(), Value::Bool(true)),
-                    ("__value".into(), typed_value),
-                    ("__default".into(), default_val),
+                    ("has_value".into(), Value::Bool(matches_schema)),
+                    ("__value".into(), value_field),
+                    ("__default".into(), default_field),
                     ("__type".into(), Value::str("Lax".into())),
                 ]))))
             }

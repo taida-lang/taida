@@ -775,6 +775,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        "taida_range" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
 
         // ── HashMap 操作 ──
         "taida_hashmap_new" => RuntimeAbi {

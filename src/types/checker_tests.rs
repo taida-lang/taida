@@ -20,6 +20,13 @@ fn check_with_target(source: &str, target: CompileTarget) -> (TypeChecker, Vec<T
     (checker, errors)
 }
 
+fn assert_has_error(errors: &[TypeError], needle: &str) {
+    assert!(
+        errors.iter().any(|err| err.message.contains(needle)),
+        "expected error containing {needle:?}, got {errors:?}"
+    );
+}
+
 fn infer_assignment_type(source: &str, target: &str) -> (Type, Vec<TypeError>) {
     let (program, parse_errors) = parse(source);
     assert!(parse_errors.is_empty(), "Parse errors: {:?}", parse_errors);
@@ -2460,24 +2467,24 @@ fn test_builtin_hashmap_empty_is_ok() {
 
 #[test]
 fn test_method_call_take_wrong_type() {
-    // E1508: xs.take("oops") — take expects Int
+    // take moved to molds; list method syntax is rejected before arg typing.
     let source = "xs <= @[1, 2, 3]\nresult <= xs.take(\"oops\")";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1508]")),
-        "Expected E1508 for take(\"oops\") type mismatch, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1509]")),
+        "Expected E1509 for removed take() method, got: {:?}",
         errors
     );
 }
 
 #[test]
 fn test_method_call_take_too_many_args() {
-    // E1508: xs.take(1, 2) — take expects 1 arg
+    // take moved to molds; list method syntax is rejected before arity typing.
     let source = "xs <= @[1, 2, 3]\nresult <= xs.take(1, 2)";
     let (_, errors) = check(source);
     assert!(
-        errors.iter().any(|e| e.message.contains("[E1508]")),
-        "Expected E1508 for take(1, 2) too many args, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1509]")),
+        "Expected E1509 for removed take() method, got: {:?}",
         errors
     );
 }
@@ -6643,7 +6650,7 @@ fn cpu_parallel_par_map_rejects_effectful_mapper_reference() {
 
 #[test]
 fn cpu_parallel_par_map_direct_throw_arm_infers_from_value_arm() {
-    let src = "TaskErr = @(type: Str, message: Str)\n\
+    let src = "Error => TaskErr = @(type: Str, message: Str)\n\
                out <= ParMap[@[3], _ x: Int = | x > 2 |> TaskErr(type <= \"TaskErr\", message <= \"boom\").throw() | _ |> x * 2]()\n";
     let (_, errors) = check(src);
     assert!(
@@ -7130,6 +7137,92 @@ r_bad <= r.hasValue
         legacy_field_errors.len(),
         3,
         "Lax-like legacy hasValue field access should be rejected with migration guidance, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn nested_named_subtyping_uses_registry_inside_compounds() {
+    let src = r#"Base = @(x: Int)
+Base => Child = @(y: Int)
+c <= Child(x <= 1, y <= 2)
+p: @(item: Base) <= @(item <= c)
+ys: @[Base] <= @[c]
+make =
+  c
+=> :Child
+fn: _ => :Base <= make
+"#;
+    let (_, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "nested named subtyping should typecheck, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn named_type_unknown_method_is_rejected() {
+    let src = r#"Pilot = @(name: Str)
+p <= Pilot(name <= "rei")
+x <= p.nope()
+"#;
+    let (_, errors) = check(src);
+    assert_has_error(&errors, "[E1509] Unknown method 'nope'");
+}
+
+#[test]
+fn named_type_data_field_call_is_rejected() {
+    let src = r#"Pilot = @(name: Str)
+p <= Pilot(name <= "rei")
+x <= p.name()
+"#;
+    let (_, errors) = check(src);
+    assert_has_error(&errors, "[E1509] Unknown method 'name'");
+}
+
+#[test]
+fn named_type_declared_method_and_function_field_calls_are_valid() {
+    let src = r#"Greeter = @(name: Str, greet =
+  "hi " + name
+=> :Str)
+g <= Greeter(name <= "rei")
+msg <= g.greet()
+
+Apply = @(run: Int => :Int)
+inc x: Int =
+  x + 1
+=> :Int
+a <= Apply(run <= inc)
+out <= a.run(2)
+"#;
+    let (checker, errors) = check(src);
+    assert!(
+        errors.is_empty(),
+        "declared method and function field calls should typecheck, got: {:?}",
+        errors
+    );
+    assert_eq!(checker.lookup_var("msg"), Some(Type::Str));
+    assert_eq!(checker.lookup_var("out"), Some(Type::Int));
+}
+
+#[test]
+fn unknown_mold_inst_reports_diagnostic() {
+    let src = "x <= MissingMold[1]";
+    let (_, errors) = check(src);
+    assert_has_error(&errors, "[E1530] Unknown mold 'MissingMold'");
+}
+
+#[test]
+fn class_like_mold_inst_form_does_not_report_unknown_mold() {
+    let src = r#"Pilot = @(id: Int)
+x <= Pilot[1]"#;
+    let (_, errors) = check(src);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.message.contains("[E1530] Unknown mold 'Pilot'")),
+        "known class-like type must not fall through to unknown mold, got: {:?}",
         errors
     );
 }

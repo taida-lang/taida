@@ -277,5 +277,5 @@ ritchan <= NervStaff(name <= "Ritsuko")  // call_sign = "", age = 0
 | [アドオンマニフェスト](../reference/addon_manifest.md) | addon.toml の仕様 |
 | [プレリュード関数 / ビルトイン型メソッド](../api/prelude.md) | `stdout` / `stdin` / `nowMs` / `sleep` / `jsonEncode` 等のプレリュード API、ビルトイン型のメソッドとコレクション |
 | [API リファレンス索引](../api/README.md) | `docs/api/` 全体の入口とパッケージ別 API 一覧 |
-| [メモリ管理モデル](../reference/memory_model.md) | 4 バックエンドのメモリ管理戦略とアドオン所有権規約 |
+| [メモリ管理モデル](../reference/memory_model.md) | バックエンド別のメモリ管理戦略とアドオン所有権規約 |
 | [診断コード](../reference/diagnostic_codes.md) | コンパイラ診断コード一覧 |

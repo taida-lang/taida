@@ -60,7 +60,7 @@ taida --no-check <FILE>
 | コマンド | 用途 |
 |---|---|
 | `taida` / `taida <FILE>` | REPL / インタプリタ実行 |
-| `build` | Native / JS / WASM 成果物の生成 |
+| `build` | Native / WASM 成果物の生成 |
 | `way` | 品質ハブ。check / lint / verify / todo を集約 |
 | `graph` | 構造グラフの抽出 / summary / query |
 | `doc` | ドキュメントコメントから Markdown を生成 |
@@ -80,7 +80,7 @@ taida --no-check <FILE>
 | `taida lint` | `taida way lint` |
 | `taida todo` | `taida way todo` |
 | `taida inspect` | `taida graph summary` |
-| `taida transpile` | `taida build js` |
+| `taida transpile` | `taida build native` |
 | `taida compile` | `taida build native` |
 | `taida deps` | `taida ingot deps` |
 | `taida install` | `taida ingot install` |
@@ -98,7 +98,7 @@ taida --no-check <FILE>
 ### 単一ターゲットビルド (既存互換)
 
 ```bash
-taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
 ```
 
 | オプション | 短縮 | 説明 |
@@ -111,8 +111,8 @@ taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--di
 挙動:
 - ターゲットは位置引数で指定します。省略時は `native` です。
 - `taida build native <PATH>` は Native バイナリを生成します。
-- `taida build js <PATH>` は `.mjs` を生成します。
 - `taida build wasm-* <PATH>` は `.wasm` を生成します。
+- 旧 `js` ターゲットは移行期間の互換機能です。正式なリリースパリティ契約には含めず、新規コードは Native または WASM を選んでください。
 - `--target <target>` / `--target=<target>` フラグは提供していません。位置引数で指定してください。誤って指定した場合は `[E1700]` + exit 2 になります。
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。
 - `--diag-format jsonl` を指定するとコンパイル診断を `taida.diagnostic.v1` JSONL 形式で出力します。

@@ -171,7 +171,13 @@ impl Interpreter {
                     return match resolved.status {
                         AsyncStatus::Fulfilled => Ok(Signal::Value(*resolved.value)),
                         AsyncStatus::Rejected => Ok(Signal::Throw(*resolved.error)),
-                        AsyncStatus::Pending => Ok(Signal::Value(Value::Unit)),
+                        AsyncStatus::Pending => {
+                            Ok(Signal::Throw(Value::Error(super::value::ErrorValue {
+                                error_type: "AsyncStateError".into(),
+                                message: "Pending Async did not resolve to a value".to_string(),
+                                fields: Vec::new(),
+                            })))
+                        }
                     };
                 }
                 // Already resolved or no task
@@ -182,8 +188,11 @@ impl Interpreter {
                         Ok(Signal::Throw(*a.error))
                     }
                     AsyncStatus::Pending => {
-                        // Pending without a task (legacy mode): treated as Unit
-                        Ok(Signal::Value(Value::Unit))
+                        Ok(Signal::Throw(Value::Error(super::value::ErrorValue {
+                            error_type: "AsyncStateError".into(),
+                            message: "Pending Async has no task to await".to_string(),
+                            fields: Vec::new(),
+                        })))
                     }
                 }
             }

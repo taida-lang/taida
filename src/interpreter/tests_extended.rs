@@ -1252,6 +1252,16 @@ a
     }
 
     #[test]
+    fn test_pending_async_unmold_method_resolves_pending_task() {
+        let source = r#"
+job <= sleep(1)
+value <= job.unmold()
+value
+"#;
+        assert_eq!(eval_ok(source), Value::Int(1));
+    }
+
+    #[test]
     fn test_cpu_parallel_par_map_sequential_reference() {
         let source = "items <= @[1, 2, 3]\n\
                       ParMap[items, _ x: Int = x * 2]() >=> out\n\
@@ -1946,6 +1956,28 @@ multiply x y = x * y => :Int
 result
 "#;
         assert_eq!(eval_ok(source), Value::Int(20)); // (2+3)*4 = 20
+    }
+
+    #[test]
+    fn test_pipeline_funccall_detects_nested_field_placeholder() {
+        let source = r#"
+data <= @(x <= 7)
+data => stdout(_.x) => written
+written
+"#;
+        let (value, output) = eval_with_output(source);
+        assert_eq!(output, vec!["7"]);
+        assert_eq!(value, Value::Int(1));
+    }
+
+    #[test]
+    fn test_pipeline_funccall_detects_placeholder_in_buchi_pack_arg() {
+        let source = r#"
+pick pack: @(x: Int) = pack.x => :Int
+3 => pick(@(x <= _ + 4)) => result
+result
+"#;
+        assert_eq!(eval_ok(source), Value::Int(7));
     }
 
     // ── Prelude: Optional (list-derived) ──
@@ -2686,6 +2718,21 @@ s <= setOf(@[1, 2, 3])
     }
 
     #[test]
+    fn test_prelude_range_over_limit_is_catchable() {
+        let source = r#"
+handle =
+  |== error: Error =
+    error.type
+  => :Str
+  range(0, 1000002)
+  "ok"
+=> :Str
+handle()
+"#;
+        assert_eq!(eval_ok(source), Value::str("RangeError".to_string()));
+    }
+
+    #[test]
     fn test_prelude_enumerate() {
         let source = r#"
 items <= enumerate(@["a", "b", "c"])
@@ -3152,6 +3199,26 @@ result.has_value
         let source = r#"
 User = @(name: Str)
 raw <= 'not valid json'
+result <= JSON[raw, User]()
+result.has_value
+"#;
+        assert_eq!(eval_ok(source), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_json_schema_primitive_type_mismatch_returns_lax_false() {
+        let source = r#"
+result <= JSON["5", Bool]()
+result.has_value
+"#;
+        assert_eq!(eval_ok(source), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_json_schema_field_type_mismatch_returns_lax_false() {
+        let source = r#"
+User = @(name: Str, active: Bool)
+raw <= '{"name":"Rei","active":"yes"}'
 result <= JSON[raw, User]()
 result.has_value
 "#;

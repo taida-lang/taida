@@ -280,19 +280,38 @@ fn type_expr_to_schema(
 /// 4. null: default value (null exclusion philosophy)
 /// 5. Nested: recursive matching
 /// 6. List: each element matched against element schema
+#[cfg(test)]
 pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Value {
+    json_to_typed_value_checked(json, schema).0
+}
+
+/// Cast JSON and report whether the input actually matched the schema.
+///
+/// Missing object fields still receive defaults: a schema defines the
+/// resulting shape, and absence is handled by Taida defaults. Present values
+/// whose JSON kind conflicts with the requested primitive / list / record /
+/// enum schema are a failed cast and must surface as `Lax.has_value=false` at
+/// the JSON mold boundary.
+pub fn json_to_typed_value_checked(json: &serde_json::Value, schema: &JsonSchema) -> (Value, bool) {
     match schema {
-        JsonSchema::Primitive(prim) => json_to_primitive(json, prim),
+        JsonSchema::Primitive(prim) => (
+            json_to_primitive(json, prim),
+            primitive_json_matches(json, prim),
+        ),
         JsonSchema::TypeDef(type_name, schema_fields) => {
             match json {
                 serde_json::Value::Object(obj) => {
                     let mut fields: Vec<(String, Value)> = Vec::new();
+                    let mut matches_schema = true;
                     for sf in schema_fields {
                         let value = if let Some(json_val) = obj.get(&sf.name) {
                             if json_val.is_null() {
                                 field_missing_default(&sf.schema)
                             } else {
-                                json_to_typed_value(json_val, &sf.schema)
+                                let (value, field_matches) =
+                                    json_to_typed_value_checked(json_val, &sf.schema);
+                                matches_schema &= field_matches;
+                                value
                             }
                         } else {
                             field_missing_default(&sf.schema)
@@ -300,7 +319,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         fields.push((sf.name.clone(), value));
                     }
                     fields.push(("__type".to_string(), Value::str(type_name.clone())));
-                    Value::pack(fields)
+                    (Value::pack(fields), matches_schema)
                 }
                 serde_json::Value::Null => {
                     // null -> all defaults
@@ -309,7 +328,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
                     fields.push(("__type".to_string(), Value::str(type_name.clone())));
-                    Value::pack(fields)
+                    (Value::pack(fields), false)
                 }
                 _ => {
                     // Non-object -> all defaults
@@ -318,20 +337,25 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
                         fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
                     }
                     fields.push(("__type".to_string(), Value::str(type_name.clone())));
-                    Value::pack(fields)
+                    (Value::pack(fields), false)
                 }
             }
         }
         JsonSchema::List(elem_schema) => match json {
             serde_json::Value::Array(arr) => {
+                let mut matches_schema = true;
                 let items: Vec<Value> = arr
                     .iter()
-                    .map(|elem| json_to_typed_value(elem, elem_schema))
+                    .map(|elem| {
+                        let (value, elem_matches) = json_to_typed_value_checked(elem, elem_schema);
+                        matches_schema &= elem_matches;
+                        value
+                    })
                     .collect();
-                Value::list(items)
+                (Value::list(items), matches_schema)
             }
-            serde_json::Value::Null => Value::list(Vec::new()),
-            _ => Value::list(Vec::new()),
+            serde_json::Value::Null => (Value::list(Vec::new()), false),
+            _ => (Value::list(Vec::new()), false),
         },
         JsonSchema::Enum(name, variants) => {
             // C16: JSON wire format is the variant name Str.
@@ -343,12 +367,12 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
             match json {
                 serde_json::Value::String(s) => {
                     if let Some(ordinal) = variants.iter().position(|v| v == s) {
-                        Value::EnumVal(name.clone(), ordinal as i64)
+                        (Value::EnumVal(name.clone(), ordinal as i64), true)
                     } else {
-                        make_lax_enum_inline()
+                        (make_lax_enum_inline(), false)
                     }
                 }
-                _ => make_lax_enum_inline(),
+                _ => (make_lax_enum_inline(), false),
             }
         }
     }
@@ -396,53 +420,42 @@ fn make_lax_enum_inline() -> Value {
 /// Convert a JSON value to a primitive Taida value.
 ///
 /// Philosophy I: "null/undefined の完全排除 — 全ての型にデフォルト値を保証"
-/// Parse failures and type mismatches silently fall back to the type's default
-/// value (0, 0.0, "", false). This is intentional per Taida's null-exclusion
-/// philosophy, though it means parse errors are indistinguishable from legitimate
-/// zero/empty values.
+/// Parse failures and type mismatches fall back to the type's default value.
+/// This keeps the no-null guarantee without introducing implicit conversions
+/// between unrelated JSON primitive kinds.
 fn json_to_primitive(json: &serde_json::Value, prim: &PrimitiveType) -> Value {
     match prim {
         PrimitiveType::Int => match json {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     Value::Int(i)
-                } else if let Some(f) = n.as_f64() {
-                    Value::Int(f as i64)
                 } else {
                     Value::Int(0)
                 }
             }
-            serde_json::Value::String(s) => {
-                s.parse::<i64>().map(Value::Int).unwrap_or(Value::Int(0))
-            }
-            serde_json::Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
             _ => Value::Int(0),
         },
         PrimitiveType::Float => match json {
             serde_json::Value::Number(n) => Value::Float(n.as_f64().unwrap_or(0.0)),
-            serde_json::Value::String(s) => s
-                .parse::<f64>()
-                .map(Value::Float)
-                .unwrap_or(Value::Float(0.0)),
-            serde_json::Value::Bool(b) => Value::Float(if *b { 1.0 } else { 0.0 }),
             _ => Value::Float(0.0),
         },
         PrimitiveType::Str => match json {
             serde_json::Value::String(s) => Value::str(s.clone()),
-            serde_json::Value::Number(n) => Value::str(format!("{}", n)),
-            serde_json::Value::Bool(b) => Value::str(format!("{}", b)),
-            serde_json::Value::Null => Value::str(String::new()),
-            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                Value::str(serde_json::to_string(json).unwrap_or_default())
-            }
+            _ => Value::str(String::new()),
         },
         PrimitiveType::Bool => match json {
             serde_json::Value::Bool(b) => Value::Bool(*b),
-            serde_json::Value::Number(n) => Value::Bool(n.as_f64().is_some_and(|f| f != 0.0)),
-            serde_json::Value::String(s) => Value::Bool(!s.is_empty()),
-            serde_json::Value::Null => Value::Bool(false),
             _ => Value::Bool(false),
         },
+    }
+}
+
+fn primitive_json_matches(json: &serde_json::Value, prim: &PrimitiveType) -> bool {
+    match prim {
+        PrimitiveType::Int => json.as_i64().is_some(),
+        PrimitiveType::Float => json.as_f64().is_some(),
+        PrimitiveType::Str => json.is_string(),
+        PrimitiveType::Bool => json.is_boolean(),
     }
 }
 

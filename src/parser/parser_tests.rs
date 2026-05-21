@@ -2633,6 +2633,29 @@ fn test_bt1_modulo_operator_rejected() {
     );
 }
 
+#[test]
+fn test_removed_lowercase_index_syntax_rejects_multiple_args() {
+    let (_, errors) = parse("y <= xs[0, 1]");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].message.contains("Index access"));
+    assert!(errors[0].message.contains(".get"));
+}
+
+#[test]
+fn test_uppercase_mold_shorthand_without_fields_still_parses() {
+    match first_stmt("value <= Result[1]") {
+        Statement::Assignment(assign) => match assign.value {
+            Expr::MoldInst(name, args, fields, _) => {
+                assert_eq!(name, "Result");
+                assert_eq!(args.len(), 1);
+                assert!(fields.is_empty());
+            }
+            other => panic!("expected MoldInst, got {:?}", other),
+        },
+        other => panic!("expected assignment, got {:?}", other),
+    }
+}
+
 // ── BT-9: Deep nesting resilience tests ──
 
 #[test]
@@ -3138,6 +3161,20 @@ fn test_e30b_007_rust_addon_binding_with_nonzero_arity() {
         other => panic!("expected IntLit, got {:?}", other),
     };
     assert_eq!(arity_int, 2);
+}
+
+#[test]
+fn rust_addon_binding_oversized_arity_is_not_a_valid_binding() {
+    use crate::parser::ast::Statement;
+
+    let source = "bad <= RustAddon[\"bad\"](arity <= 4294967296)\n";
+    let (program, errors) = parse(source);
+    assert!(errors.is_empty(), "errors: {:?}", errors);
+    let assign = match &program.statements[0] {
+        Statement::Assignment(a) => a,
+        other => panic!("expected Assignment, got {:?}", other),
+    };
+    assert_eq!(assign.as_rust_addon_binding(), None);
 }
 
 #[test]

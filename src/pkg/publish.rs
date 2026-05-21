@@ -652,7 +652,6 @@ pub fn tag_and_push(project_dir: &Path, tag: &str, retag: bool) -> Result<(), St
         format!("refs/tags/{}", tag)
     };
     if let Err(e) = run_git(project_dir, &["push", "origin", &refspec]) {
-        let _ = run_git(project_dir, &["tag", "-d", tag]);
         return Err(format!("Failed to push tag '{}' to origin: {}", tag, e));
     }
 

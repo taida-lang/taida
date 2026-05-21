@@ -1,9 +1,13 @@
 # `taida-lang/js` API リファレンス
 
-`taida-lang/js` は JavaScript エコシステムとの相互運用 (interop) を
-提供するコア同梱パッケージです。`Cage` モールドと組み合わせて、外部
-JavaScript ライブラリのオブジェクトやメソッドを Taida 側から安全に
-呼び出すための「branch capability 実行記述」群を公開します。
+`taida-lang/js` は旧 JS ターゲット向けの互換 API です。JavaScript
+エコシステムとの相互運用 (interop) を `Cage` モールドと組み合わせて
+表現するため、外部 JavaScript ライブラリのオブジェクトやメソッドを
+呼び出す「branch capability 実行記述」群を公開します。
+
+この API は正式なリリースパリティ対象ではありません。新規の portable
+コードは Interpreter / Native / WASM を前提に設計し、JavaScript 固有の
+境界が必要な既存コードの移行期間に限って使ってください。
 
 ```taida
 >>> taida-lang/js => @(JSGet, JSCall, JSCallAsync, JSNew, JSSet, JSBind, JSSpread)
@@ -176,14 +180,13 @@ Cage[Math, JSCall[@["max"], @[JSSpread[@["values"]]()], Int]()]() >=> peak
 |--------------|----------|
 | インタプリタ | 利用不可 (JavaScript ホストが必要) |
 | ネイティブ | 利用不可 |
-| JS | 全シンボル対応 |
+| 旧 JS ターゲット | 全シンボル対応 |
 | WASM (全プロファイル) | 利用不可 |
 
-`taida-lang/js` は **JS バックエンド専用** です。インタプリタや
+`taida-lang/js` は **旧 JS ターゲット専用** です。インタプリタや
 ネイティブ / WASM バックエンドからこれらのシンボルを呼ぶと、決定的な
 コンパイル時エラーが返ります。クロスプラットフォームで動作するコード
-を書く場合は、`taida-lang/js` への依存を JS ターゲットのファイル
-にのみ閉じ込めてください。
+を書く場合は、`taida-lang/js` に依存しない設計にしてください。
 
 ---
 

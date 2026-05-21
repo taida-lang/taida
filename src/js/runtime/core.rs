@@ -174,6 +174,10 @@ function __taida_isIntNumber(v) {
   return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v);
 }
 
+const __TAIDA_I64_MIN = -(1n << 63n);
+const __TAIDA_I64_MAX = (1n << 63n) - 1n;
+const __TAIDA_STRING_MOLD_MAX_LEN = 0x7fffffff;
+
 function __taida_toI64BigInt(v) {
   if (typeof v === 'bigint') return BigInt.asIntN(64, v);
   if (__taida_isIntNumber(v)) return BigInt.asIntN(64, BigInt(v));
@@ -776,6 +780,9 @@ function JSON_mold(rawValue, schema) {
   // Cast through schema
   const typedValue = __taida_castJson(jsonData, schema);
   const defaultVal = __taida_defaultForSchema(schema);
+  if (!__taida_jsonMatchesSchema(jsonData, schema)) {
+    return Lax(null, typedValue);
+  }
   return Lax(typedValue, defaultVal);
 }
 
@@ -808,9 +815,9 @@ function __taida_fieldMissingDefault(fschema) {
 function __taida_castJson(json, schema) {
   if (typeof schema === 'string') {
     switch (schema) {
-      case 'Int': return typeof json === 'number' ? Math.trunc(json) : (typeof json === 'string' ? (parseInt(json, 10) || 0) : 0);
-      case 'Float': return typeof json === 'number' ? json : (typeof json === 'string' ? (parseFloat(json) || 0.0) : 0.0);
-      case 'Str': return typeof json === 'string' ? json : (json === null || json === undefined ? '' : (typeof json === 'object' ? JSON.stringify(json) : String(json)));
+      case 'Int': return (typeof json === 'number' && Number.isInteger(json)) ? Math.trunc(json) : 0;
+      case 'Float': return typeof json === 'number' ? json : 0.0;
+      case 'Str': return typeof json === 'string' ? json : '';
       case 'Bool': return typeof json === 'boolean' ? json : false;
       default: {
         // C16: TypeDef wins over Enum when both exist (mirrors Interpreter).
@@ -862,6 +869,45 @@ function __taida_castJson(json, schema) {
     return Object.freeze(result);
   }
   return '';
+}
+
+function __taida_jsonMatchesSchema(json, schema) {
+  if (typeof schema === 'string') {
+    switch (schema) {
+      case 'Int': return typeof json === 'number' && Number.isInteger(json);
+      case 'Float': return typeof json === 'number';
+      case 'Str': return typeof json === 'string';
+      case 'Bool': return typeof json === 'boolean';
+      default: {
+        const td = __taida_typeDefs[schema];
+        if (td) {
+          if (typeof json !== 'object' || json === null || Array.isArray(json)) return false;
+          for (const [fname, fschema] of Object.entries(td)) {
+            if (fname in json && json[fname] !== null && json[fname] !== undefined) {
+              if (!__taida_jsonMatchesSchema(json[fname], fschema)) return false;
+            }
+          }
+          return true;
+        }
+        const variants = __taida_enumDefs[schema];
+        if (variants) return typeof json === 'string' && variants.includes(json);
+        return typeof json === 'string';
+      }
+    }
+  }
+  if (schema && schema.__list) {
+    return Array.isArray(json) && json.every(item => __taida_jsonMatchesSchema(item, schema.__list));
+  }
+  if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
+    if (typeof json !== 'object' || json === null || Array.isArray(json)) return false;
+    for (const [fname, fschema] of Object.entries(schema)) {
+      if (fname in json && json[fname] !== null && json[fname] !== undefined) {
+        if (!__taida_jsonMatchesSchema(json[fname], fschema)) return false;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function __taida_defaultForSchema(schema) {
@@ -1656,7 +1702,17 @@ function Foldr(list, init, fn) {
   const items = (list && list.__type === 'Stream') ? __taida_stream_collect(list) : list;
   return (items || []).reduceRight((acc, item) => fn(acc, item), init);
 }
+function __taida_nonnegative_count(n) {
+  if (typeof n === 'bigint') {
+    if (n <= 0n) return 0;
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    return n > max ? Number.MAX_SAFE_INTEGER : Number(n);
+  }
+  n = Number.isFinite(n) ? Math.trunc(n) : 0;
+  return n < 0 ? 0 : n;
+}
 function Take(list, n) {
+  n = __taida_nonnegative_count(n);
   if (list && list.__type === 'Stream') return __taida_stream(list.__items, [...list.__transforms, { op: 'take', n }]);
   return Object.freeze(list.slice(0, n));
 }
@@ -1667,6 +1723,7 @@ function TakeWhile(list, fn) {
   return Object.freeze(result);
 }
 function Drop(list, n) {
+  n = __taida_nonnegative_count(n);
   const items = (list && list.__type === 'Stream') ? __taida_stream_collect(list) : list;
   return Object.freeze(items.slice(n));
 }
@@ -1938,7 +1995,7 @@ function __taida_str_match(s, rx) {
   });
   if (typeof s !== 'string') return empty;
   if (!__taida_is_regex(rx)) {
-    const err = new Error(
+    const err = new __NativeError(
       'str.match(...) requires a Regex argument. Use Regex("pattern") to construct one.'
     );
     err.__taida_error_type = 'TypeError';
@@ -1970,7 +2027,7 @@ function __taida_str_match(s, rx) {
 function __taida_str_search(s, rx) {
   if (typeof s !== 'string') return -1;
   if (!__taida_is_regex(rx)) {
-    const err = new Error(
+    const err = new __NativeError(
       'str.search(...) requires a Regex argument. Use Regex("pattern") to construct one.'
     );
     err.__taida_error_type = 'TypeError';
@@ -1988,7 +2045,7 @@ function __taida_str_search(s, rx) {
 function __taida_str_search_lax(s, rx) {
   if (typeof s !== 'string') return Lax(null, 0);
   if (!__taida_is_regex(rx)) {
-    const err = new Error(
+    const err = new __NativeError(
       'str.searchLax(...) requires a Regex argument. Use Regex("pattern") to construct one.'
     );
     err.__taida_error_type = 'TypeError';
@@ -2036,7 +2093,13 @@ function Slice(val, optsOrStart, maybeEnd) {
   return '';
 }
 function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
-function Repeat(str, n) { return typeof str === 'string' ? str.repeat(Math.max(0, n)) : ''; }
+function Repeat(str, n) {
+  if (typeof str !== 'string') return '';
+  n = __taida_nonnegative_count(n);
+  if (n <= 0 || str.length === 0) return '';
+  if (str.length * n > __TAIDA_STRING_MOLD_MAX_LEN) return '';
+  try { return str.repeat(n); } catch (_) { return ''; }
+}
 // ── C26B-018 (B) byte-level primitives (UTF-8 byte view) ──
 // These operate on the raw UTF-8 byte stream, not on JS UTF-16 code
 // units. The TextEncoder round-trip gives O(n) the first time but
@@ -2079,12 +2142,18 @@ function ByteLength(str) {
 function StringRepeatJoin(str, n, sep) {
   if (typeof str !== 'string') str = '';
   if (typeof sep !== 'string') sep = '';
-  n = n | 0;
+  n = __taida_nonnegative_count(n);
   if (n <= 0) return '';
   if (n === 1) return str;
+  const total = str.length * n + sep.length * (n - 1);
+  if (total > __TAIDA_STRING_MOLD_MAX_LEN) return '';
   // String#repeat + join: V8 optimizes this into a single buffer.
-  if (sep === '') return str.repeat(n);
-  return new Array(n).fill(str).join(sep);
+  try {
+    if (sep === '') return str.repeat(n);
+    return new Array(n).fill(str).join(sep);
+  } catch (_) {
+    return '';
+  }
 }
 function Reverse(val) {
   if (typeof val === 'string') return val.split('').reverse().join('');
@@ -2093,16 +2162,33 @@ function Reverse(val) {
 }
 function Pad(str, len, opts) {
   if (typeof str !== 'string') return '';
+  len = __taida_nonnegative_count(len);
+  if (len <= str.length || len > __TAIDA_STRING_MOLD_MAX_LEN) return str;
   const side = (opts && opts.side) || 'start';
   const ch = (opts && opts.char) || ' ';
-  if (side === 'start') return str.padStart(len, ch);
-  if (side === 'end') return str.padEnd(len, ch);
+  try {
+    if (side === 'start') return str.padStart(len, ch);
+    if (side === 'end') return str.padEnd(len, ch);
+  } catch (_) {
+    return str;
+  }
   return str;
 }
 
 // ── Number Mold types ───────────────────────────────────
-function ToFixed(num, digits) { return typeof num === 'number' ? num.toFixed(digits) : '0'; }
-function Abs(num) { return typeof num === 'number' ? Math.abs(num) : 0; }
+function ToFixed(num, digits) {
+  if (typeof num !== 'number') return '0';
+  const precision = Math.max(0, Math.min(20, Math.trunc(Number(digits) || 0)));
+  return num.toFixed(precision);
+}
+function Abs(num) {
+  if (typeof num === 'bigint' || __taida_isIntNumber(num)) {
+    const value = __taida_toI64BigInt(num);
+    if (value === __TAIDA_I64_MIN) return __taida_fromI64BigInt(__TAIDA_I64_MAX);
+    return __taida_fromI64BigInt(value < 0n ? -value : value);
+  }
+  return typeof num === 'number' ? Math.abs(num) : 0;
+}
 function Floor(num) { return typeof num === 'number' ? Math.floor(num) : 0; }
 function Ceil(num) { return typeof num === 'number' ? Math.ceil(num) : 0; }
 function Round(num) { return typeof num === 'number' ? Math.round(num) : 0; }
@@ -3012,7 +3098,8 @@ function __taida_createHashMap(entries) {
       for (const e of _entries) {
         if (__taida_equals(e.key, key)) return Lax(e.value);
       }
-      return Lax(undefined);
+      const defaultValue = _entries.length > 0 ? __taida_lax_default(_entries[0].value) : '';
+      return Lax(null, defaultValue);
     },
     set(key, value) {
       const newEntries = [];

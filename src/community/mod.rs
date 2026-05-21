@@ -11,6 +11,33 @@ fn has_help_flag(args: &[String]) -> bool {
     args.iter().any(|arg| is_help_flag(arg.as_str()))
 }
 
+fn percent_encode_component(raw: &str) -> String {
+    let mut out = String::new();
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+fn validate_route_segment(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
+    {
+        return Err(format!(
+            "{} must contain only ASCII letters, digits, '-' or '_'",
+            label
+        ));
+    }
+    Ok(())
+}
+
 enum ParsedCommand<T> {
     Help,
     Run(T),
@@ -245,10 +272,10 @@ fn run_posts(args: &[String]) {
     let mut path = "/posts".to_string();
     let mut params = Vec::new();
     if let Some(t) = tag {
-        params.push(format!("tag={}", t));
+        params.push(format!("tag={}", percent_encode_component(t)));
     }
     if let Some(a) = author {
-        params.push(format!("author={}", a));
+        params.push(format!("author={}", percent_encode_component(a)));
     }
     if !params.is_empty() {
         path.push('?');
@@ -325,7 +352,11 @@ fn run_messages(args: &[String]) {
     }
 
     let token = require_auth();
-    let path = format!("/{}/messages", token.username);
+    if let Err(e) = validate_route_segment("username", &token.username) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+    let path = format!("/{}/messages", percent_encode_component(&token.username));
 
     match api::api_get(&path, Some(&token.github_token)) {
         Ok((status, body)) => {
@@ -358,7 +389,11 @@ fn run_message(args: &[String]) {
     };
 
     let token = require_auth();
-    let path = format!("/{}/messages", request.to_user);
+    if let Err(e) = validate_route_segment("recipient", &request.to_user) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+    let path = format!("/{}/messages", percent_encode_component(&request.to_user));
     let body = serde_json::json!({ "content": request.content });
 
     match api::api_post(&path, &body, Some(&token.github_token)) {
@@ -394,7 +429,11 @@ fn run_author(args: &[String]) {
 
     let token = load_token();
     let token_str = token.as_ref().map(|t| t.github_token.as_str());
-    let path = format!("/{}", author_name);
+    if let Err(e) = validate_route_segment("author", &author_name) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+    let path = format!("/{}", percent_encode_component(&author_name));
 
     match api::api_get(&path, token_str) {
         Ok((status, body)) => {

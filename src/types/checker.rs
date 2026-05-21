@@ -6887,8 +6887,26 @@ defaulted fields must be provided via `()`",
             }
             Expr::BoolLit(_, _) => Type::Bool,
             Expr::Gorilla(_) => Type::Unit,
-            Expr::Placeholder(_) => Type::Unknown,
-            Expr::Hole(_) => Type::Unknown,
+            Expr::Placeholder(span) => {
+                if !self.in_pipeline {
+                    self.errors.push(TypeError {
+                        message: "[E1502] `_` is only valid inside a pipeline placeholder position. \
+                                  Hint: Use `_` in an expression after `=>`, such as `value => f(_)`."
+                            .to_string(),
+                        span: span.clone(),
+                    });
+                }
+                Type::Unknown
+            }
+            Expr::Hole(span) => {
+                self.errors.push(TypeError {
+                    message: "[E1502] Empty argument slots are only valid inside function calls. \
+                              Hint: Use `f(5, )` for partial application."
+                        .to_string(),
+                    span: span.clone(),
+                });
+                Type::Unknown
+            }
             // B11-6a: TypeLiteral is a compile-time type reference, not a value
             Expr::TypeLiteral(_, _, _) => Type::Str,
 
@@ -8683,7 +8701,36 @@ defaulted fields must be provided via `()`",
                                 mold_span.clone(),
                             );
                             self.infer_expr_type(&synth_call)
+                        } else if let Some(spec) = crate::types::mold_specs::lookup_mold_spec(name)
+                        {
+                            match spec.return_kind {
+                                crate::types::mold_specs::MoldReturnKind::Int => Type::Int,
+                                crate::types::mold_specs::MoldReturnKind::Float => Type::Float,
+                                crate::types::mold_specs::MoldReturnKind::Bool => Type::Bool,
+                                crate::types::mold_specs::MoldReturnKind::Str => Type::Str,
+                                crate::types::mold_specs::MoldReturnKind::List => {
+                                    Type::List(Box::new(Type::Unknown))
+                                }
+                                crate::types::mold_specs::MoldReturnKind::Pack
+                                | crate::types::mold_specs::MoldReturnKind::Dynamic => {
+                                    Type::Unknown
+                                }
+                            }
+                        } else if matches!(self.lookup_var(name), Some(Type::Unknown)) {
+                            Type::Unknown
+                        } else if self.mold_field_defs.contains_key(name)
+                            || self.registry.type_defs.contains_key(name)
+                            || self.registry.enum_defs.contains_key(name)
+                        {
+                            Type::Named(name.clone())
                         } else {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1530] Unknown mold '{}'. Hint: Define the mold/type before use or call a function with `{}(...)` syntax.",
+                                    name, name
+                                ),
+                                span: mold_span.clone(),
+                            });
                             Type::Unknown
                         }
                     }
@@ -8795,7 +8842,26 @@ defaulted fields must be provided via `()`",
                 self.validate_type_inst_constructor(name, fields, span);
                 Type::Named(name.clone())
             }
-            Expr::Throw(_, _) => Type::Unknown,
+            Expr::Throw(inner, span) => {
+                let inner_ty = self.infer_expr_type(inner);
+                let is_error = match &inner_ty {
+                    Type::Error(_) => true,
+                    Type::Named(name) => self.registry.is_error_type(name),
+                    Type::Unknown | Type::Any => true,
+                    _ => false,
+                };
+                if !is_error {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1531] `.throw()` requires an Error value, got {}. \
+                             Hint: construct an Error-derived value before throwing.",
+                            inner_ty
+                        ),
+                        span: span.clone(),
+                    });
+                }
+                Type::Unknown
+            }
         }
     }
 

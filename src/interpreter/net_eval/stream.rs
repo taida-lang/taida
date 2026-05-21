@@ -687,6 +687,12 @@ impl Interpreter {
                 ChunkedDecoderState::WaitingChunkSize => {
                     // NB6-7: Read chunk-size line as bytes; parse hex directly.
                     let line = Self::read_line_from_body(body, stream)?;
+                    if line.is_empty() {
+                        return Err(RuntimeError {
+                            message: "readBodyChunk: missing chunk-size line (unexpected EOF)"
+                                .into(),
+                        });
+                    }
                     let trimmed = Self::trim_bytes(&line);
                     if trimmed.is_empty() {
                         // Could be trailing CRLF; try again.
@@ -937,6 +943,12 @@ impl Interpreter {
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
+                    if line.is_empty() {
+                        return Err(RuntimeError {
+                            message: "chunked body error: read timeout before chunk-size line"
+                                .into(),
+                        });
+                    }
                     break;
                 }
                 Err(e) => {
@@ -1023,9 +1035,10 @@ impl Interpreter {
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
                     if len == 0 {
-                        // If we have nothing yet, this might be a real timeout.
-                        // Retry one more time with a blocking read.
-                        continue;
+                        return Err(RuntimeError {
+                            message: "request body read timeout before any bytes were available"
+                                .into(),
+                        });
                     }
                     break; // Return what we have.
                 }
@@ -1089,97 +1102,149 @@ impl Interpreter {
             return Ok(Some(Signal::Value(Value::bytes(vec![]))));
         }
 
-        // Aggregate all remaining body bytes.
-        // This is the only place where aggregate buffering is permitted.
-        let mut all_bytes: Vec<u8> = Vec::new();
-
-        if body.is_chunked {
-            // Chunked path: read all chunks.
-            loop {
-                match body.chunked_state {
-                    ChunkedDecoderState::Done => {
-                        body.fully_read = true;
-                        break;
-                    }
-                    ChunkedDecoderState::WaitingChunkSize => {
-                        // NB6-7: Parse chunk size directly from byte slice.
-                        let line = Self::read_line_from_body(body, stream)?;
-                        let trimmed = Self::trim_bytes(&line);
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let chunk_size =
-                            Self::parse_chunk_size_bytes(&line).ok_or_else(|| RuntimeError {
-                                message: format!(
-                                    "{}: invalid chunk-size '{}' in chunked body",
-                                    api_name,
-                                    String::from_utf8_lossy(trimmed)
-                                ),
-                            })?;
-
-                        if chunk_size == 0 {
-                            body.chunked_state = ChunkedDecoderState::Done;
-                            body.fully_read = true;
-                            // NB4-8: Drain all trailing headers + final CRLF.
-                            Self::drain_chunked_trailers(body, stream)?;
-                            break;
-                        }
-
-                        body.chunked_state = ChunkedDecoderState::ReadingChunkData {
-                            remaining: chunk_size,
-                        };
-                    }
-                    ChunkedDecoderState::ReadingChunkData { remaining } => {
-                        if remaining == 0 {
-                            body.chunked_state = ChunkedDecoderState::WaitingChunkTrailer;
-                            continue;
-                        }
-                        let data = Self::read_exact_from_body(body, stream, remaining)?;
-                        let n = data.len();
-                        all_bytes.extend_from_slice(&data);
-                        let new_remaining = remaining - n;
-                        body.chunked_state = ChunkedDecoderState::ReadingChunkData {
-                            remaining: new_remaining,
-                        };
-                    }
-                    ChunkedDecoderState::WaitingChunkTrailer => {
-                        // NB4-18: Validate CRLF after chunk data.
-                        let line = Self::read_line_from_body(body, stream)?;
-                        let trimmed = Self::trim_bytes(&line);
-                        if !trimmed.is_empty() {
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "{}: malformed chunk trailer — expected CRLF after chunk data, \
-                                     got {:?}",
-                                    api_name,
-                                    String::from_utf8_lossy(&line)
-                                ),
-                            });
-                        }
-                        if line.is_empty() {
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "{}: missing CRLF after chunk data (unexpected EOF)",
-                                    api_name
-                                ),
-                            });
-                        }
-                        body.chunked_state = ChunkedDecoderState::WaitingChunkSize;
-                    }
-                }
+        debug_assert_eq!(
+            body.is_chunked,
+            matches!(body.body_encoding, BodyEncoding::Chunked)
+        );
+        let all_bytes = match body.body_encoding {
+            BodyEncoding::Chunked => Self::read_body_all_chunked(body, stream, api_name)?,
+            BodyEncoding::ContentLength(_) | BodyEncoding::Empty { .. } => {
+                Self::read_body_all_content_length(body, stream, api_name)?
             }
-        } else {
-            // Content-Length path: read remaining bytes.
-            let remaining = (body.content_length - body.bytes_consumed) as usize;
-            if remaining > 0 {
-                let data = Self::read_exact_from_body(body, stream, remaining)?;
-                body.bytes_consumed += data.len() as i64;
-                all_bytes = data;
-            }
-            body.fully_read = true;
-        }
+        };
 
         Ok(Some(Signal::Value(Value::bytes(all_bytes))))
+    }
+
+    pub(super) fn read_body_all_chunked(
+        body: &mut RequestBodyState,
+        stream: &mut ConnStream,
+        api_name: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        const READ_BUF_SIZE: usize = 8192;
+
+        let mut all_bytes = Vec::new();
+        loop {
+            match body.chunked_state {
+                ChunkedDecoderState::Done => {
+                    body.fully_read = true;
+                    break;
+                }
+                ChunkedDecoderState::WaitingChunkSize => {
+                    let line = Self::read_line_from_body(body, stream)?;
+                    if line.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: missing chunk-size line (unexpected EOF)",
+                                api_name
+                            ),
+                        });
+                    }
+                    let trimmed = Self::trim_bytes(&line);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let chunk_size =
+                        Self::parse_chunk_size_bytes(&line).ok_or_else(|| RuntimeError {
+                            message: format!(
+                                "{}: invalid chunk-size '{}' in chunked body",
+                                api_name,
+                                String::from_utf8_lossy(trimmed)
+                            ),
+                        })?;
+
+                    if chunk_size == 0 {
+                        body.chunked_state = ChunkedDecoderState::Done;
+                        body.fully_read = true;
+                        Self::drain_chunked_trailers(body, stream)?;
+                        break;
+                    }
+
+                    body.chunked_state = ChunkedDecoderState::ReadingChunkData {
+                        remaining: chunk_size,
+                    };
+                }
+                ChunkedDecoderState::ReadingChunkData { remaining } => {
+                    if remaining == 0 {
+                        body.chunked_state = ChunkedDecoderState::WaitingChunkTrailer;
+                        continue;
+                    }
+                    let to_read = remaining.min(READ_BUF_SIZE);
+                    let data = Self::read_exact_from_body(body, stream, to_read)?;
+                    let n = data.len();
+                    if n == 0 {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: truncated chunked body — expected {} more chunk-data bytes but got EOF",
+                                api_name, remaining
+                            ),
+                        });
+                    }
+                    all_bytes.extend_from_slice(&data);
+                    body.bytes_consumed += n as i64;
+                    body.chunked_state = ChunkedDecoderState::ReadingChunkData {
+                        remaining: remaining - n,
+                    };
+                }
+                ChunkedDecoderState::WaitingChunkTrailer => {
+                    let line = Self::read_line_from_body(body, stream)?;
+                    let trimmed = Self::trim_bytes(&line);
+                    if !trimmed.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: malformed chunk trailer — expected CRLF after chunk data, \
+                                 got {:?}",
+                                api_name,
+                                String::from_utf8_lossy(&line)
+                            ),
+                        });
+                    }
+                    if line.is_empty() {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: missing CRLF after chunk data (unexpected EOF)",
+                                api_name
+                            ),
+                        });
+                    }
+                    body.chunked_state = ChunkedDecoderState::WaitingChunkSize;
+                }
+            }
+        }
+        Ok(all_bytes)
+    }
+
+    pub(super) fn read_body_all_content_length(
+        body: &mut RequestBodyState,
+        stream: &mut ConnStream,
+        api_name: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        const READ_BUF_SIZE: usize = 8192;
+
+        let mut all_bytes = Vec::new();
+        loop {
+            let remaining = body.content_length - body.bytes_consumed;
+            if remaining <= 0 {
+                body.fully_read = true;
+                break;
+            }
+            let to_read = usize::try_from(remaining)
+                .map(|n| n.min(READ_BUF_SIZE))
+                .unwrap_or(READ_BUF_SIZE);
+            let data = Self::read_exact_from_body(body, stream, to_read)?;
+            if data.is_empty() {
+                return Err(RuntimeError {
+                    message: format!(
+                        "{}: truncated body — expected {} bytes (Content-Length) but got EOF after {} bytes",
+                        api_name, body.content_length, body.bytes_consumed
+                    ),
+                });
+            }
+            body.bytes_consumed += data.len() as i64;
+            all_bytes.extend_from_slice(&data);
+        }
+
+        Ok(all_bytes)
     }
 }
 

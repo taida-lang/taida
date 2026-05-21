@@ -57,6 +57,9 @@
 // WCR-2: Minimum heap address — values below this are small integers, not pointers.
 // Used by _wasm_is_valid_ptr and type detection heuristics.
 #define WASM_MIN_HEAP_ADDR 4096
+#define TAIDA_WASM_I32_MAX 2147483647
+#define TAIDA_WASM_I64_MAX 9223372036854775807LL
+#define TAIDA_WASM_I64_MIN (-9223372036854775807LL - 1LL)
 
 /* ── WASI fd_write import ── */
 
@@ -650,10 +653,10 @@ int64_t taida_debug_bool(int64_t val) {
 
 /* ── 整数演算 ── */
 
-int64_t taida_int_add(int64_t a, int64_t b) { return a + b; }
-int64_t taida_int_sub(int64_t a, int64_t b) { return a - b; }
-int64_t taida_int_mul(int64_t a, int64_t b) { return a * b; }
-int64_t taida_int_neg(int64_t a) { return -a; }
+int64_t taida_int_add(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) + ((uint64_t)b)); }
+int64_t taida_int_sub(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) - ((uint64_t)b)); }
+int64_t taida_int_mul(int64_t a, int64_t b) { return (int64_t)(((uint64_t)a) * ((uint64_t)b)); }
+int64_t taida_int_neg(int64_t a) { return (int64_t)(0ULL - ((uint64_t)a)); }
 
 /* ── 整数比較 ── */
 
@@ -974,7 +977,10 @@ int64_t taida_str_from_bool(int64_t v) {
 
 /* ── W-3: Int methods ── */
 
-int64_t taida_int_abs(int64_t a) { return a < 0 ? -a : a; }
+int64_t taida_int_abs(int64_t a) {
+    if (a == TAIDA_WASM_I64_MIN) return TAIDA_WASM_I64_MAX;
+    return a < 0 ? -a : a;
+}
 int64_t taida_int_lte(int64_t a, int64_t b) { return a <= b ? 1 : 0; }
 
 /* ── W-3: Float→Str (uses bump allocator) ── */

@@ -222,7 +222,7 @@ stdout("idle: " + health.idle.toString() + ", in use: " + health.inUse.toString(
 |--------------|----------|
 | インタプリタ | 全 API |
 | ネイティブ | 全 API |
-| JS | 全 API |
+| 旧 JS ターゲット | 全 API |
 | WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | 利用不可 |
 | WASM (`wasm-full`) | 全 API |
 

@@ -65,42 +65,11 @@ impl TypeChecker {
                         Box::new(Type::Bool),
                     )],
                 )),
-                "take" | "drop" => Some((1, 1, vec![Type::Int])),
-                "unique" | "reverse" | "sort" | "flatten" => Some((0, 0, vec![])),
-                "map" => Some((
-                    1,
-                    1,
-                    vec![Type::Function(
-                        vec![inner.as_ref().clone()],
-                        Box::new(Type::Any),
-                    )],
-                )),
-                "filter" => Some((
-                    1,
-                    1,
-                    vec![Type::Function(
-                        vec![inner.as_ref().clone()],
-                        Box::new(Type::Bool),
-                    )],
-                )),
-                "flatMap" => Some((
-                    1,
-                    1,
-                    vec![Type::Function(
-                        vec![inner.as_ref().clone()],
-                        Box::new(Type::List(Box::new(Type::Any))),
-                    )],
-                )),
                 // `fold` / `reduce` callback type depends on arg0 (`init`)
                 // and is checked by the dedicated accumulator path below.
                 // The static method signature stays arity-only here so the
                 // generic param loop does not infer a weaker callback first.
                 "reduce" | "fold" => Some((2, 2, vec![Type::Any, Type::Any])),
-                "join" => Some((1, 1, vec![Type::Str])),
-                "slice" => Some((2, 2, vec![Type::Int, Type::Int])),
-                "push" | "append" => Some((1, 1, vec![inner.as_ref().clone()])),
-                "concat" => Some((1, 1, vec![Type::List(Box::new(inner.as_ref().clone()))])),
-                "zip" => Some((1, 1, vec![Type::List(Box::new(Type::Any))])),
                 "toString" => Some((0, 0, vec![])),
                 _ => None,
             },
@@ -255,9 +224,9 @@ impl TypeChecker {
                     _ => None,
                 }
             }
-            Type::Error(_) => match method {
+            Type::Error(error_name) => match method {
                 "errorInfo" | "throw" | "toString" => Some((0, 0, vec![])),
-                _ => None,
+                _ => self.named_method_signature(error_name, method),
             },
             // A function-valued pack field invoked via `pack.fn(arg)` is
             // syntactically a MethodCall, but the receiver is a BuchiPack
@@ -285,28 +254,9 @@ impl TypeChecker {
                         _ => None,
                     })
             }
-            // A function-valued field on a declared `Named` type must obey
-            // the same boundary discipline as a `BuchiPack` literal. Walk
-            // the type's registered fields and surface the signature of any
-            // `Type::Function` field that matches the called name.
-            Type::Named(type_name) => self.registry.get_type_fields(type_name).and_then(|fields| {
-                fields
-                    .iter()
-                    .find(|(name, _)| name == method)
-                    .and_then(|(_, ty)| match ty {
-                        Type::Function(params, _) => {
-                            // See `Type::BuchiPack` arm: `Unit => :T` marks a
-                            // zero-argument signature.
-                            let effective = if params.len() == 1 && params[0] == Type::Unit {
-                                vec![]
-                            } else {
-                                params.clone()
-                            };
-                            Some((effective.len(), effective.len(), effective))
-                        }
-                        _ => None,
-                    })
-            }),
+            // Declared methods and function-valued fields on a `Named` type
+            // must obey the same boundary discipline as a `BuchiPack` literal.
+            Type::Named(type_name) => self.named_method_signature(type_name, method),
             _ => {
                 // For unknown/unresolved receiver types, generic receivers
                 // without method signatures, and user-defined Named types
@@ -356,6 +306,7 @@ impl TypeChecker {
                     | Type::Bytes
                     | Type::List(_)
             ) || matches!(obj_type, Type::Named(n) if n == "HashMap" || n == "Set")
+                || matches!(obj_type, Type::Named(n) if self.mold_field_defs.contains_key(n) || self.registry.get_type_fields(n).is_some())
                 || matches!(obj_type, Type::Generic(n, _) if n == "Lax" || n == "Result" || n == "Gorillax" || n == "RelaxedGorillax")
                 || matches!(obj_type, Type::Error(_));
             if is_known_type {
@@ -582,6 +533,77 @@ impl TypeChecker {
             }
             _ => self.registry.is_subtype_of(actual, expected),
         }
+    }
+
+    fn named_method_signature(
+        &self,
+        type_name: &str,
+        method: &str,
+    ) -> Option<(usize, usize, Vec<Type>)> {
+        if let Some(fields) = self.mold_field_defs.get(type_name)
+            && let Some(method_def) = fields
+                .iter()
+                .find(|field| field.is_method && field.name == method)
+                .and_then(|field| field.method_def.as_ref())
+        {
+            let params = method_def
+                .params
+                .iter()
+                .map(|param| {
+                    param
+                        .type_annotation
+                        .as_ref()
+                        .map(|ty| self.registry.resolve_type(ty))
+                        .unwrap_or(Type::Unknown)
+                })
+                .collect::<Vec<_>>();
+            return Some((params.len(), params.len(), params));
+        }
+
+        self.registry.get_type_fields(type_name).and_then(|fields| {
+            fields
+                .iter()
+                .find(|(name, _)| name == method)
+                .and_then(|(_, ty)| match ty {
+                    Type::Function(params, _) => {
+                        // `Unit => :T` marks a zero-argument signature.
+                        let effective = if params.len() == 1 && params[0] == Type::Unit {
+                            vec![]
+                        } else {
+                            params.clone()
+                        };
+                        Some((effective.len(), effective.len(), effective))
+                    }
+                    _ => None,
+                })
+        })
+    }
+
+    fn named_method_return_type(&self, type_name: &str, method: &str) -> Option<Type> {
+        if let Some(fields) = self.mold_field_defs.get(type_name)
+            && let Some(method_def) = fields
+                .iter()
+                .find(|field| field.is_method && field.name == method)
+                .and_then(|field| field.method_def.as_ref())
+        {
+            return Some(
+                method_def
+                    .return_type
+                    .as_ref()
+                    .map(|ty| self.registry.resolve_type(ty))
+                    .unwrap_or(Type::Unknown),
+            );
+        }
+
+        self.registry.get_type_fields(type_name).and_then(|fields| {
+            fields
+                .iter()
+                .find(|(name, _)| name == method)
+                .and_then(|(_, ty)| match ty {
+                    Type::Function(_, ret) => Some((**ret).clone()),
+                    _ => None,
+                })
+        })
     }
 
     fn check_list_accumulator_method_args(
@@ -1041,14 +1063,16 @@ impl TypeChecker {
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
-            Type::Error(_) => match method {
+            Type::Error(error_name) => match method {
                 "errorInfo" => Type::Generic(
                     "Lax".to_string(),
                     vec![Type::Named("ErrorInfo".to_string())],
                 ),
                 "throw" => Type::Unknown,
                 "toString" => Type::Str,
-                _ => Type::Unknown,
+                _ => self
+                    .named_method_return_type(error_name, method)
+                    .unwrap_or(Type::Unknown),
             },
             // Async methods
             Type::Generic(name, args) if name == "Async" => match method {
@@ -1067,30 +1091,10 @@ impl TypeChecker {
             },
             // For named types, check if they have known fields/methods
             Type::Named(type_name) => {
-                if let Some(fields) = self.registry.get_type_fields(type_name) {
-                    // Check if method name matches a field (could be a method field)
-                    if let Some((_, ty)) = fields.iter().find(|(n, _)| n == method) {
-                        // When the matched field is a function type
-                        // (e.g. `Predicate = @(check: Int => :Bool)`),
-                        // the method-call result is the function's
-                        // declared return type, not the function type
-                        // itself. Without unwrapping here the typed
-                        // table records `Type::Function(...)` and Bool
-                        // detection collapses to false for callers like
-                        // `predicate.check(x)`.
-                        if let Type::Function(_, ret) = ty {
-                            return (**ret).clone();
-                        }
-                        ty.clone()
-                    } else {
-                        // toString is available on all types
-                        if method == "toString" {
-                            Type::Str
-                        } else {
-                            Type::Unknown
-                        }
-                    }
-                } else if method == "toString" {
+                if let Some(ret) = self.named_method_return_type(type_name, method) {
+                    return ret;
+                }
+                if method == "toString" {
                     Type::Str
                 } else {
                     Type::Unknown

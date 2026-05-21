@@ -1,13 +1,13 @@
-/// Parity tests: verify that all three backends (Interpreter, JS transpiler, Native compiler)
+/// Parity tests: verify that official backends (Interpreter, Native compiler, and selected WASM profiles)
 /// produce identical output for the same .td files.
 ///
 /// This is the authoritative test for backend parity. The interpreter is the reference
 /// implementation; all other backends must match its output exactly.
 ///
 /// Test categories:
-///   1. Interpreter vs JS -- all non-module, non-stdin examples
-///   2. Interpreter vs Native -- all compile_*.td examples
-///   3. Three-way parity -- compile_*.td files tested across all three backends
+///   1. Interpreter vs Native -- shared language and runtime examples
+///   2. Interpreter vs WASM -- selected profile coverage where host tooling is available
+///   3. Legacy JS-specific tests live outside this authoritative parity gate
 mod common;
 
 use common::{normalize, run_interpreter_normalized, taida_bin, wasmtime_bin};
@@ -419,16 +419,6 @@ fn assert_backend_parity_for_source(source: &str, label: &str) {
         "interpreter/native mismatch for source case {}",
         label
     );
-
-    if node_available() {
-        let js =
-            run_js_src(source, label).unwrap_or_else(|| panic!("js backend failed for {}", label));
-        assert_eq!(
-            interp, js,
-            "interpreter/js mismatch for source case {}",
-            label
-        );
-    }
 }
 
 fn assert_full_backend_parity_for_source(source: &str, label: &str, wasmtime_args: &[&str]) {
@@ -557,9 +547,9 @@ fn test_cpu_parallel_rejected_task_backend_parity() {
         return;
     }
     let source = r#"
-TaskErr = @(type: Str, message: Str)
+Error => TaskErr = @(reason: Str)
 failTask =
-  TaskErr(type <= "TaskErr", message <= "boom").throw()
+  TaskErr(type <= "TaskErr", message <= "boom", reason <= "worker").throw()
 => :Int
 handle =
   |== error: Error =
@@ -622,9 +612,9 @@ fn test_cpu_parallel_par_map_rejected_task_message_backend_parity() {
         return;
     }
     let source = r#"
-TaskErr = @(type: Str, message: Str)
+Error => TaskErr = @(reason: Str)
 failMap x: Int =
-  TaskErr(type <= "TaskErr", message <= "map-boom").throw()
+  TaskErr(type <= "TaskErr", message <= "map-boom", reason <= "worker").throw()
 => :Int
 handle =
   |== error: Error =
@@ -3229,6 +3219,25 @@ stdout(i2.getOrDefault(-1).toString())
 }
 
 #[test]
+fn test_abs_i64_min_interpreter_native_parity() {
+    if !cc_available() {
+        eprintln!("SKIP: cc not available, skipping Abs i64 min native parity");
+        return;
+    }
+
+    let source = r#"
+x <= 0 - 9223372036854775807 - 1
+stdout(Abs[x]().toString())
+"#;
+    let interp = run_interpreter_src(source, "abs_i64_min_interp")
+        .expect("interpreter should handle Abs at i64 min");
+    let native =
+        run_native_src(source, "abs_i64_min_native").expect("native should handle Abs at i64 min");
+    assert_eq!(interp, native);
+    assert_eq!(interp, "9223372036854775807");
+}
+
+#[test]
 fn test_endian_pack_unpack_three_way_parity() {
     let has_node = node_available();
     let has_cc = cc_available();
@@ -4694,6 +4703,30 @@ stdout(42 == 0)
     );
 }
 
+#[test]
+fn test_tofixed_precision_bounds_three_backend_parity() {
+    let src = r#"
+stdout(ToFixed[13.14159, -19]())
+stdout(ToFixed[13.14159, 0]())
+stdout(ToFixed[13.14159, 2]())
+stdout(ToFixed[13.14159, 25]())
+"#;
+    let interp =
+        run_interpreter_src(src, "tofixed_precision_bounds").expect("interpreter should succeed");
+    let native = run_native_src(src, "tofixed_precision_bounds").expect("native should succeed");
+    assert_eq!(
+        interp, native,
+        "ToFixed precision bounds mismatch between interpreter and native"
+    );
+    if node_available() {
+        let js = run_js_src(src, "tofixed_precision_bounds").expect("js should succeed");
+        assert_eq!(
+            interp, js,
+            "ToFixed precision bounds mismatch between interpreter and js"
+        );
+    }
+}
+
 /// F-56 regression: Module export function closures should include all module-level symbols.
 /// When a module exports `createDefaultKv`, its internal calls to `makeKv` should work
 /// even if the importer does not explicitly import `makeKv`.
@@ -4751,6 +4784,72 @@ stdout(val)
         "F-56: expected 'hello' from kv store/fetch, got '{}'",
         interp.trim()
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_native_type_method_closure_captures_module_value() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "taida_type_method_module_capture_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    fs::write(
+        dir.join("helper.td"),
+        r#"base <= 6
+factor <= 4
+
+scale x: Int =
+  x * factor + base
+=> :Int
+
+Item = @(value: Int, bump =
+  value + base
+=> :Int)
+
+makeItem x: Int =
+  Item(value <= scale(x))
+=> :Item
+
+<<< @(base, factor, scale, Item, makeItem)
+"#,
+    )
+    .expect("write helper.td");
+
+    fs::write(
+        dir.join("main.td"),
+        r#">>> ./helper.td => @(base, factor, scale, Item, makeItem)
+
+item <= makeItem(8)
+stdout(item.value.toString())
+stdout(item.bump().toString())
+"#,
+    )
+    .expect("write main.td");
+
+    let main_path = dir.join("main.td");
+    let interp = run_interpreter(&main_path).expect("interpreter should succeed");
+    let native = run_native(&main_path).expect("native should succeed");
+    assert_eq!(
+        interp, native,
+        "type method module capture mismatch between interpreter and native"
+    );
+
+    if node_available() {
+        let js =
+            run_js_project(&main_path, "type_method_module_capture").expect("js should succeed");
+        assert_eq!(
+            interp, js,
+            "type method module capture mismatch between interpreter and js"
+        );
+    }
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -35203,6 +35302,26 @@ stdout(Repeat["ab", 3]())
     assert_eq!(out, "HI\nhello\npad\nababab");
 }
 
+#[test]
+fn test_negative_mold_counts_three_backend_parity() {
+    let source = r#"r <= Repeat["x", -1]()
+stdout(r.length().toString())
+stdout(Pad["x", -1]())
+stdout(Take[@[1, 2, 3], -1]())
+stdout(Drop[@[1, 2, 3], -1]())
+hugeRepeat <= Repeat["x", 9223372036854775807]()
+stdout(hugeRepeat.length().toString())
+hugePad <= Pad["x", 9223372036854775807]()
+stdout(hugePad.length().toString())
+joined <= StringRepeatJoin["x", 9223372036854775807, ","]()
+stdout(joined.length().toString())
+"#;
+    assert_backend_parity_for_source(source, "negative_mold_counts");
+    let out = run_interpreter_src(source, "negative_mold_counts_expected")
+        .expect("interpreter output should exist");
+    assert_eq!(out, "0\nx\n@[]\n@[1, 2, 3]\n0\n1\n0");
+}
+
 // ────────────────────────────────────────────────────────────────
 // C12-1 Phase 1 — FB-27: expr_type_tag mold-return table
 //
@@ -41783,4 +41902,65 @@ fn test_lt_chain_paren_multiline_first_rhs_rejected() {
 stdout(result.toString())
 "#;
     assert_backends_reject_source(source, "lt_chain_paren_multiline_first_rhs");
+}
+
+fn assert_native_and_js_when_available(source: &str, label: &str) {
+    let interp = run_interpreter_src(source, label)
+        .unwrap_or_else(|| panic!("interpreter failed for {}", label));
+    let native = run_native_src(source, label)
+        .unwrap_or_else(|| panic!("native backend failed for {}", label));
+    assert_eq!(
+        interp, native,
+        "interpreter/native mismatch for source case {}",
+        label
+    );
+    if node_available() {
+        let js =
+            run_js_src(source, label).unwrap_or_else(|| panic!("js backend failed for {}", label));
+        assert_eq!(
+            interp, js,
+            "interpreter/js mismatch for source case {}",
+            label
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_nested_placeholder_backend_parity() {
+    let source = r#"
+2 => stdout(_.toString())
+@[1, 2, 3] => stdout(_.length().toString())
+"#;
+    assert_native_and_js_when_available(source, "pipeline_nested_placeholder_backend_parity");
+}
+
+#[test]
+fn test_range_large_boundary_backend_parity() {
+    let source = r#"
+stdout(range(0, 1000000).length().toString())
+"#;
+    assert_native_and_js_when_available(source, "range_large_boundary_backend_parity");
+}
+
+#[test]
+fn test_hashmap_empty_missing_to_string_backend_parity() {
+    let source = r#"
+m <= hashMap()
+stdout(m.get("missing").toString())
+m2 <= hashMap().set("ok", true)
+stdout(m2.get("ok").toString())
+stdout(m2.get("missing").toString())
+"#;
+    assert_native_and_js_when_available(source, "hashmap_empty_missing_to_string_backend_parity");
+}
+
+#[test]
+fn test_json_strict_mismatch_lax_empty_backend_parity() {
+    let source = r#"
+stdout(JSON["5", Bool]().toString())
+stdout(JSON["5", Bool]().hasValue().toString())
+stdout(JSON["true", Int]().toString())
+stdout(JSON["true", Int]().hasValue().toString())
+"#;
+    assert_native_and_js_when_available(source, "json_strict_mismatch_lax_empty_backend_parity");
 }

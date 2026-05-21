@@ -63,7 +63,7 @@ sha256("") => empty_hex
 |--------------|----------|
 | インタプリタ | 対応 |
 | ネイティブ | 対応 |
-| JS | 対応 |
+| 旧 JS ターゲット | 対応 |
 | WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | 利用不可 |
 | WASM (`wasm-full`) | 対応 |
 

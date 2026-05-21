@@ -53,6 +53,89 @@ fn github_api_url() -> String {
     std::env::var("TAIDA_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
 }
 
+fn extract_source_tarball_safely(archive_path: &Path, pkg_dir: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| format!("cannot open archive '{}': {}", archive_path.display(), e))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry_result in archive
+        .entries()
+        .map_err(|e| format!("failed to read tar entries: {}", e))?
+    {
+        let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink()
+            || entry_type.is_hard_link()
+            || entry_type.is_character_special()
+            || entry_type.is_block_special()
+            || entry_type.is_fifo()
+        {
+            let path = entry
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<invalid path>".to_string());
+            return Err(format!("refusing unsafe tar entry '{}'", path));
+        }
+
+        if !entry_type.is_file() && !entry_type.is_dir() {
+            let path = entry
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<invalid path>".to_string());
+            return Err(format!("refusing unsupported tar entry '{}'", path));
+        }
+
+        let raw_path = entry
+            .path()
+            .map_err(|e| format!("failed to read tar entry path: {}", e))?
+            .into_owned();
+        let mut stripped = PathBuf::new();
+        let mut skipped_top = false;
+        for component in raw_path.components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    if !skipped_top {
+                        skipped_top = true;
+                    } else {
+                        stripped.push(part);
+                    }
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    return Err(format!(
+                        "refusing path traversal entry '{}'",
+                        raw_path.display()
+                    ));
+                }
+            }
+        }
+
+        if !skipped_top || stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        let target = pkg_dir.join(&stripped);
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("failed to create directory '{}': {}", target.display(), e))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("failed to create directory '{}': {}", parent.display(), e)
+                })?;
+            }
+            entry
+                .unpack(&target)
+                .map_err(|e| format!("failed to unpack '{}': {}", target.display(), e))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn local_mock_github_base_url_allowed() -> bool {
     (cfg!(debug_assertions) || cfg!(taida_allow_mock_github_base_url))
         && std::env::var("TAIDA_E32_ALLOW_MOCK_GITHUB_BASE_URL")
@@ -565,21 +648,12 @@ impl GlobalStore {
             return Err(e);
         }
 
-        // Extract tarball (--strip-components=1 removes the top-level directory)
-        let tar_status = std::process::Command::new("tar")
-            .args(["xzf"])
-            .arg(&archive_path)
-            .args(["--strip-components=1", "-C"])
-            .arg(&pkg_dir)
-            .status()
-            .map_err(|e| format!("Failed to run tar: {}", e))?;
-
-        if !tar_status.success() {
+        if let Err(e) = extract_source_tarball_safely(&archive_path, &pkg_dir) {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             let _ = std::fs::remove_dir_all(&pkg_dir);
             return Err(format!(
-                "Failed to extract package {}/{}@{}",
-                org, name, version
+                "Failed to extract package {}/{}@{}: {}",
+                org, name, version, e
             ));
         }
 
@@ -2350,6 +2424,111 @@ impl Drop for InstallLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "taida_store_{}_{}_{}",
+            label,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn write_tar_gz<F>(label: &str, build: F) -> (PathBuf, PathBuf)
+    where
+        F: FnOnce(&mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>),
+    {
+        let root = unique_test_dir(label);
+        std::fs::create_dir_all(&root).unwrap();
+        let archive_path = root.join("archive.tar.gz");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        build(&mut builder);
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+        (root, archive_path)
+    }
+
+    fn append_tar_file(
+        builder: &mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>,
+        path: &str,
+        bytes: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, path, bytes).unwrap();
+    }
+
+    fn append_special_tar_entry(
+        builder: &mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>,
+        path: &str,
+        entry_type: tar::EntryType,
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(entry_type);
+        header.set_size(0);
+        header.set_mode(0o644);
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            header.set_link_name("pkg/target").unwrap();
+        }
+        if entry_type.is_character_special() || entry_type.is_block_special() {
+            header.set_device_major(1).unwrap();
+            header.set_device_minor(3).unwrap();
+        }
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, std::io::empty())
+            .unwrap();
+    }
+
+    fn write_raw_tar_gz_entry(label: &str, path: &str, bytes: &[u8]) -> (PathBuf, PathBuf) {
+        fn write_octal(dst: &mut [u8], value: u64) {
+            let text = format!("{:0width$o}\0", value, width = dst.len() - 1);
+            dst.copy_from_slice(text.as_bytes());
+        }
+
+        let root = unique_test_dir(label);
+        std::fs::create_dir_all(&root).unwrap();
+        let archive_path = root.join("archive.tar.gz");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+
+        let mut header = [0u8; 512];
+        let path_bytes = path.as_bytes();
+        assert!(path_bytes.len() <= 100);
+        header[..path_bytes.len()].copy_from_slice(path_bytes);
+        write_octal(&mut header[100..108], 0o644);
+        write_octal(&mut header[108..116], 0);
+        write_octal(&mut header[116..124], 0);
+        write_octal(&mut header[124..136], bytes.len() as u64);
+        write_octal(&mut header[136..148], 0);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: u32 = header.iter().map(|b| *b as u32).sum();
+        let checksum_text = format!("{:06o}\0 ", checksum);
+        header[148..156].copy_from_slice(checksum_text.as_bytes());
+
+        encoder.write_all(&header).unwrap();
+        encoder.write_all(bytes).unwrap();
+        let pad = (512 - (bytes.len() % 512)) % 512;
+        if pad > 0 {
+            encoder.write_all(&vec![0u8; pad]).unwrap();
+        }
+        encoder.write_all(&[0u8; 1024]).unwrap();
+        encoder.finish().unwrap();
+        (root, archive_path)
+    }
 
     #[test]
     fn test_store_path_layout() {
@@ -2359,6 +2538,53 @@ mod tests {
             path,
             PathBuf::from("/tmp/taida_store_test/alice/webframework/b.12")
         );
+    }
+
+    #[test]
+    fn test_extract_source_tarball_accepts_regular_file() {
+        let (root, archive_path) = write_tar_gz("safe_tar_ok", |builder| {
+            append_tar_file(builder, "pkg/main.td", b"stdout(\"ok\")\n");
+        });
+        let pkg_dir = root.join("out");
+        extract_source_tarball_safely(&archive_path, &pkg_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pkg_dir.join("main.td")).unwrap(),
+            "stdout(\"ok\")\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_extract_source_tarball_rejects_unsafe_entry_types() {
+        for (label, entry_type) in [
+            ("symlink", tar::EntryType::Symlink),
+            ("hardlink", tar::EntryType::Link),
+            ("char", tar::EntryType::Char),
+            ("block", tar::EntryType::Block),
+            ("fifo", tar::EntryType::Fifo),
+        ] {
+            let (root, archive_path) = write_tar_gz(label, |builder| {
+                append_special_tar_entry(builder, "pkg/unsafe", entry_type);
+            });
+            let err = extract_source_tarball_safely(&archive_path, &root.join("out"))
+                .expect_err("unsafe tar entry type must reject");
+            assert!(err.contains("refusing unsafe tar entry"), "{label}: {err}");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn test_extract_source_tarball_rejects_path_traversal_entries() {
+        for (label, path) in [("parent", "pkg/../evil.td"), ("absolute", "/pkg/evil.td")] {
+            let (root, archive_path) = write_raw_tar_gz_entry(label, path, b"bad");
+            let err = extract_source_tarball_safely(&archive_path, &root.join("out"))
+                .expect_err("path traversal tar entry must reject");
+            assert!(
+                err.contains("refusing path traversal entry"),
+                "{label}: {err}"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

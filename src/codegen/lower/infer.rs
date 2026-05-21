@@ -442,7 +442,7 @@ impl Lowering {
     }
 
     /// retain-on-store: 式が List を返すかどうかを判定
-    pub(super) fn expr_is_list(&self, expr: &Expr) -> bool {
+    pub(crate) fn expr_is_list(&self, expr: &Expr) -> bool {
         match expr {
             Expr::ListLit(_, _) => true,
             Expr::Ident(name, _) => self.list_vars.contains(name),

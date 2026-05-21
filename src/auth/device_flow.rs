@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const GITHUB_CLIENT_ID: &str = "Iv23lifup4LV7q6HEz05";
 
@@ -67,12 +67,18 @@ pub fn start_device_flow() -> Result<DeviceFlowResponse, String> {
 
 /// ユーザーがコードを入力した後、GitHub にアクセストークンをポーリングする。
 /// 成功・期限切れ・エラーのいずれかまでブロックする。
-pub fn poll_for_token(device_code: &str, interval: u64) -> Result<String, String> {
+pub fn poll_for_token(device_code: &str, interval: u64, expires_in: u64) -> Result<String, String> {
     let client = reqwest::blocking::Client::new();
-    let mut poll_interval = interval;
+    let mut poll_interval = interval.clamp(1, 60);
+    let deadline = Instant::now() + Duration::from_secs(expires_in.max(1));
 
     loop {
-        thread::sleep(Duration::from_secs(poll_interval));
+        let now = Instant::now();
+        if now >= deadline {
+            return Err("Device code expired. Please run `taida auth login` again.".to_string());
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        thread::sleep(Duration::from_secs(poll_interval).min(remaining));
 
         let mut params = HashMap::new();
         params.insert("client_id", GITHUB_CLIENT_ID);
@@ -102,7 +108,10 @@ pub fn poll_for_token(device_code: &str, interval: u64) -> Result<String, String
             }
             Some("slow_down") => {
                 // ポーリング間隔を延長
-                poll_interval = token_resp.interval.unwrap_or(poll_interval + 5);
+                poll_interval = token_resp
+                    .interval
+                    .unwrap_or(poll_interval + 5)
+                    .clamp(1, 60);
             }
             Some("expired_token") => {
                 return Err("Device code expired. Please run `taida auth login` again.".to_string());

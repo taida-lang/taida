@@ -19,6 +19,24 @@ use crate::parser::*;
 fn rewrite_nested_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {
     match expr {
         Expr::Placeholder(_) => Expr::Ident(replacement.to_string(), span.clone()),
+        Expr::BuchiPack(fields, s) => Expr::BuchiPack(
+            fields
+                .iter()
+                .map(|field| BuchiField {
+                    name: field.name.clone(),
+                    value: rewrite_nested_placeholder(&field.value, replacement, span),
+                    span: field.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::ListLit(items, s) => Expr::ListLit(
+            items
+                .iter()
+                .map(|item| rewrite_nested_placeholder(item, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
         Expr::BinaryOp(lhs, op, rhs, s) => Expr::BinaryOp(
             Box::new(rewrite_nested_placeholder(lhs, replacement, span)),
             op.clone(),
@@ -45,16 +63,118 @@ fn rewrite_nested_placeholder(expr: &Expr, replacement: &str, span: &crate::lexe
                 .collect(),
             s.clone(),
         ),
+        Expr::FieldAccess(obj, field, s) => Expr::FieldAccess(
+            Box::new(rewrite_nested_placeholder(obj, replacement, span)),
+            field.clone(),
+            s.clone(),
+        ),
+        Expr::CondBranch(arms, s) => Expr::CondBranch(
+            arms.iter()
+                .map(|arm| CondArm {
+                    condition: arm
+                        .condition
+                        .as_ref()
+                        .map(|condition| rewrite_nested_placeholder(condition, replacement, span)),
+                    body: arm
+                        .body
+                        .iter()
+                        .map(|stmt| rewrite_statement_placeholder(stmt, replacement, span))
+                        .collect(),
+                    span: arm.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::Pipeline(steps, s) => Expr::Pipeline(
+            steps
+                .iter()
+                .map(|step| rewrite_nested_placeholder(step, replacement, span))
+                .collect(),
+            s.clone(),
+        ),
         Expr::MoldInst(name, type_args, fields, s) => Expr::MoldInst(
             name.clone(),
             type_args
                 .iter()
                 .map(|a| rewrite_nested_placeholder(a, replacement, span))
                 .collect(),
-            fields.clone(),
+            fields
+                .iter()
+                .map(|field| BuchiField {
+                    name: field.name.clone(),
+                    value: rewrite_nested_placeholder(&field.value, replacement, span),
+                    span: field.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::Unmold(inner, s) => Expr::Unmold(
+            Box::new(rewrite_nested_placeholder(inner, replacement, span)),
+            s.clone(),
+        ),
+        Expr::Lambda(params, body, s) => Expr::Lambda(
+            params
+                .iter()
+                .map(|param| Param {
+                    name: param.name.clone(),
+                    type_annotation: param.type_annotation.clone(),
+                    default_value: param
+                        .default_value
+                        .as_ref()
+                        .map(|value| rewrite_nested_placeholder(value, replacement, span)),
+                    span: param.span.clone(),
+                })
+                .collect(),
+            Box::new(rewrite_nested_placeholder(body, replacement, span)),
+            s.clone(),
+        ),
+        Expr::TypeInst(name, fields, s) => Expr::TypeInst(
+            name.clone(),
+            fields
+                .iter()
+                .map(|field| BuchiField {
+                    name: field.name.clone(),
+                    value: rewrite_nested_placeholder(&field.value, replacement, span),
+                    span: field.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::Throw(inner, s) => Expr::Throw(
+            Box::new(rewrite_nested_placeholder(inner, replacement, span)),
             s.clone(),
         ),
         other => other.clone(),
+    }
+}
+
+fn rewrite_statement_placeholder(
+    stmt: &Statement,
+    replacement: &str,
+    span: &crate::lexer::Span,
+) -> Statement {
+    match stmt {
+        Statement::Expr(expr) => {
+            Statement::Expr(rewrite_nested_placeholder(expr, replacement, span))
+        }
+        Statement::Assignment(assign) => Statement::Assignment(Assignment {
+            target: assign.target.clone(),
+            type_annotation: assign.type_annotation.clone(),
+            value: rewrite_nested_placeholder(&assign.value, replacement, span),
+            doc_comments: assign.doc_comments.clone(),
+            span: assign.span.clone(),
+        }),
+        Statement::UnmoldForward(unmold) => Statement::UnmoldForward(UnmoldForwardStmt {
+            source: rewrite_nested_placeholder(&unmold.source, replacement, span),
+            target: unmold.target.clone(),
+            span: unmold.span.clone(),
+        }),
+        Statement::UnmoldBackward(unmold) => Statement::UnmoldBackward(UnmoldBackwardStmt {
+            target: unmold.target.clone(),
+            source: rewrite_nested_placeholder(&unmold.source, replacement, span),
+            span: unmold.span.clone(),
+        }),
+        _ => stmt.clone(),
     }
 }
 
@@ -63,6 +183,10 @@ fn rewrite_nested_placeholder(expr: &Expr, replacement: &str, span: &crate::lexe
 fn expr_contains_placeholder(expr: &Expr) -> bool {
     match expr {
         Expr::Placeholder(_) => true,
+        Expr::BuchiPack(fields, _) => fields
+            .iter()
+            .any(|field| expr_contains_placeholder(&field.value)),
+        Expr::ListLit(items, _) => items.iter().any(expr_contains_placeholder),
         Expr::BinaryOp(lhs, _, rhs, _) => {
             expr_contains_placeholder(lhs) || expr_contains_placeholder(rhs)
         }
@@ -73,8 +197,59 @@ fn expr_contains_placeholder(expr: &Expr) -> bool {
         Expr::MethodCall(obj, _, args, _) => {
             expr_contains_placeholder(obj) || args.iter().any(expr_contains_placeholder)
         }
-        Expr::MoldInst(_, type_args, _, _) => type_args.iter().any(expr_contains_placeholder),
+        Expr::FieldAccess(obj, _, _) => expr_contains_placeholder(obj),
+        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+            arm.condition
+                .as_ref()
+                .is_some_and(expr_contains_placeholder)
+                || arm.body.iter().any(statement_contains_placeholder)
+        }),
+        Expr::Pipeline(steps, _) => steps.iter().any(expr_contains_placeholder),
+        Expr::MoldInst(_, type_args, fields, _) => {
+            type_args.iter().any(expr_contains_placeholder)
+                || fields
+                    .iter()
+                    .any(|field| expr_contains_placeholder(&field.value))
+        }
+        Expr::Unmold(inner, _) => expr_contains_placeholder(inner),
+        Expr::Lambda(params, body, _) => {
+            params.iter().any(|param| {
+                param
+                    .default_value
+                    .as_ref()
+                    .is_some_and(expr_contains_placeholder)
+            }) || expr_contains_placeholder(body)
+        }
+        Expr::TypeInst(_, fields, _) => fields
+            .iter()
+            .any(|field| expr_contains_placeholder(&field.value)),
+        Expr::Throw(inner, _) => expr_contains_placeholder(inner),
         _ => false,
+    }
+}
+
+fn statement_contains_placeholder(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Expr(expr) => expr_contains_placeholder(expr),
+        Statement::Assignment(assign) => expr_contains_placeholder(&assign.value),
+        Statement::FuncDef(func) => func.body.iter().any(statement_contains_placeholder),
+        Statement::ErrorCeiling(ceiling) => ceiling
+            .handler_body
+            .iter()
+            .any(statement_contains_placeholder),
+        Statement::UnmoldForward(unmold) => expr_contains_placeholder(&unmold.source),
+        Statement::UnmoldBackward(unmold) => expr_contains_placeholder(&unmold.source),
+        Statement::ClassLikeDef(def) => def.fields.iter().any(|field| {
+            field
+                .default_value
+                .as_ref()
+                .is_some_and(expr_contains_placeholder)
+                || field
+                    .method_def
+                    .as_ref()
+                    .is_some_and(|func| func.body.iter().any(statement_contains_placeholder))
+        }),
+        Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => false,
     }
 }
 
@@ -92,9 +267,9 @@ impl Interpreter {
         current: Value,
     ) -> Result<Signal, RuntimeError> {
         match step {
+            Expr::Placeholder(_) => Ok(Signal::Value(current)),
             Expr::FuncCall(callee, args, span) => {
-                // Check if any arg is a Placeholder
-                let has_placeholder = args.iter().any(|a| matches!(a, Expr::Placeholder(_)));
+                let has_placeholder = args.iter().any(expr_contains_placeholder);
 
                 if has_placeholder {
                     // Replace placeholders with current value in the args,
@@ -104,16 +279,11 @@ impl Interpreter {
                     let pipe_val_name = "__pipe_current__";
                     self.env.define_force(pipe_val_name, current);
 
-                    let mut new_args: Vec<Expr> = Vec::new();
                     let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    for arg in args {
-                        if matches!(arg, Expr::Placeholder(_)) {
-                            new_args
-                                .push(Expr::Ident(pipe_val_name.to_string(), dummy_span.clone()));
-                        } else {
-                            new_args.push(arg.clone());
-                        }
-                    }
+                    let new_args: Vec<Expr> = args
+                        .iter()
+                        .map(|arg| rewrite_nested_placeholder(arg, pipe_val_name, &dummy_span))
+                        .collect();
 
                     let new_call = Expr::FuncCall(callee.clone(), new_args, span.clone());
                     let result = self.eval_expr(&new_call);
@@ -204,7 +374,7 @@ impl Interpreter {
                     result
                 }
             }
-            Expr::Ident(_, _) => {
+            Expr::Ident(name, _) => {
                 // Identifier in pipeline: evaluate it, and if it's a function, call it with current
                 let step_val = match self.eval_expr(step)? {
                     Signal::Value(v) => v,
@@ -217,10 +387,12 @@ impl Interpreter {
                         self.call_function_with_values(func, &args)
                             .map(Signal::Value)
                     }
-                    _ => {
-                        // Not a function — just return the evaluated value
-                        Ok(Signal::Value(step_val))
-                    }
+                    _ => Err(RuntimeError {
+                        message: format!(
+                            "Pipeline step '{}' resolved to a non-function value",
+                            name
+                        ),
+                    }),
                 }
             }
             _ => {

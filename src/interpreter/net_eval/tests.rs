@@ -1353,6 +1353,44 @@ fn connect_with_retry(port: u16) -> std::net::TcpStream {
     );
 }
 
+fn plain_stream_pair() -> (ConnStream, std::net::TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let client = connect_with_retry(port);
+    let (server_tcp, _) = listener.accept().unwrap();
+    (ConnStream::Plain(server_tcp), client)
+}
+
+#[test]
+fn test_chunked_read_body_chunk_rejects_eof_before_size_line() {
+    let (mut server, client) = plain_stream_pair();
+    drop(client);
+    let mut body = RequestBodyState::new_legacy(true, 0, Vec::new());
+
+    let err = Interpreter::read_body_chunk_chunked(&mut body, &mut server)
+        .expect_err("peer EOF before chunk-size line must be a protocol error");
+    assert!(
+        err.message.contains("missing chunk-size line"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn test_chunked_read_body_all_rejects_eof_before_size_line() {
+    let (mut server, client) = plain_stream_pair();
+    drop(client);
+    let mut body = RequestBodyState::new_legacy(true, 0, Vec::new());
+
+    let err = Interpreter::read_body_all_chunked(&mut body, &mut server, "readBodyAll")
+        .expect_err("peer EOF before chunk-size line must be a protocol error");
+    assert!(
+        err.message.contains("missing chunk-size line"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
 /// Build a simple handler lambda expression that returns 200 OK with a given body.
 fn make_handler_expr(body_text: &str) -> Expr {
     Expr::Lambda(
@@ -3863,6 +3901,78 @@ fn test_read_body_chunked() {
     ]);
     let result = eval_read_body(&req).unwrap();
     assert_eq!(result, Value::bytes(b"Wikipedia i".to_vec()));
+}
+
+#[test]
+fn test_read_body_all_content_length_truncated_errors() {
+    let (mut stream, mut client) = plain_stream_pair();
+    std::io::Write::write_all(&mut client, b"he").unwrap();
+    let _ = std::net::TcpStream::shutdown(&client, std::net::Shutdown::Write);
+
+    let mut body = RequestBodyState::new(false, 5, true, Vec::new());
+    let err = Interpreter::read_body_all_content_length(&mut body, &mut stream, "readBodyAll")
+        .unwrap_err();
+    assert!(
+        err.message.contains("truncated body"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert!(!body.fully_read);
+}
+
+#[test]
+fn test_read_body_all_content_length_timeout_errors() {
+    let (mut stream, _client) = plain_stream_pair();
+    if let ConnStream::Plain(tcp) = &stream {
+        tcp.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .unwrap();
+    }
+
+    let mut body = RequestBodyState::new(false, 5, true, Vec::new());
+    let err = Interpreter::read_body_all_content_length(&mut body, &mut stream, "readBodyAll")
+        .unwrap_err();
+    assert!(
+        err.message.contains("read timeout"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert!(!body.fully_read);
+}
+
+#[test]
+fn test_read_body_all_chunked_truncated_errors() {
+    let (mut stream, mut client) = plain_stream_pair();
+    std::io::Write::write_all(&mut client, b"a\r\nhello").unwrap();
+    let _ = std::net::TcpStream::shutdown(&client, std::net::Shutdown::Write);
+
+    let mut body = RequestBodyState::new(true, 0, false, Vec::new());
+    let err =
+        Interpreter::read_body_all_chunked(&mut body, &mut stream, "readBodyAll").unwrap_err();
+    assert!(
+        err.message.contains("truncated chunked body"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert!(!body.fully_read);
+}
+
+#[test]
+fn test_read_body_all_chunked_timeout_errors() {
+    let (mut stream, _client) = plain_stream_pair();
+    if let ConnStream::Plain(tcp) = &stream {
+        tcp.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .unwrap();
+    }
+
+    let mut body = RequestBodyState::new(true, 0, false, Vec::new());
+    let err =
+        Interpreter::read_body_all_chunked(&mut body, &mut stream, "readBodyAll").unwrap_err();
+    assert!(
+        err.message.contains("read timeout"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert!(!body.fully_read);
 }
 
 // ── httpServe integration test: chunked body (NET2-2i) ──

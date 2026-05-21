@@ -294,16 +294,17 @@ pub fn is_placeholder_sha(value: &str) -> bool {
 // ── SHA-256 verification of an existing file ───────────────────
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), FetchError> {
+    let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
     let data = std::fs::read(path)
         .map_err(|e| cache_io(format!("cannot read cached file {}: {}", path.display(), e)))?;
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let actual = hasher.finalize_hex();
-    if actual == expected {
+    if actual == expected_hex {
         Ok(())
     } else {
         Err(FetchError::IntegrityMismatch {
-            expected: expected.to_string(),
+            expected: expected_hex.to_string(),
             actual,
         })
     }

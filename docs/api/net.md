@@ -126,7 +126,7 @@ handler req: Request  writer: Writer => :Int
 startResponse writer: Writer  status: Int  headers: @[@(name: Str, value: Str)] => :Int
 ```
 
-戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では準備した
+戻り値は実装ごとに有意な `:Int` です。Interpreter / 旧 JS ターゲットでは準備した
 start-line + ヘッダ部の合計バイト数を返します (実際の wire 書き込みは
 最初の `writeChunk` または `endResponse` 呼び出し時に確定する遅延
 コミット方式)。Native は現バージョンでは `0` を返します (具体的な
@@ -158,7 +158,7 @@ writeChunk writer: Writer  data: Bytes => :Int
 
 `startResponse` の後、`endResponse` の前に 0 回以上呼び出します。`Str` を
 渡した場合は UTF-8 エンコードした byte 列が wire に出ます。戻り値は実装
-ごとに有意な `:Int` です。Interpreter / JS では実際に wire へ書き込んだ
+ごとに有意な `:Int` です。Interpreter / 旧 JS ターゲットでは実際に wire へ書き込んだ
 バイト数 (chunked transfer-encoding の hex-size prefix + payload + `\r\n`
 suffix を含む合計) を返します。Native は現バージョンでは `0` を返し、
 具体的なバイト数の計算は後続バージョンで land します。空 chunk は
@@ -181,7 +181,7 @@ endResponse writer: Writer  trailer: Bytes => :Int
 ```
 
 最後の chunk を送り、必要に応じて trailing 部分を書き出して接続を閉じ
-ます。戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では終端化
+ます。戻り値は実装ごとに有意な `:Int` です。Interpreter / 旧 JS ターゲットでは終端化
 処理で wire に書き込んだバイト数 (chunked terminator `0\r\n\r\n` の 5
 バイト + trailer) を返します。Native は現バージョンでは `0` を返します
 (具体的なバイト数の計算は後続バージョンで land)。bodyless status (`1xx`
@@ -473,7 +473,7 @@ wsSend ws: WsConn  data: Bytes => :Int
 
 `Str` を渡すと text frame (opcode `0x1`)、`Bytes` を渡すと binary frame
 (opcode `0x2`) として送出します。戻り値は実装ごとに有意な `:Int` です。
-Interpreter / JS では WebSocket フレームとして wire に書き込んだバイト数
+Interpreter / 旧 JS ターゲットでは WebSocket フレームとして wire に書き込んだバイト数
 (header + masked payload を含む) を返します。Native は現バージョンでは
 `0` を返します (具体的なバイト数の計算は後続バージョンで land)。
 
@@ -521,7 +521,7 @@ wsClose ws: WsConn => :Int
 wsClose ws: WsConn  code: Int => :Int
 ```
 
-戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では wire に送出
+戻り値は実装ごとに有意な `:Int` です。Interpreter / 旧 JS ターゲットでは wire に送出
 した close frame のバイト数 (典型的に header 2 byte + close code 2 byte
 = 4) を返します。Native は現バージョンでは `0` を返します (具体的な
 バイト数の計算は後続バージョンで land)。
@@ -560,7 +560,7 @@ wsCloseCode received: BuchiPack => :Int
 sseEvent writer: Writer  event: Str  data: Str => :Int
 ```
 
-戻り値は実装ごとに有意な `:Int` です。Interpreter / JS では実際に書き
+戻り値は実装ごとに有意な `:Int` です。Interpreter / 旧 JS ターゲットでは実際に書き
 込んだバイト数 (`event:` 行 + `data:` 行群 + 末尾 `\n` の chunked
 transfer-encoding として送出した総バイト数) を返します。Native は現
 バージョンでは `0` を返します (具体的なバイト数の計算は後続バージョン
@@ -596,11 +596,11 @@ Enum => HttpProtocol = :H1 :H2 :H3
 
 | Variant | Wire protocol | Backend support |
 |---------|---------------|-----------------|
-| `:H1` | `h1.1` | Interpreter / JS / Native / WASM |
+| `:H1` | `h1.1` | Interpreter / Native / WASM / legacy JS |
 | `:H2` | `h2` | Interpreter / Native |
 | `:H3` | `h3` | Native |
 
-JS バックエンドは `:H1` のみ対応します。WASM バックエンドは HTTP サーバー機能が制限されるため、`httpServe` の高度な protocol 指定をコンパイル時エラーとして拒否します。
+旧 JS ターゲットは `:H1` のみ対応します。WASM バックエンドは HTTP サーバー機能が制限されるため、`httpServe` の高度な protocol 指定をコンパイル時エラーとして拒否します。
 
 ---
 
@@ -689,7 +689,7 @@ socket 上に残したままにします。そのため `req.body` は
 |--------------|----------|
 | インタプリタ | 全 API 対応 |
 | ネイティブ | 全 API 対応 |
-| JS | 全 API 対応 |
+| 旧 JS ターゲット | 全 API 対応 |
 | WASM (`wasm-min` / `wasm-edge`) | `httpServe` 利用不可。呼び出した capability は `[E1612]` を返す。 |
 | WASM (`wasm-wasi` / `wasm-full`) | plaintext HTTP/1.1 `httpServe` の部分集合のみ対応。TLS / HTTP/2 / HTTP/3 / WebSocket / streaming body は未提供。 |
 

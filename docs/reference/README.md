@@ -18,7 +18,7 @@
 | [`diagnostic_codes.md`](diagnostic_codes.md) | 公開診断コードの一覧 |
 | [`documentation_comments.md`](documentation_comments.md) | ドキュメントコメントの構文 |
 | [`graph_model.md`](graph_model.md) | 構造的内省 (introspection) グラフモデル |
-| [`memory_model.md`](memory_model.md) | 4 バックエンドのメモリ管理戦略とアドオン所有権規約 |
+| [`memory_model.md`](memory_model.md) | バックエンド別のメモリ管理戦略とアドオン所有権規約 |
 | [`naming_conventions.md`](naming_conventions.md) | 公開命名規則 |
 | [`operators.md`](operators.md) | 演算子と文法上の役割 |
 | [`perf_gates.md`](perf_gates.md) | リリース品質に関わるパフォーマンス／リソースゲート |
@@ -42,7 +42,7 @@
 
 - **構文**: BNF 風の記述、例、バリエーション。
 - **型**: 型名・フィールド・デフォルト値・モールド対応関係。
-- **挙動**: 3 バックエンドが同じ結果を返す約束と既知の例外。
+- **挙動**: 正式バックエンドが同じ結果を返す約束と既知の例外。
 - **エラー条件**: どの場面でどの `E####` 診断コードが発射されるか。
 - **入出力契約**: 返り値 pack の shape、引数の制約、副作用の有無。
 

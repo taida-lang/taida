@@ -45,6 +45,8 @@ use taida_addon::{
     TaidaAddonFunctionV1, TaidaAddonStatus, TaidaHostV1,
 };
 
+const MAX_ADDON_FUNCTIONS: u32 = 4096;
+
 /// Distinct, classifiable error variants produced by [`load_addon`].
 ///
 /// Every variant carries the addon path so the diagnostic can be
@@ -454,6 +456,15 @@ pub fn load_addon<P: AsRef<Path>>(path: P) -> Result<LoadedAddon, AddonLoadError
             ),
         });
     }
+    if descriptor.function_count > MAX_ADDON_FUNCTIONS {
+        return Err(AddonLoadError::InvalidDescriptor {
+            path: owned_path,
+            reason: format!(
+                "function_count={} exceeds supported maximum {}",
+                descriptor.function_count, MAX_ADDON_FUNCTIONS
+            ),
+        });
+    }
 
     // 6. Cache the addon name. UTF-8 validate up front so the public
     // API can hand out `&str` without per-call validation.
@@ -680,6 +691,15 @@ mod tests {
                 reason: "function_count > 0 but functions pointer is null".to_string(),
             });
         }
+        if descriptor.function_count > MAX_ADDON_FUNCTIONS {
+            return Err(AddonLoadError::InvalidDescriptor {
+                path,
+                reason: format!(
+                    "function_count={} exceeds supported maximum {}",
+                    descriptor.function_count, MAX_ADDON_FUNCTIONS
+                ),
+            });
+        }
         if descriptor.addon_name.is_null() {
             return Err(AddonLoadError::InvalidDescriptor {
                 path,
@@ -771,6 +791,29 @@ mod tests {
         match err {
             AddonLoadError::InvalidDescriptor { reason, .. } => {
                 assert!(reason.contains("functions pointer is null"));
+            }
+            other => panic!("expected InvalidDescriptor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unreasonably_large_function_count() {
+        let bad = Box::leak(Box::new(TaidaAddonDescriptorV1 {
+            abi_version: TAIDA_ADDON_ABI_VERSION,
+            _reserved: 0,
+            addon_name: c"x".as_ptr(),
+            function_count: MAX_ADDON_FUNCTIONS + 1,
+            _reserved2: 0,
+            functions: UT_FUNCTIONS.as_ptr(),
+            init: None,
+        }));
+        let err =
+            validate_descriptor_for_test(PathBuf::from("test://too-many-fns"), bad as *const _)
+                .expect_err("oversized function_count must be rejected before table walk");
+        match err {
+            AddonLoadError::InvalidDescriptor { reason, .. } => {
+                assert!(reason.contains("function_count"));
+                assert!(reason.contains("exceeds supported maximum"));
             }
             other => panic!("expected InvalidDescriptor, got {other:?}"),
         }

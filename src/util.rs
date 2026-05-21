@@ -5,9 +5,11 @@ use std::path::PathBuf;
 /// Returns an error if neither is set.
 pub fn taida_home_dir() -> Result<PathBuf, String> {
     std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|v| !v.is_empty()))
         .map(PathBuf::from)
-        .map_err(|_| "Home directory not found: neither HOME nor USERPROFILE is set".to_string())
+        .ok_or_else(|| "Home directory not found: neither HOME nor USERPROFILE is set".to_string())
 }
 
 /// Shared lock for tests that modify environment variables.

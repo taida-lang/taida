@@ -595,7 +595,12 @@ fn render_type_doc(out: &mut String, td: &TypeDoc) {
         for f in &td.fields {
             let type_str = f.type_str.as_deref().unwrap_or("-");
             let desc = if f.doc.is_empty() { "-" } else { &f.doc };
-            out.push_str(&format!("| `{}` | `{}` | {} |\n", f.name, type_str, desc));
+            out.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                escape_table_cell(&f.name),
+                escape_table_cell(type_str),
+                escape_table_cell(desc)
+            ));
         }
         out.push('\n');
     }
@@ -626,7 +631,12 @@ fn render_func_doc(out: &mut String, fd: &FuncDoc) {
                 .find(|(pn, _)| pn == name)
                 .map(|(_, d)| d.as_str())
                 .unwrap_or("-");
-            out.push_str(&format!("| `{}` | `{}` | {} |\n", name, type_str, desc));
+            out.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                escape_table_cell(name),
+                escape_table_cell(type_str),
+                escape_table_cell(desc)
+            ));
         }
         out.push('\n');
     }
@@ -660,7 +670,12 @@ fn render_mold_doc(out: &mut String, md: &MoldDoc) {
         for f in &md.fields {
             let type_str = f.type_str.as_deref().unwrap_or("-");
             let desc = if f.doc.is_empty() { "-" } else { &f.doc };
-            out.push_str(&format!("| `{}` | `{}` | {} |\n", f.name, type_str, desc));
+            out.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                escape_table_cell(&f.name),
+                escape_table_cell(type_str),
+                escape_table_cell(desc)
+            ));
         }
         out.push('\n');
     }
@@ -688,12 +703,28 @@ fn render_inherit_doc(out: &mut String, id: &InheritDoc) {
         for f in &id.fields {
             let type_str = f.type_str.as_deref().unwrap_or("-");
             let desc = if f.doc.is_empty() { "-" } else { &f.doc };
-            out.push_str(&format!("| `{}` | `{}` | {} |\n", f.name, type_str, desc));
+            out.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                escape_table_cell(&f.name),
+                escape_table_cell(type_str),
+                escape_table_cell(desc)
+            ));
         }
         out.push('\n');
     }
 
     render_tags_body(out, &id.tags);
+}
+
+fn escape_table_cell(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', "<br>")
+        .replace("```", "`\\`\\`")
+}
+
+fn escape_fenced_code_line(s: &str) -> String {
+    s.replace("```", "`\\`\\`")
 }
 
 /// Render the header section of tags: Purpose, Deprecated, Description.
@@ -730,7 +761,7 @@ fn render_tags_body(out: &mut String, tags: &DocTags) {
     if !tags.example.is_empty() {
         out.push_str("**Example**:\n\n```taida\n");
         for line in &tags.example {
-            out.push_str(line);
+            out.push_str(&escape_fenced_code_line(line));
             out.push('\n');
         }
         out.push_str("```\n\n");
@@ -777,7 +808,7 @@ fn render_ai_tags(out: &mut String, tags: &DocTags) {
     if !tags.ai_examples.is_empty() {
         out.push_str("**AI-Examples**:\n\n```taida\n");
         for line in &tags.ai_examples {
-            out.push_str(line);
+            out.push_str(&escape_fenced_code_line(line));
             out.push('\n');
         }
         out.push_str("```\n\n");

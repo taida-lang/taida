@@ -114,9 +114,12 @@ pub fn is_official_release_url(url: &str) -> bool {
         Some((h, p)) => (h, p),
         None => return false,
     };
-    matches!(host, "github.com" | "www.github.com")
-        && path.starts_with("taida-lang/")
-        && path.contains("/releases/")
+    let official_host = matches!(
+        host.to_ascii_lowercase().as_str(),
+        "github.com" | "www.github.com"
+    );
+    let path = path.to_ascii_lowercase();
+    official_host && path.starts_with("taida-lang/") && path.contains("/releases/")
 }
 
 // ── Outcomes ────────────────────────────────────────────────────
@@ -434,6 +437,9 @@ mod tests {
         ));
         assert!(is_official_release_url(
             "https://github.com/taida-lang/taida/releases/download/@c.26/taida-linux.tar.gz"
+        ));
+        assert!(is_official_release_url(
+            "https://github.com/Taida-Lang/Terminal/releases/download/@a.7/libterminal.so"
         ));
         assert!(!is_official_release_url(
             "https://github.com/some-fork/terminal/releases/download/@a.7/libterminal.so"

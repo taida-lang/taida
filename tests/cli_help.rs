@@ -44,7 +44,7 @@ fn test_transpile_command_removed_with_e1700() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("[E1700]") && stderr.contains("taida build js"),
+        stderr.contains("[E1700]") && stderr.contains("taida build native"),
         "expected E1700 replacement hint, got: {}",
         stderr
     );
@@ -96,7 +96,7 @@ fn test_subcommand_help_prints_usage_and_exits_zero() {
         (&["ingot", "--help"][..], "taida ingot install"),
         (
             &["build", "--help"][..],
-            "taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
+            "taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full]",
         ),
         (
             &["graph", "--help"][..],

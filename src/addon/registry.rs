@@ -395,21 +395,18 @@ pub fn cdylib_search_paths(pkg_dir: &Path, library_stem: &str) -> Vec<PathBuf> {
     let filename = platform_cdylib_filename(library_stem);
     let mut paths = vec![pkg_dir.join("native").join(&filename)];
 
-    let target_root = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            // When running inside the workspace, fall back to
-            // `<workspace>/target/`. We approximate "workspace" by
-            // walking up from `pkg_dir` until we find a Cargo.toml,
-            // because the package directory may live anywhere on disk.
-            //
-            // For RC1 dev addons (taida-addon-sample), pkg_dir lives
-            // *outside* the cargo workspace (under .taida/deps), so the
-            // walk-up does not find anything. We instead use the
-            // CARGO_MANIFEST_DIR env var when present (set by cargo
-            // test) so the search hits the workspace target dir.
-            std::env::var_os("CARGO_MANIFEST_DIR").map(|d| PathBuf::from(d).join("target"))
-        });
+    let target_root = if cfg!(any(test, debug_assertions)) {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                // Development/test builds may load sample addons from the
+                // workspace target directory. Release builds never consult
+                // cargo-controlled environment variables.
+                std::env::var_os("CARGO_MANIFEST_DIR").map(|d| PathBuf::from(d).join("target"))
+            })
+    } else {
+        None
+    };
 
     if let Some(root) = target_root {
         paths.push(root.join("debug").join(&filename));

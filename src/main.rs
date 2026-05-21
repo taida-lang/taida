@@ -63,7 +63,7 @@ Usage:
   taida <COMMAND> [OPTIONS]
 
 Commands:
-  build       Build Native, JS, or WASM output
+  build       Build Native or WASM output
   way         Quality hub: check, lint, verify, todo
   graph       AI-oriented structural JSON for codebase comprehension
   doc         Generate docs from doc comments
@@ -193,7 +193,7 @@ fn print_build_help() {
     println!(
         "\
 Usage:
-  taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
   taida build <PATH> --unit NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --plan NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --all-units [--release] [--diag-format text|jsonl]
@@ -211,12 +211,13 @@ Options:
 
 Examples:
   taida build app.td
-  taida build js src
+  taida build wasm-wasi src
   taida build --release app.td
   taida build app.td --unit server-x
 
 Notes:
   Target defaults to native when omitted.
+  The legacy js target remains hidden for transitional compatibility; it is not part of the release parity contract.
   Descriptor mode does not accept a positional target.
   `--no-check` is a global option and applies here."
     );
@@ -531,7 +532,7 @@ fn removed_command_replacement(command: &str) -> Option<&'static str> {
         "lint" => Some("taida way lint"),
         "todo" => Some("taida way todo"),
         "inspect" => Some("taida graph summary"),
-        "transpile" => Some("taida build js"),
+        "transpile" => Some("taida build native"),
         "compile" => Some("taida build native"),
         "deps" => Some("taida ingot deps"),
         "install" => Some("taida ingot install"),
@@ -696,7 +697,9 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
 
     // Check for --no-check flag
     let no_check = args.iter().any(|a| a == "--no-check");
@@ -1644,7 +1647,7 @@ fn print_build_usage_and_exit() -> ! {
     eprintln!(
         "\
 Usage:
-  taida build [native|js|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
   taida build <PATH> --unit NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --plan NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --all-units [--release] [--diag-format text|jsonl]
@@ -1668,7 +1671,7 @@ fn reject_removed_build_target_flag() -> ! {
     eprintln!(
         "[E1700] Flag '--target <target>' was removed in @e.X. Use 'taida build <target> <PATH>' instead."
     );
-    eprintln!("        For example: `taida build js src`.");
+    eprintln!("        For example: `taida build native src`.");
     std::process::exit(2);
 }
 
