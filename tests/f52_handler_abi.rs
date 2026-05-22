@@ -335,7 +335,7 @@ debugOk =
 => :WebResponse
 
 handle req: WebRequest =
-  | req.path == "/throw" |> Error(type <= "Error", message <= "boom").throw()
+  | req.path == "/throw" |> Error(type <= "Error", message <= "secret-token-xyz").throw()
   | req.path == "/status" |> status(999, text("status"))
   | req.path == "/header" |> header("bad\r\nname", "value", text("bad"))
   | _ |> debugOk()
@@ -376,6 +376,15 @@ handle req: WebRequest =
     assert_eq!(
         throw_json["headers"]["x-taida-error"].as_str(),
         Some("handler-throw")
+    );
+    let throw_body = base64::engine::general_purpose::STANDARD
+        .decode(throw_json["bodyBase64"].as_str().unwrap_or_default())
+        .expect("throw response body must decode");
+    let throw_body = String::from_utf8(throw_body).expect("throw response body must be utf-8");
+    assert_eq!(throw_body, "handler throw");
+    assert!(
+        !throw_body.contains("secret-token-xyz"),
+        "native handler throw response must not leak handler-supplied error message"
     );
 
     let status_raw = run_handler_native(

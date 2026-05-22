@@ -1919,7 +1919,8 @@ extern taida_val taida_abi_response_status(taida_val code, taida_val response);
 extern taida_val taida_abi_response_header(taida_val name_ptr, taida_val value_ptr, taida_val response);
 
 static taida_val taida_native_handler_error_response(const char *kind, taida_val message) {{
-    const char *body = message ? (const char *)message : "handler error";
+    (void)message;
+    const char *body = "handler throw";
     taida_val response = taida_abi_response_text((taida_val)body);
     response = taida_abi_response_status(500, response);
     response = taida_abi_response_header((taida_val)"x-taida-error", (taida_val)(kind ? kind : "handler"), response);
