@@ -18,8 +18,9 @@
 WebRequest = @(
   method: Str,
   path: Str,
-  query: HashMap[Str, Str],
-  headers: HashMap[Str, Str],
+  rawQuery: Str,
+  query: @[@(name: Str, value: Str)],
+  headers: @[@(name: Str, value: Str)],
   body: Bytes
 )
 ```
@@ -28,16 +29,22 @@ WebRequest = @(
 |-------|------|-------------|
 | `method` | `Str` | HTTP method。例: `"GET"` / `"POST"`。 |
 | `path` | `Str` | path 部分。query string は含めません。 |
-| `query` | `HashMap[Str, Str]` | query parameter。 |
-| `headers` | `HashMap[Str, Str]` | header 名から値への map。 |
+| `rawQuery` | `Str` | `?` を除いた raw query string。query が無い場合は空文字列です。 |
+| `query` | `@[@(name: Str, value: Str)]` | query parameter の出現順リスト。同名 parameter を複数保持します。 |
+| `headers` | `@[@(name: Str, value: Str)]` | request header field line の出現順リスト。同名 header を複数保持します。 |
 | `body` | `Bytes` | request body の生 bytes。 |
+
+`query` / `headers` は map ではありません。HTTP や URL の入力では同じ名前が複数回
+現れることがあるため、canonical representation は `name` / `value` の
+ぶちパックのリストです。lookup 用の派生 helper がある場合も、このリストが
+重複と順序を保持する基準です。
 
 ### 1.2 `WebResponse`
 
 ```taida
 WebResponse = @(
   status: Int,
-  headers: HashMap[Str, Str],
+  headers: @[@(name: Str, value: Str)],
   body: Bytes
 )
 ```
@@ -45,7 +52,7 @@ WebResponse = @(
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | `Int` | HTTP status code。未指定時の helper 既定値は `200`。 |
-| `headers` | `HashMap[Str, Str]` | response headers。 |
+| `headers` | `@[@(name: Str, value: Str)]` | response header field line の出現順リスト。同名 header を複数保持します。 |
 | `body` | `Bytes` | response body の生 bytes。 |
 
 ---
@@ -58,9 +65,11 @@ WebResponse = @(
 | `json` | `json value => :WebResponse` | `jsonEncode(value)` 相当の JSON response。`content-type` は `application/json`。 |
 | `bytes` | `bytes body: Bytes => :WebResponse` | bytes response。`content-type` は `application/octet-stream`。 |
 | `status` | `status code: Int  response: WebResponse => :WebResponse` | status code を差し替えた response を返す。範囲外は `100`〜`599` に丸めます。 |
-| `header` | `header name: Str  value: Str  response: WebResponse => :WebResponse` | header を追加または上書きした response を返す。無効な header 名や改行を含む値は 500 response になります。 |
+| `header` | `header name: Str  value: Str  response: WebResponse => :WebResponse` | header field line を末尾に追加した response を返す。無効な header 名や改行を含む値は 500 response になります。 |
 
 `status` / `header` は入力 response を変更せず、新しい `WebResponse` を返します。
+`header` は既存の同名 field line を削除しません。たとえば `set-cookie` を複数回
+追加した場合、`headers` には追加順で複数の field line が残ります。
 
 **Example**:
 
@@ -112,8 +121,14 @@ Request JSON:
 {
   "method": "POST",
   "path": "/items",
-  "query": { "q": "taida" },
-  "headers": { "content-type": "text/plain" },
+  "rawQuery": "tag=a&tag=b",
+  "query": [
+    { "name": "tag", "value": "a" },
+    { "name": "tag", "value": "b" }
+  ],
+  "headers": [
+    { "name": "content-type", "value": "text/plain" }
+  ],
   "bodyBase64": "aGVsbG8="
 }
 ```
@@ -123,7 +138,9 @@ Response JSON:
 ```json
 {
   "status": 200,
-  "headers": { "content-type": "text/plain; charset=utf-8" },
+  "headers": [
+    { "name": "content-type", "value": "text/plain; charset=utf-8" }
+  ],
   "bodyBase64": "T0s="
 }
 ```
@@ -132,8 +149,8 @@ Response JSON:
 コード内では `body` フィールドは `Bytes` として扱います。
 
 Native / WASM の bridge は、欠落または解釈できない request フィールドに
-既定値を入れます。既定値は `method = "GET"`、`path = "/"`、空の `query`、
-空の `headers`、空の `body` です。
+既定値を入れます。既定値は `method = "GET"`、`path = "/"`、
+`rawQuery = ""`、空の `query`、空の `headers`、空の `body` です。
 
 Native / WASM handler bridge は 1 request の wire JSON を最大 16MiB として
 扱います。上限を超える request は 413 response に変換されます。

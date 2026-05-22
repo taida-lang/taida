@@ -410,14 +410,15 @@ Enum => HttpProtocol = :H1 :H2 :H3
 WebRequest = @(
   method: Str,
   path: Str,
-  query: HashMap[Str, Str],
-  headers: HashMap[Str, Str],
+  rawQuery: Str,
+  query: @[@(name: Str, value: Str)],
+  headers: @[@(name: Str, value: Str)],
   body: Bytes
 )
 
 WebResponse = @(
   status: Int,
-  headers: HashMap[Str, Str],
+  headers: @[@(name: Str, value: Str)],
   body: Bytes
 )
 

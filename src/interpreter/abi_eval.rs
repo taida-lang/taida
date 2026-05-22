@@ -157,7 +157,7 @@ impl Interpreter {
 fn abi_response(status: i64, headers: Vec<(String, String)>, body: Vec<u8>) -> Value {
     Value::pack(vec![
         ("status".to_string(), Value::Int(clamp_status(status))),
-        ("headers".to_string(), header_map(headers)),
+        ("headers".to_string(), header_list(headers)),
         ("body".to_string(), Value::bytes(body)),
     ])
 }
@@ -204,20 +204,17 @@ fn invalid_header_response() -> Value {
     )
 }
 
-fn header_map(headers: Vec<(String, String)>) -> Value {
+fn header_list(headers: Vec<(String, String)>) -> Value {
     let entries = headers
         .into_iter()
-        .map(|(key, value)| {
+        .map(|(name, value)| {
             Value::pack(vec![
-                ("key".to_string(), Value::str(key)),
+                ("name".to_string(), Value::str(name)),
                 ("value".to_string(), Value::str(value)),
             ])
         })
         .collect();
-    Value::pack(vec![
-        ("__entries".to_string(), Value::list(entries)),
-        ("__type".to_string(), Value::str("HashMap".to_string())),
-    ])
+    Value::list(entries)
 }
 
 fn with_response_field(response: Value, field_name: &str, field_value: Value) -> Value {
@@ -258,7 +255,7 @@ fn add_response_header(response: Value, key: String, value: String) -> Value {
             if !replaced {
                 out.push((
                     "headers".to_string(),
-                    header_map(vec![(key.clone(), value.clone())]),
+                    header_list(vec![(key.clone(), value.clone())]),
                 ));
             }
             Value::pack(out)
@@ -268,38 +265,13 @@ fn add_response_header(response: Value, key: String, value: String) -> Value {
 }
 
 fn append_header(headers: &Value, key: &str, value: &str) -> Value {
-    if let Value::BuchiPack(fields) = headers
-        && let Some(Value::List(entries)) = fields
-            .iter()
-            .find(|(name, _)| name == "__entries")
-            .map(|(_, value)| value)
-    {
-        let mut next: Vec<Value> = entries
-            .as_ref()
-            .iter()
-            .filter(|entry| !header_entry_key_eq(entry, key))
-            .cloned()
-            .collect();
+    if let Value::List(entries) = headers {
+        let mut next: Vec<Value> = entries.as_ref().to_vec();
         next.push(Value::pack(vec![
-            ("key".to_string(), Value::str(key.to_string())),
+            ("name".to_string(), Value::str(key.to_string())),
             ("value".to_string(), Value::str(value.to_string())),
         ]));
-        return Value::pack(vec![
-            ("__entries".to_string(), Value::list(next)),
-            ("__type".to_string(), Value::str("HashMap".to_string())),
-        ]);
+        return Value::list(next);
     }
-    header_map(vec![(key.to_string(), value.to_string())])
-}
-
-fn header_entry_key_eq(entry: &Value, key: &str) -> bool {
-    if let Value::BuchiPack(fields) = entry
-        && let Some(Value::Str(existing)) = fields
-            .iter()
-            .find(|(name, _)| name == "key")
-            .map(|(_, value)| value)
-    {
-        return existing.as_str() == key;
-    }
-    false
+    header_list(vec![(key.to_string(), value.to_string())])
 }

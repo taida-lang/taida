@@ -5107,12 +5107,6 @@ static taida_val taida_abi_hash(const char *name) {
 
 #define TAIDA_ABI_MAX_REQUEST_BYTES (16 * 1024 * 1024)
 
-static taida_val taida_abi_headers_new(void) {
-    taida_val hm = taida_hashmap_new();
-    taida_hashmap_set_value_tag(hm, TAIDA_TAG_STR);
-    return hm;
-}
-
 static taida_val taida_abi_status_clamp(taida_val status) {
     if (status < 100) return 100;
     if (status > 599) return 599;
@@ -5145,17 +5139,32 @@ static int taida_abi_header_value_valid(const char *value) {
     return 1;
 }
 
-static taida_val taida_abi_headers_set_raw(taida_val hm, const char *name, const char *value) {
-    if (!hm) hm = taida_abi_headers_new();
-    taida_val key = (taida_val)taida_str_new_copy(name ? name : "");
-    taida_val val = (taida_val)taida_str_new_copy(value ? value : "");
-    return taida_hashmap_set(hm, taida_str_hash(key), key, val);
+static taida_val taida_abi_pair_list_new(void) {
+    taida_val list = taida_list_new();
+    taida_list_set_elem_tag(list, TAIDA_TAG_PACK);
+    return list;
 }
 
-static taida_val taida_abi_headers_set(taida_val hm, const char *name, const char *value) {
-    if (!hm) hm = taida_abi_headers_new();
-    if (!taida_abi_header_name_valid(name) || !taida_abi_header_value_valid(value)) return hm;
-    return taida_abi_headers_set_raw(hm, name, value);
+static taida_val taida_abi_name_value_pair_new(const char *name, const char *value) {
+    taida_val pair = taida_pack_new(2);
+    taida_pack_set_hash(pair, 0, taida_abi_hash("name"));
+    taida_pack_set_tag(pair, 0, TAIDA_TAG_STR);
+    taida_pack_set(pair, 0, (taida_val)taida_str_new_copy(name ? name : ""));
+    taida_pack_set_hash(pair, 1, taida_abi_hash("value"));
+    taida_pack_set_tag(pair, 1, TAIDA_TAG_STR);
+    taida_pack_set(pair, 1, (taida_val)taida_str_new_copy(value ? value : ""));
+    return pair;
+}
+
+static taida_val taida_abi_pair_list_append_raw(taida_val list, const char *name, const char *value) {
+    if (!list) list = taida_abi_pair_list_new();
+    return taida_list_push(list, taida_abi_name_value_pair_new(name, value));
+}
+
+static taida_val taida_abi_header_list_append(taida_val list, const char *name, const char *value) {
+    if (!list) list = taida_abi_pair_list_new();
+    if (!taida_abi_header_name_valid(name) || !taida_abi_header_value_valid(value)) return list;
+    return taida_abi_pair_list_append_raw(list, name, value);
 }
 
 static taida_val taida_abi_empty_bytes(void) {
@@ -5168,8 +5177,8 @@ static taida_val taida_abi_response_new(taida_val status, taida_val headers, tai
     taida_pack_set(pack, 0, taida_abi_status_clamp(status));
     taida_pack_set_tag(pack, 0, TAIDA_TAG_INT);
     taida_pack_set_hash(pack, 1, taida_abi_hash("headers"));
-    taida_pack_set(pack, 1, headers ? headers : taida_abi_headers_new());
-    taida_pack_set_tag(pack, 1, TAIDA_TAG_HMAP);
+    taida_pack_set(pack, 1, headers ? headers : taida_abi_pair_list_new());
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_LIST);
     taida_pack_set_hash(pack, 2, taida_abi_hash("body"));
     taida_pack_set(pack, 2, body ? body : taida_abi_empty_bytes());
     taida_pack_set_tag(pack, 2, body_tag);
@@ -5177,8 +5186,8 @@ static taida_val taida_abi_response_new(taida_val status, taida_val headers, tai
 }
 
 static taida_val taida_abi_response_error(taida_val status, const char *message) {
-    taida_val headers = taida_abi_headers_new();
-    headers = taida_abi_headers_set_raw(headers, "x-taida-error", "abi");
+    taida_val headers = taida_abi_pair_list_new();
+    headers = taida_abi_pair_list_append_raw(headers, "x-taida-error", "abi");
     taida_val bytes = taida_bytes_contig_new(
         (const unsigned char *)(message ? message : "handler error"),
         message ? (taida_val)strlen(message) : (taida_val)strlen("handler error")
@@ -5189,8 +5198,8 @@ static taida_val taida_abi_response_error(taida_val status, const char *message)
 taida_val taida_abi_response_text(taida_val body_ptr) {
     const char *body = (const char *)body_ptr;
     taida_val bytes = taida_bytes_contig_new((const unsigned char *)(body ? body : ""), body ? (taida_val)strlen(body) : 0);
-    taida_val headers = taida_abi_headers_new();
-    headers = taida_abi_headers_set(headers, "content-type", "text/plain; charset=utf-8");
+    taida_val headers = taida_abi_pair_list_new();
+    headers = taida_abi_header_list_append(headers, "content-type", "text/plain; charset=utf-8");
     return taida_abi_response_new(200, headers, bytes, TAIDA_TAG_PACK);
 }
 
@@ -5198,14 +5207,14 @@ taida_val taida_abi_response_json(taida_val value) {
     taida_val json = taida_json_encode(value);
     const char *body = (const char *)json;
     taida_val bytes = taida_bytes_contig_new((const unsigned char *)(body ? body : ""), body ? (taida_val)strlen(body) : 0);
-    taida_val headers = taida_abi_headers_new();
-    headers = taida_abi_headers_set(headers, "content-type", "application/json");
+    taida_val headers = taida_abi_pair_list_new();
+    headers = taida_abi_header_list_append(headers, "content-type", "application/json");
     return taida_abi_response_new(200, headers, bytes, TAIDA_TAG_PACK);
 }
 
 taida_val taida_abi_response_bytes(taida_val body_ptr) {
-    taida_val headers = taida_abi_headers_new();
-    headers = taida_abi_headers_set(headers, "content-type", "application/octet-stream");
+    taida_val headers = taida_abi_pair_list_new();
+    headers = taida_abi_header_list_append(headers, "content-type", "application/octet-stream");
     return taida_abi_response_new(200, headers, body_ptr, TAIDA_TAG_PACK);
 }
 
@@ -5222,7 +5231,7 @@ taida_val taida_abi_response_header(taida_val name_ptr, taida_val value_ptr, tai
         return taida_abi_response_error(500, "invalid response header");
     }
     taida_val headers = taida_pack_get(response, taida_abi_hash("headers"));
-    headers = taida_abi_headers_set(headers, name, value);
+    headers = taida_abi_header_list_append(headers, name, value);
     taida_val status = taida_pack_get(response, taida_abi_hash("status"));
     if (!status) status = 200;
     taida_val body = taida_pack_get(response, taida_abi_hash("body"));
@@ -11224,11 +11233,131 @@ static int taida_abi_json_find_object(const char *json, taida_val len, const cha
     return 0;
 }
 
-static taida_val taida_abi_json_string_map(const char *json, taida_val len, const char *key, int validate_headers) {
-    taida_val hm = taida_abi_headers_new();
+static int taida_abi_json_find_array(const char *json, taida_val len, const char *key, taida_val *start, taida_val *end) {
+    for (taida_val p = 0; p < len; p++) {
+        if (json[p] != '"') continue;
+        taida_val cursor = p;
+        if (!taida_abi_json_key_matches(json, len, &cursor, key)) continue;
+        taida_abi_json_skip_ws(json, len, &cursor);
+        if (cursor >= len || json[cursor] != ':') continue;
+        cursor++;
+        taida_abi_json_skip_ws(json, len, &cursor);
+        if (cursor >= len || json[cursor] != '[') continue;
+        cursor++;
+        *start = cursor;
+        int depth = 1;
+        int in_str = 0;
+        int esc = 0;
+        while (cursor < len) {
+            char c = json[cursor++];
+            if (in_str) {
+                if (esc) {
+                    esc = 0;
+                } else if (c == '\\') {
+                    esc = 1;
+                } else if (c == '"') {
+                    in_str = 0;
+                }
+                continue;
+            }
+            if (c == '"') {
+                in_str = 1;
+            } else if (c == '[') {
+                depth++;
+            } else if (c == ']') {
+                depth--;
+                if (depth == 0) {
+                    *end = cursor - 1;
+                    return 1;
+                }
+            }
+        }
+    }
+    *start = 0;
+    *end = 0;
+    return 0;
+}
+
+static char *taida_abi_json_find_string_in_range(const char *json, taida_val start, taida_val end, const char *key) {
+    for (taida_val p = start; p < end; p++) {
+        if (json[p] != '"') continue;
+        taida_val cursor = p;
+        if (!taida_abi_json_key_matches(json, end, &cursor, key)) continue;
+        taida_abi_json_skip_ws(json, end, &cursor);
+        if (cursor >= end || json[cursor] != ':') continue;
+        cursor++;
+        taida_abi_json_skip_ws(json, end, &cursor);
+        char *value = taida_abi_json_parse_string_raw(json, end, &cursor);
+        if (value) return value;
+    }
+    return NULL;
+}
+
+static taida_val taida_abi_json_pair_list(const char *json, taida_val len, const char *key, int validate_headers) {
+    taida_val list = taida_abi_pair_list_new();
     taida_val start = 0;
     taida_val end = 0;
-    if (!taida_abi_json_find_object(json, len, key, &start, &end)) return hm;
+    if (!taida_abi_json_find_array(json, len, key, &start, &end)) return list;
+    taida_val p = start;
+    taida_val count = 0;
+    while (p < end) {
+        if (count >= 512) break;
+        taida_abi_json_skip_ws(json, end, &p);
+        if (p >= end) break;
+        if (json[p] == ',') {
+            p++;
+            continue;
+        }
+        if (json[p] != '{') break;
+        p++;
+        taida_val obj_start = p;
+        int depth = 1;
+        int in_str = 0;
+        int esc = 0;
+        while (p < end) {
+            char c = json[p++];
+            if (in_str) {
+                if (esc) {
+                    esc = 0;
+                } else if (c == '\\') {
+                    esc = 1;
+                } else if (c == '"') {
+                    in_str = 0;
+                }
+                continue;
+            }
+            if (c == '"') {
+                in_str = 1;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) break;
+            }
+        }
+        if (depth != 0) break;
+        taida_val obj_end = p - 1;
+        char *name = taida_abi_json_find_string_in_range(json, obj_start, obj_end, "name");
+        char *value = taida_abi_json_find_string_in_range(json, obj_start, obj_end, "value");
+        if (name && value) {
+            list = validate_headers
+                ? taida_abi_header_list_append(list, name, value)
+                : taida_abi_pair_list_append_raw(list, name, value);
+            count++;
+        }
+        free(name);
+        free(value);
+        taida_abi_json_skip_ws(json, end, &p);
+        if (p < end && json[p] == ',') p++;
+    }
+    return list;
+}
+
+static taida_val taida_abi_json_legacy_string_map_as_pair_list(const char *json, taida_val len, const char *key, int validate_headers) {
+    taida_val list = taida_abi_pair_list_new();
+    taida_val start = 0;
+    taida_val end = 0;
+    if (!taida_abi_json_find_object(json, len, key, &start, &end)) return list;
     taida_val p = start;
     taida_val count = 0;
     while (p < end) {
@@ -11253,16 +11382,25 @@ static taida_val taida_abi_json_string_map(const char *json, taida_val len, cons
             free(map_key);
             break;
         }
-        hm = validate_headers
-            ? taida_abi_headers_set(hm, map_key, map_value)
-            : taida_abi_headers_set_raw(hm, map_key, map_value);
+        list = validate_headers
+            ? taida_abi_header_list_append(list, map_key, map_value)
+            : taida_abi_pair_list_append_raw(list, map_key, map_value);
         count++;
         free(map_key);
         free(map_value);
         taida_abi_json_skip_ws(json, end, &p);
         if (p < end && json[p] == ',') p++;
     }
-    return hm;
+    return list;
+}
+
+static taida_val taida_abi_json_request_pairs(const char *json, taida_val len, const char *key, int validate_headers) {
+    taida_val start = 0;
+    taida_val end = 0;
+    if (taida_abi_json_find_array(json, len, key, &start, &end)) {
+        return taida_abi_json_pair_list(json, len, key, validate_headers);
+    }
+    return taida_abi_json_legacy_string_map_as_pair_list(json, len, key, validate_headers);
 }
 
 static int taida_abi_b64_value(char c) {
@@ -11320,37 +11458,43 @@ taida_val taida_abi_web_make_request_json(taida_val json_ptr, taida_val len) {
 
     char *method_raw = taida_abi_json_find_string_raw(json, len, "method", "GET");
     char *path_raw = taida_abi_json_find_string_raw(json, len, "path", "/");
-    taida_val query = taida_abi_json_string_map(json, len, "query", 0);
-    taida_val headers = taida_abi_json_string_map(json, len, "headers", 1);
+    char *raw_query_raw = taida_abi_json_find_string_raw(json, len, "rawQuery", "");
+    taida_val query = taida_abi_json_request_pairs(json, len, "query", 0);
+    taida_val headers = taida_abi_json_request_pairs(json, len, "headers", 1);
     char *body_b64 = taida_abi_json_find_string_raw(json, len, "bodyBase64", "");
     taida_val body_len = 0;
     unsigned char *body_raw = taida_abi_base64_decode(body_b64, &body_len);
 
     taida_val method = (taida_val)taida_str_new_copy(method_raw);
     taida_val path = (taida_val)taida_str_new_copy(path_raw);
+    taida_val raw_query = (taida_val)taida_str_new_copy(raw_query_raw);
     taida_val body = taida_bytes_contig_new(body_raw, body_len);
 
     free(method_raw);
     free(path_raw);
+    free(raw_query_raw);
     free(body_b64);
     free(body_raw);
 
-    taida_val pack = taida_pack_new(5);
+    taida_val pack = taida_pack_new(6);
     taida_pack_set_hash(pack, 0, taida_abi_hash("method"));
     taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
     taida_pack_set(pack, 0, method);
     taida_pack_set_hash(pack, 1, taida_abi_hash("path"));
     taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
     taida_pack_set(pack, 1, path);
-    taida_pack_set_hash(pack, 2, taida_abi_hash("query"));
-    taida_pack_set_tag(pack, 2, TAIDA_TAG_HMAP);
-    taida_pack_set(pack, 2, query);
-    taida_pack_set_hash(pack, 3, taida_abi_hash("headers"));
-    taida_pack_set_tag(pack, 3, TAIDA_TAG_HMAP);
-    taida_pack_set(pack, 3, headers);
-    taida_pack_set_hash(pack, 4, taida_abi_hash("body"));
-    taida_pack_set_tag(pack, 4, TAIDA_TAG_PACK);
-    taida_pack_set(pack, 4, body);
+    taida_pack_set_hash(pack, 2, taida_abi_hash("rawQuery"));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, raw_query);
+    taida_pack_set_hash(pack, 3, taida_abi_hash("query"));
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_LIST);
+    taida_pack_set(pack, 3, query);
+    taida_pack_set_hash(pack, 4, taida_abi_hash("headers"));
+    taida_pack_set_tag(pack, 4, TAIDA_TAG_LIST);
+    taida_pack_set(pack, 4, headers);
+    taida_pack_set_hash(pack, 5, taida_abi_hash("body"));
+    taida_pack_set_tag(pack, 5, TAIDA_TAG_PACK);
+    taida_pack_set(pack, 5, body);
     return pack;
 }
 
@@ -11377,27 +11521,29 @@ static void taida_abi_json_append_base64(char **buf, size_t *cap, size_t *len, c
 }
 
 static void taida_abi_json_append_headers(char **buf, size_t *cap, size_t *len, taida_val headers) {
-    json_append_char(buf, cap, len, '{');
-    if (headers && taida_is_hashmap(headers)) {
-        taida_val *hm = (taida_val *)headers;
-        taida_val hm_cap = hm[1];
-        taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(hm_cap)];
+    json_append_char(buf, cap, len, '[');
+    if (headers && taida_is_list(headers)) {
+        taida_val *list = (taida_val *)headers;
+        taida_val list_len = list[2];
+        if (list_len < 0 || list_len > 512) list_len = 0;
         int first = 1;
-        for (taida_val oi = 0; oi < next_ord; oi++) {
-            taida_val slot = hm[TAIDA_HM_ORD_SLOT(hm_cap, oi)];
-            if (slot < 0 || slot >= hm_cap) continue;
-            taida_val sh = hm[HM_HEADER + slot * 3];
-            taida_val sk = hm[HM_HEADER + slot * 3 + 1];
-            taida_val sv = hm[HM_HEADER + slot * 3 + 2];
-            if (!HM_SLOT_OCCUPIED(sh, sk)) continue;
+        for (taida_val i = 0; i < list_len; i++) {
+            taida_val pair = list[4 + i];
+            taida_val sk = taida_pack_get(pair, taida_abi_hash("name"));
+            taida_val sv = taida_pack_get(pair, taida_abi_hash("value"));
+            const char *name = taida_is_string_value(sk) ? (const char *)sk : "";
+            const char *value = taida_is_string_value(sv) ? (const char *)sv : "";
+            if (!taida_abi_header_name_valid(name) || !taida_abi_header_value_valid(value)) continue;
             if (!first) json_append_char(buf, cap, len, ',');
             first = 0;
-            json_append_escaped_str(buf, cap, len, taida_is_string_value(sk) ? (const char *)sk : "");
-            json_append_char(buf, cap, len, ':');
-            json_append_escaped_str(buf, cap, len, taida_is_string_value(sv) ? (const char *)sv : "");
+            json_append(buf, cap, len, "{\"name\":");
+            json_append_escaped_str(buf, cap, len, name);
+            json_append(buf, cap, len, ",\"value\":");
+            json_append_escaped_str(buf, cap, len, value);
+            json_append_char(buf, cap, len, '}');
         }
     }
-    json_append_char(buf, cap, len, '}');
+    json_append_char(buf, cap, len, ']');
 }
 
 taida_val taida_abi_web_store_response_json_native(taida_val response) {

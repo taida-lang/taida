@@ -590,30 +590,31 @@ impl TypeChecker {
     }
 
     fn abi_request_fields() -> Vec<(String, Type)> {
+        let pair_list = Self::abi_name_value_pair_list_type();
         vec![
             ("method".to_string(), Type::Str),
             ("path".to_string(), Type::Str),
-            (
-                "query".to_string(),
-                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
-            ),
-            (
-                "headers".to_string(),
-                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
-            ),
+            ("rawQuery".to_string(), Type::Str),
+            ("query".to_string(), pair_list.clone()),
+            ("headers".to_string(), pair_list),
             ("body".to_string(), Type::Bytes),
         ]
     }
 
     fn abi_response_fields() -> Vec<(String, Type)> {
+        let pair_list = Self::abi_name_value_pair_list_type();
         vec![
             ("status".to_string(), Type::Int),
-            (
-                "headers".to_string(),
-                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
-            ),
+            ("headers".to_string(), pair_list),
             ("body".to_string(), Type::Bytes),
         ]
+    }
+
+    fn abi_name_value_pair_list_type() -> Type {
+        Type::List(Box::new(Type::BuchiPack(vec![
+            ("name".to_string(), Type::Str),
+            ("value".to_string(), Type::Str),
+        ])))
     }
 
     fn register_abi_type_symbol(&mut self, symbol_name: &str, local_name: &str) {

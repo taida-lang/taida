@@ -207,18 +207,19 @@ export async function handleTaidaRequest(request, env, ctx) {{
       const decoder = new TextDecoder();
 
       const url = new URL(request.url);
-      const headers = {{}};
+      const headers = [];
       request.headers.forEach((value, key) => {{
-        headers[key] = value;
+        headers.push({{ name: key, value }});
       }});
-      const query = {{}};
+      const query = [];
       url.searchParams.forEach((value, key) => {{
-        query[key] = value;
+        query.push({{ name: key, value }});
       }});
       const bodyBase64 = arrayBufferToBase64(await request.arrayBuffer());
       const payload = JSON.stringify({{
         method: request.method,
         path: url.pathname,
+        rawQuery: url.search.length > 0 ? url.search.slice(1) : "",
         query,
         headers,
         bodyBase64,
@@ -242,7 +243,12 @@ export async function handleTaidaRequest(request, env, ctx) {{
       exports.taida_abi_web_free(handle);
 
       const result = JSON.parse(raw);
-      const responseHeaders = new Headers(result.headers || {{}});
+      const responseHeaders = new Headers();
+      for (const header of result.headers || []) {{
+        if (header && typeof header.name === "string" && typeof header.value === "string") {{
+          responseHeaders.append(header.name, header.value);
+        }}
+      }}
       const body = base64ToUint8Array(result.bodyBase64 || "");
       const status = clampStatus(result.status || 200);
       return new Response(body, {{

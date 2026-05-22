@@ -717,8 +717,9 @@ const fs = require("fs");
   const payload = encoder.encode(JSON.stringify({{
     method: "POST",
     path: "/node",
-    query: {{}},
-    headers: {{}},
+    rawQuery: "",
+    query: [],
+    headers: [],
     bodyBase64: "",
   }}));
   const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
