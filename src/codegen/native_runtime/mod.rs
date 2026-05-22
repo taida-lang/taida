@@ -646,7 +646,10 @@ mod tests {
         // 2026-05-22 request handler ABI hardening adds status/header guards,
         //   native handler throw catching, and stdout redirection support.
         //   Recomputed total = 1,168,753.
-        const EXPECTED_TOTAL_LEN: usize = 1_168_753;
+        // 2026-05-22 final handler ABI hardening adds UTF-8 JSON escape
+        //   decoding and bare throw lowering support. Recomputed total =
+        //   1,170,587.
+        const EXPECTED_TOTAL_LEN: usize = 1_170_587;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1232,10 +1235,13 @@ mod tests {
         //   Marker now sits at byte offset 322,003.
         // 2026-05-22 request handler ABI hardening adds validation helpers
         //   before the marker. Marker now sits at byte offset 324,185.
+        // 2026-05-22 final handler ABI hardening adds UTF-8 JSON escape
+        //   decoding after the marker. F1 is unchanged; F2 grows by 1,834
+        //   bytes.
         const F1_LEN: usize = 324_185;
         assert_eq!(
             CORE_SECTION.len(),
-            324_185 + 194_056,
+            324_185 + 195_890,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

@@ -160,10 +160,34 @@ const fs = require("fs");
   const forgedPtr = instance.exports.taida_abi_web_out_ptr(12345n);
   const forgedLen = instance.exports.taida_abi_web_out_len(12345n);
   const hugeAlloc = instance.exports.taida_abi_web_alloc(16777217);
+  const floodHandles = [];
+  for (let i = 0; i < 64; i++) {{
+    const floodPtr = instance.exports.taida_abi_web_alloc(payload.length);
+    if (!floodPtr) throw new Error("flood alloc failed");
+    new Uint8Array(memory.buffer, floodPtr, payload.length).set(payload);
+    floodHandles.push(instance.exports.taida_abi_web_handle(floodPtr, payload.length));
+  }}
+  const staleOverflowHandle = floodHandles[63];
+  const overflowPtr = instance.exports.taida_abi_web_alloc(payload.length);
+  if (!overflowPtr) throw new Error("overflow alloc failed");
+  new Uint8Array(memory.buffer, overflowPtr, payload.length).set(payload);
+  const overflowHandle = instance.exports.taida_abi_web_handle(overflowPtr, payload.length);
+  const staleOverflowPtr = instance.exports.taida_abi_web_out_ptr(staleOverflowHandle);
+  const staleOverflowLen = instance.exports.taida_abi_web_out_len(staleOverflowHandle);
+  const overflowOutPtr = instance.exports.taida_abi_web_out_ptr(overflowHandle);
+  const overflowOutLen = instance.exports.taida_abi_web_out_len(overflowHandle);
+  instance.exports.taida_abi_web_free(overflowHandle);
+  for (let i = 0; i < floodHandles.length; i++) {{
+    instance.exports.taida_abi_web_free(floodHandles[i]);
+  }}
   console.log(JSON.stringify({{
     response,
     inputPtr: inPtr,
     reusePtr,
+    staleOverflowPtr,
+    staleOverflowLen,
+    overflowOutPtr,
+    overflowOutLen,
     inRangeUnissuedPtr,
     inRangeUnissuedLen,
     activeNeighborPtr,
@@ -309,6 +333,24 @@ fn run_handler_with_node(wasm_path: &Path, label: &str) -> Option<String> {
         value["reusePtr"].as_i64(),
         value["inputPtr"].as_i64(),
         "free(handle) must rewind the request arena for persistent wasm instances"
+    );
+    assert_eq!(
+        value["staleOverflowPtr"].as_i64(),
+        Some(0),
+        "overflow eviction must bump generation so stale handles cannot read the new response"
+    );
+    assert_eq!(
+        value["staleOverflowLen"].as_i64(),
+        Some(0),
+        "overflow eviction must reject stale handle length reads"
+    );
+    assert!(
+        value["overflowOutPtr"].as_i64().unwrap_or_default() > 0,
+        "overflow fallback must still return a readable current handle"
+    );
+    assert!(
+        value["overflowOutLen"].as_i64().unwrap_or_default() > 0,
+        "overflow fallback must still return a current response length"
     );
     let body = value["response"]["bodyBase64"].as_str()?;
     let bytes = base64::engine::general_purpose::STANDARD

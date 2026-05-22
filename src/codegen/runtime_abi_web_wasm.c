@@ -61,12 +61,28 @@ static TaidaAbiWebAlloc abi_web_allocs[TAIDA_ABI_WEB_ALLOC_TABLE_SIZE];
 static int32_t abi_web_alloc_next = 0;
 static TaidaAbiWebOut abi_web_outs[TAIDA_ABI_WEB_OUT_TABLE_SIZE];
 static int32_t abi_web_out_next = 0;
+/* Non-zero only while materializing one handler response. */
 static int32_t abi_web_current_arena_mark = 0;
+
+static int abi_wasm_is_readable(int64_t value, uint64_t min_bytes) {
+    if (value <= 0) return 0;
+    uint64_t start = (uint64_t)value;
+    uint64_t mem_bytes = (uint64_t)__builtin_wasm_memory_size(0) * 65536u;
+    if (start >= mem_bytes) return 0;
+    if (min_bytes > mem_bytes) return 0;
+    if (start + min_bytes < start) return 0;
+    return start + min_bytes <= mem_bytes;
+}
 
 static int32_t abi_strlen(const char *s) {
     int32_t n = 0;
     if (!s) return 0;
-    while (s[n]) n++;
+    int64_t addr = (int64_t)(intptr_t)s;
+    while (n < TAIDA_ABI_WEB_MAX_REQUEST_BYTES &&
+           abi_wasm_is_readable(addr + n, 1) &&
+           s[n]) {
+        n++;
+    }
     return n;
 }
 
@@ -176,13 +192,20 @@ static int64_t abi_bytes_from_raw(const unsigned char *src, int32_t len) {
 }
 
 static int abi_is_bytes_value(int64_t value) {
-    if (value <= 0) return 0;
+    if (!abi_wasm_is_readable(value, 16)) return 0;
     int64_t *bytes = (int64_t *)(intptr_t)value;
-    if ((bytes[0] & 0xFFFFFFFFFFFFFF00LL) == ABI_BYTES_MAGIC) return 1;
+    if ((bytes[0] & 0xFFFFFFFFFFFFFF00LL) == ABI_BYTES_MAGIC) {
+        int64_t len = bytes[1];
+        if (len < 0 || len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return 0;
+        return abi_wasm_is_readable(value, (uint64_t)(2 + len) * 8u);
+    }
+    if (!abi_wasm_is_readable(value, ABI_WASM_LIST_ELEMS * 8u)) return 0;
     int64_t cap = bytes[0];
     int64_t len = bytes[1];
     if (cap < 8 || cap > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return 0;
     if (len < 0 || len > cap) return 0;
+    uint64_t total_bytes = (uint64_t)(ABI_WASM_LIST_ELEMS + cap + 1) * 8u;
+    if (!abi_wasm_is_readable(value, total_bytes)) return 0;
     return bytes[3] == ABI_WASM_LIST_MAGIC &&
         bytes[ABI_WASM_LIST_ELEMS + cap] == ABI_WASM_LIST_MAGIC;
 }
@@ -778,6 +801,7 @@ int64_t taida_abi_web_store_response_json(int64_t response) {
         }
     }
     TaidaAbiWebOut *out = &abi_web_outs[0];
+    out->generation++;
     if (out->generation == 0) out->generation = 1;
     out->active = 1;
     out->ptr = (int32_t)(intptr_t)jb.buf;
