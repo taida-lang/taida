@@ -1877,11 +1877,13 @@ extern void taida_error_ceiling_pop(void);
 extern int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);
 extern int64_t taida_error_try_get_result(int64_t depth);
 extern int64_t taida_abi_web_make_request(int32_t ptr, int32_t len);
+extern int32_t taida_abi_web_begin_request(int32_t ptr, int32_t len);
 extern int32_t taida_abi_web_validate_request(int32_t ptr, int32_t len);
 extern int64_t taida_abi_web_store_response_json(int64_t response);
 extern int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_ptr);
 
 int64_t taida_abi_web_handle(int32_t ptr, int32_t len) {{
+    taida_abi_web_begin_request(ptr, len);
     if (!taida_abi_web_validate_request(ptr, len)) {{
         return taida_abi_web_store_error_response_json(413, (int64_t)(intptr_t)"request too large");
     }}

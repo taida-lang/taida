@@ -150,6 +150,7 @@ const fs = require("fs");
   const outLen = instance.exports.taida_abi_web_out_len(handle);
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
   instance.exports.taida_abi_web_free(handle);
+  const reusePtr = instance.exports.taida_abi_web_alloc(payload.length);
   const response = JSON.parse(raw);
   const inRangeUnissuedPtr = instance.exports.taida_abi_web_out_ptr(2n);
   const inRangeUnissuedLen = instance.exports.taida_abi_web_out_len(2n);
@@ -161,6 +162,8 @@ const fs = require("fs");
   const hugeAlloc = instance.exports.taida_abi_web_alloc(16777217);
   console.log(JSON.stringify({{
     response,
+    inputPtr: inPtr,
+    reusePtr,
     inRangeUnissuedPtr,
     inRangeUnissuedLen,
     activeNeighborPtr,
@@ -183,6 +186,80 @@ const fs = require("fs");
     if !output.status.success() {
         eprintln!(
             "node handler host failed for {}: {}",
+            label,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn run_handler_with_node_raw_request(
+    wasm_path: &Path,
+    label: &str,
+    request_json: &str,
+) -> Option<serde_json::Value> {
+    let js_path = std::env::temp_dir().join(format!(
+        "taida_f52_handler_raw_{}_{}.js",
+        label,
+        std::process::id()
+    ));
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let request_literal = serde_json::to_string(request_json).ok()?;
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const noOpWasi = new Proxy({{}}, {{
+    get(_target, prop) {{
+      if (prop === "fd_write") {{
+        return (_fd, _iovsPtr, _iovsLen, nwrittenPtr) => {{
+          new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+          return 0;
+        }};
+      }}
+      return () => 0;
+    }},
+  }});
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: noOpWasi,
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const payload = encoder.encode({request_literal});
+  const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
+  if (!inPtr) throw new Error("alloc failed");
+  new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
+  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
+  const outLen = instance.exports.taida_abi_web_out_len(handle);
+  const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).ok()?;
+    let output = Command::new("node").arg(&js_path).output().ok()?;
+    let _ = std::fs::remove_file(&js_path);
+    if !output.status.success() {
+        eprintln!(
+            "node raw handler host failed for {}: {}",
             label,
             String::from_utf8_lossy(&output.stderr)
         );
@@ -227,6 +304,11 @@ fn run_handler_with_node(wasm_path: &Path, label: &str) -> Option<String> {
         value["hugeAlloc"].as_i64(),
         Some(0),
         "oversized wasm request allocation must fail"
+    );
+    assert_eq!(
+        value["reusePtr"].as_i64(),
+        value["inputPtr"].as_i64(),
+        "free(handle) must rewind the request arena for persistent wasm instances"
     );
     let body = value["response"]["bodyBase64"].as_str()?;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -288,6 +370,14 @@ fn response_json(raw: &str) -> serde_json::Value {
         .unwrap_or_else(|err| panic!("response must be valid JSON: {err}; raw={raw}"))
 }
 
+fn response_body_text(value: &serde_json::Value) -> String {
+    let body = value["bodyBase64"].as_str().unwrap_or_default();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .expect("response body must decode");
+    String::from_utf8(bytes).expect("response body must be utf-8")
+}
+
 #[test]
 fn f52_wasm_profiles_share_handler_json_fixture() {
     if !node_available() {
@@ -299,6 +389,8 @@ fn f52_wasm_profiles_share_handler_json_fixture() {
 
 handle req: WebRequest =
   | req.path == "/bytes" |> bytes(req.body)
+  | req.path == "/body-info" |> text(req.body.length().toString() + ":" + req.body.get(1).getOrDefault(0).toString())
+  | req.path == "/bare-throw" |> throw("secret-token-xyz")
   | _ |> text(req.method + ":" + req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault(""))
 => :WebResponse
 "#;
@@ -338,6 +430,35 @@ handle req: WebRequest =
             "target={} must preserve embedded NUL bytes",
             target
         );
+        let value = run_handler_with_node_response(&wasm_path, target, "/body-info", "QQBD")
+            .unwrap_or_else(|| panic!("{} handler body-info host should run", target));
+        assert_eq!(
+            response_body_text(&value["response"]),
+            "3:0",
+            "target={} must expose req.body length/get",
+            target
+        );
+        let value = run_handler_with_node_raw_request(
+            &wasm_path,
+            target,
+            r#"{"method":"POST","path":"/caf\u00e9","query":{"q":"\u6771"},"headers":{"x-mode":"\u30a8\u30c3\u30b8"},"bodyBase64":""}"#,
+        )
+        .unwrap_or_else(|| panic!("{} handler unicode host should run", target));
+        assert_eq!(
+            response_body_text(&value),
+            "POST:/café:東:エッジ",
+            "target={} must decode JSON unicode escapes as UTF-8",
+            target
+        );
+        let value = run_handler_with_node_response(&wasm_path, target, "/bare-throw", "")
+            .unwrap_or_else(|| panic!("{} handler bare-throw host should run", target));
+        assert_eq!(value["response"]["status"].as_i64(), Some(500));
+        assert_eq!(
+            response_body_text(&value["response"]),
+            "handler throw",
+            "target={} must convert bare throw to a fixed handler error response",
+            target
+        );
 
         let _ = std::fs::remove_file(&td_path);
         let _ = std::fs::remove_file(&wasm_path);
@@ -350,7 +471,10 @@ fn f52_native_handler_decodes_request_body_bytes() {
     let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
 >>> taida-lang/crypto => @(sha256)
 
-handle req: WebRequest = text(req.method + ":" + req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault("") + ":" + sha256(req.body)) => :WebResponse
+handle req: WebRequest =
+  | req.path == "/body-info" |> text(req.body.length().toString() + ":" + req.body.get(1).getOrDefault(0).toString())
+  | _ |> text(req.method + ":" + req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault("") + ":" + sha256(req.body))
+=> :WebResponse
 "#;
 
     let stem = format!("taida_f52_native_{}", std::process::id());
@@ -380,6 +504,46 @@ handle req: WebRequest = text(req.method + ":" + req.path + ":" + req.query.get(
             "UE9TVDovZjUyOnNlYXJjaDpuYXRpdmU6MjM5ZjU5ZWQ1NWU3MzdjNzcxNDdjZjU1YWQwYzFiMDMwYjZkN2VlNzQ4YTc0MjY5NTJmOWI4NTJkNWE5MzVlNQ=="
         )
     );
+    let raw = run_handler_native(
+        &bin_path,
+        br#"{"method":"POST","path":"/body-info","query":{},"headers":{},"bodyBase64":"QQBD"}"#,
+    )
+    .expect("native body-info handler should run");
+    let json = response_json(&raw);
+    assert_eq!(response_body_text(&json), "3:0");
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&bin_path);
+}
+
+#[test]
+fn f52_native_handler_decodes_unicode_escapes() {
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest = text(req.path + ":" + req.query.get("q").getOrDefault("") + ":" + req.headers.get("x-mode").getOrDefault("")) => :WebResponse
+"#;
+
+    let stem = format!("taida_f52_native_unicode_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let bin_path: PathBuf = std::env::temp_dir().join(stem);
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&bin_path);
+    std::fs::write(&td_path, source).expect("write native unicode F52 handler fixture");
+
+    let err = compile_handler("native", &td_path, &bin_path);
+    assert!(
+        err.is_none(),
+        "native handler build should compile: {:?}",
+        err
+    );
+    let raw = run_handler_native(
+        &bin_path,
+        br#"{"method":"POST","path":"/caf\u00e9","query":{"q":"\u6771"},"headers":{"x-mode":"\u30a8\u30c3\u30b8"},"bodyBase64":""}"#,
+    )
+    .expect("native unicode handler should run");
+    let json = response_json(&raw);
+    assert_eq!(response_body_text(&json), "/café:東:エッジ");
 
     let _ = std::fs::remove_file(&td_path);
     let _ = std::fs::remove_file(&bin_path);
@@ -396,6 +560,7 @@ debugOk =
 
 handle req: WebRequest =
   | req.path == "/throw" |> Error(type <= "Error", message <= "secret-token-xyz").throw()
+  | req.path == "/bare-throw" |> throw("secret-token-xyz")
   | req.path == "/status" |> status(999, text("status"))
   | req.path == "/header" |> header("bad\r\nname", "value", text("bad"))
   | _ |> debugOk()
@@ -446,6 +611,19 @@ handle req: WebRequest =
         !throw_body.contains("secret-token-xyz"),
         "native handler throw response must not leak handler-supplied error message"
     );
+
+    let bare_throw_raw = run_handler_native(
+        &bin_path,
+        br#"{"method":"GET","path":"/bare-throw","query":{},"headers":{},"bodyBase64":""}"#,
+    )
+    .expect("native bare throw handler should run");
+    let bare_throw_json = response_json(&bare_throw_raw);
+    assert_eq!(bare_throw_json["status"].as_i64(), Some(500));
+    assert_eq!(
+        bare_throw_json["headers"]["x-taida-error"].as_str(),
+        Some("handler-throw")
+    );
+    assert_eq!(response_body_text(&bare_throw_json), "handler throw");
 
     let status_raw = run_handler_native(
         &bin_path,

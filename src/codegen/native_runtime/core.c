@@ -11059,6 +11059,26 @@ static int taida_abi_json_hex_value(char c) {
     return -1;
 }
 
+static void taida_abi_json_append_utf8(char *out, size_t *out_len, int cp) {
+    if (cp <= 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+        out[(*out_len)++] = '?';
+    } else if (cp <= 0x7f) {
+        out[(*out_len)++] = (char)cp;
+    } else if (cp <= 0x7ff) {
+        out[(*out_len)++] = (char)(0xc0 | ((cp >> 6) & 0x1f));
+        out[(*out_len)++] = (char)(0x80 | (cp & 0x3f));
+    } else if (cp <= 0xffff) {
+        out[(*out_len)++] = (char)(0xe0 | ((cp >> 12) & 0x0f));
+        out[(*out_len)++] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        out[(*out_len)++] = (char)(0x80 | (cp & 0x3f));
+    } else {
+        out[(*out_len)++] = (char)(0xf0 | ((cp >> 18) & 0x07));
+        out[(*out_len)++] = (char)(0x80 | ((cp >> 12) & 0x3f));
+        out[(*out_len)++] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        out[(*out_len)++] = (char)(0x80 | (cp & 0x3f));
+    }
+}
+
 static char *taida_abi_json_parse_string_raw(const char *json, taida_val len, taida_val *p) {
     if (*p >= len || json[*p] != '"') return NULL;
     (*p)++;
@@ -11092,8 +11112,22 @@ static char *taida_abi_json_parse_string_raw(const char *json, taida_val len, ta
                         int h3 = taida_abi_json_hex_value(json[*p + 3]);
                         if (h0 >= 0 && h1 >= 0 && h2 >= 0 && h3 >= 0) {
                             int cp = (h0 << 12) | (h1 << 8) | (h2 << 4) | h3;
-                            out[out_len++] = (cp >= 0 && cp <= 0x7f) ? (char)cp : '?';
                             *p += 4;
+                            if (cp >= 0xd800 && cp <= 0xdbff &&
+                                *p + 6 <= len && json[*p] == '\\' && json[*p + 1] == 'u') {
+                                int l0 = taida_abi_json_hex_value(json[*p + 2]);
+                                int l1 = taida_abi_json_hex_value(json[*p + 3]);
+                                int l2 = taida_abi_json_hex_value(json[*p + 4]);
+                                int l3 = taida_abi_json_hex_value(json[*p + 5]);
+                                if (l0 >= 0 && l1 >= 0 && l2 >= 0 && l3 >= 0) {
+                                    int low = (l0 << 12) | (l1 << 8) | (l2 << 4) | l3;
+                                    if (low >= 0xdc00 && low <= 0xdfff) {
+                                        cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00);
+                                        *p += 6;
+                                    }
+                                }
+                            }
+                            taida_abi_json_append_utf8(out, &out_len, cp);
                         }
                     }
                     break;

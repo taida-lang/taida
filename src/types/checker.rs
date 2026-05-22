@@ -372,6 +372,7 @@ impl TypeChecker {
             "jsonEncode" | "jsonPretty" => Some((1, 1)),
             "nowMs" => Some((0, 0)),
             "assert" => Some((1, 2)),
+            "throw" => Some((1, 1)),
             "range" => Some((2, 3)),
             "enumerate" => Some((1, 1)),
             "zip" => Some((2, 2)),
@@ -459,6 +460,7 @@ impl TypeChecker {
             // F42 sweep: assert returns Bool(true) on success, throws on failure.
             // Aligned with `src/interpreter/prelude.rs:801` (Value::Bool(true)).
             "assert" => Some(Type::Bool),
+            "throw" => Some(Type::Unknown),
             "range" => Some(Type::List(Box::new(Type::Int))),
             "enumerate" => Some(Type::List(Box::new(Type::Unknown))),
             "zip" => Some(Type::List(Box::new(Type::Unknown))),
