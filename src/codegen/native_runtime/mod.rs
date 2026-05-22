@@ -649,7 +649,10 @@ mod tests {
         // 2026-05-22 final handler ABI hardening adds UTF-8 JSON escape
         //   decoding and bare throw lowering support. Recomputed total =
         //   1,170,587.
-        const EXPECTED_TOTAL_LEN: usize = 1_170_587;
+        // 2026-05-23 handler ABI pair-list conversion adds rawQuery and
+        //   duplicate-preserving query/header arrays. Recomputed total =
+        //   1,175,909.
+        const EXPECTED_TOTAL_LEN: usize = 1_175_909;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1238,10 +1241,13 @@ mod tests {
         // 2026-05-22 final handler ABI hardening adds UTF-8 JSON escape
         //   decoding after the marker. F1 is unchanged; F2 grows by 1,834
         //   bytes.
-        const F1_LEN: usize = 324_185;
+        // 2026-05-23 handler ABI pair-list conversion keeps request decode
+        //   before the marker and response encode after it. Marker now sits
+        //   at byte offset 324,657.
+        const F1_LEN: usize = 324_657;
         assert_eq!(
             CORE_SECTION.len(),
-            324_185 + 195_890,
+            324_657 + 200_740,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

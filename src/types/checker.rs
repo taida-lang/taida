@@ -1409,6 +1409,54 @@ impl TypeChecker {
         }
     }
 
+    fn is_wired_constraint_type(ty: &Type) -> bool {
+        matches!(ty, Type::Named(name) if name == "Wired")
+            || matches!(ty, Type::Generic(name, args) if name == "Wired" && args.len() == 1)
+    }
+
+    fn is_host_step_type(ty: &Type) -> bool {
+        matches!(ty, Type::Generic(name, args) if name == "HostStep" && args.len() == 2)
+    }
+
+    fn erased_host_step_type() -> Type {
+        Type::Generic("HostStep".to_string(), vec![Type::Any, Type::Any])
+    }
+
+    fn is_wire_encodable_type(&self, ty: &Type) -> bool {
+        if Self::contains_unit_like_type(ty) {
+            return false;
+        }
+        match ty {
+            Type::Str | Type::Int | Type::Float | Type::Bool | Type::Bytes => true,
+            Type::List(inner) => self.is_wire_encodable_type(inner),
+            Type::BuchiPack(fields) => {
+                !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|(_, field_ty)| self.is_wire_encodable_type(field_ty))
+            }
+            Type::Named(name) => self.registry.get_type_fields(name).is_some_and(|fields| {
+                !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|(_, field_ty)| self.is_wire_encodable_type(field_ty))
+            }),
+            Type::Generic(name, args) if name == "HostCapability" => args.len() == 2,
+            _ => false,
+        }
+    }
+
+    fn push_wired_constraint_error(&mut self, subject: &str, actual: &Type, span: &Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "[E3601] {} must satisfy Wired[T], got {}. \
+                 Hint: use Str / Int / Float / Bool / Bytes, a non-empty buchi pack whose fields are wired, a wired list, WebRequest, WebResponse, or HostCapability.",
+                subject, actual
+            ),
+            span: span.clone(),
+        });
+    }
+
     fn is_async_type(ty: &Type) -> bool {
         matches!(ty, Type::Generic(name, _) if name == "Async")
     }
@@ -1554,7 +1602,7 @@ impl TypeChecker {
     /// - Primitive / scalar: `Int`, `Float`, `Num`, `Number`, `Str`,
     /// `String`, `Bytes`, `Bool`, `Boolean`
     /// - Special / forbidden surface types: `Unit`, `Void`, `JSON`, `Molten`
-    /// - Built-in molds with `MoldSpec::range`: `Lax`, `Result`, `Async`,
+    /// - Built-in type constraints / molds: `Wired`, `Lax`, `Result`, `Async`,
     /// `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
     pub(super) fn is_builtin_type_name(name: &str) -> bool {
         matches!(
@@ -1572,6 +1620,7 @@ impl TypeChecker {
                 | "Void"
                 | "JSON"
                 | "Molten"
+                | "Wired"
                 | "Lax"
                 | "Result"
                 | "Async"
@@ -4086,6 +4135,21 @@ defaulted fields must be provided via `()`",
             MoldHeaderArg::TypeParam(tp) => {
                 if let Some(constraint) = &tp.constraint {
                     let expected = self.resolve_mold_header_type(constraint, bound_types);
+                    if Self::is_wired_constraint_type(&expected) {
+                        if !self.is_wire_encodable_type(actual) {
+                            self.push_wired_constraint_error(
+                                &format!(
+                                    "MoldInst '{}' positional `[]` argument {} ('{}')",
+                                    name,
+                                    idx + 1,
+                                    tp.name
+                                ),
+                                actual,
+                                span,
+                            );
+                        }
+                        return;
+                    }
                     if !self.mold_header_type_compatible(actual, &expected) {
                         self.errors.push(TypeError {
                             message: Self::binding_diag(
@@ -4355,6 +4419,16 @@ defaulted fields must be provided via `()`",
                 continue;
             };
             let expected = self.resolve_mold_header_type(constraint, bindings);
+            if Self::is_wired_constraint_type(&expected) {
+                if !self.is_wire_encodable_type(actual) {
+                    self.push_wired_constraint_error(
+                        &format!("Generic function type parameter '{}'", type_param.name),
+                        actual,
+                        span,
+                    );
+                }
+                continue;
+            }
             if !self.mold_header_type_compatible(actual, &expected) {
                 self.errors.push(TypeError {
                     message: format!(
@@ -7106,9 +7180,30 @@ defaulted fields must be provided via `()`",
                     let first_type = self.infer_expr_type(&items[0]);
                     // リスト要素の同質性チェック (E0401)
                     // Int/Float 混在は Num に統一
-                    let mut unified_type = first_type.clone();
+                    let mut unified_type = if Self::is_host_step_type(&first_type) {
+                        Self::erased_host_step_type()
+                    } else {
+                        first_type.clone()
+                    };
                     for (i, item) in items.iter().enumerate().skip(1) {
                         let item_type = self.infer_expr_type(item);
+                        let unified_is_host_step = Self::is_host_step_type(&unified_type);
+                        let item_is_host_step = Self::is_host_step_type(&item_type);
+                        if unified_is_host_step || item_is_host_step {
+                            if unified_is_host_step && item_is_host_step {
+                                unified_type = Self::erased_host_step_type();
+                                continue;
+                            }
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E3602] HostStep list literals cannot mix HostStep elements with {} at position {}. \
+                                     Hint: keep HostCall steps as a list containing only HostStep[...] values.",
+                                    item_type, i
+                                ),
+                                span: span.clone(),
+                            });
+                            break;
+                        }
                         if Self::contains_unknown(&item_type)
                             || Self::contains_unknown(&unified_type)
                         {
