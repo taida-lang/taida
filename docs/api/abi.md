@@ -57,8 +57,8 @@ WebResponse = @(
 | `text` | `text body: Str => :WebResponse` | UTF-8 text response。`content-type` は `text/plain; charset=utf-8`。 |
 | `json` | `json value => :WebResponse` | `jsonEncode(value)` 相当の JSON response。`content-type` は `application/json`。 |
 | `bytes` | `bytes body: Bytes => :WebResponse` | bytes response。`content-type` は `application/octet-stream`。 |
-| `status` | `status code: Int  response: WebResponse => :WebResponse` | status code を差し替えた response を返す。 |
-| `header` | `header name: Str  value: Str  response: WebResponse => :WebResponse` | header を追加または上書きした response を返す。 |
+| `status` | `status code: Int  response: WebResponse => :WebResponse` | status code を差し替えた response を返す。範囲外は `100`〜`599` に丸めます。 |
+| `header` | `header name: Str  value: Str  response: WebResponse => :WebResponse` | header を追加または上書きした response を返す。無効な header 名や改行を含む値は 500 response になります。 |
 
 `status` / `header` は入力 response を変更せず、新しい `WebResponse` を返します。
 
@@ -134,6 +134,9 @@ Response JSON:
 Native / WASM の bridge は、欠落または解釈できない request フィールドに
 既定値を入れます。既定値は `method = "GET"`、`path = "/"`、空の `query`、
 空の `headers`、空の `body` です。
+
+WASM handler bridge は 1 request の wire JSON を最大 16MiB として扱います。
+上限を超える request は 413 response に変換されます。
 
 ---
 

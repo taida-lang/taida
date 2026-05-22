@@ -111,7 +111,7 @@ impl Interpreter {
                 Ok(Some(Signal::Value(with_response_field(
                     response,
                     "status",
-                    Value::Int(code),
+                    Value::Int(clamp_status(code)),
                 ))))
             }
             "header" => {
@@ -126,6 +126,9 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
+                if !valid_header_name(&key) || !valid_header_value(&value) {
+                    return Ok(Some(Signal::Value(invalid_header_response())));
+                }
                 Ok(Some(Signal::Value(add_response_header(
                     response, key, value,
                 ))))
@@ -153,10 +156,52 @@ impl Interpreter {
 
 fn abi_response(status: i64, headers: Vec<(String, String)>, body: Vec<u8>) -> Value {
     Value::pack(vec![
-        ("status".to_string(), Value::Int(status)),
+        ("status".to_string(), Value::Int(clamp_status(status))),
         ("headers".to_string(), header_map(headers)),
         ("body".to_string(), Value::bytes(body)),
     ])
+}
+
+fn clamp_status(status: i64) -> i64 {
+    status.clamp(100, 599)
+}
+
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn valid_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (b >= 0x20 && b != b'\r' && b != b'\n'))
+}
+
+fn invalid_header_response() -> Value {
+    abi_response(
+        500,
+        vec![("x-taida-error".to_string(), "abi".to_string())],
+        b"invalid response header".to_vec(),
+    )
 }
 
 fn header_map(headers: Vec<(String, String)>) -> Value {
@@ -229,7 +274,12 @@ fn append_header(headers: &Value, key: &str, value: &str) -> Value {
             .find(|(name, _)| name == "__entries")
             .map(|(_, value)| value)
     {
-        let mut next = entries.as_ref().clone();
+        let mut next: Vec<Value> = entries
+            .as_ref()
+            .iter()
+            .filter(|entry| !header_entry_key_eq(entry, key))
+            .cloned()
+            .collect();
         next.push(Value::pack(vec![
             ("key".to_string(), Value::str(key.to_string())),
             ("value".to_string(), Value::str(value.to_string())),
@@ -240,4 +290,16 @@ fn append_header(headers: &Value, key: &str, value: &str) -> Value {
         ]);
     }
     header_map(vec![(key.to_string(), value.to_string())])
+}
+
+fn header_entry_key_eq(entry: &Value, key: &str) -> bool {
+    if let Value::BuchiPack(fields) = entry
+        && let Some(Value::Str(existing)) = fields
+            .iter()
+            .find(|(name, _)| name == "key")
+            .map(|(_, value)| value)
+    {
+        return existing.as_str() == key;
+    }
+    false
 }

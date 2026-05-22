@@ -643,7 +643,10 @@ mod tests {
         // 2026-05-22 request handler ABI native JSON bridge and handler-main
         //   guard add WebRequest decode / WebResponse encode support.
         //   Recomputed total = 1,165,022.
-        const EXPECTED_TOTAL_LEN: usize = 1_165_022;
+        // 2026-05-22 request handler ABI hardening adds status/header guards,
+        //   native handler throw catching, and stdout redirection support.
+        //   Recomputed total = 1,168,753.
+        const EXPECTED_TOTAL_LEN: usize = 1_168_753;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1227,10 +1230,12 @@ mod tests {
         // 2026-05-22 request handler ABI native JSON bridge appends request /
         //   response conversion helpers before the Error-ceiling marker.
         //   Marker now sits at byte offset 322,003.
-        const F1_LEN: usize = 322_003;
+        // 2026-05-22 request handler ABI hardening adds validation helpers
+        //   before the marker. Marker now sits at byte offset 324,185.
+        const F1_LEN: usize = 324_185;
         assert_eq!(
             CORE_SECTION.len(),
-            322_003 + 192_507,
+            324_185 + 194_056,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

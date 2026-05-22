@@ -23,19 +23,37 @@ extern int64_t taida_json_encode(int64_t value);
 
 #define ABI_TAG_INT   0
 #define ABI_TAG_STR   3
+#define ABI_TAG_PACK  4
 #define ABI_TAG_HMAP  7
 #define ABI_HM_HEADER 4
+#define ABI_BYTES_MAGIC 0x5441494442595400LL
+#define TAIDA_ABI_WEB_MAX_REQUEST_BYTES (16 * 1024 * 1024)
+#define TAIDA_ABI_WEB_MAX_HEADERS 512
+#define TAIDA_ABI_WEB_ALLOC_TABLE_SIZE 64
+#define TAIDA_ABI_WEB_OUT_TABLE_SIZE 64
 
 typedef struct {
+    int32_t active;
     int32_t ptr;
     int32_t len;
 } TaidaAbiWebOut;
+
+typedef struct {
+    int32_t active;
+    int32_t ptr;
+    int32_t len;
+} TaidaAbiWebAlloc;
 
 typedef struct {
     char *buf;
     int32_t len;
     int32_t cap;
 } TaidaAbiJsonBuilder;
+
+static TaidaAbiWebAlloc abi_web_allocs[TAIDA_ABI_WEB_ALLOC_TABLE_SIZE];
+static int32_t abi_web_alloc_next = 0;
+static TaidaAbiWebOut abi_web_outs[TAIDA_ABI_WEB_OUT_TABLE_SIZE];
+static int32_t abi_web_out_next = 0;
 
 static int32_t abi_strlen(const char *s) {
     int32_t n = 0;
@@ -53,6 +71,7 @@ static void abi_memcpy(void *dest, const void *src, int32_t n) {
 static char *abi_copy_bytes(const char *src, int32_t len) {
     if (len < 0) len = 0;
     char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    if (!out) return (char *)"";
     if (src && len > 0) abi_memcpy(out, src, len);
     out[len] = '\0';
     return out;
@@ -72,7 +91,39 @@ static int64_t abi_header_map_new(void) {
     return hm;
 }
 
-static int64_t abi_header_map_set(int64_t hm, const char *name, const char *value) {
+static int64_t abi_status_clamp(int64_t status) {
+    if (status < 100) return 100;
+    if (status > 599) return 599;
+    return status;
+}
+
+static int abi_header_name_valid(const char *name) {
+    if (!name || !name[0]) return 0;
+    for (int32_t i = 0; name[i]; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' ||
+            c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' ||
+            c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
+            c == '|' || c == '~') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int abi_header_value_valid(const char *value) {
+    if (!value) return 1;
+    for (int32_t i = 0; value[i]; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c == '\r' || c == '\n') return 0;
+        if (c < 0x20 && c != '\t') return 0;
+    }
+    return 1;
+}
+
+static int64_t abi_string_map_set_raw(int64_t hm, const char *name, const char *value) {
     if (!hm) hm = abi_header_map_new();
     char *key = abi_copy_cstr(name ? name : "");
     char *val = abi_copy_cstr(value ? value : "");
@@ -81,63 +132,156 @@ static int64_t abi_header_map_set(int64_t hm, const char *name, const char *valu
     return taida_hashmap_set(hm, taida_str_hash(key_ptr), key_ptr, val_ptr);
 }
 
+static int64_t abi_header_map_set(int64_t hm, const char *name, const char *value) {
+    if (!hm) hm = abi_header_map_new();
+    if (!abi_header_name_valid(name) || !abi_header_value_valid(value)) return hm;
+    return abi_string_map_set_raw(hm, name, value);
+}
+
+static int64_t abi_bytes_default(void) {
+    int64_t *bytes = (int64_t *)wasm_alloc(3 * 8);
+    if (!bytes) return 0;
+    bytes[0] = ABI_BYTES_MAGIC;
+    bytes[1] = 0;
+    bytes[2] = 0;
+    return (int64_t)(intptr_t)bytes;
+}
+
+static int64_t abi_bytes_from_raw(const unsigned char *src, int32_t len) {
+    if (len < 0) len = 0;
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + len) * 8));
+    if (!bytes) return abi_bytes_default();
+    bytes[0] = ABI_BYTES_MAGIC;
+    bytes[1] = len;
+    for (int32_t i = 0; i < len; i++) {
+        bytes[2 + i] = src ? (int64_t)src[i] : 0;
+    }
+    return (int64_t)(intptr_t)bytes;
+}
+
+static int abi_is_bytes_value(int64_t value) {
+    if (value <= 0) return 0;
+    int64_t *bytes = (int64_t *)(intptr_t)value;
+    return (bytes[0] & 0xFFFFFFFFFFFFFF00LL) == ABI_BYTES_MAGIC;
+}
+
+static int32_t abi_bytes_value_len(int64_t value) {
+    if (!abi_is_bytes_value(value)) return 0;
+    int64_t len = ((int64_t *)(intptr_t)value)[1];
+    if (len < 0) return 0;
+    if (len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return TAIDA_ABI_WEB_MAX_REQUEST_BYTES;
+    return (int32_t)len;
+}
+
+static unsigned char abi_bytes_value_at(int64_t value, int32_t index) {
+    int64_t *bytes = (int64_t *)(intptr_t)value;
+    return (unsigned char)(bytes[2 + index] & 0xff);
+}
+
+static int64_t abi_body_to_bytes(int64_t body) {
+    if (abi_is_bytes_value(body)) return body;
+    const char *s = (const char *)(intptr_t)body;
+    return abi_bytes_from_raw((const unsigned char *)(s ? s : ""), abi_strlen(s));
+}
+
 static int64_t abi_response_new(int64_t status, int64_t headers, int64_t body) {
     int64_t pack = taida_pack_new(3);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("status"));
     taida_pack_set_tag(pack, 0, ABI_TAG_INT);
-    taida_pack_set(pack, 0, status);
+    taida_pack_set(pack, 0, abi_status_clamp(status));
     taida_pack_set_hash(pack, 1, abi_hash_cstr("headers"));
     taida_pack_set_tag(pack, 1, ABI_TAG_HMAP);
     taida_pack_set(pack, 1, headers ? headers : abi_header_map_new());
     taida_pack_set_hash(pack, 2, abi_hash_cstr("body"));
-    taida_pack_set_tag(pack, 2, ABI_TAG_STR);
-    taida_pack_set(pack, 2, body ? body : (int64_t)(intptr_t)"");
+    taida_pack_set_tag(pack, 2, ABI_TAG_PACK);
+    taida_pack_set(pack, 2, body ? abi_body_to_bytes(body) : abi_bytes_default());
     return pack;
 }
 
+static int64_t abi_error_response(int64_t status, const char *message) {
+    int64_t headers = abi_header_map_new();
+    headers = abi_string_map_set_raw(headers, "x-taida-error", "abi");
+    int64_t body = abi_bytes_from_raw(
+        (const unsigned char *)(message ? message : "handler error"),
+        abi_strlen(message ? message : "handler error")
+    );
+    return abi_response_new(status, headers, body);
+}
+
 int64_t taida_abi_response_text(int64_t body_ptr) {
+    const char *body = (const char *)(intptr_t)body_ptr;
     int64_t headers = abi_header_map_new();
     headers = abi_header_map_set(headers, "content-type", "text/plain; charset=utf-8");
-    return abi_response_new(200, headers, body_ptr);
+    return abi_response_new(
+        200,
+        headers,
+        abi_bytes_from_raw((const unsigned char *)(body ? body : ""), abi_strlen(body))
+    );
 }
 
 int64_t taida_abi_response_json(int64_t value) {
-    int64_t body = taida_json_encode(value);
+    int64_t encoded = taida_json_encode(value);
+    const char *body = (const char *)(intptr_t)encoded;
     int64_t headers = abi_header_map_new();
     headers = abi_header_map_set(headers, "content-type", "application/json");
-    return abi_response_new(200, headers, body);
+    return abi_response_new(
+        200,
+        headers,
+        abi_bytes_from_raw((const unsigned char *)(body ? body : ""), abi_strlen(body))
+    );
 }
 
 int64_t taida_abi_response_bytes(int64_t body_ptr) {
     int64_t headers = abi_header_map_new();
     headers = abi_header_map_set(headers, "content-type", "application/octet-stream");
-    return abi_response_new(200, headers, body_ptr);
+    return abi_response_new(200, headers, abi_body_to_bytes(body_ptr));
 }
 
 int64_t taida_abi_response_status(int64_t code, int64_t response) {
     int64_t headers = taida_pack_get(response, abi_hash_cstr("headers"));
     int64_t body = taida_pack_get(response, abi_hash_cstr("body"));
-    return abi_response_new(code, headers, body);
+    return abi_response_new(abi_status_clamp(code), headers, body);
 }
 
 int64_t taida_abi_response_header(int64_t name_ptr, int64_t value_ptr, int64_t response) {
+    const char *name = (const char *)(intptr_t)name_ptr;
+    const char *value = (const char *)(intptr_t)value_ptr;
+    if (!abi_header_name_valid(name) || !abi_header_value_valid(value)) {
+        return abi_error_response(500, "invalid response header");
+    }
     int64_t headers = taida_pack_get(response, abi_hash_cstr("headers"));
     headers = abi_header_map_set(
         headers,
-        (const char *)(intptr_t)name_ptr,
-        (const char *)(intptr_t)value_ptr
+        name,
+        value
     );
     int64_t status = taida_pack_get(response, abi_hash_cstr("status"));
     if (status == 0) status = 200;
     int64_t body = taida_pack_get(response, abi_hash_cstr("body"));
-    return abi_response_new(status, headers, body);
+    return abi_response_new(abi_status_clamp(status), headers, body);
 }
 
 int32_t taida_abi_web_alloc(int32_t len) {
-    if (len < 0) len = 0;
+    if (len < 0 || len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return 0;
     char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    if (!buf) return 0;
     buf[len] = '\0';
+    TaidaAbiWebAlloc *entry = &abi_web_allocs[abi_web_alloc_next];
+    entry->active = 1;
+    entry->ptr = (int32_t)(intptr_t)buf;
+    entry->len = len;
+    abi_web_alloc_next = (abi_web_alloc_next + 1) % TAIDA_ABI_WEB_ALLOC_TABLE_SIZE;
     return (int32_t)(intptr_t)buf;
+}
+
+int32_t taida_abi_web_validate_request(int32_t ptr, int32_t len) {
+    if (ptr <= 0 || len < 0 || len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return 0;
+    for (int32_t i = 0; i < TAIDA_ABI_WEB_ALLOC_TABLE_SIZE; i++) {
+        TaidaAbiWebAlloc *entry = &abi_web_allocs[i];
+        if (!entry->active) continue;
+        if (entry->ptr == ptr && len <= entry->len) return 1;
+    }
+    return 0;
 }
 
 static void abi_json_skip_ws(const char *json, int32_t len, int32_t *p) {
@@ -277,13 +421,15 @@ static int abi_json_find_object(const char *json, int32_t len, const char *key, 
     return 0;
 }
 
-static int64_t abi_json_string_map(const char *json, int32_t len, const char *key) {
+static int64_t abi_json_string_map(const char *json, int32_t len, const char *key, int validate_headers) {
     int64_t hm = abi_header_map_new();
     int32_t start = 0;
     int32_t end = 0;
     if (!abi_json_find_object(json, len, key, &start, &end)) return hm;
     int32_t p = start;
+    int32_t count = 0;
     while (p < end) {
+        if (count >= TAIDA_ABI_WEB_MAX_HEADERS) break;
         abi_json_skip_ws(json, end, &p);
         if (p >= end) break;
         if (json[p] == ',') {
@@ -298,7 +444,10 @@ static int64_t abi_json_string_map(const char *json, int32_t len, const char *ke
         abi_json_skip_ws(json, end, &p);
         char *map_value = abi_json_parse_string(json, end, &p);
         if (!map_value) break;
-        hm = abi_header_map_set(hm, map_key, map_value);
+        hm = validate_headers
+            ? abi_header_map_set(hm, map_key, map_value)
+            : abi_string_map_set_raw(hm, map_key, map_value);
+        count++;
         abi_json_skip_ws(json, end, &p);
         if (p < end && json[p] == ',') p++;
     }
@@ -316,7 +465,15 @@ static int abi_b64_value(char c) {
 
 static char *abi_base64_decode(const char *src, int32_t *out_len) {
     int32_t len = abi_strlen(src);
+    if (len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) {
+        if (out_len) *out_len = 0;
+        return abi_copy_cstr("");
+    }
     char *out = (char *)wasm_alloc((unsigned int)((len / 4) * 3 + 4));
+    if (!out) {
+        if (out_len) *out_len = 0;
+        return abi_copy_cstr("");
+    }
     int32_t opos = 0;
     int buf = 0;
     int bits = 0;
@@ -343,15 +500,18 @@ static char *abi_base64_decode(const char *src, int32_t *out_len) {
 
 int64_t taida_abi_web_make_request(int32_t ptr, int32_t len) {
     const char *json = (const char *)(intptr_t)ptr;
-    if (!json || len < 0) len = 0;
+    if (!json || len < 0 || !taida_abi_web_validate_request(ptr, len)) {
+        json = "{}";
+        len = 2;
+    }
     char *method = abi_json_find_string(json, len, "method", "GET");
     char *path = abi_json_find_string(json, len, "path", "/");
-    int64_t query = abi_json_string_map(json, len, "query");
-    int64_t headers = abi_json_string_map(json, len, "headers");
+    int64_t query = abi_json_string_map(json, len, "query", 0);
+    int64_t headers = abi_json_string_map(json, len, "headers", 1);
     char *body_b64 = abi_json_find_string(json, len, "bodyBase64", "");
     int32_t body_len = 0;
     char *body = abi_base64_decode(body_b64, &body_len);
-    (void)body_len;
+    int64_t body_bytes = abi_bytes_from_raw((const unsigned char *)body, body_len);
 
     int64_t pack = taida_pack_new(5);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("method"));
@@ -367,8 +527,8 @@ int64_t taida_abi_web_make_request(int32_t ptr, int32_t len) {
     taida_pack_set_tag(pack, 3, ABI_TAG_HMAP);
     taida_pack_set(pack, 3, headers);
     taida_pack_set_hash(pack, 4, abi_hash_cstr("body"));
-    taida_pack_set_tag(pack, 4, ABI_TAG_STR);
-    taida_pack_set(pack, 4, (int64_t)(intptr_t)body);
+    taida_pack_set_tag(pack, 4, ABI_TAG_PACK);
+    taida_pack_set(pack, 4, body_bytes);
     return pack;
 }
 
@@ -415,21 +575,36 @@ static void abi_jb_append_int(TaidaAbiJsonBuilder *jb, int64_t n) {
     abi_jb_append(jb, &tmp[pos + 1]);
 }
 
+static char abi_hex_digit(int n) {
+    return (char)(n < 10 ? ('0' + n) : ('a' + (n - 10)));
+}
+
 static void abi_jb_append_json_string(TaidaAbiJsonBuilder *jb, const char *s) {
     abi_jb_append(jb, "\"");
     for (int32_t i = 0; s && s[i]; i++) {
-        char c = s[i];
+        unsigned char c = (unsigned char)s[i];
         if (c == '"' || c == '\\') {
             abi_jb_append_len(jb, "\\", 1);
-            abi_jb_append_len(jb, &c, 1);
+            char ch = (char)c;
+            abi_jb_append_len(jb, &ch, 1);
         } else if (c == '\n') {
             abi_jb_append(jb, "\\n");
         } else if (c == '\r') {
             abi_jb_append(jb, "\\r");
         } else if (c == '\t') {
             abi_jb_append(jb, "\\t");
+        } else if (c < 0x20) {
+            char esc[6];
+            esc[0] = '\\';
+            esc[1] = 'u';
+            esc[2] = '0';
+            esc[3] = '0';
+            esc[4] = abi_hex_digit((c >> 4) & 0x0f);
+            esc[5] = abi_hex_digit(c & 0x0f);
+            abi_jb_append_len(jb, esc, 6);
         } else {
-            abi_jb_append_len(jb, &c, 1);
+            char ch = (char)c;
+            abi_jb_append_len(jb, &ch, 1);
         }
     }
     abi_jb_append(jb, "\"");
@@ -446,6 +621,22 @@ static void abi_jb_append_base64(TaidaAbiJsonBuilder *jb, const unsigned char *d
         unsigned int b0 = data[i];
         unsigned int b1 = rem > 1 ? data[i + 1] : 0;
         unsigned int b2 = rem > 2 ? data[i + 2] : 0;
+        char out[4];
+        out[0] = abi_b64_char((b0 >> 2) & 63);
+        out[1] = abi_b64_char(((b0 & 3) << 4) | ((b1 >> 4) & 15));
+        out[2] = rem > 1 ? abi_b64_char(((b1 & 15) << 2) | ((b2 >> 6) & 3)) : '=';
+        out[3] = rem > 2 ? abi_b64_char(b2 & 63) : '=';
+        abi_jb_append_len(jb, out, 4);
+    }
+}
+
+static void abi_jb_append_base64_bytes(TaidaAbiJsonBuilder *jb, int64_t bytes_value) {
+    int32_t len = abi_bytes_value_len(bytes_value);
+    for (int32_t i = 0; i < len; i += 3) {
+        int rem = len - i;
+        unsigned int b0 = abi_bytes_value_at(bytes_value, i);
+        unsigned int b1 = rem > 1 ? abi_bytes_value_at(bytes_value, i + 1) : 0;
+        unsigned int b2 = rem > 2 ? abi_bytes_value_at(bytes_value, i + 2) : 0;
         char out[4];
         out[0] = abi_b64_char((b0 >> 2) & 63);
         out[1] = abi_b64_char(((b0 & 3) << 4) | ((b1 >> 4) & 15));
@@ -479,37 +670,65 @@ static void abi_jb_append_headers(TaidaAbiJsonBuilder *jb, int64_t headers) {
 int64_t taida_abi_web_store_response_json(int64_t response) {
     int64_t status = taida_pack_get(response, abi_hash_cstr("status"));
     if (status == 0) status = 200;
+    status = abi_status_clamp(status);
     int64_t headers = taida_pack_get(response, abi_hash_cstr("headers"));
-    const char *body = (const char *)(intptr_t)taida_pack_get(response, abi_hash_cstr("body"));
-    if (!body) body = "";
+    int64_t body_value = taida_pack_get(response, abi_hash_cstr("body"));
+    int64_t body_bytes = abi_body_to_bytes(body_value);
+    int32_t body_len = abi_bytes_value_len(body_bytes);
 
     TaidaAbiJsonBuilder jb;
-    abi_jb_init(&jb, 256 + abi_strlen(body) * 2);
+    abi_jb_init(&jb, 256 + body_len * 2);
     abi_jb_append(&jb, "{\"status\":");
     abi_jb_append_int(&jb, status);
     abi_jb_append(&jb, ",\"headers\":");
     abi_jb_append_headers(&jb, headers);
     abi_jb_append(&jb, ",\"bodyBase64\":\"");
-    abi_jb_append_base64(&jb, (const unsigned char *)body, abi_strlen(body));
+    abi_jb_append_base64_bytes(&jb, body_bytes);
     abi_jb_append(&jb, "\"}");
 
-    TaidaAbiWebOut *out = (TaidaAbiWebOut *)wasm_alloc(sizeof(TaidaAbiWebOut));
-    out->ptr = (int32_t)(intptr_t)jb.buf;
-    out->len = jb.len;
-    return (int64_t)(intptr_t)out;
+    for (int32_t probe = 0; probe < TAIDA_ABI_WEB_OUT_TABLE_SIZE; probe++) {
+        int32_t slot = (abi_web_out_next + probe) % TAIDA_ABI_WEB_OUT_TABLE_SIZE;
+        if (!abi_web_outs[slot].active) {
+            abi_web_outs[slot].active = 1;
+            abi_web_outs[slot].ptr = (int32_t)(intptr_t)jb.buf;
+            abi_web_outs[slot].len = jb.len;
+            abi_web_out_next = (slot + 1) % TAIDA_ABI_WEB_OUT_TABLE_SIZE;
+            return (int64_t)(slot + 1);
+        }
+    }
+    abi_web_outs[0].active = 1;
+    abi_web_outs[0].ptr = (int32_t)(intptr_t)jb.buf;
+    abi_web_outs[0].len = jb.len;
+    abi_web_out_next = 1;
+    return 1;
+}
+
+int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_ptr) {
+    const char *message = (const char *)(intptr_t)message_ptr;
+    return taida_abi_web_store_response_json(abi_error_response(status, message));
+}
+
+static TaidaAbiWebOut *abi_web_out_get(int64_t handle) {
+    if (handle <= 0 || handle > TAIDA_ABI_WEB_OUT_TABLE_SIZE) return (TaidaAbiWebOut *)0;
+    TaidaAbiWebOut *out = &abi_web_outs[(int32_t)handle - 1];
+    return out->active ? out : (TaidaAbiWebOut *)0;
 }
 
 int32_t taida_abi_web_out_ptr(int64_t handle) {
-    TaidaAbiWebOut *out = (TaidaAbiWebOut *)(intptr_t)handle;
+    TaidaAbiWebOut *out = abi_web_out_get(handle);
     return out ? out->ptr : 0;
 }
 
 int32_t taida_abi_web_out_len(int64_t handle) {
-    TaidaAbiWebOut *out = (TaidaAbiWebOut *)(intptr_t)handle;
+    TaidaAbiWebOut *out = abi_web_out_get(handle);
     return out ? out->len : 0;
 }
 
 int32_t taida_abi_web_free(int64_t handle) {
-    (void)handle;
+    TaidaAbiWebOut *out = abi_web_out_get(handle);
+    if (!out) return 0;
+    out->active = 0;
+    out->ptr = 0;
+    out->len = 0;
     return 1;
 }

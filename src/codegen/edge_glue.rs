@@ -199,49 +199,59 @@ pub fn generate_handler_edge_js_source(stem: &str, wasm_filename: &str) -> Strin
 
 import WASM from "./{wasm_filename}";
 
-let instancePromise;
-
 export async function handleTaidaRequest(request, env, ctx) {{
-    const {{ instance, memory }} = await getInstance(env);
-    const exports = instance.exports;
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
+    try {{
+      const {{ instance, memory }} = await getInstance(env);
+      const exports = instance.exports;
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
 
-    const url = new URL(request.url);
-    const headers = {{}};
-    request.headers.forEach((value, key) => {{
-      headers[key] = value;
-    }});
-    const query = {{}};
-    url.searchParams.forEach((value, key) => {{
-      query[key] = value;
-    }});
-    const bodyBase64 = arrayBufferToBase64(await request.arrayBuffer());
-    const payload = JSON.stringify({{
-      method: request.method,
-      path: url.pathname,
-      query,
-      headers,
-      bodyBase64,
-    }});
+      const url = new URL(request.url);
+      const headers = {{}};
+      request.headers.forEach((value, key) => {{
+        headers[key] = value;
+      }});
+      const query = {{}};
+      url.searchParams.forEach((value, key) => {{
+        query[key] = value;
+      }});
+      const bodyBase64 = arrayBufferToBase64(await request.arrayBuffer());
+      const payload = JSON.stringify({{
+        method: request.method,
+        path: url.pathname,
+        query,
+        headers,
+        bodyBase64,
+      }});
 
-    const input = encoder.encode(payload);
-    const inPtr = exports.taida_abi_web_alloc(input.length);
-    new Uint8Array(memory.buffer, inPtr, input.length).set(input);
+      const input = encoder.encode(payload);
+      const inPtr = exports.taida_abi_web_alloc(input.length);
+      if (!inPtr) {{
+        return taidaErrorResponse(413, "request too large");
+      }}
+      new Uint8Array(memory.buffer, inPtr, input.length).set(input);
 
-    const handle = exports.taida_abi_web_handle(inPtr, input.length);
-    const outPtr = exports.taida_abi_web_out_ptr(handle);
-    const outLen = exports.taida_abi_web_out_len(handle);
-    const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
-    exports.taida_abi_web_free(handle);
+      const handle = exports.taida_abi_web_handle(inPtr, input.length);
+      const outPtr = exports.taida_abi_web_out_ptr(handle);
+      const outLen = exports.taida_abi_web_out_len(handle);
+      if (!outPtr || outLen < 0) {{
+        exports.taida_abi_web_free(handle);
+        return taidaErrorResponse(500, "invalid handler output");
+      }}
+      const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
+      exports.taida_abi_web_free(handle);
 
-    const result = JSON.parse(raw);
-    const responseHeaders = new Headers(result.headers || {{}});
-    const body = base64ToUint8Array(result.bodyBase64 || "");
-    return new Response(body, {{
-      status: result.status || 200,
-      headers: responseHeaders,
-    }});
+      const result = JSON.parse(raw);
+      const responseHeaders = new Headers(result.headers || {{}});
+      const body = base64ToUint8Array(result.bodyBase64 || "");
+      const status = clampStatus(result.status || 200);
+      return new Response(body, {{
+        status,
+        headers: responseHeaders,
+      }});
+    }} catch (_err) {{
+      return taidaErrorResponse(500, "handler failed");
+    }}
 }}
 
 export default {{
@@ -251,7 +261,6 @@ export default {{
 }};
 
 async function getInstance(env) {{
-  if (!instancePromise) {{
     let memory = new WebAssembly.Memory({{ initial: 2 }});
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
@@ -307,7 +316,7 @@ async function getInstance(env) {{
       }},
     }};
 
-    instancePromise = WebAssembly.instantiate(WASM, {{
+    return WebAssembly.instantiate(WASM, {{
       env: {{ memory }},
       wasi_snapshot_preview1: wasi,
       taida_host,
@@ -317,8 +326,20 @@ async function getInstance(env) {{
       }}
       return {{ instance, memory }};
     }});
-  }}
-  return instancePromise;
+}}
+
+function clampStatus(status) {{
+  const n = Number.isFinite(status) ? Math.trunc(status) : 200;
+  if (n < 100) return 100;
+  if (n > 599) return 599;
+  return n;
+}}
+
+function taidaErrorResponse(status, message) {{
+  return new Response(message, {{
+    status: clampStatus(status),
+    headers: {{ "content-type": "text/plain; charset=utf-8", "x-taida-error": "abi" }},
+  }});
 }}
 
 function arrayBufferToBase64(buffer) {{

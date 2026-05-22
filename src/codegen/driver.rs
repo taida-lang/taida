@@ -1872,12 +1872,28 @@ fn wasm_handler_wrapper_source(handler_symbol: &str) -> String {
         r#"
 
 extern int64_t {handler_symbol}(int64_t request);
+extern int64_t taida_error_ceiling_push(void);
+extern void taida_error_ceiling_pop(void);
+extern int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);
+extern int64_t taida_error_try_get_result(int64_t depth);
 extern int64_t taida_abi_web_make_request(int32_t ptr, int32_t len);
+extern int32_t taida_abi_web_validate_request(int32_t ptr, int32_t len);
 extern int64_t taida_abi_web_store_response_json(int64_t response);
+extern int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_ptr);
 
 int64_t taida_abi_web_handle(int32_t ptr, int32_t len) {{
+    if (!taida_abi_web_validate_request(ptr, len)) {{
+        return taida_abi_web_store_error_response_json(413, (int64_t)(intptr_t)"request too large");
+    }}
     int64_t request = taida_abi_web_make_request(ptr, len);
-    int64_t response = {handler_symbol}(request);
+    int64_t depth = taida_error_ceiling_push();
+    int64_t thrown = taida_error_try_call((int64_t)(intptr_t)&{handler_symbol}, request, depth);
+    if (thrown) {{
+        taida_error_ceiling_pop();
+        return taida_abi_web_store_error_response_json(500, (int64_t)(intptr_t)"handler throw");
+    }}
+    int64_t response = taida_error_try_get_result(depth);
+    taida_error_ceiling_pop();
     return taida_abi_web_store_response_json(response);
 }}
 "#,
@@ -1890,8 +1906,25 @@ fn native_handler_main_source(handler_symbol: &str) -> String {
         r#"
 
 extern taida_val {handler_symbol}(taida_val request);
+extern taida_val taida_error_ceiling_push(void);
+extern void taida_error_ceiling_pop(void);
+extern taida_val taida_error_try_call(taida_val fn_ptr, taida_val env_ptr, taida_val depth);
+extern taida_val taida_error_try_get_result(taida_val depth);
+extern taida_val taida_error_get_value(taida_val depth);
+extern void taida_handler_set_stdout_redirect(taida_val enabled);
 extern taida_val taida_abi_web_make_request_json(taida_val json_ptr, taida_val len);
 extern taida_val taida_abi_web_store_response_json_native(taida_val response);
+extern taida_val taida_abi_response_text(taida_val body_ptr);
+extern taida_val taida_abi_response_status(taida_val code, taida_val response);
+extern taida_val taida_abi_response_header(taida_val name_ptr, taida_val value_ptr, taida_val response);
+
+static taida_val taida_native_handler_error_response(const char *kind, taida_val message) {{
+    const char *body = message ? (const char *)message : "handler error";
+    taida_val response = taida_abi_response_text((taida_val)body);
+    response = taida_abi_response_status(500, response);
+    response = taida_abi_response_header((taida_val)"x-taida-error", (taida_val)(kind ? kind : "handler"), response);
+    return response;
+}}
 
 static char *taida_native_handler_read_stdin(taida_val *out_len) {{
     size_t cap = 4096;
@@ -1903,11 +1936,12 @@ static char *taida_native_handler_read_stdin(taida_val *out_len) {{
     }}
     for (;;) {{
         if (len == cap) {{
-            if (cap > SIZE_MAX / 2) {{
+            if (cap >= TAIDA_ABI_MAX_REQUEST_BYTES || cap > SIZE_MAX / 2) {{
                 fprintf(stderr, "taida: handler stdin too large\n");
                 exit(1);
             }}
             cap *= 2;
+            if (cap > TAIDA_ABI_MAX_REQUEST_BYTES) cap = TAIDA_ABI_MAX_REQUEST_BYTES;
             char *next = (char *)realloc(buf, cap + 1);
             if (!next) {{
                 free(buf);
@@ -1941,7 +1975,19 @@ int main(int argc, char **argv) {{
     taida_val input_len = 0;
     char *input = taida_native_handler_read_stdin(&input_len);
     taida_val request = taida_abi_web_make_request_json((taida_val)input, input_len);
-    taida_val response = {handler_symbol}(request);
+    taida_val depth = taida_error_ceiling_push();
+    taida_handler_set_stdout_redirect(1);
+    taida_val thrown = taida_error_try_call((taida_val)(intptr_t)&{handler_symbol}, request, depth);
+    taida_handler_set_stdout_redirect(0);
+    taida_val response = 0;
+    if (thrown) {{
+        taida_val error = taida_error_get_value(depth);
+        taida_val message = taida_throw_to_display_string(error);
+        response = taida_native_handler_error_response("handler-throw", message);
+    }} else {{
+        response = taida_error_try_get_result(depth);
+    }}
+    taida_error_ceiling_pop();
     taida_val json = taida_abi_web_store_response_json_native(response);
     const char *out = (const char *)json;
     if (out) fputs(out, stdout);
