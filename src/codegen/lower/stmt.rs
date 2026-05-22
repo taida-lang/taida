@@ -377,6 +377,7 @@ impl Lowering {
                             | "taida-lang/crypto"
                             | "taida-lang/net"
                             | "taida-lang/pool"
+                            | "taida-lang/abi"
                     );
 
                     // B11B-023 + B11B-026: Pre-resolve facade once per import statement
@@ -454,6 +455,7 @@ impl Lowering {
                             "taida-lang/crypto" => Self::crypto_func_mapping(orig_name),
                             "taida-lang/net" => Self::net_func_mapping(orig_name),
                             "taida-lang/pool" => Self::pool_func_mapping(orig_name),
+                            "taida-lang/abi" => Self::abi_func_mapping(orig_name),
                             _ => None,
                         };
 

@@ -4597,6 +4597,7 @@ int64_t taida_addon_call(
 /* end of RC2.5 addon dispatch block                                            */
 /* ============================================================================ */
 
+#ifndef TAIDA_NATIVE_HANDLER_MAIN
 int main(int argc, char **argv) {
     taida_cli_argc = argc;
     taida_cli_argv = argv;
@@ -4622,3 +4623,4 @@ int main(int argc, char **argv) {
     (void)_taida_main();
     return 0;
 }
+#endif

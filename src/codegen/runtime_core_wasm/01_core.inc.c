@@ -1336,7 +1336,7 @@ static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes);
    — vanishingly unlikely to collide. */
 static int _check_list_trailing_magic(int64_t *data, int64_t expected_magic, unsigned int base_addr) {
     int64_t cap = data[0];
-    if (cap < 8 || cap > 0x100000) return 0;  /* taida_list_new starts at 16, grows via *2 */
+    if (cap < 8 || cap > 0x1000000) return 0;  /* request Bytes may carry up to the 16MiB ABI cap */
     unsigned int tail_bytes = (unsigned int)(WASM_LIST_ELEMS + cap + 1) * 8u;
     unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
     if ((uint64_t)base_addr + (uint64_t)tail_bytes > (uint64_t)mem_size) return 0;

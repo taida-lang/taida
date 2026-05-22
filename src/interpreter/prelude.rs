@@ -146,7 +146,24 @@ impl Interpreter {
             return Ok(Some(result));
         }
 
+        // taida-lang/abi request/response helper dispatch.
+        if let Some(result) = self.try_abi_func(name, args)? {
+            return Ok(Some(result));
+        }
+
         match name {
+            "throw" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!("throw requires exactly 1 argument, got {}", args.len()),
+                    });
+                }
+                let val = match self.eval_expr(&args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Throw(val)))
+            }
             // ── stdout(...args): write to output buffer (prelude) ──
             // C12-5 (FB-18): returns the byte count (Int) of the written
             // content so that `n <= stdout("hi")` binds `n = 2`. `Value::Unit`

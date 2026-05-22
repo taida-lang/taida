@@ -589,6 +589,7 @@ impl JsCodegen {
             "debug"
                 | "typeof"
                 | "assert"
+                | "throw"
                 | "stdout"
                 | "stderr"
                 | "stdin"
@@ -3036,6 +3037,7 @@ impl JsCodegen {
                             "debug" => self.write("__taida_debug"),
                             "typeof" => self.write("__taida_typeof"),
                             "assert" => self.write("__taida_assert"),
+                            "throw" => self.write("__taida_throw"),
                             "stdout" => self.write("__taida_stdout"),
                             "stderr" => self.write("__taida_stderr"),
                             "stdin" => self.write("__taida_stdin"),
@@ -3145,6 +3147,7 @@ impl JsCodegen {
                             "debug" => self.write("__taida_debug"),
                             "typeof" => self.write("__taida_typeof"),
                             "assert" => self.write("__taida_assert"),
+                            "throw" => self.write("__taida_throw"),
                             "stdout" => self.write("__taida_stdout"),
                             "stderr" => self.write("__taida_stderr"),
                             "stdin" => self.write("__taida_stdin"),
@@ -4272,6 +4275,7 @@ impl JsCodegen {
                             "debug" => self.write("__taida_debug"),
                             "typeof" => self.write("__taida_typeof"),
                             "assert" => self.write("__taida_assert"),
+                            "throw" => self.write("__taida_throw"),
                             "stdout" => self.write("__taida_stdout"),
                             "stderr" => self.write("__taida_stderr"),
                             "stdin" => self.write("__taida_stdin"),
@@ -4536,6 +4540,7 @@ impl JsCodegen {
                     "debug" => self.write("__taida_debug(__p)"),
                     "typeof" => self.write("__taida_typeof(__p)"),
                     "assert" => self.write("__taida_assert(__p)"),
+                    "throw" => self.write("__taida_throw(__p)"),
                     "stdout" => self.write("__taida_stdout(__p)"),
                     "stderr" => self.write("__taida_stderr(__p)"),
                     "stdin" => self.write("__taida_stdin(__p)"),

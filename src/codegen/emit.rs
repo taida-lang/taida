@@ -1795,6 +1795,28 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // ── taida-lang/abi response helpers ──
+        "taida_abi_response_text" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_abi_response_json" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_abi_response_bytes" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_abi_response_status" => RuntimeAbi {
+            params: &[Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_abi_response_header" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
+            returns: &[Ptr],
+        },
+
         // ── taida-lang/net HTTP v1 ──
         // taida_net_http_parse_request_head(input: Ptr) -> Ptr
         "taida_net_http_parse_request_head" => RuntimeAbi {

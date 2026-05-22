@@ -1,4 +1,5 @@
 pub mod driver;
+pub mod edge_glue;
 pub mod emit;
 pub mod emit_wasm_c;
 pub mod ir;

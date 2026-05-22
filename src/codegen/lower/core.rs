@@ -29,6 +29,7 @@ impl Lowering {
         // with `src/interpreter/prelude.rs::"assert"` and
         // `src/js/runtime/core.rs::__taida_assert`.
         stdlib_runtime_funcs.insert("assert".to_string(), "taida_assert".to_string());
+        stdlib_runtime_funcs.insert("throw".to_string(), "taida_throw".to_string());
         // Prelude constructors — ABOLISHED: Some/None/Ok/Err/Optional (v0.8.0)
         // Use Lax[value]() and Result[value]() mold syntax.
         // Prelude collection constructors

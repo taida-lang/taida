@@ -43,7 +43,9 @@ use taida::graph::verify;
 use taida::interpreter::Interpreter;
 use taida::js;
 use taida::module_graph;
-use taida::parser::{BuchiField, Expr, FieldDef, FuncDef, ImportStmt, Program, Statement, parse};
+use taida::parser::{
+    BuchiField, Expr, FieldDef, FuncDef, ImportStmt, Program, Statement, TypeExpr, parse,
+};
 use taida::pkg;
 use taida::types::{CompileTarget, TypeChecker};
 use taida::version::taida_version;
@@ -193,7 +195,7 @@ fn print_build_help() {
     println!(
         "\
 Usage:
-  taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] [--handler SYMBOL] <PATH>
   taida build <PATH> --unit NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --plan NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --all-units [--release] [--diag-format text|jsonl]
@@ -202,6 +204,7 @@ Options:
   --output, -o    Output file or directory
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
+  --handler       Native/WASM handler entry symbol
   --release, -r   Fail if TODO/Stub remains in source
   --no-cache      Disable WASM runtime .o cache
   --diag-format   text | jsonl
@@ -1388,6 +1391,13 @@ impl BuildTarget {
             Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
         )
     }
+
+    fn supports_handler(self) -> bool {
+        matches!(
+            self,
+            Self::Native | Self::WasmMin | Self::WasmWasi | Self::WasmEdge | Self::WasmFull
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1647,7 +1657,7 @@ fn print_build_usage_and_exit() -> ! {
     eprintln!(
         "\
 Usage:
-  taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+  taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] [--handler SYMBOL] <PATH>
   taida build <PATH> --unit NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --plan NAME [--release] [--diag-format text|jsonl]
   taida build <PATH> --all-units [--release] [--diag-format text|jsonl]
@@ -1656,6 +1666,7 @@ Options:
   --output, -o    Output file or directory
   --outdir        Alias of `--output`
   --entry         Native dir entry override (default: main.td)
+  --handler       Native/WASM handler entry symbol
   --release, -r   Fail if TODO/Stub remains in source
   --no-cache      Disable WASM runtime .o cache
   --diag-format   text | jsonl
@@ -1861,6 +1872,7 @@ struct BuildUnitDescriptor {
     target: BuildTarget,
     entry_symbol: String,
     entry_path: Option<PathBuf>,
+    handler: Option<String>,
     route_assets: Vec<RouteAssetDescriptor>,
     before_hooks: Vec<String>,
 }
@@ -2824,6 +2836,16 @@ fn parse_build_unit(
     })?;
     let entry_symbol = required_ident_field(fields, "entry", "BuildUnit")?;
     let entry_path = import_symbols.get(&entry_symbol).cloned();
+    let handler = optional_string_field(fields, "handler", "BuildUnit")?;
+    if handler.is_some() && !target.supports_handler() {
+        return Err(DescriptorBuildError::new(
+            "E1902",
+            format!(
+                "BuildUnit '{}' uses handler mode, but handler is only valid for Native/WASM targets.",
+                name
+            ),
+        ));
+    }
     reject_retired_field(
         fields,
         "output",
@@ -2840,6 +2862,7 @@ fn parse_build_unit(
         target,
         entry_symbol,
         entry_path,
+        handler,
         route_assets,
         before_hooks: ident_list_field(fields, "before")?,
     })
@@ -4080,6 +4103,9 @@ fn run_child_build(
         .arg(entry_path)
         .arg("-o")
         .arg(&output_path);
+    if let Some(handler) = &unit.handler {
+        cmd.arg("--handler").arg(handler);
+    }
     if release_mode {
         cmd.arg("--release");
     }
@@ -4564,6 +4590,7 @@ fn run_build(args: &[String], no_check: bool) {
     let mut input_path: Option<String> = None;
     let mut output_path: Option<String> = None;
     let mut entry_path: Option<String> = None;
+    let mut handler_symbol: Option<String> = None;
     let mut release_mode = false;
     let mut no_cache = false;
     let mut run_hooks = false;
@@ -4588,6 +4615,13 @@ fn run_build(args: &[String], no_check: bool) {
                     print_build_usage_and_exit();
                 }
                 entry_path = Some(args[i].clone());
+            }
+            "--handler" => {
+                i += 1;
+                if i >= args.len() {
+                    print_build_usage_and_exit();
+                }
+                handler_symbol = Some(args[i].clone());
             }
             "--diag-format" => {
                 i += 1;
@@ -4699,6 +4733,16 @@ fn run_build(args: &[String], no_check: bool) {
             2,
         );
     }
+    if selector_count == 1 && handler_symbol.is_some() {
+        emit_build_cli_diagnostic_and_exit(
+            &mut compile_stats,
+            diag_format,
+            "E1900",
+            "`--handler` is only valid in single-target Native/WASM build mode.",
+            Some("Use BuildUnit.handler for descriptor builds."),
+            2,
+        );
+    }
     if selector_count == 0 && run_hooks {
         emit_build_cli_diagnostic_and_exit(
             &mut compile_stats,
@@ -4718,6 +4762,19 @@ fn run_build(args: &[String], no_check: bool) {
             no_check,
             diag_format,
             &mut compile_stats,
+        );
+    }
+
+    if handler_symbol.is_some() && !target.supports_handler() {
+        emit_build_cli_diagnostic_and_exit(
+            &mut compile_stats,
+            diag_format,
+            "E1900",
+            "`--handler` is only valid with Native/WASM build targets.",
+            Some(
+                "Use `taida build native --handler handle app.td` or `taida build wasm-edge --handler handle app.td`.",
+            ),
+            2,
         );
     }
 
@@ -4772,6 +4829,7 @@ fn run_build(args: &[String], no_check: bool) {
                 input_path,
                 output_path.as_deref(),
                 entry_path.as_deref(),
+                handler_symbol.as_deref(),
                 release_mode,
                 no_check,
                 diag_format,
@@ -4789,6 +4847,7 @@ fn run_build(args: &[String], no_check: bool) {
             run_build_wasm_min(
                 input_path,
                 output_path.as_deref(),
+                handler_symbol.as_deref(),
                 release_mode,
                 no_check,
                 wasm_rt_cache.as_ref(),
@@ -4807,6 +4866,7 @@ fn run_build(args: &[String], no_check: bool) {
             run_build_wasm_wasi(
                 input_path,
                 output_path.as_deref(),
+                handler_symbol.as_deref(),
                 release_mode,
                 no_check,
                 wasm_rt_cache.as_ref(),
@@ -4825,6 +4885,7 @@ fn run_build(args: &[String], no_check: bool) {
             run_build_wasm_edge(
                 input_path,
                 output_path.as_deref(),
+                handler_symbol.as_deref(),
                 release_mode,
                 no_check,
                 wasm_rt_cache.as_ref(),
@@ -4843,6 +4904,7 @@ fn run_build(args: &[String], no_check: bool) {
             run_build_wasm_full(
                 input_path,
                 output_path.as_deref(),
+                handler_symbol.as_deref(),
                 release_mode,
                 no_check,
                 wasm_rt_cache.as_ref(),
@@ -5739,10 +5801,14 @@ fn run_build_js_dir(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_native(
     input_path: &Path,
     output_path: Option<&str>,
     entry_path: Option<&str>,
+    handler_symbol: Option<&str>,
     release_mode: bool,
     no_check: bool,
     diag_format: DiagFormat,
@@ -5778,7 +5844,7 @@ fn run_build_native(
         }
     }
 
-    if !no_check {
+    if !no_check || handler_symbol.is_some() {
         let source = match fs::read_to_string(&entry_file) {
             Ok(s) => s,
             Err(e) => {
@@ -5822,13 +5888,29 @@ fn run_build_native(
             }
             std::process::exit(1);
         }
-        run_type_checks_and_warnings(
-            &program,
-            &entry_file.to_string_lossy(),
-            CompileTarget::Native,
-            diag_format,
-            compile_stats,
-        );
+        if let Some(handler) = handler_symbol
+            && let Err(message) = validate_web_handler_entry(&program, handler)
+        {
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1961",
+                &message,
+                Some(
+                    "Use a one-argument handler: `handle req: WebRequest = text(\"ok\") => :WebResponse`.",
+                ),
+                1,
+            );
+        }
+        if !no_check || handler_symbol.is_some() {
+            run_type_checks_and_warnings(
+                &program,
+                &entry_file.to_string_lossy(),
+                CompileTarget::Native,
+                diag_format,
+                compile_stats,
+            );
+        }
     }
 
     // Default output: .taida/build/native/{stem} (project-local)
@@ -5856,7 +5938,12 @@ fn run_build_native(
         default_native_output = build_dir.join(stem);
         Some(default_native_output.as_path())
     };
-    match codegen::driver::compile_file(&entry_file, output) {
+    let build_result = if let Some(handler) = handler_symbol {
+        codegen::driver::compile_file_handler(&entry_file, output, handler)
+    } else {
+        codegen::driver::compile_file(&entry_file, output)
+    };
+    match build_result {
         Ok(bin_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display the canonical (absolute) path for consistency
@@ -5889,9 +5976,13 @@ fn run_build_native(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_min(
     input_path: &Path,
     output_path: Option<&str>,
+    handler_symbol: Option<&str>,
     release_mode: bool,
     no_check: bool,
     rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
@@ -5936,7 +6027,7 @@ fn run_build_wasm_min(
         std::process::exit(1);
     }
 
-    if !no_check {
+    if !no_check || handler_symbol.is_some() {
         let source = match fs::read_to_string(input_path) {
             Ok(s) => s,
             Err(e) => {
@@ -5980,13 +6071,29 @@ fn run_build_wasm_min(
             }
             std::process::exit(1);
         }
-        run_type_checks_and_warnings(
-            &program,
-            &input_path.to_string_lossy(),
-            CompileTarget::WasmMin,
-            diag_format,
-            compile_stats,
-        );
+        if let Some(handler) = handler_symbol
+            && let Err(message) = validate_web_handler_entry(&program, handler)
+        {
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1961",
+                &message,
+                Some(
+                    "Use a one-argument handler: `handle req: WebRequest = text(\"ok\") => :WebResponse`.",
+                ),
+                1,
+            );
+        }
+        if !no_check || handler_symbol.is_some() {
+            run_type_checks_and_warnings(
+                &program,
+                &input_path.to_string_lossy(),
+                CompileTarget::WasmMin,
+                diag_format,
+                compile_stats,
+            );
+        }
     }
 
     // F-2: Release gate -- block TODO/Stub molds in --release builds
@@ -6024,7 +6131,12 @@ fn run_build_wasm_min(
         Some(default_wasm_output.as_path())
     };
     // S-2: Cache is initialized once in run_build and passed in.
-    match codegen::driver::compile_file_wasm_cached(input_path, output, rt_cache) {
+    let build_result = if let Some(handler) = handler_symbol {
+        codegen::driver::compile_file_wasm_handler_cached(input_path, output, rt_cache, handler)
+    } else {
+        codegen::driver::compile_file_wasm_cached(input_path, output, rt_cache)
+    };
+    match build_result {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -6056,9 +6168,13 @@ fn run_build_wasm_min(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_wasi(
     input_path: &Path,
     output_path: Option<&str>,
+    handler_symbol: Option<&str>,
     release_mode: bool,
     no_check: bool,
     rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
@@ -6103,7 +6219,7 @@ fn run_build_wasm_wasi(
         std::process::exit(1);
     }
 
-    if !no_check {
+    if !no_check || handler_symbol.is_some() {
         let source = match fs::read_to_string(input_path) {
             Ok(s) => s,
             Err(e) => {
@@ -6147,13 +6263,29 @@ fn run_build_wasm_wasi(
             }
             std::process::exit(1);
         }
-        run_type_checks_and_warnings(
-            &program,
-            &input_path.to_string_lossy(),
-            CompileTarget::WasmWasi,
-            diag_format,
-            compile_stats,
-        );
+        if let Some(handler) = handler_symbol
+            && let Err(message) = validate_web_handler_entry(&program, handler)
+        {
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1961",
+                &message,
+                Some(
+                    "Use a one-argument handler: `handle req: WebRequest = text(\"ok\") => :WebResponse`.",
+                ),
+                1,
+            );
+        }
+        if !no_check || handler_symbol.is_some() {
+            run_type_checks_and_warnings(
+                &program,
+                &input_path.to_string_lossy(),
+                CompileTarget::WasmWasi,
+                diag_format,
+                compile_stats,
+            );
+        }
     }
 
     // F-2: Release gate -- block TODO/Stub molds in --release builds
@@ -6191,7 +6323,14 @@ fn run_build_wasm_wasi(
         Some(default_wasm_output.as_path())
     };
     // S-2: Cache is initialized once in run_build and passed in.
-    match codegen::driver::compile_file_wasm_wasi_cached(input_path, output, rt_cache) {
+    let build_result = if let Some(handler) = handler_symbol {
+        codegen::driver::compile_file_wasm_wasi_handler_cached(
+            input_path, output, rt_cache, handler,
+        )
+    } else {
+        codegen::driver::compile_file_wasm_wasi_cached(input_path, output, rt_cache)
+    };
+    match build_result {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -6222,10 +6361,89 @@ fn run_build_wasm_wasi(
     }
 }
 
+fn validate_web_handler_entry(program: &Program, handler: &str) -> Result<(), String> {
+    let mut request_names: HashSet<String> = HashSet::from(["WebRequest".to_string()]);
+    let mut response_names: HashSet<String> = HashSet::from(["WebResponse".to_string()]);
+    let mut has_abi_import = false;
+
+    for stmt in &program.statements {
+        if let Statement::Import(import) = stmt
+            && import.path == "taida-lang/abi"
+        {
+            has_abi_import = true;
+            for sym in &import.symbols {
+                let local = sym.alias.as_ref().unwrap_or(&sym.name).clone();
+                match sym.name.as_str() {
+                    "WebRequest" => {
+                        request_names.insert(local);
+                    }
+                    "WebResponse" => {
+                        response_names.insert(local);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !has_abi_import {
+        return Err(
+            "handler mode requires `>>> taida-lang/abi => @(WebRequest, WebResponse, ...)`."
+                .to_string(),
+        );
+    }
+
+    let Some(func) = program.statements.iter().find_map(|stmt| match stmt {
+        Statement::FuncDef(fd) if fd.name == handler => Some(fd),
+        _ => None,
+    }) else {
+        return Err(format!("Handler function '{}' was not found.", handler));
+    };
+
+    if func.params.len() != 1 {
+        return Err(format!(
+            "Handler '{}' must take exactly one WebRequest parameter.",
+            handler
+        ));
+    }
+
+    let param_ty = func.params[0]
+        .type_annotation
+        .as_ref()
+        .and_then(named_type_expr);
+    if !param_ty.is_some_and(|name| request_names.contains(name)) {
+        return Err(format!(
+            "Handler '{}' parameter must be annotated as WebRequest.",
+            handler
+        ));
+    }
+
+    let ret_ty = func.return_type.as_ref().and_then(named_type_expr);
+    if !ret_ty.is_some_and(|name| response_names.contains(name)) {
+        return Err(format!(
+            "Handler '{}' return type must be annotated as WebResponse.",
+            handler
+        ));
+    }
+
+    Ok(())
+}
+
+fn named_type_expr(ty: &TypeExpr) -> Option<&str> {
+    match ty {
+        TypeExpr::Named(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_edge(
     input_path: &Path,
     output_path: Option<&str>,
+    handler_symbol: Option<&str>,
     release_mode: bool,
     no_check: bool,
     rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
@@ -6270,7 +6488,7 @@ fn run_build_wasm_edge(
         std::process::exit(1);
     }
 
-    if !no_check {
+    if !no_check || handler_symbol.is_some() {
         let source = match fs::read_to_string(input_path) {
             Ok(s) => s,
             Err(e) => {
@@ -6314,13 +6532,29 @@ fn run_build_wasm_edge(
             }
             std::process::exit(1);
         }
-        run_type_checks_and_warnings(
-            &program,
-            &input_path.to_string_lossy(),
-            CompileTarget::WasmEdge,
-            diag_format,
-            compile_stats,
-        );
+        if let Some(handler) = handler_symbol
+            && let Err(message) = validate_web_handler_entry(&program, handler)
+        {
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1961",
+                &message,
+                Some(
+                    "Use a one-argument handler: `handle req: WebRequest = text(\"ok\") => :WebResponse`.",
+                ),
+                1,
+            );
+        }
+        if !no_check || handler_symbol.is_some() {
+            run_type_checks_and_warnings(
+                &program,
+                &input_path.to_string_lossy(),
+                CompileTarget::WasmEdge,
+                diag_format,
+                compile_stats,
+            );
+        }
     }
 
     // F-2: Release gate -- block TODO/Stub molds in --release builds
@@ -6358,7 +6592,12 @@ fn run_build_wasm_edge(
         Some(default_wasm_output.as_path())
     };
     // S-2: Cache is initialized once in run_build and passed in.
-    match codegen::driver::compile_file_wasm_edge_cached(input_path, output, rt_cache) {
+    match codegen::driver::compile_file_wasm_edge_cached(
+        input_path,
+        output,
+        rt_cache,
+        handler_symbol,
+    ) {
         Ok(result) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -6392,9 +6631,13 @@ fn run_build_wasm_edge(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_full(
     input_path: &Path,
     output_path: Option<&str>,
+    handler_symbol: Option<&str>,
     release_mode: bool,
     no_check: bool,
     rt_cache: Option<&codegen::driver::WasmRuntimeCache>,
@@ -6439,7 +6682,7 @@ fn run_build_wasm_full(
         std::process::exit(1);
     }
 
-    if !no_check {
+    if !no_check || handler_symbol.is_some() {
         let source = match fs::read_to_string(input_path) {
             Ok(s) => s,
             Err(e) => {
@@ -6483,13 +6726,29 @@ fn run_build_wasm_full(
             }
             std::process::exit(1);
         }
-        run_type_checks_and_warnings(
-            &program,
-            &input_path.to_string_lossy(),
-            CompileTarget::WasmFull,
-            diag_format,
-            compile_stats,
-        );
+        if let Some(handler) = handler_symbol
+            && let Err(message) = validate_web_handler_entry(&program, handler)
+        {
+            emit_build_cli_diagnostic_and_exit(
+                compile_stats,
+                diag_format,
+                "E1961",
+                &message,
+                Some(
+                    "Use a one-argument handler: `handle req: WebRequest = text(\"ok\") => :WebResponse`.",
+                ),
+                1,
+            );
+        }
+        if !no_check || handler_symbol.is_some() {
+            run_type_checks_and_warnings(
+                &program,
+                &input_path.to_string_lossy(),
+                CompileTarget::WasmFull,
+                diag_format,
+                compile_stats,
+            );
+        }
     }
 
     // F-2: Release gate -- block TODO/Stub molds in --release builds
@@ -6527,7 +6786,14 @@ fn run_build_wasm_full(
         Some(default_wasm_output.as_path())
     };
     // S-2: Cache is initialized once in run_build and passed in.
-    match codegen::driver::compile_file_wasm_full_cached(input_path, output, rt_cache) {
+    let build_result = if let Some(handler) = handler_symbol {
+        codegen::driver::compile_file_wasm_full_handler_cached(
+            input_path, output, rt_cache, handler,
+        )
+    } else {
+        codegen::driver::compile_file_wasm_full_cached(input_path, output, rt_cache)
+    };
+    match build_result {
         Ok(wasm_path) => {
             if diag_format == DiagFormat::Text {
                 // RCB-217: Display canonical path for consistency with JS backend
@@ -8972,6 +9238,7 @@ mod tests {
             target: BuildTarget::WasmMin,
             entry_symbol: "entryMain".to_string(),
             entry_path: Some(entry.clone()),
+            handler: None,
             route_assets: Vec::new(),
             before_hooks: Vec::new(),
         };
@@ -9013,6 +9280,7 @@ mod tests {
             target: BuildTarget::Js,
             entry_symbol: "entryMain".to_string(),
             entry_path: Some(entry.clone()),
+            handler: None,
             route_assets: Vec::new(),
             before_hooks: Vec::new(),
         };

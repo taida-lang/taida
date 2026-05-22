@@ -30,7 +30,7 @@
 > コンパイル成果物 (Native binary / `.wasm`) のディスクリプタ。
 
 ```taida
-BuildUnit name: Str  target: Str  entry: Symbol  assets: @[RouteAsset]  before: @[BuildHook]
+BuildUnit name: Str  target: Str  entry: Symbol  handler: Str  assets: @[RouteAsset]  before: @[BuildHook]
 ```
 
 **フィールド**:
@@ -40,6 +40,7 @@ BuildUnit name: Str  target: Str  entry: Symbol  assets: @[RouteAsset]  before: 
 | `name` | `Str` | はい | 成果物名。staging 階層、artifact-map のキー、ホックログディレクトリで単一パスセグメントとして使われる。 |
 | `target` | `Str` | はい | `"native"` / `"wasm-min"` / `"wasm-wasi"` / `"wasm-edge"` / `"wasm-full"` のいずれか。旧 `"js"` target は移行期間の互換機能で、正式パリティ対象ではありません。 |
 | `entry` | `Symbol` | はい | ローカル import で取り込んだ関数シンボル。 |
+| `handler` | `Str` | いいえ | Native / WASM handler mode の entry 関数名。指定する関数は `WebRequest` を 1 つ受け取り `WebResponse` を返す。 |
 | `assets` | `@[RouteAsset]` | いいえ | 成果物・アセットバンドルへの経路メタデータ。 |
 | `before` | `@[BuildHook]` | いいえ | ビルド時前段ステップ。`--run-hooks` 明示時のみ実行。 |
 
@@ -47,6 +48,7 @@ BuildUnit name: Str  target: Str  entry: Symbol  assets: @[RouteAsset]  before: 
 
 - `entry` はファイルパスではなくシンボル。`>>> ./server.td => @(serverMain)` で取り込んだ関数を `entry <= serverMain` の形で渡す。
 - `name` の単一パスセグメント制約に違反すると `[E1916]` で reject。
+- `handler` を指定する場合、`target` は `"native"` または WASM target でなければならない。handler 関数の詳細は [`abi.md`](abi.md) を参照。
 
 **Example**:
 
@@ -228,13 +230,13 @@ buildFrontend <= BuildHook(
 各 `BuildUnit` は `target` に応じて、依存閉包に含めて良いコア API を制限します。
 表にない外部パッケージは通常の依存解決とビルド対象バックエンドの能力に従います。
 
-| target | `taida-lang/os` | `taida-lang/net` | `taida-lang/terminal` |
-|--------|-----------------|------------------|-----------------------|
-| `native` | 受理 | 受理 | 受理 |
-| `wasm-min` | reject | reject | reject |
-| `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | reject |
-| `wasm-wasi` | `EnvVar`, `allEnv`, `Read`, `Exists`, `writeFile`, `readBytesAt` のみ受理 | reject | reject |
-| `wasm-full` | `wasm-wasi` と同じ OS subset を受理 | reject | reject |
+| target | `taida-lang/os` | `taida-lang/net` | `taida-lang/abi` | `taida-lang/terminal` |
+|--------|-----------------|------------------|------------------|-----------------------|
+| `native` | 受理 | 受理 | 受理 | 受理 |
+| `wasm-min` | reject | reject | 受理 | reject |
+| `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | 受理 | reject |
+| `wasm-wasi` | `EnvVar`, `allEnv`, `Read`, `Exists`, `writeFile`, `readBytesAt` のみ受理 | reject | 受理 | reject |
+| `wasm-full` | `wasm-wasi` と同じ OS subset を受理 | reject | 受理 | reject |
 
 allow list は import 元のシンボル名で判定します。alias は判定を変えません。
 コア API import でシンボルリストが空の場合は package wildcard とみなし、

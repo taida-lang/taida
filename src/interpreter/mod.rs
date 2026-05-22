@@ -1,3 +1,4 @@
+mod abi_eval;
 #[cfg(feature = "native")]
 mod addon_eval;
 mod control_flow;

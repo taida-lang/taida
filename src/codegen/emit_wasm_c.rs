@@ -665,6 +665,23 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "void taida_hashmap_set_value_tag(int64_t hm, int64_t tag);".to_string()
         }
         "taida_str_hash" => "int64_t taida_str_hash(int64_t str_ptr);".to_string(),
+        // taida-lang/abi response helper functions
+        "taida_abi_response_text" => {
+            "int64_t taida_abi_response_text(int64_t body_ptr);".to_string()
+        }
+        "taida_abi_response_json" => {
+            "int64_t taida_abi_response_json(int64_t value);".to_string()
+        }
+        "taida_abi_response_bytes" => {
+            "int64_t taida_abi_response_bytes(int64_t body_ptr);".to_string()
+        }
+        "taida_abi_response_status" => {
+            "int64_t taida_abi_response_status(int64_t code, int64_t response);".to_string()
+        }
+        "taida_abi_response_header" => {
+            "int64_t taida_abi_response_header(int64_t name_ptr, int64_t value_ptr, int64_t response);"
+                .to_string()
+        }
         // W-4: Set runtime functions
         "taida_set_from_list" => "int64_t taida_set_from_list(int64_t list_ptr);".to_string(),
         "taida_set_add" => "int64_t taida_set_add(int64_t set_ptr, int64_t item);".to_string(),

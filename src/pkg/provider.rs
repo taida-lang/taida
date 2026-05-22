@@ -157,6 +157,7 @@ impl PackageProvider for WorkspaceProvider {
 /// - `taida-lang/crypto`: cryptographic primitives (`sha256`)
 /// - `taida-lang/net`: network APIs (socket/TCP/UDP contract surface)
 /// - `taida-lang/pool`: pool contract surface (official upper package)
+/// - `taida-lang/abi`: request/response handler ABI surface
 ///
 /// Core-bundled packages are resolved to `~/.taida/bundled/<name>/` (global directory)
 /// that is created on demand with stub Taida source files.
@@ -196,6 +197,10 @@ impl CoreBundledProvider {
             ("taida-lang".to_string(), "pool".to_string()),
             "a.1".to_string(),
         );
+        known.insert(
+            ("taida-lang".to_string(), "abi".to_string()),
+            "a.1".to_string(),
+        );
         CoreBundledProvider {
             known,
             bundled_root_override: None,
@@ -212,7 +217,7 @@ impl CoreBundledProvider {
 
     /// Check if a package is a known core-bundled package.
     pub fn is_core_bundled(org: &str, name: &str) -> bool {
-        org == "taida-lang" && matches!(name, "os" | "js" | "crypto" | "net" | "pool")
+        org == "taida-lang" && matches!(name, "os" | "js" | "crypto" | "net" | "pool" | "abi")
     }
 
     /// materialize a core-bundled package on-demand even when
@@ -246,6 +251,7 @@ impl CoreBundledProvider {
             "crypto" => Self::crypto_package_source(),
             "net" => Self::net_package_source(),
             "pool" => Self::pool_package_source(),
+            "abi" => Self::abi_package_source(),
             _ => return None,
         };
         let needs_write = match std::fs::read_to_string(&main_td) {
@@ -394,6 +400,31 @@ Enum => HttpProtocol = :H1 :H2 :H3
 "#
     }
 
+    /// Generate the abi package stub source.
+    fn abi_package_source() -> &'static str {
+        r#"// taida-lang/abi — Core bundled request/response ABI package
+// Handler-mode surface:
+//   WebRequest, WebResponse
+//   text, json, bytes, status, header
+
+WebRequest = @(
+  method: Str,
+  path: Str,
+  query: HashMap[Str, Str],
+  headers: HashMap[Str, Str],
+  body: Bytes
+)
+
+WebResponse = @(
+  status: Int,
+  headers: HashMap[Str, Str],
+  body: Bytes
+)
+
+<<< @(WebRequest, WebResponse, text, json, bytes, status, header)
+"#
+    }
+
     /// Get the global bundled directory (`~/.taida/bundled/`).
     fn global_bundled_root() -> PathBuf {
         let home = crate::util::taida_home_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -418,6 +449,7 @@ Enum => HttpProtocol = :H1 :H2 :H3
             "crypto" => Self::crypto_package_source(),
             "net" => Self::net_package_source(),
             "pool" => Self::pool_package_source(),
+            "abi" => Self::abi_package_source(),
             _ => "// Unknown core-bundled package\n",
         };
         let needs_write = match std::fs::read_to_string(&main_td) {

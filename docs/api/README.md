@@ -18,6 +18,7 @@
 | [`os.md`](os.md) | `taida-lang/os` の API 仕様 (ファイル I/O、プロセス、環境、ソケット、DNS) |
 | [`net.md`](net.md) | `taida-lang/net` の API 仕様 (HTTP/1.1、H2、H3、WebSocket、SSE) |
 | [`crypto.md`](crypto.md) | `taida-lang/crypto` の API 仕様 (`sha256`) |
+| [`abi.md`](abi.md) | `taida-lang/abi` の API 仕様 (`WebRequest` / `WebResponse` / handler helpers) |
 | [`js.md`](js.md) | 旧 JS ターゲット向け `taida-lang/js` の API 仕様 |
 | [`pool.md`](pool.md) | `taida-lang/pool` の API 仕様 (リソースプーリング) |
 | [`build_descriptors.md`](build_descriptors.md) | `taida-lang/build` の API 仕様 (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) |
@@ -31,7 +32,7 @@ Taida のパッケージは大きく次の 3 層に分かれます。
 1. **プレリュード** — インポート不要で常に利用可能な関数・型コンストラクタ。
    詳細は [`prelude.md`](prelude.md) を参照してください。
 2. **コア同梱パッケージ** — `taida-lang/os` / `taida-lang/net` /
-   `taida-lang/crypto` / `taida-lang/pool` /
+   `taida-lang/crypto` / `taida-lang/abi` / `taida-lang/pool` /
    `taida-lang/build`。Taida バイナリに同梱されており、`taida ingot install`
    などのインストールは不要です。`>>> taida-lang/<pkg> => @(...)` で
    明示インポートします (`taida-lang/build` のディスクリプタは
@@ -44,5 +45,5 @@ Taida のパッケージは大きく次の 3 層に分かれます。
    してください。
 
 個別パッケージの API 仕様 (`os.md` / `net.md` / `crypto.md` /
-`pool.md` / `build_descriptors.md`) を直接参照してください。`js.md` は
+`abi.md` / `pool.md` / `build_descriptors.md`) を直接参照してください。`js.md` は
 旧 JS ターゲット互換のためのリファレンスで、正式パリティ対象の API ではありません。

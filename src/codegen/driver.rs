@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::edge_glue::{self, EdgeGlueConfig};
 use super::emit::Emitter;
 use super::emit_wasm_c;
 use super::lifetime;
@@ -356,6 +357,12 @@ impl WasmRuntimeCache {
         self.get_or_compile("rt_edge", source, profile)
     }
 
+    /// Get or compile the shared web handler ABI runtime `.o`
+    pub fn rt_abi_web(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
+        let source = include_str!("runtime_abi_web_wasm.c");
+        self.get_or_compile("rt_abi_web", source, profile)
+    }
+
     /// Get or compile the full runtime `.o`
     pub fn rt_full(&self, profile: emit_wasm_c::WasmProfile) -> Result<PathBuf, CompileError> {
         let source = include_str!("runtime_full_wasm.c");
@@ -518,6 +525,13 @@ pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
 
 /// 単一 `.td` ファイルを Native `.o` にコンパイル（リンクなし）
 fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), CompileError> {
+    compile_to_object_with_exports(input_path, &[])
+}
+
+fn compile_to_object_with_exports(
+    input_path: &Path,
+    extra_exports: &[String],
+) -> Result<(PathBuf, ModuleImports), CompileError> {
     let source = fs::read_to_string(input_path).map_err(|e| CompileError {
         message: format!("failed to read '{}': {}", input_path.display(), e),
     })?;
@@ -548,6 +562,13 @@ fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), Comp
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;
+    for export in extra_exports {
+        if ir_module.functions.iter().any(|func| func.name == *export)
+            && !ir_module.exports.contains(export)
+        {
+            ir_module.exports.push(export.clone());
+        }
+    }
 
     // C27B-018 Option B (wf018B): lifetime tracking — insert
     // ReleaseAuto for short-lived bindings whose function-end Release
@@ -584,6 +605,23 @@ pub fn compile_file(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_inner(input_path, output_path, None)
+}
+
+pub fn compile_file_handler(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    handler: &str,
+) -> Result<PathBuf, CompileError> {
+    let link_symbol = handler_link_symbol(input_path, handler)?;
+    compile_file_inner(input_path, output_path, Some(link_symbol))
+}
+
+fn compile_file_inner(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    handler_link_symbol: Option<String>,
+) -> Result<PathBuf, CompileError> {
     module_graph::detect_local_import_cycle(input_path).map_err(|e| CompileError {
         message: e.to_string(),
     })?;
@@ -591,7 +629,8 @@ pub fn compile_file(
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
     // メインファイルをコンパイル
-    let (main_obj, imports) = compile_to_object(input_path)?;
+    let handler_exports: Vec<String> = handler_link_symbol.iter().cloned().collect();
+    let (main_obj, imports) = compile_to_object_with_exports(input_path, &handler_exports)?;
 
     // 依存モジュールを再帰的にコンパイル
     let mut all_objs = vec![main_obj.clone()];
@@ -653,7 +692,7 @@ pub fn compile_file(
             }
         };
 
-        link_objects(&all_objs, &bin_path)?;
+        link_objects(&all_objs, &bin_path, handler_link_symbol.as_deref())?;
         Ok(bin_path)
     })();
 
@@ -871,16 +910,21 @@ fn find_project_root(start_dir: &Path) -> PathBuf {
 }
 
 /// 複数 `.o` ファイルをリンクしてバイナリを生成
-fn link_objects(obj_paths: &[PathBuf], bin_path: &Path) -> Result<(), CompileError> {
+fn link_objects(
+    obj_paths: &[PathBuf],
+    bin_path: &Path,
+    handler_link_symbol: Option<&str>,
+) -> Result<(), CompileError> {
     // メイン .o のパスからエントリポイント C ファイルの場所を決定
     let obj_path = &obj_paths[0];
-    link_objects_inner(obj_paths, obj_path, bin_path)
+    link_objects_inner(obj_paths, obj_path, bin_path, handler_link_symbol)
 }
 
 fn link_objects_inner(
     obj_paths: &[PathBuf],
     obj_path: &Path,
     bin_path: &Path,
+    handler_link_symbol: Option<&str>,
 ) -> Result<(), CompileError> {
     // cc を使ってリンク（ランタイム関数はプロセス内に存在しないので、
     // スタブ .o も生成する必要がある）
@@ -898,7 +942,17 @@ fn link_objects_inner(
     // 配下の 7 fragment (`01_core.inc.c` .. `07_net_h3_main.inc.c`) に
     // 機械分割し、`LazyLock<&'static str>` で初回アクセス時に連結する。
     // Rust-level 連結のため clang 視点では依然 1 TU で byte-identical。
-    let c_wrapper: &str = &crate::codegen::native_runtime::NATIVE_RUNTIME_C;
+    let c_wrapper_owned;
+    let c_wrapper: &str = if let Some(handler) = handler_link_symbol {
+        c_wrapper_owned = format!(
+            "#define TAIDA_NATIVE_HANDLER_MAIN 1\n{}\n{}",
+            *crate::codegen::native_runtime::NATIVE_RUNTIME_C,
+            native_handler_main_source(handler)
+        );
+        &c_wrapper_owned
+    } else {
+        &crate::codegen::native_runtime::NATIVE_RUNTIME_C
+    };
 
     let c_path = obj_path.with_extension("_entry.c");
     fs::write(&c_path, c_wrapper).map_err(|e| CompileError {
@@ -1603,6 +1657,7 @@ fn wasm_compile_and_link_uncached(
     wasm_path: &Path,
     runtime_sources: &[(&str, &str)],
     tmp_suffix: &str,
+    extra_ld_args: &[&str],
     profile: emit_wasm_c::WasmProfile,
 ) -> Result<(), CompileError> {
     let tmp_base = wasm_path.with_extension(tmp_suffix);
@@ -1728,6 +1783,7 @@ fn wasm_compile_and_link_uncached(
         "--strip-all",
         "--gc-sections",
     ]);
+    cmd.args(extra_ld_args);
     // C25B-026 / Phase 5-G: honour TAIDA_WASM_{INITIAL,MAX}_PAGES and
     // (for the long-running-workload profiles) export the arena-release
     // helpers.
@@ -1765,6 +1821,240 @@ fn wasm_compile_and_link_uncached(
 // WASM profile compilation functions
 // ---------------------------------------------------------------------------
 
+fn wasm_handler_export_flags(handler_mode: bool) -> Vec<&'static str> {
+    if handler_mode {
+        vec![
+            "--export-memory",
+            "--export=taida_abi_web_alloc",
+            "--export=taida_abi_web_handle",
+            "--export=taida_abi_web_out_ptr",
+            "--export=taida_abi_web_out_len",
+            "--export=taida_abi_web_free",
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+fn wasm_needs_abi_web_runtime(generated_c: &str, handler_mode: bool) -> bool {
+    handler_mode || generated_c.contains("taida_abi_response_")
+}
+
+fn handler_link_symbol(input_path: &Path, handler_name: &str) -> Result<String, CompileError> {
+    let source = fs::read_to_string(input_path).map_err(|e| CompileError {
+        message: format!("failed to read '{}': {}", input_path.display(), e),
+    })?;
+    let (program, parse_errors) = parse(&source);
+    if !parse_errors.is_empty() {
+        let msgs: Vec<String> = parse_errors.iter().map(|e| format!("{}", e)).collect();
+        return Err(CompileError {
+            message: format!("parse errors:\n{}", msgs.join("\n")),
+        });
+    }
+    let is_library_module = program
+        .statements
+        .iter()
+        .any(|stmt| matches!(stmt, crate::parser::Statement::Export(_)));
+    if is_library_module {
+        let module_key = Lowering::module_key_for_path(input_path);
+        Ok(format!("_taida_fn_{}_{}", module_key, handler_name))
+    } else {
+        Ok(format!("_taida_fn_{}", handler_name))
+    }
+}
+
+fn wasm_handler_link_symbol(input_path: &Path, handler_name: &str) -> Result<String, CompileError> {
+    handler_link_symbol(input_path, handler_name)
+}
+
+fn wasm_handler_wrapper_source(handler_symbol: &str) -> String {
+    format!(
+        r#"
+
+extern int64_t {handler_symbol}(int64_t request);
+extern int64_t taida_error_ceiling_push(void);
+extern void taida_error_ceiling_pop(void);
+extern int64_t taida_error_try_call(int64_t fn_ptr, int64_t env_ptr, int64_t depth);
+extern int64_t taida_error_try_get_result(int64_t depth);
+extern int64_t taida_abi_web_make_request(int32_t ptr, int32_t len);
+extern int32_t taida_abi_web_begin_request(int32_t ptr, int32_t len);
+extern int32_t taida_abi_web_validate_request(int32_t ptr, int32_t len);
+extern int64_t taida_abi_web_store_response_json(int64_t response);
+extern int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_ptr);
+
+int64_t taida_abi_web_handle(int32_t ptr, int32_t len) {{
+    taida_abi_web_begin_request(ptr, len);
+    if (!taida_abi_web_validate_request(ptr, len)) {{
+        return taida_abi_web_store_error_response_json(413, (int64_t)(intptr_t)"request too large");
+    }}
+    int64_t request = taida_abi_web_make_request(ptr, len);
+    int64_t depth = taida_error_ceiling_push();
+    int64_t thrown = taida_error_try_call((int64_t)(intptr_t)&{handler_symbol}, request, depth);
+    if (thrown) {{
+        taida_error_ceiling_pop();
+        return taida_abi_web_store_error_response_json(500, (int64_t)(intptr_t)"handler throw");
+    }}
+    int64_t response = taida_error_try_get_result(depth);
+    taida_error_ceiling_pop();
+    return taida_abi_web_store_response_json(response);
+}}
+"#,
+        handler_symbol = handler_symbol
+    )
+}
+
+fn native_handler_main_source(handler_symbol: &str) -> String {
+    format!(
+        r#"
+
+extern taida_val {handler_symbol}(taida_val request);
+extern taida_val taida_error_ceiling_push(void);
+extern void taida_error_ceiling_pop(void);
+extern taida_val taida_error_try_call(taida_val fn_ptr, taida_val env_ptr, taida_val depth);
+extern taida_val taida_error_try_get_result(taida_val depth);
+extern taida_val taida_error_get_value(taida_val depth);
+extern void taida_handler_set_stdout_redirect(taida_val enabled);
+extern taida_val taida_abi_web_make_request_json(taida_val json_ptr, taida_val len);
+extern taida_val taida_abi_web_store_response_json_native(taida_val response);
+extern taida_val taida_abi_response_text(taida_val body_ptr);
+extern taida_val taida_abi_response_status(taida_val code, taida_val response);
+extern taida_val taida_abi_response_header(taida_val name_ptr, taida_val value_ptr, taida_val response);
+
+static taida_val taida_native_handler_error_response(const char *kind, taida_val message) {{
+    (void)message;
+    const char *body = "handler throw";
+    taida_val response = taida_abi_response_text((taida_val)body);
+    response = taida_abi_response_status(500, response);
+    response = taida_abi_response_header((taida_val)"x-taida-error", (taida_val)(kind ? kind : "handler"), response);
+    return response;
+}}
+
+static taida_val taida_native_handler_status_response(taida_val code, const char *kind, const char *body) {{
+    taida_val response = taida_abi_response_text((taida_val)(body ? body : ""));
+    response = taida_abi_response_status(code, response);
+    response = taida_abi_response_header((taida_val)"x-taida-error", (taida_val)(kind ? kind : "abi"), response);
+    return response;
+}}
+
+static void taida_native_handler_write_response(taida_val response) {{
+    taida_val json = taida_abi_web_store_response_json_native(response);
+    const char *out = (const char *)json;
+    if (out) fputs(out, stdout);
+    fputc('\n', stdout);
+}}
+
+static char *taida_native_handler_read_stdin(taida_val *out_len) {{
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buf = (char *)malloc(cap + 1);
+    if (!buf) {{
+        fprintf(stderr, "taida: out of memory (handler stdin)\n");
+        exit(1);
+    }}
+    for (;;) {{
+        if (len == cap) {{
+            if (cap >= TAIDA_ABI_MAX_REQUEST_BYTES) {{
+                int extra = fgetc(stdin);
+                if (extra == EOF) {{
+                    if (ferror(stdin)) {{
+                        free(buf);
+                        fprintf(stderr, "taida: failed to read handler stdin\n");
+                        exit(1);
+                    }}
+                    break;
+                }}
+                fprintf(stderr, "taida: handler stdin too large\n");
+                free(buf);
+                *out_len = -1;
+                return NULL;
+            }}
+            if (cap > SIZE_MAX / 2) {{
+                fprintf(stderr, "taida: handler stdin too large\n");
+                free(buf);
+                *out_len = -1;
+                return NULL;
+            }}
+            cap *= 2;
+            if (cap > TAIDA_ABI_MAX_REQUEST_BYTES) cap = TAIDA_ABI_MAX_REQUEST_BYTES;
+            char *next = (char *)realloc(buf, cap + 1);
+            if (!next) {{
+                free(buf);
+                fprintf(stderr, "taida: out of memory (handler stdin grow)\n");
+                exit(1);
+            }}
+            buf = next;
+        }}
+        size_t got = fread(buf + len, 1, cap - len, stdin);
+        len += got;
+        if (got == 0) {{
+            if (ferror(stdin)) {{
+                free(buf);
+                fprintf(stderr, "taida: failed to read handler stdin\n");
+                exit(1);
+            }}
+            break;
+        }}
+    }}
+    buf[len] = '\0';
+    *out_len = (taida_val)len;
+    return buf;
+}}
+
+int main(int argc, char **argv) {{
+    taida_cli_argc = argc;
+    taida_cli_argv = argv;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
+    taida_val input_len = 0;
+    char *input = taida_native_handler_read_stdin(&input_len);
+    if (input_len < 0) {{
+        taida_native_handler_write_response(
+            taida_native_handler_status_response(413, "abi", "request too large")
+        );
+        return 0;
+    }}
+    taida_val request = taida_abi_web_make_request_json((taida_val)input, input_len);
+    taida_val depth = taida_error_ceiling_push();
+    taida_handler_set_stdout_redirect(1);
+    taida_val thrown = taida_error_try_call((taida_val)(intptr_t)&{handler_symbol}, request, depth);
+    taida_handler_set_stdout_redirect(0);
+    taida_val response = 0;
+    if (thrown) {{
+        taida_val error = taida_error_get_value(depth);
+        taida_val message = taida_throw_to_display_string(error);
+        response = taida_native_handler_error_response("handler-throw", message);
+    }} else {{
+        response = taida_error_try_get_result(depth);
+    }}
+    taida_error_ceiling_pop();
+    taida_native_handler_write_response(response);
+    free(input);
+    return 0;
+}}
+"#,
+        handler_symbol = handler_symbol
+    )
+}
+
+fn push_cached_abi_web_obj(
+    rt_cache: &WasmRuntimeCache,
+    objs: &mut Vec<PathBuf>,
+    profile: emit_wasm_c::WasmProfile,
+    enabled: bool,
+) -> Result<(), CompileError> {
+    if enabled {
+        objs.push(rt_cache.rt_abi_web(profile)?);
+    }
+    Ok(())
+}
+
+fn push_uncached_abi_web_source<'a>(sources: &mut Vec<(&'a str, &'a str)>, enabled: bool) {
+    if enabled {
+        sources.push(("rt_abi_web", include_str!("runtime_abi_web_wasm.c")));
+    }
+}
+
 /// `.td` ファイルを wasm-min ターゲットでコンパイルし `.wasm` を生成する
 ///
 /// モジュールインポート対応: 依存モジュールを IR レベルでインライン展開し、
@@ -1785,27 +2075,56 @@ pub fn compile_file_wasm_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_cached_with_handler(input_path, output_path, cache, None)
+}
+
+pub fn compile_file_wasm_handler_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+    handler: &str,
+) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_cached_with_handler(input_path, output_path, cache, Some(handler))
+}
+
+fn compile_file_wasm_cached_with_handler(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+    handler: Option<&str>,
+) -> Result<PathBuf, CompileError> {
     let profile = emit_wasm_c::WasmProfile::Min;
-    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    let (mut generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    if let Some(handler_name) = handler {
+        let link_symbol = wasm_handler_link_symbol(input_path, handler_name)?;
+        generated_c.push_str(&wasm_handler_wrapper_source(&link_symbol));
+    }
+    let needs_abi_web = wasm_needs_abi_web_runtime(&generated_c, handler.is_some());
+    let extra_ld_args = wasm_handler_export_flags(handler.is_some());
 
     if let Some(rt_cache) = cache {
-        let rt_obj = rt_cache.rt_core(profile)?;
+        let mut rt_objs = vec![rt_cache.rt_core(profile)?];
+        push_cached_abi_web_obj(rt_cache, &mut rt_objs, profile, needs_abi_web)?;
         rt_cache.link_wasm_cached(
-            &[rt_obj],
+            &rt_objs,
             &generated_c,
             &wasm_path,
             "_wasm_tmp",
-            &[],
+            &extra_ld_args,
             profile,
         )?;
         return Ok(wasm_path);
     }
 
+    let mut runtime_sources: Vec<(&str, &str)> =
+        vec![("rt", &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM)];
+    push_uncached_abi_web_source(&mut runtime_sources, needs_abi_web);
     wasm_compile_and_link_uncached(
         &generated_c,
         &wasm_path,
-        &[("rt", &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM)],
+        &runtime_sources,
         "_wasm_tmp",
+        &extra_ld_args,
         profile,
     )?;
 
@@ -1835,34 +2154,61 @@ pub fn compile_file_wasm_wasi_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_wasi_cached_with_handler(input_path, output_path, cache, None)
+}
+
+pub fn compile_file_wasm_wasi_handler_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+    handler: &str,
+) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_wasi_cached_with_handler(input_path, output_path, cache, Some(handler))
+}
+
+fn compile_file_wasm_wasi_cached_with_handler(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+    handler: Option<&str>,
+) -> Result<PathBuf, CompileError> {
     let profile = emit_wasm_c::WasmProfile::Wasi;
-    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    let (mut generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    if let Some(handler_name) = handler {
+        let link_symbol = wasm_handler_link_symbol(input_path, handler_name)?;
+        generated_c.push_str(&wasm_handler_wrapper_source(&link_symbol));
+    }
+    let needs_abi_web = wasm_needs_abi_web_runtime(&generated_c, handler.is_some());
+    let extra_ld_args = wasm_handler_export_flags(handler.is_some());
 
     if let Some(rt_cache) = cache {
-        let rt_core = rt_cache.rt_core(profile)?;
-        let rt_wasi = rt_cache.rt_wasi(profile)?;
+        let mut rt_objs = vec![rt_cache.rt_core(profile)?, rt_cache.rt_wasi(profile)?];
+        push_cached_abi_web_obj(rt_cache, &mut rt_objs, profile, needs_abi_web)?;
         rt_cache.link_wasm_cached(
-            &[rt_core, rt_wasi],
+            &rt_objs,
             &generated_c,
             &wasm_path,
             "_wasm_wasi_tmp",
-            &[],
+            &extra_ld_args,
             profile,
         )?;
         return Ok(wasm_path);
     }
 
+    let mut runtime_sources: Vec<(&str, &str)> = vec![
+        (
+            "rt_core",
+            &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+        ),
+        ("rt_wasi", include_str!("runtime_wasi_io.c")),
+    ];
+    push_uncached_abi_web_source(&mut runtime_sources, needs_abi_web);
     wasm_compile_and_link_uncached(
         &generated_c,
         &wasm_path,
-        &[
-            (
-                "rt_core",
-                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
-            ),
-            ("rt_wasi", include_str!("runtime_wasi_io.c")),
-        ],
+        &runtime_sources,
         "_wasm_wasi_tmp",
+        &extra_ld_args,
         profile,
     )?;
 
@@ -1881,7 +2227,7 @@ pub fn compile_file_wasm_edge(
     input_path: &Path,
     output_path: Option<&Path>,
 ) -> Result<WasmEdgeOutput, CompileError> {
-    compile_file_wasm_edge_cached(input_path, output_path, None)
+    compile_file_wasm_edge_cached(input_path, output_path, None, None)
 }
 
 /// wasm-edge コンパイル with optional runtime cache (RC-8a/8d).
@@ -1889,44 +2235,54 @@ pub fn compile_file_wasm_edge_cached(
     input_path: &Path,
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
+    handler: Option<&str>,
 ) -> Result<WasmEdgeOutput, CompileError> {
     let profile = emit_wasm_c::WasmProfile::Edge;
-    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    let (mut generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    if let Some(handler_name) = handler {
+        let link_symbol = wasm_handler_link_symbol(input_path, handler_name)?;
+        generated_c.push_str(&wasm_handler_wrapper_source(&link_symbol));
+    }
+    let needs_abi_web = wasm_needs_abi_web_runtime(&generated_c, handler.is_some());
+    let extra_ld_args = wasm_handler_export_flags(handler.is_some());
 
     if let Some(rt_cache) = cache {
-        let rt_core = rt_cache.rt_core(profile)?;
-        let rt_edge = rt_cache.rt_edge(profile)?;
+        let mut rt_objs = vec![rt_cache.rt_core(profile)?, rt_cache.rt_edge(profile)?];
+        push_cached_abi_web_obj(rt_cache, &mut rt_objs, profile, needs_abi_web)?;
         rt_cache.link_wasm_cached(
-            &[rt_core, rt_edge],
+            &rt_objs,
             &generated_c,
             &wasm_path,
             "_wasm_edge_tmp",
-            &[],
+            &extra_ld_args,
             profile,
         )?;
-        let glue_path = generate_edge_js_glue(&wasm_path)?;
+        let glue_path = generate_edge_js_glue(&wasm_path, handler.is_some())?;
         return Ok(WasmEdgeOutput {
             wasm_path,
             glue_path,
         });
     }
 
+    let mut runtime_sources: Vec<(&str, &str)> = vec![
+        (
+            "rt_core",
+            &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+        ),
+        ("rt_edge", include_str!("runtime_edge_host.c")),
+    ];
+    push_uncached_abi_web_source(&mut runtime_sources, needs_abi_web);
     wasm_compile_and_link_uncached(
         &generated_c,
         &wasm_path,
-        &[
-            (
-                "rt_core",
-                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
-            ),
-            ("rt_edge", include_str!("runtime_edge_host.c")),
-        ],
+        &runtime_sources,
         "_wasm_edge_tmp",
+        &extra_ld_args,
         profile,
     )?;
 
     // WE-2d: Generate JS glue alongside the .wasm
-    let glue_path = generate_edge_js_glue(&wasm_path)?;
+    let glue_path = generate_edge_js_glue(&wasm_path, handler.is_some())?;
 
     Ok(WasmEdgeOutput {
         wasm_path,
@@ -1959,45 +2315,71 @@ pub fn compile_file_wasm_full_cached(
     output_path: Option<&Path>,
     cache: Option<&WasmRuntimeCache>,
 ) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_full_cached_with_handler(input_path, output_path, cache, None)
+}
+
+pub fn compile_file_wasm_full_handler_cached(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+    handler: &str,
+) -> Result<PathBuf, CompileError> {
+    compile_file_wasm_full_cached_with_handler(input_path, output_path, cache, Some(handler))
+}
+
+fn compile_file_wasm_full_cached_with_handler(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    cache: Option<&WasmRuntimeCache>,
+    handler: Option<&str>,
+) -> Result<PathBuf, CompileError> {
     let profile = emit_wasm_c::WasmProfile::Full;
-    let (generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    let (mut generated_c, wasm_path) = wasm_frontend(input_path, output_path, profile)?;
+    if let Some(handler_name) = handler {
+        let link_symbol = wasm_handler_link_symbol(input_path, handler_name)?;
+        generated_c.push_str(&wasm_handler_wrapper_source(&link_symbol));
+    }
+    let needs_abi_web = wasm_needs_abi_web_runtime(&generated_c, handler.is_some());
+    let extra_ld_args = wasm_handler_export_flags(handler.is_some());
 
     if let Some(rt_cache) = cache {
-        let rt_core = rt_cache.rt_core(profile)?;
-        let rt_wasi = rt_cache.rt_wasi(profile)?;
-        let rt_full = rt_cache.rt_full(profile)?;
+        let mut rt_objs = vec![
+            rt_cache.rt_core(profile)?,
+            rt_cache.rt_wasi(profile)?,
+            rt_cache.rt_full(profile)?,
+        ];
+        push_cached_abi_web_obj(rt_cache, &mut rt_objs, profile, needs_abi_web)?;
         rt_cache.link_wasm_cached(
-            &[rt_core, rt_wasi, rt_full],
+            &rt_objs,
             &generated_c,
             &wasm_path,
             "_wasm_full_tmp",
-            &[],
+            &extra_ld_args,
             profile,
         )?;
         return Ok(wasm_path);
     }
 
+    let mut runtime_sources: Vec<(&str, &str)> = vec![
+        (
+            "rt_core",
+            &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+        ),
+        ("rt_wasi", include_str!("runtime_wasi_io.c")),
+        ("rt_full", include_str!("runtime_full_wasm.c")),
+    ];
+    push_uncached_abi_web_source(&mut runtime_sources, needs_abi_web);
     wasm_compile_and_link_uncached(
         &generated_c,
         &wasm_path,
-        &[
-            (
-                "rt_core",
-                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
-            ),
-            ("rt_wasi", include_str!("runtime_wasi_io.c")),
-            ("rt_full", include_str!("runtime_full_wasm.c")),
-        ],
+        &runtime_sources,
         "_wasm_full_tmp",
+        &extra_ld_args,
         profile,
     )?;
 
     Ok(wasm_path)
 }
-
-// ---------------------------------------------------------------------------
-// WE-2d: JS glue generation for Cloudflare Workers
-// ---------------------------------------------------------------------------
 
 /// Generate a JS glue file for Cloudflare Workers deployment.
 ///
@@ -2007,7 +2389,7 @@ pub fn compile_file_wasm_full_cached(
 /// - Workers `export default { fetch }` entrypoint
 ///
 /// Output: `{stem}.edge.js` next to the `.wasm` file.
-fn generate_edge_js_glue(wasm_path: &Path) -> Result<PathBuf, CompileError> {
+fn generate_edge_js_glue(wasm_path: &Path, handler_mode: bool) -> Result<PathBuf, CompileError> {
     let stem = wasm_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -2019,7 +2401,12 @@ fn generate_edge_js_glue(wasm_path: &Path) -> Result<PathBuf, CompileError> {
 
     let glue_path = wasm_path.with_extension("edge.js");
 
-    let glue = generate_edge_js_source(stem, wasm_filename);
+    let config = if handler_mode {
+        EdgeGlueConfig::handler(stem, wasm_filename)
+    } else {
+        EdgeGlueConfig::stdout(stem, wasm_filename)
+    };
+    let glue = edge_glue::generate_edge_js_source(config);
 
     fs::write(&glue_path, glue).map_err(|e| CompileError {
         message: format!("failed to write JS glue '{}': {}", glue_path.display(), e),
@@ -2032,145 +2419,11 @@ fn generate_edge_js_glue(wasm_path: &Path) -> Result<PathBuf, CompileError> {
 ///
 /// This is a pure function (no I/O) to facilitate testing.
 pub fn generate_edge_js_source(stem: &str, wasm_filename: &str) -> String {
-    format!(
-        r#"// {stem}.edge.js -- Cloudflare Workers glue for Taida wasm-edge
-// Generated by `taida build wasm-edge`
-//
-// Deploy: wrangler deploy --name {stem}
-// wrangler.toml should set:
-//   main = "{stem}.edge.js"
-//   [wasm_modules]
-//   WASM = "{wasm_filename}"
+    edge_glue::generate_edge_js_source(EdgeGlueConfig::stdout(stem, wasm_filename))
+}
 
-import WASM from "./{wasm_filename}";
-
-export default {{
-  async fetch(request, env, ctx) {{
-    const stdoutChunks = [];
-    const stderrChunks = [];
-
-    let memory = new WebAssembly.Memory({{ initial: 2 }});
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-
-    // -- helpers --
-
-    function readStr(ptr, len) {{
-      return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
-    }}
-
-    function writeStr(ptr, str) {{
-      const bytes = encoder.encode(str);
-      new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
-      return bytes.length;
-    }}
-
-    // -- wasi_snapshot_preview1 --
-
-    const wasi = {{
-      fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) {{
-        const view = new DataView(memory.buffer);
-        let total = 0;
-        for (let i = 0; i < iovs_len; i++) {{
-          const base = iovs_ptr + i * 8;
-          const ptr = view.getUint32(base, true);
-          const len = view.getUint32(base + 4, true);
-          const chunk = new Uint8Array(memory.buffer, ptr, len);
-          if (fd === 1) {{
-            stdoutChunks.push(new Uint8Array(chunk));
-          }} else if (fd === 2) {{
-            stderrChunks.push(new Uint8Array(chunk));
-          }}
-          total += len;
-        }}
-        view.setUint32(nwritten_ptr, total, true);
-        return 0;
-      }},
-    }};
-
-    // -- taida_host --
-
-    const taida_host = {{
-      env_get(key_ptr, key_len, buf_ptr, buf_cap) {{
-        const key = readStr(key_ptr, key_len);
-        const val = env[key];
-        if (val === undefined || val === null || typeof val !== "string") {{
-          return 0;
-        }}
-        const bytes = encoder.encode(val);
-        if (bytes.length > buf_cap) {{
-          return bytes.length;
-        }}
-        new Uint8Array(memory.buffer, buf_ptr, bytes.length).set(bytes);
-        return bytes.length;
-      }},
-
-      env_get_all(buf_ptr, buf_cap) {{
-        const entries = [];
-        for (const [k, v] of Object.entries(env)) {{
-          if (typeof v === "string") {{
-            entries.push(k + "=" + v);
-          }}
-        }}
-        if (entries.length === 0) return 0;
-        const payload = entries.join("\0") + "\0\0";
-        const bytes = encoder.encode(payload);
-        if (bytes.length > buf_cap) {{
-          return bytes.length;
-        }}
-        new Uint8Array(memory.buffer, buf_ptr, bytes.length).set(bytes);
-        return bytes.length;
-      }},
-    }};
-
-    // -- instantiate and run --
-
-    const importObject = {{
-      env: {{ memory }},
-      wasi_snapshot_preview1: wasi,
-      taida_host,
-    }};
-
-    const instance = await WebAssembly.instantiate(WASM, importObject);
-
-    // If the module exports its own memory, use that instead
-    if (instance.exports.memory) {{
-      memory = instance.exports.memory;
-    }}
-
-    if (instance.exports._start) {{
-      instance.exports._start();
-    }}
-
-    // Log stderr to console
-    if (stderrChunks.length > 0) {{
-      const errBytes = concat(stderrChunks);
-      console.error(decoder.decode(errBytes));
-    }}
-
-    // Return stdout as response
-    const outBytes = concat(stdoutChunks);
-    return new Response(decoder.decode(outBytes), {{
-      headers: {{ "content-type": "text/plain; charset=utf-8" }},
-    }});
-  }},
-}};
-
-function concat(arrays) {{
-  let total = 0;
-  for (const a of arrays) total += a.length;
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const a of arrays) {{
-    result.set(a, offset);
-    offset += a.length;
-  }}
-  return result;
-}}
-"#,
-        stem = stem,
-        wasm_filename = wasm_filename,
-    )
+pub fn generate_edge_handler_js_source(stem: &str, wasm_filename: &str) -> String {
+    edge_glue::generate_edge_js_source(EdgeGlueConfig::handler(stem, wasm_filename))
 }
 
 #[cfg(test)]
