@@ -34,6 +34,7 @@ extern int64_t taida_json_encode(int64_t value);
 
 typedef struct {
     int32_t active;
+    uint32_t generation;
     int32_t ptr;
     int32_t len;
 } TaidaAbiWebOut;
@@ -689,18 +690,22 @@ int64_t taida_abi_web_store_response_json(int64_t response) {
     for (int32_t probe = 0; probe < TAIDA_ABI_WEB_OUT_TABLE_SIZE; probe++) {
         int32_t slot = (abi_web_out_next + probe) % TAIDA_ABI_WEB_OUT_TABLE_SIZE;
         if (!abi_web_outs[slot].active) {
-            abi_web_outs[slot].active = 1;
-            abi_web_outs[slot].ptr = (int32_t)(intptr_t)jb.buf;
-            abi_web_outs[slot].len = jb.len;
+            TaidaAbiWebOut *out = &abi_web_outs[slot];
+            if (out->generation == 0) out->generation = 1;
+            out->active = 1;
+            out->ptr = (int32_t)(intptr_t)jb.buf;
+            out->len = jb.len;
             abi_web_out_next = (slot + 1) % TAIDA_ABI_WEB_OUT_TABLE_SIZE;
-            return (int64_t)(slot + 1);
+            return ((int64_t)out->generation << 16) | (int64_t)(slot + 1);
         }
     }
-    abi_web_outs[0].active = 1;
-    abi_web_outs[0].ptr = (int32_t)(intptr_t)jb.buf;
-    abi_web_outs[0].len = jb.len;
+    TaidaAbiWebOut *out = &abi_web_outs[0];
+    if (out->generation == 0) out->generation = 1;
+    out->active = 1;
+    out->ptr = (int32_t)(intptr_t)jb.buf;
+    out->len = jb.len;
     abi_web_out_next = 1;
-    return 1;
+    return ((int64_t)out->generation << 16) | 1;
 }
 
 int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_ptr) {
@@ -709,9 +714,15 @@ int64_t taida_abi_web_store_error_response_json(int64_t status, int64_t message_
 }
 
 static TaidaAbiWebOut *abi_web_out_get(int64_t handle) {
-    if (handle <= 0 || handle > TAIDA_ABI_WEB_OUT_TABLE_SIZE) return (TaidaAbiWebOut *)0;
-    TaidaAbiWebOut *out = &abi_web_outs[(int32_t)handle - 1];
-    return out->active ? out : (TaidaAbiWebOut *)0;
+    if (handle <= 0) return (TaidaAbiWebOut *)0;
+    uint64_t raw = (uint64_t)handle;
+    int32_t slot = (int32_t)(raw & 0xffffu) - 1;
+    uint32_t generation = (uint32_t)(raw >> 16);
+    if (slot < 0 || slot >= TAIDA_ABI_WEB_OUT_TABLE_SIZE || generation == 0) {
+        return (TaidaAbiWebOut *)0;
+    }
+    TaidaAbiWebOut *out = &abi_web_outs[slot];
+    return (out->active && out->generation == generation) ? out : (TaidaAbiWebOut *)0;
 }
 
 int32_t taida_abi_web_out_ptr(int64_t handle) {
@@ -730,5 +741,7 @@ int32_t taida_abi_web_free(int64_t handle) {
     out->active = 0;
     out->ptr = 0;
     out->len = 0;
+    out->generation++;
+    if (out->generation == 0) out->generation = 1;
     return 1;
 }

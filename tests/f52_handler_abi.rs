@@ -151,10 +151,24 @@ const fs = require("fs");
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
   instance.exports.taida_abi_web_free(handle);
   const response = JSON.parse(raw);
+  const inRangeUnissuedPtr = instance.exports.taida_abi_web_out_ptr(2n);
+  const inRangeUnissuedLen = instance.exports.taida_abi_web_out_len(2n);
+  const activeNeighborHandle = (1n << 16n) | 2n;
+  const activeNeighborPtr = instance.exports.taida_abi_web_out_ptr(activeNeighborHandle);
+  const activeNeighborLen = instance.exports.taida_abi_web_out_len(activeNeighborHandle);
   const forgedPtr = instance.exports.taida_abi_web_out_ptr(12345n);
   const forgedLen = instance.exports.taida_abi_web_out_len(12345n);
   const hugeAlloc = instance.exports.taida_abi_web_alloc(16777217);
-  console.log(JSON.stringify({{ response, forgedPtr, forgedLen, hugeAlloc }}));
+  console.log(JSON.stringify({{
+    response,
+    inRangeUnissuedPtr,
+    inRangeUnissuedLen,
+    activeNeighborPtr,
+    activeNeighborLen,
+    forgedPtr,
+    forgedLen,
+    hugeAlloc,
+  }}));
 }})().catch((err) => {{
   console.error(err && err.stack ? err.stack : err);
   process.exit(1);
@@ -185,9 +199,29 @@ fn run_handler_with_node(wasm_path: &Path, label: &str) -> Option<String> {
         "forged output handle must not expose memory"
     );
     assert_eq!(
+        value["inRangeUnissuedPtr"].as_i64(),
+        Some(0),
+        "in-range unissued output handle must not expose memory"
+    );
+    assert_eq!(
+        value["activeNeighborPtr"].as_i64(),
+        Some(0),
+        "active generation with unissued slot must not expose memory"
+    );
+    assert_eq!(
         value["forgedLen"].as_i64(),
         Some(0),
         "forged output handle length must be rejected"
+    );
+    assert_eq!(
+        value["inRangeUnissuedLen"].as_i64(),
+        Some(0),
+        "in-range unissued output handle length must be rejected"
+    );
+    assert_eq!(
+        value["activeNeighborLen"].as_i64(),
+        Some(0),
+        "active generation with unissued slot length must be rejected"
     );
     assert_eq!(
         value["hugeAlloc"].as_i64(),
@@ -211,6 +245,32 @@ fn run_handler_native(bin_path: &Path, payload: &[u8]) -> Option<String> {
     {
         let stdin = child.stdin.as_mut()?;
         stdin.write_all(payload).ok()?;
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "native handler host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_handler_native_with_large_payload(bin_path: &Path, payload: &[u8]) -> Option<String> {
+    let mut child = Command::new(bin_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    {
+        let stdin = child.stdin.as_mut()?;
+        if let Err(err) = stdin.write_all(payload) {
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                return None;
+            }
+        }
     }
     let output = child.wait_with_output().ok()?;
     if !output.status.success() {
@@ -440,6 +500,45 @@ handle req: WebRequest = text(req.method + ":" + req.path + ":" + sha256(req.bod
         "malformed native request should use default method/path/body: {}",
         raw
     );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&bin_path);
+}
+
+#[test]
+fn f52_native_handler_oversized_request_returns_413_json() {
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest = text(req.method + ":" + req.path) => :WebResponse
+"#;
+
+    let stem = format!("taida_f52_native_oversized_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let bin_path: PathBuf = std::env::temp_dir().join(stem);
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&bin_path);
+    std::fs::write(&td_path, source).expect("write native oversized F52 handler fixture");
+
+    let err = compile_handler("native", &td_path, &bin_path);
+    assert!(
+        err.is_none(),
+        "native handler build should compile: {:?}",
+        err
+    );
+
+    let payload = vec![b'{'; 16 * 1024 * 1024 + 1];
+    let raw = run_handler_native_with_large_payload(&bin_path, &payload)
+        .expect("oversized native request should return structured JSON");
+    let json = response_json(&raw);
+    assert_eq!(json["status"].as_i64(), Some(413));
+    assert_eq!(json["headers"]["x-taida-error"].as_str(), Some("abi"));
+
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(json["bodyBase64"].as_str().unwrap_or_default())
+        .expect("oversized response body must decode");
+    let body = String::from_utf8(body).expect("oversized response body must be utf-8");
+    assert_eq!(body, "request too large");
 
     let _ = std::fs::remove_file(&td_path);
     let _ = std::fs::remove_file(&bin_path);

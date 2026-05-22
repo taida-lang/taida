@@ -1927,6 +1927,20 @@ static taida_val taida_native_handler_error_response(const char *kind, taida_val
     return response;
 }}
 
+static taida_val taida_native_handler_status_response(taida_val code, const char *kind, const char *body) {{
+    taida_val response = taida_abi_response_text((taida_val)(body ? body : ""));
+    response = taida_abi_response_status(code, response);
+    response = taida_abi_response_header((taida_val)"x-taida-error", (taida_val)(kind ? kind : "abi"), response);
+    return response;
+}}
+
+static void taida_native_handler_write_response(taida_val response) {{
+    taida_val json = taida_abi_web_store_response_json_native(response);
+    const char *out = (const char *)json;
+    if (out) fputs(out, stdout);
+    fputc('\n', stdout);
+}}
+
 static char *taida_native_handler_read_stdin(taida_val *out_len) {{
     size_t cap = 4096;
     size_t len = 0;
@@ -1937,9 +1951,26 @@ static char *taida_native_handler_read_stdin(taida_val *out_len) {{
     }}
     for (;;) {{
         if (len == cap) {{
-            if (cap >= TAIDA_ABI_MAX_REQUEST_BYTES || cap > SIZE_MAX / 2) {{
+            if (cap >= TAIDA_ABI_MAX_REQUEST_BYTES) {{
+                int extra = fgetc(stdin);
+                if (extra == EOF) {{
+                    if (ferror(stdin)) {{
+                        free(buf);
+                        fprintf(stderr, "taida: failed to read handler stdin\n");
+                        exit(1);
+                    }}
+                    break;
+                }}
                 fprintf(stderr, "taida: handler stdin too large\n");
-                exit(1);
+                free(buf);
+                *out_len = -1;
+                return NULL;
+            }}
+            if (cap > SIZE_MAX / 2) {{
+                fprintf(stderr, "taida: handler stdin too large\n");
+                free(buf);
+                *out_len = -1;
+                return NULL;
             }}
             cap *= 2;
             if (cap > TAIDA_ABI_MAX_REQUEST_BYTES) cap = TAIDA_ABI_MAX_REQUEST_BYTES;
@@ -1975,6 +2006,12 @@ int main(int argc, char **argv) {{
 
     taida_val input_len = 0;
     char *input = taida_native_handler_read_stdin(&input_len);
+    if (input_len < 0) {{
+        taida_native_handler_write_response(
+            taida_native_handler_status_response(413, "abi", "request too large")
+        );
+        return 0;
+    }}
     taida_val request = taida_abi_web_make_request_json((taida_val)input, input_len);
     taida_val depth = taida_error_ceiling_push();
     taida_handler_set_stdout_redirect(1);
@@ -1989,10 +2026,7 @@ int main(int argc, char **argv) {{
         response = taida_error_try_get_result(depth);
     }}
     taida_error_ceiling_pop();
-    taida_val json = taida_abi_web_store_response_json_native(response);
-    const char *out = (const char *)json;
-    if (out) fputs(out, stdout);
-    fputc('\n', stdout);
+    taida_native_handler_write_response(response);
     free(input);
     return 0;
 }}
