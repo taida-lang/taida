@@ -5801,6 +5801,9 @@ fn run_build_js_dir(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_native(
     input_path: &Path,
     output_path: Option<&str>,
@@ -5973,6 +5976,9 @@ fn run_build_native(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_min(
     input_path: &Path,
     output_path: Option<&str>,
@@ -6162,6 +6168,9 @@ fn run_build_wasm_min(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_wasi(
     input_path: &Path,
     output_path: Option<&str>,
@@ -6428,6 +6437,9 @@ fn named_type_expr(ty: &TypeExpr) -> Option<&str> {
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_edge(
     input_path: &Path,
     output_path: Option<&str>,
@@ -6619,6 +6631,9 @@ fn run_build_wasm_edge(
 }
 
 #[cfg(feature = "native")]
+// Build target entry points preserve the CLI surface shape explicitly; packing
+// these one-off arguments would hide the target-specific diagnostic flow.
+#[allow(clippy::too_many_arguments)]
 fn run_build_wasm_full(
     input_path: &Path,
     output_path: Option<&str>,

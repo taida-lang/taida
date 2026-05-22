@@ -390,10 +390,10 @@ fn run_handler_native_with_large_payload(bin_path: &Path, payload: &[u8]) -> Opt
         .ok()?;
     {
         let stdin = child.stdin.as_mut()?;
-        if let Err(err) = stdin.write_all(payload) {
-            if err.kind() != std::io::ErrorKind::BrokenPipe {
-                return None;
-            }
+        match stdin.write_all(payload) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(_) => return None,
         }
     }
     let output = child.wait_with_output().ok()?;
