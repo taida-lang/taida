@@ -33,6 +33,22 @@ fn compile_wasm_edge(td_path: &Path, wasm_path: &Path) -> Option<String> {
     }
 }
 
+fn compile_wasm_edge_handler(td_path: &Path, wasm_path: &Path, handler: &str) -> Option<String> {
+    let output = Command::new(taida_bin())
+        .args(["build", "wasm-edge", "--no-cache", "--handler", handler])
+        .arg(td_path)
+        .arg("-o")
+        .arg(wasm_path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // WE-3a: Smoke tests
 // ---------------------------------------------------------------------------
@@ -441,6 +457,31 @@ fn wasm_edge_glue_current_mode_is_stdout_start_adapter() {
     );
 }
 
+/// Test: explicit handler mode generates Workers glue for the request ABI.
+#[test]
+fn wasm_edge_handler_glue_uses_request_abi() {
+    let glue = taida::codegen::edge_glue::generate_edge_js_source(
+        taida::codegen::edge_glue::EdgeGlueConfig::handler("test", "test.wasm"),
+    );
+
+    assert!(
+        glue.contains("taida_abi_web_handle"),
+        "handler adapter should call the request ABI entry point"
+    );
+    assert!(
+        glue.contains("bodyBase64"),
+        "handler adapter should marshal request and response bodies"
+    );
+    assert!(
+        glue.contains("new Headers"),
+        "handler adapter should rebuild response headers"
+    );
+    assert!(
+        !glue.contains("instance.exports._start()"),
+        "handler adapter should not execute the stdout _start path"
+    );
+}
+
 /// Test: generated glue can be imported from user-authored Workers JS.
 #[test]
 fn wasm_edge_glue_exposes_importable_request_adapter() {
@@ -489,6 +530,232 @@ fn wasm_edge_env_generates_js_glue() {
 
     let _ = std::fs::remove_file(&wasm_path);
     let _ = std::fs::remove_file(&glue_path);
+}
+
+/// Test: handler mode builds a wasm module and a handler-specific glue file.
+#[test]
+fn wasm_edge_handler_build_generates_handler_glue() {
+    let stem = format!("taida_wasm_edge_handler_glue_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+    let glue_path = std::env::temp_dir().join(format!("{}.edge.js", stem));
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest = text(req.method + ":" + req.path) => :WebResponse
+"#;
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    let _ = std::fs::remove_file(&glue_path);
+    std::fs::write(&td_path, source).expect("write handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(err.is_none(), "handler build should compile: {:?}", err);
+    assert!(wasm_path.exists(), ".wasm file should exist");
+    assert!(glue_path.exists(), ".edge.js glue file should exist");
+
+    let glue_content = std::fs::read_to_string(&glue_path).expect("should read handler glue");
+    assert!(
+        glue_content.contains("taida_abi_web_handle"),
+        "handler glue should call the wasm handler export"
+    );
+    assert!(
+        !glue_content.contains("instance.exports._start()"),
+        "handler glue should not execute the stdout adapter"
+    );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    let _ = std::fs::remove_file(&glue_path);
+}
+
+/// Test: handler mode rejects mismatched WebRequest/WebResponse annotations.
+#[test]
+fn wasm_edge_handler_rejects_bad_signature() {
+    let stem = format!("taida_wasm_edge_handler_bad_sig_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: Str = text(req) => :WebResponse
+"#;
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    std::fs::write(&td_path, source).expect("write bad handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle")
+        .expect("bad handler signature should fail");
+    assert!(
+        err.contains("[E1961]") && err.contains("WebRequest"),
+        "handler signature diagnostic should mention E1961 and WebRequest, got: {}",
+        err
+    );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+}
+
+/// Test: handler mode rejects missing symbols, wrong arity, and bad returns.
+#[test]
+fn wasm_edge_handler_rejects_entry_shape_errors() {
+    let cases = [
+        (
+            "missing",
+            "missing",
+            r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest = text("ok") => :WebResponse
+"#,
+            "was not found",
+        ),
+        (
+            "arity",
+            "handle",
+            r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest other: WebRequest = text("ok") => :WebResponse
+"#,
+            "exactly one WebRequest parameter",
+        ),
+        (
+            "return",
+            "handle",
+            r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest = "ok" => :Str
+"#,
+            "WebResponse",
+        ),
+    ];
+
+    for (idx, (name, handler, source, expected)) in cases.iter().enumerate() {
+        let stem = format!(
+            "taida_wasm_edge_handler_shape_{}_{}_{}",
+            name,
+            idx,
+            std::process::id()
+        );
+        let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+        let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+        std::fs::write(&td_path, source).expect("write handler shape fixture");
+
+        let err = compile_wasm_edge_handler(&td_path, &wasm_path, handler)
+            .expect("invalid handler shape should fail");
+        assert!(
+            err.contains("[E1961]") && err.contains(expected),
+            "{} handler diagnostic should mention E1961 and {:?}, got: {}",
+            name,
+            expected,
+            err
+        );
+
+        let _ = std::fs::remove_file(&td_path);
+        let _ = std::fs::remove_file(&wasm_path);
+    }
+}
+
+/// Test: the exported handler ABI can be invoked from a JS host.
+#[test]
+fn wasm_edge_handler_roundtrip_node() {
+    if !Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("node not found, skipping wasm-edge handler ABI runtime test");
+        return;
+    }
+
+    let stem = format!("taida_wasm_edge_handler_node_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+    let js_path = std::env::temp_dir().join(format!("{}.js", stem));
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+
+handle req: WebRequest = text(req.method + ":" + req.path) => :WebResponse
+"#;
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    let _ = std::fs::remove_file(&js_path);
+    std::fs::write(&td_path, source).expect("write handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(err.is_none(), "handler build should compile: {:?}", err);
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const payload = encoder.encode(JSON.stringify({{
+    method: "POST",
+    path: "/node",
+    query: {{}},
+    headers: {{}},
+    bodyBase64: "",
+  }}));
+  const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
+  new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
+  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
+  const outLen = instance.exports.taida_abi_web_out_len(handle);
+  const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node handler harness should run");
+    assert!(
+        run.status.success(),
+        "node handler harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(r#""status":200"#) && stdout.contains(r#""bodyBase64":"UE9TVDovbm9kZQ==""#),
+        "handler ABI output should encode 200 response with request fields, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    let _ = std::fs::remove_file(&js_path);
 }
 
 /// Test: wasm-edge binary size is bounded.

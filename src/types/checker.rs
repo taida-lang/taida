@@ -587,6 +587,121 @@ impl TypeChecker {
         }
     }
 
+    fn abi_request_fields() -> Vec<(String, Type)> {
+        vec![
+            ("method".to_string(), Type::Str),
+            ("path".to_string(), Type::Str),
+            (
+                "query".to_string(),
+                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
+            ),
+            (
+                "headers".to_string(),
+                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
+            ),
+            ("body".to_string(), Type::Bytes),
+        ]
+    }
+
+    fn abi_response_fields() -> Vec<(String, Type)> {
+        vec![
+            ("status".to_string(), Type::Int),
+            (
+                "headers".to_string(),
+                Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Str]),
+            ),
+            ("body".to_string(), Type::Bytes),
+        ]
+    }
+
+    fn register_abi_type_symbol(&mut self, symbol_name: &str, local_name: &str) {
+        match symbol_name {
+            "WebRequest" => {
+                self.registry
+                    .register_type(local_name, Self::abi_request_fields());
+                self.declared_concrete_type_names
+                    .insert(local_name.to_string());
+                self.declared_header_arities
+                    .insert(local_name.to_string(), 0);
+            }
+            "WebResponse" => {
+                self.registry
+                    .register_type(local_name, Self::abi_response_fields());
+                self.declared_concrete_type_names
+                    .insert(local_name.to_string());
+                self.declared_header_arities
+                    .insert(local_name.to_string(), 0);
+            }
+            _ => {}
+        }
+    }
+
+    fn register_abi_imports(&mut self, symbols: &[crate::parser::ImportSymbol]) {
+        let request_name = symbols
+            .iter()
+            .find(|sym| sym.name == "WebRequest")
+            .map(|sym| sym.alias.as_deref().unwrap_or(sym.name.as_str()))
+            .unwrap_or("WebRequest");
+        let response_name = symbols
+            .iter()
+            .find(|sym| sym.name == "WebResponse")
+            .map(|sym| sym.alias.as_deref().unwrap_or(sym.name.as_str()))
+            .unwrap_or("WebResponse");
+
+        for sym in symbols {
+            let local_name = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+            self.register_abi_type_symbol(&sym.name, local_name);
+        }
+
+        let response_ty = Type::Named(response_name.to_string());
+        for sym in symbols {
+            let local_name = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+            match sym.name.as_str() {
+                "text" => {
+                    self.func_types
+                        .insert(local_name.to_string(), response_ty.clone());
+                    self.func_param_counts.insert(local_name.to_string(), 1);
+                    self.func_param_types
+                        .insert(local_name.to_string(), vec![Type::Str]);
+                }
+                "json" => {
+                    self.func_types
+                        .insert(local_name.to_string(), response_ty.clone());
+                    self.func_param_counts.insert(local_name.to_string(), 1);
+                    self.func_param_types
+                        .insert(local_name.to_string(), vec![Type::Unknown]);
+                }
+                "bytes" => {
+                    self.func_types
+                        .insert(local_name.to_string(), response_ty.clone());
+                    self.func_param_counts.insert(local_name.to_string(), 1);
+                    self.func_param_types
+                        .insert(local_name.to_string(), vec![Type::Bytes]);
+                }
+                "status" => {
+                    self.func_types
+                        .insert(local_name.to_string(), response_ty.clone());
+                    self.func_param_counts.insert(local_name.to_string(), 2);
+                    self.func_param_types
+                        .insert(local_name.to_string(), vec![Type::Int, response_ty.clone()]);
+                }
+                "header" => {
+                    self.func_types
+                        .insert(local_name.to_string(), response_ty.clone());
+                    self.func_param_counts.insert(local_name.to_string(), 3);
+                    self.func_param_types.insert(
+                        local_name.to_string(),
+                        vec![Type::Str, Type::Str, response_ty.clone()],
+                    );
+                }
+                "WebRequest" | "WebResponse" => {
+                    let _ = request_name;
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn binding_diag(code: &str, message: String, hint: &str) -> String {
         format!("[{}] {} Hint: {}", code, message, hint)
     }
@@ -1996,6 +2111,31 @@ impl TypeChecker {
             }
             return;
         }
+        if imp.path == "taida-lang/abi" {
+            const ABI_EXPORTS: &[&str] = &[
+                "WebRequest",
+                "WebResponse",
+                "text",
+                "json",
+                "bytes",
+                "status",
+                "header",
+            ];
+            for sym in &imp.symbols {
+                if !ABI_EXPORTS.contains(&sym.name.as_str()) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "Symbol '{}' not found in module '{}'. The module exports: {}",
+                            sym.name,
+                            imp.path,
+                            ABI_EXPORTS.join(", ")
+                        ),
+                        span: imp.span.clone(),
+                    });
+                }
+            }
+            return;
+        }
 
         // Skip other core-bundled and npm packages
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
@@ -2317,6 +2457,11 @@ impl TypeChecker {
     /// under the alias, mirroring the interpreter behaviour.
     fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
+
+        if imp.path == "taida-lang/abi" {
+            self.register_abi_imports(&imp.symbols);
+            return;
+        }
 
         // Core bundled packages are handled elsewhere (net / crypto).
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
@@ -3371,6 +3516,8 @@ impl TypeChecker {
                         let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
                         self.register_os_import_symbol(&sym.name, &local_name);
                     }
+                } else if imp.path == "taida-lang/abi" {
+                    self.register_abi_imports(&imp.symbols);
                 }
             }
             _ => {}
@@ -5593,6 +5740,9 @@ defaulted fields must be provided via `()`",
                 // compile time. Unpinned os symbols still fall through to
                 // `Type::Unknown` below.
                 let os_import = imp.path == "taida-lang/os";
+                if imp.path == "taida-lang/abi" {
+                    self.register_abi_imports(&imp.symbols);
+                }
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
                     if imp.path == "taida-lang/net" || os_import {

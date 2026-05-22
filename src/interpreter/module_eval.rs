@@ -413,6 +413,15 @@ impl Interpreter {
                         self.env
                             .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
                     }
+                } else if in_bundled("abi") {
+                    self.env
+                        .define_force("WebRequest", Value::str("WebRequest".to_string()));
+                    self.env
+                        .define_force("WebResponse", Value::str("WebResponse".to_string()));
+                    for sym in super::abi_eval::abi_symbols() {
+                        self.env
+                            .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));
+                    }
                 }
             }
 

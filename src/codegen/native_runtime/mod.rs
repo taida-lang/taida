@@ -638,7 +638,12 @@ mod tests {
         // 2026-05-22 differential parity fixes add native range(), strict JSON
         //   schema mismatch handling, and HashMap/Lax display parity in core.c.
         //   Recomputed total = 1,148,858.
-        const EXPECTED_TOTAL_LEN: usize = 1_148_858;
+        // 2026-05-22 request-handler ABI helpers add WebResponse constructors
+        //   for text/json/bytes/status/header. Recomputed total = 1,152,448.
+        // 2026-05-22 request handler ABI native JSON bridge and handler-main
+        //   guard add WebRequest decode / WebResponse encode support.
+        //   Recomputed total = 1,165,022.
+        const EXPECTED_TOTAL_LEN: usize = 1_165_022;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -656,7 +661,7 @@ mod tests {
         // main() — catches accidental truncation of the tail fragment.
         assert!(
             asm.trim_end()
-                .ends_with("(void)_taida_main();\n    return 0;\n}"),
+                .ends_with("(void)_taida_main();\n    return 0;\n}\n#endif"),
             "tail of assembled source must end with main() body + closing brace"
         );
     }
@@ -1219,10 +1224,13 @@ mod tests {
         // 2026-05-22 differential parity fixes add native range(), strict JSON
         //   schema mismatch handling, and HashMap/Lax display parity. The
         //   Error-ceiling marker now sits at byte offset 318,413.
-        const F1_LEN: usize = 318_413;
+        // 2026-05-22 request handler ABI native JSON bridge appends request /
+        //   response conversion helpers before the Error-ceiling marker.
+        //   Marker now sits at byte offset 322,003.
+        const F1_LEN: usize = 322_003;
         assert_eq!(
             CORE_SECTION.len(),
-            318_413 + 179_974,
+            322_003 + 192_507,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

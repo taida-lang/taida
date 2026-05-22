@@ -69,6 +69,7 @@ wasm 専用コードを取り込むことはありません。
 
 - ターゲットと互換しないコアパッケージ API / OS 操作 / ネットサーバー API は `[E1941]` で reject
 - アドオン互換メタデータも閉包検証の入力にする
+- `BuildUnit.handler` を指定した場合、handler entry は `taida-lang/abi` の `WebRequest` / `WebResponse` 形状として検証する
 - 共有モジュールはターゲット中立なら複数閉包に入ってよい
 - 共有モジュールがターゲット専用 API を使う場合、その API と互換しない `BuildUnit` の閉包では reject
 - コンパイラによる自動サブグラフ分割 / ブランチ推論は対象外

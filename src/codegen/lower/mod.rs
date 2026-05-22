@@ -348,6 +348,7 @@ impl Default for Lowering {
     }
 }
 
+mod abi;
 mod core;
 mod expr;
 mod imports;

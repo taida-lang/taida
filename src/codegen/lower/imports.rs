@@ -46,6 +46,7 @@ impl Lowering {
             || import.path == "taida-lang/os"
             || import.path == "taida-lang/crypto"
             || import.path == "taida-lang/pool"
+            || import.path == "taida-lang/abi"
         {
             // Core-bundled / npm packages — they don't define user
             // Enum types in .td sources that we can read, so there is

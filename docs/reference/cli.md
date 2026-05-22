@@ -98,20 +98,26 @@ taida --no-check <FILE>
 ### 単一ターゲットビルド (既存互換)
 
 ```bash
-taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] <PATH>
+taida build [native|wasm-min|wasm-wasi|wasm-edge|wasm-full] [--release] [--no-cache] [--diag-format text|jsonl] [-o OUTPUT] [--entry ENTRY] [--handler SYMBOL] <PATH>
 ```
 
 | オプション | 短縮 | 説明 |
 |---|---|---|
 | `--output <PATH>` / `--outdir <DIR>` | `-o` | 出力先 |
 | `--entry <PATH>` | - | Native + dir入力時のエントリ上書き |
+| `--handler <SYMBOL>` | - | Native / WASM handler mode の entry 関数名 |
 | `--release` | `-r` | TODO/Stub 残存時に失敗 |
+| `--no-cache` | - | WASM runtime object cache を使わずにビルド |
 | `--diag-format <text\|jsonl>` | - | 診断出力形式 |
 
 挙動:
 - ターゲットは位置引数で指定します。省略時は `native` です。
 - `taida build native <PATH>` は Native バイナリを生成します。
 - `taida build wasm-* <PATH>` は `.wasm` を生成します。
+- `--handler <SYMBOL>` を指定すると、`taida-lang/abi` の `WebRequest` /
+  `WebResponse` handler としてビルドします。Native は標準入力/標準出力の
+  JSON bridge を持つ binary、WASM は host adapter から呼び出す ABI export
+  を持つ module を生成します。詳細は [`docs/api/abi.md`](../api/abi.md) を参照してください。
 - 旧 `js` ターゲットは移行期間の互換機能です。正式なリリースパリティ契約には含めず、新規コードは Native または WASM を選んでください。
 - `--target <target>` / `--target=<target>` フラグは提供していません。位置引数で指定してください。誤って指定した場合は `[E1700]` + exit 2 になります。
 - 既定では parse + type check を実行します。`--no-check` で型検査をスキップできます。

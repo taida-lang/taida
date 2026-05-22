@@ -146,6 +146,11 @@ impl Interpreter {
             return Ok(Some(result));
         }
 
+        // taida-lang/abi request/response helper dispatch.
+        if let Some(result) = self.try_abi_func(name, args)? {
+            return Ok(Some(result));
+        }
+
         match name {
             // ── stdout(...args): write to output buffer (prelude) ──
             // C12-5 (FB-18): returns the byte count (Int) of the written
