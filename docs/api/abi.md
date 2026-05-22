@@ -8,6 +8,11 @@
 >>> taida-lang/abi => @(WebRequest, WebResponse, text, json, bytes, status, header)
 ```
 
+`text` / `json` / `bytes` / `status` / `header` は特別な namespace ではなく、
+import された通常のシンボルです。アプリ側に同名の関数や値がある場合は、必要な
+type と helper だけを明示 import してください。たとえば JSON helper が不要なら
+`json` を import せず、`WebRequest` / `WebResponse` / `text` だけを選びます。
+
 ---
 
 ## 1. 型
