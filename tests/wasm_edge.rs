@@ -465,8 +465,12 @@ fn wasm_edge_handler_glue_uses_request_abi() {
     );
 
     assert!(
-        glue.contains("taida_abi_web_handle"),
-        "handler adapter should call the request ABI entry point"
+        glue.contains("taida_abi_web_start") && glue.contains("taida_abi_web_poll"),
+        "handler adapter should drive the request ABI session loop"
+    );
+    assert!(
+        glue.contains("taida_abi_web_resume"),
+        "handler adapter should be prepared to resume host calls"
     );
     assert!(
         glue.contains("bodyBase64"),
@@ -480,6 +484,24 @@ fn wasm_edge_handler_glue_uses_request_abi() {
         !glue.contains("instance.exports._start()"),
         "handler adapter should not execute the stdout _start path"
     );
+
+    if let Ok(node_output) = Command::new("node").arg("--version").output()
+        && node_output.status.success()
+    {
+        let mjs_path = std::env::temp_dir().join("taida_wasm_edge_handler_glue_check.mjs");
+        std::fs::write(&mjs_path, &glue).expect("should write handler glue temp .mjs");
+        let check = Command::new("node")
+            .arg("--check")
+            .arg(&mjs_path)
+            .output()
+            .expect("node --check should run");
+        let _ = std::fs::remove_file(&mjs_path);
+        assert!(
+            check.status.success(),
+            "handler JS glue has syntax errors: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+    }
 }
 
 /// Test: generated glue can be imported from user-authored Workers JS.
@@ -556,8 +578,8 @@ handle req: WebRequest = text(req.method + ":" + req.path) => :WebResponse
 
     let glue_content = std::fs::read_to_string(&glue_path).expect("should read handler glue");
     assert!(
-        glue_content.contains("taida_abi_web_handle"),
-        "handler glue should call the wasm handler export"
+        glue_content.contains("taida_abi_web_start") && glue_content.contains("taida_abi_web_poll"),
+        "handler glue should drive the wasm handler session loop"
     );
     assert!(
         !glue_content.contains("instance.exports._start()"),
@@ -714,6 +736,9 @@ const fs = require("fs");
   }}
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  if (typeof instance.exports.taida_abi_web_start !== "function") throw new Error("missing start export");
+  if (typeof instance.exports.taida_abi_web_poll !== "function") throw new Error("missing poll export");
+  if (typeof instance.exports.taida_abi_web_resume !== "function") throw new Error("missing resume export");
   const payload = encoder.encode(JSON.stringify({{
     method: "POST",
     path: "/node",
@@ -724,7 +749,9 @@ const fs = require("fs");
   }}));
   const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
   new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
-  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const handle = instance.exports.taida_abi_web_start(inPtr, payload.length);
+  const poll = instance.exports.taida_abi_web_poll(handle);
+  if (poll !== 0) throw new Error("unexpected poll state " + poll);
   const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
   const outLen = instance.exports.taida_abi_web_out_len(handle);
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));

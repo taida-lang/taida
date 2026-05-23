@@ -1826,6 +1826,9 @@ fn wasm_handler_export_flags(handler_mode: bool) -> Vec<&'static str> {
         vec![
             "--export-memory",
             "--export=taida_abi_web_alloc",
+            "--export=taida_abi_web_start",
+            "--export=taida_abi_web_poll",
+            "--export=taida_abi_web_resume",
             "--export=taida_abi_web_handle",
             "--export=taida_abi_web_out_ptr",
             "--export=taida_abi_web_out_len",
@@ -1897,6 +1900,10 @@ int64_t taida_abi_web_handle(int32_t ptr, int32_t len) {{
     int64_t response = taida_error_try_get_result(depth);
     taida_error_ceiling_pop();
     return taida_abi_web_store_response_json(response);
+}}
+
+int64_t taida_abi_web_start(int32_t ptr, int32_t len) {{
+    return taida_abi_web_handle(ptr, len);
 }}
 "#,
         handler_symbol = handler_symbol

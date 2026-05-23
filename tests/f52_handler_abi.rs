@@ -138,6 +138,9 @@ const fs = require("fs");
   }}
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  if (typeof instance.exports.taida_abi_web_start !== "function") throw new Error("missing start export");
+  if (typeof instance.exports.taida_abi_web_poll !== "function") throw new Error("missing poll export");
+  if (typeof instance.exports.taida_abi_web_resume !== "function") throw new Error("missing resume export");
   const payload = encoder.encode(JSON.stringify({{
     method: "POST",
     path: "{path}",
@@ -149,7 +152,9 @@ const fs = require("fs");
   const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
   if (!inPtr) throw new Error("alloc failed");
   new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
-  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const handle = instance.exports.taida_abi_web_start(inPtr, payload.length);
+  const poll = instance.exports.taida_abi_web_poll(handle);
+  if (poll !== 0) throw new Error("unexpected poll state " + poll);
   const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
   const outLen = instance.exports.taida_abi_web_out_len(handle);
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
@@ -266,11 +271,16 @@ const fs = require("fs");
   }}
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  if (typeof instance.exports.taida_abi_web_start !== "function") throw new Error("missing start export");
+  if (typeof instance.exports.taida_abi_web_poll !== "function") throw new Error("missing poll export");
+  if (typeof instance.exports.taida_abi_web_resume !== "function") throw new Error("missing resume export");
   const payload = encoder.encode({request_literal});
   const inPtr = instance.exports.taida_abi_web_alloc(payload.length);
   if (!inPtr) throw new Error("alloc failed");
   new Uint8Array(memory.buffer, inPtr, payload.length).set(payload);
-  const handle = instance.exports.taida_abi_web_handle(inPtr, payload.length);
+  const handle = instance.exports.taida_abi_web_start(inPtr, payload.length);
+  const poll = instance.exports.taida_abi_web_poll(handle);
+  if (poll !== 0) throw new Error("unexpected poll state " + poll);
   const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
   const outLen = instance.exports.taida_abi_web_out_len(handle);
   const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));

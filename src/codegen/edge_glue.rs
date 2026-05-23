@@ -232,15 +232,10 @@ export async function handleTaidaRequest(request, env, ctx) {{
       }}
       new Uint8Array(memory.buffer, inPtr, input.length).set(input);
 
-      const handle = exports.taida_abi_web_handle(inPtr, input.length);
-      const outPtr = exports.taida_abi_web_out_ptr(handle);
-      const outLen = exports.taida_abi_web_out_len(handle);
-      if (!outPtr || outLen < 0) {{
-        exports.taida_abi_web_free(handle);
-        return taidaErrorResponse(500, "invalid handler output");
-      }}
-      const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
-      exports.taida_abi_web_free(handle);
+      const session = exports.taida_abi_web_start
+        ? exports.taida_abi_web_start(inPtr, input.length)
+        : exports.taida_abi_web_handle(inPtr, input.length);
+      const raw = await readTaidaWebSession(exports, memory, decoder, encoder, session, env);
 
       const result = JSON.parse(raw);
       const responseHeaders = new Headers();
@@ -332,6 +327,80 @@ async function getInstance(env) {{
       }}
       return {{ instance, memory }};
     }});
+}}
+
+async function readTaidaWebSession(exports, memory, decoder, encoder, session, env) {{
+    for (let i = 0; i < 32; i++) {{
+      const state = exports.taida_abi_web_poll ? exports.taida_abi_web_poll(session) : 0;
+      if (state === 0) {{
+        const outPtr = exports.taida_abi_web_out_ptr(session);
+        const outLen = exports.taida_abi_web_out_len(session);
+        if (!outPtr || outLen < 0) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("invalid handler output");
+        }}
+        const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
+        exports.taida_abi_web_free(session);
+        return raw;
+      }}
+      if (state === 1) {{
+        if (!exports.taida_abi_web_resume) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("host call resume unsupported");
+        }}
+        const outPtr = exports.taida_abi_web_out_ptr(session);
+        const outLen = exports.taida_abi_web_out_len(session);
+        if (!outPtr || outLen < 0) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("invalid host call payload");
+        }}
+        const payload = JSON.parse(decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen)));
+        const resumePayload = await dispatchTaidaHostCall(payload, env);
+        const resumeBytes = encoder.encode(JSON.stringify(resumePayload));
+        const resumePtr = exports.taida_abi_web_alloc(resumeBytes.length);
+        if (!resumePtr) {{
+          exports.taida_abi_web_free(session);
+          throw new Error("host call resume payload too large");
+        }}
+        new Uint8Array(memory.buffer, resumePtr, resumeBytes.length).set(resumeBytes);
+        exports.taida_abi_web_resume(session, resumePtr, resumeBytes.length);
+        continue;
+      }}
+      exports.taida_abi_web_free(session);
+      throw new Error("handler ABI error");
+    }}
+    exports.taida_abi_web_free(session);
+    throw new Error("handler ABI poll limit exceeded");
+}}
+
+async function dispatchTaidaHostCall(envelope, env) {{
+    const id = envelope && Number.isFinite(envelope.id) ? Math.trunc(envelope.id) : 0;
+    try {{
+      if (!envelope || envelope.kind !== "host_call") {{
+        throw new Error("unsupported host call");
+      }}
+      let target = env[envelope.capability];
+      if (target === undefined || target === null) {{
+        throw new Error("host capability unavailable");
+      }}
+      const steps = Array.isArray(envelope.steps) ? envelope.steps : [];
+      for (const step of steps) {{
+        const method = step && typeof step.method === "string" ? step.method : "";
+        const args = step && Array.isArray(step.args) ? step.args : [];
+        const fn = target && target[method];
+        if (typeof fn !== "function") {{
+          throw new Error("host method unavailable");
+        }}
+        target = await fn.apply(target, args);
+      }}
+      return {{ id, ok: true, value: target }};
+    }} catch (err) {{
+      return {{
+        id,
+        ok: false,
+        error: err && err.message ? String(err.message) : "host call failed",
+      }};
+    }}
 }}
 
 function clampStatus(status) {{

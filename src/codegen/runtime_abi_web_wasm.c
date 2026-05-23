@@ -978,6 +978,16 @@ static TaidaAbiWebOut *abi_web_out_get(int64_t handle) {
     return (out->active && out->generation == generation) ? out : (TaidaAbiWebOut *)0;
 }
 
+int32_t taida_abi_web_poll(int64_t handle) {
+    return abi_web_out_get(handle) ? 0 : 2;
+}
+
+void taida_abi_web_resume(int64_t handle, int32_t ptr, int32_t len) {
+    (void)handle;
+    (void)ptr;
+    (void)len;
+}
+
 int32_t taida_abi_web_out_ptr(int64_t handle) {
     TaidaAbiWebOut *out = abi_web_out_get(handle);
     return out ? out->ptr : 0;
