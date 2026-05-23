@@ -763,7 +763,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_abi_host_capability(int64_t name, int64_t kind);".to_string()
         }
         "taida_abi_host_step" => {
-            "int64_t taida_abi_host_step(int64_t method, int64_t args);".to_string()
+            "int64_t taida_abi_host_step(int64_t method, int64_t args, int64_t args_schema);"
+                .to_string()
         }
         "taida_abi_host_call" => {
             "int64_t taida_abi_host_call(int64_t steps, int64_t schema);".to_string()
@@ -1018,6 +1019,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t val);", name)
         }
         "taida_json_schema_cast" => "int64_t taida_json_schema_cast(int64_t raw, int64_t schema);".to_string(),
+        "taida_json_encode_wire" => {
+            "int64_t taida_json_encode_wire(int64_t value, int64_t schema);".to_string()
+        }
         "taida_json_empty" => "int64_t taida_json_empty(void);".to_string(),
         "taida_json_has" => "int64_t taida_json_has(int64_t json, int64_t key);".to_string(),
         "taida_json_size" => "int64_t taida_json_size(int64_t json);".to_string(),

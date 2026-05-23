@@ -549,6 +549,105 @@ fn wasm_edge_handler_glue_keeps_host_dispatch_policy_free() {
     }
 }
 
+/// Test: the generated adapter dispatcher turns host-side failures into
+/// mechanical resume errors without classifying the capability or method.
+#[test]
+fn wasm_edge_handler_glue_dispatcher_maps_host_failures_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping dispatcher failure mapping test");
+        return;
+    }
+
+    let glue = taida::codegen::edge_glue::generate_edge_js_source(
+        taida::codegen::edge_glue::EdgeGlueConfig::handler("test", "test.wasm"),
+    );
+    let dispatch_start = glue
+        .find("async function dispatchTaidaHostCall")
+        .expect("handler glue should include host-call dispatcher");
+    let dispatch_end = glue[dispatch_start..]
+        .find("\n}\n\nfunction clampStatus")
+        .map(|offset| dispatch_start + offset + 3)
+        .expect("dispatcher should end before response helpers");
+    let dispatch = &glue[dispatch_start..dispatch_end];
+    let script = format!(
+        r#"
+{dispatch}
+
+(async () => {{
+  const ok = await dispatchTaidaHostCall({{
+    id: 1,
+    capability: "CAP",
+    steps: [
+      {{ method: "first", args: ["k"] }},
+      {{ method: "second", args: [] }},
+    ],
+  }}, {{
+    CAP: {{
+      first(key) {{ return {{ key, second() {{ return "value"; }} }}; }},
+    }},
+  }});
+  if (!ok.ok || ok.value !== "value") throw new Error("chained dispatch failed: " + JSON.stringify(ok));
+
+  const missing = await dispatchTaidaHostCall({{
+    id: 2,
+    capability: "CAP",
+    steps: [{{ method: "missing", args: [] }}],
+  }}, {{ CAP: {{}} }});
+  if (missing.ok || !String(missing.error).includes("not a function")) {{
+    throw new Error("missing method should become resume error: " + JSON.stringify(missing));
+  }}
+
+  const thrown = await dispatchTaidaHostCall({{
+    id: 3,
+    capability: "CAP",
+    steps: [{{ method: "explode", args: [] }}],
+  }}, {{ CAP: {{ explode() {{ throw new Error("boom"); }} }} }});
+  if (thrown.ok || thrown.error !== "boom") {{
+    throw new Error("throw should become resume error: " + JSON.stringify(thrown));
+  }}
+
+  const rejected = await dispatchTaidaHostCall({{
+    id: 4,
+    capability: "CAP",
+    steps: [{{ method: "reject", args: [] }}],
+  }}, {{ CAP: {{ reject() {{ return Promise.reject(new Error("later")); }} }} }});
+  if (rejected.ok || rejected.error !== "later") {{
+    throw new Error("promise rejection should become resume error: " + JSON.stringify(rejected));
+  }}
+
+  console.log("dispatcher failures mapped");
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    let script_path = std::env::temp_dir().join(format!(
+        "taida_wasm_edge_dispatcher_failures_{}.mjs",
+        std::process::id()
+    ));
+    std::fs::write(&script_path, script).expect("write dispatcher failure script");
+    let run = Command::new("node")
+        .arg(&script_path)
+        .output()
+        .expect("node dispatcher failure script should run");
+    let _ = std::fs::remove_file(&script_path);
+    assert!(
+        run.status.success(),
+        "dispatcher failure script failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("dispatcher failures mapped"),
+        "dispatcher failure script did not complete"
+    );
+}
+
 /// Test: generated glue can be imported from user-authored Workers JS.
 #[test]
 fn wasm_edge_glue_exposes_importable_request_adapter() {
@@ -989,6 +1088,682 @@ const fs = require("fs");
     assert!(
         stdout.contains(r#""status":200"#) && stdout.contains(r#""bodyBase64":"aGl0""#),
         "HostCall resume should produce response body, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Test: HostCall encodes Bytes arguments with the same base64 wire rule as the
+/// request/response ABI instead of exposing the internal list-of-Int layout.
+#[test]
+fn wasm_edge_handler_host_call_bytes_arg_is_base64_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping wasm-edge HostCall Bytes ABI runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_bytes_arg");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_bytes.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+KV <= "cloudflare/kv"
+
+handle req: WebRequest =
+  cache <= HostCapability["CACHE", KV]()
+  value <=< Cage[cache, HostCall[@[HostStep["put", @[req.body]]()], Str]()]()
+  text(value)
+=> :WebResponse
+"#;
+    let wrangler = r#"{ "kv_namespaces": [{ "binding": "CACHE" }] }"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write HostCall Bytes handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "HostCall Bytes handler build should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "POST",
+    path: "/host",
+    rawQuery: "",
+    query: [],
+    headers: [],
+    bodyBase64: "QQBC",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 1) throw new Error("expected host_call_pending");
+  const pendingPtr = instance.exports.taida_abi_web_out_ptr(handle);
+  const pendingLen = instance.exports.taida_abi_web_out_len(handle);
+  const pending = JSON.parse(decoder.decode(new Uint8Array(memory.buffer, pendingPtr, pendingLen)));
+  if (pending.steps[0].args[0] !== "QQBC") {{
+    throw new Error("Bytes arg was not base64: " + JSON.stringify(pending.steps[0].args[0]));
+  }}
+
+  const resume = encoder.encode(JSON.stringify({{ id: pending.id, ok: true, value: "stored" }}));
+  const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+  new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+  instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  const raw = decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  ));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write HostCall Bytes node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node HostCall Bytes handler harness should run");
+    assert!(
+        run.status.success(),
+        "node HostCall Bytes harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(r#""status":200"#) && stdout.contains(r#""bodyBase64":"c3RvcmVk""#),
+        "HostCall Bytes resume should produce response body, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Test: invalid base64 in a HostCall `Bytes` resume value rejects the Async
+/// rather than silently decoding to an empty byte sequence.
+#[test]
+fn wasm_edge_handler_host_call_invalid_bytes_resume_rejects_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping wasm-edge HostCall Bytes reject runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_invalid_bytes");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_invalid_bytes.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+KV <= "cloudflare/kv"
+
+handle req: WebRequest =
+  |== error: Error =
+    text("caught:" + error.message)
+  => :WebResponse
+  cache <= HostCapability["CACHE", KV]()
+  value <=< Cage[cache, HostCall[@[HostStep["getBytes", @["key"]]()], Bytes]()]()
+  text("uncaught")
+=> :WebResponse
+"#;
+    let wrangler = r#"{ "kv_namespaces": [{ "binding": "CACHE" }] }"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write invalid Bytes handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "HostCall invalid Bytes handler build should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  async function assertRejected(value) {{
+    const request = encoder.encode(JSON.stringify({{
+      method: "GET",
+      path: "/host",
+      rawQuery: "",
+      query: [],
+      headers: [],
+      bodyBase64: "",
+    }}));
+    const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+    new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+    const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+    if (instance.exports.taida_abi_web_poll(handle) !== 1) throw new Error("expected host_call_pending");
+    const pending = JSON.parse(decoder.decode(new Uint8Array(
+      memory.buffer,
+      instance.exports.taida_abi_web_out_ptr(handle),
+      instance.exports.taida_abi_web_out_len(handle)
+    )));
+    const resume = encoder.encode(JSON.stringify({{ id: pending.id, ok: true, value }}));
+    const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+    new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+    instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+    if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected response after rejected Async");
+    const raw = decoder.decode(new Uint8Array(
+      memory.buffer,
+      instance.exports.taida_abi_web_out_ptr(handle),
+      instance.exports.taida_abi_web_out_len(handle)
+    ));
+    instance.exports.taida_abi_web_free(handle);
+    const response = JSON.parse(raw);
+    const body = Buffer.from(response.bodyBase64 || "", "base64").toString("utf8");
+    if (response.status !== 200 || !body.includes("caught:")) {{
+      throw new Error("invalid base64 should reject into |==, got " + raw + " body=" + body);
+    }}
+  }}
+
+  await assertRejected("A");
+  await assertRejected("@@@=");
+  console.log("rejected");
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write invalid Bytes node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node invalid Bytes handler harness should run");
+    assert!(
+        run.status.success(),
+        "node invalid Bytes harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("rejected"),
+        "invalid Bytes harness did not complete"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Test: adapter-provided `ok:false` resume payloads become rejected Async
+/// values that user code can catch with an error ceiling.
+#[test]
+fn wasm_edge_handler_host_call_resume_error_is_catchable_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping wasm-edge HostCall resume error test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_resume_error");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_resume_error.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+KV <= "cloudflare/kv"
+
+handle req: WebRequest =
+  |== error: Error =
+    text("caught:" + error.message)
+  => :WebResponse
+  cache <= HostCapability["CACHE", KV]()
+  value <=< Cage[cache, HostCall[@[HostStep["get", @["answer"]]()], Str]()]()
+  text(value)
+=> :WebResponse
+"#;
+    let wrangler = r#"{ "kv_namespaces": [{ "binding": "CACHE" }] }"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write resume error handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "HostCall resume error handler should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "GET",
+    path: "/host",
+    rawQuery: "",
+    query: [],
+    headers: [],
+    bodyBase64: "",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 1) throw new Error("expected host_call_pending");
+  const pending = JSON.parse(decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  )));
+  const resume = encoder.encode(JSON.stringify({{ id: pending.id, ok: false, error: "host boom" }}));
+  const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+  new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+  instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected response_ready");
+  const raw = decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  ));
+  instance.exports.taida_abi_web_free(handle);
+  const response = JSON.parse(raw);
+  const body = Buffer.from(response.bodyBase64 || "", "base64").toString("utf8");
+  if (response.status !== 200 || !body.includes("caught:host boom")) {{
+    throw new Error("resume error should be caught, got " + raw + " body=" + body);
+  }}
+  console.log("caught");
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write resume error node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node resume error harness should run");
+    assert!(
+        run.status.success(),
+        "node resume error harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("caught"),
+        "resume error harness did not complete"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Test: a D1-style multi-step HostCall can suspend once and resume with a
+/// typed row decoded by the guest runtime.
+#[test]
+fn wasm_edge_handler_host_call_d1_mock_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping wasm-edge D1 HostCall runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_d1");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_d1.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+Row = @(name: Str)
+D1 <= "cloudflare/d1"
+
+handle req: WebRequest =
+  db <= HostCapability["DB", D1]()
+  row <=< Cage[db, HostCall[@[HostStep["prepare", @["select name from users where id = ?"]](), HostStep["bind", @["42"]](), HostStep["first", @[]]()], Row]()]()
+  text(row.name)
+=> :WebResponse
+"#;
+    let wrangler = r#"
+{
+  "d1_databases": [
+    { "binding": "DB", "database_name": "test", "database_id": "local" }
+  ]
+}
+"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write D1 HostCall handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "D1 HostCall handler should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "GET",
+    path: "/user",
+    rawQuery: "",
+    query: [],
+    headers: [],
+    bodyBase64: "",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 1) throw new Error("expected host_call_pending");
+  const pending = JSON.parse(decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  )));
+  if (pending.capability !== "DB") throw new Error("bad capability " + pending.capability);
+  if (pending.steps.length !== 3) throw new Error("bad step count " + pending.steps.length);
+  if (pending.steps[0].method !== "prepare") throw new Error("missing prepare");
+  if (pending.steps[1].method !== "bind") throw new Error("missing bind");
+  if (pending.steps[2].method !== "first") throw new Error("missing first");
+  if (pending.steps[1].args[0] !== "42") throw new Error("bad bind arg");
+
+  const resume = encoder.encode(JSON.stringify({{ id: pending.id, ok: true, value: {{ name: "Ada" }} }}));
+  const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+  new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+  instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected response_ready");
+  const raw = decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  ));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write D1 node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node D1 HostCall harness should run");
+    assert!(
+        run.status.success(),
+        "node D1 HostCall harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(r#""status":200"#) && stdout.contains(r#""bodyBase64":"QWRh""#),
+        "D1 HostCall resume should produce row response, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Test: a Durable Object style HostCall can pass the full WebRequest as an
+/// argument and resume with a WebResponse decoded back into the ABI shape.
+#[test]
+fn wasm_edge_handler_host_call_do_mock_webrequest_webresponse_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping wasm-edge DO HostCall runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_do");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_do.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, HostCall, HostStep, HostCapability)
+
+DONamespace <= "cloudflare/do_namespace"
+
+handle req: WebRequest =
+  ns <= HostCapability["COUNTER", DONamespace]()
+  resp <=< Cage[ns, HostCall[@[HostStep["idFromName", @["main"]](), HostStep["get", @[]](), HostStep["fetch", @[req]]()], WebResponse]()]()
+  resp
+=> :WebResponse
+"#;
+    let wrangler = r#"
+{
+  "durable_objects": {
+    "bindings": [
+      { "name": "COUNTER", "class_name": "Counter" }
+    ]
+  }
+}
+"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write DO HostCall handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "DO HostCall handler should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "POST",
+    path: "/counter",
+    rawQuery: "tag=a&tag=b",
+    query: [{{ name: "tag", value: "a" }}, {{ name: "tag", value: "b" }}],
+    headers: [{{ name: "x-repeat", value: "one" }}],
+    bodyBase64: "ZG8=",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 1) throw new Error("expected host_call_pending");
+  const pending = JSON.parse(decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  )));
+  if (pending.capability !== "COUNTER") throw new Error("bad capability " + pending.capability);
+  if (pending.steps.length !== 3) throw new Error("bad step count " + pending.steps.length);
+  if (pending.steps[0].method !== "idFromName") throw new Error("missing idFromName");
+  if (pending.steps[1].method !== "get") throw new Error("missing get");
+  if (pending.steps[2].method !== "fetch") throw new Error("missing fetch");
+  const reqArg = pending.steps[2].args[0];
+  if (reqArg.method !== "POST" || reqArg.path !== "/counter") throw new Error("bad WebRequest arg");
+  if (reqArg.bodyBase64 !== "ZG8=") throw new Error("bad WebRequest body");
+  if (reqArg.query.length !== 2 || reqArg.query[1].value !== "b") throw new Error("bad WebRequest query pairs");
+
+  const resume = encoder.encode(JSON.stringify({{
+    id: pending.id,
+    ok: true,
+    value: {{
+      status: 202,
+      headers: [{{ name: "x-do", value: "ok" }}],
+      bodyBase64: "ZG9uZQ==",
+    }},
+  }}));
+  const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+  new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+  instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected response_ready");
+  const raw = decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  ));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write DO node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node DO HostCall harness should run");
+    assert!(
+        run.status.success(),
+        "node DO HostCall harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(r#""status":202"#)
+            && stdout.contains(r#""name":"x-do""#)
+            && stdout.contains(r#""bodyBase64":"ZG9uZQ==""#),
+        "DO HostCall resume should produce WebResponse, got: {}",
         stdout
     );
 

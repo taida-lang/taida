@@ -150,7 +150,14 @@ static int64_t wasm_find_parent_type(int64_t child_str) {
     return 0;
 }
 
+__attribute__((weak)) int32_t taida_abi_web_is_host_call_pending_error(int64_t error) {
+    (void)error;
+    return 0;
+}
+
 int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str) {
+    if (taida_abi_web_is_host_call_pending_error(error_val)) return 0;
+
     /* "Error" catches everything */
     const char *handler_s = (const char*)(intptr_t)handler_type_str;
     if (handler_s && _wf_strcmp(handler_s, "Error") == 0) return 1;

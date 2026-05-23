@@ -2677,11 +2677,14 @@ impl Lowering {
                 }
                 let method = self.lower_expr(func, &type_args[0])?;
                 let args = self.lower_expr(func, &type_args[1])?;
+                let args_schema_desc = self.resolve_wire_schema_descriptor(&type_args[1])?;
+                let args_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(args_schema, args_schema_desc));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
                     "taida_abi_host_step".to_string(),
-                    vec![method, args],
+                    vec![method, args, args_schema],
                 ));
                 Ok(result)
             }

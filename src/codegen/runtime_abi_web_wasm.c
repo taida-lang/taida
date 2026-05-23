@@ -22,6 +22,7 @@ extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
 extern int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);
 extern int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
 extern int64_t taida_json_encode(int64_t value);
+extern int64_t taida_json_encode_wire(int64_t value, int64_t schema);
 extern int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr);
 extern int64_t taida_async_ok(int64_t value);
 extern int64_t taida_async_err(int64_t error);
@@ -1085,8 +1086,8 @@ int64_t taida_abi_host_capability(int64_t name, int64_t kind) {
     return pack;
 }
 
-int64_t taida_abi_host_step(int64_t method, int64_t args) {
-    int64_t pack = taida_pack_new(3);
+int64_t taida_abi_host_step(int64_t method, int64_t args, int64_t args_schema) {
+    int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("__type"));
     taida_pack_set_tag(pack, 0, ABI_TAG_STR);
     taida_pack_set(pack, 0, (int64_t)(intptr_t)"HostStep");
@@ -1096,6 +1097,9 @@ int64_t taida_abi_host_step(int64_t method, int64_t args) {
     taida_pack_set_hash(pack, 2, abi_hash_cstr("args"));
     taida_pack_set_tag(pack, 2, ABI_TAG_LIST);
     taida_pack_set(pack, 2, args);
+    taida_pack_set_hash(pack, 3, abi_hash_cstr("args_schema"));
+    taida_pack_set_tag(pack, 3, ABI_TAG_STR);
+    taida_pack_set(pack, 3, args_schema);
     return pack;
 }
 
@@ -1123,8 +1127,9 @@ static void abi_jb_append_host_steps(TaidaAbiJsonBuilder *jb, int64_t steps) {
             int64_t step = list[ABI_WASM_LIST_ELEMS + i];
             int64_t method = taida_pack_get(step, abi_hash_cstr("method"));
             int64_t args = taida_pack_get(step, abi_hash_cstr("args"));
+            int64_t args_schema = taida_pack_get(step, abi_hash_cstr("args_schema"));
             const char *method_str = (const char *)(intptr_t)method;
-            int64_t args_json = taida_json_encode(args);
+            int64_t args_json = taida_json_encode_wire(args, args_schema);
             if (!first) abi_jb_append(jb, ",");
             first = 0;
             abi_jb_append(jb, "{\"method\":");
