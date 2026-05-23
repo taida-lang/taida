@@ -2338,6 +2338,22 @@ impl Interpreter {
         }
     }
 
+    fn eval_host_boundary_str_arg(
+        &mut self,
+        arg: &Expr,
+        label: &str,
+    ) -> Result<String, RuntimeError> {
+        match self.eval_expr(arg)? {
+            Signal::Value(Value::Str(s)) => Ok(Value::str_take(s)),
+            Signal::Value(other) => Err(RuntimeError {
+                message: format!("{} must be Str, got {}", label, Self::type_name_of(&other)),
+            }),
+            other => Err(RuntimeError {
+                message: format!("{}: unexpected control signal {:?}", label, other),
+            }),
+        }
+    }
+
     /// Try to evaluate core built-in molds that were historically special-cased
     /// in eval.rs (Result/Lax/Gorillax/Cage and conversion molds).
     pub(crate) fn try_core_mold(
@@ -4409,6 +4425,62 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Value(Value::str(self.value_type_name(&val)))))
             }
+
+            // ── Host boundary descriptor molds ──────────────────
+            "HostCapability" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostCapability requires exactly 2 type arguments: HostCapability[name, kind](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let name = self.eval_host_boundary_str_arg(&type_args[0], "HostCapability name")?;
+                let kind = self.eval_host_boundary_str_arg(&type_args[1], "HostCapability kind")?;
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("name".into(), Value::str(name)),
+                    ("kind".into(), Value::str(kind)),
+                ]))))
+            }
+            "HostStep" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostStep requires exactly 2 type arguments: HostStep[method, args](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let method = self.eval_host_boundary_str_arg(&type_args[0], "HostStep method")?;
+                let args_value = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "HostStep args: unexpected control signal {:?}",
+                                other
+                            ),
+                        });
+                    }
+                };
+                if !matches!(args_value, Value::List(_)) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "HostStep args must be a list, got {}",
+                            Self::type_name_of(&args_value)
+                        ),
+                    });
+                }
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("method".into(), Value::str(method)),
+                    ("args".into(), args_value),
+                ]))))
+            }
+            "HostCall" => Err(RuntimeError {
+                message: "HostCall is only available through a host adapter Cage boundary"
+                    .to_string(),
+            }),
 
             // ── JS-backend-only mold types ──────────────────────
             // These molds operate on Molten values and are only available

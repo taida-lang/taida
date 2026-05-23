@@ -418,6 +418,9 @@ impl Interpreter {
                         .define_force("WebRequest", Value::str("WebRequest".to_string()));
                     self.env
                         .define_force("WebResponse", Value::str("WebResponse".to_string()));
+                    for sym in ["HostCall", "HostStep", "HostCapability"] {
+                        self.env.define_force(sym, Value::str(sym.to_string()));
+                    }
                     for sym in super::abi_eval::abi_symbols() {
                         self.env
                             .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));

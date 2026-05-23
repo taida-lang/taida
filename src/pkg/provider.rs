@@ -402,10 +402,12 @@ Enum => HttpProtocol = :H1 :H2 :H3
 
     /// Generate the abi package stub source.
     fn abi_package_source() -> &'static str {
-        r#"// taida-lang/abi — Core bundled request/response ABI package
+        r#"// taida-lang/abi — Core bundled host/guest boundary ABI package
 // Handler-mode surface:
 //   WebRequest, WebResponse
 //   text, json, bytes, status, header
+// Host capability descriptor surface:
+//   HostCall, HostStep, HostCapability
 
 WebRequest = @(
   method: Str,
@@ -422,7 +424,7 @@ WebResponse = @(
   body: Bytes
 )
 
-<<< @(WebRequest, WebResponse, text, json, bytes, status, header)
+<<< @(WebRequest, WebResponse, text, json, bytes, status, header, HostCall, HostStep, HostCapability)
 "#
     }
 
