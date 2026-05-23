@@ -1293,6 +1293,19 @@ int64_t taida_async_err(int64_t error) {
     return (int64_t)(intptr_t)obj;
 }
 
+int64_t taida_async_pending_with_error(int64_t error) {
+    int64_t *obj = (int64_t *)wasm_alloc(7 * 8);
+    if (!obj) return 0;
+    obj[0] = WASM_ASYNC_MAGIC;
+    obj[1] = 0;  /* pending */
+    obj[2] = 0;
+    obj[3] = error;
+    obj[4] = 0;
+    obj[5] = WASM_ASYNC_TAG_UNKNOWN;
+    obj[6] = WASM_TAG_PACK;
+    return (int64_t)(intptr_t)obj;
+}
+
 void taida_async_set_value_tag(int64_t async_ptr, int64_t tag) {
     if (!_wasm_is_async_obj(async_ptr)) return;
     ((int64_t *)(intptr_t)async_ptr)[5] = tag;
@@ -1311,6 +1324,9 @@ int64_t taida_async_unmold(int64_t async_ptr) {
             (int64_t)(intptr_t)"AsyncError",
             (int64_t)(intptr_t)"Async rejected");
         return taida_throw(err);
+    }
+    if (status == 0 && obj[3] != 0) {
+        return taida_throw(obj[3]);
     }
     return 0;  /* pending (should not happen in wasm-min) */
 }
