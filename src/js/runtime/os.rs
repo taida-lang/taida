@@ -1476,9 +1476,12 @@ function __taida_lax_from_bytes_cursor_step(step, hasValue) {
 // ── taida-lang/crypto: sha256 ──────────────────────────────────
 const __taida_crypto = await import('node:crypto').catch(() => null);
 function sha256(value) {
-  const data = typeof value === 'string' ? value : String(value);
   if (__taida_crypto) {
-    return __taida_crypto.createHash('sha256').update(data, 'utf8').digest('hex');
+    const hash = __taida_crypto.createHash('sha256');
+    if (typeof value === 'string') return hash.update(value, 'utf8').digest('hex');
+    if (value instanceof Uint8Array) return hash.update(Buffer.from(value)).digest('hex');
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return hash.update(value).digest('hex');
+    throw new TypeError('sha256: input must be Str or Bytes');
   }
   // Fallback: pure-JS SHA-256 (should not reach here in Node.js)
   return '';

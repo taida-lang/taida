@@ -187,6 +187,8 @@ pub struct TypeChecker {
     func_param_counts: HashMap<String, usize>,
     /// Function parameter types (name -> param types). Used for partial application type inference.
     func_param_types: HashMap<String, Vec<Type>>,
+    /// Imported local names for `taida-lang/crypto::sha256`.
+    crypto_sha256_funcs: HashSet<String>,
     /// Function definitions retained for expected-type body inference.
     func_defs: HashMap<String, FuncDef>,
     /// Scope depth where a function name was bound as the function value.
@@ -321,6 +323,7 @@ impl TypeChecker {
             func_types: HashMap::new(),
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
+            crypto_sha256_funcs: HashSet::new(),
             func_defs: HashMap::new(),
             func_def_scope_depths: HashMap::new(),
             generic_func_defs: HashMap::new(),
@@ -1442,6 +1445,34 @@ impl TypeChecker {
 
     fn is_host_step_type(ty: &Type) -> bool {
         matches!(ty, Type::Generic(name, args) if name == "HostStep" && args.len() == 2)
+    }
+
+    fn is_crypto_hash_input_type(ty: &Type) -> bool {
+        matches!(ty, Type::Str | Type::Bytes)
+    }
+
+    fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
+        for (i, arg) in args.iter().take(1).enumerate() {
+            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                continue;
+            }
+            let actual_ty = self.infer_expr_type(arg);
+            if actual_ty == Type::Unknown {
+                continue;
+            }
+            if !Self::is_crypto_hash_input_type(&actual_ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Argument {} of '{}' has type {}, expected Str or Bytes. \
+                         Hint: use `Bytes[...]()` and unmold the Lax value with `>=>` before hashing raw bytes.",
+                        i + 1,
+                        name,
+                        actual_ty
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
     }
 
     fn erased_host_step_type() -> Type {
@@ -3796,7 +3827,8 @@ impl TypeChecker {
                         if sym.name == "sha256" {
                             let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
                             self.func_types.insert(local_name.clone(), Type::Str);
-                            self.func_param_counts.insert(local_name, 1);
+                            self.func_param_counts.insert(local_name.clone(), 1);
+                            self.crypto_sha256_funcs.insert(local_name);
                         }
                     }
                 } else if imp.path == "taida-lang/net" {
@@ -7853,6 +7885,9 @@ defaulted fields must be provided via `()`",
                                     span: span.clone(),
                                 });
                             }
+                        }
+                        if self.crypto_sha256_funcs.contains(name) {
+                            self.validate_crypto_sha256_call(name, args, span);
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {

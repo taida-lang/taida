@@ -1401,6 +1401,7 @@ int64_t taida_str_alloc(int64_t len_raw) {
     int len = (int)len_raw;
     if (len < 0) len = 0;
     char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    if (!buf) return 0;
     buf[len] = '\0';
     return (int64_t)buf;
 }
@@ -1426,6 +1427,9 @@ void taida_str_release(int64_t s) {
 }
 
 /* ── taida-lang/crypto: sha256 (pure, all WASM profiles) ───────────── */
+#define TAIDA_WASM_SHA256_MAX_INPUT_BYTES (256LL * 1024LL * 1024LL)
+#define TAIDA_WASM_BYTES_MAGIC 0x5441494442595400LL  /* "TAIDBYT\0" */
+
 typedef struct {
     uint32_t state[8];
     uint64_t total_len;
@@ -1454,6 +1458,71 @@ static const uint32_t TAIDA_WASM_SHA256_K[64] = {
 
 static uint32_t taida_wasm_sha256_rotr(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32 - n));
+}
+
+static void taida_wasm_sha256_trap(void) {
+    __builtin_trap();
+}
+
+static int taida_wasm_sha256_ptr_readable(int64_t ptr, uint64_t bytes) {
+    if (ptr <= 0 || ptr > 0xFFFFFFFFLL) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)ptr;
+    uint64_t mem_size = (uint64_t)__builtin_wasm_memory_size(0) * 65536ULL;
+    return (uint64_t)addr + bytes <= mem_size;
+}
+
+static int taida_wasm_sha256_bounded_strlen(const char *s, int64_t max_len, int64_t *out_len) {
+    if (!s) {
+        if (out_len) *out_len = 0;
+        return 1;
+    }
+    int64_t ptr = (int64_t)(intptr_t)s;
+    if (!taida_wasm_sha256_ptr_readable(ptr, 1)) return 0;
+    uint64_t addr = (uint64_t)(unsigned int)(uint64_t)ptr;
+    uint64_t mem_size = (uint64_t)__builtin_wasm_memory_size(0) * 65536ULL;
+    uint64_t available = mem_size > addr ? mem_size - addr : 0;
+    uint64_t limit = (uint64_t)max_len < available ? (uint64_t)max_len : available;
+    for (uint64_t i = 0; i <= limit; i++) {
+        if (i == available) break;
+        if (((const unsigned char *)s)[i] == 0) {
+            if (out_len) *out_len = (int64_t)i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int taida_wasm_sha256_list_input(int64_t value, int64_t **out_list, int64_t *out_len) {
+    if (!taida_wasm_sha256_ptr_readable(value, 32)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)value;
+    if ((addr & 7u) != 0) return 0;
+    int64_t *list = (int64_t *)(intptr_t)value;
+    if (list[3] != WASM_LIST_MAGIC && list[3] != WASM_SET_MAGIC) return 0;
+    int64_t cap = list[0];
+    int64_t len = list[1];
+    if (cap < 0 || cap > TAIDA_WASM_SHA256_MAX_INPUT_BYTES) return -1;
+    if (len < 0 || len > cap || len > TAIDA_WASM_SHA256_MAX_INPUT_BYTES) return -1;
+    uint64_t total_bytes = (uint64_t)(WASM_LIST_ELEMS + cap + 1) * 8ULL;
+    if (!taida_wasm_sha256_ptr_readable(value, total_bytes)) return -1;
+    if (list[WASM_LIST_ELEMS + cap] != list[3]) return -1;
+    if (out_list) *out_list = list;
+    if (out_len) *out_len = len;
+    return 1;
+}
+
+static int taida_wasm_sha256_bytes_input(int64_t value, int64_t **out_bytes, int64_t *out_len) {
+    if (!taida_wasm_sha256_ptr_readable(value, 16)) return 0;
+    unsigned int addr = (unsigned int)(uint64_t)value;
+    if ((addr & 7u) != 0) return 0;
+    int64_t *bytes = (int64_t *)(intptr_t)value;
+    if ((bytes[0] & 0xFFFFFFFFFFFFFF00LL) != TAIDA_WASM_BYTES_MAGIC) return 0;
+    int64_t len = bytes[1];
+    if (len < 0 || len > TAIDA_WASM_SHA256_MAX_INPUT_BYTES) return -1;
+    uint64_t total_bytes = (uint64_t)(2 + len) * 8ULL;
+    if (!taida_wasm_sha256_ptr_readable(value, total_bytes)) return -1;
+    if (out_bytes) *out_bytes = bytes;
+    if (out_len) *out_len = len;
+    return 1;
 }
 
 static void taida_wasm_sha256_init(taida_sha256_ctx *ctx) {
@@ -1530,6 +1599,7 @@ static void taida_wasm_sha256_transform(taida_sha256_ctx *ctx, const unsigned ch
 }
 
 static void taida_wasm_sha256_update_byte(taida_sha256_ctx *ctx, unsigned char byte) {
+    if (ctx->block_len < 0 || ctx->block_len >= 64) taida_wasm_sha256_trap();
     ctx->block[ctx->block_len++] = byte;
     ctx->total_len++;
     if (ctx->block_len == 64) {
@@ -1538,9 +1608,9 @@ static void taida_wasm_sha256_update_byte(taida_sha256_ctx *ctx, unsigned char b
     }
 }
 
-static void taida_wasm_sha256_update(taida_sha256_ctx *ctx, const unsigned char *data, int len) {
+static void taida_wasm_sha256_update(taida_sha256_ctx *ctx, const unsigned char *data, int64_t len) {
     if (!data || len <= 0) return;
-    for (int i = 0; i < len; i++) {
+    for (int64_t i = 0; i < len; i++) {
         taida_wasm_sha256_update_byte(ctx, data[i]);
     }
 }
@@ -1550,6 +1620,9 @@ static int64_t taida_wasm_sha256_finish_hex(taida_sha256_ctx *ctx) {
     unsigned char digest[32];
     static const char hex[] = "0123456789abcdef";
 
+    /* Invariant: update_byte transforms immediately at 64 bytes, so finish
+       only accepts a pending block length in 0..63. */
+    if (ctx->block_len < 0 || ctx->block_len >= 64) taida_wasm_sha256_trap();
     ctx->block[ctx->block_len++] = 0x80;
     if (ctx->block_len > 56) {
         while (ctx->block_len < 64) ctx->block[ctx->block_len++] = 0;
@@ -1571,6 +1644,7 @@ static int64_t taida_wasm_sha256_finish_hex(taida_sha256_ctx *ctx) {
     }
 
     char *out = (char *)(intptr_t)taida_str_alloc(64);
+    if (!out) taida_wasm_sha256_trap();
     for (int i = 0; i < 32; i++) {
         out[i * 2] = hex[(digest[i] >> 4) & 0x0f];
         out[i * 2 + 1] = hex[digest[i] & 0x0f];
@@ -1583,24 +1657,34 @@ int64_t taida_sha256(int64_t value) {
     taida_sha256_ctx ctx;
     taida_wasm_sha256_init(&ctx);
 
-    if (_looks_like_list(value)) {
-        int64_t *list = (int64_t *)(intptr_t)value;
-        int64_t len = list[1];
-        if (len > 0 && len <= 0x1000000) {
-            for (int64_t i = 0; i < len; i++) {
-                taida_wasm_sha256_update_byte(
-                    &ctx,
-                    (unsigned char)(list[WASM_LIST_ELEMS + i] & 0xff));
-            }
+    int64_t len = 0;
+    int64_t *list = (int64_t *)0;
+    int list_status = taida_wasm_sha256_list_input(value, &list, &len);
+    if (list_status < 0) taida_wasm_sha256_trap();
+    if (list_status > 0) {
+        for (int64_t i = 0; i < len; i++) {
+            taida_wasm_sha256_update_byte(
+                &ctx,
+                (unsigned char)(list[WASM_LIST_ELEMS + i] & 0xff));
         }
         return taida_wasm_sha256_finish_hex(&ctx);
     }
 
-    int64_t display = _looks_like_string(value)
-        ? value
-        : taida_value_to_display_string(value);
-    const char *s = (const char *)(intptr_t)display;
-    taida_wasm_sha256_update(&ctx, (const unsigned char *)(s ? s : ""), s ? wasm_strlen(s) : 0);
+    int64_t *bytes = (int64_t *)0;
+    int bytes_status = taida_wasm_sha256_bytes_input(value, &bytes, &len);
+    if (bytes_status < 0) taida_wasm_sha256_trap();
+    if (bytes_status > 0) {
+        for (int64_t i = 0; i < len; i++) {
+            taida_wasm_sha256_update_byte(&ctx, (unsigned char)(bytes[2 + i] & 0xff));
+        }
+        return taida_wasm_sha256_finish_hex(&ctx);
+    }
+
+    const char *s = (const char *)(intptr_t)value;
+    if (!taida_wasm_sha256_bounded_strlen(s, TAIDA_WASM_SHA256_MAX_INPUT_BYTES, &len)) {
+        taida_wasm_sha256_trap();
+    }
+    taida_wasm_sha256_update(&ctx, (const unsigned char *)s, len);
     return taida_wasm_sha256_finish_hex(&ctx);
 }
 

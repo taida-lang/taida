@@ -11858,15 +11858,12 @@ taida_val taida_sha256(taida_val value) {
         return out;
     }
 
-    taida_val display = taida_value_to_display_string(value);
-    const char *s = (const char*)display;
+    const char *s = (const char*)value;
     size_t slen = 0;
-    if (!taida_read_cstr_len_safe(s, 1 << 20, &slen)) {
-        taida_str_release(display);
+    if (!taida_str_byte_len(s, &slen)) {
         return taida_sha256_hex_from_bytes(NULL, 0);
     }
     taida_val out = taida_sha256_hex_from_bytes((const unsigned char*)s, slen);
-    taida_str_release(display);
     return out;
 }
 

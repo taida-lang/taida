@@ -3132,7 +3132,22 @@ fn test_sha256_three_way_parity() {
 
     let source = r#"
 >>> taida-lang/crypto => @(sha256)
+emptyLax <= Bytes[@[]]()
+emptyLax >=> emptyBytes
+abcLax <= Bytes[@[65, 66, 67]]()
+abcLax >=> abcBytes
+nulLax <= Bytes[@[72, 0, 73]]()
+nulLax >=> nulBytes
+zeroLax <= Bytes[@[0, 0, 0, 0]]()
+zeroLax >=> zeroBytes
+stdout(sha256(""))
 stdout(sha256("abc"))
+stdout(sha256("\x01hello"))
+stdout(sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+stdout(sha256(emptyBytes))
+stdout(sha256(abcBytes))
+stdout(sha256(nulBytes))
+stdout(sha256(zeroBytes))
 "#;
     std::fs::write(&main_path, source).expect("write main.td");
     std::fs::write(&packages_path, ">>> taida-lang/crypto@a.1\n").expect("write packages.tdm");
@@ -3158,10 +3173,18 @@ stdout(sha256("abc"))
         assert_eq!(interp, js, "interpreter/js mismatch for sha256");
     }
 
-    assert_eq!(
-        interp,
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
+    let expected = [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "cceeb7a985ecc3dabcb4c8f666cd637f16f008e3c963db6aa6f83a7b288c54ef",
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78",
+        "827768ed493ac4f0c3f0374242e98408ced57830e9d0bf65b99d730502255776",
+        "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
+    ]
+    .join("\n");
+    assert_eq!(interp, expected);
 
     let _ = std::fs::remove_dir_all(&project_dir);
 }

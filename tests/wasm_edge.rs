@@ -18,8 +18,12 @@ use std::process::Command;
 
 /// Compile a .td file with wasm-edge and return the wasm path (or None on failure).
 fn compile_wasm_edge(td_path: &Path, wasm_path: &Path) -> Option<String> {
+    compile_wasm_profile("wasm-edge", td_path, wasm_path)
+}
+
+fn compile_wasm_profile(target: &str, td_path: &Path, wasm_path: &Path) -> Option<String> {
     let output = Command::new(taida_bin())
-        .args(["build", "wasm-edge"])
+        .args(["build", target])
         .arg(td_path)
         .arg("-o")
         .arg(wasm_path)
@@ -123,7 +127,10 @@ fn wasm_edge_crypto_sha256_runs() {
     let td_path = std::env::temp_dir().join(format!("{}.td", stem));
     let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
     let source = r#">>> taida-lang/crypto => @(sha256)
+stdout(sha256(""))
 stdout(sha256("abc"))
+stdout(sha256("\x01hello"))
+stdout(sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
 "#;
 
     let _ = std::fs::remove_file(&td_path);
@@ -148,11 +155,88 @@ stdout(sha256("abc"))
     let stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
     assert_eq!(
         stdout,
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        [
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "cceeb7a985ecc3dabcb4c8f666cd637f16f008e3c963db6aa6f83a7b288c54ef",
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+        ]
+        .join("\n")
     );
 
     let _ = std::fs::remove_file(&td_path);
     let _ = std::fs::remove_file(&wasm_path);
+}
+
+/// Test: wasm-full hashes the concrete Bytes runtime layout directly.
+#[test]
+fn wasm_full_crypto_sha256_bytes_runs() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-full crypto Bytes runtime test");
+            return;
+        }
+    };
+
+    let stem = format!("taida_wasm_full_crypto_sha256_bytes_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+    let source = r#">>> taida-lang/crypto => @(sha256)
+emptyLax <= Bytes[@[]]()
+emptyLax >=> emptyBytes
+abcLax <= Bytes[@[65, 66, 67]]()
+abcLax >=> abcBytes
+nulLax <= Bytes[@[72, 0, 73]]()
+nulLax >=> nulBytes
+zeroLax <= Bytes[@[0, 0, 0, 0]]()
+zeroLax >=> zeroBytes
+stdout(sha256(emptyBytes))
+stdout(sha256(abcBytes))
+stdout(sha256(nulBytes))
+stdout(sha256(zeroBytes))
+"#;
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    std::fs::write(&td_path, source).expect("write wasm-full crypto Bytes fixture");
+
+    let err = compile_wasm_profile("wasm-full", &td_path, &wasm_path);
+    assert!(err.is_none(), "compile failed: {:?}", err);
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+    assert_eq!(
+        stdout,
+        [
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78",
+            "827768ed493ac4f0c3f0374242e98408ced57830e9d0bf65b99d730502255776",
+            "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119",
+        ]
+        .join("\n")
+    );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+}
+
+#[test]
+fn wasm_crypto_runtime_uses_sha256_specific_input_limit() {
+    let runtime = include_str!("../src/codegen/runtime_core_wasm/02_containers.inc.c");
+    assert!(runtime.contains("TAIDA_WASM_SHA256_MAX_INPUT_BYTES"));
+    assert!(!runtime.contains("len <= 0x1000000"));
 }
 
 /// Test: wasm-edge env example compiles (runtime test skipped -- needs taida_host imports).
@@ -1056,6 +1140,7 @@ handle req: WebRequest = text(sha256(req.body)) => :WebResponse
     let script = format!(
         r#"
 const fs = require("fs");
+const nodeCrypto = require("crypto");
 
 (async () => {{
   let memory = new WebAssembly.Memory({{ initial: 2 }});
@@ -1079,25 +1164,45 @@ const fs = require("fs");
   }}
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
-  const request = encoder.encode(JSON.stringify({{
-    method: "POST",
-    path: "/digest",
-    rawQuery: "",
-    query: [],
-    headers: [],
-    bodyBase64: "QQBC",
-  }}));
-  const inPtr = instance.exports.taida_abi_web_alloc(request.length);
-  new Uint8Array(memory.buffer, inPtr, request.length).set(request);
-  const handle = instance.exports.taida_abi_web_start(inPtr, request.length);
-  if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected ready response");
-  const raw = decoder.decode(new Uint8Array(
-    memory.buffer,
-    instance.exports.taida_abi_web_out_ptr(handle),
-    instance.exports.taida_abi_web_out_len(handle)
-  ));
-  instance.exports.taida_abi_web_free(handle);
-  console.log(raw);
+  function digest(bytes) {{
+    return nodeCrypto.createHash("sha256").update(bytes).digest("hex");
+  }}
+  function invoke(bodyBase64) {{
+    const request = encoder.encode(JSON.stringify({{
+      method: "POST",
+      path: "/digest",
+      rawQuery: "",
+      query: [],
+      headers: [],
+      bodyBase64,
+    }}));
+    const inPtr = instance.exports.taida_abi_web_alloc(request.length);
+    if (!inPtr) throw new Error("alloc failed for request length " + request.length);
+    new Uint8Array(memory.buffer, inPtr, request.length).set(request);
+    const handle = instance.exports.taida_abi_web_start(inPtr, request.length);
+    if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected ready response");
+    const raw = decoder.decode(new Uint8Array(
+      memory.buffer,
+      instance.exports.taida_abi_web_out_ptr(handle),
+      instance.exports.taida_abi_web_out_len(handle)
+    ));
+    instance.exports.taida_abi_web_free(handle);
+    return JSON.parse(raw);
+  }}
+  const vectors = [
+    Buffer.alloc(0),
+    Buffer.from([0x41, 0x00, 0x42]),
+    Buffer.from([0x00, 0x00, 0x00, 0x00]),
+  ];
+  for (const bytes of vectors) {{
+    const response = invoke(bytes.toString("base64"));
+    const body = Buffer.from(response.bodyBase64 || "", "base64").toString("utf8");
+    const expected = digest(bytes);
+    if (response.status !== 200 || body !== expected) {{
+      throw new Error("digest mismatch: got " + JSON.stringify(response) + " expected " + expected);
+    }}
+  }}
+  console.log("ok");
 }})().catch((err) => {{
   console.error(err && err.stack ? err.stack : err);
   process.exit(1);
@@ -1115,15 +1220,8 @@ const fs = require("fs");
         "node handler crypto harness failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains(r#""status":200"#)
-            && stdout.contains(
-                r#""bodyBase64":"NzZmZTM5MjVjNzE2NzMxN2YyZGY2ODQ1NDMzOWY1ZWMzNjUwZTQwNjIxNzhiNGYyYmUyMTliMTA1YTUwNzkwNw==""#
-            ),
-        "handler crypto digest should hash raw request bytes, got: {}",
-        stdout
-    );
+    let stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+    assert_eq!(stdout, "ok", "handler crypto digest vectors failed");
 
     let _ = std::fs::remove_file(&td_path);
     let _ = std::fs::remove_file(&wasm_path);
