@@ -12,7 +12,7 @@
 /// fd_write and does NOT use taida_host imports.
 mod common;
 
-use common::{taida_bin, wasmtime_bin};
+use common::{taida_bin, unique_temp_dir, wasmtime_bin};
 use std::path::Path;
 use std::process::Command;
 
@@ -616,6 +616,44 @@ handle req: Str = text(req) => :WebResponse
 
     let _ = std::fs::remove_file(&td_path);
     let _ = std::fs::remove_file(&wasm_path);
+}
+
+/// Test: wasm-edge build reads Cloudflare bindings from wrangler JSONC before type checking.
+#[test]
+fn wasm_edge_handler_injects_wrangler_host_capability_manifest() {
+    let dir = unique_temp_dir("taida_wasm_edge_wrangler_manifest");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCapability)
+
+D1Database <= "cloudflare/d1"
+
+handle req: WebRequest =
+  db <= HostCapability["DB", D1Database]()
+  text(req.path)
+=> :WebResponse
+"#;
+    let wrangler = r#"
+{
+  // This manifest is active, but it does not declare DB as a D1 binding.
+  "kv_namespaces": [
+    { "binding": "CACHE" },
+  ],
+}
+"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle")
+        .expect("undeclared HostCapability should fail before codegen");
+    assert!(
+        err.contains("[E3603]") && err.contains("DB") && err.contains("cloudflare/d1"),
+        "diagnostic should report the missing wrangler capability, got: {}",
+        err
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Test: handler mode rejects missing symbols, wrong arity, and bad returns.
