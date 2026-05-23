@@ -845,6 +845,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         // W-5: String template helpers (str_from_int/float/bool are aliases)
         "taida_str_from_int" => "int64_t taida_str_from_int(int64_t v);".to_string(),
         "taida_str_from_float" => "int64_t taida_str_from_float(int64_t v);".to_string(),
+        // taida-lang/crypto: pure SHA-256 is available in every WASM profile.
+        "taida_sha256" => "int64_t taida_sha256(int64_t value);".to_string(),
         // W-5: Lax method helpers
         "taida_can_throw_payload" => "int64_t taida_can_throw_payload(int64_t val);".to_string(),
         // W-5: Float comparison

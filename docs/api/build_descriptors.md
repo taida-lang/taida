@@ -230,13 +230,13 @@ buildFrontend <= BuildHook(
 各 `BuildUnit` は `target` に応じて、依存閉包に含めて良いコア API を制限します。
 表にない外部パッケージは通常の依存解決とビルド対象バックエンドの能力に従います。
 
-| target | `taida-lang/os` | `taida-lang/net` | `taida-lang/abi` | `taida-lang/terminal` |
-|--------|-----------------|------------------|------------------|-----------------------|
-| `native` | 受理 | 受理 | 受理 | 受理 |
-| `wasm-min` | reject | reject | 受理 | reject |
-| `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | 受理 | reject |
-| `wasm-wasi` | `EnvVar`, `allEnv`, `Read`, `Exists`, `writeFile`, `readBytesAt` のみ受理 | reject | 受理 | reject |
-| `wasm-full` | `wasm-wasi` と同じ OS subset を受理 | reject | 受理 | reject |
+| target | `taida-lang/os` | `taida-lang/net` | `taida-lang/crypto` | `taida-lang/abi` | `taida-lang/terminal` |
+|--------|-----------------|------------------|----------------------|------------------|-----------------------|
+| `native` | 受理 | 受理 | `sha256` | 受理 | 受理 |
+| `wasm-min` | reject | reject | `sha256` | 受理 | reject |
+| `wasm-edge` | `EnvVar`, `allEnv` のみ受理 | reject | `sha256` | 受理 | reject |
+| `wasm-wasi` | `EnvVar`, `allEnv`, `Read`, `Exists`, `writeFile`, `readBytesAt` のみ受理 | reject | `sha256` | 受理 | reject |
+| `wasm-full` | `wasm-wasi` と同じ OS subset を受理 | reject | `sha256` | 受理 | reject |
 
 allow list は import 元のシンボル名で判定します。alias は判定を変えません。
 コア API import でシンボルリストが空の場合は package wildcard とみなし、

@@ -64,10 +64,10 @@ sha256("") => empty_hex
 | インタプリタ | 対応 |
 | ネイティブ | 対応 |
 | 旧 JS ターゲット | 対応 |
-| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | 利用不可 |
-| WASM (`wasm-full`) | 対応 |
+| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | `sha256` に対応 |
 
-`wasm-min` / `wasm-wasi` / `wasm-edge` プロファイルでは
-`taida-lang/crypto` のインポート自体がコンパイル時に拒否されます。
-詳細は [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md)
-を参照してください。
+WASM プロファイルの `sha256` は guest 内の純粋な実装で完結し、host
+capability bridge を使いません。HMAC、乱数、署名検証などの追加 API は
+まだ公開 surface ではありません。詳細は
+[`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) を参照して
+ください。

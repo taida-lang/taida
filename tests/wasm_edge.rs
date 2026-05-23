@@ -107,6 +107,54 @@ fn wasm_edge_hello_runs() {
     assert_eq!(stdout, "Hello from edge!");
 }
 
+/// Test: wasm-edge can run the pure `taida-lang/crypto` SHA-256 subset
+/// without a host capability bridge.
+#[test]
+fn wasm_edge_crypto_sha256_runs() {
+    let wasmtime = match wasmtime_bin() {
+        Some(p) => p,
+        None => {
+            eprintln!("wasmtime not found, skipping wasm-edge crypto runtime test");
+            return;
+        }
+    };
+
+    let stem = format!("taida_wasm_edge_crypto_sha256_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+    let source = r#">>> taida-lang/crypto => @(sha256)
+stdout(sha256("abc"))
+"#;
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    std::fs::write(&td_path, source).expect("write crypto fixture");
+
+    let err = compile_wasm_edge(&td_path, &wasm_path);
+    assert!(err.is_none(), "compile failed: {:?}", err);
+
+    let run = Command::new(&wasmtime)
+        .arg("run")
+        .arg("--")
+        .arg(&wasm_path)
+        .output()
+        .expect("wasmtime should run");
+    assert!(
+        run.status.success(),
+        "wasmtime failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
+    assert_eq!(
+        stdout,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+}
+
 /// Test: wasm-edge env example compiles (runtime test skipped -- needs taida_host imports).
 ///
 /// Note: The wasm-edge env example uses `taida_host.env_get` and `taida_host.env_get_all`
@@ -960,6 +1008,120 @@ const fs = require("fs");
     assert!(
         stdout.contains(r#""status":200"#) && stdout.contains(r#""bodyBase64":"UE9TVDovbm9kZQ==""#),
         "handler ABI output should encode 200 response with request fields, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    let _ = std::fs::remove_file(&js_path);
+}
+
+/// Test: handler request bodies are valid `Bytes` inputs for the wasm-edge
+/// crypto subset, including embedded NUL bytes.
+#[test]
+fn wasm_edge_handler_crypto_sha256_body_bytes_node() {
+    if !Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("node not found, skipping wasm-edge handler crypto runtime test");
+        return;
+    }
+
+    let stem = format!("taida_wasm_edge_handler_crypto_{}", std::process::id());
+    let td_path = std::env::temp_dir().join(format!("{}.td", stem));
+    let wasm_path = std::env::temp_dir().join(format!("{}.wasm", stem));
+    let js_path = std::env::temp_dir().join(format!("{}.js", stem));
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text)
+>>> taida-lang/crypto => @(sha256)
+
+handle req: WebRequest = text(sha256(req.body)) => :WebResponse
+"#;
+
+    let _ = std::fs::remove_file(&td_path);
+    let _ = std::fs::remove_file(&wasm_path);
+    let _ = std::fs::remove_file(&js_path);
+    std::fs::write(&td_path, source).expect("write handler crypto fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "handler crypto build should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "POST",
+    path: "/digest",
+    rawQuery: "",
+    query: [],
+    headers: [],
+    bodyBase64: "QQBC",
+  }}));
+  const inPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, inPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(inPtr, request.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected ready response");
+  const raw = decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  ));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write handler crypto node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node handler crypto harness should run");
+    assert!(
+        run.status.success(),
+        "node handler crypto harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(r#""status":200"#)
+            && stdout.contains(
+                r#""bodyBase64":"NzZmZTM5MjVjNzE2NzMxN2YyZGY2ODQ1NDMzOWY1ZWMzNjUwZTQwNjIxNzhiNGYyYmUyMTliMTA1YTUwNzkwNw==""#
+            ),
+        "handler crypto digest should hash raw request bytes, got: {}",
         stdout
     );
 
