@@ -374,31 +374,18 @@ async function readTaidaWebSession(exports, memory, decoder, encoder, session, e
 }}
 
 async function dispatchTaidaHostCall(envelope, env) {{
-    const id = envelope && Number.isFinite(envelope.id) ? Math.trunc(envelope.id) : 0;
+    const id = envelope.id;
     try {{
-      if (!envelope || envelope.kind !== "host_call") {{
-        throw new Error("unsupported host call");
-      }}
       let target = env[envelope.capability];
-      if (target === undefined || target === null) {{
-        throw new Error("host capability unavailable");
-      }}
-      const steps = Array.isArray(envelope.steps) ? envelope.steps : [];
-      for (const step of steps) {{
-        const method = step && typeof step.method === "string" ? step.method : "";
-        const args = step && Array.isArray(step.args) ? step.args : [];
-        const fn = target && target[method];
-        if (typeof fn !== "function") {{
-          throw new Error("host method unavailable");
-        }}
-        target = await fn.apply(target, args);
+      for (const step of envelope.steps) {{
+        target = await target[step.method](...step.args);
       }}
       return {{ id, ok: true, value: target }};
     }} catch (err) {{
       return {{
         id,
         ok: false,
-        error: err && err.message ? String(err.message) : "host call failed",
+        error: err && err.message ? String(err.message) : String(err),
       }};
     }}
 }}

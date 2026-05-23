@@ -504,6 +504,51 @@ fn wasm_edge_handler_glue_uses_request_abi() {
     }
 }
 
+/// Test: host-call dispatch stays mechanical and does not encode capability policy.
+#[test]
+fn wasm_edge_handler_glue_keeps_host_dispatch_policy_free() {
+    let glue = taida::codegen::edge_glue::generate_edge_js_source(
+        taida::codegen::edge_glue::EdgeGlueConfig::handler("test", "test.wasm"),
+    );
+    let dispatch_start = glue
+        .find("async function dispatchTaidaHostCall")
+        .expect("handler glue should include host-call dispatcher");
+    let dispatch_end = glue[dispatch_start..]
+        .find("\n}\n\nfunction clampStatus")
+        .map(|offset| dispatch_start + offset)
+        .expect("dispatcher should end before response helpers");
+    let dispatch = &glue[dispatch_start..dispatch_end];
+
+    assert!(
+        dispatch.contains("let target = env[envelope.capability];"),
+        "dispatcher should resolve the host value by binding name"
+    );
+    assert!(
+        dispatch.contains("target = await target[step.method](...step.args);"),
+        "dispatcher should mechanically invoke each requested method"
+    );
+    for forbidden in [
+        "envelope.kind",
+        "Array.isArray",
+        "typeof fn",
+        "switch",
+        "case ",
+        "cloudflare/d1",
+        "cloudflare/kv",
+        "schema",
+        "unsupported host call",
+        "host capability unavailable",
+        "host method unavailable",
+    ] {
+        assert!(
+            !dispatch.contains(forbidden),
+            "dispatcher must not contain adapter policy token `{}`:\n{}",
+            forbidden,
+            dispatch
+        );
+    }
+}
+
 /// Test: generated glue can be imported from user-authored Workers JS.
 #[test]
 fn wasm_edge_glue_exposes_importable_request_adapter() {
