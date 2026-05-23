@@ -3,6 +3,7 @@ mod common;
 use std::process::Command;
 
 use common::{taida_bin, unique_temp_dir};
+use taida::interpreter::{AsyncStatus, HostCallMockStep, Interpreter, Value};
 use taida::types::{CompileTarget, TypeChecker};
 
 fn run_way_check(source: &str, label: &str) -> (bool, String) {
@@ -58,6 +59,17 @@ fn typecheck_with_manifest(source: &str, manifest: &[(&str, &str)]) -> Vec<Strin
         .iter()
         .map(|err| err.message.clone())
         .collect()
+}
+
+fn eval_with_host_fixture(source: &str, capability: &str, steps: Vec<HostCallMockStep>) -> Value {
+    let (program, parse_errors) = taida::parser::parse(source);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut interpreter = Interpreter::new();
+    interpreter.set_host_capability_mock_steps(capability, steps);
+    interpreter
+        .eval_program(&program)
+        .expect("host capability fixture should evaluate")
 }
 
 #[test]
@@ -275,6 +287,73 @@ cap.name
         output.contains("CAP"),
         "HostCapability runtime pack should expose name field:\n{}",
         output
+    );
+}
+
+#[test]
+fn host_call_fixture_returns_async_output() {
+    let source = r#">>> taida-lang/abi => @(HostCall, HostStep, HostCapability)
+
+Kind <= "mock/kind"
+cap <= HostCapability["CAP", Kind]()
+Cage[cap, HostCall[@[HostStep["get", @["k"]](), HostStep["decode", @[]]()], Str]()]() >=> out
+out
+"#;
+
+    let result = eval_with_host_fixture(
+        source,
+        "CAP",
+        vec![
+            HostCallMockStep {
+                method: "get".to_string(),
+                args: vec![Value::str("k".to_string())],
+                result: Value::str("raw".to_string()),
+            },
+            HostCallMockStep {
+                method: "decode".to_string(),
+                args: Vec::new(),
+                result: Value::str("value".to_string()),
+            },
+        ],
+    );
+
+    assert_eq!(result, Value::str("value".to_string()));
+}
+
+#[test]
+fn host_call_fixture_missing_mock_returns_rejected_async() {
+    let source = r#">>> taida-lang/abi => @(HostCall, HostStep, HostCapability)
+
+Kind <= "mock/kind"
+cap <= HostCapability["MISSING", Kind]()
+Cage[cap, HostCall[@[HostStep["get", @[]]()], Str]()]()
+"#;
+
+    let (program, parse_errors) = taida::parser::parse(source);
+    assert!(parse_errors.is_empty(), "parse errors: {:?}", parse_errors);
+
+    let mut interpreter = Interpreter::new();
+    let result = interpreter
+        .eval_program(&program)
+        .expect("missing fixture should be a rejected Async value");
+
+    let Value::Async(async_value) = result else {
+        panic!("HostCall should return Async, got {:?}", result);
+    };
+    assert_eq!(async_value.status, AsyncStatus::Rejected);
+    let Value::Error(error) = *async_value.error else {
+        panic!(
+            "rejected HostCall should carry Error, got {:?}",
+            async_value.error
+        );
+    };
+    assert_eq!(error.error_type, "HostCapabilityError");
+    assert!(
+        error
+            .message
+            .contains("No interpreter host fixture registered"),
+        "unexpected error message: {}",
+        error.message
     );
 }
 
