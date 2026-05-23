@@ -39,4 +39,10 @@ Mold[T <= :Wired[T]] => WireBox[T <= :Wired[T]] = @(marker: Int <= 0)
 `Num` は wire 上の独立した実値型ではないため、`Int` または `Float` に確定させて
 から渡します。
 
-`Wired[T]` 違反は `[E3601]` です。
+Host capability では、`HostStep[method, args]()` の `args` が `Wired` な値の
+リストであることを要求します。`Bytes` は wire 上で標準 base64 文字列になり、
+`WebRequest` / `WebResponse` は handler ABI と同じ `bodyBase64` 形で運ばれます。
+
+`Wired[T]` 違反は `[E3601]` です。`HostCall` の steps list が `HostStep` 以外を
+含む場合は `[E3602]`、host boundary descriptor の compile-time identity や
+manifest 照合に失敗した場合は `[E3603]` です。

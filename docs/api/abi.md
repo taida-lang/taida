@@ -88,7 +88,77 @@ handle req: WebRequest =
 
 ---
 
-## 3. Handler Mode
+## 3. Host Capability
+
+`taida-lang/abi` は inbound の `WebRequest` / `WebResponse` に加えて、
+outbound の host capability 呼び出しを扱う descriptor も提供します。
+
+```taida
+>>> taida-lang/abi => @(HostCapability, HostStep, HostCall)
+```
+
+| Descriptor | 概要 |
+|------------|------|
+| `HostCapability[name, kind]()` | adapter が解決する host binding を表す。`name` は binding 名、`kind` は adapter / wrapper ingot が決める opaque な `Str`。 |
+| `HostStep[method, args]()` | host 側 method 呼び出しを 1 step 表す。`method` は compile-time `Str`、`args` は wire 可能な値のリスト。 |
+| `HostCall[steps, Out]()` | `Cage` の runner として使う host call 記述。`steps` は `HostStep` のリスト、`Out` は decode 後の戻り型。 |
+
+`HostCapability[name, kind]()` は、build target が host capability manifest を
+提供する場合に compile-time 照合されます。`name` / `kind` が compile-time
+`Str` として解決できない場合、または manifest に未宣言の場合は `[E3603]` です。
+kind 文字列の命名規約は `taida-lang/abi` では定義しません。
+
+`HostStep` の `args` は必ずリストです。空引数は `@[]` と書きます。各要素は
+`Wired[T]` を満たす必要があります。`Str` / `Int` / `Float` / `Bool` / `Bytes`、
+wire 可能な list / ぶちパック / 名前付きぶちパック、`WebRequest` /
+`WebResponse`、`HostCapability` が対象です。違反は `[E3601]` です。
+
+`HostCall` は `Cage` で実行します。
+
+```taida
+>>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCapability, HostStep, HostCall)
+
+KV <= "cloud/kv"
+
+handle req: WebRequest =
+  cache <= HostCapability["CACHE", KV]()
+  value <=< Cage[cache, HostCall[@[HostStep["get", @["answer"]]()], Str]()]()
+  text(value)
+=> :WebResponse
+```
+
+戻り値は `Async[Out]` なので、`>=>` / `<=<` で待ちます。host 側の capability
+解決失敗、method 不在、host 例外、Promise rejection、`Out` の decode 失敗は
+rejected `Async[Out]` になります。通常の `Async` と同じく error ceiling で
+受けられます。
+
+```taida
+handle req: WebRequest =
+  |== error: Error =
+    text("host error: " + error.message)
+  => :WebResponse
+
+  cache <= HostCapability["CACHE", "cloud/kv"]()
+  value <=< Cage[cache, HostCall[@[HostStep["get", @["answer"]]()], Str]()]()
+  text(value)
+=> :WebResponse
+```
+
+HostCall の wire 値では、`Bytes` は標準 base64 の `Str` として運ばれます。
+`WebRequest` / `WebResponse` は handler JSON と同じく body を `bodyBase64`
+で運び、`query` / `headers` は `name` / `value` の出現順リストを維持します。
+
+`wasm-edge --handler` は Cloudflare Workers 用の manifest reader を持ち、
+`wrangler.jsonc` / `wrangler.json` の binding から host capability manifest を
+作ります。対応する binding は D1 database、KV namespace、Durable Object
+namespace、R2 bucket、Queue producer、Service binding です。生成される Workers
+glue は `env[capability]` から対象を取り、`steps` の method を順に呼ぶ機械的な
+bridge です。allow-list 判定、kind 別分岐、payload 検査、result schema decode は
+glue では行いません。
+
+---
+
+## 4. Handler Mode
 
 `taida build native` と各 WASM target は `--handler <SYMBOL>` を受け付けます。
 handler 関数は、必ず 1 つの `WebRequest` を受け取り、`WebResponse` を返します。
@@ -172,11 +242,27 @@ WASM handler bridge の portable な契約です。
 
 ---
 
-## 4. バックエンド対応
+## 5. Stable / Provisional Boundary
+
+| 領域 | 状態 | 内容 |
+|------|------|------|
+| Taida surface | Stable | `WebRequest` / `WebResponse`、response helpers、`HostCapability` / `HostStep` / `HostCall`、`Cage` から返る `Async[Out]`、`Wired[T]` 制約。 |
+| Build surface | Stable | `taida build native --handler` と `taida build wasm-* --handler` の entry 検証、handler signature 診断、manifest が active な target での capability 照合。 |
+| Handler wire JSON | Stable | Request / response JSON の `method` / `path` / `rawQuery` / `query` / `headers` / `bodyBase64`、および response の `status` / `headers` / `bodyBase64`。 |
+| HostCall transport | Provisional | WASM の poll / resume export、`host_call` envelope、generated adapter の内部 loop。adapter author 向けの低レベル transport であり、Taida source surface ではありません。 |
+| Adapter detail | Provisional | Cloudflare Workers glue、Wrangler binding reader、各 host runtime での capability 解決方法。 |
+
+将来、低レベル transport は binary ABI や async effect protocol に置き換わる可能性が
+あります。その場合でも、Taida source は `Cage[cap, HostCall[...]]()` と
+`Async[Out]` の形を維持する方針です。
+
+---
+
+## 6. バックエンド対応
 
 | バックエンド | 対応範囲 |
 |--------------|----------|
-| インタプリタ | 型・helper 評価に対応。handler binary は生成しません。 |
+| インタプリタ | 型・helper 評価と fixture-backed host call に対応。handler binary は生成しません。 |
 | ネイティブ | `--handler` で request/response JSON bridge を持つ binary を生成。 |
-| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | `--handler` と共有 WebRequest/WebResponse ABI に対応。 |
+| WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | `--handler`、共有 WebRequest/WebResponse ABI、host call poll/resume ABI に対応。 |
 | 旧 JS ターゲット | handler mode 非対応。 |
