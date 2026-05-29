@@ -4187,12 +4187,18 @@ static void *net_worker_thread(void *arg) {
             int head_malformed = 0;
             taida_val parse_result = 0;  // retained across head+body for single-parse reuse
             taida_val parse_inner = 0;   // inner pack from parse_result
+            // NET-1: resume the CRLFCRLF scan from where the previous read left
+            // off (minus a 3-byte overlap so a terminator split across reads is
+            // not missed) instead of rescanning from the front every read,
+            // giving O(total) head accumulation rather than O(H²).
+            size_t head_scan_pos = 0;
 
             while (total_read < NET_MAX_REQUEST_BUF) {
                 // Try to parse what we have so far
                 if (total_read > 3) {
                     int found_end = 0;
-                    for (size_t i = 0; i + 3 < total_read; i++) {
+                    size_t scan_start = head_scan_pos > 3 ? head_scan_pos - 3 : 0;
+                    for (size_t i = scan_start; i + 3 < total_read; i++) {
                         if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
                             found_end = 1;
                             head_consumed = i + 4;
@@ -4221,6 +4227,9 @@ static void *net_worker_thread(void *arg) {
                         taida_release(parse_bytes);
                         break;
                     }
+                    // Terminator not found yet: everything up to total_read has
+                    // been scanned, so the next read resumes from here.
+                    head_scan_pos = total_read;
                 }
 
                 // Read more data

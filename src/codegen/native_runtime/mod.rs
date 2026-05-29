@@ -656,7 +656,11 @@ mod tests {
         //   (net_h2 server) for the per-stream eager-body size limit
         //   (H2_MAX_REQUEST_BODY_SIZE + ENHANCE_YOUR_CALM reset + the two new
         //   #defines). Recomputed total = 1,177,022.
-        const EXPECTED_TOTAL_LEN: usize = 1_177_022;
+        // 2026-05-30 HTTP/1.1 head-scan O(H) fix: +639 bytes inside fragment 5
+        //   (HTTP/1 worker) for the resumable CRLFCRLF scan (head_scan_pos +
+        //   3-byte overlap margin) replacing the O(H²) re-scan. Recomputed
+        //   total = 1,177,661.
+        const EXPECTED_TOTAL_LEN: usize = 1_177_661;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1426,14 +1430,17 @@ mod tests {
         // 2026-05-16 F42 sweep (R6): contract label rewrite
         //   across the streaming/WS contract comments adds 24 bytes to F5.
         //   F6 unchanged. F5 223,893 → 223,917.
-        const F5_LEN: usize = 223_917;
+        // 2026-05-30 HTTP/1.1 head-scan O(H) fix: +639 bytes inside fragment 5
+        //   (HTTP/1 worker, before the divider) for the resumable CRLFCRLF scan
+        //   (head_scan_pos). F5_LEN: 223,917 + 639 = 224,556.
+        const F5_LEN: usize = 224_556;
         // 2026-05-30 HTTP/2 request body cap lands inside fragment 6 (net_h2
         //   server, after the divider): the H2_MAX_REQUEST_BODY_SIZE guard +
         //   ENHANCE_YOUR_CALM reset + the two new #defines net to +1,113 bytes.
-        //   F5_LEN unchanged; F6 grows: 106,128 + 1,113 = 107,241.
+        //   F6 grows: 106,128 + 1,113 = 107,241.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            223_917 + 107_241,
+            224_556 + 107_241,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";
