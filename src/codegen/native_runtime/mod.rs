@@ -660,7 +660,12 @@ mod tests {
         //   (HTTP/1 worker) for the resumable CRLFCRLF scan (head_scan_pos +
         //   3-byte overlap margin) replacing the O(H²) re-scan. Recomputed
         //   total = 1,177,661.
-        const EXPECTED_TOTAL_LEN: usize = 1_177_661;
+        // 2026-05-30 os run/execShell deadlock fix: +1,835 bytes in os.c for
+        //   taida_os_drain_two_pipes (poll-based concurrent stdout/stderr
+        //   drain) + #include <poll.h>, replacing the two sequential read
+        //   loops. os.c is outside the F1/F2/F5/F6 boundaries so only the grand
+        //   total shifts. Recomputed total = 1,179,496.
+        const EXPECTED_TOTAL_LEN: usize = 1_179_496;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

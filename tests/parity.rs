@@ -3001,6 +3001,15 @@ stdout(okShellV.code.toString())
 
 badShell <= execShell("exit 7")
 stdout(badShell.hasValue().toString())
+
+// Large stderr (200KB, > the ~64KB pipe buffer) must not deadlock the parent
+// reader: draining stdout to EOF before stderr would block the child on its
+// stderr write while the parent blocks on the stdout read. All backends must
+// drain both pipes concurrently and still recover stdout "OK".
+bigErr <= execShell("yes x | head -c 200000 >&2; printf OK")
+bigErr >=> bigErrV
+stdout(bigErrV.stdout)
+stdout(bigErrV.code.toString())
 "#;
     assert_backend_parity_for_source(source, "os_process_gorillax");
 }
