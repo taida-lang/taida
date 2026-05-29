@@ -4869,6 +4869,15 @@ static void *net_worker_thread(void *arg) {
 #define H2_ERROR_FRAME_SIZE_ERROR  0x6
 #define H2_ERROR_STREAM_CLOSED     0x5
 #define H2_ERROR_COMPRESSION_ERROR 0x9
+#define H2_ERROR_ENHANCE_YOUR_CALM 0xb
+
+/* Maximum eager-accumulated request body size per HTTP/2 stream (16 MiB).
+ * The stream flow-control window is replenished without an overall cap, so
+ * the per-stream request_body buffer must be bounded here; otherwise a single
+ * stream can grow its body indefinitely until END_STREAM arrives, exhausting
+ * memory. Matches the Interpreter MAX_REQUEST_BODY_SIZE and the WebSocket max
+ * payload bound. Exceeding it resets the stream with ENHANCE_YOUR_CALM. */
+#define H2_MAX_REQUEST_BODY_SIZE (16u * 1024u * 1024u)
 
 // Settings identifiers
 #define H2_SETTINGS_HEADER_TABLE_SIZE      0x1
@@ -6597,6 +6606,17 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
 
                     const unsigned char *data = payload + offset;
                     uint32_t data_bytes = payload_len - offset - pad_len;
+                    // Bound eager body accumulation (matches Interpreter
+                    // MAX_REQUEST_BODY_SIZE): flow-control windows are
+                    // replenished without an overall cap, so without this a
+                    // single stream's body grows until END_STREAM (OOM).
+                    if ((size_t)s->request_body_len + data_bytes > H2_MAX_REQUEST_BODY_SIZE) {
+                        h2_send_rst_stream(client_fd, frame_stream_id, H2_ERROR_ENHANCE_YOUR_CALM);
+                        s->state = H2_STREAM_CLOSED;
+                        h2_conn_remove_closed_streams(&conn);
+                        free(payload);
+                        continue;
+                    }
                     // Accumulate body
                     if (s->request_body_len + data_bytes > s->request_body_cap) {
                         size_t new_cap = s->request_body_cap ? s->request_body_cap * 2 : 4096;
