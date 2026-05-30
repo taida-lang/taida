@@ -3357,6 +3357,106 @@ static int _wasm_value_eq(int64_t a, int64_t b) {
     return 0;
 }
 
+/* F54B-016 (G4) commit 2: O(n) fingerprint seen-set for Set / list.unique.
+   FNV-1a over the same structure _wasm_value_eq compares; collisions confirmed
+   with _wasm_value_eq. Engaged only when every element is _wasm_value_hashable;
+   linear path kept otherwise. Bump-allocated (wasm_alloc), no free needed. */
+static void _wasm_fnv_bytes(uint64_t *h, const void *p, int n) {
+    const unsigned char *b = (const unsigned char*)p;
+    for (int i = 0; i < n; i++) { *h ^= b[i]; *h *= 0x100000001b3ULL; }
+}
+static void _wasm_fp_accum(int64_t v, uint64_t *h) {
+    if (_looks_like_string(v)) {
+        unsigned char tag = 2; _wasm_fnv_bytes(h, &tag, 1);
+        const char *s = (const char*)(intptr_t)v; int l = _wf_strlen(s);
+        uint64_t ll = (uint64_t)l; _wasm_fnv_bytes(h, &ll, sizeof(ll));
+        _wasm_fnv_bytes(h, s, l);
+        return;
+    }
+    if (_looks_like_list(v)) {
+        unsigned char tag = 7; _wasm_fnv_bytes(h, &tag, 1);
+        int64_t *l = (int64_t*)(intptr_t)v; int64_t n = l[1];
+        uint64_t nn = (uint64_t)n; _wasm_fnv_bytes(h, &nn, sizeof(nn));
+        for (int64_t i = 0; i < n; i++) _wasm_fp_accum(l[WASM_LIST_ELEMS + i], h);
+        return;
+    }
+    if (_looks_like_empty_pack(v)) {
+        unsigned char tag = 8; _wasm_fnv_bytes(h, &tag, 1);
+        uint64_t z = 0; _wasm_fnv_bytes(h, &z, sizeof(z)); _wasm_fnv_bytes(h, &z, sizeof(z));
+        return;
+    }
+    if (_looks_like_pack(v)) {
+        unsigned char tag = 8; _wasm_fnv_bytes(h, &tag, 1);
+        int64_t *p = (int64_t*)(intptr_t)v; int64_t n = p[0];
+        uint64_t nn = (uint64_t)n; _wasm_fnv_bytes(h, &nn, sizeof(nn));
+        uint64_t mix = 0;
+        for (int64_t i = 0; i < n; i++) {
+            uint64_t fh = 0xcbf29ce484222325ULL;
+            int64_t nh = p[1 + i*3]; _wasm_fnv_bytes(&fh, &nh, sizeof(nh));
+            _wasm_fp_accum(p[1 + i*3 + 2], &fh);
+            mix ^= fh;
+        }
+        _wasm_fnv_bytes(h, &mix, sizeof(mix));
+        return;
+    }
+    unsigned char tag = 0; _wasm_fnv_bytes(h, &tag, 1);
+    _wasm_fnv_bytes(h, &v, sizeof(v));
+}
+static uint64_t _wasm_value_fingerprint(int64_t v) {
+    uint64_t h = 0xcbf29ce484222325ULL; _wasm_fp_accum(v, &h); return h;
+}
+static int _wasm_value_hashable(int64_t v) {
+    if (_is_wasm_hashmap(v) || _is_wasm_set(v) || _wasm_is_async_obj(v)) return 0;
+    if (_looks_like_string(v)) return 1;
+    if (_looks_like_list(v)) {
+        int64_t *l = (int64_t*)(intptr_t)v; int64_t n = l[1];
+        for (int64_t i = 0; i < n; i++) if (!_wasm_value_hashable(l[WASM_LIST_ELEMS + i])) return 0;
+        return 1;
+    }
+    if (_looks_like_empty_pack(v)) return 1;
+    if (_looks_like_pack(v)) {
+        int64_t *p = (int64_t*)(intptr_t)v; int64_t n = p[0];
+        for (int64_t i = 0; i < n; i++) if (!_wasm_value_hashable(p[1 + i*3 + 2])) return 0;
+        return 1;
+    }
+    return 1; /* scalar */
+}
+typedef struct { uint64_t *fps; int64_t *vals; unsigned char *used; int mask; } _wasm_seen;
+static int _wasm_seen_init(_wasm_seen *s, int64_t hint) {
+    int cap = 16; int64_t want = (hint > 0 ? hint : 1) * 2 + 1;
+    while ((int64_t)cap < want) cap <<= 1;
+    s->mask = cap - 1;
+    s->fps  = (uint64_t*)wasm_alloc((unsigned int)((int)cap * (int)sizeof(uint64_t)));
+    s->vals = (int64_t*)wasm_alloc((unsigned int)((int)cap * (int)sizeof(int64_t)));
+    s->used = (unsigned char*)wasm_alloc((unsigned int)cap);
+    if (!s->fps || !s->vals || !s->used) return 0;
+    for (int i = 0; i < cap; i++) s->used[i] = 0;
+    return 1;
+}
+static int _wasm_seen_add(_wasm_seen *s, int64_t v) {
+    uint64_t fp = _wasm_value_fingerprint(v);
+    int i = (int)(fp & (uint64_t)s->mask);
+    for (;;) {
+        if (!s->used[i]) { s->used[i] = 1; s->fps[i] = fp; s->vals[i] = v; return 1; }
+        if (s->fps[i] == fp && _wasm_value_eq(s->vals[i], v)) return 0;
+        i = (i + 1) & s->mask;
+    }
+}
+static int _wasm_seen_contains(_wasm_seen *s, int64_t v) {
+    uint64_t fp = _wasm_value_fingerprint(v);
+    int i = (int)(fp & (uint64_t)s->mask);
+    for (;;) {
+        if (!s->used[i]) return 0;
+        if (s->fps[i] == fp && _wasm_value_eq(s->vals[i], v)) return 1;
+        i = (i + 1) & s->mask;
+    }
+}
+static int _wasm_list_all_hashable(int64_t *list) {
+    int64_t n = list[1];
+    for (int64_t i = 0; i < n; i++) if (!_wasm_value_hashable(list[WASM_LIST_ELEMS + i])) return 0;
+    return 1;
+}
+
 int64_t taida_set_has(int64_t set_ptr, int64_t item) {
     int64_t *set = (int64_t *)(intptr_t)set_ptr;
     int64_t len = set[1];
@@ -3396,8 +3496,12 @@ int64_t taida_set_from_list(int64_t list_ptr) {
        structural dispatcher would false-match the large Int against a
        collection sentinel. */
     taida_list_set_elem_tag(set, list[2]);
+    _wasm_seen seen;
+    int use_hash = _wasm_list_all_hashable(list) && _wasm_seen_init(&seen, len);
     for (int64_t i = 0; i < len; i++) {
-        set = taida_set_add(set, list[WASM_LIST_ELEMS + i]);
+        int64_t item = list[WASM_LIST_ELEMS + i];
+        int dup = use_hash ? !_wasm_seen_add(&seen, item) : taida_set_has(set, item);
+        if (!dup) set = taida_list_push(set, item);
     }
     return set;
 }
@@ -3422,13 +3526,17 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t b_len = b[1];
     int64_t result = taida_set_new();
+    _wasm_seen seen;
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+                   && _wasm_seen_init(&seen, a_len + b_len);
     for (int64_t i = 0; i < a_len; i++) {
+        if (use_hash) _wasm_seen_add(&seen, a[WASM_LIST_ELEMS + i]);
         result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     for (int64_t i = 0; i < b_len; i++) {
-        if (!taida_set_has(result, b[WASM_LIST_ELEMS + i])) {
-            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
-        }
+        int dup = use_hash ? !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i])
+                           : taida_set_has(result, b[WASM_LIST_ELEMS + i]);
+        if (!dup) result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
     }
     return result;
 }
@@ -3437,11 +3545,16 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
 int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
+    int64_t *b = (int64_t *)(intptr_t)set_b;
     int64_t result = taida_set_new();
+    _wasm_seen seen;
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+                   && _wasm_seen_init(&seen, b[1]);
+    if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        if (taida_set_has(set_b, a[WASM_LIST_ELEMS + i])) {
-            result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
-        }
+        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
+                            : taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
+        if (in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
 }
@@ -3450,11 +3563,16 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
 int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
+    int64_t *b = (int64_t *)(intptr_t)set_b;
     int64_t result = taida_set_new();
+    _wasm_seen seen;
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+                   && _wasm_seen_init(&seen, b[1]);
+    if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        if (!taida_set_has(set_b, a[WASM_LIST_ELEMS + i])) {
-            result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
-        }
+        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
+                            : taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
+        if (!in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
 }

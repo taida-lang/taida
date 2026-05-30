@@ -670,7 +670,7 @@ mod tests {
         //   taida_value_struct_eq + bytes helpers) plus the three struct-eq call
         //   sites, all before the "Error ceiling" marker. F1_LEN 324,657 ->
         //   328,992; total 1,179,496 -> 1,183,831.
-        const EXPECTED_TOTAL_LEN: usize = 1_183_831;
+        const EXPECTED_TOTAL_LEN: usize = 1_190_634;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1264,7 +1264,7 @@ mod tests {
         //   at byte offset 324,657.
         // F54B-016 (G4) commit 1: +4,335 bytes (structural Set/unique engine)
         // land before the Error ceiling marker, moving F1_LEN 324,657 -> 328,992.
-        const F1_LEN: usize = 328_992;
+        const F1_LEN: usize = 335_795;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 is 200,593 bytes. The previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

@@ -993,16 +993,22 @@ int64_t taida_list_unique(int64_t list_ptr) {
     int64_t new_list = taida_list_new();
     int64_t *nl_init = (int64_t *)(intptr_t)new_list;
     nl_init[2] = elem_tag;
+    _wasm_seen seen;
+    int use_hash = _wasm_list_all_hashable(list) && _wasm_seen_init(&seen, len);
     for (int64_t i = 0; i < len; i++) {
         int64_t item = list[WASM_LIST_ELEMS + i];
-        /* Check if already in new_list */
-        int64_t *nl = (int64_t *)(intptr_t)new_list;
-        int64_t nlen = nl[1];
-        int64_t found = 0;
-        for (int64_t j = 0; j < nlen; j++) {
-            if (_wasm_value_eq(nl[WASM_LIST_ELEMS + j], item)) { found = 1; break; }
+        int dup;
+        if (use_hash) {
+            dup = !_wasm_seen_add(&seen, item);
+        } else {
+            int64_t *nl = (int64_t *)(intptr_t)new_list;
+            int64_t nlen = nl[1];
+            dup = 0;
+            for (int64_t j = 0; j < nlen; j++) {
+                if (_wasm_value_eq(nl[WASM_LIST_ELEMS + j], item)) { dup = 1; break; }
+            }
         }
-        if (!found) {
+        if (!dup) {
             new_list = taida_list_push(new_list, item);
         }
     }
