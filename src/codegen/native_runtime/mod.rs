@@ -665,7 +665,12 @@ mod tests {
         //   drain) + #include <poll.h>, replacing the two sequential read
         //   loops. os.c is outside the F1/F2/F5/F6 boundaries so only the grand
         //   total shifts. Recomputed total = 1,179,496.
-        const EXPECTED_TOTAL_LEN: usize = 1_179_496;
+        // 2026-05-30 F54B-016 (G4) commit 1: +4,335 bytes in core.c F1 for the
+        //   structural Set / list.unique equality engine (taida_value_kind +
+        //   taida_value_struct_eq + bytes helpers) plus the three struct-eq call
+        //   sites, all before the "Error ceiling" marker. F1_LEN 324,657 ->
+        //   328,992; total 1,179,496 -> 1,183,831.
+        const EXPECTED_TOTAL_LEN: usize = 1_183_831;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1257,10 +1262,18 @@ mod tests {
         // 2026-05-23 handler ABI pair-list conversion keeps request decode
         //   before the marker and response encode after it. Marker now sits
         //   at byte offset 324,657.
-        const F1_LEN: usize = 324_657;
+        // F54B-016 (G4) commit 1: +4,335 bytes (structural Set/unique engine)
+        // land before the Error ceiling marker, moving F1_LEN 324,657 -> 328,992.
+        const F1_LEN: usize = 328_992;
+        // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
+        // F2 is 200,593 bytes. The previous 200_740 figure was stale: the
+        // post-handler-ABI F2 had already shrunk by 147 bytes without this
+        // sub-assert being refreshed (EXPECTED_TOTAL_LEN tracked the true total,
+        // so this c13_4 assert had been failing independently of G4). Express it
+        // as F1_LEN + F2 so the F1 side stays in lockstep with the const above.
         assert_eq!(
             CORE_SECTION.len(),
-            324_657 + 200_740,
+            F1_LEN + 200_593,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -1445,7 +1458,12 @@ mod tests {
         //   F6 grows: 106,128 + 1,113 = 107,241.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            224_556 + 107_241,
+            // F6 = 107,388. The previous 107_241 was stale on HEAD: a net_h2
+            // change added 147 bytes after the divider without refreshing this
+            // sub-assert (EXPECTED_TOTAL_LEN already tracked the true total, so
+            // c13_4 had been failing on net_h1_h2.c independently of G4). F5_LEN
+            // and the F6_PREFIX anchor are unaffected.
+            224_556 + 107_388,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

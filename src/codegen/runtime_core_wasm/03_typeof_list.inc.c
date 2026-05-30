@@ -1000,7 +1000,7 @@ int64_t taida_list_unique(int64_t list_ptr) {
         int64_t nlen = nl[1];
         int64_t found = 0;
         for (int64_t j = 0; j < nlen; j++) {
-            if (nl[WASM_LIST_ELEMS + j] == item) { found = 1; break; }
+            if (_wasm_value_eq(nl[WASM_LIST_ELEMS + j], item)) { found = 1; break; }
         }
         if (!found) {
             new_list = taida_list_push(new_list, item);

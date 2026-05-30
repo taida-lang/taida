@@ -3311,11 +3311,48 @@ void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
 
 /* W-4f/F-3: Type-tag-aware equality for Set elements.
    For strings, compare by content (strcmp). For others, compare by raw value. */
+/* F54B-016 (G4): structural value equality for Set / list.unique, mirroring
+   the interpreter `ValueKey` (src/interpreter/value_key.rs). Strings, Lists and
+   BuchiPacks recurse; BuchiPack field order is ignored. Scalars (Int / Bool /
+   Enum-ordinal) compare by raw value -- Enum is lowered to its Int ordinal, so
+   Int<->Enum equivalence is automatic (enum-name distinction is out of scope,
+   F54B-018). HashMap / Set elements fall back to identity. */
 static int _wasm_value_eq(int64_t a, int64_t b) {
     if (a == b) return 1;
-    /* Check if both look like strings — if so, compare by content */
-    if (_looks_like_string(a) && _looks_like_string(b)) {
-        return _wasm_streq((const char *)(intptr_t)a, (const char *)(intptr_t)b);
+    int a_str = _looks_like_string(a), b_str = _looks_like_string(b);
+    if (a_str || b_str)
+        return (a_str && b_str)
+            ? _wasm_streq((const char *)(intptr_t)a, (const char *)(intptr_t)b)
+            : 0;
+    int a_list = _looks_like_list(a), b_list = _looks_like_list(b);
+    if (a_list || b_list) {
+        if (!a_list || !b_list) return 0;
+        int64_t *la = (int64_t *)(intptr_t)a, *lb = (int64_t *)(intptr_t)b;
+        if (la[1] != lb[1]) return 0;
+        for (int64_t i = 0; i < la[1]; i++)
+            if (!_wasm_value_eq(la[WASM_LIST_ELEMS + i], lb[WASM_LIST_ELEMS + i])) return 0;
+        return 1;
+    }
+    if (_is_wasm_hashmap(a) || _is_wasm_hashmap(b) || _is_wasm_set(a) || _is_wasm_set(b))
+        return 0;
+    int a_ep = _looks_like_empty_pack(a), b_ep = _looks_like_empty_pack(b);
+    if (a_ep || b_ep) return (a_ep && b_ep) ? 1 : 0;
+    int a_pack = _looks_like_pack(a), b_pack = _looks_like_pack(b);
+    if (a_pack || b_pack) {
+        if (!a_pack || !b_pack) return 0;
+        int64_t *pa = (int64_t *)(intptr_t)a, *pb = (int64_t *)(intptr_t)b;
+        int64_t na = pa[0], nb = pb[0];
+        if (na != nb) return 0;
+        for (int64_t i = 0; i < na; i++) {
+            int64_t nh = pa[1 + i * 3];
+            int64_t va = pa[1 + i * 3 + 2];
+            int found = 0;
+            for (int64_t j = 0; j < nb; j++) {
+                if (pb[1 + j * 3] == nh && _wasm_value_eq(va, pb[1 + j * 3 + 2])) { found = 1; break; }
+            }
+            if (!found) return 0;
+        }
+        return 1;
     }
     return 0;
 }

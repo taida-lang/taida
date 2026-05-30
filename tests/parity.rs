@@ -41996,3 +41996,45 @@ stdout(JSON["true", Int]().hasValue().toString())
 "#;
     assert_native_and_js_when_available(source, "json_strict_mismatch_lax_empty_backend_parity");
 }
+
+/// F54B-016 (G4): Set / `Unique` must dedup by STRUCTURE across every backend,
+/// not by raw pointer identity. This builds structurally-equal-but-distinct-
+/// pointer strings (via `+`), BuchiPacks and Lists, then checks that set /
+/// union / intersect / diff / unique sizes agree with the interpreter (the
+/// structural reference) on native, JS and wasm-min. Before G4 the native
+/// backend used pointer identity and wasm-min a string-only `_wasm_value_eq`,
+/// so both over-counted; the prior parity suite only used Int literals and
+/// missed it. Interpreter reference output is `2 3 1 1 1 1 2`.
+#[test]
+fn test_f54b016_structural_set_unique_parity() {
+    let source = r#"
+sa <= setOf(@["a" + "b", "c"])
+sb <= setOf(@["ab", "d"])
+dupStrs <= @["x" + "y", "xy", "z"]
+stdout(setOf(dupStrs).size().toString())
+stdout(sa.union(sb).size().toString())
+stdout(sa.intersect(sb).size().toString())
+stdout(sa.diff(sb).size().toString())
+p1 <= @(name <= "f" + "oo", n <= 1)
+p2 <= @(name <= "foo", n <= 1)
+stdout(setOf(@[p1, p2]).size().toString())
+l1 <= @["a" + "b"]
+l2 <= @["ab"]
+stdout(setOf(@[l1, l2]).size().toString())
+uniqList <= @["m" + "n", "mn", "z"]
+stdout(Unique[uniqList]().length().toString())
+"#;
+    let label = "f54b016_structural_set_unique";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native structural Set parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js structural Set parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min structural Set parity");
+    }
+}

@@ -5556,6 +5556,109 @@ taida_val taida_list_sort(taida_val list_ptr) {
     return new_list;
 }
 
+// -- F54B-016 (G4): structural value equality for Set / list.unique --
+// Set membership and `Unique` dedup compare by STRUCTURE, mirroring the
+// interpreter `ValueKey` (src/interpreter/value_key.rs), not by raw `taida_val`
+// identity. Strings / Bytes / Lists / BuchiPacks recurse; BuchiPack field order
+// is ignored (order-independent match), matching the interpreter BuchiPack
+// PartialEq contract. Scalars (Int / Bool / Unit / Enum-ordinal) compare by
+// value -- Enum is lowered to its Int ordinal in native, so the Int<->Enum
+// cross-type equivalence is automatic; enum-name distinction is out of scope
+// (F54B-018). HashMap / Set / Closure / Async elements are not key-eligible and
+// fall back to raw identity. Uses the same `taida_is_string_value` classifier
+// already used by `taida_poly_eq`, so it inherits native value-vs-pointer
+// behaviour rather than introducing a new heuristic.
+typedef enum {
+    TKIND_SCALAR, TKIND_STR, TKIND_BYTES, TKIND_LIST, TKIND_PACK, TKIND_OTHER
+} taida_value_kind_t;
+
+static taida_value_kind_t taida_value_kind(taida_val v) {
+    if (v < 4096) return TKIND_SCALAR; // Int / Bool / Unit / Enum-ordinal / null
+    if (TAIDA_IS_LIST(v)) return TKIND_LIST;
+    if (TAIDA_IS_PACK(v)) return TKIND_PACK;
+    if (TAIDA_IS_BYTES(v) || TAIDA_IS_BYTES_CONTIG(v)) return TKIND_BYTES;
+    if (TAIDA_IS_SET(v) || TAIDA_IS_HMAP(v) || TAIDA_IS_CLOSURE(v) || TAIDA_IS_ASYNC(v))
+        return TKIND_OTHER;
+    if (taida_is_string_value(v)) return TKIND_STR;
+    return TKIND_SCALAR; // large Int that is not a live typed pointer
+}
+
+static size_t taida_bytes_count(taida_val v) {
+    if (TAIDA_IS_BYTES_CONTIG(v)) {
+        taida_val n = taida_bytes_contig_len(v);
+        return n > 0 ? (size_t)n : 0;
+    }
+    if (TAIDA_IS_BYTES(v)) {
+        taida_val n = ((taida_val*)v)[1];
+        return n > 0 ? (size_t)n : 0;
+    }
+    return 0;
+}
+
+static unsigned char taida_bytes_byte_at(taida_val v, size_t i) {
+    if (TAIDA_IS_BYTES_CONTIG(v)) {
+        const unsigned char *p = taida_bytes_contig_data(v);
+        return p ? p[i] : 0;
+    }
+    return (unsigned char)(((taida_val*)v)[2 + i] & 0xFF);
+}
+
+// Structural equality aligned with `ValueKey::eq` over the key-eligible subset;
+// raw identity for everything else.
+static int taida_value_struct_eq(taida_val a, taida_val b) {
+    if (a == b) return 1;
+    taida_value_kind_t ka = taida_value_kind(a);
+    taida_value_kind_t kb = taida_value_kind(b);
+    if (ka != kb) return 0;
+    switch (ka) {
+        case TKIND_STR: {
+            size_t la = 0, lb = 0;
+            if (!taida_str_byte_len((const char*)a, &la)) la = 0;
+            if (!taida_str_byte_len((const char*)b, &lb)) lb = 0;
+            if (la != lb) return 0;
+            return la == 0 ? 1 : (memcmp((const char*)a, (const char*)b, la) == 0);
+        }
+        case TKIND_BYTES: {
+            size_t la = taida_bytes_count(a), lb = taida_bytes_count(b);
+            if (la != lb) return 0;
+            for (size_t i = 0; i < la; i++)
+                if (taida_bytes_byte_at(a, i) != taida_bytes_byte_at(b, i)) return 0;
+            return 1;
+        }
+        case TKIND_LIST: {
+            taida_val *la = (taida_val*)a, *lb = (taida_val*)b;
+            taida_val n = la[2];
+            if (n != lb[2]) return 0;
+            for (taida_val i = 0; i < n; i++)
+                if (!taida_value_struct_eq(la[4 + i], lb[4 + i])) return 0;
+            return 1;
+        }
+        case TKIND_PACK: {
+            taida_val *pa = (taida_val*)a, *pb = (taida_val*)b;
+            taida_val na = pa[1], nb = pb[1];
+            if (na != nb) return 0;
+            for (taida_val i = 0; i < na; i++) {
+                taida_val nh = pa[2 + i * 3];
+                taida_val va = pa[2 + i * 3 + 2];
+                int found = 0;
+                for (taida_val j = 0; j < nb; j++) {
+                    if (pb[2 + j * 3] == nh
+                        && taida_value_struct_eq(va, pb[2 + j * 3 + 2])) {
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) return 0;
+            }
+            return 1;
+        }
+        case TKIND_SCALAR:
+        case TKIND_OTHER:
+        default:
+            return 0; // raw identity already failed above
+    }
+}
+
 taida_val taida_list_unique(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
@@ -5570,7 +5673,7 @@ taida_val taida_list_unique(taida_val list_ptr) {
         taida_val nlen = nl[2];
         taida_val found = 0;
         for (taida_val j = 0; j < nlen; j++) {
-            if (nl[4 + j] == item) { found = 1; break; }
+            if (taida_value_struct_eq(nl[4 + j], item)) { found = 1; break; }
         }
         if (!found) {
             taida_list_elem_retain(item, elem_tag);
@@ -6866,7 +6969,7 @@ static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
     for (taida_val i = 0; i < len; i++) {
-        if (list[4 + i] == item) return 1;
+        if (taida_value_struct_eq(list[4 + i], item)) return 1;
     }
     return 0;
 }
@@ -6914,7 +7017,7 @@ taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
     for (taida_val i = 0; i < len; i++) {
-        if (list[4 + i] != item) {
+        if (!taida_value_struct_eq(list[4 + i], item)) {
             taida_list_elem_retain(list[4 + i], elem_tag);  // NO-2: retain-on-copy
             new_set = taida_list_push(new_set, list[4 + i]);
         }
