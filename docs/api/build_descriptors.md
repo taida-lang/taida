@@ -212,9 +212,7 @@ buildFrontend <= BuildHook(
 
 ## 6. ディスクリプタが有効な文脈
 
-ディスクリプタ値は以下の文脈でのみ有効です。それ以外でランタイム値として
-使う (`stdout(serverX)`、ユーザ関数引数への通常の受け渡し、`Str[serverX]()`
-など) と、型検査器またはビルドドライバが診断を出します。
+ディスクリプタ値は以下の文脈でのみ有効です。
 
 - トップレベル export (`<<< serverX`、`<<< plan`) による named artifact entrypoint
 - `BuildPlan.units`
@@ -222,6 +220,14 @@ buildFrontend <= BuildHook(
 - `RouteAsset.unit` / `RouteAsset.asset`
 - `BuildUnit.before` / `AssetBundle.before` / `BuildPlan.before`
 - ビルドドライバのディスクリプタ取り込み
+
+ビルドドライバはディスクリプタ取り込み時に shape・パス安全性・参照整合を
+検証し、違反を `[E19xx]` 系の診断として報告します (§1〜§5 の各
+Constraints を参照)。上記以外の文脈でランタイム値として使った場合
+(`stdout(serverX)` など)、ディスクリプタは `__type` フィールドを持つ
+通常のぶちパックとして見えます — 専用の reject 診断は現在ありません。
+ディスクリプタはビルドドライバ専用値として扱い、ランタイムロジックに
+混ぜないでください。
 
 ---
 

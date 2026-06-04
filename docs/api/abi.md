@@ -265,4 +265,4 @@ WASM handler bridge の portable な契約です。
 | インタプリタ | 型・helper 評価と fixture-backed host call に対応。handler binary は生成しません。 |
 | ネイティブ | `--handler` で request/response JSON bridge を持つ binary を生成。 |
 | WASM (`wasm-min` / `wasm-wasi` / `wasm-edge` / `wasm-full`) | `--handler`、共有 WebRequest/WebResponse ABI、host call poll/resume ABI に対応。 |
-| 旧 JS ターゲット | handler mode 非対応。 |
+| 旧 JS ターゲット | 非対応。`>>> taida-lang/abi` の import 自体が決定的なコンパイル時エラーになります (handler mode・response helper の JS ランタイムは存在しません)。 |
