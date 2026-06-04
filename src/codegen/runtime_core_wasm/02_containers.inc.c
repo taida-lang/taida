@@ -1430,6 +1430,32 @@ void taida_str_release(int64_t s) {
 #define TAIDA_WASM_SHA256_MAX_INPUT_BYTES (256LL * 1024LL * 1024LL)
 #define TAIDA_WASM_BYTES_MAGIC 0x5441494442595400LL  /* "TAIDBYT\0" */
 
+/* F54B-016 (G4): structural Bytes identity + content access for Set /
+   list.unique. A Bytes value is laid out as [magic, len, byte0, byte1, ...]
+   with one int64_t per byte (the same layout taida_wasm_sha256_bytes_input
+   parses). The Bytes constructor mold is implemented on wasm-full only;
+   wasm-min / wasm-wasi never materialise a Bytes value, so these helpers
+   matter only where Bytes can actually exist. Mirrors the native
+   taida_value_kind / taida_value_struct_eq Bytes path so all four backends
+   agree on structural dedup -- the interpreter ValueKey treats Bytes as a
+   key-eligible, content-compared value. Forward-declared in 01_core. */
+static int _looks_like_bytes(int64_t val) {
+    if (!_wasm_is_valid_ptr(val, 16)) return 0;  /* need magic + len slots */
+    unsigned int addr = (unsigned int)(uint64_t)val;
+    if ((addr & 7u) != 0) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if ((p[0] & 0xFFFFFFFFFFFFFF00LL) != TAIDA_WASM_BYTES_MAGIC) return 0;
+    int64_t len = p[1];
+    if (len < 0) return 0;
+    unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+    if ((uint64_t)addr + (uint64_t)(2 + len) * 8ULL > (uint64_t)mem_size) return 0;
+    return 1;
+}
+static int64_t _wasm_bytes_len(int64_t val) { return ((int64_t *)(intptr_t)val)[1]; }
+static unsigned char _wasm_bytes_at(int64_t val, int64_t i) {
+    return (unsigned char)(((int64_t *)(intptr_t)val)[2 + i] & 0xFF);
+}
+
 typedef struct {
     uint32_t state[8];
     uint64_t total_len;

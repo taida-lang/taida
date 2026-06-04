@@ -670,7 +670,18 @@ mod tests {
         //   taida_value_struct_eq + bytes helpers) plus the three struct-eq call
         //   sites, all before the "Error ceiling" marker. F1_LEN 324,657 ->
         //   328,992; total 1,179,496 -> 1,183,831.
-        const EXPECTED_TOTAL_LEN: usize = 1_190_634;
+        // 2026-05-30 F54B-016 (G4) commit 2: +6,803 bytes in core.c F1 for the
+        //   fingerprint seen-set (taida_value_fingerprint + taida_value_hashable
+        //   + taida_seen_* open-addressing) wired into from_list / union /
+        //   intersect / diff / list_unique. F1_LEN 328,992 -> 335,795; total
+        //   1,183,831 -> 1,190,634.
+        // 2026-05-31 F54B-016 (C2 follow-up): +916 bytes in core.c F1 for
+        //   taida_list_unique_by structural-key dedup (fingerprint seen-set +
+        //   struct-eq fallback replacing the raw `==` key scan). F1_LEN
+        //   335,795 -> 336,711; total 1,190,634 -> 1,191,550. The WASM Bytes /
+        //   unique_by edits land outside NATIVE_RUNTIME_C, so they do not move
+        //   these constants.
+        const EXPECTED_TOTAL_LEN: usize = 1_191_550;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1262,9 +1273,11 @@ mod tests {
         // 2026-05-23 handler ABI pair-list conversion keeps request decode
         //   before the marker and response encode after it. Marker now sits
         //   at byte offset 324,657.
-        // F54B-016 (G4) commit 1: +4,335 bytes (structural Set/unique engine)
-        // land before the Error ceiling marker, moving F1_LEN 324,657 -> 328,992.
-        const F1_LEN: usize = 335_795;
+        // F54B-016 (G4 commit 1+2 + C2 follow-up) all land before the Error
+        // ceiling marker: structural engine (+4,335) + fingerprint seen-set
+        // (+6,803) + unique_by structural-key dedup (+916), moving F1_LEN
+        // 324,657 -> 336,711.
+        const F1_LEN: usize = 336_711;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 is 200,593 bytes. The previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

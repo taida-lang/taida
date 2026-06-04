@@ -42038,3 +42038,82 @@ stdout(Unique[uniqList]().length().toString())
         assert_eq!(interp, wasm, "interpreter/wasm-min structural Set parity");
     }
 }
+
+/// F54B-016 (G4 follow-up): Bytes must dedup by STRUCTURE across backends, like
+/// the other key-eligible variants. native dedups Bytes by content (TKIND_BYTES);
+/// WASM originally had no Bytes branch in `_wasm_value_eq` / `_wasm_fp_accum` /
+/// `_wasm_value_hashable`, so structurally-equal distinct-pointer Bytes fell back
+/// to raw pointer identity and over-counted. `.unmold()` strips the Lax wrapper
+/// so the Set holds raw Bytes -- a `Lax[Bytes]` element would instead trip the
+/// separate JS Lax-equality gap (F54B-020), unrelated to Bytes dedup. The
+/// `Bytes[...]()` constructor mold is wasm-full only (not wasm-min / wasm-wasi),
+/// so this checks interpreter / native / JS + wasm-full. Interpreter reference
+/// output is `2 1 2 1` (size{ab,cd}=2, unique{ab,ab,ab}=1, union=2, intersect=1).
+#[test]
+fn test_f54b016_bytes_structural_set_parity() {
+    let source = r#"
+b1 <= Bytes["ab"]().unmold()
+b2 <= Bytes["a" + "b"]().unmold()
+b3 <= Bytes["cd"]().unmold()
+stdout(setOf(@[b1, b2, b3]).size().toString())
+stdout(Unique[@[b1, b2, b1]]().length().toString())
+sa <= setOf(@[b1])
+sb <= setOf(@[b2, b3])
+stdout(sa.union(sb).size().toString())
+stdout(sa.intersect(sb).size().toString())
+"#;
+    let label = "f54b016_bytes_structural_set";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native Bytes structural Set parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js Bytes structural Set parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_full_src(source, label, &[]) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-full Bytes structural Set parity"
+        );
+    }
+}
+
+/// F54B-016 (G4 follow-up): `Unique[](by)` must dedup the extracted keys by
+/// STRUCTURE. native / WASM `taida_list_unique_by` compared keys by raw value /
+/// pointer, so a `by` callback returning a freshly-built (distinct-pointer)
+/// structurally-equal key (here `s + "!"`) was not deduped, diverging from the
+/// interpreter (Value::eq) and JS (fingerprint + __taida_equals). Keys are Str so
+/// this runs on wasm-min too. Interpreter reference output is `2`.
+#[test]
+fn test_f54b016_unique_by_structural_parity() {
+    let source = r#"
+addBang s: Str = s + "!" => :Str
+items <= @["a", "b", "a"]
+u <= Unique[items](by <= addBang)
+stdout(u.length().toString())
+"#;
+    let label = "f54b016_unique_by_structural";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native unique_by structural parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js unique_by structural parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min unique_by structural parity"
+        );
+    }
+}

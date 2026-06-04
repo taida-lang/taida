@@ -5949,22 +5949,39 @@ taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *nl_init = (taida_val*)new_list;
     nl_init[3] = elem_tag;
     if (len == 0) return new_list;
+    // F54B-016 (C2): dedup keys by STRUCTURE (was raw `==`), mirroring the
+    // interpreter Unique[](by) path (mold_eval.rs): a fingerprint seen-set while
+    // keys are hashable, switching to a linear struct-eq scan once a
+    // non-hashable key appears. `seen_keys` retains every emitted key so the
+    // fallback scan still sees keys added during the hashable phase. Float/Bool
+    // key cross-type equality (Int<->Float / Bool<->Int) stays out of scope here
+    // (native value-tag limitation, tracked separately).
     size_t keys_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_unique_by keys");
     taida_val *seen_keys = (taida_val*)TAIDA_MALLOC(keys_size, "list_unique_by seen_keys");
     taida_val seen_count = 0;
+    taida_seen seen;
+    int use_hash = taida_seen_init(&seen, len);
+    int fallback = 0;
     for (taida_val i = 0; i < len; i++) {
         taida_val item = list[4 + i];
         taida_val key = taida_invoke_callback1(fn_ptr, item);
-        taida_val found = 0;
-        for (taida_val j = 0; j < seen_count; j++) {
-            if (seen_keys[j] == key) { found = 1; break; }
+        int dup;
+        if (!fallback && use_hash && taida_value_hashable(key)) {
+            dup = !taida_seen_add(&seen, key);
+        } else {
+            fallback = 1;  // a non-hashable key appeared: linear from now on
+            dup = 0;
+            for (taida_val j = 0; j < seen_count; j++) {
+                if (taida_value_struct_eq(seen_keys[j], key)) { dup = 1; break; }
+            }
         }
-        if (!found) {
+        if (!dup) {
             seen_keys[seen_count++] = key;
             taida_list_elem_retain(item, elem_tag);
             new_list = taida_list_push(new_list, item);
         }
     }
+    if (use_hash) taida_seen_free(&seen);
     free(seen_keys);
     return new_list;
 }

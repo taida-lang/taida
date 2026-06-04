@@ -700,6 +700,9 @@ static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
 static int64_t _wasm_result_is_error_check(int64_t result);
 static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes);  /* NTH-4: forward decl */
 static int _wasm_is_async_obj(int64_t val);   /* PR-4: forward decl for async */
+static int _looks_like_bytes(int64_t val);    /* F54B-016: forward decl for Bytes structural eq (defined in 02_containers) */
+static int64_t _wasm_bytes_len(int64_t val);  /* F54B-016 */
+static unsigned char _wasm_bytes_at(int64_t val, int64_t i); /* F54B-016 */
 int64_t taida_async_unmold(int64_t async_ptr);              /* PR-4: forward decl */
 int64_t taida_async_map(int64_t async_ptr, int64_t fn_ptr); /* PR-4: forward decl */
 int64_t taida_async_get_or_default(int64_t async_ptr, int64_t fallback); /* PR-4 */
@@ -3324,6 +3327,15 @@ static int _wasm_value_eq(int64_t a, int64_t b) {
         return (a_str && b_str)
             ? _wasm_streq((const char *)(intptr_t)a, (const char *)(intptr_t)b)
             : 0;
+    int a_by = _looks_like_bytes(a), b_by = _looks_like_bytes(b);
+    if (a_by || b_by) {
+        if (!a_by || !b_by) return 0;
+        int64_t lab = _wasm_bytes_len(a), lbb = _wasm_bytes_len(b);
+        if (lab != lbb) return 0;
+        for (int64_t i = 0; i < lab; i++)
+            if (_wasm_bytes_at(a, i) != _wasm_bytes_at(b, i)) return 0;
+        return 1;
+    }
     int a_list = _looks_like_list(a), b_list = _looks_like_list(b);
     if (a_list || b_list) {
         if (!a_list || !b_list) return 0;
@@ -3373,6 +3385,13 @@ static void _wasm_fp_accum(int64_t v, uint64_t *h) {
         _wasm_fnv_bytes(h, s, l);
         return;
     }
+    if (_looks_like_bytes(v)) {
+        unsigned char tag = 3; _wasm_fnv_bytes(h, &tag, 1);
+        int64_t l = _wasm_bytes_len(v);
+        uint64_t ll = (uint64_t)l; _wasm_fnv_bytes(h, &ll, sizeof(ll));
+        for (int64_t i = 0; i < l; i++) { unsigned char c = _wasm_bytes_at(v, i); _wasm_fnv_bytes(h, &c, 1); }
+        return;
+    }
     if (_looks_like_list(v)) {
         unsigned char tag = 7; _wasm_fnv_bytes(h, &tag, 1);
         int64_t *l = (int64_t*)(intptr_t)v; int64_t n = l[1];
@@ -3407,6 +3426,7 @@ static uint64_t _wasm_value_fingerprint(int64_t v) {
 }
 static int _wasm_value_hashable(int64_t v) {
     if (_is_wasm_hashmap(v) || _is_wasm_set(v) || _wasm_is_async_obj(v)) return 0;
+    if (_looks_like_bytes(v)) return 1;
     if (_looks_like_string(v)) return 1;
     if (_looks_like_list(v)) {
         int64_t *l = (int64_t*)(intptr_t)v; int64_t n = l[1];
