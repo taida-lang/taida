@@ -42169,3 +42169,79 @@ stdout(h3.name + "=" + h3.value)
         assert_eq!(interp, wasm, "interpreter/wasm-min abi header parity");
     }
 }
+
+/// F54B-020 (G7): JS `__taida_equals` / `__taida_fingerprint` excluded every
+/// `__`-prefixed key, which also dropped the closure-mold DATA fields
+/// (`__value` / `__default` / `__type` / `__error`), so any two Lax values
+/// with the same `has_value` compared equal regardless of payload — JS
+/// deduped `Lax(12)` vs `Lax(34)` into one element (observed `1 1 1` vs the
+/// interpreter's `1 2 2`). The filter now only drops method keys (function
+/// values), matching the interpreter's whole-pack BuchiPack comparison and
+/// the native pack comparison. Expected output: `1 2 1 2`
+/// (same-payload success Lax dedup, success-vs-failure distinct,
+/// same-shape failure Lax dedup, mixed unique). `Int[Str]()` conversion
+/// molds are available on all four backends.
+#[test]
+fn test_f54b020_lax_payload_equality_parity() {
+    let source = r#"
+i1 <= Int["12"]()
+i2 <= Int["12"]()
+i3 <= Int["abc"]()
+i4 <= Int["xyz"]()
+stdout(setOf(@[i1, i2]).size().toString())
+stdout(setOf(@[i1, i3]).size().toString())
+stdout(setOf(@[i3, i4]).size().toString())
+stdout(Unique[@[i1, i2, i3, i4]]().length().toString())
+"#;
+    let label = "f54b020_lax_payload_equality";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "1", "2"],
+        "interpreter Lax payload equality reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native Lax equality parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js Lax equality parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min Lax equality parity");
+    }
+}
+
+/// F54B-020 companion: the original reproducer kept the `Lax[Bytes]` wrapper
+/// (no `.unmold()`), which is exactly the shape the `__`-filter bug
+/// collapsed. `Bytes[...]()` molds exist on interpreter / native / JS
+/// (wasm-full only on WASM, so WASM is skipped here). Expected `1 2 2`.
+#[test]
+fn test_f54b020_lax_bytes_wrapper_equality_parity() {
+    let source = r#"
+a <= Bytes["ab"]()
+b <= Bytes["ab"]()
+c <= Bytes["cd"]()
+stdout(setOf(@[a, b]).size().toString())
+stdout(setOf(@[a, c]).size().toString())
+stdout(Unique[@[a, b, c]]().length().toString())
+"#;
+    let label = "f54b020_lax_bytes_wrapper_equality";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "2"],
+        "interpreter Lax[Bytes] wrapper equality reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native Lax[Bytes] parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js Lax[Bytes] parity");
+    }
+}

@@ -2798,9 +2798,15 @@ function __taida_equals(a, b) {
     return a.every((v, i) => __taida_equals(v, b[i]));
   }
   if (Array.isArray(a) || Array.isArray(b)) return false;
-  // Filter out internal keys (__*) and method keys (function values)
-  const ka = Object.keys(a).filter(k => !k.startsWith('__') && typeof a[k] !== 'function');
-  const kb = Object.keys(b).filter(k => !k.startsWith('__') && typeof b[k] !== 'function');
+  // Filter out method keys (function values) only. Closure-mold packs
+  // (Lax / Result / Gorillax / Set / ...) carry their real payload in
+  // dunder DATA fields (__type / __value / __default / __items / __error);
+  // the interpreter's BuchiPack equality compares every field, so dropping
+  // all __-prefixed keys here collapsed e.g. every same-arm Lax into one
+  // value regardless of payload (F54 parity fix: dedup now matches the
+  // interpreter / native pack comparison).
+  const ka = Object.keys(a).filter(k => typeof a[k] !== 'function');
+  const kb = Object.keys(b).filter(k => typeof b[k] !== 'function');
   if (ka.length !== kb.length) return false;
   return ka.every(k => __taida_equals(a[k], b[k]));
 }
@@ -3226,7 +3232,9 @@ function __taida_fingerprint(x) {
   if (t === 'string') return "s:" + x;
   if (Array.isArray(x)) return "L:" + x.length + ":" + x.map(__taida_fingerprint).join(",");
   if (t === 'object') {
-    const ks = Object.keys(x).filter(k => !k.startsWith('__') && typeof x[k] !== 'function').sort();
+    // Keep dunder DATA fields (mirror __taida_equals): only methods are
+    // excluded, so Lax/Result/Gorillax fingerprints reflect their payload.
+    const ks = Object.keys(x).filter(k => typeof x[k] !== 'function').sort();
     return "O:" + ks.map(k => k + "=" + __taida_fingerprint(x[k])).join(",");
   }
   return "x"; // non-hashable (function etc.) -> single bucket + __taida_equals confirm
