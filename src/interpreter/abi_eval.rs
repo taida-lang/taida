@@ -220,14 +220,15 @@ fn header_list(headers: Vec<(String, String)>) -> Value {
 fn with_response_field(response: Value, field_name: &str, field_value: Value) -> Value {
     match response {
         Value::BuchiPack(fields) => {
-            let mut out = Vec::with_capacity(fields.len().max(3));
+            // COW: chained helper calls (`header(.., status(.., text(..)))`)
+            // hand us the only reference, so `pack_take` moves the fields
+            // out without cloning; shared packs fall back to a clone.
+            let mut out = Value::pack_take(fields);
             let mut replaced = false;
-            for (name, value) in fields.iter() {
+            for (name, value) in out.iter_mut() {
                 if name == field_name {
-                    out.push((name.clone(), field_value.clone()));
+                    *value = field_value.clone();
                     replaced = true;
-                } else {
-                    out.push((name.clone(), value.clone()));
                 }
             }
             if !replaced {
@@ -242,17 +243,21 @@ fn with_response_field(response: Value, field_name: &str, field_value: Value) ->
 fn add_response_header(response: Value, key: String, value: String) -> Value {
     match response {
         Value::BuchiPack(fields) => {
-            let mut out = Vec::with_capacity(fields.len().max(3));
-            let mut replaced = false;
-            for (name, field_value) in fields.iter() {
+            // COW: take ownership of the pack fields and append to the
+            // headers list in place. A `header(...)` chain of k calls is
+            // O(k) total — each link moves the uniquely-owned list and
+            // pushes one entry — instead of re-cloning the whole pack and
+            // headers list per link (O(k²)).
+            let mut out = Value::pack_take(fields);
+            let mut appended = false;
+            for (name, field_value) in out.iter_mut() {
                 if name == "headers" {
-                    out.push((name.clone(), append_header(field_value, &key, &value)));
-                    replaced = true;
-                } else {
-                    out.push((name.clone(), field_value.clone()));
+                    let headers = std::mem::replace(field_value, Value::default_list());
+                    *field_value = append_header(headers, &key, &value);
+                    appended = true;
                 }
             }
-            if !replaced {
+            if !appended {
                 out.push((
                     "headers".to_string(),
                     header_list(vec![(key.clone(), value.clone())]),
@@ -264,9 +269,9 @@ fn add_response_header(response: Value, key: String, value: String) -> Value {
     }
 }
 
-fn append_header(headers: &Value, key: &str, value: &str) -> Value {
+fn append_header(headers: Value, key: &str, value: &str) -> Value {
     if let Value::List(entries) = headers {
-        let mut next: Vec<Value> = entries.as_ref().to_vec();
+        let mut next = Value::list_take(entries);
         next.push(Value::pack(vec![
             ("name".to_string(), Value::str(key.to_string())),
             ("value".to_string(), Value::str(value.to_string())),
