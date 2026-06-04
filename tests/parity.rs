@@ -42257,6 +42257,7 @@ stdout(Unique[@[a, b, c]]().length().toString())
 /// - An explicit timeoutMs <= 0 is `kind:"invalid"` on every backend
 ///   (JS used to silently fall back to the pool config).
 /// - `poolHealth.waiting` returns to 0 after a timed-out wait.
+///
 /// The elapsed check asserts only the lower bound (>= 250ms of a 300ms
 /// budget) so slow CI cannot make it flaky.
 #[test]
