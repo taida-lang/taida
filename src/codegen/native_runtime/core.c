@@ -7153,6 +7153,55 @@ static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
     return 0;
 }
 
+// ── F54 tier 2: numeric-domain aware Set×Set comparison ──────────
+// Containers carry one elem_type_tag, and the raw values of Int / Bool /
+// Float are mutually indistinguishable (Float is an f64 bit pattern).
+// When BOTH operands of a set operation pin a scalar domain via their
+// tags, compare in the numeric domain the interpreter uses:
+//   - INT/BOOL vs FLOAT: lift the int side, compare as f64 (Int(3) ==
+//     Float(3.0), mirroring Value::PartialEq).
+//   - BOOL vs INT/FLOAT: never equal (the interpreter distinguishes
+//     Bool from numbers even when the ordinal matches).
+//   - FLOAT vs FLOAT: f64 comparison (bitcast equality would diverge
+//     on ±0.0).
+// Containers whose tag does not pin a scalar domain (HETEROGENEOUS /
+// UNKNOWN / composites) fall back to the structural engine — per-element
+// type identity is unrepresentable there until values carry their own
+// tags, which is a representation-level change out of scope here.
+static int taida_tag_is_scalar_domain(taida_val tag) {
+    return tag == TAIDA_TAG_INT || tag == TAIDA_TAG_BOOL || tag == TAIDA_TAG_FLOAT;
+}
+
+// True when a cross-container comparison cannot rely on raw equality /
+// the shared fingerprint engine and must walk the tagged linear path.
+// The interpreter also degrades to a linear scan whenever a Float is in
+// play (Float is not hashable in ValueKey), so the complexity matches.
+static int taida_set_numeric_cross(taida_val tag_a, taida_val tag_b) {
+    if (!taida_tag_is_scalar_domain(tag_a) || !taida_tag_is_scalar_domain(tag_b)) return 0;
+    if (tag_a == TAIDA_TAG_FLOAT || tag_b == TAIDA_TAG_FLOAT) return 1;
+    return tag_a != tag_b; // INT vs BOOL: raw values collide but must differ
+}
+
+static int taida_tagged_scalar_eq(taida_val a, taida_val tag_a, taida_val b, taida_val tag_b) {
+    // Bool never equals a non-Bool number, no matter the raw value.
+    if ((tag_a == TAIDA_TAG_BOOL) != (tag_b == TAIDA_TAG_BOOL)) return 0;
+    if (tag_a == TAIDA_TAG_FLOAT || tag_b == TAIDA_TAG_FLOAT) {
+        double da = (tag_a == TAIDA_TAG_FLOAT) ? _l2d(a) : (double)a;
+        double db = (tag_b == TAIDA_TAG_FLOAT) ? _l2d(b) : (double)b;
+        return da == db ? 1 : 0;
+    }
+    return a == b ? 1 : 0;
+}
+
+static int taida_tagged_set_contains(const taida_val *container, taida_val container_tag,
+                                     taida_val item, taida_val item_tag) {
+    taida_val len = container[2];
+    for (taida_val i = 0; i < len; i++) {
+        if (taida_tagged_scalar_eq(container[4 + i], container_tag, item, item_tag)) return 1;
+    }
+    return 0;
+}
+
 taida_val taida_set_from_list(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];  // length at index 2
@@ -7240,11 +7289,19 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     taida_val a_len = a[2];  // length at index 2
     taida_val b_len = b[2];
     taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag from set_a
-    // Start with a copy of a
+    taida_val tag_b = b[3];
+    // F54 tier 2: when the two sets pin different scalar domains (or a
+    // Float domain is in play), dedup across them numerically — b is a
+    // Set, hence already unique, so the dup test only needs "is b[i]
+    // in a". A mixed-domain result no longer has one honest elem tag;
+    // latch HETEROGENEOUS like list-push does.
+    int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
+    taida_val result_tag = elem_tag;
+    if (numeric_cross && elem_tag != tag_b) result_tag = TAIDA_TAG_HETEROGENEOUS;
     taida_val result = taida_set_new();
-    ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
+    ((taida_val*)result)[3] = result_tag;
     taida_seen seen;
-    int use_hash = taida_list_all_hashable(a) && taida_list_all_hashable(b)
+    int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, a_len + b_len);
     for (taida_val i = 0; i < a_len; i++) {
         if (use_hash) taida_seen_add(&seen, a[4 + i]);  // a is already unique
@@ -7253,9 +7310,16 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     }
     // Add items from b that aren't in a
     for (taida_val i = 0; i < b_len; i++) {
-        int dup = use_hash ? !taida_seen_add(&seen, b[4 + i]) : taida_set_contains(result, b[4 + i]);
+        int dup;
+        if (numeric_cross) {
+            dup = taida_tagged_set_contains(a, elem_tag, b[4 + i], tag_b);
+        } else if (use_hash) {
+            dup = !taida_seen_add(&seen, b[4 + i]);
+        } else {
+            dup = taida_set_contains(result, b[4 + i]);
+        }
         if (!dup) {
-            taida_list_elem_retain(b[4 + i], elem_tag);  // NO-2: retain-on-copy
+            taida_list_elem_retain(b[4 + i], tag_b);  // NO-2: retain-on-copy
             result = taida_list_push(result, b[4 + i]);
         }
     }
@@ -7268,14 +7332,25 @@ taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
     taida_val a_len = a[2];  // length at index 2
     taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
     taida_val *b = (taida_val*)set_b;
+    taida_val tag_b = b[3];
+    // F54 tier 2: tagged numeric membership when scalar domains differ.
+    // The result holds a-side elements only, so the a tag stays honest.
+    int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
     taida_val result = taida_set_new();
     ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
     taida_seen seen;
-    int use_hash = taida_list_all_hashable(a) && taida_list_all_hashable(b)
+    int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, b[2]);
     if (use_hash) for (taida_val i = 0; i < b[2]; i++) taida_seen_add(&seen, b[4 + i]);
     for (taida_val i = 0; i < a_len; i++) {
-        int in_b = use_hash ? taida_seen_contains(&seen, a[4 + i]) : taida_set_contains(set_b, a[4 + i]);
+        int in_b;
+        if (numeric_cross) {
+            in_b = taida_tagged_set_contains(b, tag_b, a[4 + i], elem_tag);
+        } else if (use_hash) {
+            in_b = taida_seen_contains(&seen, a[4 + i]);
+        } else {
+            in_b = taida_set_contains(set_b, a[4 + i]);
+        }
         if (in_b) {
             taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, a[4 + i]);
@@ -7290,14 +7365,24 @@ taida_val taida_set_diff(taida_val set_a, taida_val set_b) {
     taida_val a_len = a[2];  // length at index 2
     taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
     taida_val *b = (taida_val*)set_b;
+    taida_val tag_b = b[3];
+    // F54 tier 2: tagged numeric membership when scalar domains differ.
+    int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
     taida_val result = taida_set_new();
     ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
     taida_seen seen;
-    int use_hash = taida_list_all_hashable(a) && taida_list_all_hashable(b)
+    int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, b[2]);
     if (use_hash) for (taida_val i = 0; i < b[2]; i++) taida_seen_add(&seen, b[4 + i]);
     for (taida_val i = 0; i < a_len; i++) {
-        int in_b = use_hash ? taida_seen_contains(&seen, a[4 + i]) : taida_set_contains(set_b, a[4 + i]);
+        int in_b;
+        if (numeric_cross) {
+            in_b = taida_tagged_set_contains(b, tag_b, a[4 + i], elem_tag);
+        } else if (use_hash) {
+            in_b = taida_seen_contains(&seen, a[4 + i]);
+        } else {
+            in_b = taida_set_contains(set_b, a[4 + i]);
+        }
         if (!in_b) {
             taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, a[4 + i]);

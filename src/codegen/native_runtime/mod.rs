@@ -701,7 +701,11 @@ mod tests {
         //   taida_float_eq/neq/lt/gt/lte/gte comparison family (f64 semantics
         //   via _to_double, mirroring the dormant wasm W-5 helpers). F1 is
         //   untouched; F2 200,593 -> 201,685. Total -> 1,198,951.
-        const EXPECTED_TOTAL_LEN: usize = 1_198_951;
+        // 2026-06-04 F54B-019 (G8 tier 2): +4,116 bytes in core.c F1 for the
+        //   numeric-domain aware Set×Set comparison (taida_set_numeric_cross /
+        //   taida_tagged_scalar_eq / taida_tagged_set_contains wired into
+        //   union/intersect/diff). F1 337,711 -> 341,827. Total -> 1,203,067.
+        const EXPECTED_TOTAL_LEN: usize = 1_203_067;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1299,7 +1303,9 @@ mod tests {
         // 324,657 -> 336,711.
         // F54B-014 (G5) adds taida_abi_pair_list_copy (+1,000) before the
         // marker as well: F1_LEN 336,711 -> 337,711.
-        const F1_LEN: usize = 337_711;
+        // F54B-019 (G8 tier 2) adds the tagged numeric Set comparison
+        // helpers (+4,116) before the marker: F1_LEN 337,711 -> 341,827.
+        const F1_LEN: usize = 341_827;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

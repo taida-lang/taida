@@ -3539,23 +3539,71 @@ int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
     return result;
 }
 
+/* ── F54 tier 2: numeric-domain aware Set×Set comparison ──────────
+ * Mirrors native core.c: containers carry one elem_type_tag (slot [2]
+ * in the wasm layout) and raw Int / Bool / Float values are mutually
+ * indistinguishable. When BOTH operands pin a scalar domain, compare in
+ * the interpreter's numeric domain (Int↔Float lifts the int side; Bool
+ * never equals a number; Float uses f64). Tags that do not pin a scalar
+ * domain keep the structural engine. */
+static int _wasm_tag_is_scalar_domain(int64_t tag) {
+    return tag == WASM_TAG_INT || tag == WASM_TAG_BOOL || tag == WASM_TAG_FLOAT;
+}
+
+static int _wasm_set_numeric_cross(int64_t tag_a, int64_t tag_b) {
+    if (!_wasm_tag_is_scalar_domain(tag_a) || !_wasm_tag_is_scalar_domain(tag_b)) return 0;
+    if (tag_a == WASM_TAG_FLOAT || tag_b == WASM_TAG_FLOAT) return 1;
+    return tag_a != tag_b;
+}
+
+static int _wasm_tagged_scalar_eq(int64_t a, int64_t tag_a, int64_t b, int64_t tag_b) {
+    if ((tag_a == WASM_TAG_BOOL) != (tag_b == WASM_TAG_BOOL)) return 0;
+    if (tag_a == WASM_TAG_FLOAT || tag_b == WASM_TAG_FLOAT) {
+        double da = (tag_a == WASM_TAG_FLOAT) ? _l2d(a) : (double)a;
+        double db = (tag_b == WASM_TAG_FLOAT) ? _l2d(b) : (double)b;
+        return da == db ? 1 : 0;
+    }
+    return a == b ? 1 : 0;
+}
+
+static int _wasm_tagged_set_contains(const int64_t *container, int64_t container_tag,
+                                     int64_t item, int64_t item_tag) {
+    int64_t len = container[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (_wasm_tagged_scalar_eq(container[WASM_LIST_ELEMS + i], container_tag, item, item_tag)) return 1;
+    }
+    return 0;
+}
+
 /* W-4f: Set.union(other) -> new Set with all elements from both */
 int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t *b = (int64_t *)(intptr_t)set_b;
     int64_t a_len = a[1];
     int64_t b_len = b[1];
+    int64_t tag_a = a[2];
+    int64_t tag_b = b[2];
+    /* F54 tier 2: b is a Set (already unique), so under a numeric-domain
+     * cross the dup test only needs "is b[i] in a", compared in the
+     * numeric domain. */
+    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, a_len + b_len);
     for (int64_t i = 0; i < a_len; i++) {
         if (use_hash) _wasm_seen_add(&seen, a[WASM_LIST_ELEMS + i]);
         result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     for (int64_t i = 0; i < b_len; i++) {
-        int dup = use_hash ? !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i])
-                           : taida_set_has(result, b[WASM_LIST_ELEMS + i]);
+        int dup;
+        if (numeric_cross) {
+            dup = _wasm_tagged_set_contains(a, tag_a, b[WASM_LIST_ELEMS + i], tag_b);
+        } else if (use_hash) {
+            dup = !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
+        } else {
+            dup = taida_set_has(result, b[WASM_LIST_ELEMS + i]);
+        }
         if (!dup) result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -3566,14 +3614,23 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
+    int64_t tag_a = a[2];
+    int64_t tag_b = b[2];
+    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
     if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
-                            : taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
+        int in_b;
+        if (numeric_cross) {
+            in_b = _wasm_tagged_set_contains(b, tag_b, a[WASM_LIST_ELEMS + i], tag_a);
+        } else if (use_hash) {
+            in_b = _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i]);
+        } else {
+            in_b = taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
+        }
         if (in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -3584,14 +3641,23 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
+    int64_t tag_a = a[2];
+    int64_t tag_b = b[2];
+    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
     if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
-                            : taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
+        int in_b;
+        if (numeric_cross) {
+            in_b = _wasm_tagged_set_contains(b, tag_b, a[WASM_LIST_ELEMS + i], tag_a);
+        } else if (use_hash) {
+            in_b = _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i]);
+        } else {
+            in_b = taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
+        }
         if (!in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;

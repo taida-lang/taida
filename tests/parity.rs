@@ -42379,3 +42379,55 @@ stdout((2.5 >= g).toString())
         assert_eq!(interp, wasm, "interpreter/wasm-min float comparison parity");
     }
 }
+
+/// F54B-019 (G8 tier 2): Set×Set operations across numeric domains.
+/// Sets carry one elem_type_tag; when the two operands of union /
+/// intersect / diff pin DIFFERENT scalar domains (or a Float domain is
+/// in play), native/WASM previously compared raw i64 values — the f64
+/// bit pattern of 3.0 never equals 3 — so `union(@[3,4], @[3.0])` had
+/// 3 elements while the interpreter (Int↔Float cross-type equality)
+/// has 2. Both C runtimes now walk a tagged linear path in that case
+/// (the interpreter also degrades to a linear scan whenever Float is
+/// involved, so complexity matches). Heterogeneous-tagged containers
+/// remain on the structural engine: per-element type identity is not
+/// representable without value-level tags. Expected: 2 1 1 3 2
+#[test]
+fn test_f54b019_set_numeric_cross_parity() {
+    let source = r#"
+s1 <= setOf(@[3, 4])
+s2 <= setOf(@[3.0])
+stdout(s1.union(s2).size().toString())
+stdout(s1.intersect(s2).size().toString())
+stdout(s1.diff(s2).size().toString())
+s3 <= setOf(@[4.5])
+u <= s1.union(s3)
+stdout(u.size().toString())
+lst <= @[1.5, 1.5, 2.5]
+stdout(Unique[lst]().length().toString())
+"#;
+    let label = "f54b019_set_numeric_cross";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2", "1", "1", "3", "2"],
+        "interpreter set numeric-cross reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native set numeric-cross parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js set numeric-cross parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min set numeric-cross parity"
+        );
+    }
+}
