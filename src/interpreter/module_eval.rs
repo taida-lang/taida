@@ -425,6 +425,33 @@ impl Interpreter {
                         self.env
                             .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));
                     }
+                } else if in_bundled("build") {
+                    // F54: descriptor-only package. The descriptor parser
+                    // recognizes `BuildUnit(...)` & co. by TYPE NAME, with or
+                    // without an import; these sentinels only make the
+                    // documented `>>> taida-lang/build => @(...)` import
+                    // resolve instead of failing at the export-collection
+                    // step. They are not runtime constructors.
+                    if let Some(spec) = crate::pkg::catalog::find("build") {
+                        for sym in spec.exports {
+                            self.env.define_force(
+                                sym,
+                                Value::str(format!("__build_descriptor_{}", sym)),
+                            );
+                        }
+                    }
+                } else if in_bundled("js") {
+                    // F54 (D-2 fix): `taida-lang/js` materialized but never
+                    // injected sentinels, so the import itself silently
+                    // half-worked. The descriptors are JS-backend-only; the
+                    // interpreter rejects their use at evaluation time, but
+                    // the import statement documents itself honestly now.
+                    if let Some(spec) = crate::pkg::catalog::find("js") {
+                        for sym in spec.exports {
+                            self.env
+                                .define_force(sym, Value::str(format!("__js_descriptor_{}", sym)));
+                        }
+                    }
                 }
             }
 

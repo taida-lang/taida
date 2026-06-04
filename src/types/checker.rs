@@ -1,6 +1,6 @@
 use super::types::{Type, TypeRegistry};
 use crate::lexer::Span;
-use crate::net_surface::{NET_HTTP_PROTOCOL_VARIANTS, is_net_export_name, net_export_list};
+use crate::net_surface::NET_HTTP_PROTOCOL_VARIANTS;
 use crate::parser::*;
 /// Type checker for Taida Lang.
 ///
@@ -2400,50 +2400,32 @@ impl TypeChecker {
     fn validate_import_symbols(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
-        if imp.path == "taida-lang/net" {
+        // F54 (unknown-symbol unification): every core-bundled package is
+        // validated against the catalog export list. Previously only net
+        // and abi were checked; a typo'd symbol on os / crypto / pool / js
+        // skipped the checker, lowered to Type::Unknown, and was silently
+        // dropped by the native lowering — vanishing without a diagnostic.
+        if let Some((org, name)) = imp.path.split_once('/')
+            && org == crate::pkg::catalog::BUNDLED_ORG
+            && let Some(spec) = crate::pkg::catalog::find(name)
+        {
             for sym in &imp.symbols {
-                if !is_net_export_name(&sym.name) {
+                if !spec.exports.contains(&sym.name.as_str()) {
                     self.errors.push(TypeError {
                         message: format!(
                             "Symbol '{}' not found in module '{}'. The module exports: {}",
                             sym.name,
                             imp.path,
-                            net_export_list()
+                            spec.exports.join(", ")
                         ),
                         span: imp.span.clone(),
                     });
-                }
-            }
-            return;
-        }
-        if imp.path == "taida-lang/abi" {
-            const ABI_EXPORTS: &[&str] = &[
-                "WebRequest",
-                "WebResponse",
-                "text",
-                "json",
-                "bytes",
-                "status",
-                "header",
-                "HostCall",
-                "HostStep",
-                "HostCapability",
-            ];
-            for sym in &imp.symbols {
-                if !ABI_EXPORTS.contains(&sym.name.as_str()) {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "Symbol '{}' not found in module '{}'. The module exports: {}",
-                            sym.name,
-                            imp.path,
-                            ABI_EXPORTS.join(", ")
-                        ),
-                        span: imp.span.clone(),
-                    });
-                } else if matches!(
-                    sym.name.as_str(),
-                    "HostCall" | "HostStep" | "HostCapability"
-                ) && sym.alias.is_some()
+                } else if name == "abi"
+                    && matches!(
+                        sym.name.as_str(),
+                        "HostCall" | "HostStep" | "HostCapability"
+                    )
+                    && sym.alias.is_some()
                 {
                     self.errors.push(TypeError {
                         message: format!(
@@ -2458,7 +2440,8 @@ impl TypeChecker {
             return;
         }
 
-        // Skip other core-bundled and npm packages
+        // Skip unknown taida-lang/* paths (resolver rejects them at runtime)
+        // and npm packages.
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
             return;
         }
