@@ -3873,6 +3873,22 @@ stdout(lax.has_value)"#;
     // ── OS_SYMBOLS test ──
 
     #[test]
+    fn test_os_symbols_match_catalog_exports() {
+        // F54: the interpreter sentinel list and the bundled package
+        // catalog must agree on the os surface (set equality — the
+        // sentinel keeps its historical, index-stable order).
+        let spec = crate::pkg::catalog::find("os").expect("os catalog entry");
+        let mut sentinel: Vec<&str> = OS_SYMBOLS.to_vec();
+        let mut exports: Vec<&str> = spec.exports.to_vec();
+        sentinel.sort_unstable();
+        exports.sort_unstable();
+        assert_eq!(
+            sentinel, exports,
+            "OS_SYMBOLS drifted from the catalog os export list"
+        );
+    }
+
+    #[test]
     fn test_os_symbols_count() {
         // C18 layout: 35 symbols. C19 appends 2 more (runInteractive,
         // execShellInteractive). C26B-020 柱 1 appends 1 more (readBytesAt).

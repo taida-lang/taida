@@ -403,15 +403,13 @@ impl Interpreter {
                             .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
                     }
                 } else if in_bundled("pool") {
-                    for sym in [
-                        "poolCreate",
-                        "poolAcquire",
-                        "poolRelease",
-                        "poolClose",
-                        "poolHealth",
-                    ] {
-                        self.env
-                            .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
+                    // F54: sentinel list derived from the catalog so the
+                    // injected surface cannot drift from the export list.
+                    if let Some(spec) = crate::pkg::catalog::find("pool") {
+                        for sym in spec.exports {
+                            self.env
+                                .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
+                        }
                     }
                 } else if in_bundled("abi") {
                     self.env
