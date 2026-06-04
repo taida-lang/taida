@@ -200,6 +200,25 @@ static int64_t abi_header_list_append(int64_t list, const char *name, const char
     return abi_pair_list_append_raw(list, name, value);
 }
 
+/* The response builders store the headers list pointer into each derived
+ * response pack without copying, so several response values can share one
+ * spine. taida_list_push mutates that spine in place; appending through a
+ * shared list would therefore also mutate the *input* response, breaking
+ * the documented "returns a new WebResponse, input unchanged" helper
+ * contract (interpreter keeps the input intact). Copy the spine before
+ * appending — pair packs are immutable and stay shared. WASM layout:
+ * [cap, len, elem_tag, magic, items...]. Arena allocation, no retain. */
+static int64_t abi_pair_list_copy(int64_t list_ptr) {
+    int64_t out = abi_pair_list_new();
+    if (!list_ptr) return out;
+    int64_t *src = (int64_t *)(intptr_t)list_ptr;
+    int64_t len = src[1];
+    for (int64_t i = 0; i < len; i++) {
+        out = taida_list_push(out, src[4 + i]);
+    }
+    return out;
+}
+
 static int64_t abi_bytes_default(void) {
     int64_t cap = 8;
     int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((ABI_WASM_LIST_ELEMS + cap + 1) * 8));
@@ -335,7 +354,7 @@ int64_t taida_abi_response_header(int64_t name_ptr, int64_t value_ptr, int64_t r
     if (!abi_header_name_valid(name) || !abi_header_value_valid(value)) {
         return abi_error_response(500, "invalid response header");
     }
-    int64_t headers = taida_pack_get(response, abi_hash_cstr("headers"));
+    int64_t headers = abi_pair_list_copy(taida_pack_get(response, abi_hash_cstr("headers")));
     headers = abi_header_list_append(
         headers,
         name,

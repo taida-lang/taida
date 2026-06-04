@@ -5167,6 +5167,27 @@ static taida_val taida_abi_header_list_append(taida_val list, const char *name, 
     return taida_abi_pair_list_append_raw(list, name, value);
 }
 
+// The response builders store the headers list pointer into each derived
+// response pack without copying (taida_pack_set), so several response
+// values can share one spine. taida_list_push mutates that spine in place;
+// appending through a shared list would therefore also mutate the *input*
+// response, breaking the documented "returns a new WebResponse, input
+// unchanged" helper contract (interpreter keeps the input intact). Copy the
+// spine before appending — the name/value pair packs are immutable and stay
+// shared (retained per NO-4 RULE 1).
+static taida_val taida_abi_pair_list_copy(taida_val list_ptr) {
+    taida_val out = taida_abi_pair_list_new();
+    if (!list_ptr) return out;
+    taida_val *src = (taida_val*)list_ptr;
+    taida_val len = src[2];
+    for (taida_val i = 0; i < len; i++) {
+        taida_val elem = src[4 + i];
+        taida_list_elem_retain(elem, TAIDA_TAG_PACK);
+        out = taida_list_push(out, elem);
+    }
+    return out;
+}
+
 static taida_val taida_abi_empty_bytes(void) {
     return taida_bytes_contig_new((const unsigned char *)"", 0);
 }
@@ -5230,7 +5251,7 @@ taida_val taida_abi_response_header(taida_val name_ptr, taida_val value_ptr, tai
     if (!taida_abi_header_name_valid(name) || !taida_abi_header_value_valid(value)) {
         return taida_abi_response_error(500, "invalid response header");
     }
-    taida_val headers = taida_pack_get(response, taida_abi_hash("headers"));
+    taida_val headers = taida_abi_pair_list_copy(taida_pack_get(response, taida_abi_hash("headers")));
     headers = taida_abi_header_list_append(headers, name, value);
     taida_val status = taida_pack_get(response, taida_abi_hash("status"));
     if (!status) status = 200;

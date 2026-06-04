@@ -681,7 +681,14 @@ mod tests {
         //   335,795 -> 336,711; total 1,190,634 -> 1,191,550. The WASM Bytes /
         //   unique_by edits land outside NATIVE_RUNTIME_C, so they do not move
         //   these constants.
-        const EXPECTED_TOTAL_LEN: usize = 1_191_550;
+        // 2026-06-04 F54B-014 (G5): +1,000 bytes in core.c F1 for
+        //   taida_abi_pair_list_copy — the abi `header(...)` helper now copies
+        //   the headers spine before appending so derived responses stop
+        //   mutating the input response's shared list (pair packs stay
+        //   shared/retained). F1_LEN 336,711 -> 337,711; total
+        //   1,191,550 -> 1,192,550. The matching runtime_abi_web_wasm.c edit
+        //   lands outside NATIVE_RUNTIME_C.
+        const EXPECTED_TOTAL_LEN: usize = 1_192_550;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1277,7 +1284,9 @@ mod tests {
         // ceiling marker: structural engine (+4,335) + fingerprint seen-set
         // (+6,803) + unique_by structural-key dedup (+916), moving F1_LEN
         // 324,657 -> 336,711.
-        const F1_LEN: usize = 336_711;
+        // F54B-014 (G5) adds taida_abi_pair_list_copy (+1,000) before the
+        // marker as well: F1_LEN 336,711 -> 337,711.
+        const F1_LEN: usize = 337_711;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 is 200,593 bytes. The previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

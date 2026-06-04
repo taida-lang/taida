@@ -42117,3 +42117,55 @@ stdout(u.length().toString())
         );
     }
 }
+
+/// F54B-014 (G5): the abi `header(...)` helper must return a NEW WebResponse
+/// and leave the input response untouched. native/WASM stored the headers
+/// list pointer into each derived response pack without copying, and
+/// `taida_list_push` mutates the spine in place, so deriving twice from the
+/// same base (`header("x-a", .., base)` + `header("x-b", .., base)`) leaked
+/// both names into `base` and every derived response (observed native /
+/// wasm: `3 3 3` vs interpreter `1 2 2`). Both C runtimes now copy the
+/// spine before appending; the interpreter side gained a COW fast path
+/// (pack_take / list_take) that makes direct `header(..)` chains O(k)
+/// without changing output. Expected output:
+/// `1 2 2` (base untouched) then `201 4 x-a=1 x-c=3` (chain order intact).
+/// JS codegen cannot resolve `taida-lang/abi` imports, so this checks
+/// interpreter / native / wasm-min.
+#[test]
+fn test_f54b014_abi_header_no_input_mutation_parity() {
+    let source = r#"
+>>> taida-lang/abi => @(WebRequest, WebResponse, text, status, header)
+
+base <= text("b")
+r1 <= header("x-a", "1", base)
+r2 <= header("x-b", "2", base)
+stdout(base.headers.length().toString())
+stdout(r1.headers.length().toString())
+stdout(r2.headers.length().toString())
+chained <= header("x-c", "3", header("x-b", "2", header("x-a", "1", status(201, text("ok")))))
+stdout(chained.status.toString())
+stdout(chained.headers.length().toString())
+chained.headers.get(1) >=> h1
+stdout(h1.name + "=" + h1.value)
+chained.headers.get(3) >=> h3
+stdout(h3.name + "=" + h3.value)
+"#;
+    let label = "f54b014_abi_header_no_input_mutation";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    // Pin the interpreter reference output shape itself so a COW regression
+    // on the reference implementation cannot slip through backend-vs-backend
+    // comparison alone.
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "2", "201", "4", "x-a=1", "x-c=3"],
+        "interpreter abi header no-mutation reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native abi header parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min abi header parity");
+    }
+}
