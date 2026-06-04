@@ -688,7 +688,16 @@ mod tests {
         //   shared/retained). F1_LEN 336,711 -> 337,711; total
         //   1,191,550 -> 1,192,550. The matching runtime_abi_web_wasm.c edit
         //   lands outside NATIVE_RUNTIME_C.
-        const EXPECTED_TOTAL_LEN: usize = 1_192_550;
+        // 2026-06-04 F54B-009 (G6): +5,010 bytes in tls.c for the pool
+        //   waiting semaphore — pthread mutex/cond guarding the pool table
+        //   (POOL-5), open-addressing in-use hash for O(1) release (POOL-4),
+        //   cond_timedwait blocking acquire with live `waiting` count, and
+        //   Lax-wrapped acquire resources. core.c fragments are untouched,
+        //   so F1_LEN stays at 337,711. Total 1,192,550 -> 1,197,560, then
+        //   +299 bytes for the INT64_MIN omitted-timeout sentinel (the
+        //   lowering used to inject an explicit 30s, dead-lettering
+        //   poolCreate's acquireTimeoutMs). Total -> 1,197,859.
+        const EXPECTED_TOTAL_LEN: usize = 1_197_859;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

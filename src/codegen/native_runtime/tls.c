@@ -1559,13 +1559,67 @@ typedef struct {
     size_t idle_cap;
     taida_val *idle_tokens;
     taida_val *idle_resources;
+    // POOL-4: in-use token membership is an open-addressing hash table
+    // (0 = empty, -1 = tombstone; real tokens start at 1) so poolRelease
+    // is O(1) instead of a linear scan. Capacity is fixed at creation
+    // (first power of two >= 2 * max_size), so no resize path is needed.
     size_t in_use_len;
-    size_t in_use_cap;
-    taida_val *in_use_tokens;
+    size_t in_use_hash_cap;
+    taida_val *in_use_hash;
+    // Waiting-semaphore state: number of poolAcquire calls currently
+    // blocked in pthread_cond_timedwait. Surfaced as poolHealth.waiting.
+    taida_val waiting;
 } taida_pool_state;
 
 static taida_pool_state *taida_pool_states[TAIDA_POOL_MAX_STATES] = {0};
 static taida_val taida_pool_next_id = 1;
+
+// POOL-5: one mutex/cond pair guards the pool table and every pool state.
+// httpServe worker threads call pool functions concurrently; the previous
+// lock-free table was a data race. Waiters block on the cond and are
+// woken by poolRelease / poolClose broadcasts (spurious wakeups are
+// absorbed by the re-check loop in taida_pool_acquire).
+static pthread_mutex_t taida_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t taida_pool_cond = PTHREAD_COND_INITIALIZER;
+
+static size_t taida_pool_hash_slot(taida_val token, size_t cap) {
+    uint64_t h = (uint64_t)token * 0x9E3779B97F4A7C15ULL;
+    return (size_t)(h & (uint64_t)(cap - 1));
+}
+
+static int taida_pool_in_use_add(taida_pool_state *st, taida_val token) {
+    size_t cap = st->in_use_hash_cap;
+    if (cap == 0) return 0;
+    size_t i = taida_pool_hash_slot(token, cap);
+    for (size_t probe = 0; probe < cap; probe++) {
+        taida_val v = st->in_use_hash[i];
+        if (v == 0 || v == -1) {
+            st->in_use_hash[i] = token;
+            st->in_use_len++;
+            return 1;
+        }
+        if (v == token) return 1;
+        i = (i + 1) & (cap - 1);
+    }
+    return 0;
+}
+
+static int taida_pool_in_use_remove(taida_pool_state *st, taida_val token) {
+    size_t cap = st->in_use_hash_cap;
+    if (cap == 0) return 0;
+    size_t i = taida_pool_hash_slot(token, cap);
+    for (size_t probe = 0; probe < cap; probe++) {
+        taida_val v = st->in_use_hash[i];
+        if (v == 0) return 0;
+        if (v == token) {
+            st->in_use_hash[i] = -1;
+            st->in_use_len--;
+            return 1;
+        }
+        i = (i + 1) & (cap - 1);
+    }
+    return 0;
+}
 
 static taida_val taida_pool_parse_handle(taida_val pool_or_pack) {
     taida_val pool_hash = taida_str_hash((taida_val)"pool");
@@ -1636,25 +1690,6 @@ static int taida_pool_push_idle(taida_pool_state *st, taida_val token, taida_val
     return 1;
 }
 
-static int taida_pool_push_in_use(taida_pool_state *st, taida_val token) {
-    if (st->in_use_len >= st->in_use_cap) {
-        size_t new_cap = st->in_use_cap == 0 ? 4 : st->in_use_cap * 2;
-        taida_val *new_tokens = (taida_val*)realloc(st->in_use_tokens, sizeof(taida_val) * new_cap);
-        if (!new_tokens) return 0;
-        st->in_use_tokens = new_tokens;
-        st->in_use_cap = new_cap;
-    }
-    st->in_use_tokens[st->in_use_len++] = token;
-    return 1;
-}
-
-static taida_val taida_pool_find_in_use_idx(taida_pool_state *st, taida_val token) {
-    for (size_t i = 0; i < st->in_use_len; i++) {
-        if (st->in_use_tokens[i] == token) return (taida_val)i;
-    }
-    return -1;
-}
-
 static taida_val taida_pool_health_pack(taida_val open, taida_val idle, taida_val in_use, taida_val waiting) {
     taida_val pack = taida_pack_new(4);
     taida_val open_hash = taida_str_hash((taida_val)"open");
@@ -1705,19 +1740,35 @@ taida_val taida_pool_create(taida_val config_ptr) {
         return taida_pool_result_failure("invalid", "poolCreate: acquireTimeoutMs must be > 0");
     }
 
+    pthread_mutex_lock(&taida_pool_mutex);
     taida_val pool_id = taida_pool_next_id++;
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_pool_result_failure("other", "poolCreate: pool table exhausted");
     }
 
     taida_pool_state *st = (taida_pool_state*)calloc(1, sizeof(taida_pool_state));
-    if (!st) return taida_pool_result_failure("other", "poolCreate: out of memory");
+    if (!st) {
+        pthread_mutex_unlock(&taida_pool_mutex);
+        return taida_pool_result_failure("other", "poolCreate: out of memory");
+    }
     st->open = 1;
     st->max_size = max_size;
     st->max_idle = max_idle;
     st->acquire_timeout_ms = acquire_timeout_ms;
     st->next_token = 1;
+    // POOL-4: fixed-capacity in-use hash — first power of two >= 2*max_size.
+    size_t hash_cap = 4;
+    while ((taida_val)hash_cap < max_size * 2) hash_cap <<= 1;
+    st->in_use_hash = (taida_val*)calloc(hash_cap, sizeof(taida_val));
+    if (!st->in_use_hash) {
+        free(st);
+        pthread_mutex_unlock(&taida_pool_mutex);
+        return taida_pool_result_failure("other", "poolCreate: out of memory");
+    }
+    st->in_use_hash_cap = hash_cap;
     taida_pool_states[pool_id] = st;
+    pthread_mutex_unlock(&taida_pool_mutex);
 
     taida_val inner = taida_pack_new(1);
     taida_val pool_hash = taida_str_hash((taida_val)"pool");
@@ -1728,44 +1779,94 @@ taida_val taida_pool_create(taida_val config_ptr) {
 
 taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms) {
     taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
+    pthread_mutex_lock(&taida_pool_mutex);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_async_resolved(taida_pool_result_failure("invalid", "poolAcquire: unknown pool handle"));
     }
 
     taida_pool_state *st = taida_pool_states[pool_id];
     if (!st->open) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_async_resolved(taida_pool_result_failure("closed", "poolAcquire: pool is closed"));
     }
 
-    taida_val effective_timeout = timeout_ms > 0 ? timeout_ms : st->acquire_timeout_ms;
-    if (effective_timeout <= 0) {
+    // INT64_MIN is the omitted-argument sentinel injected by the lowering:
+    // fall back to the pool's configured acquireTimeoutMs (interpreter
+    // parity). Any other non-positive explicit value is invalid.
+    taida_val effective_timeout;
+    if (timeout_ms == INT64_MIN) {
+        effective_timeout = st->acquire_timeout_ms;
+    } else if (timeout_ms <= 0) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_async_resolved(taida_pool_result_failure("invalid", "poolAcquire: timeoutMs must be > 0"));
-    }
-
-    taida_val token = 0;
-    taida_val resource = 0;  // Unit
-    if (st->idle_len > 0) {
-        st->idle_len--;
-        token = st->idle_tokens[st->idle_len];
-        resource = st->idle_resources[st->idle_len];
-    } else if ((taida_val)st->in_use_len < st->max_size) {
-        token = st->next_token++;
-        resource = 0;
     } else {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "poolAcquire: timed out after %" PRId64 "ms", effective_timeout);
-        return taida_async_resolved(taida_pool_result_failure("timeout", msg));
+        effective_timeout = timeout_ms;
     }
 
-    if (!taida_pool_push_in_use(st, token)) {
+    // Waiting-semaphore contract: the acquired pack carries
+    // `resource: Lax` — Lax(value) when an idle (BYO, deposited via
+    // poolRelease) resource is reused, failure-side Lax (placeholder
+    // default 0; the pool does not know the element type) when the slot
+    // is fresh. When the pool is exhausted, block on the cond until
+    // poolRelease / poolClose signals or the deadline passes.
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += effective_timeout / 1000;
+    deadline.tv_nsec += (long)(effective_timeout % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    int registered_waiter = 0;
+    taida_val token = 0;
+    taida_val resource_lax = 0;
+    for (;;) {
+        if (!st->open) {
+            if (registered_waiter) st->waiting--;
+            pthread_mutex_unlock(&taida_pool_mutex);
+            return taida_async_resolved(taida_pool_result_failure("closed", "poolAcquire: pool is closed"));
+        }
+        if (st->idle_len > 0) {
+            st->idle_len--;
+            token = st->idle_tokens[st->idle_len];
+            resource_lax = taida_lax_new(st->idle_resources[st->idle_len], 0);
+            break;
+        }
+        if ((taida_val)st->in_use_len < st->max_size) {
+            token = st->next_token++;
+            resource_lax = taida_lax_empty(0);
+            break;
+        }
+        if (!registered_waiter) {
+            st->waiting++;
+            registered_waiter = 1;
+        }
+        int rc = pthread_cond_timedwait(&taida_pool_cond, &taida_pool_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            st->waiting--;
+            pthread_mutex_unlock(&taida_pool_mutex);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "poolAcquire: timed out after %" PRId64 "ms", effective_timeout);
+            return taida_async_resolved(taida_pool_result_failure("timeout", msg));
+        }
+        // Broadcast or spurious wakeup: loop and re-check the pool state.
+    }
+    if (registered_waiter) st->waiting--;
+
+    if (!taida_pool_in_use_add(st, token)) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_async_resolved(taida_pool_result_failure("other", "poolAcquire: out of memory"));
     }
+    pthread_mutex_unlock(&taida_pool_mutex);
 
     taida_val inner = taida_pack_new(2);
     taida_val resource_hash = taida_str_hash((taida_val)"resource");
     taida_val token_hash = taida_str_hash((taida_val)"token");
     taida_pack_set_hash(inner, 0, resource_hash);
-    taida_pack_set(inner, 0, resource);
+    taida_pack_set(inner, 0, resource_lax);
+    taida_pack_set_tag(inner, 0, TAIDA_TAG_PACK);
     taida_pack_set_hash(inner, 1, token_hash);
     taida_pack_set(inner, 1, token);
     return taida_async_resolved(taida_os_result_success(inner));
@@ -1773,29 +1874,35 @@ taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms) {
 
 taida_val taida_pool_release(taida_val pool_or_pack, taida_val token, taida_val resource) {
     taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
+    pthread_mutex_lock(&taida_pool_mutex);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_pool_result_failure("invalid", "poolRelease: unknown pool handle");
     }
 
     taida_pool_state *st = taida_pool_states[pool_id];
     if (!st->open) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_pool_result_failure("closed", "poolRelease: pool is closed");
     }
 
-    taida_val idx = taida_pool_find_in_use_idx(st, token);
-    if (idx < 0) {
+    if (!taida_pool_in_use_remove(st, token)) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_pool_result_failure("invalid", "poolRelease: token is not in-use");
     }
-    st->in_use_tokens[idx] = st->in_use_tokens[st->in_use_len - 1];
-    st->in_use_len--;
 
     taida_val reused = 0;
     if ((taida_val)st->idle_len < st->max_idle) {
         if (!taida_pool_push_idle(st, token, resource)) {
+            pthread_mutex_unlock(&taida_pool_mutex);
             return taida_pool_result_failure("other", "poolRelease: out of memory");
         }
         reused = 1;
     }
+    // A slot just freed up — wake every blocked poolAcquire so one of
+    // them can take it (the rest re-check and keep waiting).
+    pthread_cond_broadcast(&taida_pool_cond);
+    pthread_mutex_unlock(&taida_pool_mutex);
 
     taida_val inner = taida_pack_new(2);
     taida_val ok_hash = taida_str_hash((taida_val)"ok");
@@ -1809,16 +1916,25 @@ taida_val taida_pool_release(taida_val pool_or_pack, taida_val token, taida_val 
 
 taida_val taida_pool_close(taida_val pool_or_pack) {
     taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
+    pthread_mutex_lock(&taida_pool_mutex);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_async_resolved(taida_pool_result_failure("invalid", "poolClose: unknown pool handle"));
     }
     taida_pool_state *st = taida_pool_states[pool_id];
     if (!st->open) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_async_resolved(taida_pool_result_failure("closed", "poolClose: pool already closed"));
     }
     st->open = 0;
     st->idle_len = 0;
     st->in_use_len = 0;
+    if (st->in_use_hash) {
+        memset(st->in_use_hash, 0, st->in_use_hash_cap * sizeof(taida_val));
+    }
+    // Wake every blocked poolAcquire so they fail with kind:"closed".
+    pthread_cond_broadcast(&taida_pool_cond);
+    pthread_mutex_unlock(&taida_pool_mutex);
 
     taida_val inner = taida_pack_new(1);
     taida_val ok_hash = taida_str_hash((taida_val)"ok");
@@ -1829,9 +1945,16 @@ taida_val taida_pool_close(taida_val pool_or_pack) {
 
 taida_val taida_pool_health(taida_val pool_or_pack) {
     taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
+    pthread_mutex_lock(&taida_pool_mutex);
     if (pool_id <= 0 || pool_id >= TAIDA_POOL_MAX_STATES || !taida_pool_states[pool_id]) {
+        pthread_mutex_unlock(&taida_pool_mutex);
         return taida_pool_health_pack(0, 0, 0, 0);
     }
     taida_pool_state *st = taida_pool_states[pool_id];
-    return taida_pool_health_pack(st->open, (taida_val)st->idle_len, (taida_val)st->in_use_len, 0);
+    taida_val open = st->open;
+    taida_val idle = (taida_val)st->idle_len;
+    taida_val in_use = (taida_val)st->in_use_len;
+    taida_val waiting = st->waiting;
+    pthread_mutex_unlock(&taida_pool_mutex);
+    return taida_pool_health_pack(open, idle, in_use, waiting);
 }

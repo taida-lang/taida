@@ -42245,3 +42245,87 @@ stdout(Unique[@[a, b, c]]().length().toString())
         assert_eq!(interp, js, "interpreter/js Lax[Bytes] parity");
     }
 }
+
+/// F54B-009 (G6): pool waiting-semaphore contract across backends.
+/// - `resource` is now `Lax`: failure-side on a fresh slot (the caller
+///   builds the resource), `Lax(value)` when an idle BYO resource
+///   deposited via poolRelease is reused.
+/// - An exhausted pool BLOCKS up to the configured acquireTimeoutMs
+///   (previously it failed immediately and the config value was only
+///   used in the error message; native lowering additionally injected
+///   an explicit 30s default that dead-lettered the pool config).
+/// - An explicit timeoutMs <= 0 is `kind:"invalid"` on every backend
+///   (JS used to silently fall back to the pool config).
+/// - `poolHealth.waiting` returns to 0 after a timed-out wait.
+/// The elapsed check asserts only the lower bound (>= 250ms of a 300ms
+/// budget) so slow CI cannot make it flaky.
+#[test]
+fn test_f54b009_pool_wait_semaphore_parity() {
+    let source = r#"
+poolCreate(@(maxSize <= 1, acquireTimeoutMs <= 300)) >=> c1
+p <= c1.pool
+
+tryAcquire =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
+  poolAcquire(p) >=> rr
+  rr >=> aa
+  @(kind <= "ok")
+=> :@(kind: Str)
+
+tryAcquireZero =
+  |== err: Error =
+    @(kind <= err.kind)
+  => :@(kind: Str)
+  poolAcquire(p, 0) >=> rr
+  rr >=> aa
+  @(kind <= "ok")
+=> :@(kind: Str)
+
+poolAcquire(p) >=> r1
+r1 >=> a1
+stdout("fresh=" + a1.resource.has_value.toString())
+poolRelease(p, a1.token, "res-G6") >=> rl1
+poolAcquire(p) >=> r2
+r2 >=> a2
+stdout("reused=" + a2.resource.has_value.toString())
+a2.resource >=> res
+stdout("val=" + res)
+
+t0 <= nowMs()
+to1 <= tryAcquire()
+t1 <= nowMs()
+stdout("kind=" + to1.kind)
+stdout("waited=" + (t1 - t0 >= 250).toString())
+h <= poolHealth(p)
+stdout("waiting=" + h.waiting.toString())
+
+bad <= tryAcquireZero()
+stdout("zero=" + bad.kind)
+"#;
+    let label = "f54b009_pool_wait_semaphore";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        [
+            "fresh=false",
+            "reused=true",
+            "val=res-G6",
+            "kind=timeout",
+            "waited=true",
+            "waiting=0",
+            "zero=invalid"
+        ],
+        "interpreter pool wait-semaphore reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native pool wait parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js pool wait parity");
+    }
+}

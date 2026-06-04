@@ -82,6 +82,9 @@ pub(crate) struct PoolState {
     pub(crate) idle: Vec<PoolEntry>,
     pub(crate) in_use_tokens: HashSet<i64>,
     pub(crate) next_token: i64,
+    /// Number of poolAcquire calls currently blocked waiting for a free
+    /// slot (waiting semaphore). Surfaced as `poolHealth.waiting`.
+    pub(crate) waiting: i64,
 }
 
 /// One expected host-capability call in an interpreter fixture.

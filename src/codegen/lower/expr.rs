@@ -381,7 +381,21 @@ impl Lowering {
                             });
                         }
                         let pool = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
+                        // Unlike the socket APIs above, the pool carries its
+                        // own configured acquireTimeoutMs. Injecting
+                        // OS_NET_DEFAULT_TIMEOUT_MS here made the omitted-arg
+                        // call always pass an explicit 30s, silently dead-
+                        // lettering poolCreate's acquireTimeoutMs (interpreter
+                        // falls back to the pool config). i64::MIN is the
+                        // omitted-argument sentinel the runtime maps to the
+                        // pool's configured timeout.
+                        let timeout = if let Some(arg) = args.get(1) {
+                            self.lower_expr(func, arg)?
+                        } else {
+                            let t = func.alloc_var();
+                            func.push(IrInst::ConstInt(t, i64::MIN));
+                            t
+                        };
                         let result = func.alloc_var();
                         func.push(IrInst::Call(
                             result,
