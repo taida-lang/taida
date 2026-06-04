@@ -42329,3 +42329,53 @@ stdout("zero=" + bad.kind)
         assert_eq!(interp, js, "interpreter/js pool wait parity");
     }
 }
+
+/// F54B-019 (G8 tier 1): Float comparison operators must use f64 semantics
+/// on native/WASM. The lowering routed every Float-involved Eq/NotEq to the
+/// raw i64 comparison (so `3 == 3.0` was false — the bit pattern of 3.0 is
+/// not 3) and Lt/Gt/GtEq were unconditionally raw (so `-1.0 < -2.0` was
+/// TRUE — more-negative floats have larger bit patterns — and `3 > 2.5`
+/// was false). Now a Float on either side routes to taida_float_eq/neq/
+/// lt/gt/gte, whose _to_double lifts the Int side for the interpreter's
+/// Int↔Float cross-type semantics. Bool↔Int comparison stays statically
+/// rejected by the checker ([E1605]), so no dynamic case exists here.
+/// Expected: false true true true true false true true false
+#[test]
+fn test_f54b019_float_comparison_parity() {
+    let source = r#"
+a <= 0.0 - 1.0
+b <= 0.0 - 2.0
+stdout((a < b).toString())
+stdout((b < a).toString())
+stdout((a > b).toString())
+f <= 2.5
+stdout((f > 2).toString())
+stdout((3 > f).toString())
+stdout((3 == f).toString())
+g <= 3.0
+stdout((3 == g).toString())
+stdout((g >= 3).toString())
+stdout((2.5 >= g).toString())
+"#;
+    let label = "f54b019_float_comparison";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        [
+            "false", "true", "true", "true", "true", "false", "true", "true", "false"
+        ],
+        "interpreter float comparison reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(interp, native, "interpreter/native float comparison parity");
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js float comparison parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(interp, wasm, "interpreter/wasm-min float comparison parity");
+    }
+}

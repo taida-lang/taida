@@ -10775,6 +10775,20 @@ taida_val taida_float_sub(taida_val a, taida_val b) { return _d2l(_to_double(a) 
 taida_val taida_float_mul(taida_val a, taida_val b) { return _d2l(_to_double(a) * _to_double(b)); }
 // taida_float_div removed — use Div[x, y]() mold instead
 
+// Float comparison (F54 numeric parity). Raw i64 comparison of f64 bit
+// patterns broke every mixed Int/Float comparison (3 == 3.0 was false)
+// and inverted the ordering of negative floats (-1.0 < -2.0 was true,
+// because more-negative floats have larger bit patterns). _to_double
+// lifts small integers, so the Int↔Float cross-type cases follow the
+// interpreter's PartialEq/PartialOrd semantics. Mirrors the (previously
+// dormant) wasm W-5 helpers of the same names.
+taida_val taida_float_eq(taida_val a, taida_val b) { return _to_double(a) == _to_double(b) ? 1 : 0; }
+taida_val taida_float_neq(taida_val a, taida_val b) { return _to_double(a) != _to_double(b) ? 1 : 0; }
+taida_val taida_float_lt(taida_val a, taida_val b) { return _to_double(a) < _to_double(b) ? 1 : 0; }
+taida_val taida_float_gt(taida_val a, taida_val b) { return _to_double(a) > _to_double(b) ? 1 : 0; }
+taida_val taida_float_lte(taida_val a, taida_val b) { return _to_double(a) <= _to_double(b) ? 1 : 0; }
+taida_val taida_float_gte(taida_val a, taida_val b) { return _to_double(a) >= _to_double(b) ? 1 : 0; }
+
 // ── Field Name Registry (for jsonEncode) ──────────────────
 // Global hash -> name table for BuchiPack field name lookup.
 // Populated by taida_register_field_name() calls emitted at compile time.

@@ -697,7 +697,11 @@ mod tests {
         //   +299 bytes for the INT64_MIN omitted-timeout sentinel (the
         //   lowering used to inject an explicit 30s, dead-lettering
         //   poolCreate's acquireTimeoutMs). Total -> 1,197,859.
-        const EXPECTED_TOTAL_LEN: usize = 1_197_859;
+        // 2026-06-04 F54B-019 (G8 tier 1): +1,092 bytes in core.c F2 for the
+        //   taida_float_eq/neq/lt/gt/lte/gte comparison family (f64 semantics
+        //   via _to_double, mirroring the dormant wasm W-5 helpers). F1 is
+        //   untouched; F2 200,593 -> 201,685. Total -> 1,198,951.
+        const EXPECTED_TOTAL_LEN: usize = 1_198_951;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1297,14 +1301,15 @@ mod tests {
         // marker as well: F1_LEN 336,711 -> 337,711.
         const F1_LEN: usize = 337_711;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
-        // F2 is 200,593 bytes. The previous 200_740 figure was stale: the
+        // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
-        // sub-assert being refreshed (EXPECTED_TOTAL_LEN tracked the true total,
-        // so this c13_4 assert had been failing independently of G4). Express it
-        // as F1_LEN + F2 so the F1 side stays in lockstep with the const above.
+        // sub-assert being refreshed). G8 tier 1 adds the taida_float_eq/neq/
+        // lt/gt/lte/gte family after the marker: F2 200,593 -> 201,685.
+        // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
+        // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 200_593,
+            F1_LEN + 201_685,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
