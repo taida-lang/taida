@@ -128,6 +128,28 @@ impl Lowering {
         }
     }
 
+    /// Value-tag track: assign a stable 1-based type id to an enum the
+    /// first time it is defined (0 in the aux bits means "no aux", so ids
+    /// start at 1). Idempotent for re-registrations of the same name.
+    pub(crate) fn register_enum_type_id(&mut self, name: &str) {
+        let next = self.enum_type_ids.len() as i64 + 1;
+        self.enum_type_ids.entry(name.to_string()).or_insert(next);
+    }
+
+    /// Value-tag track: the per-element kind entry (EKIND) for a single
+    /// expression — kind in the low 8 bits, enum type id in the upper
+    /// bits, mirroring the runtime's kind-array encoding. UNKNOWN is the
+    /// 0xFF kind byte (NOT -1: the runtime packs entries as u32).
+    pub(crate) fn expr_ekind(&self, expr: &Expr) -> i64 {
+        if let Some(enum_name) = self.expr_enum_type_name(expr)
+            && let Some(id) = self.enum_type_ids.get(&enum_name)
+        {
+            return 9 | (id << 8); // TAIDA_TAG_ENUM | type_id << 8
+        }
+        let tag = self.expr_type_tag(expr);
+        if tag < 0 { 0xFF } else { tag }
+    }
+
     /// A-4c: TypeDef のフィールド型注釈から型タグを決定する
     pub(super) fn type_field_type_tag(&self, type_name: &str, field_name: &str) -> i64 {
         if let Some(field_types) = self.type_field_types.get(type_name) {

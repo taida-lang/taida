@@ -2356,18 +2356,24 @@ impl Lowering {
         let mut current_list = list_var;
         for item in items {
             // C23B-007: stamp this element's tag BEFORE the push so the
-            // per-element downgrade logic in `taida_list_set_elem_tag`
-            // can latch onto HETEROGENEOUS as soon as two primitive
-            // types disagree. For homogeneous lists the tag converges
-            // to that primitive tag after the first call and stays put
-            // (subsequent calls are no-ops).
+            // per-element downgrade logic can latch as soon as two
+            // primitive types disagree. For homogeneous lists the tag
+            // converges to that primitive tag after the first call and
+            // stays put (subsequent calls are no-ops).
+            //
+            // Value-tag track: the stamp goes through the EKIND entry
+            // point (kind | enum-type-id<<8) so a mixed literal
+            // materialises the per-element kind array instead of
+            // collapsing to the bare HETEROGENEOUS sentinel, and enum
+            // variants keep their type id for container equality.
             let tag = self.expr_type_tag(item);
+            let ekind = self.expr_ekind(item);
             let tag_var = func.alloc_var();
-            func.push(IrInst::ConstInt(tag_var, tag));
+            func.push(IrInst::ConstInt(tag_var, ekind));
             let tag_dummy = func.alloc_var();
             func.push(IrInst::Call(
                 tag_dummy,
-                "taida_list_set_elem_tag".to_string(),
+                "taida_list_note_push_ekind".to_string(),
                 vec![current_list, tag_var],
             ));
             let item_var = self.lower_expr(func, item)?;

@@ -475,7 +475,11 @@ impl Lowering {
         Ok(result)
     }
 
-    /// HashMap.has(key) / Set.has(item) -- polymorphic collection has
+    /// HashMap.has(key) / Set.has(item) -- polymorphic collection has.
+    /// Value-tag track: the probe argument's static kind (EKIND entry —
+    /// kind | enum-type-id<<8) rides along so Set membership follows the
+    /// same pair semantics as construction-time dedup. HashMaps ignore
+    /// the kind (key hashing is a separate system).
     fn lower_hashmap_has(
         &mut self,
         func: &mut IrFunction,
@@ -488,16 +492,24 @@ impl Lowering {
             });
         }
         let item_var = self.lower_expr(func, &args[0])?;
+        let ekind = self.expr_ekind(&args[0]);
+        let ek_var = func.alloc_var();
+        func.push(IrInst::ConstInt(ek_var, ekind));
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
-            "taida_collection_has".to_string(),
-            vec![obj_var, item_var],
+            "taida_collection_has_tagged".to_string(),
+            vec![obj_var, item_var, ek_var],
         ));
         Ok(result)
     }
 
-    /// Set.add(item) -- add item to set
+    /// Set.add(item) -- add item to set.
+    /// Value-tag track: the inserted item's static kind rides along and
+    /// the runtime projects the result Set's per-element kinds itself, so
+    /// the legacy pre-add `taida_set_set_elem_tag` stamp on the INPUT set
+    /// is gone (it mutated the input's tag latch; the tagged add records
+    /// the kind on the result where it belongs).
     fn lower_set_add(
         &mut self,
         func: &mut IrFunction,
@@ -510,22 +522,14 @@ impl Lowering {
             });
         }
         let item_var = self.lower_expr(func, &args[0])?;
-        // NO-2: Set elem_type_tag — set before add so the new Set inherits the tag.
-        // This is idempotent — subsequent .add() calls will overwrite with the same tag.
-        let elem_tag = self.expr_type_tag(&args[0]);
-        let tag_const = func.alloc_var();
-        func.push(IrInst::ConstInt(tag_const, elem_tag));
-        let tag_dummy = func.alloc_var();
-        func.push(IrInst::Call(
-            tag_dummy,
-            "taida_set_set_elem_tag".to_string(),
-            vec![set_var, tag_const],
-        ));
+        let ekind = self.expr_ekind(&args[0]);
+        let ek_var = func.alloc_var();
+        func.push(IrInst::ConstInt(ek_var, ekind));
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
-            "taida_set_add".to_string(),
-            vec![set_var, item_var],
+            "taida_set_add_tagged".to_string(),
+            vec![set_var, item_var, ek_var],
         ));
         Ok(result)
     }

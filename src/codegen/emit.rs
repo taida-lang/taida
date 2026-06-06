@@ -329,6 +329,25 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[],
         },
+        // Value-tag track: EKIND-form stamp (kind | enum-type-id<<8) used
+        // by list-literal lowering, plus the tagged Set membership /
+        // insertion entry points that carry the probe argument's kind.
+        "taida_list_note_push_ekind" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_set_has_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Val],
+        },
+        "taida_set_add_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_collection_has_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Val],
+        },
         "taida_list_push" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[Ptr],

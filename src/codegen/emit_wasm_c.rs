@@ -645,6 +645,23 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_set_elem_tag" => {
             "void taida_list_set_elem_tag(int64_t list_ptr, int64_t tag);".to_string()
         }
+        // Value-tag track: EKIND-form stamp + tagged Set membership /
+        // insertion (kind | enum-type-id<<8 in the third argument).
+        "taida_list_note_push_ekind" => {
+            "void taida_list_note_push_ekind(int64_t list_ptr, int64_t ekind);".to_string()
+        }
+        "taida_set_has_tagged" => {
+            "int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
+        "taida_set_add_tagged" => {
+            "int64_t taida_set_add_tagged(int64_t set_ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
+        "taida_collection_has_tagged" => {
+            "int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
         // W-4: HashMap runtime functions
         "taida_hashmap_new" => "int64_t taida_hashmap_new(void);".to_string(),
         "taida_hashmap_set" => {
@@ -1682,6 +1699,7 @@ fn emit_inst(
                 || name == "taida_release"
                 || name == "taida_str_retain"
                 || name == "taida_list_set_elem_tag"
+                || name == "taida_list_note_push_ekind"
                 || name == "taida_hashmap_set_value_tag"
                 || name == "taida_set_set_elem_tag"
                 || name == "taida_error_ceiling_pop"

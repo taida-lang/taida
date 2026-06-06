@@ -3747,6 +3747,13 @@ void taida_list_set_elem_tag(taida_ptr list_ptr, taida_val tag) {
     }
 }
 
+// EKIND-form sibling of taida_list_set_elem_tag for codegen call sites:
+// takes the full kind|aux entry (enum type id in the upper bits, 0xFF
+// kind byte for unknown) so list literals can record enum identities.
+void taida_list_note_push_ekind(taida_ptr list_ptr, taida_val ekind_arg) {
+    taida_elem_tags_note_push_ek((taida_val *)list_ptr, (uint32_t)ekind_arg);
+}
+
 taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val rc  = list[0];
@@ -7565,13 +7572,21 @@ void taida_set_set_elem_tag(taida_val set_ptr, taida_val tag) {
     ((taida_val*)set_ptr)[3] = tag;
 }
 
-static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
+// Kind-aware membership core: the set side reports each element's
+// recorded kind, the probe item's kind comes from the caller (EKIND
+// unknown degrades pairs to the legacy structural comparison, so the
+// 2-arg wrapper below is behaviour-identical to the historical scan).
+static taida_val taida_set_contains_k(taida_val set_ptr, taida_val item, uint32_t ek) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
     for (taida_val i = 0; i < len; i++) {
-        if (taida_value_struct_eq(list[4 + i], item)) return 1;
+        if (taida_ekind_value_eq(list[4 + i], taida_elem_kind_at(list, i), item, ek)) return 1;
     }
     return 0;
+}
+
+static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
+    return taida_set_contains_k(set_ptr, item, TAIDA_EKIND_UNKNOWN);
 }
 
 // ── F54 tier 2: numeric-domain aware Set×Set comparison ──────────
@@ -7702,6 +7717,21 @@ taida_val taida_set_add(taida_val set_ptr, taida_val item) {
 taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware removal: survivors keep their recorded kinds (the
+        // probe item has no kind here, so the pair comparison degrades to
+        // structural for it — same membership the 2-arg has() reports).
+        taida_val new_set = taida_set_new();
+        for (taida_val i = 0; i < len; i++) {
+            uint32_t ek = taida_elem_kind_at(list, i);
+            if (!taida_ekind_value_eq(list[4 + i], ek, item, TAIDA_EKIND_UNKNOWN)) {
+                taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
+                new_set = taida_list_push(new_set, list[4 + i]);
+            }
+        }
+        return new_set;
+    }
     taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
@@ -7718,6 +7748,37 @@ taida_val taida_set_has(taida_val set_ptr, taida_val item) {
     return taida_set_contains(set_ptr, item);
 }
 
+// Tagged entry points: codegen passes the probe/insert argument's static
+// kind (an EKIND entry — kind in the low byte, enum type id in the upper
+// bits) so single-value membership and insertion follow the same pair
+// semantics as construction-time dedup. An UNKNOWN entry degrades to the
+// legacy structural behaviour.
+taida_val taida_set_has_tagged(taida_val set_ptr, taida_val item, taida_val ekind_arg) {
+    return taida_set_contains_k(set_ptr, item, (uint32_t)ekind_arg);
+}
+
+taida_val taida_set_add_tagged(taida_val set_ptr, taida_val item, taida_val ekind_arg) {
+    uint32_t ek = (uint32_t)ekind_arg;
+    if (taida_set_contains_k(set_ptr, item, ek)) {
+        return set_ptr;  // already present under pair semantics
+    }
+    // Clone the set, projecting each element's recorded kind into the
+    // result, then append the new item under the caller's kind.
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];
+    taida_val new_set = taida_set_new();
+    for (taida_val i = 0; i < len; i++) {
+        uint32_t eki = taida_elem_kind_at(list, i);
+        taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(eki));
+        taida_elem_tags_note_push_ek((taida_val*)new_set, eki);
+        new_set = taida_list_push(new_set, list[4 + i]);
+    }
+    taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+    taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
+    new_set = taida_list_push(new_set, item);
+    return new_set;
+}
+
 taida_val taida_set_size(taida_val set_ptr) {
     return ((taida_val*)set_ptr)[2];  // length at index 2
 }
@@ -7730,6 +7791,17 @@ taida_val taida_set_to_list(taida_val set_ptr) {
     // Clone the set as a regular list (not tagged as Set)
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware clone: the list keeps the set's per-element kinds.
+        taida_val new_list = taida_list_new();
+        for (taida_val i = 0; i < len; i++) {
+            uint32_t ek = taida_elem_kind_at(list, i);
+            taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(ek));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, ek);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
+        return new_list;
+    }
     taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag
     taida_val new_list = taida_list_new();  // regular list, refcount=1 (not SET tag)
     ((taida_val*)new_list)[3] = elem_tag;  // NO-2: set elem_type_tag on result list
@@ -7745,8 +7817,29 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     taida_val *b = (taida_val*)set_b;
     taida_val a_len = a[2];  // length at index 2
     taida_val b_len = b[2];
-    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag from set_a
-    taida_val tag_b = b[3];
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])) {
+        // Kind-aware linear union. Array-carrying sets are literal-sized,
+        // so the O(|a|·|b|) pair scan keeps exact (value, kind) semantics
+        // without a hash path; the result rebuilds its own kind entries.
+        taida_val result = taida_set_new();
+        for (taida_val i = 0; i < a_len; i++) {
+            uint32_t ek = taida_elem_kind_at(a, i);
+            taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
+            taida_elem_tags_note_push_ek((taida_val*)result, ek);
+            result = taida_list_push(result, a[4 + i]);
+        }
+        for (taida_val i = 0; i < b_len; i++) {
+            uint32_t ek = taida_elem_kind_at(b, i);
+            if (!taida_set_contains_k(result, b[4 + i], ek)) {
+                taida_list_elem_retain(b[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)result, ek);
+                result = taida_list_push(result, b[4 + i]);
+            }
+        }
+        return result;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag from set_a
+    taida_val tag_b = taida_elem_tag_for_propagation(b);
     // F54 tier 2: when the two sets pin different scalar domains (or a
     // Float domain is in play), dedup across them numerically — b is a
     // Set, hence already unique, so the dup test only needs "is b[i]
@@ -7795,9 +7888,24 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
 taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
     taida_val *a = (taida_val*)set_a;
     taida_val a_len = a[2];  // length at index 2
-    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
     taida_val *b = (taida_val*)set_b;
-    taida_val tag_b = b[3];
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])) {
+        // Kind-aware linear intersection (see union above for rationale).
+        // The result holds a-side elements only, projected with their
+        // recorded kinds.
+        taida_val result = taida_set_new();
+        for (taida_val i = 0; i < a_len; i++) {
+            uint32_t ek = taida_elem_kind_at(a, i);
+            if (taida_set_contains_k(set_b, a[4 + i], ek)) {
+                taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)result, ek);
+                result = taida_list_push(result, a[4 + i]);
+            }
+        }
+        return result;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag
+    taida_val tag_b = taida_elem_tag_for_propagation(b);
     // F54 tier 2: tagged numeric membership when scalar domains differ.
     // The result holds a-side elements only, so the a tag stays honest.
     int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
@@ -7828,9 +7936,22 @@ taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
 taida_val taida_set_diff(taida_val set_a, taida_val set_b) {
     taida_val *a = (taida_val*)set_a;
     taida_val a_len = a[2];  // length at index 2
-    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
     taida_val *b = (taida_val*)set_b;
-    taida_val tag_b = b[3];
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])) {
+        // Kind-aware linear difference (see union above for rationale).
+        taida_val result = taida_set_new();
+        for (taida_val i = 0; i < a_len; i++) {
+            uint32_t ek = taida_elem_kind_at(a, i);
+            if (!taida_set_contains_k(set_b, a[4 + i], ek)) {
+                taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)result, ek);
+                result = taida_list_push(result, a[4 + i]);
+            }
+        }
+        return result;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag
+    taida_val tag_b = taida_elem_tag_for_propagation(b);
     // F54 tier 2: tagged numeric membership when scalar domains differ.
     int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
     taida_val result = taida_set_new();
@@ -8037,6 +8158,17 @@ taida_val taida_collection_has(taida_val ptr, taida_val item) {
     }
     // Set/List: linear scan
     return taida_set_has(ptr, item);
+}
+
+// Tagged sibling: codegen supplies the probe argument's static kind so
+// Set membership follows pair semantics; HashMaps keep their key-hash
+// path (key kinds are a separate system).
+taida_val taida_collection_has_tagged(taida_val ptr, taida_val item, taida_val ekind_arg) {
+    if (taida_is_hashmap(ptr)) {
+        taida_val key_hash = taida_value_hash(item);
+        return taida_hashmap_has(ptr, key_hash, item);
+    }
+    return taida_set_contains_k(ptr, item, (uint32_t)ekind_arg);
 }
 
 // .remove(key_or_item) — HashMap: hash-based removal, Set: linear scan

@@ -71,5 +71,6 @@ impl Lowering {
                 .map(|variant| (*variant).to_string())
                 .collect(),
         );
+        self.register_enum_type_id(local_name);
     }
 }

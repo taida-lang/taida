@@ -303,6 +303,7 @@ impl Lowering {
                             .map(|variant| variant.name.clone())
                             .collect(),
                     );
+                    self.register_enum_type_id(&enum_def.name);
                 }
                 Statement::Export(export_stmt) => {
                     // RCB-212: Re-export path `<<< ./path` is not supported.

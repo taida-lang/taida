@@ -3486,6 +3486,21 @@ int64_t taida_set_has(int64_t set_ptr, int64_t item) {
     return 0;
 }
 
+/* Value-tag bridges (degraded until the WASM mirror of the per-element
+ * kind array lands): the shared lowering now emits the EKIND-form entry
+ * points (kind in the low byte, enum type id above, 0xFF = unknown).
+ * These collapse the entry back onto the legacy tag latch / 2-arg ops so
+ * WASM behaviour is unchanged in the interim. */
+void taida_list_note_push_ekind(int64_t list_ptr, int64_t ekind) {
+    int64_t k = ekind & 0xFF;
+    taida_list_set_elem_tag(list_ptr, k == 0xFF ? WASM_TAG_UNKNOWN : k);
+}
+
+int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
+    (void)ekind;
+    return taida_set_has(set_ptr, item);
+}
+
 int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     if (taida_set_has(set_ptr, item)) return set_ptr;
     /* Create a new set (copy elements) to preserve immutable semantics.
@@ -3503,6 +3518,15 @@ int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     }
     new_set = taida_list_push(new_set, item);
     return new_set;
+}
+
+/* Value-tag bridge: stamp the inserted item's kind byte through the
+ * legacy latch (mirroring what the pre-tagged lowering used to emit as a
+ * separate taida_set_set_elem_tag call), then delegate to the 2-arg add. */
+int64_t taida_set_add_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
+    int64_t k = ekind & 0xFF;
+    taida_set_set_elem_tag(set_ptr, k == 0xFF ? WASM_TAG_UNKNOWN : k);
+    return taida_set_add(set_ptr, item);
 }
 
 int64_t taida_set_from_list(int64_t list_ptr) {
@@ -3715,6 +3739,13 @@ int64_t taida_collection_has(int64_t ptr, int64_t item) {
     }
     /* Set/List: linear scan */
     return taida_set_has(ptr, item);
+}
+
+/* Value-tag bridge: the shared lowering passes the probe argument's
+ * EKIND; degraded to the untagged scan until the WASM kind mirror lands. */
+int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind) {
+    (void)ekind;
+    return taida_collection_has(ptr, item);
 }
 
 /* .remove(key_or_item) — HashMap: clone + hash-based removal, Set: linear scan */

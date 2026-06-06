@@ -97,6 +97,10 @@ pub struct Lowering {
     pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::ClassLikeDef>,
     /// Enum definitions: enum_name -> variants in ordinal order
     pub(crate) enum_defs: std::collections::HashMap<String, Vec<String>>,
+    /// Value-tag track: enum_name -> stable type id (1-based; 0 means
+    /// "no aux"). Carried in the upper bits of per-element kind entries so
+    /// same-ordinal variants of different enums stay distinct at runtime.
+    pub(crate) enum_type_ids: std::collections::HashMap<String, i64>,
     /// B11-6d: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
     pub(crate) type_parents: std::collections::HashMap<String, String>,
     /// Mold 名 → solidify ヘルパー関数シンボル（mangled）

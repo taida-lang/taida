@@ -739,7 +739,11 @@ mod tests {
         //   the kind-aware equality engine (pair equality / fingerprints /
         //   seen-set + array-carrier unique & set_from_list; see F1_LEN
         //   history). F1 352,219 -> 364,649. Total -> 1,232,476.
-        const EXPECTED_TOTAL_LEN: usize = 1_232_476;
+        // 2026-06-06 value-tag track step 4: +6,637 bytes in core.c F1 for
+        //   kind-aware Set operations + tagged membership/insertion entry
+        //   points + the EKIND stamp bridge (see F1_LEN history).
+        //   F1 364,649 -> 371,286. Total -> 1,239,113.
+        const EXPECTED_TOTAL_LEN: usize = 1_239_113;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1370,7 +1374,14 @@ mod tests {
         // of taida_list_unique / taida_set_from_list. struct_eq's LIST
         // walk is now kind-aware end-to-end (nested containers included).
         // F1_LEN 352,219 -> 364,649.
-        const F1_LEN: usize = 364_649;
+        // Value-tag track step 4 (2026-06-06): +6,637 before the marker —
+        // kind-aware Set operations (union/intersect/diff/remove/to_list
+        // gain array-carrier paths that project per-element kinds and a
+        // contains_k membership core; add/has gain tagged entry points
+        // taking the probe argument's EKIND from codegen) plus the
+        // taida_list_note_push_ekind / taida_collection_has_tagged
+        // bridges. F1_LEN 364,649 -> 371,286.
+        const F1_LEN: usize = 371_286;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
