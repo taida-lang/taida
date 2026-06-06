@@ -2677,10 +2677,10 @@ static int h3_process_stream(QuicConnSlot *slot, QuicConnPool *pool,
     inet_ntop(AF_INET, &slot->peer_addr.sin_addr, peer_host, sizeof(peer_host));
     int peer_port = ntohs(slot->peer_addr.sin_port);
 
-    // F55 S2: branch on handler arity. The 1-arg path keeps the eager request
+    // Branch on handler arity. The 1-arg path keeps the eager request
     // pack (body completed value). The 2-arg path activates the streaming-body
-    // observation contract shared with H1/H2 (option (b),
-    // `.dev/F55_S2_STREAMING_DESIGN.md` §5): the H3 DATA frames have already
+    // observation contract shared with H1/H2 (eager fill, streaming
+    // observation): the H3 DATA frames have already
     // been collected (request_body, bounded by the 64 KiB stream buffer), so
     // we pre-load a copy into a Content-Length-style Net4BodyState whose
     // `leftover` holds the whole body. readBody* drains `leftover`

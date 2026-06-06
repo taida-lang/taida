@@ -466,13 +466,13 @@ impl Lowering {
         let key_var = self.lower_expr(func, &args[0])?;
         // For HashMap: compute key hash, then call taida_collection_remove
         // taida_collection_remove auto-detects HashMap vs Set.
-        // Value-tag track: the probe's static kind rides along so Set
-        // removal follows the same pair semantics as has/add (HashMaps
-        // ignore it). Without this, removing Int 1 from setOf(@[1.0, 2])
-        // missed the Float under the interpreter's crossing.
-        let ekind = self.expr_ekind(&args[0]);
-        let ek_var = func.alloc_var();
-        func.push(IrInst::ConstInt(ek_var, ekind));
+        // Value-tag track: the probe's kind rides along so Set removal
+        // follows the same pair semantics as has/add (HashMaps ignore it).
+        // Without this, removing Int 1 from setOf(@[1.0, 2]) missed the
+        // Float under the interpreter's crossing. The kind comes from the
+        // unmold shadow variable when the probe carries a runtime kind
+        // (`xs.get(i) >=> a`), falling back to the static EKIND constant.
+        let ek_var = self.emit_operand_ekind(func, &args[0]);
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -499,9 +499,9 @@ impl Lowering {
             });
         }
         let item_var = self.lower_expr(func, &args[0])?;
-        let ekind = self.expr_ekind(&args[0]);
-        let ek_var = func.alloc_var();
-        func.push(IrInst::ConstInt(ek_var, ekind));
+        // The probe kind honours the unmold shadow variable (runtime kind)
+        // before the static EKIND constant — see lower_hashmap_remove.
+        let ek_var = self.emit_operand_ekind(func, &args[0]);
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -529,9 +529,10 @@ impl Lowering {
             });
         }
         let item_var = self.lower_expr(func, &args[0])?;
-        let ekind = self.expr_ekind(&args[0]);
-        let ek_var = func.alloc_var();
-        func.push(IrInst::ConstInt(ek_var, ekind));
+        // The inserted item's kind honours the unmold shadow variable
+        // (runtime kind) before the static EKIND constant — see
+        // lower_hashmap_remove.
+        let ek_var = self.emit_operand_ekind(func, &args[0]);
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,

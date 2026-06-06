@@ -459,6 +459,49 @@ fn arity_shortfall_errors_use_e1301() {
     }
 }
 
+/// The injection also counts toward the *excess* side: a pipeline stage
+/// call whose written arguments already fill the arity overflows the
+/// fixed ABI once the piped value is prepended (`"abc" => sha256("x")`
+/// lowers to a 2-value call of a 1-ary builtin — the interpreter guards
+/// at runtime, native fails at build time, and JS silently misruns).
+/// Such calls must be rejected at check time.
+#[test]
+fn pipeline_excess_args_use_e1301() {
+    for (label, source) in [
+        (
+            "sha256_pipeline_excess",
+            ">>> taida-lang/crypto => @(sha256)\n\"abc\" => sha256(\"x\") => stdout(_)\n",
+        ),
+        (
+            "hmac_pipeline_excess",
+            ">>> taida-lang/crypto => @(hmacSha256)\n\"data\" => hmacSha256(\"key\", \"extra\") => stdout(_)\n",
+        ),
+        (
+            "random_pipeline_excess",
+            ">>> taida-lang/crypto => @(randomBytes)\n32 => randomBytes(1) => stdout(_.length().toString())\n",
+        ),
+    ] {
+        let td = write_td(label, source);
+        let out = Command::new(taida_bin())
+            .arg(&td)
+            .output()
+            .expect("spawn taida");
+        let _ = std::fs::remove_file(&td);
+        assert!(
+            !out.status.success(),
+            "[{}] pipeline excess args must reject",
+            label
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[E1301]"),
+            "[{}] expected [E1301], got: {}",
+            label,
+            stderr
+        );
+    }
+}
+
 /// A placeholder-free pipeline stage call receives the piped value as an
 /// implicit first argument at runtime (`"abc" => sha256()` runs as
 /// `sha256("abc")`). The fixed-arity validation must count that injection

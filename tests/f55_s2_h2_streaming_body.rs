@@ -11,11 +11,11 @@
 //! `readBody` / `readBodyChunk` / `readBodyAll` already honour
 //! (`tests/c26b_023_two_arg_handler_body.rs`, `tests/c27b_027_read_body_2arg.rs`).
 //!
-//! S2 (`.dev/F55_S2_STREAMING_DESIGN.md`, option (b)) activates the same
-//! observation contract under H2 / H3: at HEADERS+END_HEADERS the handler
-//! is dispatched with `req.body.len = 0`, and `readBody*` pulls the body
-//! bytes that were already accumulated off the wire (DATA frames, still
-//! capped at 16 MiB) from a pre-loaded per-stream queue.
+//! The streaming revision ("eager fill, streaming observation") activates
+//! the same observation contract under H2 / H3: at HEADERS+END_HEADERS the
+//! handler is dispatched with `req.body.len = 0`, and `readBody*` pulls
+//! the body bytes that were already accumulated off the wire (DATA frames,
+//! still capped at 16 MiB) from a pre-loaded per-stream queue.
 //!
 //! # Scope of this file
 //!
@@ -623,8 +623,8 @@ stdout(r.requests)
 // `curl --http2` requests. The native readBody* machinery (net_h1_h2.c
 // Net4BodyState) is shared verbatim with H1, and the H2 2-arg branch
 // pre-loads the already-accumulated DATA-frame body into that state's
-// `leftover` supply (option (b) — `.dev/F55_S2_STREAMING_DESIGN.md` §5),
-// so the bytes the handler observes match the interpreter / wire exactly.
+// `leftover` supply (eager fill, streaming observation), so the bytes
+// the handler observes match the interpreter / wire exactly.
 
 // ── Native H2 end-to-end: readBodyAll echoes the full body ──────────
 

@@ -1610,10 +1610,26 @@ impl TypeChecker {
         // it as supplied. Hole-bearing calls are partial application and
         // are slot-checked by the [E1505] pass instead.
         let effective_args = args.len() + usize::from(pipeline_injects_first_arg);
-        if effective_args < arity && !args.iter().any(|a| matches!(a, Expr::Hole(_))) {
+        let has_hole = args.iter().any(|a| matches!(a, Expr::Hole(_)));
+        if effective_args < arity && !has_hole {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1301] Function '{}' expects exactly {} argument(s), got {}. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
+                    name, arity, effective_args
+                ),
+                span: span.clone(),
+            });
+        }
+        // The excess side: a non-pipeline call with too many arguments is
+        // already rejected by the general per-function arity check, but that
+        // check counts only the written arguments — a pipeline stage call
+        // that looks complete on paper still overflows the fixed ABI once
+        // the injected pipe value is counted (the lowered call would carry
+        // arity+1 values). Reject it here so no backend sees it.
+        if pipeline_injects_first_arg && effective_args > arity && !has_hole {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly {} argument(s), got {} (the piped value counts as the first argument). Hint: Remove the extra argument(s); crypto functions have a fixed arity.",
                     name, arity, effective_args
                 ),
                 span: span.clone(),
@@ -1660,12 +1676,26 @@ impl TypeChecker {
         // Same fixed-arity rule as `validate_crypto_call`: a missing
         // argument must never reach lowering. A placeholder-free pipeline
         // stage call (`data => sha256()`) receives the piped value as its
-        // implicit first argument and is therefore complete.
+        // implicit first argument and is therefore complete — and for the
+        // same reason a stage call with a written argument is one over.
         if args.is_empty() && !pipeline_injects_first_arg {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1301] Function '{}' expects exactly 1 argument(s), got 0. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
                     name
+                ),
+                span: span.clone(),
+            });
+        }
+        if pipeline_injects_first_arg
+            && !args.is_empty()
+            && !args.iter().any(|a| matches!(a, Expr::Hole(_)))
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly 1 argument(s), got {} (the piped value counts as the first argument). Hint: Remove the extra argument(s); crypto functions have a fixed arity.",
+                    name,
+                    args.len() + 1
                 ),
                 span: span.clone(),
             });

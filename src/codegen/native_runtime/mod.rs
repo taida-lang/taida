@@ -719,8 +719,8 @@ mod tests {
         //   in core.c F2 (taida_async_join is handle-based: it also reclaims
         //   resolved-but-unjoined worker pthreads in unmold/map/get_or_default).
         //   F1 342,227 -> 342,811. Total -> 1,208,693.
-        // 2026-06-06 F55B-002: +1,945 bytes in net_h3_quic.c for addon-call
-        //   Float marshalling — taida_addon_val_from_raw gains a
+        // 2026-06-06 addon-call Float marshalling: +1,945 bytes in
+        //   net_h3_quic.c — taida_addon_val_from_raw gains a
         //   TAIDA_TAG_FLOAT case + float scratch plumbing (the lowering now
         //   tags Float args instead of letting them fall through as raw-bit
         //   Ints), and taida_addon_val_to_raw mirrors it for Float returns
@@ -793,7 +793,12 @@ mod tests {
         //   a direct `(a_len != b_len)` seed in core.c (lengths are
         //   public; only the byte walk must be constant-time): -86 bytes
         //   in F2. Total 1,284,726 -> 1,284,640.
-        const EXPECTED_TOTAL_LEN: usize = 1_284_640;
+        // 2026-06-07 comment neutralisation: -45 bytes total (-21 in
+        //   net_h1_h2.c F6, -24 in net_h3_quic.c) from rewriting the
+        //   2-arg streaming-handler comments to self-contained wording
+        //   (no internal design-document paths). Comment-only; code bytes
+        //   untouched. Total 1,284,640 -> 1,284,595.
+        const EXPECTED_TOTAL_LEN: usize = 1_284_595;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1685,9 +1690,12 @@ mod tests {
         //   __body_token fields) adds +7,229 bytes after the HTTP/2 divider.
         //   All edits sit in F6; F5_LEN and the F6_PREFIX anchor are unaffected.
         //   F6: 107,388 + 7,229 = 114,617.
+        // 2026-06-07 comment neutralisation: the two streaming-handler
+        //   comment blocks after the divider are rewritten to self-contained
+        //   wording. F6: 114,617 - 21 = 114,596. F5 untouched.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            224_556 + 114_617,
+            224_556 + 114_596,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

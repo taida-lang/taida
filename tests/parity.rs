@@ -42727,6 +42727,51 @@ stdout((b == 1.0).toString())
     }
 }
 
+/// Regression: the tagged Set entry points (has / add / remove) passed
+/// only the probe's *static* EKIND constant, ignoring the unmold shadow
+/// kind that a runtime-kind binding carries (`xs.get(i) >=> a`). Native
+/// then treated a dynamic Float probe as statically-typed, losing the
+/// Int/Float numeric crossing that the interpreter and JS apply.
+/// Expected: true 1 1 1
+#[test]
+fn test_value_tag_set_probe_shadow_kind_parity() {
+    let source = r#"
+xs <= @[1, 1.0]
+xs.get(1) >=> a
+s <= setOf(@[1])
+stdout(s.has(a).toString())
+stdout(s.add(a).size().toString())
+stdout(setOf(@[a]).size().toString())
+s2 <= setOf(@[1.0, 2])
+stdout(s2.remove(a).size().toString())
+"#;
+    let label = "value_tag_set_probe_shadow_kind";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "1", "1", "1"],
+        "interpreter set-probe shadow kind reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native set-probe shadow kind parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js set-probe shadow kind parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min set-probe shadow kind parity"
+        );
+    }
+}
+
 /// Regression: comparing two lists with == fell through to a raw
 /// pointer comparison on native/WASM, so even two identical
 /// homogeneous literals compared false, and the Int/Float crossing

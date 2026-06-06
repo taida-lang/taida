@@ -6185,15 +6185,15 @@ static taida_val h2_dispatch_request(H2ServeCtx *ctx, taida_val request_pack) {
 // Build a taida_val BuchiPack representing the HTTP/2 request.
 // This mirrors the Interpreter's request pack in serve_h2().
 //
-// F55 S2: `streaming` selects the 2-arg handler shape (option (b) from
-// `.dev/F55_S2_STREAMING_DESIGN.md` §5). When `streaming` is non-zero the
+// `streaming` selects the 2-arg handler shape (eager fill, streaming
+// observation). When `streaming` is non-zero the
 // `body` field is published as an empty span (the handler reads the bytes via
 // readBody / readBodyChunk / readBodyAll instead of seeing them eagerly) and
 // two sentinel fields — `__body_stream` + `__body_token` — are appended so the
 // readBody* identity check accepts the pack. `body_token` must equal the
 // Net4BodyState.request_token installed around the handler call. The arena is
 // built identically to the 1-arg path (body still lives at offset 0 of
-// `req.raw`), so the D29B-001 arena shape is unchanged for both arities. When
+// `req.raw`), so the pinned arena shape is unchanged for both arities. When
 // `streaming` is zero the legacy eager 14-field pack is produced verbatim.
 static taida_val h2_build_request_pack(H2RequestFields *fields,
                                         const unsigned char *body, size_t body_len,
@@ -6846,13 +6846,14 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
 
                 // F55 S2: branch on handler arity. The 1-arg path is the
                 // pre-existing eager contract (body completed value, arena
-                // shape pinned by D29B-001). The 2-arg path activates the same
-                // streaming-body observation contract H1 already implements:
-                // req.body is an empty span and the handler pulls bytes via
-                // readBody / readBodyChunk / readBodyAll.
+                // shape pinned by the existing span regression tests). The
+                // 2-arg path activates the same streaming-body observation
+                // contract H1 already implements: req.body is an empty span
+                // and the handler pulls bytes via readBody / readBodyChunk /
+                // readBodyAll.
                 //
-                // Streaming form: option (b) from the S2 design
-                // (`.dev/F55_S2_STREAMING_DESIGN.md` §5). The DATA frames for
+                // Streaming form: eager fill, streaming
+                // observation. The DATA frames for
                 // this stream were already read to END_STREAM into
                 // s->request_body (which is what triggers dispatch here and is
                 // bounded by H2_MAX_REQUEST_BODY_SIZE during accumulation), so

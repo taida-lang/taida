@@ -205,13 +205,13 @@ impl Interpreter {
 
             // F55 S2: branch on handler arity. The 1-arg path is the
             // pre-existing eager contract (body completed value, arena shape
-            // pinned by D29B-011). The 2-arg path activates the streaming body
-            // observation contract H1/H2 implement: req.body span is empty and
-            // the handler pulls bytes via readBody / readBodyChunk /
-            // readBodyAll.
+            // pinned by the existing span regression tests). The 2-arg path
+            // activates the streaming body observation contract H1/H2
+            // implement: req.body span is empty and the handler pulls bytes
+            // via readBody / readBodyChunk / readBodyAll.
             //
-            // Streaming form chosen: option (b) from the S2 design
-            // (`.dev/F55_S2_STREAMING_DESIGN.md` §4 step 3). H3 collects every
+            // Streaming form chosen: eager fill, streaming observation.
+            // H3 collects every
             // DATA-frame body byte in `read_request_stream` *before* this
             // closure runs (`req.body` is already complete), so there is no
             // recv stream to defer here — and the quinn RecvStream is owned by

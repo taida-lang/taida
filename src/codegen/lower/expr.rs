@@ -1560,7 +1560,7 @@ impl Lowering {
 
     /// Value-tag track: the shadow-kind variable name for an operand, when
     /// the operand is an identifier bound by a runtime-kind unmold.
-    fn operand_shadow_kind(&self, expr: &Expr) -> Option<String> {
+    pub(crate) fn operand_shadow_kind(&self, expr: &Expr) -> Option<String> {
         if let Expr::Ident(name, _) = expr
             && self.shadow_kind_vars.contains(name)
         {
@@ -1569,10 +1569,11 @@ impl Lowering {
         None
     }
 
-    /// Emit the kind argument for one operand of a tagged poly comparison:
-    /// the shadow IR variable when one exists, otherwise the compile-time
+    /// Emit the kind argument for one operand of a tagged runtime call
+    /// (poly comparisons and the tagged Set/collection entry points): the
+    /// shadow IR variable when one exists, otherwise the compile-time
     /// EKIND constant.
-    fn emit_operand_ekind(&mut self, func: &mut IrFunction, expr: &Expr) -> IrVar {
+    pub(crate) fn emit_operand_ekind(&mut self, func: &mut IrFunction, expr: &Expr) -> IrVar {
         if let Some(shadow_name) = self.operand_shadow_kind(expr) {
             let v = func.alloc_var();
             func.push(IrInst::UseVar(v, shadow_name));
