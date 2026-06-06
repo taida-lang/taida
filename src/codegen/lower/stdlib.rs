@@ -47,6 +47,16 @@ impl Lowering {
     pub(super) fn crypto_func_mapping(sym: &str) -> Option<&'static str> {
         match sym {
             "sha256" => Some("taida_sha256"),
+            "sha512" => Some("taida_crypto_sha512"),
+            "sha384" => Some("taida_crypto_sha384"),
+            "sha224" => Some("taida_crypto_sha224"),
+            "hmacSha256" => Some("taida_crypto_hmac_sha256"),
+            "constantTimeEquals" => Some("taida_crypto_constant_time_equals"),
+            "hexEncode" => Some("taida_crypto_hex_encode"),
+            "hexDecode" => Some("taida_crypto_hex_decode"),
+            "base64Encode" => Some("taida_crypto_base64_encode"),
+            "base64Decode" => Some("taida_crypto_base64_decode"),
+            "randomBytes" => Some("taida_crypto_random_bytes"),
             _ => None,
         }
     }

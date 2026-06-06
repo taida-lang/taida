@@ -1512,4 +1512,130 @@ function sha256(value) {
   // Fallback: pure-JS SHA-256 (should not reach here in Node.js)
   return '';
 }
+
+// ── F55 S4: extended taida-lang/crypto surface ─────────────────
+// Hash family via node:crypto; hex/base64/constantTimeEquals are pure JS
+// so their byte output is identical to the interpreter / native / wasm
+// hand-written implementations regardless of node:crypto availability.
+function __taida_crypto_to_buffer(value, fnName) {
+  if (typeof value === 'string') return Buffer.from(value, 'utf8');
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return value;
+  throw new TypeError(fnName + ': input must be Str or Bytes');
+}
+function __taida_crypto_hash(algo, value, fnName) {
+  if (!__taida_crypto) throw new __TaidaError(fnName + ': node:crypto unavailable');
+  return __taida_crypto.createHash(algo).update(__taida_crypto_to_buffer(value, fnName)).digest('hex');
+}
+function sha512(value) { return __taida_crypto_hash('sha512', value, 'sha512'); }
+function sha384(value) { return __taida_crypto_hash('sha384', value, 'sha384'); }
+function sha224(value) { return __taida_crypto_hash('sha224', value, 'sha224'); }
+function hmacSha256(key, data) {
+  if (!__taida_crypto) throw new __TaidaError('hmacSha256: node:crypto unavailable');
+  const k = __taida_crypto_to_buffer(key, 'hmacSha256');
+  const d = __taida_crypto_to_buffer(data, 'hmacSha256');
+  return __taida_crypto.createHmac('sha256', k).update(d).digest('hex');
+}
+function constantTimeEquals(a, b) {
+  const ba = __taida_crypto_to_buffer(a, 'constantTimeEquals');
+  const bb = __taida_crypto_to_buffer(b, 'constantTimeEquals');
+  // Length mismatch -> false, but walk the full length of `a` so timing
+  // does not depend on mismatch position.
+  let lx = (ba.length ^ bb.length) >>> 0;
+  let diff = (lx | (lx >>> 8) | (lx >>> 16)) & 0xff;
+  for (let i = 0; i < ba.length; i++) {
+    const x = bb.length === 0 ? 0 : bb[i % bb.length];
+    diff |= ba[i] ^ x;
+  }
+  return diff === 0;
+}
+const __TAIDA_HEX = '0123456789abcdef';
+function hexEncode(value) {
+  const buf = __taida_crypto_to_buffer(value, 'hexEncode');
+  let out = '';
+  for (let i = 0; i < buf.length; i++) {
+    out += __TAIDA_HEX[(buf[i] >> 4) & 0x0f] + __TAIDA_HEX[buf[i] & 0x0f];
+  }
+  return out;
+}
+function __taida_hex_val(c) {
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 97 && c <= 102) return c - 97 + 10;
+  if (c >= 65 && c <= 70) return c - 65 + 10;
+  return -1;
+}
+function hexDecode(hex) {
+  if (typeof hex !== 'string') throw new TypeError('hexDecode: input must be Str');
+  if (hex.length % 2 !== 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const hi = __taida_hex_val(hex.charCodeAt(i * 2));
+    const lo = __taida_hex_val(hex.charCodeAt(i * 2 + 1));
+    if (hi < 0 || lo < 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
+    out[i] = (hi << 4) | lo;
+  }
+  return __taida_lax_from_bytes(out, true);
+}
+const __TAIDA_B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function base64Encode(value) {
+  const buf = __taida_crypto_to_buffer(value, 'base64Encode');
+  let out = '';
+  let i = 0;
+  for (; i + 3 <= buf.length; i += 3) {
+    const n = (buf[i] << 16) | (buf[i + 1] << 8) | buf[i + 2];
+    out += __TAIDA_B64[(n >> 18) & 0x3f] + __TAIDA_B64[(n >> 12) & 0x3f] + __TAIDA_B64[(n >> 6) & 0x3f] + __TAIDA_B64[n & 0x3f];
+  }
+  const rem = buf.length - i;
+  if (rem === 1) {
+    const n = buf[i] << 16;
+    out += __TAIDA_B64[(n >> 18) & 0x3f] + __TAIDA_B64[(n >> 12) & 0x3f] + '==';
+  } else if (rem === 2) {
+    const n = (buf[i] << 16) | (buf[i + 1] << 8);
+    out += __TAIDA_B64[(n >> 18) & 0x3f] + __TAIDA_B64[(n >> 12) & 0x3f] + __TAIDA_B64[(n >> 6) & 0x3f] + '=';
+  }
+  return out;
+}
+function __taida_b64_val(c) {
+  if (c >= 65 && c <= 90) return c - 65;
+  if (c >= 97 && c <= 122) return c - 97 + 26;
+  if (c >= 48 && c <= 57) return c - 48 + 52;
+  if (c === 43) return 62;
+  if (c === 47) return 63;
+  return -1;
+}
+function base64Decode(b64) {
+  if (typeof b64 !== 'string') throw new TypeError('base64Decode: input must be Str');
+  if (b64.length % 4 !== 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
+  if (b64.length === 0) return __taida_lax_from_bytes(new Uint8Array(0), true);
+  const nChunks = b64.length / 4;
+  const tmp = new Uint8Array(nChunks * 3);
+  let oi = 0;
+  for (let c = 0; c < nChunks; c++) {
+    const q = [b64.charCodeAt(c * 4), b64.charCodeAt(c * 4 + 1), b64.charCodeAt(c * 4 + 2), b64.charCodeAt(c * 4 + 3)];
+    const isLast = c === nChunks - 1;
+    const pad = (q[0] === 61) + (q[1] === 61) + (q[2] === 61) + (q[3] === 61);
+    if ((pad > 0 && !isLast) || pad > 2) return __taida_lax_from_bytes(new Uint8Array(0), false);
+    if ((pad === 1 && q[3] !== 61) || (pad === 2 && (q[2] !== 61 || q[3] !== 61))) {
+      return __taida_lax_from_bytes(new Uint8Array(0), false);
+    }
+    const nData = 4 - pad;
+    const v0 = __taida_b64_val(q[0]);
+    const v1 = __taida_b64_val(q[1]);
+    const v2 = nData > 2 ? __taida_b64_val(q[2]) : 0;
+    const v3 = nData > 3 ? __taida_b64_val(q[3]) : 0;
+    if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) return __taida_lax_from_bytes(new Uint8Array(0), false);
+    const triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
+    tmp[oi++] = (triple >> 16) & 0xff;
+    if (nData >= 3) tmp[oi++] = (triple >> 8) & 0xff;
+    if (nData >= 4) tmp[oi++] = triple & 0xff;
+  }
+  return __taida_lax_from_bytes(tmp.slice(0, oi), true);
+}
+function randomBytes(n) {
+  if (typeof n !== 'number' || !Number.isInteger(n)) throw new TypeError('randomBytes: argument must be Int');
+  if (n < 0) throw new __TaidaError('randomBytes: count must be non-negative');
+  if (n === 0) return new Uint8Array(0);
+  if (!__taida_crypto) throw new __TaidaError('randomBytes: node:crypto unavailable');
+  return new Uint8Array(__taida_crypto.randomBytes(n));
+}
 "#;

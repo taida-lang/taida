@@ -1591,6 +1591,53 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Ptr],
         },
+        // F55 S4: extended crypto surface.
+        // Hash family: 1 arg (Str|Bytes) -> Str (Ptr).
+        "taida_crypto_sha512" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_sha384" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_sha224" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // hmacSha256: 2 args (key, data) -> Str (Ptr).
+        "taida_crypto_hmac_sha256" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        // constantTimeEquals: 2 args -> Bool (Val).
+        "taida_crypto_constant_time_equals" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        // hexEncode / base64Encode: 1 arg (Str|Bytes) -> Str (Ptr).
+        "taida_crypto_hex_encode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_base64_encode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // hexDecode / base64Decode: 1 arg (Str) -> Lax[Bytes] pack (Ptr).
+        "taida_crypto_hex_decode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_base64_decode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // randomBytes: 1 arg (Int) -> Bytes (Ptr).
+        "taida_crypto_random_bytes" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // typeof prelude
         "taida_typeof" => RuntimeAbi {
             params: &[Val, Val],

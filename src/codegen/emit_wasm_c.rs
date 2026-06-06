@@ -879,6 +879,19 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_from_float" => "int64_t taida_str_from_float(int64_t v);".to_string(),
         // taida-lang/crypto: pure SHA-256 is available in every WASM profile.
         "taida_sha256" => "int64_t taida_sha256(int64_t value);".to_string(),
+        // F55 S4: extended crypto. The hash family / HMAC / *Encode /
+        // constantTimeEquals return Str / Bool only (no Bytes constructor),
+        // so they are available on every WASM profile (implemented in
+        // runtime_core_wasm/02_containers.inc.c alongside sha256). The
+        // decode / randomBytes producers (which build Bytes) are gated to
+        // wasm-wasi / wasm-full further below.
+        "taida_crypto_sha512" | "taida_crypto_sha384" | "taida_crypto_sha224"
+        | "taida_crypto_hex_encode" | "taida_crypto_base64_encode" => {
+            format!("int64_t {}(int64_t value);", name)
+        }
+        "taida_crypto_hmac_sha256" | "taida_crypto_constant_time_equals" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
         // W-5: Lax method helpers
         "taida_can_throw_payload" => "int64_t taida_can_throw_payload(int64_t val);".to_string(),
         // W-5: Float comparison
@@ -1374,6 +1387,35 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         "taida_bytes_from_raw" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
             "int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);".to_string()
+        }
+        // F55 S4: crypto producers that build Bytes (hexDecode / base64Decode
+        // -> Lax[Bytes], randomBytes -> Bytes). They depend on the Bytes
+        // constructor + (for randomBytes) the WASI random_get import, both
+        // available only on wasm-wasi / wasm-full (implemented in
+        // runtime_wasi_io.c). wasm-min / wasm-edge reject these below.
+        "taida_crypto_hex_decode" | "taida_crypto_base64_decode" | "taida_crypto_random_bytes"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t value);", name)
+        }
+        "taida_crypto_hex_decode" | "taida_crypto_base64_decode" | "taida_crypto_random_bytes"
+            if matches!(profile, WasmProfile::Min | WasmProfile::Edge) =>
+        {
+            let profile_name = if profile == WasmProfile::Min {
+                "wasm-min"
+            } else {
+                "wasm-edge"
+            };
+            return Err(WasmCEmitError {
+                message: format!(
+                    "{} does not support runtime function '{}' \
+                     (crypto Bytes producers require the wasm-wasi / wasm-full \
+                     Bytes runtime; randomBytes additionally needs the WASI \
+                     random_get import). Use wasm-wasi, wasm-full, or the \
+                     native backend instead.",
+                    profile_name, name
+                ),
+            });
         }
         "taida_bytes_new_filled"
             if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>

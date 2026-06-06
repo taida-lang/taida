@@ -78,7 +78,14 @@ mod tests {
     /// rotting the source surface, so the log is no longer kept inline.
     #[test]
     fn test_runtime_core_wasm_fragment_concat_preserves_bytes() {
-        const EXPECTED_TOTAL_LEN: usize = 431_217;
+        // F55 S4 (2026-06-06): +17,954 bytes in 02_containers.inc.c for the
+        // extended crypto surface that is available on every WASM profile —
+        // SHA-512 / 384 / 224 cores, HMAC-SHA256, constant-time equality,
+        // and hex / base64 encode (all return Str / Bool, so no Bytes
+        // constructor is needed). The Bytes-producing decode / randomBytes
+        // symbols live in runtime_wasi_io.c (wasm-wasi / wasm-full only), so
+        // they do not affect this core total.
+        const EXPECTED_TOTAL_LEN: usize = 449_171;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

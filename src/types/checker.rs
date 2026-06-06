@@ -197,6 +197,61 @@ impl FunctionHintDiagnostic {
     }
 }
 
+/// Argument-shape category of a `taida-lang/crypto` export. Drives the
+/// per-symbol `[E1506]` argument-type checks and the registered function
+/// signature (return type + arity).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CryptoSym {
+    /// 1 arg `Str | Bytes` -> `Str` (lowercase hex digest).
+    /// sha256 / sha512 / sha384 / sha224.
+    Hash,
+    /// 2 args `Str | Bytes` (key, data) -> `Str` (hex). hmacSha256.
+    Hmac,
+    /// 2 args `Str | Bytes` -> `Bool`. constantTimeEquals.
+    Equals,
+    /// 1 arg `Str | Bytes` -> `Str`. hexEncode / base64Encode.
+    Encode,
+    /// 1 arg `Str` -> `Lax[Bytes]`. hexDecode / base64Decode.
+    Decode,
+    /// 1 arg `Int` -> `Bytes`. randomBytes.
+    Random,
+}
+
+impl CryptoSym {
+    /// Map an export name to its argument-shape category. Returns `None`
+    /// for names that are not part of the crypto surface (so a typo'd
+    /// import still routes through the uniform unknown-symbol diagnostic).
+    fn from_export(name: &str) -> Option<Self> {
+        Some(match name {
+            "sha256" | "sha512" | "sha384" | "sha224" => CryptoSym::Hash,
+            "hmacSha256" => CryptoSym::Hmac,
+            "constantTimeEquals" => CryptoSym::Equals,
+            "hexEncode" | "base64Encode" => CryptoSym::Encode,
+            "hexDecode" | "base64Decode" => CryptoSym::Decode,
+            "randomBytes" => CryptoSym::Random,
+            _ => return None,
+        })
+    }
+
+    /// Registered return type of the symbol.
+    fn return_type(self) -> Type {
+        match self {
+            CryptoSym::Hash | CryptoSym::Hmac | CryptoSym::Encode => Type::Str,
+            CryptoSym::Equals => Type::Bool,
+            CryptoSym::Decode => Type::Generic("Lax".to_string(), vec![Type::Bytes]),
+            CryptoSym::Random => Type::Bytes,
+        }
+    }
+
+    /// Maximum arity (parameter count upper bound).
+    fn max_arity(self) -> usize {
+        match self {
+            CryptoSym::Hmac | CryptoSym::Equals => 2,
+            _ => 1,
+        }
+    }
+}
+
 /// Position context for the build-descriptor runtime-use pass ([E1532]).
 ///
 /// `Allowed` marks the three positions where a build descriptor may appear
@@ -224,6 +279,10 @@ pub struct TypeChecker {
     func_param_types: HashMap<String, Vec<Type>>,
     /// Imported local names for `taida-lang/crypto::sha256`.
     crypto_sha256_funcs: HashSet<String>,
+    /// Imported local names for every `taida-lang/crypto` symbol, mapped to
+    /// the per-symbol argument-shape validator (hash / hmac / encode / decode
+    /// / random / equals). Drives the generalized `[E1506]` argument checks.
+    crypto_funcs: HashMap<String, CryptoSym>,
     /// Function definitions retained for expected-type body inference.
     func_defs: HashMap<String, FuncDef>,
     /// Scope depth where a function name was bound as the function value.
@@ -373,6 +432,7 @@ impl TypeChecker {
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
             crypto_sha256_funcs: HashSet::new(),
+            crypto_funcs: HashMap::new(),
             func_defs: HashMap::new(),
             func_def_scope_depths: HashMap::new(),
             generic_func_defs: HashMap::new(),
@@ -1502,6 +1562,53 @@ impl TypeChecker {
         matches!(ty, Type::Str | Type::Bytes)
     }
 
+    /// Per-symbol argument-shape validator for the generalized
+    /// `taida-lang/crypto` surface. Mirrors `validate_crypto_sha256_call`'s
+    /// `[E1506]` diagnostics but is parameterized over the symbol kind so
+    /// each function (hash / hmac / encode / decode / random / equals)
+    /// enforces its own arity and per-argument type rule.
+    fn validate_crypto_call(&mut self, name: &str, kind: CryptoSym, args: &[Expr], span: &Span) {
+        let (arity, expected_label): (usize, &str) = match kind {
+            // 1 arg: Str | Bytes
+            CryptoSym::Hash | CryptoSym::Encode => (1, "Str or Bytes"),
+            // 1 arg: Str
+            CryptoSym::Decode => (1, "Str"),
+            // 1 arg: Int
+            CryptoSym::Random => (1, "Int"),
+            // 2 args: Str | Bytes each
+            CryptoSym::Hmac | CryptoSym::Equals => (2, "Str or Bytes"),
+        };
+
+        for (i, arg) in args.iter().take(arity).enumerate() {
+            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                continue;
+            }
+            let actual_ty = self.infer_expr_type(arg);
+            if actual_ty == Type::Unknown {
+                continue;
+            }
+            let ok = match kind {
+                CryptoSym::Hash | CryptoSym::Encode | CryptoSym::Hmac | CryptoSym::Equals => {
+                    Self::is_crypto_hash_input_type(&actual_ty)
+                }
+                CryptoSym::Decode => matches!(actual_ty, Type::Str),
+                CryptoSym::Random => matches!(actual_ty, Type::Int),
+            };
+            if !ok {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Argument {} of '{}' has type {}, expected {}.",
+                        i + 1,
+                        name,
+                        actual_ty,
+                        expected_label
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+
     fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
         for (i, arg) in args.iter().take(1).enumerate() {
             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
@@ -1718,7 +1825,7 @@ impl TypeChecker {
         matches!(ty, Type::Generic(name, _) if name == "Async")
     }
 
-    /// RCB-50: Check whether a type contains an unresolved type variable.
+    /// Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
     /// an unresolved generic type parameter (e.g. `T`, `U`). When
@@ -1781,7 +1888,7 @@ impl TypeChecker {
         }
     }
 
-    /// RCB-50: Check whether a type is a mold-defined Named type.
+    /// Check whether a type is a mold-defined Named type.
     ///
     /// Custom mold instantiations (e.g. `AlwaysFail[x]()`) return
     /// `Type::Named("AlwaysFail")` from `infer_expr_type`, but the
@@ -2447,7 +2554,7 @@ impl TypeChecker {
     /// If `span` is provided and the name already exists in the current scope,
     /// a compile error is reported (same-scope redefinition is forbidden).
     /// Shadowing across scopes (inner scope redefines outer) is allowed.
-    /// RCB-201: Validate that all imported symbols are actually exported by the target module.
+    /// Validate that all imported symbols are actually exported by the target module.
     fn validate_import_symbols(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
@@ -3870,11 +3977,18 @@ impl TypeChecker {
                 // Core bundled package signatures (imported symbol path).
                 if imp.path == "taida-lang/crypto" {
                     for sym in &imp.symbols {
-                        if sym.name == "sha256" {
+                        if let Some(kind) = CryptoSym::from_export(&sym.name) {
                             let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
-                            self.func_types.insert(local_name.clone(), Type::Str);
-                            self.func_param_counts.insert(local_name.clone(), 1);
-                            self.crypto_sha256_funcs.insert(local_name);
+                            self.func_types
+                                .insert(local_name.clone(), kind.return_type());
+                            self.func_param_counts
+                                .insert(local_name.clone(), kind.max_arity());
+                            self.crypto_funcs.insert(local_name.clone(), kind);
+                            // sha256 keeps its dedicated set for the unchanged
+                            // legacy [E1506] message wording.
+                            if sym.name == "sha256" {
+                                self.crypto_sha256_funcs.insert(local_name);
+                            }
                         }
                     }
                 } else if imp.path == "taida-lang/net" {
@@ -8172,6 +8286,8 @@ defaulted fields must be provided via `()`",
                         }
                         if self.crypto_sha256_funcs.contains(name) {
                             self.validate_crypto_sha256_call(name, args, span);
+                        } else if let Some(kind) = self.crypto_funcs.get(name).copied() {
+                            self.validate_crypto_call(name, kind, args, span);
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {

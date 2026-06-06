@@ -1,6 +1,6 @@
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{AsyncStatus, AsyncValue, PendingState, Value};
-use crate::crypto::sha256_hex_bytes;
+use crate::crypto;
 /// Prelude (built-in) functions for the Taida interpreter.
 ///
 /// Contains `try_builtin_func` and `type_name_of` — the built-in function
@@ -96,6 +96,154 @@ impl Interpreter {
         }
     }
 
+    /// Dispatch a `taida-lang/crypto` symbol (resolved from the
+    /// `__crypto_builtin_<sym>` sentinel). Returns the computed value.
+    ///
+    /// PHILOSOPHY I: every branch returns Str / Bytes / Bool / Lax — never
+    /// Unit / `@()`. Decode failures surface as the empty side of
+    /// `Lax[Bytes]`; `randomBytes` entropy failures throw.
+    fn try_crypto_func(&mut self, sym: &str, args: &[Expr]) -> Result<Signal, RuntimeError> {
+        // Evaluate a Str|Bytes argument into a raw byte vector.
+        let eval_str_or_bytes = |me: &mut Self,
+                                 idx: usize,
+                                 fn_name: &str|
+         -> Result<Result<Vec<u8>, Signal>, RuntimeError> {
+            let val = match me.eval_expr(&args[idx])? {
+                Signal::Value(v) => v,
+                other => return Ok(Err(other)),
+            };
+            match val {
+                Value::Bytes(b) => Ok(Ok(Value::bytes_take(b))),
+                Value::Str(s) => Ok(Ok(Value::str_take(s).into_bytes())),
+                other => Err(RuntimeError {
+                    message: format!("{}: input must be Str or Bytes, got {}", fn_name, other),
+                }),
+            }
+        };
+
+        // Arity guard.
+        let want = match sym {
+            "hmacSha256" | "constantTimeEquals" => 2,
+            _ => 1,
+        };
+        if args.len() != want {
+            return Err(RuntimeError {
+                message: format!(
+                    "{} requires exactly {} argument(s), got {}",
+                    sym,
+                    want,
+                    args.len()
+                ),
+            });
+        }
+
+        match sym {
+            "sha256" | "sha512" | "sha384" | "sha224" => {
+                let bytes = match eval_str_or_bytes(self, 0, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                let hex = match sym {
+                    "sha256" => crypto::sha256_hex_bytes(&bytes),
+                    "sha512" => crypto::sha512_hex_bytes(&bytes),
+                    "sha384" => crypto::sha384_hex_bytes(&bytes),
+                    "sha224" => crypto::sha224_hex_bytes(&bytes),
+                    _ => unreachable!(),
+                };
+                Ok(Signal::Value(Value::str(hex)))
+            }
+            "hmacSha256" => {
+                let key = match eval_str_or_bytes(self, 0, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                let data = match eval_str_or_bytes(self, 1, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                Ok(Signal::Value(Value::str(crypto::hmac_sha256_hex(
+                    &key, &data,
+                ))))
+            }
+            "constantTimeEquals" => {
+                let a = match eval_str_or_bytes(self, 0, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                let b = match eval_str_or_bytes(self, 1, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                Ok(Signal::Value(Value::Bool(crypto::constant_time_eq(&a, &b))))
+            }
+            "hexEncode" => {
+                let bytes = match eval_str_or_bytes(self, 0, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                Ok(Signal::Value(Value::str(crypto::hex_encode(&bytes))))
+            }
+            "base64Encode" => {
+                let bytes = match eval_str_or_bytes(self, 0, sym)? {
+                    Ok(b) => b,
+                    Err(sig) => return Ok(sig),
+                };
+                Ok(Signal::Value(Value::str(crypto::base64_encode(&bytes))))
+            }
+            "hexDecode" | "base64Decode" => {
+                // Decode accepts Str only.
+                let val = match self.eval_expr(&args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(other),
+                };
+                let input = match val {
+                    Value::Str(s) => Value::str_take(s),
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("{}: input must be Str, got {}", sym, other),
+                        });
+                    }
+                };
+                let decoded = if sym == "hexDecode" {
+                    crypto::hex_decode(&input)
+                } else {
+                    crypto::base64_decode(&input)
+                };
+                let lax = match decoded {
+                    Some(bytes) => super::os_eval::make_lax_success_pub(Value::bytes(bytes)),
+                    None => super::os_eval::make_lax_failure_pub(Value::bytes(Vec::new())),
+                };
+                Ok(Signal::Value(lax))
+            }
+            "randomBytes" => {
+                let val = match self.eval_expr(&args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(other),
+                };
+                let n = match val {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError {
+                            message: format!("randomBytes: argument must be Int, got {}", other),
+                        });
+                    }
+                };
+                if n < 0 {
+                    return Err(RuntimeError {
+                        message: format!("randomBytes: count must be non-negative, got {}", n),
+                    });
+                }
+                match crypto::random_bytes(n as usize) {
+                    Ok(bytes) => Ok(Signal::Value(Value::bytes(bytes))),
+                    Err(e) => Err(RuntimeError { message: e }),
+                }
+            }
+            other => Err(RuntimeError {
+                message: format!("unknown crypto builtin '{}'", other),
+            }),
+        }
+    }
+
     /// Try to handle a built-in function call (prelude functions).
     pub(crate) fn try_builtin_func(
         &mut self,
@@ -118,30 +266,14 @@ impl Interpreter {
         }
 
         // taida-lang/crypto imported symbol dispatch.
-        // We intentionally do not provide prelude-level sha256 compatibility.
-        if matches!(
-            self.env.get(name),
-            Some(Value::Str(tag)) if tag.as_str() == "__crypto_builtin_sha256"
-        ) {
-            if args.len() != 1 {
-                return Err(RuntimeError {
-                    message: format!("sha256 requires exactly 1 argument, got {}", args.len()),
-                });
+        // We intentionally do not provide prelude-level crypto compatibility:
+        // the symbols resolve only through the `__crypto_builtin_*` sentinel
+        // injected on import.
+        if let Some(Value::Str(tag)) = self.env.get(name) {
+            if let Some(sym) = tag.as_str().strip_prefix("__crypto_builtin_") {
+                let sym = sym.to_string();
+                return self.try_crypto_func(&sym, args).map(Some);
             }
-            let val = match self.eval_expr(&args[0])? {
-                Signal::Value(v) => v,
-                other => return Ok(Some(other)),
-            };
-            let bytes: Vec<u8> = match val {
-                Value::Bytes(b) => Value::bytes_take(b),
-                Value::Str(s) => Value::str_take(s).into_bytes(),
-                other => {
-                    return Err(RuntimeError {
-                        message: format!("sha256: input must be Str or Bytes, got {}", other),
-                    });
-                }
-            };
-            return Ok(Some(Signal::Value(Value::str(sha256_hex_bytes(&bytes)))));
         }
 
         // taida-lang/pool runtime dispatch.

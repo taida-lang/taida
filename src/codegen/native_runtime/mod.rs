@@ -775,7 +775,18 @@ mod tests {
         //   net_h1_h2.c +7,229 (F6, after the HTTP/2 divider) and
         //   net_h3_quic.c +4,353. core.c is untouched, so F1_LEN / F2_LEN are
         //   unchanged. Total 1,252,787 -> 1,264,369.
-        const EXPECTED_TOTAL_LEN: usize = 1_264_369;
+        // 2026-06-06 F55 S4 (crypto surface expansion): +20,357 bytes in
+        //   core.c for the extended crypto runtime (SHA-512 / 384 / 224
+        //   cores, HMAC-SHA256, constant-time equality, hex/base64
+        //   encode/decode, randomBytes). Split as F1 +169 (the
+        //   `#include <sys/random.h>` guard for getentropy, before the
+        //   "Error ceiling" marker) and F2 +20,188 (all crypto helpers and
+        //   the public ABI functions, defined next to taida_sha256 which
+        //   already sits in F2; the public functions carry the
+        //   `taida_crypto_` prefix so they cannot collide with the static
+        //   WebSocket base64 helpers in net_h1_h2.c). Other fragments
+        //   untouched. Total 1,264,369 -> 1,284,726.
+        const EXPECTED_TOTAL_LEN: usize = 1_284_726;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1452,7 +1463,11 @@ mod tests {
         // element instead of an i==0 stamp, and taida_list_map_k records
         // a statically-known callback return kind. F1_LEN 383,539 ->
         // 384,554.
-        const F1_LEN: usize = 384_554;
+        // F55 S4 (2026-06-06): +169 bytes in F1 for the
+        // `#include <sys/random.h>` guard (getentropy for randomBytes),
+        // inserted in the top-of-file include block before the "Error
+        // ceiling" marker. F1_LEN 384,554 -> 384,723.
+        const F1_LEN: usize = 384_723;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1463,11 +1478,14 @@ mod tests {
         // F2 201,685 -> 202,180.
         // Value-tag track step 8 adds taida_collection_remove_tagged in the
         // collection-dispatch region after the marker: F2 202,180 -> 202,586.
+        // F55 S4 (2026-06-06) adds the extended crypto helpers + public ABI
+        // functions next to taida_sha256 (which sits after the marker):
+        // F2 202,586 -> 222,774.
         // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 202_586, // F2 unchanged in step 9
+            F1_LEN + 222_774, // F2 grew by +20,188 in F55 S4 (crypto surface)
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
