@@ -42628,3 +42628,182 @@ stdout((2.5 < 1).toString())
         );
     }
 }
+
+/// Regression: heterogeneous container literals lost per-element type
+/// identity on native/WASM (one container-level tag slot), so a Bool
+/// collided with Int in setOf, an Int/Float pair failed to cross over
+/// in Unique, same-ordinal variants of different enums merged, and
+/// membership/insertion followed the collapsed view. Containers now
+/// carry a per-element kind array materialised at the first mixed
+/// stamp, and dedup/membership compare (value, kind) pairs.
+/// Expected: 2 1 2 2 2 3
+#[test]
+fn test_value_tag_mixed_container_dedup_parity() {
+    let source = r#"
+stdout(setOf(@[1, true]).size())
+Unique[@[1, 1.0]]() >=> u
+stdout(u.length())
+Enum => Color = :Red :Green
+Enum => Size = :Small :Large
+stdout(setOf(@[Color:Red(), Size:Small()]).size())
+stdout(setOf(@[Color:Red(), Size:Small(), 0]).size())
+s <= setOf(@[1, true])
+s.add(2 == 2) => s2
+stdout(s2.size())
+s.add(0) => s3
+stdout(s3.size())
+"#;
+    let label = "value_tag_mixed_container_dedup";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2", "1", "2", "2", "2", "3"],
+        "interpreter mixed-container dedup reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native mixed-container dedup parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js mixed-container dedup parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mixed-container dedup parity"
+        );
+    }
+}
+
+/// Regression: a value unmolded out of a mixed list lost its runtime
+/// kind, so the comparison after `xs.get(1) >=> a` took the raw-int
+/// fast path and a Float payload never equalled an Int literal. The
+/// list accessors now stamp the element's recorded kind on the Lax
+/// payload and the unmold captures it as a shadow for tagged poly
+/// comparisons.
+/// Expected: true true
+#[test]
+fn test_value_tag_readback_shadow_kind_parity() {
+    let source = r#"
+xs <= @[1, 1.0]
+xs.get(1) >=> a
+stdout((a == 1).toString())
+xs.get(0) >=> b
+stdout((b == 1.0).toString())
+"#;
+    let label = "value_tag_readback_shadow_kind";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "true"],
+        "interpreter read-back shadow kind reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native read-back shadow kind parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js read-back shadow kind parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min read-back shadow kind parity"
+        );
+    }
+}
+
+/// Regression: comparing two lists with == fell through to a raw
+/// pointer comparison on native/WASM, so even two identical
+/// homogeneous literals compared false, and the Int/Float crossing
+/// inside elements never applied. Statically-known list operands now
+/// run the kind-aware structural walk.
+/// Expected: true true false false
+#[test]
+fn test_value_tag_list_structural_eq_parity() {
+    let source = r#"
+xs <= @[1, 2]
+ys <= @[1, 2]
+stdout((xs == ys).toString())
+ms <= @[1, 1.0]
+ns <= @[1.0, 1]
+stdout((ms == ns).toString())
+zs <= @[1, 2.0]
+stdout((ms == zs).toString())
+stdout((ms != ns).toString())
+"#;
+    let label = "value_tag_list_structural_eq";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "true", "false", "false"],
+        "interpreter list structural eq reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native list structural eq parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js list structural eq parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min list structural eq parity"
+        );
+    }
+}
+
+/// Regression: a nested list containing a Float rode an
+/// order-sensitive fingerprint through unique/setOf (the hashability
+/// gate could not see the Float inside), so permuted Int/Float pairs
+/// failed to dedup. The gate now consults each element's recorded
+/// kind and the linear path walks kind-aware pairs.
+/// Expected: 2
+#[test]
+fn test_value_tag_nested_mixed_unique_parity() {
+    let source = r#"
+Unique[@[@[1, 1.0], @[1.0, 1], @[2.0, 3]]]() >=> u
+stdout(u.length())
+"#;
+    let label = "value_tag_nested_mixed_unique";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2"],
+        "interpreter nested mixed unique reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native nested mixed unique parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js nested mixed unique parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min nested mixed unique parity"
+        );
+    }
+}
