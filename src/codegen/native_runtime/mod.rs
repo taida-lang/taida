@@ -752,7 +752,12 @@ mod tests {
         // 2026-06-06 value-tag track step 6: +1,325 bytes in core.c F1 —
         //   kind-aware hashability gate for nested lists (see F1_LEN
         //   history). F1 373,668 -> 374,993. Total -> 1,242,820.
-        const EXPECTED_TOTAL_LEN: usize = 1_242_820;
+        // 2026-06-06 value-tag track step 7 (review fix): +646 bytes in
+        //   core.c F1 — Lax kind stamping widened to all known kinds
+        //   except ENUM so heuristic INT tags on string payloads can no
+        //   longer poison the shadow reader (see F1_LEN history).
+        //   F1 374,993 -> 375,639. Total -> 1,243,466.
+        const EXPECTED_TOTAL_LEN: usize = 1_243_466;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1401,7 +1406,13 @@ mod tests {
         // linear (kind-aware) dedup path like the interpreter instead of
         // riding an order-sensitive fingerprint. Kind-less elements keep
         // the structural classification. F1_LEN 373,668 -> 374,993.
-        const F1_LEN: usize = 374_993;
+        // Value-tag track step 7 (2026-06-06, review fix): +646 before the
+        // marker — the kind-stamped Lax constructor stamps every known
+        // kind except ENUM (the plain constructor's heuristic could leave
+        // a bare INT tag on a string payload, which the shadow reader then
+        // trusted and compared a Str under INT semantics), and the shadow
+        // reader trusts the full stamped range. F1_LEN 374,993 -> 375,639.
+        const F1_LEN: usize = 375_639;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

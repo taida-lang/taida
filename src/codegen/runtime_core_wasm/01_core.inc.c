@@ -2946,8 +2946,10 @@ int64_t taida_list_length(int64_t list_ptr) {
 static int64_t _wasm_lax_new_k(int64_t value, int64_t default_value, uint32_t ekind) {
     int64_t pack = taida_lax_new(value, default_value);
     uint32_t k = ekind & 0xFFu;
-    if (k == (uint32_t)WASM_TAG_INT || k == (uint32_t)WASM_TAG_FLOAT
-        || k == (uint32_t)WASM_TAG_BOOL) {
+    /* Stamp every known kind except ENUM (native mirror): in particular
+       STR, so the constructor heuristic's bare INT on a string payload
+       can never be mistaken for a trusted kind by the shadow reader. */
+    if (k != WASM_EKIND_UNKNOWN && k != (uint32_t)WASM_TAG_ENUM) {
         taida_pack_set_tag(pack, 1, (int64_t)k);
     }
     return pack;
@@ -3906,7 +3908,9 @@ int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
 int64_t taida_lax_value_ekind(int64_t maybe_lax) {
     if (!_looks_like_pack(maybe_lax)) return (int64_t)WASM_EKIND_UNKNOWN;
     int64_t tag = taida_pack_get_field_tag(maybe_lax, WASM_HASH___VALUE);
-    if (tag == WASM_TAG_INT || tag == WASM_TAG_FLOAT || tag == WASM_TAG_BOOL)
+    /* Only kind-stamped Lax packs reach this reader (shadow whitelist),
+       so the recorded tag is trustworthy across the known range. */
+    if (tag >= WASM_TAG_INT && tag <= WASM_TAG_BYTES && tag != WASM_TAG_ENUM)
         return tag;
     return (int64_t)WASM_EKIND_UNKNOWN;
 }

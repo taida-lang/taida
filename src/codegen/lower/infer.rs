@@ -530,9 +530,14 @@ impl Lowering {
     ) {
         // A rebind always invalidates a previous shadow for this name.
         self.shadow_kind_vars.remove(target);
+        // Restricted to the accessors that build their Lax through the
+        // kind-stamping constructor — max/min still use the plain
+        // constructor whose heuristic field tag is NOT trustworthy (a
+        // string payload can read back as a bare INT), so they must not
+        // feed a shadow.
         let is_lax_accessor = matches!(
             source,
-            Expr::MethodCall(_, m, _, _) if matches!(m.as_str(), "get" | "first" | "last" | "max" | "min")
+            Expr::MethodCall(_, m, _, _) if matches!(m.as_str(), "get" | "first" | "last")
         );
         if !is_lax_accessor {
             return;

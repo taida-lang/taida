@@ -3805,8 +3805,14 @@ taida_val taida_list_length(taida_val list_ptr) {
 static taida_val taida_lax_new_k(taida_val value, taida_val default_value, uint32_t ekind) {
     taida_val pack = taida_lax_new(value, default_value);
     uint32_t k = ekind & 0xFFu;
-    if (k == (uint32_t)TAIDA_TAG_INT || k == (uint32_t)TAIDA_TAG_FLOAT
-        || k == (uint32_t)TAIDA_TAG_BOOL) {
+    // Stamp every known kind except ENUM (the pack field tag's existing
+    // display consumers only understand the legacy scalar/heap tags, so
+    // recording 9 would change rendering — enum payloads stay on the
+    // heuristic tag and read back as unknown). Stamping STR here matters:
+    // the constructor's retain-and-tag heuristic can leave a bare INT(0)
+    // on a string payload, and a reader that trusted it would compare a
+    // genuine Str under INT semantics.
+    if (k != TAIDA_EKIND_UNKNOWN && k != (uint32_t)TAIDA_TAG_ENUM) {
         taida_pack_set_tag(pack, 1, (taida_val)k);
     }
     return pack;
@@ -6162,7 +6168,10 @@ static int taida_ekind_hashable(taida_val v, uint32_t ekind) {
 taida_val taida_lax_value_ekind(taida_val maybe_lax) {
     if (!TAIDA_IS_PACK(maybe_lax)) return (taida_val)TAIDA_EKIND_UNKNOWN;
     taida_val tag = taida_pack_get_field_tag((taida_ptr)maybe_lax, (taida_val)HASH___VALUE);
-    if (tag == TAIDA_TAG_INT || tag == TAIDA_TAG_FLOAT || tag == TAIDA_TAG_BOOL)
+    // Only Lax packs built by taida_lax_new_k reach this reader (the
+    // unmold shadow whitelist is restricted to the accessors that use
+    // it), so the recorded tag is trustworthy across the known range.
+    if (tag >= TAIDA_TAG_INT && tag <= TAIDA_TAG_BYTES && tag != TAIDA_TAG_ENUM)
         return tag;
     return (taida_val)TAIDA_EKIND_UNKNOWN;
 }
