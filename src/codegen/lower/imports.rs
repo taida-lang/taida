@@ -726,10 +726,11 @@ impl Lowering {
         // Lower argument expressions first so any inner error surfaces
         // before we allocate stack slots / const strings.
         //
-        // Tag inference is best-effort: Str / Bool / Int are what the
-        // RC2 v1 terminal surface actually exercises. Everything else
-        // falls through to TAIDA_TAG_INT (0) and is treated as a raw
-        // i64 payload by the C dispatcher.
+        // Tag inference is best-effort: Str / Bool / Float / Int cover
+        // every scalar the v1 ABI can marshal. Everything else falls
+        // through to TAIDA_TAG_INT (0) and is treated as a raw i64
+        // payload by the C dispatcher. (Float used to fall through too,
+        // leaking the f64 bit pattern across the ABI as a bogus Int.)
         let mut arg_vars: Vec<IrVar> = Vec::with_capacity(args.len());
         let mut arg_tags: Vec<i64> = Vec::with_capacity(args.len());
         for arg in args {
@@ -738,6 +739,8 @@ impl Lowering {
                 3 // TAIDA_TAG_STR
             } else if self.expr_is_bool(arg) {
                 2 // TAIDA_TAG_BOOL
+            } else if self.expr_returns_float(arg) {
+                1 // TAIDA_TAG_FLOAT
             } else {
                 0 // TAIDA_TAG_INT
             };

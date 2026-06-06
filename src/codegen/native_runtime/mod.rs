@@ -719,7 +719,14 @@ mod tests {
         //   in core.c F2 (taida_async_join is handle-based: it also reclaims
         //   resolved-but-unjoined worker pthreads in unmold/map/get_or_default).
         //   F1 342,227 -> 342,811. Total -> 1,208,693.
-        const EXPECTED_TOTAL_LEN: usize = 1_208_693;
+        // 2026-06-06 F55B-002: +1,945 bytes in net_h3_quic.c for addon-call
+        //   Float marshalling — taida_addon_val_from_raw gains a
+        //   TAIDA_TAG_FLOAT case + float scratch plumbing (the lowering now
+        //   tags Float args instead of letting them fall through as raw-bit
+        //   Ints), and taida_addon_val_to_raw mirrors it for Float returns
+        //   (top-level + pack fields). core.c fragments untouched, so F1/F2
+        //   stay at 342,811 / 201,685. Total -> 1,210,638.
+        const EXPECTED_TOTAL_LEN: usize = 1_210_638;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

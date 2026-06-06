@@ -42531,3 +42531,100 @@ stdout("val=" + res)
         assert_eq!(interp, js, "interpreter/js pool pending-acquire parity");
     }
 }
+
+/// Regression: float-family binary ops used to guess the kind of each
+/// operand from its magnitude (a ±2^20 window decided "plain integer"
+/// vs "f64 bit pattern"), so a statically-typed Int operand outside
+/// that window was reinterpreted as f64 bits: `2000000 == 2000000.0`
+/// was false and `2000000 + 0.5` evaluated to 0.5 on native/WASM. The
+/// lowering now lifts statically-known Int operands with
+/// `taida_int_to_float` at the call site, and the Div/Mod molds (which
+/// always pre-widened) are pinned here against the same boundary.
+/// Expected: true true 2000000.5 4000000.0 1000000.0 1.0
+#[test]
+fn test_float_op_large_int_lift_parity() {
+    let source = r#"
+stdout((2000000 == 2000000.0).toString())
+a <= 0 - 2000000
+b <= 0.0 - 2000000.0
+stdout((a == b).toString())
+stdout(2000000 + 0.5)
+stdout(2000000.0 * 2)
+Div[2000000, 2.0]() >=> d
+stdout(d)
+Mod[2000001.0, 2]() >=> m
+stdout(m)
+"#;
+    let label = "float_op_large_int_lift";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "true", "2000000.5", "4000000.0", "1000000.0", "1.0"],
+        "interpreter large-int float lift reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native large-int float lift parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js large-int float lift parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min large-int float lift parity"
+        );
+    }
+}
+
+/// Regression: passing an operator expression directly to stdout
+/// (`stdout(3.0 * 2)`) printed the raw f64 bit pattern as an Int on
+/// native/WASM, while the variable-bound form (`x <= 3.0 * 2;
+/// stdout(x)`) printed 6.0. The compile-time tag inference had no arm
+/// for binary/unary operator results, so the polymorphic printer
+/// received UNKNOWN and fell back to the Int rendering. The tag arms
+/// now mirror the operator dispatch exactly.
+/// Expected: 6.0 3.0 true -1.5 false
+#[test]
+fn test_stdout_direct_operator_expr_tag_parity() {
+    let source = r#"
+stdout(3.0 * 2)
+stdout(2.5 + 0.5)
+stdout((1 == 1.0).toString())
+stdout(0 - 1.5)
+stdout((2.5 < 1).toString())
+"#;
+    let label = "stdout_direct_operator_expr_tag";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["6.0", "3.0", "true", "-1.5", "false"],
+        "interpreter direct operator-expr stdout reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native direct operator-expr stdout parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(
+            interp, js,
+            "interpreter/js direct operator-expr stdout parity"
+        );
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min direct operator-expr stdout parity"
+        );
+    }
+}

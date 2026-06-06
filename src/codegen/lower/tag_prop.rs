@@ -327,6 +327,55 @@ impl Lowering {
                 }
             }
             Expr::Unmold(_, _) => -1, // TAIDA_TAG_UNKNOWN: could be anything
+            // Binary / unary operator results. Mirrors the dispatch order of
+            // `lower_binary_op` exactly so the tag seen by stdout/_with_tag
+            // (and list-literal element tags) cannot drift from the runtime
+            // function the operator actually lowers to. Before this arm a
+            // direct expression like `stdout(3.0 * 2)` fell through to
+            // UNKNOWN(-1) and the polymorphic printer rendered the f64 bit
+            // pattern as a raw Int.
+            Expr::BinaryOp(lhs, op, rhs, _) => match op {
+                BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::GtEq
+                | BinOp::And
+                | BinOp::Or => 2, // TAIDA_TAG_BOOL
+                BinOp::Concat => 3, // TAIDA_TAG_STR
+                BinOp::Add => {
+                    if self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs) {
+                        3 // string concatenation via `+`
+                    } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                        1 // TAIDA_TAG_FLOAT
+                    } else if self.expr_type_is_unknown(lhs) || self.expr_type_is_unknown(rhs) {
+                        -1 // poly_add: result type resolved at runtime
+                    } else {
+                        0 // TAIDA_TAG_INT
+                    }
+                }
+                BinOp::Sub | BinOp::Mul => {
+                    if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                        1
+                    } else if self.expr_type_is_unknown(lhs) || self.expr_type_is_unknown(rhs) {
+                        -1
+                    } else {
+                        0
+                    }
+                }
+            },
+            Expr::UnaryOp(op, inner, _) => match op {
+                UnaryOp::Not => 2,
+                UnaryOp::Neg => {
+                    if self.expr_returns_float(inner) {
+                        1
+                    } else if self.expr_type_is_unknown(inner) {
+                        -1
+                    } else {
+                        0
+                    }
+                }
+            },
             _ if self.expr_is_likely_bool(expr) => 2,
             _ => -1, // TAIDA_TAG_UNKNOWN
         }

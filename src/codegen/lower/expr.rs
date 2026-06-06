@@ -1495,6 +1495,25 @@ impl Lowering {
             BinOp::Or => "taida_bool_or",
             BinOp::Concat => "taida_str_concat",
         };
+        // When a float-family helper was selected, lift any operand that is
+        // statically known to be Int to an f64 bit pattern at the call site
+        // (`taida_int_to_float` — the conversion the runtime's own comment
+        // always documented as "the lowering inserts a taida_int_to_float
+        // call" but binary ops never emitted). The helpers previously
+        // guessed the operand kind from the value via a ±2^20 magnitude
+        // heuristic, which broke both comparison (`2000000 == 2000000.0` →
+        // false) and arithmetic (`2000000 + 0.5` → 0.5) outside that
+        // window. With the lift, every statically-typed operand arrives as
+        // a genuine f64 bit pattern and the heuristic is only left covering
+        // dynamically-typed operands.
+        let (lhs_var, rhs_var) = if runtime_fn.starts_with("taida_float_") {
+            (
+                self.lift_static_int_to_f64(func, lhs, lhs_var),
+                self.lift_static_int_to_f64(func, rhs, rhs_var),
+            )
+        } else {
+            (lhs_var, rhs_var)
+        };
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -1502,6 +1521,28 @@ impl Lowering {
             vec![lhs_var, rhs_var],
         ));
         Ok(result)
+    }
+
+    /// Lift an operand of a float-family binary op to an f64 bit pattern
+    /// when (and only when) it is statically known to be an Int. Float
+    /// operands already carry f64 bits, dynamically-typed operands keep the
+    /// runtime-side dispatch, and Bool/Str can only reach a float helper
+    /// through paths the checker rejects, so they are left untouched.
+    fn lift_static_int_to_f64(&mut self, func: &mut IrFunction, expr: &Expr, var: IrVar) -> IrVar {
+        if self.expr_returns_float(expr)
+            || self.expr_type_is_unknown(expr)
+            || self.expr_is_bool(expr)
+            || self.expr_is_string_full(expr)
+        {
+            return var;
+        }
+        let lifted = func.alloc_var();
+        func.push(IrInst::Call(
+            lifted,
+            "taida_int_to_float".to_string(),
+            vec![var],
+        ));
+        lifted
     }
 
     pub(super) fn lower_unary_op(

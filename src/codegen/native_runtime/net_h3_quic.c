@@ -4288,7 +4288,8 @@ static void taida_addon_val_from_raw(
     TaidaAddonValueV1 *out,
     TaidaAddonIntPayloadV1 *int_scratch,
     TaidaAddonBytesPayloadV1 *str_scratch,
-    TaidaAddonBoolPayloadV1 *bool_scratch)
+    TaidaAddonBoolPayloadV1 *bool_scratch,
+    TaidaAddonFloatPayloadV1 *float_scratch)
 {
     out->_reserved = 0;
     switch (internal_tag) {
@@ -4302,6 +4303,19 @@ static void taida_addon_val_from_raw(
             out->tag = TAIDA_ADDON_TAG_BOOL;
             out->payload = bool_scratch;
             return;
+        case TAIDA_TAG_FLOAT: {
+            /* The runtime stores Float as f64 bits inside a taida_val;
+             * undo the bitcast so the addon sees a genuine double.
+             * Previously the lowering never tagged Float arguments (they
+             * fell through as TAIDA_TAG_INT) and the raw bit pattern
+             * leaked across the ABI as a bogus Int. */
+            union { taida_val l; double d; } u;
+            u.l = raw;
+            float_scratch->value = u.d;
+            out->tag = TAIDA_ADDON_TAG_FLOAT;
+            out->payload = float_scratch;
+            return;
+        }
         case TAIDA_TAG_STR: {
             const char *s = (const char *)(taida_ptr)raw;
             str_scratch->ptr = (const uint8_t *)(s ? s : "");
@@ -4334,6 +4348,14 @@ static taida_val taida_addon_val_to_raw(const TaidaAddonValueV1 *v) {
         case TAIDA_ADDON_TAG_BOOL: {
             const TaidaAddonBoolPayloadV1 *p = (const TaidaAddonBoolPayloadV1 *)v->payload;
             return (taida_val)(p && p->value ? 1 : 0);
+        }
+        case TAIDA_ADDON_TAG_FLOAT: {
+            /* Mirror of the argv direction: re-bitcast the double into the
+             * runtime's f64-bits-in-taida_val representation. */
+            const TaidaAddonFloatPayloadV1 *p = (const TaidaAddonFloatPayloadV1 *)v->payload;
+            union { taida_val l; double d; } u;
+            u.d = p ? p->value : 0.0;
+            return u.l;
         }
         case TAIDA_ADDON_TAG_STR: {
             const TaidaAddonBytesPayloadV1 *p = (const TaidaAddonBytesPayloadV1 *)v->payload;
@@ -4372,6 +4394,14 @@ static taida_val taida_addon_val_to_raw(const TaidaAddonValueV1 *v) {
                         const TaidaAddonBoolPayloadV1 *bp = (const TaidaAddonBoolPayloadV1 *)child->payload;
                         taida_pack_set((taida_ptr)pack, (taida_val)i, (taida_val)(bp && bp->value ? 1 : 0));
                         taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_BOOL);
+                        break;
+                    }
+                    case TAIDA_ADDON_TAG_FLOAT: {
+                        const TaidaAddonFloatPayloadV1 *fp = (const TaidaAddonFloatPayloadV1 *)child->payload;
+                        union { taida_val l; double d; } u;
+                        u.d = fp ? fp->value : 0.0;
+                        taida_pack_set((taida_ptr)pack, (taida_val)i, u.l);
+                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_FLOAT);
                         break;
                     }
                     case TAIDA_ADDON_TAG_STR: {
@@ -4453,10 +4483,12 @@ int64_t taida_addon_call(
     TaidaAddonIntPayloadV1 inline_ints[16];
     TaidaAddonBytesPayloadV1 inline_strs[16];
     TaidaAddonBoolPayloadV1 inline_bools[16];
+    TaidaAddonFloatPayloadV1 inline_floats[16];
     TaidaAddonValueV1 *values_ptr = inline_values;
     TaidaAddonIntPayloadV1 *ints_ptr = inline_ints;
     TaidaAddonBytesPayloadV1 *strs_ptr = inline_strs;
     TaidaAddonBoolPayloadV1 *bools_ptr = inline_bools;
+    TaidaAddonFloatPayloadV1 *floats_ptr = inline_floats;
     int heap_allocated = 0;
     if (argc > 16) {
         values_ptr = (TaidaAddonValueV1 *)TAIDA_MALLOC(
@@ -4471,6 +4503,9 @@ int64_t taida_addon_call(
         bools_ptr = (TaidaAddonBoolPayloadV1 *)TAIDA_MALLOC(
             taida_safe_mul((size_t)argc, sizeof(TaidaAddonBoolPayloadV1), "addon_argv_bool"),
             "addon_argv_bool");
+        floats_ptr = (TaidaAddonFloatPayloadV1 *)TAIDA_MALLOC(
+            taida_safe_mul((size_t)argc, sizeof(TaidaAddonFloatPayloadV1), "addon_argv_float"),
+            "addon_argv_float");
         heap_allocated = 1;
     }
 
@@ -4479,6 +4514,7 @@ int64_t taida_addon_call(
         if (pack == NULL) {
             if (heap_allocated) {
                 free(values_ptr); free(ints_ptr); free(strs_ptr); free(bools_ptr);
+                free(floats_ptr);
             }
             taida_addon_fail(package_id, "argv pack is null");
         }
@@ -4487,7 +4523,8 @@ int64_t taida_addon_call(
             taida_val tag = pack[2 + i * 3 + 1];
             taida_val raw = pack[2 + i * 3 + 2];
             taida_addon_val_from_raw(raw, tag, &values_ptr[i],
-                                     &ints_ptr[i], &strs_ptr[i], &bools_ptr[i]);
+                                     &ints_ptr[i], &strs_ptr[i], &bools_ptr[i],
+                                     &floats_ptr[i]);
         }
     }
 
@@ -4502,6 +4539,7 @@ int64_t taida_addon_call(
      * take below. */
     if (heap_allocated) {
         free(values_ptr); free(ints_ptr); free(strs_ptr); free(bools_ptr);
+        free(floats_ptr);
         heap_allocated = 0;
     }
 
