@@ -222,6 +222,18 @@ impl Lowering {
                     5
                 } else if self.closure_vars.contains(name) {
                     6
+                } else if self.int_vars.contains(name)
+                    && !self.return_type_inferred_params.contains(name)
+                {
+                    // Value-tag track: explicitly Int-annotated names report
+                    // INT instead of falling through to UNKNOWN. This was
+                    // the missing arm that made `@[1, ..., n]` (n: Int)
+                    // materialise a per-element kind array on every literal
+                    // and ride the linear mixed-dedup path. Return-type
+                    // INFERRED params stay UNKNOWN — that inference is not
+                    // trustworthy for tagging (the param might be a closure)
+                    // and the runtime caller-tag mechanism covers them.
+                    0
                 } else {
                     -1 // TAIDA_TAG_UNKNOWN: type cannot be determined at compile time
                 }
