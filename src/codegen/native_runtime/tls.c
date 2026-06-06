@@ -1777,6 +1777,100 @@ taida_val taida_pool_create(taida_val config_ptr) {
     return taida_os_result_success(inner);
 }
 
+// Try to take a slot while holding taida_pool_mutex. On success the
+// Lax-wrapped resource + token are stored and the token is registered
+// as in-use. Returns 1 acquired / 0 exhausted / -1 out of memory.
+static int taida_pool_try_take_slot(taida_pool_state *st, taida_val *out_lax, taida_val *out_token) {
+    taida_val token = 0;
+    taida_val resource_lax = 0;
+    if (st->idle_len > 0) {
+        st->idle_len--;
+        token = st->idle_tokens[st->idle_len];
+        resource_lax = taida_lax_new(st->idle_resources[st->idle_len], 0);
+    } else if ((taida_val)st->in_use_len < st->max_size) {
+        token = st->next_token++;
+        resource_lax = taida_lax_empty(0);
+    } else {
+        return 0;
+    }
+    if (!taida_pool_in_use_add(st, token)) return -1;
+    *out_lax = resource_lax;
+    *out_token = token;
+    return 1;
+}
+
+// Build the success payload for an acquired slot: Result[@(resource, token)].
+static taida_val taida_pool_acquire_success(taida_val resource_lax, taida_val token) {
+    taida_val inner = taida_pack_new(2);
+    taida_val resource_hash = taida_str_hash((taida_val)"resource");
+    taida_val token_hash = taida_str_hash((taida_val)"token");
+    taida_pack_set_hash(inner, 0, resource_hash);
+    taida_pack_set(inner, 0, resource_lax);
+    taida_pack_set_tag(inner, 0, TAIDA_TAG_PACK);
+    taida_pack_set_hash(inner, 1, token_hash);
+    taida_pack_set(inner, 1, token);
+    return taida_os_result_success(inner);
+}
+
+// F54B-024: a pool-exhausted acquire must stay pending until awaited.
+// The cond-wait loop runs on this background pthread, which resolves the
+// pending Async with the same write protocol as taida_thread_entry
+// (value + tag, release fence, then fulfilled status). The caller gets
+// the pending Async back immediately, so it can poolRelease from the
+// same Taida thread before awaiting — interpreter (tokio task) and JS
+// (async function) both keep the exhausted acquire pending this way.
+typedef struct {
+    taida_val pool_id;
+    taida_val effective_timeout;
+    struct timespec deadline;
+    taida_val *async_obj;
+} taida_pool_wait_arg;
+
+static void* taida_pool_acquire_wait_thread(void *raw) {
+    taida_pool_wait_arg *wa = (taida_pool_wait_arg*)raw;
+    taida_val result = 0;
+    pthread_mutex_lock(&taida_pool_mutex);
+    // Pool states are never freed (poolClose only flips `open`), so the
+    // entry fetched here stays valid for the whole wait. The caller
+    // already registered this waiter (st->waiting++).
+    taida_pool_state *st = taida_pool_states[wa->pool_id];
+    for (;;) {
+        if (!st || !st->open) {
+            if (st) st->waiting--;
+            pthread_mutex_unlock(&taida_pool_mutex);
+            result = taida_pool_result_failure("closed", "poolAcquire: pool is closed");
+            break;
+        }
+        taida_val resource_lax = 0;
+        taida_val token = 0;
+        int took = taida_pool_try_take_slot(st, &resource_lax, &token);
+        if (took != 0) {
+            st->waiting--;
+            pthread_mutex_unlock(&taida_pool_mutex);
+            result = (took < 0)
+                ? taida_pool_result_failure("other", "poolAcquire: out of memory")
+                : taida_pool_acquire_success(resource_lax, token);
+            break;
+        }
+        int rc = pthread_cond_timedwait(&taida_pool_cond, &taida_pool_mutex, &wa->deadline);
+        if (rc == ETIMEDOUT) {
+            st->waiting--;
+            pthread_mutex_unlock(&taida_pool_mutex);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "poolAcquire: timed out after %" PRId64 "ms", wa->effective_timeout);
+            result = taida_pool_result_failure("timeout", msg);
+            break;
+        }
+        // Broadcast or spurious wakeup: loop and re-check the pool state.
+    }
+    wa->async_obj[2] = result;
+    wa->async_obj[5] = taida_detect_value_tag(result);
+    __atomic_thread_fence(__ATOMIC_RELEASE);  // barrier: value+tag visible before status
+    wa->async_obj[1] = 1;  // mark fulfilled (must be last — signals to readers)
+    free(wa);
+    return NULL;
+}
+
 taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms) {
     taida_val pool_id = taida_pool_parse_handle(pool_or_pack);
     pthread_mutex_lock(&taida_pool_mutex);
@@ -1808,8 +1902,28 @@ taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms) {
     // `resource: Lax` — Lax(value) when an idle (BYO, deposited via
     // poolRelease) resource is reused, failure-side Lax (placeholder
     // default 0; the pool does not know the element type) when the slot
-    // is fresh. When the pool is exhausted, block on the cond until
-    // poolRelease / poolClose signals or the deadline passes.
+    // is fresh. Fast path: a slot is free right now — resolve inline.
+    taida_val resource_lax = 0;
+    taida_val token = 0;
+    int took = taida_pool_try_take_slot(st, &resource_lax, &token);
+    if (took < 0) {
+        pthread_mutex_unlock(&taida_pool_mutex);
+        return taida_async_resolved(taida_pool_result_failure("other", "poolAcquire: out of memory"));
+    }
+    if (took > 0) {
+        pthread_mutex_unlock(&taida_pool_mutex);
+        return taida_async_resolved(taida_pool_acquire_success(resource_lax, token));
+    }
+
+    // Pool exhausted (F54B-024): blocking here would deadlock the
+    // "create a pending acquire, release, then await" pattern — the
+    // releasing code runs on this very thread. Register as a waiter NOW
+    // (poolHealth.waiting must reflect the pending acquire immediately,
+    // interpreter parity), then hand the cond-wait loop to a background
+    // pthread and return a pending Async; `>=>` joins it on await.
+    st->waiting++;
+    pthread_mutex_unlock(&taida_pool_mutex);
+
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += effective_timeout / 1000;
@@ -1819,57 +1933,34 @@ taida_val taida_pool_acquire(taida_val pool_or_pack, taida_val timeout_ms) {
         deadline.tv_nsec -= 1000000000L;
     }
 
-    int registered_waiter = 0;
-    taida_val token = 0;
-    taida_val resource_lax = 0;
-    for (;;) {
-        if (!st->open) {
-            if (registered_waiter) st->waiting--;
-            pthread_mutex_unlock(&taida_pool_mutex);
-            return taida_async_resolved(taida_pool_result_failure("closed", "poolAcquire: pool is closed"));
-        }
-        if (st->idle_len > 0) {
-            st->idle_len--;
-            token = st->idle_tokens[st->idle_len];
-            resource_lax = taida_lax_new(st->idle_resources[st->idle_len], 0);
-            break;
-        }
-        if ((taida_val)st->in_use_len < st->max_size) {
-            token = st->next_token++;
-            resource_lax = taida_lax_empty(0);
-            break;
-        }
-        if (!registered_waiter) {
-            st->waiting++;
-            registered_waiter = 1;
-        }
-        int rc = pthread_cond_timedwait(&taida_pool_cond, &taida_pool_mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            st->waiting--;
-            pthread_mutex_unlock(&taida_pool_mutex);
-            char msg[96];
-            snprintf(msg, sizeof(msg), "poolAcquire: timed out after %" PRId64 "ms", effective_timeout);
-            return taida_async_resolved(taida_pool_result_failure("timeout", msg));
-        }
-        // Broadcast or spurious wakeup: loop and re-check the pool state.
+    taida_pool_wait_arg *wa = (taida_pool_wait_arg*)malloc(sizeof(taida_pool_wait_arg));
+    taida_val *obj = (taida_val*)malloc(7 * sizeof(taida_val));
+    pthread_t waiter;
+    int spawn_ok = 0;
+    if (wa && obj) {
+        obj[0] = TAIDA_ASYNC_MAGIC | 1;  // magic + refcount
+        obj[1] = 0;                      // status: pending
+        obj[2] = 0;                      // no value yet
+        obj[3] = 0;                      // no error
+        obj[4] = 0;                      // thread handle (set below)
+        obj[5] = TAIDA_TAG_UNKNOWN;      // value_tag (set on resolve)
+        obj[6] = TAIDA_TAG_UNKNOWN;      // error_tag (unused)
+        wa->pool_id = pool_id;
+        wa->effective_timeout = effective_timeout;
+        wa->deadline = deadline;
+        wa->async_obj = obj;
+        spawn_ok = pthread_create(&waiter, NULL, taida_pool_acquire_wait_thread, wa) == 0;
     }
-    if (registered_waiter) st->waiting--;
-
-    if (!taida_pool_in_use_add(st, token)) {
+    if (!spawn_ok) {
+        free(wa);
+        free(obj);
+        pthread_mutex_lock(&taida_pool_mutex);
+        if (taida_pool_states[pool_id]) taida_pool_states[pool_id]->waiting--;
         pthread_mutex_unlock(&taida_pool_mutex);
-        return taida_async_resolved(taida_pool_result_failure("other", "poolAcquire: out of memory"));
+        return taida_async_resolved(taida_pool_result_failure("other", "poolAcquire: cannot start waiter thread"));
     }
-    pthread_mutex_unlock(&taida_pool_mutex);
-
-    taida_val inner = taida_pack_new(2);
-    taida_val resource_hash = taida_str_hash((taida_val)"resource");
-    taida_val token_hash = taida_str_hash((taida_val)"token");
-    taida_pack_set_hash(inner, 0, resource_hash);
-    taida_pack_set(inner, 0, resource_lax);
-    taida_pack_set_tag(inner, 0, TAIDA_TAG_PACK);
-    taida_pack_set_hash(inner, 1, token_hash);
-    taida_pack_set(inner, 1, token);
-    return taida_async_resolved(taida_os_result_success(inner));
+    obj[4] = (taida_val)waiter;
+    return (taida_val)obj;
 }
 
 taida_val taida_pool_release(taida_val pool_or_pack, taida_val token, taida_val resource) {

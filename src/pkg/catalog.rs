@@ -108,7 +108,7 @@ pub const BUNDLED_PACKAGES: &[BundledPackageSpec] = &[
 //
 // Binary file APIs:
 //   readBytes(path)                      -- read file as Bytes (64MB limit)
-//   readBytesAt(path, offset, len)       -- chunked read (C26B-020 柱 1)
+//   readBytesAt(path, offset, len)       -- chunked read (offset/length window)
 //   writeBytes(path, content)            -- write Bytes payload to file
 //
 // Side-effect APIs (functions -> Result):
@@ -230,7 +230,7 @@ pub const BUNDLED_PACKAGES: &[BundledPackageSpec] = &[
 //   wsUpgrade, wsSend, wsReceive, wsClose, wsCloseCode
 //   HttpProtocol
 //
-// TI-21 contract notes:
+// Contract notes:
 //   TLS verification on Http* uses backend default trust store (no insecure -k path)
 //   Protocol/runtime details remain behind httpServe contract
 //   Legacy tcp*/udp*/dnsResolve re-exports were removed after HTTP/3 package freeze
@@ -252,7 +252,7 @@ Enum => HttpProtocol = :H1 :H2 :H3
             "poolHealth",
         ],
         stub_source: r#"// taida-lang/pool — Core bundled pool package (contract stub)
-// TI-22 minimal contract (official upper package):
+// Minimal contract (official upper package):
 //   poolCreate(config) -> Result[@(pool)]
 //   poolAcquire(pool[, timeoutMs]) -> Async[Result[@(resource, token), _]]
 //   poolRelease(pool, token, resource) -> Result[@(ok, reused)]

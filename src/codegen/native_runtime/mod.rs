@@ -705,7 +705,21 @@ mod tests {
         //   numeric-domain aware Set×Set comparison (taida_set_numeric_cross /
         //   taida_tagged_scalar_eq / taida_tagged_set_contains wired into
         //   union/intersect/diff). F1 337,711 -> 341,827. Total -> 1,203,067.
-        const EXPECTED_TOTAL_LEN: usize = 1_203_067;
+        // 2026-06-04 F54B-024/025 (Codex post-F54 review): +4,147 bytes in
+        //   tls.c for the pending-Async pool acquire (taida_pool_try_take_slot /
+        //   taida_pool_acquire_success / taida_pool_acquire_wait_thread — the
+        //   exhausted-pool cond-wait loop moved to a background pthread), and
+        //   +400 bytes in core.c F1 for the honest union result tag (per-add
+        //   HETEROGENEOUS latch instead of unconditional downgrade).
+        //   F1 341,827 -> 342,227. Total -> 1,207,614.
+        // 2026-06-06 F54B-028/029 (Codex review round 2): +584 bytes in
+        //   core.c F1 (union latch now stamps EVERY actually-added b element
+        //   so an empty-a UNKNOWN result promotes to the b tag, + the Async
+        //   release path joins any remaining worker handle) and +495 bytes
+        //   in core.c F2 (taida_async_join is handle-based: it also reclaims
+        //   resolved-but-unjoined worker pthreads in unmold/map/get_or_default).
+        //   F1 342,227 -> 342,811. Total -> 1,208,693.
+        const EXPECTED_TOTAL_LEN: usize = 1_208_693;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1305,17 +1319,27 @@ mod tests {
         // marker as well: F1_LEN 336,711 -> 337,711.
         // F54B-019 (G8 tier 2) adds the tagged numeric Set comparison
         // helpers (+4,116) before the marker: F1_LEN 337,711 -> 341,827.
-        const F1_LEN: usize = 341_827;
+        // F54B-025 (Codex post-F54 review) reworks taida_set_union's result
+        // tag to the per-add HETEROGENEOUS latch (+400) before the marker:
+        // F1_LEN 341,827 -> 342,227.
+        // F54B-028/029 (Codex review round 2) widen the union latch to every
+        // actually-added b element and join leftover worker handles in the
+        // Async release path (+584) before the marker: F1_LEN 342,227 ->
+        // 342,811.
+        const F1_LEN: usize = 342_811;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
         // sub-assert being refreshed). G8 tier 1 adds the taida_float_eq/neq/
         // lt/gt/lte/gte family after the marker: F2 200,593 -> 201,685.
+        // F54B-029 (Codex review round 2) makes taida_async_join handle-based
+        // (reclaims resolved-but-unjoined worker pthreads) after the marker:
+        // F2 201,685 -> 202,180.
         // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 201_685,
+            F1_LEN + 202_180,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

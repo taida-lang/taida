@@ -2718,18 +2718,24 @@ taida_val taida_release(taida_ptr ptr) {
                     taida_list_elem_release(aobj[3], etag);
                 }
                 // pending (status == 0): no value/error to release
-                // thread_handle: if still pending with a live thread, we
-                // must join before freeing (the thread writes into aobj).
-                if (status == 0 && aobj[4] != 0) {
+                // thread_handle: any remaining handle must be joined before
+                // freeing — while pending the thread still writes into aobj,
+                // and a resolved-but-unjoined worker would leak its joinable
+                // pthread resources (exhausted poolAcquire waiters resolve
+                // in the background and may never be awaited).
+                if (aobj[4] != 0) {
                     pthread_join((pthread_t)aobj[4], NULL);
                     aobj[4] = 0;
-                    // After join, thread may have written value/error.
-                    // Re-check and release.
-                    taida_val new_status = aobj[1];
-                    if (new_status == 1) {
-                        taida_list_elem_release(aobj[2], aobj[5]);
-                    } else if (new_status == 2) {
-                        taida_list_elem_release(aobj[3], aobj[6]);
+                    // If the pre-join status was still pending, the worker's
+                    // value/error was missed by the status-based release
+                    // above — re-check and release exactly once.
+                    if (status == 0) {
+                        taida_val new_status = aobj[1];
+                        if (new_status == 1) {
+                            taida_list_elem_release(aobj[2], aobj[5]);
+                        } else if (new_status == 2) {
+                            taida_list_elem_release(aobj[3], aobj[6]);
+                        }
                     }
                 }
             }
@@ -7293,13 +7299,14 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     // F54 tier 2: when the two sets pin different scalar domains (or a
     // Float domain is in play), dedup across them numerically — b is a
     // Set, hence already unique, so the dup test only needs "is b[i]
-    // in a". A mixed-domain result no longer has one honest elem tag;
-    // latch HETEROGENEOUS like list-push does.
+    // in a". The result starts with the a-side tag; only a b element
+    // that actually lands in the result can make it mixed-domain (the
+    // per-add latch below downgrades via taida_list_set_elem_tag). If
+    // every b element was a numeric dup of an a element, the a-side
+    // tag stays honest and downstream Set ops keep numeric semantics.
     int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
-    taida_val result_tag = elem_tag;
-    if (numeric_cross && elem_tag != tag_b) result_tag = TAIDA_TAG_HETEROGENEOUS;
     taida_val result = taida_set_new();
-    ((taida_val*)result)[3] = result_tag;
+    ((taida_val*)result)[3] = elem_tag;
     taida_seen seen;
     int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, a_len + b_len);
@@ -7321,6 +7328,13 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
         if (!dup) {
             taida_list_elem_retain(b[4 + i], tag_b);  // NO-2: retain-on-copy
             result = taida_list_push(result, b[4 + i]);
+            // F54 tier 2: every actually-added b element stamps its tag
+            // through the shared latch. An UNKNOWN-tagged result (empty-a
+            // union) promotes to tag_b, a matching tag is a no-op, and a
+            // genuine cross-domain add downgrades to HETEROGENEOUS
+            // (structural engine + no-op elem release: leak-not-crash,
+            // same policy as the rest of the tag system).
+            taida_list_set_elem_tag(result, tag_b);
         }
     }
     if (use_hash) taida_seen_free(&seen);
@@ -9280,8 +9294,9 @@ taida_val taida_monadic_to_string(taida_val obj) {
 // ── Async methods ────────────────────────────────────────
 taida_val taida_async_map(taida_val async_ptr, taida_val fn_ptr) {
     taida_val *obj = (taida_val*)async_ptr;
-    // Join thread if pending
-    if (obj[1] == 0) taida_async_join(async_ptr);
+    // Join the worker thread: blocks while pending, reclaims a finished
+    // joinable pthread when already fulfilled (no-op without a handle).
+    taida_async_join(async_ptr);
     if (obj[1] != 1) return async_ptr; // not fulfilled, return as-is
     taida_val new_val = taida_invoke_callback1(fn_ptr, obj[2]);
     // NO-3: detect type of mapped value and create tagged async
@@ -9291,8 +9306,9 @@ taida_val taida_async_map(taida_val async_ptr, taida_val fn_ptr) {
 
 taida_val taida_async_get_or_default(taida_val async_ptr, taida_val def) {
     taida_val *obj = (taida_val*)async_ptr;
-    // Join thread if pending
-    if (obj[1] == 0) taida_async_join(async_ptr);
+    // Join the worker thread: blocks while pending, reclaims a finished
+    // joinable pthread when already fulfilled (no-op without a handle).
+    taida_async_join(async_ptr);
     if (obj[1] == 1) return obj[2]; // fulfilled
     return def;
 }
@@ -9483,10 +9499,14 @@ void taida_async_set_value_tag(taida_val async_ptr, taida_val tag) {
     ((taida_val*)async_ptr)[5] = tag;
 }
 
-// Join a pending Async's thread (if any). After this call, status is no longer Pending.
+// Join an Async's worker thread (if any). Blocks while the Async is
+// still pending; on an already-fulfilled Async this reclaims the
+// finished (joinable) pthread immediately — workers that resolve before
+// the consumer awaits would otherwise leak their pthread resources
+// under repeated exhausted-acquire/release workloads. After this call
+// obj[4] is 0 and status is no longer Pending.
 static void taida_async_join(taida_val async_ptr) {
     taida_val *obj = (taida_val*)async_ptr;
-    if (obj[1] != 0) return;              // not pending — nothing to join
     taida_val th = obj[4];
     if (th != 0) {
         pthread_join((pthread_t)th, NULL);
@@ -9498,10 +9518,9 @@ static void taida_async_join(taida_val async_ptr) {
 taida_val taida_async_unmold(taida_val async_ptr) {
     if (async_ptr == 0) return 0;
     taida_val *obj = (taida_val*)async_ptr;
-    // If pending with a thread, join it first
-    if (obj[1] == 0) {
-        taida_async_join(async_ptr);
-    }
+    // Join the worker thread: blocks while pending, reclaims a finished
+    // joinable pthread when already fulfilled (no-op without a handle).
+    taida_async_join(async_ptr);
     taida_val status = obj[1];
     if (status == 1) return obj[2];       // fulfilled → value
     if (status == 2) {                    // rejected → throw (catchable by |==)

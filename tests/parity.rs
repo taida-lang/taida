@@ -42432,3 +42432,102 @@ stdout(Unique[lst]().length().toString())
         );
     }
 }
+
+/// Regression: numeric-cross Set ops must keep an honest result elem tag.
+/// `union(@[3,4], @[3.0])` adds nothing (3.0 is a numeric dup of 3), so
+/// the result is all-Int — but native latched HETEROGENEOUS up front
+/// whenever the operand domains differed, and WASM left the union /
+/// intersect / diff / remove results untagged entirely. Either way the
+/// FOLLOW-UP Set op lost the numeric-domain path and fell back to the
+/// structural engine (raw i64: the bit pattern of 3.0 never equals 3),
+/// returning 0 where interpreter/JS return 1. Every b element that
+/// actually lands in a union result now stamps its tag through the
+/// shared latch: an UNKNOWN-tagged result (empty-a union) promotes to
+/// the b tag, a matching tag is a no-op, and a genuine cross-domain add
+/// downgrades to HETEROGENEOUS.
+/// Expected: 1 1 1 1 1 1
+#[test]
+fn test_f54b025_set_op_result_tag_parity() {
+    let source = r#"
+u <= setOf(@[3, 4]).union(setOf(@[3.0]))
+stdout(u.intersect(setOf(@[3.0])).size().toString())
+stdout(u.diff(setOf(@[4.0])).size().toString())
+i <= setOf(@[3, 4]).intersect(setOf(@[3.0, 4.0]))
+stdout(i.intersect(setOf(@[3.0])).size().toString())
+r <= setOf(@[3, 4]).remove(4)
+stdout(r.intersect(setOf(@[3.0])).size().toString())
+e <= setOf(@[]).union(setOf(@[3]))
+stdout(e.size().toString())
+stdout(e.intersect(setOf(@[3.0])).size().toString())
+"#;
+    let label = "f54b025_set_op_result_tag";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "1", "1", "1", "1", "1"],
+        "interpreter set-op result-tag reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native set-op result-tag parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js set-op result-tag parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min set-op result-tag parity"
+        );
+    }
+}
+
+/// Regression: a pool-exhausted poolAcquire must return a PENDING Async
+/// instead of blocking inside the runtime call. The native runtime ran
+/// the cond-wait loop synchronously before returning a (resolved)
+/// Async, so "create a pending acquire → poolRelease → await" timed
+/// out: the release could never run while the acquire was blocking the
+/// only Taida thread. The wait loop now runs on a background pthread
+/// that resolves a pending Async (interpreter: tokio task; JS: async
+/// function — both already kept the exhausted acquire pending).
+/// Expected: released=true val=res-X
+#[test]
+fn test_f54b024_pool_pending_acquire_release_parity() {
+    let source = r#"
+poolCreate(@(maxSize <= 1, acquireTimeoutMs <= 2000)) >=> c1
+p <= c1.pool
+poolAcquire(p) >=> r1
+r1 >=> a1
+pending <= poolAcquire(p, 1500)
+poolRelease(p, a1.token, "res-X") >=> rl1
+pending >=> r2
+r2 >=> a2
+stdout("released=" + a2.resource.has_value.toString())
+a2.resource >=> res
+stdout("val=" + res)
+"#;
+    let label = "f54b024_pool_pending_acquire";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["released=true", "val=res-X"],
+        "interpreter pool pending-acquire reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native pool pending-acquire parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js pool pending-acquire parity");
+    }
+}

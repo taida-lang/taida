@@ -3531,6 +3531,9 @@ int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
     int64_t result = taida_set_new();
+    /* F54 tier 2: the result holds source elements only, so the source
+       elem tag stays honest (mirrors native taida_set_remove). */
+    taida_list_set_elem_tag(result, list[2]);
     for (int64_t i = 0; i < len; i++) {
         if (!_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) {
             result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
@@ -3585,9 +3588,12 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t tag_b = b[2];
     /* F54 tier 2: b is a Set (already unique), so under a numeric-domain
      * cross the dup test only needs "is b[i] in a", compared in the
-     * numeric domain. */
+     * numeric domain. The result starts with the a-side tag; only a b
+     * element that actually lands in the result can make it mixed-domain
+     * (per-add latch below, mirroring native taida_set_union). */
     int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
+    taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
     int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, a_len + b_len);
@@ -3604,7 +3610,15 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
         } else {
             dup = taida_set_has(result, b[WASM_LIST_ELEMS + i]);
         }
-        if (!dup) result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
+        if (!dup) {
+            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
+            /* F54 tier 2: every actually-added b element stamps its tag
+               through the shared latch — an UNKNOWN-tagged result (empty-a
+               union) promotes to tag_b, a matching tag is a no-op, and a
+               genuine cross-domain add downgrades to HETEROGENEOUS
+               (mirrors native taida_set_union). */
+            taida_list_set_elem_tag(result, tag_b);
+        }
     }
     return result;
 }
@@ -3618,6 +3632,9 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t tag_b = b[2];
     int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
+    /* F54 tier 2: the result holds a-side elements only, so the a tag
+       stays honest (mirrors native taida_set_intersect). */
+    taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
     int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
@@ -3645,6 +3662,9 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t tag_b = b[2];
     int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
+    /* F54 tier 2: the result holds a-side elements only, so the a tag
+       stays honest (mirrors native taida_set_diff). */
+    taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
     int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
