@@ -53,6 +53,29 @@ use std::collections::{HashMap, HashSet};
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
 const MAX_CALL_ARGUMENTS: usize = 256;
 
+/// Build-driver descriptor constructor names (`taida-lang/build`).
+///
+/// These five names denote build-driver descriptors consumed by
+/// `taida build --unit / --plan / --all-units`, **not** ordinary runtime
+/// values. The descriptor build path parses the entry module and matches
+/// these `Expr::TypeInst` names directly (see `run_descriptor_build_driver`
+/// in `src/main.rs`), bypassing the type checker entirely. When a program
+/// is instead run / checked / single-target-built, the checker must reject
+/// any attempt to use a descriptor value in a runtime position (`[E1532]`).
+///
+/// The names are reserved by the build driver regardless of whether
+/// `taida-lang/build` is imported, so an importless `BuildUnit(...)` and an
+/// imported one are detected identically. A user-declared type that shadows
+/// one of these names (a class-like / mold definition in the same program)
+/// is *not* treated as a descriptor — see `is_descriptor_type_name`.
+const BUILD_DESCRIPTOR_NAMES: [&str; 5] = [
+    "BuildUnit",
+    "BuildPlan",
+    "AssetBundle",
+    "RouteAsset",
+    "BuildHook",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CageBranch {
     Js,
@@ -174,6 +197,18 @@ impl FunctionHintDiagnostic {
     }
 }
 
+/// Position context for the build-descriptor runtime-use pass ([E1532]).
+///
+/// `Allowed` marks the three positions where a build descriptor may appear
+/// (a top-level export value, a descriptor field, a top-level binding RHS);
+/// `Runtime` marks every other position, where a descriptor value is a
+/// misuse and is rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DescriptorUseCtx {
+    Allowed,
+    Runtime,
+}
+
 /// Type checker state.
 pub struct TypeChecker {
     pub registry: TypeRegistry,
@@ -248,6 +283,20 @@ pub struct TypeChecker {
     current_func_type_params: Vec<Vec<TypeParam>>,
     /// Re-entrancy guard for expected-type named function body inference.
     hinted_func_stack: Vec<String>,
+    /// Top-level variable names whose bound value is a build-driver
+    /// descriptor (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset`
+    /// / `BuildHook`). Populated during the descriptor-usage pass so that a
+    /// descriptor reached through a `name <= BuildUnit(...)` binding is still
+    /// recognised when `name` is later used in a runtime position. Bindings
+    /// are the only allow-listed indirection (they let a descriptor reach a
+    /// top-level export); any *other* use of such a name is rejected with
+    /// `[E1532]`.
+    descriptor_binding_names: HashSet<String>,
+    /// Names user-declared as class-like / mold types in the current program
+    /// that collide with a reserved descriptor name. Such a name resolves to
+    /// the user's own type, not a build descriptor, so it is excluded from
+    /// `[E1532]` detection.
+    descriptor_shadow_names: HashSet<String>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -347,6 +396,8 @@ impl TypeChecker {
             host_capability_manifest: None,
             current_func_type_params: Vec::new(),
             hinted_func_stack: Vec::new(),
+            descriptor_binding_names: HashSet::new(),
+            descriptor_shadow_names: HashSet::new(),
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -3328,6 +3379,18 @@ impl TypeChecker {
             self.check_mold_errors_in_stmt(stmt);
         }
 
+        // Build-descriptor runtime-use pass ([E1532]): reject build-driver
+        // descriptors (`BuildUnit` / `BuildPlan` / `AssetBundle` /
+        // `RouteAsset` / `BuildHook`) used as ordinary runtime values. The
+        // descriptor build path (`taida build --unit / --plan / --all-units`)
+        // parses + matches the AST directly without invoking the checker, so
+        // this pass only ever runs when a descriptor module is `run` /
+        // `way check`'d / single-target built — i.e. exactly the cases where a
+        // descriptor is being treated as a runtime value. Allow-listed
+        // positions (top-level export value, descriptor field, binding RHS)
+        // are threaded through `DescriptorUseCtx`.
+        self.check_descriptor_runtime_use(program);
+
         // C12-3 / FB-8: promote non-tail mutual recursion to a
         // compile-time error so programs that would overflow the stack at
         // runtime (`Maximum call depth exceeded`) are rejected up front.
@@ -5091,6 +5154,244 @@ defaulted fields must be provided via `()`",
             Expr::FieldAccess(obj, _, _) => self.check_mold_errors_in_expr_ctx(obj, false),
             Expr::Lambda(_, body, _) => self.check_mold_errors_in_expr_ctx(body, false),
             // Leaf expressions — no recursion needed
+            _ => {}
+        }
+    }
+
+    // ── Build-descriptor runtime-use pass ([E1532]) ──────────────────
+    //
+    // `BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`
+    // are build-driver descriptors, not runtime values. They are valid only
+    // in a handful of positions; everywhere else they are rejected so a
+    // descriptor cannot leak into a runtime computation (where the backends
+    // would treat its `__type`-tagged pack as an ordinary pack — the
+    // behaviour the docs previously only discouraged in prose).
+    //
+    // Allow-listed positions (`DescriptorUseCtx::Allowed`):
+    //   - a top-level `<<<` export value (a descriptor *is* the artefact the
+    //     build driver consumes),
+    //   - a field value of an enclosing descriptor (`BuildUnit.assets` holding
+    //     `RouteAsset(...)`, `BuildPlan.units` holding `BuildUnit` references,
+    //     etc. — the nested-descriptor shape the driver walks),
+    //   - the right-hand side of a top-level binding (`name <= BuildUnit(...)`),
+    //     which exists purely so the value can reach an export.
+    // Every other position (`DescriptorUseCtx::Runtime`) is rejected:
+    //   builtin args (`stdout(unit)`), user-function args, conversion / mold
+    //   args, operator operands, field / method access, list elements outside
+    //   a descriptor field, etc.
+
+    fn is_descriptor_type_name(&self, name: &str) -> bool {
+        BUILD_DESCRIPTOR_NAMES.contains(&name) && !self.descriptor_shadow_names.contains(name)
+    }
+
+    /// If `expr` evaluates to a build descriptor, return its descriptor type
+    /// name. Recognises a direct `Name(...)` constructor and a top-level
+    /// binding name previously bound to a descriptor (the only allow-listed
+    /// indirection). Anything wrapped further (in a pack, list, call, ...)
+    /// is intentionally *not* unwrapped here — that wrapping is itself the
+    /// runtime use we want to flag at the wrapper.
+    fn descriptor_value_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::TypeInst(name, _, _) if self.is_descriptor_type_name(name) => Some(name.clone()),
+            Expr::Ident(name, _) if self.descriptor_binding_names.contains(name) => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn push_descriptor_use_error(&mut self, descriptor_name: &str, span: &Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1532] '{}' is a build-driver descriptor, not a runtime value, and cannot be \
+                 used in this position. Build descriptors (BuildUnit / BuildPlan / AssetBundle / \
+                 RouteAsset / BuildHook) are consumed only by `taida build --unit` / `--plan` / \
+                 `--all-units`. Hint: bind a descriptor to a name and export it with `<<<`, or nest \
+                 it inside another descriptor's field (e.g. a `RouteAsset` inside `BuildUnit.assets`). \
+                 See docs/api/build_descriptors.md and docs/reference/diagnostic_codes.md [E1532].",
+                descriptor_name
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn check_descriptor_runtime_use(&mut self, program: &Program) {
+        // Pre-pass 1: a user-declared class-like / mold type that shadows a
+        // reserved descriptor name resolves to the user's type, so exclude it.
+        self.descriptor_shadow_names.clear();
+        for stmt in &program.statements {
+            if let Statement::ClassLikeDef(cl) = stmt
+                && BUILD_DESCRIPTOR_NAMES.contains(&cl.name.as_str())
+            {
+                self.descriptor_shadow_names.insert(cl.name.clone());
+            }
+        }
+
+        // Pre-pass 2: collect top-level bindings whose RHS is a descriptor so
+        // `name <= BuildUnit(...)` then `<<< name` is recognised. Only the
+        // outermost descriptor binding form is tracked (the allow-listed
+        // indirection); the RHS itself is still validated as a binding context.
+        self.descriptor_binding_names.clear();
+        for stmt in &program.statements {
+            if let Statement::Assignment(assign) = stmt
+                && self.descriptor_value_name(&assign.value).is_some()
+            {
+                self.descriptor_binding_names.insert(assign.target.clone());
+            }
+        }
+
+        for stmt in &program.statements {
+            self.check_descriptor_use_in_stmt(stmt, true);
+        }
+    }
+
+    fn check_descriptor_use_in_stmt(&mut self, stmt: &Statement, top_level: bool) {
+        match stmt {
+            // A *top-level* binding RHS is allow-listed when it is directly a
+            // descriptor value (`name <= BuildUnit(...)`) — that is the form
+            // that carries the descriptor toward an export. The descriptor's
+            // own fields are then checked in `Allowed` context (nested
+            // descriptors). Any other RHS (`name <= stdout(unit)`,
+            // `name <= @(u <= BuildUnit(...))`) is a runtime computation, so it
+            // is walked in `Runtime` and a descriptor wrapped inside is flagged.
+            // Inside a function body / handler / branch a binding cannot reach
+            // a top-level export, so its RHS is always `Runtime`.
+            Statement::Assignment(assign) => {
+                let rhs_ctx = if top_level && self.descriptor_value_name(&assign.value).is_some() {
+                    DescriptorUseCtx::Allowed
+                } else {
+                    DescriptorUseCtx::Runtime
+                };
+                self.check_descriptor_use_in_expr(&assign.value, rhs_ctx);
+            }
+            Statement::Expr(e) => {
+                self.check_descriptor_use_in_expr(e, DescriptorUseCtx::Runtime);
+            }
+            Statement::FuncDef(fd) => {
+                // A descriptor returned / used inside a function body is a
+                // runtime use (functions are not the descriptor build path).
+                for s in &fd.body {
+                    self.check_descriptor_use_in_stmt(s, false);
+                }
+            }
+            Statement::ErrorCeiling(ec) => {
+                for s in &ec.handler_body {
+                    self.check_descriptor_use_in_stmt(s, false);
+                }
+            }
+            Statement::UnmoldForward(u) => {
+                self.check_descriptor_use_in_expr(&u.source, DescriptorUseCtx::Runtime);
+            }
+            Statement::UnmoldBackward(u) => {
+                self.check_descriptor_use_in_expr(&u.source, DescriptorUseCtx::Runtime);
+            }
+            // Exports name symbols (`<<< @(name)`); the bound value was
+            // validated at its binding site as the allow-listed RHS. Class /
+            // enum / import statements carry no descriptor value positions.
+            _ => {}
+        }
+    }
+
+    fn check_descriptor_use_in_expr(&mut self, expr: &Expr, ctx: DescriptorUseCtx) {
+        // Flag a descriptor value sitting in a runtime position before
+        // recursing — the wrapper position is where the misuse lives.
+        if ctx == DescriptorUseCtx::Runtime
+            && let Some(descriptor_name) = self.descriptor_value_name(expr)
+        {
+            self.push_descriptor_use_error(&descriptor_name, expr.span());
+            // A bare descriptor `Ident` has no children worth recursing into;
+            // for a `TypeInst` we still recurse below so a misuse nested in a
+            // field value is also reported.
+        }
+
+        match expr {
+            // Descriptor constructor: its own field values are the
+            // allow-listed nested-descriptor slots, so they are checked in
+            // `Allowed` context (a `RouteAsset` inside `BuildUnit.assets` is
+            // valid). Non-descriptor named constructors get `Runtime` fields.
+            Expr::TypeInst(name, fields, _) => {
+                let field_ctx = if self.is_descriptor_type_name(name) {
+                    DescriptorUseCtx::Allowed
+                } else {
+                    DescriptorUseCtx::Runtime
+                };
+                for f in fields {
+                    self.check_descriptor_use_in_expr(&f.value, field_ctx);
+                }
+            }
+            // Anonymous packs and lists pass their context through: a list
+            // that is itself a descriptor field (`assets <= @[RouteAsset(...)]`)
+            // keeps the descriptor field allowance for its elements, while a
+            // runtime list rejects descriptor elements.
+            Expr::BuchiPack(fields, _) => {
+                for f in fields {
+                    self.check_descriptor_use_in_expr(&f.value, ctx);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    self.check_descriptor_use_in_expr(item, ctx);
+                }
+            }
+            // Every remaining compound position is a runtime computation:
+            // descend with `Runtime` so a descriptor anywhere inside is flagged.
+            Expr::FuncCall(callee, args, _) => {
+                self.check_descriptor_use_in_expr(callee, DescriptorUseCtx::Runtime);
+                for arg in args {
+                    self.check_descriptor_use_in_expr(arg, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_descriptor_use_in_expr(obj, DescriptorUseCtx::Runtime);
+                for arg in args {
+                    self.check_descriptor_use_in_expr(arg, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::MoldInst(_, type_args, fields, _) => {
+                for arg in type_args {
+                    self.check_descriptor_use_in_expr(arg, DescriptorUseCtx::Runtime);
+                }
+                for f in fields {
+                    self.check_descriptor_use_in_expr(&f.value, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.check_descriptor_use_in_expr(l, DescriptorUseCtx::Runtime);
+                self.check_descriptor_use_in_expr(r, DescriptorUseCtx::Runtime);
+            }
+            Expr::UnaryOp(_, inner, _) => {
+                self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
+            }
+            Expr::FieldAccess(obj, _, _) => {
+                self.check_descriptor_use_in_expr(obj, DescriptorUseCtx::Runtime);
+            }
+            Expr::Unmold(inner, _) => {
+                self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
+            }
+            Expr::Throw(inner, _) => {
+                self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
+            }
+            Expr::Lambda(_, body, _) => {
+                self.check_descriptor_use_in_expr(body, DescriptorUseCtx::Runtime);
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_descriptor_use_in_expr(e, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                // A descriptor selected by a runtime branch is a runtime use:
+                // arm bodies are never an allow-listed descriptor position.
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.check_descriptor_use_in_expr(cond, DescriptorUseCtx::Runtime);
+                    }
+                    for s in &arm.body {
+                        self.check_descriptor_use_in_stmt(s, false);
+                    }
+                }
+            }
+            // Leaf expressions (handled above for the descriptor case).
             _ => {}
         }
     }
